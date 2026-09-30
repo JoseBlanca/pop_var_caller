@@ -860,6 +860,7 @@ fn tract_strata_describing(
     let fitted_stratum =
         |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
             StratumOutcome::Fitted(Box::new(StratumFit {
+                standard_errors: None,
                 stratum: FitStratum {
                     period: 2,
                     reference_repeats: repeats,

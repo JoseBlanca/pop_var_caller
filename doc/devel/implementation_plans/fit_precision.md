@@ -218,7 +218,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 
 ### Milestone C — each stratum's errors and the climb's stopping rule
 
-1. ☐ **C1 — a stratum's curvature errors.** The central-difference curvature of the stratum's total
+1. ✅ **C1 — a stratum's curvature errors.** The central-difference curvature of the stratum's total
    log-likelihood over all its numbers, at its final answer, on the climb's scales, carried to the
    natural scale; `None` where the curvature is not negative-definite in that direction. Computed and
    carried in `StratumFit`, printed as a summary; **no number moves.** *Depends:* —. *Source:* spec §4.2.

@@ -70,6 +70,9 @@ use settled::{
     furthest, is_the_new_best, is_the_new_yardstick, not_settled,
 };
 pub use settled::{FurthestFromSettled, StartEnding};
+/// The inversion that drops a parameter the data do not tell apart, which the repeat-tract fit's
+/// stratum errors use too ([`ssr_fit`](super::ssr_fit)).
+pub(in crate::parameter_estimation::joint) use standard_errors::{Identified, invert_identified};
 use standard_errors::{StandardErrors, newton_step};
 
 // ---------------------------------------------------------------------

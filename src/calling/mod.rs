@@ -4266,6 +4266,7 @@ mod tests {
         };
         let one = |period: u8, repeats: u64, length_spectrum: Vec<f64>, concentration: f64| {
             StratumOutcome::Fitted(Box::new(StratumFit {
+                standard_errors: None,
                 stratum: Stratum {
                     period,
                     reference_repeats: repeats,

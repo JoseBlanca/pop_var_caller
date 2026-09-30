@@ -1164,6 +1164,7 @@ mod tests {
     /// - period 1 at 30 repeats — **refused**, which contributes nothing at all.
     fn the_runs_slippage() -> StratumFits {
         let fitted = StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
             stratum: Stratum {
                 period: 2,
                 reference_repeats: 6,

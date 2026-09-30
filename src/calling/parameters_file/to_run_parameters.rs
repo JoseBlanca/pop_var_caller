@@ -1715,6 +1715,7 @@ mod the_north_star_round_trip {
                         *weight /= total;
                     }
                     outcomes.push(StratumOutcome::Fitted(Box::new(StratumFit {
+                        standard_errors: None,
                         stratum,
                         slippage,
                         length_spectrum: weights,

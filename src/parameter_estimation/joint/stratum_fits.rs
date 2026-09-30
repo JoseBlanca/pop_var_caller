@@ -1403,6 +1403,7 @@ mod tests {
         concentration: f64,
     ) -> StratumOutcome {
         StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
             stratum: at,
             slippage: vec![Some(slippage(level))],
             length_spectrum,

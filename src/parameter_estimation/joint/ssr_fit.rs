@@ -394,7 +394,81 @@ pub struct StratumFit {
     pub level_provenance: Vec<Option<LevelProvenance>>,
     /// Per slippage group, where that group's direction split and fall-off came from.
     pub shares_provenance: Vec<Option<SharesProvenance>>,
+    /// **How precisely the stratum's own tracts determine each of its numbers**, at the answer the
+    /// climb returned (`fit_precision.md` §4.2).
+    ///
+    /// **The errors of the stratum's own fit, and only of it.** Once [`fit_strata`] has drawn the
+    /// curves, [`StratumFit::slippage`] may hold a blend of the own fit and its period's curve, and
+    /// these are not that blend's errors — a blended number has none (spec §5.2). The own fit's level
+    /// is the one [`LevelProvenance::slipped_reads`] is counted from.
+    ///
+    /// `None` where no error was computed: on the fixtures tests build by hand.
+    pub standard_errors: Option<StratumErrors>,
 }
+
+/// **The standard errors of one stratum's own fit**, each on its number's own scale, from the
+/// curvature of the stratum's total log-likelihood at the answer (`fit_precision.md` §4.2).
+///
+/// An error is how far the number would typically move were the same kind of reads drawn again. A
+/// number without one says why ([`StratumError`]); never a zero, and never a large number standing in
+/// for one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StratumErrors {
+    /// Per slippage group, its three numbers' errors — `None` where the group put no read in this
+    /// stratum, matching [`StratumFit::slippage`] index for index.
+    pub slippage: Vec<Option<SlippageErrors>>,
+    /// Per allele class, the error of its share of the stratum's chromosomes, indexed as
+    /// [`StratumFit::length_spectrum`] is.
+    pub length_spectrum: Vec<StratumError>,
+    /// The concentration's error.
+    pub concentration: StratumError,
+}
+
+/// The standard errors of one slippage group's three numbers in one stratum ([`StratumErrors`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlippageErrors {
+    pub level: StratumError,
+    pub shorter_share: StratumError,
+    pub fall_off: StratumError,
+}
+
+/// **One number's standard error in a stratum's fit, or why it has none.**
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StratumError {
+    /// The error, on the number's own scale.
+    Estimated(f64),
+    /// **The tracts do not tell it apart from the stratum's other numbers**: once they are accounted
+    /// for, the log-likelihood is not curved downwards in its direction — flat, or a saddle.
+    NotIdentified,
+    /// **The tracts do not place it**: its error on the scale the climb moves it on — logit for a
+    /// slippage number, log for the concentration, a log-ratio for a share — is above
+    /// [`NOT_PLACED`], so a one-error interval spans odds or a size hundreds of times apart. Where
+    /// the climb ran a number off towards an end of its range and stopped at the end of its reach,
+    /// the log-likelihood there is flat, and carrying its curvature to the number's own scale would
+    /// report an error hundreds of times too small. Also a number in `[0, 1]` — a slippage number or
+    /// a share — whose error, on its own scale, is wider than that whole range: the SNP/indel fit's
+    /// "wider than its range" (spec §3.2).
+    NotPlaced,
+    /// **A length class with no share at all**, held at zero and never fitted.
+    NoShare,
+}
+
+impl StratumError {
+    /// The error, or `None` when there is none.
+    pub fn value(self) -> Option<f64> {
+        match self {
+            Self::Estimated(error) => Some(error),
+            Self::NotIdentified | Self::NotPlaced | Self::NoShare => None,
+        }
+    }
+}
+
+/// **The largest error, on the scale the climb moves a number on, that still places the number**:
+/// three units of logit or of log, so a one-error interval either side spans odds or a size `e⁶`,
+/// about 400 times, apart. Measured in the review of plan step C1 on drawn strata: numbers the tracts
+/// determine sat at 0.02 to 0.5 on those scales, and numbers the climb ran off to the end of its
+/// reach at 1,000 to 2,400.
+pub const NOT_PLACED: f64 = 3.0;
 
 /// Where one slippage group's level at one stratum came from, and what stood behind it.
 ///
@@ -933,6 +1007,7 @@ fn the_fit_of(
     borrowed: &[u64],
     live_groups: &[bool],
     winner: Climb,
+    standard_errors: Option<StratumErrors>,
 ) -> StratumFit {
     let Climb {
         parameters,
@@ -986,10 +1061,12 @@ fn the_fit_of(
                 })
             })
             .collect(),
+        standard_errors,
     }
 }
 
-/// Fit `evidence`, whose tracts may already include borrowed ones, recording where from.
+/// Fit `evidence`, whose tracts may already include borrowed ones, recording where from, with the
+/// standard errors of the answer ([`standard_errors_at`]).
 fn fit_pooled(
     evidence: &StratumEvidence,
     borrowed: &[u64],
@@ -997,6 +1074,32 @@ fn fit_pooled(
     config: &SsrFitConfig,
     threads: WhereTheThreadsGo,
 ) -> Option<StratumFit> {
+    let (best, live_groups) = the_best_walk(evidence, homozygote_excess, config, threads)?;
+    let standard_errors = standard_errors_at(
+        evidence,
+        &best.parameters,
+        homozygote_excess,
+        &live_groups,
+        config,
+        threads,
+    );
+    Some(the_fit_of(
+        evidence,
+        borrowed,
+        &live_groups,
+        best,
+        Some(standard_errors),
+    ))
+}
+
+/// **The best of the walks from every starting point over `evidence`**, and which slippage groups
+/// they moved; `None` when no group put a read in it, so there is nothing to walk.
+fn the_best_walk(
+    evidence: &StratumEvidence,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> Option<(Climb, Vec<bool>)> {
     // **The one precondition on `SsrFitConfig::allele_span` that nothing else states.** It is a
     // public field with no lower bound, read from an environment variable by
     // `examples/ng_joint_records_walk.rs` and parsed with no floor, and at zero the fit returns
@@ -1031,13 +1134,357 @@ fn fit_pooled(
             )
         })
         .fold(None, the_better_walk);
+    Some((best.expect("at least one starting point"), live_groups))
+}
 
-    Some(the_fit_of(
+// ---------------------------------------------------------------------
+// How precisely a stratum's tracts determine its answer
+// ---------------------------------------------------------------------
+
+/// **Each central difference's step**, on the climb's scales — logit, log, log-ratio — which are
+/// already relative to a number's size, so one step suits every coordinate.
+///
+/// Large enough that the objective's rounding does not reach the curvature — the quadrature's
+/// points are placed by solving Beta quantiles to 10⁻¹², which the objective carries into every
+/// tract at once — and small enough that the difference's own error, of order the step squared, is
+/// small beside it: at a third of it the errors of a drawn stratum agree to 2 in 100 (tested).
+const CURVATURE_STEP: f64 = 1e-2;
+
+/// One number of a stratum's fit as its curvature is taken: on the scale the climb moves it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurvatureCoordinate {
+    /// Slippage group `group`'s number `which` — 0 the level, 1 the shorter share, 2 the fall-off —
+    /// on the logit scale.
+    Slippage { group: usize, which: usize },
+    /// An allele class's share of the spectrum, as the log of its ratio to the largest class's
+    /// share. The shares sum to one, so the largest is the one not moved on its own.
+    SpectrumRatio { class: usize },
+    /// The concentration, on the log scale.
+    Concentration,
+}
+
+/// The numbers one stratum's curvature is taken over, in order: each live slippage group's three,
+/// every allele class with a share but the largest, and the concentration.
+struct CurvatureLayout {
+    coordinates: Vec<CurvatureCoordinate>,
+    /// The class whose share the others are taken as ratios to.
+    largest_class: usize,
+}
+
+impl CurvatureLayout {
+    fn of(parameters: &Parameters, live_groups: &[bool]) -> Self {
+        let spectrum = &parameters.length_spectrum;
+        // PANIC-FREE: `fit_pooled` refuses an allele span below one, so a spectrum has at least three
+        // classes.
+        let largest_class = (0..spectrum.len())
+            .max_by(|&left, &right| spectrum[left].total_cmp(&spectrum[right]))
+            .expect("a spectrum has at least one class");
+        let mut coordinates = Vec::new();
+        for (group, live) in live_groups.iter().enumerate() {
+            if *live {
+                coordinates
+                    .extend((0..3).map(|which| CurvatureCoordinate::Slippage { group, which }));
+            }
+        }
+        // A class with no share at all is held at zero: its ratio has no logarithm.
+        coordinates.extend(
+            (0..spectrum.len())
+                .filter(|&class| class != largest_class && spectrum[class] > 0.0)
+                .map(|class| CurvatureCoordinate::SpectrumRatio { class }),
+        );
+        coordinates.push(CurvatureCoordinate::Concentration);
+        Self {
+            coordinates,
+            largest_class,
+        }
+    }
+
+    /// `parameters` on the climb's scales, in the layout's order.
+    fn center(&self, parameters: &Parameters) -> Vec<f64> {
+        let largest = parameters.length_spectrum[self.largest_class];
+        self.coordinates
+            .iter()
+            .map(|coordinate| match *coordinate {
+                CurvatureCoordinate::Slippage { group, which } => {
+                    let value = read_slippage(&parameters.slippage[group], which);
+                    float::ln(value / (1.0 - value))
+                }
+                CurvatureCoordinate::SpectrumRatio { class } => {
+                    float::ln(parameters.length_spectrum[class] / largest)
+                }
+                CurvatureCoordinate::Concentration => float::ln(parameters.concentration),
+            })
+            .collect()
+    }
+
+    /// `base` with every number of the layout set from `at`, on the climb's scales.
+    fn parameters_at(&self, base: &Parameters, at: &[f64]) -> Parameters {
+        let mut parameters = base.clone();
+        let mut ratios: Vec<f64> = base
+            .length_spectrum
+            .iter()
+            .map(|share| {
+                if *share > 0.0 {
+                    share / base.length_spectrum[self.largest_class]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        ratios[self.largest_class] = 1.0;
+        for (coordinate, value) in self.coordinates.iter().zip(at) {
+            match *coordinate {
+                CurvatureCoordinate::Slippage { group, which } => {
+                    write_slippage(&mut parameters.slippage[group], which, expit(*value));
+                }
+                CurvatureCoordinate::SpectrumRatio { class } => ratios[class] = float::exp(*value),
+                CurvatureCoordinate::Concentration => parameters.concentration = float::exp(*value),
+            }
+        }
+        normalise(&mut ratios);
+        parameters.length_spectrum = ratios;
+        parameters
+    }
+}
+
+/// **The second derivatives of `total` at `center`**, by central differences of `steps`, as a
+/// row-major `p × p` matrix: `(f(x + hⱼ) − 2 f(x) + f(x − hⱼ)) / hⱼ²` on the diagonal and
+/// `(f(+hᵢ +hⱼ) − f(+hᵢ −hⱼ) − f(−hᵢ +hⱼ) + f(−hᵢ −hⱼ)) / 4hᵢhⱼ` off it — `1 + 2p²` evaluations.
+///
+/// **The points are visited grouped by the coordinates `costly` names**, so a scorer that rebuilds
+/// something whenever those change — the read likelihoods, when a slippage number moves — rebuilds
+/// it once a distinct setting rather than once a point. The order changes no value.
+fn curvature_of(
+    center: &[f64],
+    steps: &[f64],
+    costly: impl Fn(usize) -> bool,
+    mut total: impl FnMut(&[f64]) -> f64,
+) -> Vec<f64> {
+    // One point of the differences: the coordinates it moves, and which way.
+    type Moves = Vec<(usize, i8)>;
+    let p = center.len();
+    // The centre moves none.
+    let mut points: Vec<Moves> = vec![Vec::new()];
+    for j in 0..p {
+        points.push(vec![(j, 1)]);
+        points.push(vec![(j, -1)]);
+    }
+    for i in 0..p {
+        for j in i + 1..p {
+            for (a, b) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                points.push(vec![(i, a), (j, b)]);
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..points.len()).collect();
+    order.sort_by_key(|&point| {
+        let (costly_moves, others): (Moves, Moves) =
+            points[point].iter().partition(|(j, _)| costly(*j));
+        (costly_moves, others)
+    });
+    let mut values = vec![0.0; points.len()];
+    for point in order {
+        let mut at = center.to_vec();
+        for &(j, sign) in &points[point] {
+            at[j] += f64::from(sign) * steps[j];
+        }
+        values[point] = total(&at);
+    }
+    let at_centre = values[0];
+    let mut hessian = vec![0.0; p * p];
+    for j in 0..p {
+        let (up, down) = (values[1 + 2 * j], values[2 + 2 * j]);
+        hessian[j * p + j] = (up - 2.0 * at_centre + down) / (steps[j] * steps[j]);
+    }
+    let mut next = 1 + 2 * p;
+    for i in 0..p {
+        for j in i + 1..p {
+            let [both_up, up_down, down_up, both_down] = [
+                values[next],
+                values[next + 1],
+                values[next + 2],
+                values[next + 3],
+            ];
+            next += 4;
+            let entry = (both_up - up_down - down_up + both_down) / (4.0 * steps[i] * steps[j]);
+            hessian[i * p + j] = entry;
+            hessian[j * p + i] = entry;
+        }
+    }
+    hessian
+}
+
+/// **The standard errors of one stratum's fit at `parameters`** (`fit_precision.md` §4.2).
+///
+/// The curvature of the stratum's **total** log-likelihood — the mean a tract the climb maximises,
+/// times the tracts it is a mean over; the mean's curvature would give every error too large by the
+/// square root of the tract count — over every number the stratum fits, on the scales the climb
+/// uses, by central differences ([`curvature_of`]). Its negative is the information, inverted over
+/// the numbers it identifies ([`invert_identified`](super::fit::invert_identified)): a number whose
+/// curvature is not negative once the others are accounted for — a flat or a saddle direction — is
+/// dropped and has no error, and the rest are inverted without it. The variances are carried to each
+/// number's own scale by its derivative: `p(1 − p)` for a slippage number, the concentration itself
+/// for its logarithm, and for a share of the spectrum the derivative of the shares in the log-ratios.
+///
+/// **Cost:** `1 + 2p²` evaluations of the stratum's likelihood for `p` numbers — 513 at one slippage
+/// group and thirteen classes — once a stratum, at the winning walk's answer.
+fn standard_errors_at(
+    evidence: &StratumEvidence,
+    parameters: &Parameters,
+    homozygote_excess: &[f64],
+    live_groups: &[bool],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> StratumErrors {
+    standard_errors_with_step(
         evidence,
-        borrowed,
-        &live_groups,
-        best.expect("at least one starting point"),
-    ))
+        parameters,
+        homozygote_excess,
+        live_groups,
+        config,
+        threads,
+        CURVATURE_STEP,
+    )
+}
+
+/// [`standard_errors_at`] with the central differences' step given, which a test varies.
+fn standard_errors_with_step(
+    evidence: &StratumEvidence,
+    parameters: &Parameters,
+    homozygote_excess: &[f64],
+    live_groups: &[bool],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+    step: f64,
+) -> StratumErrors {
+    let genotypes = genotype_pairs((2 * config.allele_span + 1) as usize);
+    let mut scorer = Scorer::new(evidence, homozygote_excess, &genotypes, config, threads);
+    let layout = CurvatureLayout::of(parameters, live_groups);
+    let center = layout.center(parameters);
+    let steps = vec![step; center.len()];
+    let tracts = evidence.tracts.len() as f64;
+    let hessian = curvature_of(
+        &center,
+        &steps,
+        |j| matches!(layout.coordinates[j], CurvatureCoordinate::Slippage { .. }),
+        |at| tracts * scorer.score(&layout.parameters_at(parameters, at)),
+    );
+    let p = center.len();
+    let information: Vec<f64> = hessian.iter().map(|entry| -entry).collect();
+    let own_curvature: Vec<f64> = (0..p).map(|j| information[j * p + j]).collect();
+    let identified = super::fit::invert_identified(&information, p, &own_curvature);
+    errors_on_the_natural_scale(&layout, parameters, live_groups, &identified)
+}
+
+/// The errors [`standard_errors_at`] reports, from the inverse over the identified coordinates: a
+/// coordinate dropped from it, or whose variance is not positive, is [`StratumError::NotIdentified`];
+/// one whose error on the climb's scale exceeds [`NOT_PLACED`], or a number in `[0, 1]` whose error
+/// exceeds that range, is [`StratumError::NotPlaced`]; a class with no share is
+/// [`StratumError::NoShare`].
+fn errors_on_the_natural_scale(
+    layout: &CurvatureLayout,
+    parameters: &Parameters,
+    live_groups: &[bool],
+    identified: &super::fit::Identified,
+) -> StratumErrors {
+    let kept = identified.kept.len();
+    // Each layout coordinate's row in the inverse, `None` when it was dropped.
+    let row_of = |coordinate: CurvatureCoordinate| {
+        let index = layout.coordinates.iter().position(|c| *c == coordinate)?;
+        identified.kept.iter().position(|&k| k == index)
+    };
+    // A coordinate's error on the climb's scale, and what that says of the number.
+    let on_its_scale = |coordinate: CurvatureCoordinate| -> Result<f64, StratumError> {
+        let row = row_of(coordinate).ok_or(StratumError::NotIdentified)?;
+        let variance = identified.inverse[row * kept + row];
+        if !(variance.is_finite() && variance > 0.0) {
+            return Err(StratumError::NotIdentified);
+        }
+        let error = variance.sqrt();
+        if error > NOT_PLACED {
+            return Err(StratumError::NotPlaced);
+        }
+        Ok(error)
+    };
+    let estimated = |error: f64| {
+        if error.is_finite() && error > 0.0 {
+            StratumError::Estimated(error)
+        } else {
+            StratumError::NotIdentified
+        }
+    };
+    // A number in `[0, 1]` — a slippage number, a share — whose error is wider than that whole range
+    // is not placed by the tracts either (spec §3.2's rule, on the number's own scale). The largest
+    // class's share has no log-ratio of its own; its error comes through the other classes'.
+    let within_its_range = |error: StratumError| match error {
+        StratumError::Estimated(value) if value > 1.0 => StratumError::NotPlaced,
+        other => other,
+    };
+    let slippage = live_groups
+        .iter()
+        .enumerate()
+        .map(|(group, live)| {
+            live.then(|| {
+                let of = |which: usize| match on_its_scale(CurvatureCoordinate::Slippage {
+                    group,
+                    which,
+                }) {
+                    Ok(error) => {
+                        let value = read_slippage(&parameters.slippage[group], which);
+                        within_its_range(estimated(error * value * (1.0 - value)))
+                    }
+                    Err(reason) => reason,
+                };
+                SlippageErrors {
+                    level: of(0),
+                    shorter_share: of(1),
+                    fall_off: of(2),
+                }
+            })
+        })
+        .collect();
+    let spectrum = &parameters.length_spectrum;
+    // The spectrum's coordinates the inverse kept, with their rows.
+    let ratios: Vec<(usize, usize)> = (0..spectrum.len())
+        .filter_map(|class| Some((class, row_of(CurvatureCoordinate::SpectrumRatio { class })?)))
+        .collect();
+    let length_spectrum = (0..spectrum.len())
+        .map(|class| {
+            if spectrum[class] <= 0.0 {
+                return StratumError::NoShare;
+            }
+            if class != layout.largest_class {
+                // Its own log-ratio must be placed before its share can be.
+                if let Err(reason) = on_its_scale(CurvatureCoordinate::SpectrumRatio { class }) {
+                    return reason;
+                }
+            }
+            if ratios.is_empty() {
+                return StratumError::NotIdentified;
+            }
+            // The share's slope in each kept log-ratio: `s_k (δ_kj − s_j)`.
+            let slope: Vec<f64> = ratios
+                .iter()
+                .map(|&(j, _)| spectrum[class] * (if j == class { 1.0 } else { 0.0 } - spectrum[j]))
+                .collect();
+            let mut total = 0.0;
+            for (a, &(_, row_a)) in ratios.iter().enumerate() {
+                for (b, &(_, row_b)) in ratios.iter().enumerate() {
+                    total += slope[a] * identified.inverse[row_a * kept + row_b] * slope[b];
+                }
+            }
+            within_its_range(estimated(total.sqrt()))
+        })
+        .collect();
+    let concentration = match on_its_scale(CurvatureCoordinate::Concentration) {
+        Ok(error) => estimated(error * parameters.concentration),
+        Err(reason) => reason,
+    };
+    StratumErrors {
+        slippage,
+        length_spectrum,
+        concentration,
+    }
 }
 
 /// One pass of coordinate ascent over everything the stratum fits.
@@ -1271,17 +1718,41 @@ fn every_stratum_from_every_start(
     // order the walks finished in: `climbed` is in the order of `walks`, and `walks` lists a
     // stratum's starting points in the order the config gives them.
     let mut climbed = climbed.into_iter();
-    before_walking
+    let winners: Vec<Result<StratumOutcome, (Vec<bool>, Climb)>> = before_walking
         .into_iter()
-        .enumerate()
-        .map(|(index, entry)| match entry {
-            Ok(outcome) => outcome,
-            Err(live) => {
+        .map(|entry| {
+            entry.map_err(|live| {
                 let best = (&mut climbed)
                     .take(starts)
                     .fold(None, the_better_walk)
                     .expect("at least one starting point");
-                StratumOutcome::Fitted(Box::new(the_fit_of(&strata[index], &[], &live, best)))
+                (live, best)
+            })
+        })
+        .collect();
+    // **Each winner's standard errors, one stratum a thread**, under the same bound as the walks: a
+    // thread holds one stratum's table at a time. Collected in stratum order.
+    winners
+        .into_par_iter()
+        .enumerate()
+        .map(|(index, entry)| match entry {
+            Ok(outcome) => outcome,
+            Err((live, best)) => {
+                let standard_errors = standard_errors_at(
+                    &strata[index],
+                    &best.parameters,
+                    homozygote_excess,
+                    &live,
+                    config,
+                    WhereTheThreadsGo::AcrossStrata,
+                );
+                StratumOutcome::Fitted(Box::new(the_fit_of(
+                    &strata[index],
+                    &[],
+                    &live,
+                    best,
+                    Some(standard_errors),
+                )))
             }
         })
         .collect()
@@ -1446,6 +1917,10 @@ pub fn fit_strata(
             .collect(),
     };
 
+    if let Some(summary) = standard_errors_summary(&outcomes) {
+        stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
+    }
+
     // **The curves are drawn after every stratum has its own answer, never during.** Stage one
     // is untouched by this — a stratum's own fitted numbers are the same whether curves are drawn
     // or not, which is the property the parity oracle checks.
@@ -1466,6 +1941,84 @@ pub fn fit_strata(
     }
     stage.always(|into| format!("repeat-tract fit: done; {into}"));
     outcomes
+}
+
+/// **What the run's log says about the strata's own standard errors**, once every stratum has its
+/// answer and before any curve blends it (`fit_precision.md` §4.2): over the strata fitted on their
+/// own tracts, the median and largest error of the level and of the concentration as a percentage of
+/// the number, and of the two shares, the fall-off and the length classes' shares as they are; then
+/// how many numbers have no error, by why. `None` when no stratum carries errors.
+fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
+    let errors: Vec<(&StratumFit, &StratumErrors)> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StratumOutcome::Fitted(fit) => Some((fit.as_ref(), fit.standard_errors.as_ref()?)),
+            _ => None,
+        })
+        .collect();
+    if errors.is_empty() {
+        return None;
+    }
+    // Per kind of number, its errors (divided by `scale`), and the numbers without one by why.
+    let mut level = Vec::new();
+    let mut shorter = Vec::new();
+    let mut fall_off = Vec::new();
+    let mut concentration = Vec::new();
+    let mut shares = Vec::new();
+    let (mut numbers, mut not_identified, mut not_placed, mut no_share) = (0, 0, 0, 0);
+    let mut count = |error: StratumError, into: &mut Vec<f64>, scale: f64| {
+        numbers += 1;
+        match error {
+            StratumError::Estimated(error) => into.push(error / scale),
+            StratumError::NotIdentified => not_identified += 1,
+            StratumError::NotPlaced => not_placed += 1,
+            StratumError::NoShare => no_share += 1,
+        }
+    };
+    for (fit, stratum) in &errors {
+        for (slippage, group) in fit.slippage.iter().zip(&stratum.slippage) {
+            let (Some(slippage), Some(group)) = (slippage, group) else {
+                continue;
+            };
+            count(group.level, &mut level, slippage.level / 100.0);
+            count(group.shorter_share, &mut shorter, 1.0);
+            count(group.fall_off, &mut fall_off, 1.0);
+        }
+        count(
+            stratum.concentration,
+            &mut concentration,
+            fit.concentration / 100.0,
+        );
+        for share in &stratum.length_spectrum {
+            count(*share, &mut shares, 1.0);
+        }
+    }
+    let described = |mut values: Vec<f64>, what: &str, relative: bool| {
+        if values.is_empty() {
+            return format!("{what}: none has an error");
+        }
+        values.sort_by(f64::total_cmp);
+        let (median, largest) = (values[values.len() / 2], values[values.len() - 1]);
+        if relative {
+            format!("{what} ± median {median:.0}% of itself (largest {largest:.0}%)")
+        } else {
+            format!("{what} ± median {median:.3} (largest {largest:.3})")
+        }
+    };
+    Some(format!(
+        "standard errors of the {} strata fitted on their own tracts, before any curve: {}; {}; {}; \
+         {}; {}; of their {numbers} numbers, {not_placed} have no error because the tracts do not \
+         place them (an error of more than {NOT_PLACED} on the climb's logit or log scale, or \
+         wider than a share's whole range), \
+         {not_identified} because the tracts cannot tell them apart from the others, and {no_share} \
+         are length classes with no share",
+        errors.len(),
+        described(level, "slippage level", true),
+        described(shorter, "shorter share", false),
+        described(fall_off, "fall-off", false),
+        described(concentration, "concentration", true),
+        described(shares, "length-class shares", false),
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -1590,15 +2143,17 @@ pub fn fit_period_length_spectra(
         // independent of each other as the strata are, so this loop could be spread the other
         // way too; it is left alone because it runs over a handful of periods rather than over
         // a hundred and forty strata, and because no calling run reaches it yet.
-        let Some(fit) = fit_pooled(
+        // **No standard errors here**: only the length spectrum and the concentration are kept,
+        // and nothing reads their errors at this rung.
+        let Some((best, live_groups)) = the_best_walk(
             &pooled,
-            &[],
             homozygote_excess,
             config,
             WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
         ) else {
             continue;
         };
+        let fit = the_fit_of(&pooled, &[], &live_groups, best, None);
         fitted.insert(
             period,
             PeriodLengthSpectrum {
@@ -3261,6 +3816,30 @@ mod tests {
         }
     }
 
+    /// A fitted stratum's standard errors laid out flat, each absent one as a negative code saying
+    /// why — so a schedule's errors are compared as the numbers are. A fit must carry them.
+    fn every_error(fit: &StratumFit) -> Vec<f64> {
+        let errors = fit
+            .standard_errors
+            .as_ref()
+            .expect("a fitted stratum carries its errors");
+        let code = |error: &StratumError| match error {
+            StratumError::Estimated(error) => *error,
+            StratumError::NotIdentified => -1.0,
+            StratumError::NotPlaced => -2.0,
+            StratumError::NoShare => -3.0,
+        };
+        let mut flat: Vec<f64> = errors.length_spectrum.iter().map(code).collect();
+        flat.push(code(&errors.concentration));
+        for group in &errors.slippage {
+            match group {
+                Some(it) => flat.extend([&it.level, &it.shorter_share, &it.fall_off].map(code)),
+                None => flat.extend([-4.0; 3]),
+            }
+        }
+        flat
+    }
+
     /// Every number a fitted class carries, laid out flat so two runs can be compared value by
     /// value rather than by a derived `PartialEq` the type does not have.
     fn every_fitted_number(outcomes: &[StratumOutcome]) -> Vec<f64> {
@@ -3272,6 +3851,7 @@ mod tests {
                     flat.push(fit.concentration);
                     flat.push(fit.log_likelihood_a_tract);
                     flat.extend(fit.length_spectrum.iter().copied());
+                    flat.extend(every_error(fit));
                     for slippage in &fit.slippage {
                         match slippage {
                             Some(it) => flat.extend([it.level, it.shorter_share, it.fall_off]),
@@ -3640,10 +4220,472 @@ mod tests {
         );
     }
 
+    /// **Central differences return a quadratic's second derivatives**, off the diagonal as on it,
+    /// in `1 + 2p²` evaluations — whichever order the points are visited in.
+    #[test]
+    fn central_differences_give_a_quadratics_second_derivatives() {
+        let curvature = [
+            [4.0, 1.0, -0.5, 0.2],
+            [1.0, 3.0, 0.3, 0.0],
+            [-0.5, 0.3, 2.0, -0.7],
+            [0.2, 0.0, -0.7, 5.0],
+        ];
+        let slope = [0.3, -1.1, 0.7, 2.0];
+        let center = [0.5, -2.0, 1.5, 0.1];
+        let mut evaluations = 0;
+        let hessian = curvature_of(
+            &center,
+            &[0.01, 0.02, 0.03, 0.04],
+            |j| j == 2,
+            |at| {
+                evaluations += 1;
+                let mut value = 7.0;
+                for i in 0..4 {
+                    value += slope[i] * at[i];
+                    for j in 0..4 {
+                        value -= 0.5 * at[i] * curvature[i][j] * at[j];
+                    }
+                }
+                value
+            },
+        );
+        assert_eq!(evaluations, 1 + 2 * 4 * 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert!(
+                    (hessian[i * 4 + j] + curvature[i][j]).abs() < 1e-8,
+                    "({i}, {j}): {} against {}",
+                    hessian[i * 4 + j],
+                    -curvature[i][j]
+                );
+            }
+        }
+    }
+
+    /// **Each variance is carried to its number's own scale**: a slippage number's by `p(1 − p)`, the
+    /// concentration's by itself, a share's by the shares' slopes in the log-ratios, the largest
+    /// class's included; a dropped coordinate leaves its number with no error, and the others keep
+    /// theirs.
+    #[test]
+    fn the_errors_are_carried_to_each_numbers_own_scale() {
+        let parameters = Parameters {
+            slippage: vec![Slippage {
+                level: 0.1,
+                shorter_share: 0.8,
+                fall_off: 0.3,
+            }],
+            length_spectrum: vec![0.2, 0.5, 0.3],
+            concentration: 2.0,
+        };
+        let layout = CurvatureLayout::of(&parameters, &[true]);
+        assert_eq!(layout.largest_class, 1);
+        assert_eq!(layout.coordinates.len(), 6);
+        // Variances 0.01 … 0.06 on the diagonal, and a covariance between the two log-ratios.
+        let n = 6;
+        let mut inverse = vec![0.0; n * n];
+        for j in 0..n {
+            inverse[j * n + j] = 0.01 * (j + 1) as f64;
+        }
+        inverse[3 * n + 4] = 0.01;
+        inverse[4 * n + 3] = 0.01;
+        let identified = crate::parameter_estimation::joint::fit::Identified {
+            kept: (0..n).collect(),
+            dropped: Vec::new(),
+            inverse: inverse.clone(),
+        };
+        let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
+        let group = errors.slippage[0].expect("a live group");
+        let close = |got: StratumError, expected: f64| {
+            let got = got.value().expect("an error");
+            assert!((got - expected).abs() < 1e-12, "{got} against {expected}");
+        };
+        close(group.level, 0.01_f64.sqrt() * 0.1 * 0.9);
+        close(group.shorter_share, 0.02_f64.sqrt() * 0.8 * 0.2);
+        close(group.fall_off, 0.03_f64.sqrt() * 0.3 * 0.7);
+        close(errors.concentration, 0.06_f64.sqrt() * 2.0);
+        // The shares' slopes in (log-ratio of class 0, log-ratio of class 2).
+        let s = [0.2, 0.5, 0.3];
+        let (v0, v2, c) = (0.04, 0.05, 0.01);
+        let share_error =
+            |g0: f64, g2: f64| (g0 * g0 * v0 + 2.0 * g0 * g2 * c + g2 * g2 * v2).sqrt();
+        close(
+            errors.length_spectrum[0],
+            share_error(s[0] * (1.0 - s[0]), -s[0] * s[2]),
+        );
+        close(
+            errors.length_spectrum[1],
+            share_error(-s[1] * s[0], -s[1] * s[2]),
+        );
+        close(
+            errors.length_spectrum[2],
+            share_error(-s[2] * s[0], s[2] * (1.0 - s[2])),
+        );
+
+        // Class 2's log-ratio dropped: its share has no error, class 0's and the largest's keep one
+        // from class 0's ratio alone.
+        let kept: Vec<usize> = vec![0, 1, 2, 3, 5];
+        let dropped_inverse: Vec<f64> = kept
+            .iter()
+            .flat_map(|&row| kept.iter().map(move |&column| (row, column)))
+            .map(|(row, column)| inverse[row * n + column])
+            .collect();
+        let identified = crate::parameter_estimation::joint::fit::Identified {
+            kept,
+            dropped: vec![4],
+            inverse: dropped_inverse,
+        };
+        let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
+        assert_eq!(errors.length_spectrum[2], StratumError::NotIdentified);
+        close(errors.length_spectrum[0], (s[0] * (1.0 - s[0])) * v0.sqrt());
+        close(errors.length_spectrum[1], (s[1] * s[0]) * v0.sqrt());
+        close(errors.concentration, 0.06_f64.sqrt() * 2.0);
+
+        // Class 2's log-ratio kept but its variance 10⁶: that ratio is not placed, and the shares
+        // whose errors it enters come out wider than their whole range, so they are not placed either.
+        let mut wide = inverse.clone();
+        wide[4 * n + 4] = 1e6;
+        let identified = crate::parameter_estimation::joint::fit::Identified {
+            kept: (0..n).collect(),
+            dropped: Vec::new(),
+            inverse: wide,
+        };
+        let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
+        assert_eq!(
+            errors.length_spectrum,
+            [StratumError::NotPlaced; 3],
+            "class 2 on its own scale, classes 0 and 1 wider than the range"
+        );
+        close(
+            errors.slippage[0].expect("a live group").level,
+            0.01_f64.sqrt() * 0.1 * 0.9,
+        );
+    }
+
+    /// **A stratum's errors are its total log-likelihood's, not the mean's**: on drawn strata of 400
+    /// and of 1,600 tracts, every number has an error, the level's shrinks by about half as the tracts
+    /// quadruple — the mean's curvature would leave it unchanged — and the fitted level lies within
+    /// three of its errors of the truth it was drawn at.
+    #[test]
+    fn a_stratums_errors_shrink_as_its_tracts_grow() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let spectrum = spectrum_of(3);
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let level_error = |tracts: usize| {
+            let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, tracts, 20, 6, 1, 29);
+            let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+            let errors = fitted
+                .standard_errors
+                .as_ref()
+                .expect("a fit computes its errors");
+            let group = errors.slippage[0].expect("the one group has reads");
+            assert!(
+                [group.level, group.shorter_share, group.fall_off]
+                    .iter()
+                    .all(|error| error.value().is_some()),
+                "{group:?}"
+            );
+            assert!(errors.concentration.value().is_some(), "{errors:?}");
+            assert!(
+                errors
+                    .length_spectrum
+                    .iter()
+                    .all(|error| error.value().is_some()),
+                "{errors:?}"
+            );
+            let level = fitted.slippage[0].expect("fitted").level;
+            let error = group.level.value().expect("checked");
+            eprintln!("{tracts} tracts: level {level:.5} ± {error:.5}; {errors:?}");
+            assert!(
+                (level - truth.level).abs() < 3.0 * error,
+                "{tracts} tracts: level {level} ± {error} against a truth of {}",
+                truth.level
+            );
+            error
+        };
+        let (few, many) = (level_error(400), level_error(1_600));
+        let ratio = many / few;
+        assert!(
+            (0.35..0.65).contains(&ratio),
+            "the level's error went from {few} to {many}, a ratio of {ratio}"
+        );
+    }
+
+    /// **The errors do not depend on the differences' step**: at the default step and at a third of
+    /// it, every error of a drawn stratum's fit agrees to within 2 in 100.
+    #[test]
+    fn a_stratums_errors_do_not_depend_on_the_difference_step() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let spectrum = spectrum_of(3);
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 600, 20, 6, 1, 31);
+        let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+        let parameters = Parameters {
+            slippage: vec![fitted.slippage[0].expect("fitted")],
+            length_spectrum: fitted.length_spectrum.clone(),
+            concentration: fitted.concentration,
+        };
+        let at = |step: f64| {
+            standard_errors_with_step(
+                &evidence,
+                &parameters,
+                &[0.4; 20],
+                &[true],
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                step,
+            )
+        };
+        let (default, finer) = (at(CURVATURE_STEP), at(CURVATURE_STEP / 3.0));
+        let flatten = |errors: &StratumErrors| {
+            let group = errors.slippage[0].expect("a live group");
+            let mut all = vec![
+                group.level,
+                group.shorter_share,
+                group.fall_off,
+                errors.concentration,
+            ];
+            all.extend(errors.length_spectrum.iter().copied());
+            all.into_iter().map(StratumError::value).collect::<Vec<_>>()
+        };
+        for (index, (a, b)) in flatten(&default)
+            .into_iter()
+            .zip(flatten(&finer))
+            .enumerate()
+        {
+            let (a, b) = (a.expect("an error"), b.expect("an error"));
+            assert!((a - b).abs() < 0.02 * a, "number {index}: {a} against {b}");
+        }
+        assert_eq!(
+            fitted.standard_errors,
+            Some(default),
+            "the fit's errors are the default step's"
+        );
+    }
+
+    /// **A number the climb left at the end of its reach is not placed**, where carrying its flat
+    /// curvature to its own scale would report an error hundreds of times too small (review of plan
+    /// step C1): on three thin drawn strata the fall-off runs towards zero, the shorter share towards
+    /// one, and the concentration off to millions — each stops where five rounds of the climb could
+    /// take it, and each comes back without an error, the others of the stratum keeping theirs.
+    #[test]
+    fn a_number_the_climb_left_at_the_end_of_its_reach_is_not_placed() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let spectrum = spectrum_of(3);
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let fit = |tracts: usize, samples: usize, depth: u32, seed: u64, concentration: f64| {
+            let evidence = draw_stratum(
+                truth,
+                &spectrum,
+                concentration,
+                0.4,
+                tracts,
+                samples,
+                depth,
+                1,
+                seed,
+            );
+            let fitted =
+                fit_stratum(&evidence, &vec![0.4; samples], &config).expect("reads were drawn");
+            eprintln!(
+                "{tracts} x {samples} x {depth}: {:?}, concentration {}; {:?}",
+                fitted.slippage[0], fitted.concentration, fitted.standard_errors
+            );
+            fitted
+        };
+        let errors_of = |fitted: &StratumFit| {
+            fitted
+                .standard_errors
+                .clone()
+                .expect("a fit computes its errors")
+        };
+
+        let fall_off_run_off = fit(10, 8, 6, 16, 0.5);
+        assert!(fall_off_run_off.slippage[0].expect("fitted").fall_off < 1e-5);
+        let group = errors_of(&fall_off_run_off).slippage[0].expect("fitted");
+        assert_eq!(group.fall_off, StratumError::NotPlaced);
+        assert!(group.level.value().is_some(), "{group:?}");
+
+        let share_run_off = fit(15, 4, 3, 6, 0.5);
+        assert!(share_run_off.slippage[0].expect("fitted").shorter_share > 1.0 - 1e-5);
+        let group = errors_of(&share_run_off).slippage[0].expect("fitted");
+        assert_eq!(group.shorter_share, StratumError::NotPlaced);
+
+        let concentration_run_off = fit(200, 4, 3, 8, 50.0);
+        assert!(concentration_run_off.concentration > 1e5);
+        let errors = errors_of(&concentration_run_off);
+        assert_eq!(errors.concentration, StratumError::NotPlaced);
+        assert!(
+            errors.slippage[0].expect("fitted").level.value().is_some(),
+            "{errors:?}"
+        );
+    }
+
+    /// **Tracts no sample read change no error**: they add a factor of one to the likelihood, so the
+    /// total — the mean a tract times every tract, those without reads included — is the same, and so
+    /// is its curvature, whichever count the mean is taken over.
+    #[test]
+    fn tracts_without_reads_change_no_error() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 20, 6, 1, 37);
+        let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+        let parameters = Parameters {
+            slippage: vec![fitted.slippage[0].expect("fitted")],
+            length_spectrum: fitted.length_spectrum.clone(),
+            concentration: fitted.concentration,
+        };
+        let mut padded = evidence.clone();
+        padded
+            .tracts
+            .extend(std::iter::repeat_n(TractReads::default(), 300));
+        let errors = |evidence: &StratumEvidence| {
+            standard_errors_at(
+                evidence,
+                &parameters,
+                &[0.4; 20],
+                &[true],
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+            )
+        };
+        let (plain, with_empty) = (errors(&evidence), errors(&padded));
+        let flat = |errors: &StratumErrors| {
+            let group = errors.slippage[0].expect("a live group");
+            let mut all = vec![
+                group.level,
+                group.shorter_share,
+                group.fall_off,
+                errors.concentration,
+            ];
+            all.extend(errors.length_spectrum.iter().copied());
+            all.into_iter()
+                .map(|error| error.value().expect("an error"))
+                .collect::<Vec<f64>>()
+        };
+        for (a, b) in flat(&plain).into_iter().zip(flat(&with_empty)) {
+            assert!((a - b).abs() <= 1e-6 * a, "{a} against {b}");
+        }
+    }
+
+    /// **The curvature is taken at the fitted answer**: the layout's centre, set back through
+    /// `parameters_at`, is the answer the climb returned, every number to within 10⁻¹² of itself.
+    #[test]
+    fn the_curvatures_centre_is_the_fitted_answer() {
+        let parameters = Parameters {
+            slippage: vec![
+                Slippage {
+                    level: 0.05,
+                    shorter_share: 0.83,
+                    fall_off: 0.25,
+                },
+                Slippage {
+                    level: 0.2,
+                    shorter_share: 0.4,
+                    fall_off: 0.6,
+                },
+            ],
+            length_spectrum: vec![0.1, 0.05, 0.6, 0.2, 0.05],
+            concentration: 3.7,
+        };
+        let layout = CurvatureLayout::of(&parameters, &[true, true]);
+        let back = layout.parameters_at(&parameters, &layout.center(&parameters));
+        let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-12 * b.abs(), "{a} against {b}");
+        for (a, b) in back.slippage.iter().zip(&parameters.slippage) {
+            close(a.level, b.level);
+            close(a.shorter_share, b.shorter_share);
+            close(a.fall_off, b.fall_off);
+        }
+        for (a, b) in back.length_spectrum.iter().zip(&parameters.length_spectrum) {
+            close(*a, *b);
+        }
+        close(back.concentration, parameters.concentration);
+    }
+
+    /// **The log's summary**: the level's and the concentration's errors as a percentage of the
+    /// number, the others as they are, the median and the largest, and the numbers without an error
+    /// counted by why.
+    #[test]
+    fn the_summary_gives_each_kinds_errors_and_counts_the_missing_by_why() {
+        let with_errors = |level: f64, level_error: StratumError, concentration: StratumError| {
+            let StratumOutcome::Fitted(mut fit) = fitted_at(2, 10, level, 1_000) else {
+                unreachable!("fitted_at builds a fit")
+            };
+            fit.standard_errors = Some(StratumErrors {
+                slippage: vec![Some(SlippageErrors {
+                    level: level_error,
+                    shorter_share: StratumError::Estimated(0.05),
+                    fall_off: StratumError::NotPlaced,
+                })],
+                length_spectrum: vec![StratumError::Estimated(0.01)],
+                concentration,
+            });
+            StratumOutcome::Fitted(fit)
+        };
+        let outcomes = [
+            with_errors(
+                0.1,
+                StratumError::Estimated(0.02),
+                StratumError::Estimated(0.3),
+            ),
+            with_errors(
+                0.04,
+                StratumError::Estimated(0.004),
+                StratumError::NotIdentified,
+            ),
+            with_errors(0.2, StratumError::NotIdentified, StratumError::NotPlaced),
+        ];
+        let summary = standard_errors_summary(&outcomes).expect("errors were carried");
+        for part in [
+            "the 3 strata",
+            "slippage level ± median 20% of itself (largest 20%)",
+            "shorter share ± median 0.050 (largest 0.050)",
+            "fall-off: none has an error",
+            "concentration ± median 50% of itself (largest 50%)",
+            "of their 15 numbers, 4 have no error because the tracts do not place them",
+            "2 because the tracts cannot tell them apart",
+            "and 0 are length classes with no share",
+        ] {
+            assert!(summary.contains(part), "{part:?} in {summary}");
+        }
+        assert_eq!(
+            standard_errors_summary(&[fitted_at(2, 10, 0.1, 1_000)]),
+            None
+        );
+    }
+
     /// A stratum fitted on its own tracts, built directly so the smoothing can be exercised
     /// without paying for the climb.
     fn fitted_at(period: u8, repeats: u64, level: f64, reads: u64) -> StratumOutcome {
         StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
             stratum: Stratum {
                 period,
                 reference_repeats: repeats,
