@@ -4681,6 +4681,296 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Whether a stratum's errors mean what they say (plan step C2)
+    // -----------------------------------------------------------------
+
+    /// How often one kind of number lands within one and two of its errors of the truth, over many
+    /// drawn strata, and how many came back without an error.
+    #[derive(Debug, Default)]
+    struct StratumCoverage {
+        /// Each estimate's distance from the truth in its own errors, signed.
+        distances: Vec<f64>,
+        not_identified: usize,
+        not_placed: usize,
+    }
+
+    impl StratumCoverage {
+        fn record(&mut self, estimate: f64, truth: f64, error: StratumError) {
+            match error {
+                StratumError::Estimated(error) => self.distances.push((estimate - truth) / error),
+                StratumError::NotIdentified => self.not_identified += 1,
+                StratumError::NotPlaced => self.not_placed += 1,
+                StratumError::NoShare => {}
+            }
+        }
+
+        fn share_within(&self, errors: f64) -> f64 {
+            self.distances
+                .iter()
+                .filter(|distance| distance.abs() <= errors)
+                .count() as f64
+                / self.distances.len().max(1) as f64
+        }
+
+        fn mean(&self) -> f64 {
+            self.distances.iter().sum::<f64>() / self.distances.len().max(1) as f64
+        }
+
+        fn spread(&self) -> f64 {
+            let mean = self.mean();
+            (self
+                .distances
+                .iter()
+                .map(|distance| (distance - mean) * (distance - mean))
+                .sum::<f64>()
+                / (self.distances.len().max(2) - 1) as f64)
+                .sqrt()
+        }
+    }
+
+    /// How many strata each regime draws by default, and the variable that overrides it.
+    const STRATUM_DRAWS: usize = 100;
+    const STRATUM_DRAWS_VARIABLE: &str = "NG_FIT_PRECISION_STRATUM_DRAWS";
+
+    /// Draw `draws` strata of one regime from known numbers, fit each, and tally every estimate's
+    /// distance from the truth in its own errors, by kind; how many fits converged; and how many
+    /// draws gave nothing to tally — no fit, or no errors — which the test requires to be none.
+    #[allow(clippy::too_many_arguments)]
+    fn stratum_coverage_of(
+        truth: Slippage,
+        classes: usize,
+        concentration: f64,
+        tracts: usize,
+        samples: usize,
+        depth: u32,
+        draws: usize,
+        seed: u64,
+    ) -> (BTreeMap<&'static str, StratumCoverage>, usize, usize) {
+        let span = (classes / 2) as i32;
+        let spectrum = spectrum_of(classes);
+        let config = SsrFitConfig {
+            allele_span: span,
+            ..SsrFitConfig::default()
+        };
+        let mut tally: BTreeMap<&'static str, StratumCoverage> = BTreeMap::new();
+        let mut converged = 0;
+        let mut skipped = 0;
+        for draw in 0..draws {
+            let evidence = draw_stratum(
+                truth,
+                &spectrum,
+                concentration,
+                0.4,
+                tracts,
+                samples,
+                depth,
+                span,
+                seed + draw as u64,
+            );
+            let Some(fitted) = fit_stratum(&evidence, &vec![0.4; samples], &config) else {
+                skipped += 1;
+                continue;
+            };
+            converged += usize::from(fitted.converged);
+            let errors = fitted
+                .standard_errors
+                .as_ref()
+                .expect("a fit computes its errors");
+            let (Some(slippage), Some(group)) = (fitted.slippage[0], errors.slippage[0]) else {
+                skipped += 1;
+                continue;
+            };
+            for (kind, estimate, truth, error) in [
+                ("slippage level", slippage.level, truth.level, group.level),
+                (
+                    "shorter share",
+                    slippage.shorter_share,
+                    truth.shorter_share,
+                    group.shorter_share,
+                ),
+                (
+                    "fall-off",
+                    slippage.fall_off,
+                    truth.fall_off,
+                    group.fall_off,
+                ),
+                (
+                    "concentration",
+                    fitted.concentration,
+                    concentration,
+                    errors.concentration,
+                ),
+            ] {
+                tally
+                    .entry(kind)
+                    .or_default()
+                    .record(estimate, truth, error);
+            }
+            for (class, (estimate, error)) in fitted
+                .length_spectrum
+                .iter()
+                .zip(&errors.length_spectrum)
+                .enumerate()
+            {
+                let kind = if class == span as usize {
+                    "reference-length share"
+                } else {
+                    "other length shares"
+                };
+                tally
+                    .entry(kind)
+                    .or_default()
+                    .record(*estimate, spectrum[class], *error);
+            }
+        }
+        (tally, converged, skipped)
+    }
+
+    /// **A stratum's errors mean what they say** (plan step C2, spec §4.5 item 1): strata drawn from
+    /// known slippage, a known length spectrum and concentration, many times in each regime, each
+    /// fitted by the fit's own rule; of every estimate with an error, the share within one error of
+    /// the truth and within two — about 68 in 100 and 95 in 100 for an error that means what it says —
+    /// with the mean distance (a bias, in errors) and the spread of the distances (about one). At
+    /// three allele classes over 300 tracts of 20 samples, at 3 reads a sample and at 30; and at the
+    /// production span, thirteen classes, over 200 tracts at 3 reads, on a quarter as many draws.
+    ///
+    /// **What it measured** (100 draws, `fit_precision_c2` report). At three classes the slippage
+    /// numbers and the concentration land within one error 61 to 76 times in 100 and within two 91 to
+    /// 99, their mean distance from the truth under a quarter of an error; the class shares are
+    /// covered less well at 30 reads (47 to 53 in 100 within one, spread 1.6). **At thirteen classes
+    /// the estimate itself is off** — the reference-length share a mean of 18 errors from its truth,
+    /// the concentration 8 — because the fixed 256-point integral over a tract's length frequencies
+    /// misrepresents the likelihood there (refitting one stratum at 1,024 and 4,096 points moved the
+    /// share from 0.17 to 0.23 and 0.31, against 0.30, and in review no point count up to 65,536 was
+    /// shown to suffice); so that regime is printed and not held to anything. The three-class regimes
+    /// are held to [`hold_to_the_three_class_bounds`] at the default count of draws.
+    ///
+    /// Ignored by default: 20 to 40 minutes in the container. `scripts/dev.sh env
+    /// NG_FIT_PRECISION_STRATUM_DRAWS=10 cargo test --release --lib a_stratums_errors_mean_what_they_say
+    /// -- --ignored --nocapture` shortens it, and checks nothing but that it runs.
+    #[test]
+    #[ignore = "a measurement over hundreds of fitted strata; run at a checkpoint"]
+    fn a_stratums_errors_mean_what_they_say() {
+        let draws = match std::env::var(STRATUM_DRAWS_VARIABLE) {
+            Err(std::env::VarError::NotPresent) => STRATUM_DRAWS,
+            Err(std::env::VarError::NotUnicode(value)) => {
+                panic!("{STRATUM_DRAWS_VARIABLE}={value:?} is not a positive whole number")
+            }
+            Ok(value) => value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|&count: &usize| count > 0)
+                .unwrap_or_else(|| {
+                    panic!("{STRATUM_DRAWS_VARIABLE}={value:?} is not a positive whole number")
+                }),
+        };
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        for (classes, tracts, depth, regime_draws) in [
+            (3, 300, 3, draws),
+            (3, 300, 30, draws),
+            (13, 200, 3, draws.div_ceil(4)),
+        ] {
+            let (tally, converged, skipped) = stratum_coverage_of(
+                truth,
+                classes,
+                0.5,
+                tracts,
+                20,
+                depth,
+                regime_draws,
+                0xC2C0_7E7A_0000_0000 + (classes as u64) * 1_000 + u64::from(depth),
+            );
+            let regime = format!("{classes} classes, {tracts} tracts x 20 samples x {depth} reads");
+            eprintln!(
+                "STRATUM COVERAGE {regime}: {converged} of {regime_draws} climbs settled within \
+                 their rounds; {skipped} draw(s) gave nothing to tally"
+            );
+            assert_eq!(
+                skipped, 0,
+                "{regime}: every draw is fitted and carries errors"
+            );
+            // Every kind printed before any is held to its bounds, so a failure shows the whole
+            // regime.
+            for (kind, coverage) in &tally {
+                eprintln!(
+                    "STRATUM COVERAGE {regime}, {kind}: {} estimates with an error, {} not \
+                     identified, {} not placed; within one error {:.3}, within two {:.3}; mean \
+                     distance {:+.3}, spread {:.3}",
+                    coverage.distances.len(),
+                    coverage.not_identified,
+                    coverage.not_placed,
+                    coverage.share_within(1.0),
+                    coverage.share_within(2.0),
+                    coverage.mean(),
+                    coverage.spread(),
+                );
+            }
+            if classes == 3 && regime_draws >= STRATUM_DRAWS {
+                for (kind, coverage) in &tally {
+                    hold_to_the_three_class_bounds(&regime, kind, coverage, regime_draws);
+                }
+            }
+        }
+    }
+
+    /// **The bounds a three-class regime is held to** at [`STRATUM_DRAWS`] draws or more, from the
+    /// runs of plan step C2 (report `fit_precision_c2`) with a margin: every draw gives every kind an
+    /// estimate, and every estimate an error; the slippage numbers and the concentration land within
+    /// one error 55 to 82 times in 100 and within two at least 88, their distances spread 0.85 to 1.2
+    /// times their errors, the mean distance under 0.4 errors — the shorter share sits +0.22 errors
+    /// high in every run; the class shares within one at least 40 in 100 and within two 75, which
+    /// accepts their measured under-coverage at 30 reads, due at least in part to the 256-point
+    /// integral (report §3).
+    ///
+    /// **What they cannot see**: every error scaled by 0.88 to 1.18 passes, and the class shares'
+    /// errors by much more (measured in review).
+    fn hold_to_the_three_class_bounds(
+        regime: &str,
+        kind: &str,
+        coverage: &StratumCoverage,
+        draws: usize,
+    ) {
+        let shares = kind.contains("length");
+        let expected = if kind == "other length shares" {
+            2 * draws
+        } else {
+            draws
+        };
+        assert_eq!(
+            (
+                coverage.distances.len(),
+                coverage.not_identified,
+                coverage.not_placed
+            ),
+            (expected, 0, 0),
+            "{regime}, {kind}: every estimate has an error"
+        );
+        let (one, two) = (coverage.share_within(1.0), coverage.share_within(2.0));
+        let (least_within_one, least_within_two) = if shares { (0.40, 0.75) } else { (0.55, 0.88) };
+        assert!(
+            one >= least_within_one && one <= 0.82 && two >= least_within_two,
+            "{regime}, {kind}: within one error {one:.3}, within two {two:.3}"
+        );
+        if !shares {
+            let spread = coverage.spread();
+            assert!(
+                (0.85..=1.2).contains(&spread),
+                "{regime}, {kind}: the distances spread {spread:.3} times the errors"
+            );
+            assert!(
+                coverage.mean().abs() < 0.4,
+                "{regime}, {kind}: the estimates sit {:+.3} errors from the truth",
+                coverage.mean()
+            );
+        }
+    }
+
     /// A stratum fitted on its own tracts, built directly so the smoothing can be exercised
     /// without paying for the climb.
     fn fitted_at(period: u8, repeats: u64, level: f64, reads: u64) -> StratumOutcome {

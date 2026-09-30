@@ -222,7 +222,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    log-likelihood over all its numbers, at its final answer, on the climb's scales, carried to the
    natural scale; `None` where the curvature is not negative-definite in that direction. Computed and
    carried in `StratumFit`, printed as a summary; **no number moves.** *Depends:* —. *Source:* spec §4.2.
-2. ☐ **C2 — the stratum errors mean what they say.** A test (ignored by default) fitting strata drawn
+2. ✅ **C2 — the stratum errors mean what they say.** A test (ignored by default) fitting strata drawn
    at known slippage many times, at 3 and 30 reads, comparing spread with reported error. *Depends:*
    C1. *Source:* spec §4.5 item 1.
 3. ☐ **C3 — the climb stops on its projected remaining total gain**, and a round that loses is not
