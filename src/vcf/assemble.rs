@@ -87,7 +87,8 @@ pub struct LocusEvidenceForOutput {
     /// Cohort-pooled mapping qualities, one per allele, reference first.
     pub allele_mapq: Vec<MapqPool>,
     /// The reference base beside the span, resolved where the reference was still open —
-    /// `Some` exactly when some allele of the locus is empty (spec §5).
+    /// `Some` exactly when some allele of the locus is empty (spec §5). [`assemble_record`] drops
+    /// it again when the only empty allele is an alternative no sample calls.
     pub padding_base: Option<PaddingBase>,
     /// The site quality **after** the artifact correction, and the two penalties it subtracted.
     ///
@@ -175,6 +176,14 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         &mut allele_mapq,
         &mut sample_columns,
     );
+    // **The padding base was resolved over the whole candidate table, and the drop above can
+    // take away the only empty allele** — a deletion that survived selection but that no sample
+    // is called carrying. A record with no empty allele is written without padding (spec §5),
+    // so the base goes with the allele that needed it. The drop removes alleles and never
+    // shortens one, so it cannot make a padding base necessary where there was none.
+    let padding_base = evidence
+        .padding_base
+        .filter(|_| alleles.iter().any(|allele| allele.is_empty()));
 
     VcfRecord::new(
         locus.region,
@@ -182,7 +191,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         expected_copies,
         sample_columns,
         allele_mapq,
-        evidence.padding_base,
+        padding_base,
         evidence.corrected_site_quality,
         evidence.artifact_penalties,
         evidence.filter,
