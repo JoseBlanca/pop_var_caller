@@ -4971,6 +4971,357 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // How far the 256-point average is from the truth (after plan step C2)
+    // -----------------------------------------------------------------
+
+    /// A reproducible stream of uniforms, normals, and Gamma and Dirichlet draws kept in logs.
+    struct Stream(u64);
+
+    impl Stream {
+        fn uniform(&mut self) -> f64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+        }
+
+        fn normal(&mut self) -> f64 {
+            let (u1, u2) = (self.uniform(), self.uniform());
+            (-2.0 * float::ln(u1)).sqrt() * float::cos(std::f64::consts::TAU * u2)
+        }
+
+        /// The logarithm of a Gamma(`shape`, 1) draw, kept in logs so a tiny shape does not
+        /// underflow to zero.
+        fn ln_gamma_draw(&mut self, shape: f64) -> f64 {
+            if shape < 1.0 {
+                let u = self.uniform();
+                return self.ln_gamma_draw(shape + 1.0) + float::ln(u) / shape;
+            }
+            let d = shape - 1.0 / 3.0;
+            let c = 1.0 / (9.0 * d).sqrt();
+            loop {
+                let x = self.normal();
+                let v = float::powi(1.0 + c * x, 3);
+                if v <= 0.0 {
+                    continue;
+                }
+                if float::ln(self.uniform()) < 0.5 * x * x + d - d * v + d * float::ln(v) {
+                    return float::ln(d * v);
+                }
+            }
+        }
+
+        /// The logarithms of one Dirichlet(`alpha`) draw's coordinates.
+        fn ln_dirichlet(&mut self, alpha: &[f64]) -> Vec<f64> {
+            let draws: Vec<f64> = alpha.iter().map(|a| self.ln_gamma_draw(*a)).collect();
+            let total = ln_sum_exp(&draws);
+            draws.into_iter().map(|draw| draw - total).collect()
+        }
+    }
+
+    fn ln_dirichlet_density(alpha: &[f64], ln_frequencies: &[f64]) -> f64 {
+        let total: f64 = alpha.iter().sum();
+        ln_gamma(total)
+            + alpha
+                .iter()
+                .zip(ln_frequencies)
+                .map(|(a, ln_f)| (a - 1.0) * ln_f - ln_gamma(*a))
+                .sum::<f64>()
+    }
+
+    /// `ln` of one tract's likelihood at the length frequencies `frequencies` — the thing the
+    /// average is taken over, term for term as [`ln_tract`] computes it.
+    fn ln_integrand(
+        likelihoods: &TractLikelihoods,
+        frequencies: &[f64],
+        genotypes: &[(usize, usize)],
+    ) -> f64 {
+        let mut total = likelihoods.ln_offset;
+        for (row, excess) in likelihoods
+            .scaled
+            .chunks_exact(likelihoods.width)
+            .zip(&likelihoods.homozygote_excess)
+        {
+            let (mut at_random, mut by_descent) = (0.0, 0.0);
+            for (slot, (first, second)) in genotypes.iter().enumerate() {
+                if first == second {
+                    at_random += frequencies[*first] * frequencies[*first] * row[slot];
+                    by_descent += frequencies[*first] * row[slot];
+                } else {
+                    at_random += 2.0 * frequencies[*first] * frequencies[*second] * row[slot];
+                }
+            }
+            let sum = excess * by_descent + (1.0 - excess) * at_random;
+            if sum <= 0.0 {
+                return f64::NEG_INFINITY;
+            }
+            total += float::ln(sum);
+        }
+        total
+    }
+
+    /// How many copies of each allele class one tract's reads put in its samples, by each sample's
+    /// genotype posterior under the stratum's mean frequencies: where a tract's reads say its
+    /// frequencies are.
+    fn copies_the_reads_say(
+        likelihoods: &TractLikelihoods,
+        spectrum: &[f64],
+        genotypes: &[(usize, usize)],
+    ) -> Vec<f64> {
+        let mut copies = vec![0.0; spectrum.len()];
+        for (row, excess) in likelihoods
+            .scaled
+            .chunks_exact(likelihoods.width)
+            .zip(&likelihoods.homozygote_excess)
+        {
+            let weights: Vec<f64> = genotypes
+                .iter()
+                .enumerate()
+                .map(|(slot, (first, second))| {
+                    let prior = if first == second {
+                        excess * spectrum[*first]
+                            + (1.0 - excess) * spectrum[*first] * spectrum[*first]
+                    } else {
+                        (1.0 - excess) * 2.0 * spectrum[*first] * spectrum[*second]
+                    };
+                    prior * row[slot]
+                })
+                .collect();
+            let total: f64 = weights.iter().sum();
+            for (weight, (first, second)) in weights.iter().zip(genotypes) {
+                copies[*first] += weight / total;
+                copies[*second] += weight / total;
+            }
+        }
+        copies
+    }
+
+    /// `ln` of a tract's average by importance sampling, and that logarithm's standard error: `draws`
+    /// points from a mixture — a tenth from the stratum's own Dirichlet, the rest in three equal
+    /// parts from Dirichlets moved all, half and a quarter of the way to the copies the tract's reads
+    /// say it carries — each weighted by the target's density over the mixture's.
+    fn importance_average(
+        likelihoods: &TractLikelihoods,
+        genotypes: &[(usize, usize)],
+        alpha: &[f64],
+        towards: &[f64],
+        draws: usize,
+        stream: &mut Stream,
+    ) -> (f64, f64) {
+        let moved = |share: f64| -> Vec<f64> {
+            alpha
+                .iter()
+                .zip(towards)
+                .map(|(a, t)| a + share * (t - a))
+                .collect()
+        };
+        let parts: Vec<(f64, Vec<f64>)> = vec![
+            (0.1, alpha.to_vec()),
+            (0.3, moved(1.0)),
+            (0.3, moved(0.5)),
+            (0.3, moved(0.25)),
+        ];
+        let ln_weights: Vec<f64> = (0..draws)
+            .map(|_| {
+                let mut u = stream.uniform();
+                let mut chosen = parts.len() - 1;
+                for (index, (weight, _)) in parts.iter().enumerate() {
+                    if u < *weight {
+                        chosen = index;
+                        break;
+                    }
+                    u -= weight;
+                }
+                let ln_f = stream.ln_dirichlet(&parts[chosen].1);
+                let frequencies: Vec<f64> = ln_f.iter().map(|ln| float::exp(*ln)).collect();
+                let ln_target = ln_dirichlet_density(alpha, &ln_f);
+                let ln_proposal = ln_sum_exp(
+                    &parts
+                        .iter()
+                        .map(|(weight, shape)| {
+                            float::ln(*weight) + ln_dirichlet_density(shape, &ln_f)
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                ln_integrand(likelihoods, &frequencies, genotypes) + ln_target - ln_proposal
+            })
+            .collect();
+        let ln_mean = ln_sum_exp(&ln_weights) - float::ln(draws as f64);
+        let variance = ln_weights
+            .iter()
+            .map(|ln_w| {
+                let ratio = float::exp(ln_w - ln_mean) - 1.0;
+                ratio * ratio
+            })
+            .sum::<f64>()
+            / draws as f64;
+        (ln_mean, (variance / draws as f64).sqrt())
+    }
+
+    /// **How far the fixed-point average over a tract's length frequencies is from the truth**
+    /// (the investigation decided after plan step C2): on strata drawn at known numbers, each
+    /// tract's log-likelihood at those numbers, averaged over the fit's own point set at 256 to
+    /// 65,536 points, against a reference by importance sampling with its standard error; at 3 to
+    /// 13 allele classes, concentrations 0.1 to 10, 3 and 30 reads, 4 to 63 samples. Also the same
+    /// importance sampler at 256 and 4,096 points, a first look at placing a tract's points where
+    /// its reads say its frequencies are. Results: `fit_precision_quadrature_average_2026-10-01.md`.
+    ///
+    /// Ignored by default: two to five minutes in the container. `NG_AVERAGE_REFERENCE_DRAWS` sets the
+    /// reference's points a tract (20,000; the report's 3-read cells at 9 and 13 classes used
+    /// 200,000), `NG_AVERAGE_DEPTH` keeps the cells at one depth, and `NG_AVERAGE_LEAST_CLASSES` drops
+    /// the cells below a class count.
+    #[test]
+    #[ignore = "a measurement; run by hand"]
+    fn the_average_over_a_tracts_frequencies_against_the_truth() {
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        let tracts = 60;
+        let mut cells = Vec::new();
+        for classes in [3_usize, 5, 9, 13] {
+            for concentration in [0.1, 0.5, 2.0, 10.0] {
+                for depth in [3_u32, 30] {
+                    cells.push((classes, concentration, 20_usize, depth));
+                }
+            }
+        }
+        cells.extend([
+            (13, 0.5, 4, 3),
+            (13, 0.5, 63, 3),
+            (13, 0.5, 4, 30),
+            (13, 0.5, 63, 30),
+        ]);
+        let reference_draws: usize = std::env::var("NG_AVERAGE_REFERENCE_DRAWS")
+            .ok()
+            .map_or(20_000, |value| value.parse().expect("a count"));
+        let only_depth: Option<u32> = std::env::var("NG_AVERAGE_DEPTH")
+            .ok()
+            .map(|value| value.parse().expect("a depth"));
+        let least_classes: usize = std::env::var("NG_AVERAGE_LEAST_CLASSES")
+            .ok()
+            .map_or(0, |value| value.parse().expect("a count"));
+        for (cell, (classes, concentration, samples, depth)) in cells.into_iter().enumerate() {
+            if only_depth.is_some_and(|only| only != depth) || classes < least_classes {
+                continue;
+            }
+            let span = (classes / 2) as i32;
+            let spectrum = spectrum_of(classes);
+            let excess = vec![0.4; samples];
+            let evidence = draw_stratum(
+                truth,
+                &spectrum,
+                concentration,
+                0.4,
+                tracts,
+                samples,
+                depth,
+                span,
+                0xA7E0_0000 + cell as u64,
+            );
+            let genotypes = genotype_pairs(classes);
+            let per_allele: Vec<Vec<Vec<f64>>> = vec![
+                (-span..=span)
+                    .map(|allele| truth.read_probabilities(allele, span))
+                    .collect(),
+            ];
+            let likelihoods: Vec<TractLikelihoods> = evidence
+                .tracts
+                .iter()
+                .map(|tract| TractLikelihoods::of(tract, &per_allele, &genotypes, &excess))
+                .collect();
+            let alpha: Vec<f64> = spectrum.iter().map(|share| concentration * share).collect();
+            let mut stream = Stream(0x5EED + cell as u64);
+            let reference: Vec<(f64, f64)> = likelihoods
+                .iter()
+                .map(|tract| {
+                    let towards: Vec<f64> = alpha
+                        .iter()
+                        .zip(copies_the_reads_say(tract, &spectrum, &genotypes))
+                        .map(|(a, copies)| a + copies)
+                        .collect();
+                    importance_average(
+                        tract,
+                        &genotypes,
+                        &alpha,
+                        &towards,
+                        reference_draws,
+                        &mut stream,
+                    )
+                })
+                .collect();
+            let reference_error = reference.iter().map(|(_, se)| *se).fold(0.0, f64::max);
+            let unsure = reference.iter().filter(|(_, se)| *se > 0.05).count();
+            let mut line = format!(
+                "AVERAGE {classes} classes, concentration {concentration}, {samples} samples x \
+                 {depth} reads: reference {:.3} a tract (largest standard error {reference_error:.4}, \
+                 {unsure} tracts above 0.05);",
+                reference.iter().map(|(ln, _)| ln).sum::<f64>() / tracts as f64
+            );
+            for points in [256_usize, 1_024, 4_096, 16_384, 65_536] {
+                let quadrature = dirichlet_points(
+                    &spectrum,
+                    concentration,
+                    points,
+                    &genotypes,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                );
+                let gaps: Vec<f64> = likelihoods
+                    .iter()
+                    .zip(&reference)
+                    .map(|(tract, (truth, _))| ln_tract(tract, &quadrature, &genotypes) - truth)
+                    .collect();
+                if points == 256 {
+                    // The integrand is the one `ln_tract` averages.
+                    let first = &likelihoods[0];
+                    let terms: Vec<f64> = quadrature
+                        .frequencies
+                        .chunks_exact(classes)
+                        .map(|point| ln_integrand(first, point, &genotypes) + quadrature.ln_weight)
+                        .collect();
+                    let by_hand = ln_sum_exp(&terms);
+                    let by_fit = ln_tract(first, &quadrature, &genotypes);
+                    assert!(
+                        (by_hand - by_fit).abs() < 1e-8,
+                        "{by_hand} against {by_fit}"
+                    );
+                }
+                let mean = gaps.iter().sum::<f64>() / tracts as f64;
+                let worst = gaps.iter().copied().fold(0.0_f64, |a, b| a.min(b));
+                line.push_str(&format!(" {points} points {mean:+.3} (worst {worst:+.2});"));
+            }
+            for draws in [256_usize, 4_096] {
+                let gaps: Vec<f64> = likelihoods
+                    .iter()
+                    .zip(&reference)
+                    .map(|(tract, (truth, _))| {
+                        let towards: Vec<f64> = alpha
+                            .iter()
+                            .zip(copies_the_reads_say(tract, &spectrum, &genotypes))
+                            .map(|(a, copies)| a + copies)
+                            .collect();
+                        importance_average(tract, &genotypes, &alpha, &towards, draws, &mut stream)
+                            .0
+                            - truth
+                    })
+                    .collect();
+                let mean = gaps.iter().sum::<f64>() / tracts as f64;
+                let spread = (gaps
+                    .iter()
+                    .map(|gap| (gap - mean) * (gap - mean))
+                    .sum::<f64>()
+                    / tracts as f64)
+                    .sqrt();
+                line.push_str(&format!(" placed {draws} {mean:+.3} (spread {spread:.3});"));
+            }
+            eprintln!("{line}");
+        }
+    }
+
     /// A stratum fitted on its own tracts, built directly so the smoothing can be exercised
     /// without paying for the climb.
     fn fitted_at(period: u8, repeats: u64, level: f64, reads: u64) -> StratumOutcome {
