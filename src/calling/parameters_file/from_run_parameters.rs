@@ -1184,6 +1184,7 @@ mod tests {
             borrowed: Vec::new(),
             ending: ClimbEnding::Settled,
             walks: Vec::new(),
+            samples_fitted_on: None,
             tracts_of_its_own: 900,
             reads_crossing: 19_000,
             level_provenance: vec![

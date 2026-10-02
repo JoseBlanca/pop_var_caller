@@ -41,6 +41,7 @@ use crate::parameter_estimation::joint::fit::{
 };
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
+use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::{
     self, SsrFitConfig, StratumOutcome, StratumSubstitutionCounts, gather_strata,
@@ -202,7 +203,13 @@ pub fn fit_a_cohort(
             source: Box::new(source),
         }
     })?;
-    let outcomes = ssr_fit::fit_strata(&evidence, &homozygote_excess, tracts);
+    // **A large cohort's strata are each read from a subset of its samples**, the first in a
+    // fixed order drawn from the samples' names (`fit_precision.md` §4.4); the order is indexed as
+    // the evidence's samples and `homozygote_excess` are, the cohort's own order.
+    let names: Vec<&str> = cohort.sample_names().collect();
+    let order = sample_order(&names, SAMPLE_ORDER_SEED);
+    let outcomes =
+        ssr_fit::fit_strata_on_sample_subsets(&evidence, &homozygote_excess, &order, tracts);
     // **The evidence is the largest thing the tract half holds and nothing after the fit needs
     // more of it than these two counts a stratum**, so it goes here rather than when the
     // parameters file has been written.

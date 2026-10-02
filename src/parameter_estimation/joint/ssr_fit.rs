@@ -380,15 +380,25 @@ pub struct StratumFit {
     /// order: how it ended and how many rounds it took — what the climb cost. Empty on the fixtures
     /// tests build by hand.
     pub walks: Vec<WalkRecord>,
-    /// Tracts **this stratum itself** holds with at least one spanning read, whatever it read to
-    /// produce its answer.
+    /// **How many samples the stratum was fitted on**, when a large cohort's stratum was fitted on
+    /// a subset of them ([`fit_strata_on_sample_subsets`]) — the whole cohort's count when the
+    /// subset grew to every sample. `None` when every sample was read without a subset being drawn:
+    /// a cohort of at most [`SampleSubsets::first`] samples, or any call to [`fit_strata`]. The
+    /// evidence counts the fit carries ([`tracts_fitted`](Self::tracts_fitted),
+    /// [`tracts_of_its_own`](Self::tracts_of_its_own), [`reads_crossing`](Self::reads_crossing))
+    /// are the subset's.
+    pub samples_fitted_on: Option<usize>,
+    /// Tracts **this stratum itself** holds with at least one spanning read **among the samples it
+    /// was fitted on** — every sample unless a large cohort's stratum was fitted on a subset
+    /// ([`samples_fitted_on`](Self::samples_fitted_on)) — whatever it read to produce its answer.
     ///
     /// **Distinct from [`StratumFit::tracts_fitted`], and the difference is the whole point.** A
     /// stratum with eight tracts of its own that borrowed its way to a thousand has an answer
     /// resting on its neighbours, and a consumer told only the second number cannot see that
     /// (`str_slippage_level_curve.md` §8).
     pub tracts_of_its_own: usize,
-    /// Reads that crossed a whole tract of **this stratum itself**, over every sample and group.
+    /// Reads that crossed a whole tract of **this stratum itself**, over every group and every
+    /// sample it was fitted on ([`samples_fitted_on`](Self::samples_fitted_on)).
     pub reads_crossing: u64,
     /// Per slippage group, where that group's emitted slippage *level* came from — `None` where
     /// the group put no read in this stratum, matching [`StratumFit::slippage`] index for index.
@@ -875,6 +885,9 @@ pub struct SsrFitConfig {
     /// grain to choose, so it always spreads the pool over that stratum's tracts whatever this
     /// says.
     pub strata_at_once: NonZeroUsize,
+    /// **How a large cohort's strata take a subset of their samples** ([`SampleSubsets`]). Read
+    /// only by [`fit_strata_on_sample_subsets`]; [`fit_strata`] fits every sample.
+    pub subsets: SampleSubsets,
 }
 
 impl Default for SsrFitConfig {
@@ -889,6 +902,7 @@ impl Default for SsrFitConfig {
             refusal_floor: DEFAULT_REFUSAL_FLOOR,
             curve: SlippageCurveConfig::default(),
             strata_at_once: DEFAULT_STRATA_AT_ONCE,
+            subsets: SampleSubsets::default(),
         }
     }
 }
@@ -900,6 +914,51 @@ impl Default for SsrFitConfig {
 /// there; whether a walk ever settles after 40 is not known. It was 5, which left 9 of 15 walks at
 /// thirteen classes out of rounds.
 pub const DEFAULT_MAX_ROUNDS: u32 = 40;
+
+/// **How many samples a large cohort's repeat-tract stratum is first fitted on: 256** (spec §4.4,
+/// soft). A cohort of at most this many is fitted on every sample, exactly as before samples were subset.
+pub const FIRST_SUBSET: usize = 256;
+
+/// **How precisely a stratum's slippage level must be measured before its subset stops growing**:
+/// its standard error below 0.02 of the level itself (spec §4.4, soft). On drawn strata the level's
+/// error is close to one over the square root of the slipped reads, so this is roughly 2,500
+/// slipped reads in the subset at thirteen allele classes and 5,000 at three (the review of plan
+/// step D2, `fit_precision_d2_2026-10-02.md`).
+pub const LEVEL_RELATIVE_ERROR_TARGET: f64 = 0.02;
+
+/// **How many samples with reads of one slippage group a subset takes at least**, whenever the
+/// group put reads in the stratum: 8, or all of the group's own if it has fewer (spec §4.4, soft;
+/// amended at checkpoint D2 from "when the first samples hold none").
+pub const MIN_SAMPLES_A_GROUP: usize = 8;
+
+/// **How a large cohort's repeat-tract strata are fitted on a subset of their samples** (spec §4.4).
+/// Each stratum is fitted on the first [`first`](Self::first) samples of the cohort's fixed order
+/// ([`sample_order`](super::sample_order::sample_order)), then on twice as many, and so on, until
+/// its slippage level is measured to
+/// [`level_relative_error_target`](Self::level_relative_error_target) or every sample is in. Read
+/// only by [`fit_strata_on_sample_subsets`]; [`fit_strata`] ignores it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleSubsets {
+    /// The samples a stratum is first fitted on ([`FIRST_SUBSET`]); a cohort of no more than this
+    /// is fitted on all of them.
+    pub first: usize,
+    /// The level's standard error, as a share of the level, below which the subset stops growing
+    /// ([`LEVEL_RELATIVE_ERROR_TARGET`]). Every live slippage group's level must reach it.
+    pub level_relative_error_target: f64,
+    /// The samples with reads of a slippage group a subset takes at least, when the first samples
+    /// hold none of that group's reads ([`MIN_SAMPLES_A_GROUP`]).
+    pub min_samples_a_group: usize,
+}
+
+impl Default for SampleSubsets {
+    fn default() -> Self {
+        Self {
+            first: FIRST_SUBSET,
+            level_relative_error_target: LEVEL_RELATIVE_ERROR_TARGET,
+            min_samples_a_group: MIN_SAMPLES_A_GROUP,
+        }
+    }
+}
 
 /// How few tracts leave a stratum with nothing worth fitting at all.
 ///
@@ -1060,6 +1119,30 @@ fn climb_from(
 ) -> Climb {
     let allele_classes = (2 * config.allele_span + 1) as usize;
     let parameters = Parameters::start(start, evidence.groups, allele_classes);
+    climb_from_parameters(
+        evidence,
+        parameters,
+        homozygote_excess,
+        genotypes,
+        live_groups,
+        config,
+        threads,
+    )
+}
+
+/// **One walk uphill from `parameters`**: [`climb_from`]'s walk, from a point given whole rather
+/// than from a starting point — a larger subset's walk starts from the smaller one's answer
+/// ([`fit_on_growing_subsets`]).
+fn climb_from_parameters(
+    evidence: &StratumEvidence,
+    parameters: Parameters,
+    homozygote_excess: &[f64],
+    genotypes: &[(usize, usize)],
+    live_groups: &[bool],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> Climb {
+    let allele_classes = (2 * config.allele_span + 1) as usize;
     let mut climbing = StratumClimb {
         scorer: Scorer::new(evidence, homozygote_excess, genotypes, config, threads),
         evidence,
@@ -1367,6 +1450,7 @@ fn the_fit_of(
         borrowed: borrowed.to_vec(),
         ending,
         walks,
+        samples_fitted_on: None,
         // **What the stratum holds on its own is not knowable here.** `evidence` may already be
         // the pooled set, so these two are placeholders that `fit_strata` replaces with the
         // receiving stratum's own counts, exactly as it replaces `stratum` and `borrowed`.
@@ -2089,12 +2173,317 @@ fn normalise(weights: &mut [f64]) {
 // Spending the pool on the walks rather than on the strata
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// A stratum read from a subset of samples (spec §4.4)
+// ---------------------------------------------------------------------
+
+impl StratumEvidence {
+    /// **The same stratum read from the samples `keep` marks, and no others.** Every tract is kept,
+    /// one whose readers are all left out kept empty: the score is a mean over every tract either
+    /// way (spec §4.1's trap), and a tract without reads moves no answer. The counts the fit does
+    /// not take per sample — the guard's and the substitution counts — stay the whole stratum's.
+    fn of_samples(&self, keep: &[bool]) -> StratumEvidence {
+        StratumEvidence {
+            stratum: self.stratum,
+            tracts: self
+                .tracts
+                .iter()
+                .map(|tract| TractReads {
+                    samples: tract
+                        .samples
+                        .iter()
+                        .filter(|reads| keep[reads.sample as usize])
+                        .cloned()
+                        .collect(),
+                })
+                .collect(),
+            read_span: self.read_span,
+            groups: self.groups,
+            tracts_over_guard_threshold: self.tracts_over_guard_threshold,
+            reads_reaching_not_crossing: self.reads_reaching_not_crossing,
+            guard_reads: self.guard_reads,
+            bases_compared: self.bases_compared,
+            mismatching_bases: self.mismatching_bases,
+        }
+    }
+
+    /// **Which samples put reads of each slippage group in this stratum**, a row of `samples`
+    /// flags a group.
+    fn readers_by_group(&self, samples: usize) -> Vec<Vec<bool>> {
+        let mut readers = vec![vec![false; samples]; self.groups];
+        for tract in &self.tracts {
+            for reads in &tract.samples {
+                for (group, counts) in &reads.by_group {
+                    if counts.iter().any(|count| *count > 0) {
+                        readers[*group as usize][reads.sample as usize] = true;
+                    }
+                }
+            }
+        }
+        readers
+    }
+}
+
+/// **Adds to `keep` the samples a stratum's subset of `size` holds** (spec §4.4 as amended at
+/// checkpoint D2), so a larger subset always holds the smaller one's samples: the first `size` in
+/// `order`; then, for every slippage group that put reads in the stratum, that group's readers in
+/// `order` until `min_a_group` of them are in, or all of its own.
+fn grow_subset(
+    keep: &mut [bool],
+    readers: &[Vec<bool>],
+    order: &[usize],
+    size: usize,
+    min_a_group: usize,
+) {
+    for &sample in order.iter().take(size) {
+        keep[sample] = true;
+    }
+    for group_readers in readers {
+        let mut held = group_readers
+            .iter()
+            .zip(keep.iter())
+            .filter(|(reads, kept)| **reads && **kept)
+            .count();
+        for &sample in order {
+            if held >= min_a_group {
+                break;
+            }
+            if group_readers[sample] && !keep[sample] {
+                keep[sample] = true;
+                held += 1;
+            }
+        }
+    }
+}
+
+/// **The size the next subset takes**: twice `size`, or every sample once that would hold more than
+/// three quarters of the cohort's `samples` (spec §4.4 as amended at checkpoint D2) — at 2,169
+/// samples, 256, 512 and 1,024, then every sample rather than 2,048.
+fn next_subset_size(size: usize, samples: usize) -> usize {
+    let doubled = size.saturating_mul(2);
+    if doubled.saturating_mul(4) > samples.saturating_mul(3) {
+        samples
+    } else {
+        doubled
+    }
+}
+
+/// **Whether a fitted stratum's slippage level is measured to `target`** of itself in every live
+/// slippage group that `still_growing` marks: the level's standard error below `target` times the
+/// level. A group whose level has no error, or is zero, has not reached it. A group not marked —
+/// every one of its readers already in the subset — cannot be measured better by growing, so it is
+/// not asked; with no group asked, the level is as well measured as it can be.
+fn level_is_measured_to(
+    parameters: &Parameters,
+    live_groups: &[bool],
+    errors: &StratumErrors,
+    still_growing: &[bool],
+    target: f64,
+) -> bool {
+    live_groups
+        .iter()
+        .zip(&still_growing[..live_groups.len()])
+        .enumerate()
+        .filter(|(_, (live, growing))| **live && **growing)
+        .all(|(group, _)| {
+            let level = parameters.slippage[group].level;
+            errors.slippage[group]
+                .and_then(|group| group.level.value())
+                .is_some_and(|error| {
+                    error.partial_cmp(&(target * level)) == Some(std::cmp::Ordering::Less)
+                })
+        })
+}
+
+/// **One stratum of a large cohort, fitted on a subset of its samples grown until its slippage
+/// level is measured precisely enough** (spec §4.4 as amended at checkpoint D2).
+///
+/// - **The refusal floor is judged on the whole stratum**, before any subset is drawn: a stratum
+///   whose reads are all in samples outside the first subset grows its subset rather than being
+///   refused.
+/// - The first subset is the first [`SampleSubsets::first`] samples of `order`, each slippage group
+///   with reads in the stratum topped up to [`SampleSubsets::min_samples_a_group`] of its readers
+///   ([`grow_subset`]). Each larger subset holds the smaller one's samples, doubles it, and takes
+///   every sample once it would pass three quarters of them ([`next_subset_size`]).
+/// - **A subset holding fewer tracts with reads than [`SsrFitConfig::refusal_floor`] is not
+///   fitted**; it grows.
+/// - The first subset fitted is fitted from every starting point; each later one by one walk from
+///   the last answer, which decides only whether to grow.
+/// - The subset stops growing once every live slippage group that still has readers outside it has
+///   a level with a standard error below [`SampleSubsets::level_relative_error_target`] of itself
+///   ([`level_is_measured_to`]), or once it holds every sample. **The subset the answer is taken
+///   from is fitted from every starting point and from the last answer as well**, the best walk
+///   winning: one walk from a nearby answer can settle short of the best of several.
+/// - The answer's evidence counts are that subset's, and the fit records how many samples it held
+///   ([`StratumFit::samples_fitted_on`]); its walks are that subset's.
+fn fit_on_growing_subsets(
+    evidence: &StratumEvidence,
+    order: &[usize],
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> StratumOutcome {
+    assert_eq!(
+        order.len(),
+        homozygote_excess.len(),
+        "the sample order must rank every sample the homozygote excess is given for"
+    );
+    if let Some(refused) = refused_before_any_walk(evidence, config) {
+        return refused;
+    }
+    // The precondition `the_best_walk` states, for the walks taken here directly.
+    assert!(
+        config.allele_span >= 1,
+        "`SsrFitConfig::allele_span` must be at least 1, so a tract can carry a length other than \
+         its reference's"
+    );
+    let subsets = config.subsets;
+    let samples = order.len();
+    let readers = evidence.readers_by_group(samples);
+    let genotypes = genotype_pairs(allele_classes_of(config));
+    let mut keep = vec![false; samples];
+    let mut size = subsets.first.max(1);
+    if size.saturating_mul(4) > samples.saturating_mul(3) {
+        size = samples;
+    }
+    // The last answer, which a larger subset's one walk starts from.
+    let mut last: Option<Parameters> = None;
+    loop {
+        grow_subset(
+            &mut keep,
+            &readers,
+            order,
+            size,
+            subsets.min_samples_a_group,
+        );
+        let every_sample = keep.iter().all(|kept| *kept);
+        // **The whole stratum when every sample is in**, so a stratum that grows that far holds
+        // no second copy of its evidence.
+        let copied;
+        let subset: &StratumEvidence = if every_sample {
+            evidence
+        } else {
+            copied = evidence.of_samples(&keep);
+            &copied
+        };
+        let live_groups = subset.groups_with_reads();
+        let fit_it = live_groups.iter().any(|live| *live)
+            && (every_sample || subset.tracts_with_reads() >= config.refusal_floor);
+        if fit_it {
+            let climb = |start: Parameters| {
+                climb_from_parameters(
+                    subset,
+                    start,
+                    homozygote_excess,
+                    &genotypes,
+                    &live_groups,
+                    config,
+                    threads,
+                )
+            };
+            let from_every_start = || -> Vec<Climb> {
+                config
+                    .starting_points
+                    .iter()
+                    .map(|start| {
+                        climb(Parameters::start(
+                            *start,
+                            subset.groups,
+                            allele_classes_of(config),
+                        ))
+                    })
+                    .collect()
+            };
+            let mut climbs = match &last {
+                None => from_every_start(),
+                Some(previous) => vec![climb(previous.clone())],
+            };
+            let mut best = the_best_of_the_walks(&climbs);
+            let errors_at = |climb: &mut Climb| {
+                climb.standard_errors.take().unwrap_or_else(|| {
+                    standard_errors_at(
+                        subset,
+                        &climb.parameters,
+                        homozygote_excess,
+                        &live_groups,
+                        config,
+                        threads,
+                    )
+                })
+            };
+            let mut errors = errors_at(&mut climbs[best]);
+            let still_growing: Vec<bool> = readers
+                .iter()
+                .map(|group| {
+                    group
+                        .iter()
+                        .zip(&keep)
+                        .any(|(reads, kept)| *reads && !*kept)
+                })
+                .collect();
+            let precise = level_is_measured_to(
+                &climbs[best].parameters,
+                &live_groups,
+                &errors,
+                &still_growing,
+                subsets.level_relative_error_target,
+            );
+            if precise || every_sample {
+                if last.is_some() {
+                    // The answer's subset: every starting point, then the walk from the last
+                    // answer, the best winning.
+                    let warm = climbs.remove(0);
+                    climbs = from_every_start();
+                    climbs.push(warm);
+                    best = the_best_of_the_walks(&climbs);
+                    // The walk from the last answer was judged already; a starting point's
+                    // winner needs its own errors.
+                    if best != climbs.len() - 1 {
+                        errors = errors_at(&mut climbs[best]);
+                    }
+                }
+                let walks = climbs.iter().map(Climb::record).collect();
+                let winner = climbs.swap_remove(best);
+                let mut fit = the_fit_of(subset, &[], &live_groups, winner, walks, Some(errors));
+                fit.samples_fitted_on = Some(keep.iter().filter(|kept| **kept).count());
+                return StratumOutcome::Fitted(Box::new(fit));
+            }
+            last = Some(climbs.swap_remove(best).parameters);
+        } else if every_sample {
+            return StratumOutcome::Refused {
+                stratum: evidence.stratum,
+                tracts: evidence.tracts_with_reads(),
+                reason: StratumRefusal::NoSpanningReads,
+            };
+        }
+        size = next_subset_size(size, samples);
+    }
+}
+
+/// The allele classes the climb fits, `2 × span + 1`.
+fn allele_classes_of(config: &SsrFitConfig) -> usize {
+    (2 * config.allele_span + 1) as usize
+}
+
+/// **Which of `climbs` scored highest**, the earlier winning a tie and a score that is not a number
+/// never winning — the rule [`the_better_walk`] keeps.
+fn the_best_of_the_walks(climbs: &[Climb]) -> usize {
+    let mut best = 0;
+    for (index, climb) in climbs.iter().enumerate().skip(1) {
+        if climb.score.partial_cmp(&climbs[best].score) == Some(std::cmp::Ordering::Greater) {
+            best = index;
+        }
+    }
+    best
+}
+
 /// **What a stratum's outcome is before a single walk is taken**, or `None` when it is to be
 /// fitted.
 ///
 /// Both arms of [`fit_strata`] ask this, and they must ask the same thing: a stratum refused by
 /// one and fitted by the other would make the answer depend on how the threads were spent, which
-/// is exactly what the arms are built not to do.
+/// is exactly what the arms are built not to do. [`fit_on_growing_subsets`] asks it of the whole
+/// stratum, before any subset is drawn.
 fn refused_before_any_walk(
     evidence: &StratumEvidence,
     config: &SsrFitConfig,
@@ -2370,9 +2759,45 @@ fn a_pool_for(
 /// replaced by a curve through every stratum of the period, weighted, which reaches strata
 /// neither could. Removing pooling also removed the run's expensive arm — 1,036.8 s against
 /// 155.5 s on the same cohort (`str_slippage_level_curve.md` §5.1).
+///
+/// **Every stratum is read from every sample**, whatever `config.subsets` says. A run calls
+/// [`fit_strata_on_sample_subsets`], which reads a large cohort's strata from a subset grown to the
+/// precision their levels need.
 pub fn fit_strata(
     strata: &[StratumEvidence],
     homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> Vec<StratumOutcome> {
+    fit_strata_with(strata, homozygote_excess, None, config)
+}
+
+/// **[`fit_strata`], with each stratum of a large cohort read from a subset of its samples**
+/// (spec §4.4): a cohort of more than [`SampleSubsets::first`] samples has each
+/// stratum fitted on the first samples of `sample_order`, grown until its slippage level is measured
+/// to [`SampleSubsets::level_relative_error_target`] ([`fit_on_growing_subsets`]). A cohort of no
+/// more is [`fit_strata`]'s, exactly.
+///
+/// `sample_order` is every sample of the cohort, in the fixed order
+/// [`sample_order`](super::sample_order::sample_order) gives, indexed as the evidence's
+/// [`SampleTractReads::sample`] and `homozygote_excess` are.
+pub fn fit_strata_on_sample_subsets(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    sample_order: &[usize],
+    config: &SsrFitConfig,
+) -> Vec<StratumOutcome> {
+    if sample_order.len() <= config.subsets.first {
+        return fit_strata(strata, homozygote_excess, config);
+    }
+    fit_strata_with(strata, homozygote_excess, Some(sample_order), config)
+}
+
+/// [`fit_strata`]'s work, every stratum read from every sample when `sample_order` is `None` and
+/// from a growing subset of them otherwise; everything after the strata's own answers is the same.
+fn fit_strata_with(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    sample_order: Option<&[usize]>,
     config: &SsrFitConfig,
 ) -> Vec<StratumOutcome> {
     // **Every stratum is fitted on its own tracts and no other's.** Pooling a thin stratum's
@@ -2423,24 +2848,63 @@ pub fn fit_strata(
         strata.len(),
         config.starting_points.len(),
     ));
-    let mut outcomes: Vec<StratumOutcome> = match &pool {
-        Some(pool) => pool
+    let progress = |index: usize| {
+        stage.now_and_then(|into| {
+            format!(
+                "repeat-tract fit: stratum {} of {}; {into}",
+                index + 1,
+                strata.len()
+            )
+        });
+    };
+    let mut outcomes: Vec<StratumOutcome> = match (sample_order, &pool) {
+        (None, Some(pool)) => pool
             .install(|| every_stratum_from_every_start(strata, homozygote_excess, config, &stage)),
-        None => strata
+        (None, None) => strata
             .iter()
             .enumerate()
             .map(|(index, evidence)| {
-                stage.now_and_then(|into| {
-                    format!(
-                        "repeat-tract fit: stratum {} of {}; {into}",
-                        index + 1,
-                        strata.len()
-                    )
-                });
+                progress(index);
                 one_at_a_time(evidence)
             })
             .collect(),
+        // **A subset grows one fit after another**, so a stratum's walks cannot be handed to the
+        // pool together as a whole stratum's are; the strata are, each on one thread.
+        (Some(order), Some(pool)) => pool.install(|| {
+            strata
+                .par_iter()
+                .map(|evidence| {
+                    fit_on_growing_subsets(
+                        evidence,
+                        order,
+                        homozygote_excess,
+                        config,
+                        WhereTheThreadsGo::AcrossStrata,
+                    )
+                })
+                .collect()
+        }),
+        (Some(order), None) => strata
+            .iter()
+            .enumerate()
+            .map(|(index, evidence)| {
+                progress(index);
+                fit_on_growing_subsets(
+                    evidence,
+                    order,
+                    homozygote_excess,
+                    config,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                )
+            })
+            .collect(),
     };
+
+    if let Some(order) = sample_order
+        && let Some(summary) = subsets_summary(&outcomes, order.len())
+    {
+        stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
+    }
 
     if let Some(summary) = climb_endings_summary(&outcomes, config.max_rounds) {
         stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
@@ -2469,6 +2933,33 @@ pub fn fit_strata(
     }
     stage.always(|into| format!("repeat-tract fit: done; {into}"));
     outcomes
+}
+
+/// **What the run's log says about the subsets the strata were read from** (spec §4.4): over the
+/// strata fitted on their own tracts, the fewest, the median and the most samples a stratum was
+/// fitted on, and how many grew to every sample. `None` when no fitted stratum took a subset.
+fn subsets_summary(outcomes: &[StratumOutcome], cohort: usize) -> Option<String> {
+    let mut sizes: Vec<usize> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StratumOutcome::Fitted(fit) => fit.samples_fitted_on,
+            _ => None,
+        })
+        .collect();
+    if sizes.is_empty() {
+        return None;
+    }
+    sizes.sort_unstable();
+    Some(format!(
+        "the {strata} strata fitted on their own tracts were read from a subset of the cohort's \
+         {cohort} samples: {fewest} to {most}, median {median}; {every} of them grew to every \
+         sample",
+        strata = sizes.len(),
+        fewest = sizes[0],
+        most = sizes[sizes.len() - 1],
+        median = sizes[sizes.len() / 2],
+        every = sizes.iter().filter(|size| **size >= cohort).count(),
+    ))
 }
 
 /// **What the run's log says about how the climbs ended** (`fit_precision.md` §4.3): over the strata
@@ -6975,6 +7466,7 @@ mod tests {
             borrowed: Vec::new(),
             ending: ClimbEnding::Settled,
             walks: Vec::new(),
+            samples_fitted_on: None,
             tracts_of_its_own: 500,
             reads_crossing: reads,
             level_provenance: vec![Some(LevelProvenance {
@@ -7818,6 +8310,479 @@ mod tests {
         more_groups.groups = 2;
         let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 99), more_groups];
         let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+    }
+
+    // -----------------------------------------------------------------
+    // A stratum read from a subset of samples (plan step D2)
+    // -----------------------------------------------------------------
+
+    /// The slippage the subset tests draw at.
+    fn subset_truth() -> Slippage {
+        Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        }
+    }
+
+    /// A config whose first subset is `first` samples and whose level target is `target`.
+    fn subset_config(first: usize, target: f64) -> SsrFitConfig {
+        let mut config = SsrFitConfig {
+            allele_span: 1,
+            subsets: SampleSubsets {
+                first,
+                level_relative_error_target: target,
+                min_samples_a_group: MIN_SAMPLES_A_GROUP,
+            },
+            ..SsrFitConfig::default()
+        };
+        config.curve.draw_curves = false;
+        config
+    }
+
+    fn fitted(outcome: &StratumOutcome) -> &StratumFit {
+        match outcome {
+            StratumOutcome::Fitted(fit) => fit,
+            other => panic!("not fitted: {other:?}"),
+        }
+    }
+
+    /// **A cohort no larger than the first subset is fitted whole, and one sample more takes a
+    /// subset**: with a first subset of 20, twenty samples give `fit_strata`'s outcome with no subset
+    /// recorded; twenty-one are read from a subset.
+    #[test]
+    fn a_cohort_no_larger_than_the_first_subset_is_fitted_whole() {
+        let config = subset_config(20, 10.0);
+        for (samples, seed, subset) in [(20_usize, 51_u64, false), (21, 52, true)] {
+            let evidence = draw_stratum(
+                subset_truth(),
+                &spectrum_of(3),
+                0.5,
+                0.4,
+                100,
+                samples,
+                6,
+                1,
+                seed,
+            );
+            let order: Vec<usize> = (0..samples).collect();
+            let excess = vec![0.4; samples];
+            let strata = [evidence];
+            let outcomes = fit_strata_on_sample_subsets(&strata, &excess, &order, &config);
+            assert_eq!(
+                fitted(&outcomes[0]).samples_fitted_on.is_some(),
+                subset,
+                "{samples} samples"
+            );
+            if !subset {
+                assert_eq!(outcomes, fit_strata(&strata, &excess, &config));
+            }
+        }
+    }
+
+    /// **The subset stops growing once the level is measured to the target, and otherwise grows to
+    /// every sample, whose answer is the best of every starting point and the last answer**: on 64
+    /// drawn samples with a first subset of 8, a target no fit reaches takes all 64 and four walks,
+    /// scoring at least what three starts on every sample score; a target the first fit meets stops
+    /// at 8 from three walks, with the subset's own, smaller, evidence counts.
+    #[test]
+    fn a_subset_grows_until_the_level_is_measured_or_every_sample_is_in() {
+        let evidence = draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 300, 64, 6, 1, 53);
+        let order: Vec<usize> = (0..64).collect();
+        let excess = [0.4; 64];
+        let strata = [evidence];
+
+        let unreachable =
+            fit_strata_on_sample_subsets(&strata, &excess, &order, &subset_config(8, 1e-9));
+        let every = fitted(&unreachable[0]);
+        assert_eq!(every.samples_fitted_on, Some(64));
+        assert_eq!(every.walks.len(), 4, "{:?}", every.walks);
+        let whole = fit_stratum(&strata[0], &excess, &subset_config(8, 1e-9)).expect("reads");
+        assert_eq!(every.reads_crossing, whole.reads_crossing);
+        assert!(every.log_likelihood_a_tract >= whole.log_likelihood_a_tract);
+
+        let met = fit_strata_on_sample_subsets(&strata, &excess, &order, &subset_config(8, 10.0));
+        let first = fitted(&met[0]);
+        assert_eq!(first.samples_fitted_on, Some(8));
+        assert_eq!(first.walks.len(), 3);
+        assert!(first.reads_crossing < whole.reads_crossing);
+        assert_eq!(first.tracts_fitted, first.tracts_of_its_own);
+    }
+
+    /// **A subset doubles, and takes every sample once doubling would pass three quarters of them.**
+    #[test]
+    fn the_subset_doubles_until_three_quarters_of_the_cohort() {
+        assert_eq!(next_subset_size(256, 2_169), 512);
+        assert_eq!(next_subset_size(512, 2_169), 1_024);
+        assert_eq!(next_subset_size(1_024, 2_169), 2_169);
+        assert_eq!(next_subset_size(16, 64), 32);
+        assert_eq!(next_subset_size(32, 64), 64);
+        assert_eq!(next_subset_size(64, 64), 64);
+    }
+
+    /// **A larger subset holds the smaller one's samples, and every slippage group has eight of its
+    /// readers in**: group 1 read by samples 2, 5, 7 and 20 to 29; the first eight samples hold three
+    /// of them, so five more are added in order; doubling keeps every one of them.
+    #[test]
+    fn a_subset_tops_up_a_thin_group_and_keeps_its_samples_as_it_grows() {
+        let samples = 40;
+        let order: Vec<usize> = (0..samples).collect();
+        let mut readers = vec![vec![true; samples], vec![false; samples]];
+        for sample in [2, 5, 7].into_iter().chain(20..30) {
+            readers[1][sample] = true;
+        }
+        let mut keep = vec![false; samples];
+        grow_subset(&mut keep, &readers, &order, 8, MIN_SAMPLES_A_GROUP);
+        let kept: Vec<usize> = (0..samples).filter(|&sample| keep[sample]).collect();
+        assert_eq!(kept, (0..8).chain(20..25).collect::<Vec<_>>());
+        let before = keep.clone();
+        grow_subset(&mut keep, &readers, &order, 16, MIN_SAMPLES_A_GROUP);
+        assert!(before.iter().zip(&keep).all(|(was, is)| !*was || *is));
+        let kept: Vec<usize> = (0..samples).filter(|&sample| keep[sample]).collect();
+        assert_eq!(kept, (0..16).chain(20..25).collect::<Vec<_>>());
+    }
+
+    /// **The refusal floor is judged on the whole stratum, and a subset with fewer tracts than the
+    /// floor grows rather than being fitted**: forty tracts each read by one sample, a first subset
+    /// of 4 holding 4 tracts — not refused, and not fitted on 4 tracts: it grows to the 8 samples that
+    /// read 8. Six such tracts are refused, below the floor of 8.
+    #[test]
+    fn the_floor_is_judged_on_the_whole_stratum_and_a_thin_subset_grows() {
+        let read_by_one = |tracts: usize| {
+            let mut evidence =
+                draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 40, 40, 6, 1, 57);
+            for (index, tract) in evidence.tracts.iter_mut().enumerate() {
+                tract
+                    .samples
+                    .retain(|reads| reads.sample as usize == index && index < tracts);
+            }
+            evidence
+        };
+        let order: Vec<usize> = (0..40).collect();
+        // One reader a group at least, so the top-up leaves the first subset at its 4 tracts.
+        let mut config = subset_config(4, 10.0);
+        config.subsets.min_samples_a_group = 1;
+        let outcomes =
+            fit_strata_on_sample_subsets(&[read_by_one(40)], &[0.4; 40], &order, &config);
+        let fit = fitted(&outcomes[0]);
+        assert_eq!(fit.samples_fitted_on, Some(8));
+        assert_eq!(fit.tracts_fitted, 8);
+        let thin = fit_strata_on_sample_subsets(&[read_by_one(6)], &[0.4; 40], &order, &config);
+        assert!(
+            matches!(
+                thin[0],
+                StratumOutcome::Refused {
+                    reason: StratumRefusal::BelowTheFloor { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            thin[0]
+        );
+    }
+
+    /// **The subset is the same samples whatever order they arrive in**: with the cohort's indices
+    /// shuffled and the evidence relabelled to match, the subset holds the same names, a slippage
+    /// group the first samples lack topped up with three of its readers.
+    #[test]
+    fn the_subset_is_the_same_samples_whatever_order_they_arrive_in() {
+        use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
+        let names: Vec<String> = (0..40).map(|i| format!("accession_{i}")).collect();
+        // Group 1 reads in the samples ranked twentieth or later, so the first eight hold none.
+        let mut rank = vec![0; 40];
+        for (place, sample) in sample_order(&names, SAMPLE_ORDER_SEED)
+            .into_iter()
+            .enumerate()
+        {
+            rank[sample] = place;
+        }
+        let mut evidence =
+            draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 100, 40, 6, 1, 59);
+        for tract in &mut evidence.tracts {
+            for reads in tract
+                .samples
+                .iter_mut()
+                .filter(|reads| rank[reads.sample as usize] >= 20)
+            {
+                for (group, _) in &mut reads.by_group {
+                    *group = 1;
+                }
+            }
+        }
+        evidence.groups = 2;
+        let members_by_name = |evidence: &StratumEvidence, names: &[String]| {
+            let order = sample_order(names, SAMPLE_ORDER_SEED);
+            let mut keep = vec![false; names.len()];
+            grow_subset(
+                &mut keep,
+                &evidence.readers_by_group(names.len()),
+                &order,
+                8,
+                3,
+            );
+            let mut kept: Vec<String> = (0..names.len())
+                .filter(|&sample| keep[sample])
+                .map(|sample| names[sample].clone())
+                .collect();
+            kept.sort();
+            kept
+        };
+        let before = members_by_name(&evidence, &names);
+        // Sample `i` arrives at index `(7 i + 3) mod 40`.
+        let moved = |sample: usize| (7 * sample + 3) % 40;
+        let mut shuffled_names = vec![String::new(); 40];
+        for (sample, name) in names.iter().enumerate() {
+            shuffled_names[moved(sample)] = name.clone();
+        }
+        let mut shuffled = evidence.clone();
+        for tract in &mut shuffled.tracts {
+            for reads in &mut tract.samples {
+                reads.sample = moved(reads.sample as usize) as u32;
+            }
+        }
+        assert_eq!(members_by_name(&shuffled, &shuffled_names), before);
+        assert_eq!(
+            before.len(),
+            8 + 3,
+            "three group-1 readers added: {before:?}"
+        );
+    }
+
+    /// **Both schedules give the same bits on subsets**: two strata of 40 samples, a first subset of
+    /// 8, one stratum at a time and both at once.
+    #[test]
+    fn the_two_schedules_give_the_same_bits_on_subsets() {
+        let strata: Vec<StratumEvidence> = [(10_u64, 61_u64), (11, 63)]
+            .into_iter()
+            .map(|(repeats, seed)| {
+                let mut evidence = draw_stratum(
+                    subset_truth(),
+                    &spectrum_of(3),
+                    0.5,
+                    0.4,
+                    150,
+                    40,
+                    6,
+                    1,
+                    seed,
+                );
+                evidence.stratum = Stratum {
+                    period: 2,
+                    reference_repeats: repeats,
+                };
+                evidence
+            })
+            .collect();
+        let order: Vec<usize> = (0..40).rev().collect();
+        let outcomes_at = |at_once: usize| {
+            let config = SsrFitConfig {
+                strata_at_once: NonZeroUsize::new(at_once).expect("positive"),
+                ..subset_config(8, LEVEL_RELATIVE_ERROR_TARGET)
+            };
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .expect("a pool");
+            pool.install(|| fit_strata_on_sample_subsets(&strata, &[0.4; 40], &order, &config))
+        };
+        let (one, two) = (outcomes_at(1), outcomes_at(2));
+        let bits = |outcomes: &[StratumOutcome]| -> Vec<u64> {
+            every_fitted_number(outcomes)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect()
+        };
+        assert_eq!(bits(&one), bits(&two));
+        assert_eq!(one, two);
+        assert!(fitted(&one[0]).samples_fitted_on.is_some());
+    }
+
+    /// **The level is measured to the target when every live group that can still grow is**: two
+    /// groups at 1% and 5% of their levels; a target of 2% is met only when the second has no
+    /// readers left outside, or neither has; a group without an error that can grow has not met it.
+    #[test]
+    fn the_level_is_judged_only_in_groups_that_can_still_grow() {
+        let mut parameters = Parameters::start(
+            StartingPoint {
+                slippage_level: 0.1,
+                concentration: 0.5,
+            },
+            2,
+            3,
+        );
+        parameters.slippage[1].level = 0.1;
+        let group = |error: f64| SlippageErrors {
+            level: StratumError::Estimated(error),
+            shorter_share: StratumError::Estimated(0.1),
+            fall_off: StratumError::Estimated(0.1),
+        };
+        let mut errors = StratumErrors {
+            slippage: vec![Some(group(0.001)), Some(group(0.005))],
+            length_spectrum: vec![StratumError::Estimated(0.1); 3],
+            concentration: StratumError::Estimated(0.1),
+        };
+        let live = [true, true];
+        let judged = |errors: &StratumErrors, growing: [bool; 2]| {
+            level_is_measured_to(&parameters, &live, errors, &growing, 0.02)
+        };
+        assert!(!judged(&errors, [true, true]));
+        assert!(judged(&errors, [true, false]));
+        assert!(judged(&errors, [false, false]));
+        errors.slippage[0] = Some(SlippageErrors {
+            level: StratumError::NotIdentified,
+            ..group(0.001)
+        });
+        assert!(!judged(&errors, [true, false]));
+        assert!(judged(&errors, [false, false]));
+    }
+
+    /// **One read makes a reader**: a sample whose buckets hold one read reads the group, one whose
+    /// buckets are all empty does not.
+    #[test]
+    fn one_read_makes_a_sample_a_reader_of_its_group() {
+        let evidence = StratumEvidence {
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 10,
+            },
+            tracts: vec![TractReads {
+                samples: vec![
+                    SampleTractReads {
+                        sample: 0,
+                        by_group: vec![(0, vec![0, 1, 0])],
+                    },
+                    SampleTractReads {
+                        sample: 2,
+                        by_group: vec![(0, vec![0, 0, 0])],
+                    },
+                ],
+            }],
+            read_span: 1,
+            groups: 1,
+            tracts_over_guard_threshold: 0,
+            reads_reaching_not_crossing: 0,
+            guard_reads: 0,
+            bases_compared: 0,
+            mismatching_bases: 0,
+        };
+        assert_eq!(evidence.readers_by_group(3), vec![vec![true, false, false]]);
+    }
+
+    /// **The log's line about the subsets**: the fewest, the median and the most samples a stratum
+    /// was read from, and how many grew to every sample; no line when no stratum took a subset.
+    #[test]
+    fn the_subsets_summary_counts_the_sizes() {
+        let with = |size: Option<usize>| {
+            let mut outcome = fitted_at(2, 10, 0.1, 1_000);
+            if let StratumOutcome::Fitted(fit) = &mut outcome {
+                fit.samples_fitted_on = size;
+            }
+            outcome
+        };
+        let outcomes = [
+            with(Some(256)),
+            with(Some(2_169)),
+            with(Some(512)),
+            with(None),
+        ];
+        let summary = subsets_summary(&outcomes, 2_169).expect("subsets taken");
+        for part in [
+            "the 3 strata",
+            "256 to 2169, median 512",
+            "1 of them grew to every sample",
+        ] {
+            assert!(summary.contains(part), "{part:?} in {summary}");
+        }
+        assert_eq!(subsets_summary(&[with(None)], 2_169), None);
+    }
+
+    /// **The subset against every sample** (plan step D2, spec §4.5 item 3 on drawn cohorts): strata
+    /// drawn at a known level over a cohort larger than the first subset, fitted on every sample and
+    /// on the grown subset; each line gives the samples the subset reached, both levels and their
+    /// errors, how far apart the two levels are in the whole fit's errors, and both times.
+    ///
+    /// Ignored by default: minutes in the container. `NG_FIT_PRECISION_SUBSET_DRAWS` sets the draws a
+    /// regime (default 3).
+    #[test]
+    #[ignore = "a measurement over cohorts larger than the first subset, each fitted twice"]
+    fn the_subset_against_every_sample() {
+        let draws: u64 = std::env::var("NG_FIT_PRECISION_SUBSET_DRAWS")
+            .ok()
+            .map_or(3, |value| {
+                value.trim().parse().expect("a whole number of draws")
+            });
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        for (classes, tracts, samples, depth) in [
+            (3, 300, 1_024, 3),
+            (3, 1_000, 1_024, 3),
+            (3, 300, 1_024, 30),
+            (13, 200, 600, 3),
+        ] {
+            let span = (classes / 2) as i32;
+            let config = SsrFitConfig {
+                allele_span: span,
+                ..SsrFitConfig::default()
+            };
+            let excess = vec![0.4; samples];
+            let order: Vec<usize> = (0..samples).collect();
+            for draw in 0..draws {
+                let seed = 0xD200_0000 + (classes as u64) * 10_000 + tracts as u64 + draw;
+                let evidence = draw_stratum(
+                    truth,
+                    &spectrum_of(classes),
+                    0.5,
+                    0.4,
+                    tracts,
+                    samples,
+                    depth,
+                    span,
+                    seed,
+                );
+                let started = std::time::Instant::now();
+                let whole = fit_stratum(&evidence, &excess, &config).expect("reads were drawn");
+                let whole_time = started.elapsed();
+                let started = std::time::Instant::now();
+                let outcome = fit_on_growing_subsets(
+                    &evidence,
+                    &order,
+                    &excess,
+                    &config,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                );
+                let subset_time = started.elapsed();
+                let StratumOutcome::Fitted(subset) = outcome else {
+                    panic!("not fitted: {outcome:?}");
+                };
+                let level_and_error = |fit: &StratumFit| {
+                    let level = fit.slippage[0].expect("live").level;
+                    let error = fit
+                        .standard_errors
+                        .as_ref()
+                        .and_then(|errors| errors.slippage[0])
+                        .and_then(|group| group.level.value());
+                    (level, error)
+                };
+                let (whole_level, whole_error) = level_and_error(&whole);
+                let (subset_level, subset_error) = level_and_error(&subset);
+                let apart = whole_error.map(|error| (subset_level - whole_level) / error);
+                eprintln!(
+                    "SUBSET {classes} classes, {tracts} tracts x {samples} samples x {depth} reads, \
+                     draw {draw}: subset {:?} samples; level every sample {whole_level:.5} \
+                     ± {:.5}, subset {subset_level:.5} ± {:.5} ({:.2} of the whole fit's errors \
+                     apart); {:.1} s against {:.1} s",
+                    subset.samples_fitted_on,
+                    whole_error.unwrap_or(f64::NAN),
+                    subset_error.unwrap_or(f64::NAN),
+                    apart.unwrap_or(f64::NAN),
+                    subset_time.as_secs_f64(),
+                    whole_time.as_secs_f64(),
+                );
+            }
+        }
     }
 }
 

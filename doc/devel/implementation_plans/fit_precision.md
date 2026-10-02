@@ -245,12 +245,17 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 1. ✅ **D1 — the sample order.** A pure function from the cohort's sample names and a fixed seed to
    their order, tested to be the same whatever order the names arrive in. *Depends:* —. *Source:*
    spec §4.4 (the order).
-2. ☐ **D2 — the growing subset.** Fit on the first `FIRST_SUBSET` samples, add slippage groups'
+2. ✅ **D2 — the growing subset.** Fit on the first `FIRST_SUBSET` samples, add slippage groups'
    samples to `MIN_SAMPLES_A_GROUP`, double until the level's relative error is below
    `LEVEL_RELATIVE_ERROR_TARGET` or every sample is in, each climb warm-started from the last; the
    refusal floor judged on the whole stratum. Evidence counts from the subset. **Own commit.** At 256
    samples or fewer it must be byte-identical to C3's result: **the checksums pass unchanged.**
    *Depends:* D1, C1, C3. *Source:* spec §4.4.
+   **Decided during D2 (owner, 2026-10-02):** after the step's review, the subsets nest, every slippage
+   group is topped up to `MIN_SAMPLES_A_GROUP` readers, the subset takes every sample past three quarters,
+   a subset thinner than the refusal floor grows, the target is judged only on groups with readers still
+   outside, and the answer's subset is fitted from every starting point and the last answer (spec §4.4
+   amended); E2 writes how many samples each stratum was fitted on.
 3. ☐ **D3 — the comparison tool.** An example fitting chosen strata of a cohort both on every sample
    and on the grown subset, printing each stratum's three numbers, their errors, the subset size
    reached and the time, for the owner to run on kimura. *Depends:* D2. *Source:* spec §4.5 item 3.
@@ -273,6 +278,9 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    A′): a sample whose walk wrote repeat-tract sections and no ordinary one leaves its read groups in
    the fit's list with nothing scored, and they are written `defaulted` with zero observations — not
    fitted, with the run's position count — with a test on a tracts-only sample.
+   **And how many samples each repeat-tract stratum was fitted on** (owner, at D2): a large cohort's
+   stratum fitted on a subset writes `StratumFit::samples_fitted_on` beside its origin block, and the
+   file's text for `expected_slipped_reads` says the reads are among the samples the stratum was fitted on.
    The fitted-parameters checksum is re-recorded (the key and the version move it; no fitted
    number does — the commit shows the file's diff). *Depends:* E1.
    *Source:* spec §5.2–5.3.

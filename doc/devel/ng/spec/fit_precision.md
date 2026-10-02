@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) and at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02).
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02).
 Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
@@ -535,6 +535,31 @@ Each larger subset starts its climb from the previous subset's answer.
 ("bound the parameters fit's resident set by a subsample of *samples*, chosen the same data-blind way
 the loci are", lines 1627-1634) applied to the repeat-tract half, with its question 8 — how large the
 subsample must be — answered per stratum by the precision target rather than once for the cohort.
+
+**Amended at plan step D2 (owner, 2026-10-02)**, after the step's review measured the rule above as first
+built (`fit_precision_d2_2026-10-02.md`):
+
+- **Each larger subset holds the smaller one's samples.** Built literally, a slippage group's added readers
+  could leave the subset when it doubled.
+- **Every slippage group with reads in the stratum is topped up to `MIN_SAMPLES_A_GROUP` of its readers**,
+  not only one the first samples hold none of: one reader in 256 is barely better than none.
+- **The subset takes every sample once doubling would hold more than three quarters of them.** At 2,169
+  samples the subsets are 256, 512, 1,024, then every sample rather than 2,048.
+- **A subset holding fewer tracts with reads than the refusal floor is not fitted; it grows.** The floor is
+  still judged first on the whole stratum, so a stratum is never refused for its subset's thinness.
+- **The target is judged only on the slippage groups that still have readers outside the subset.** A group
+  whose every reader is in cannot be measured better by growing, and would otherwise hold every stratum to
+  the whole cohort.
+- **A larger subset is one walk from the last answer, which decides only whether to grow; the subset the
+  answer is taken from is fitted from every starting point and from the last answer, the best winning.** On
+  one drawn stratum of thirteen allele classes, one walk from the last answer ended 1.3 to 41
+  log-likelihood units below three fresh starts on the same samples, in all four comparisons, once with its
+  level 0.79 of an error away.
+- **What else moves.** A subset-fitted stratum's evidence counts are the subset's, so the curves across
+  strata weigh it by the subset's slipped reads, roughly 2,500 at thirteen classes once the target is met:
+  against a curve with HG002's homopolymer held-out error (7.7%), the curve's share of a well-read stratum's
+  blended level rises from under 1 in 100 to about 6 in 100. With several strata fitted at once, each stratum's
+  subsets run one after another on one thread.
 
 ### 4.5 How we know Part B works
 

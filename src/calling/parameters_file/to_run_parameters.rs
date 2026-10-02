@@ -1727,6 +1727,7 @@ mod the_north_star_round_trip {
                         borrowed: Vec::new(),
                         ending: ClimbEnding::Settled,
                         walks: Vec::new(),
+                        samples_fitted_on: None,
                         tracts_of_its_own: 100 + which_repeats,
                         reads_crossing: 5_000 + which_repeats as u64,
                         level_provenance: level,
