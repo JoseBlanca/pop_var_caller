@@ -44,7 +44,7 @@ use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
 use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::{
-    self, SsrFitConfig, StratumOutcome, StratumSubstitutionCounts, gather_strata,
+    self, SsrFitConfig, StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata,
     strata_of_kept_loci,
 };
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
@@ -143,6 +143,67 @@ pub enum CohortFitError {
     },
 }
 
+/// **Refuse a cohort whose censuses were written against another selection than `loci`**: the
+/// digest every census records of the ordinary positions it kept, against the digest of `loci`'s.
+///
+/// # Errors
+///
+/// [`CohortFitError::AnotherSelection`] when they differ; [`CohortFitError::NoSamples`] for a cohort
+/// of none.
+pub fn refuse_another_selection(
+    cohort: &CohortCensusEvidence,
+    loci: &CensusLoci,
+) -> Result<(), CohortFitError> {
+    // The digest is over the kept ordinary positions, in the order the writer digested them —
+    // which is the order `CensusWriter` holds them in, straight from the selection.
+    let recorded = cohort
+        .terms()
+        .ok_or(CohortFitError::NoSamples)?
+        .kept_loci
+        .clone();
+    let mut digester = CensusLociDigester::new();
+    for (index, position) in loci.generic().iter().enumerate() {
+        digester.observe(index, *position);
+    }
+    if digester.finish() != recorded {
+        return Err(CohortFitError::AnotherSelection);
+    }
+    Ok(())
+}
+
+/// **A cohort's repeat-tract evidence**: every stratum with each sample's reads at its tracts, and
+/// how many tracts the selection kept.
+pub struct CohortTractStrata {
+    /// One entry a stratum, its samples indexed by the cohort's own sample order.
+    pub strata: Vec<StratumEvidence>,
+    /// The repeat tracts the selection kept, over every stratum.
+    pub tracts: usize,
+}
+
+/// **Every repeat-tract stratum of a cohort, with each sample's reads at its tracts** — what the
+/// tract half of [`fit_a_cohort`] fits.
+///
+/// # Errors
+///
+/// [`CohortFitError::Tracts`] when a census's tract sections cannot be read.
+pub fn the_tract_strata_of_a_cohort(
+    cohort: &mut CohortCensusEvidence,
+    loci: &CensusLoci,
+    contig_of: &dyn Fn(&str) -> Option<ContigId>,
+    slippage_group_of: &BTreeMap<ReadGroupId, u32>,
+) -> Result<CohortTractStrata, CohortFitError> {
+    let kept = strata_of_kept_loci(loci, contig_of);
+    let strata = gather_strata(cohort, &kept, slippage_group_of).map_err(|source| {
+        CohortFitError::Tracts {
+            source: Box::new(source),
+        }
+    })?;
+    Ok(CohortTractStrata {
+        strata,
+        tracts: kept.len(),
+    })
+}
+
 /// **Fit a cohort of censuses, both halves.**
 ///
 /// `loci` is the selection rebuilt from this run's reference and catalog; it is checked against
@@ -167,18 +228,7 @@ pub fn fit_a_cohort(
     //
     // The digest is over the kept ordinary positions, in the order the writer digested them —
     // which is the order `CensusWriter` holds them in, straight from the selection.
-    let recorded = cohort
-        .terms()
-        .ok_or(CohortFitError::NoSamples)?
-        .kept_loci
-        .clone();
-    let mut digester = CensusLociDigester::new();
-    for (index, position) in loci.generic().iter().enumerate() {
-        digester.observe(index, *position);
-    }
-    if digester.finish() != recorded {
-        return Err(CohortFitError::AnotherSelection);
-    }
+    refuse_another_selection(cohort, loci)?;
 
     let fit = crate::parameter_estimation::joint::fit::fit_jointly(cohort, generic).map_err(
         |source| CohortFitError::Generic {
@@ -197,12 +247,10 @@ pub fn fit_a_cohort(
         })
         .collect();
 
-    let strata = strata_of_kept_loci(loci, contig_of);
-    let evidence = gather_strata(cohort, &strata, slippage_group_of).map_err(|source| {
-        CohortFitError::Tracts {
-            source: Box::new(source),
-        }
-    })?;
+    let CohortTractStrata {
+        strata: evidence,
+        tracts: kept_tracts,
+    } = the_tract_strata_of_a_cohort(cohort, loci, contig_of, slippage_group_of)?;
     // **A large cohort's strata are each read from a subset of its samples**, the first in a
     // fixed order drawn from the samples' names (`fit_precision.md` §4.4); the order is indexed as
     // the evidence's samples and `homozygote_excess` are, the cohort's own order.
@@ -222,7 +270,7 @@ pub fn fit_a_cohort(
     Ok(CohortFit {
         generic: fit,
         strata: outcomes,
-        tracts: strata.len(),
+        tracts: kept_tracts,
         substitution_counts,
     })
 }

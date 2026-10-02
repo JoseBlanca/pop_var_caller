@@ -256,7 +256,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    a subset thinner than the refusal floor grows, the target is judged only on groups with readers still
    outside, and the answer's subset is fitted from every starting point and the last answer (spec §4.4
    amended); E2 writes how many samples each stratum was fitted on.
-3. ☐ **D3 — the comparison tool.** An example fitting chosen strata of a cohort both on every sample
+3. ✅ **D3 — the comparison tool.** An example fitting chosen strata of a cohort both on every sample
    and on the grown subset, printing each stratum's three numbers, their errors, the subset size
    reached and the time, for the owner to run on kimura. *Depends:* D2. *Source:* spec §4.5 item 3.
 
