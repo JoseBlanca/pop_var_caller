@@ -458,6 +458,23 @@ pub enum StratumError {
     NoShare,
 }
 
+impl StratumErrors {
+    /// Whether any number of the stratum has an error.
+    pub fn any(&self) -> bool {
+        let slippage = self.slippage.iter().flatten().any(|group| {
+            [group.level, group.shorter_share, group.fall_off]
+                .iter()
+                .any(|error| error.value().is_some())
+        });
+        slippage
+            || self
+                .length_spectrum
+                .iter()
+                .any(|error| error.value().is_some())
+            || self.concentration.value().is_some()
+    }
+}
+
 impl StratumError {
     /// The error, or `None` when there is none.
     pub fn value(self) -> Option<f64> {
@@ -509,6 +526,11 @@ pub struct WalkRecord {
     pub rounds: u32,
     /// How many times a point of it was judged for settling — one curvature of the stratum each.
     pub judgements: u32,
+    /// **Whether it settled at a point where no number had a standard error**, so the judgement had
+    /// nothing to measure: settled by the spec's definition (`fit_precision.md` §4.3) and counted in
+    /// the run's log, so that such walks are seen rather than read as convergence (owner, checkpoint
+    /// C, 2026-10-02).
+    pub settled_with_no_error: bool,
 }
 
 /// Where one slippage group's level at one stratum came from, and what stood behind it.
@@ -1001,6 +1023,8 @@ struct Climb {
     /// The standard errors at the point it stopped, when its last round was judged there — settled
     /// or not: the stratum's errors if this walk wins, without a second curvature.
     standard_errors: Option<StratumErrors>,
+    /// Whether it settled at a point where no number had an error ([`WalkRecord`]).
+    settled_with_no_error: bool,
 }
 
 impl Climb {
@@ -1009,8 +1033,16 @@ impl Climb {
             ending: self.ending,
             rounds: self.rounds,
             judgements: self.judgements,
+            settled_with_no_error: self.settled_with_no_error,
         }
     }
+}
+
+/// **Whether a walk settled with nothing to judge**: it ended settled, and the judgement at its last
+/// point found no number with an error — every one not placed, not identified, or a class with no
+/// share. A settled walk was always judged at the point it returns.
+fn settled_with_no_error(ending: ClimbEnding, judged_here: Option<&StratumErrors>) -> bool {
+    ending.settled() && judged_here.is_some_and(|errors| !errors.any())
 }
 
 /// **One walk uphill, from one starting point.**
@@ -1046,6 +1078,7 @@ fn climb_from(
         config.max_rounds,
     );
     Climb {
+        settled_with_no_error: settled_with_no_error(walked.ending, walked.judged_here.as_ref()),
         parameters: walked.at,
         score: walked.score,
         ending: walked.ending,
@@ -1318,6 +1351,7 @@ fn the_fit_of(
         rounds: _,
         judgements: _,
         standard_errors: _,
+        settled_with_no_error: _,
     } = winner;
     StratumFit {
         stratum: evidence.stratum,
@@ -2438,8 +2472,9 @@ pub fn fit_strata(
 }
 
 /// **What the run's log says about how the climbs ended** (`fit_precision.md` §4.3): over the strata
-/// fitted on their own tracts, how many walks settled, stopped at a round that lost, or ran out of
-/// rounds, the rounds they took between them, and in how many strata the winning walk settled.
+/// fitted on their own tracts, how many walks settled — and how many of those at a point where no
+/// number had an error — stopped at a round that lost, or ran out of rounds, the rounds they took
+/// between them, and in how many strata the winning walk settled.
 /// `None` when no fitted stratum records its walks.
 fn climb_endings_summary(outcomes: &[StratumOutcome], max_rounds: u32) -> Option<String> {
     let fits: Vec<&StratumFit> = outcomes
@@ -2457,12 +2492,14 @@ fn climb_endings_summary(outcomes: &[StratumOutcome], max_rounds: u32) -> Option
     let rounds: u64 = walks().map(|walk| u64::from(walk.rounds)).sum();
     Some(format!(
         "the climbs of the {strata} strata fitted on their own tracts: of their {count} walks, \
-         {settled} settled, {lost} stopped at a round that lost (its moves undone) and {out} ran \
+         {settled} settled ({no_error} of them at a point where no number had an error), {lost} \
+         stopped at a round that lost (its moves undone) and {out} ran \
          out of their {max_rounds} rounds, {rounds} rounds in all; the winning walk settled in \
          {winners} of the {strata}",
         strata = fits.len(),
         count = walks().count(),
         settled = ended(ClimbEnding::Settled),
+        no_error = walks().filter(|walk| walk.settled_with_no_error).count(),
         lost = ended(ClimbEnding::LostARound),
         out = ended(ClimbEnding::OutOfRounds),
         winners = fits.iter().filter(|fit| fit.ending.settled()).count(),
@@ -4396,6 +4433,7 @@ mod tests {
                             code(walk.ending),
                             f64::from(walk.rounds),
                             f64::from(walk.judgements),
+                            f64::from(u8::from(walk.settled_with_no_error)),
                         ]);
                     }
                     for slippage in &fit.slippage {
@@ -6958,6 +6996,7 @@ mod tests {
             ending,
             rounds,
             judgements: 1,
+            settled_with_no_error: false,
         };
         let with = |ending, walks: Vec<WalkRecord>| {
             let mut outcome = fitted_at(2, 10, 0.1, 1_000);
@@ -6981,7 +7020,10 @@ mod tests {
                 vec![
                     walk(ClimbEnding::LostARound, 5),
                     walk(ClimbEnding::Settled, 3),
-                    walk(ClimbEnding::Settled, 2),
+                    WalkRecord {
+                        settled_with_no_error: true,
+                        ..walk(ClimbEnding::Settled, 2)
+                    },
                 ],
             ),
             fitted_at(2, 11, 0.1, 1_000),
@@ -6989,13 +7031,61 @@ mod tests {
         let summary = climb_endings_summary(&outcomes, 30).expect("walks recorded");
         for part in [
             "the 2 strata",
-            "of their 6 walks, 3 settled, 2 stopped",
+            "of their 6 walks, 3 settled (1 of them at a point where no number had an error), 2 \
+             stopped",
             "and 1 ran out of their 30 rounds, 51 rounds in all",
             "settled in 1 of the 2",
         ] {
             assert!(summary.contains(part), "{part:?} in {summary}");
         }
         assert_eq!(climb_endings_summary(&[fitted_at(2, 10, 0.1, 1)], 30), None);
+    }
+
+    /// **A walk settled with nothing to judge only when it settled and its last judgement found no
+    /// number with an error**: one error anywhere — a slippage number, a share or the concentration —
+    /// makes it an ordinary settled walk, and a walk that did not settle is never counted.
+    #[test]
+    fn a_walk_settled_with_no_error_only_when_no_number_had_one() {
+        let none = StratumErrors {
+            slippage: vec![
+                Some(SlippageErrors {
+                    level: StratumError::NotIdentified,
+                    shorter_share: StratumError::NotPlaced,
+                    fall_off: StratumError::NotPlaced,
+                }),
+                None,
+            ],
+            length_spectrum: vec![
+                StratumError::NotIdentified,
+                StratumError::NoShare,
+                StratumError::NotPlaced,
+            ],
+            concentration: StratumError::NotPlaced,
+        };
+        assert!(!none.any());
+        assert!(settled_with_no_error(ClimbEnding::Settled, Some(&none)));
+        assert!(!settled_with_no_error(ClimbEnding::LostARound, Some(&none)));
+        assert!(!settled_with_no_error(
+            ClimbEnding::OutOfRounds,
+            Some(&none)
+        ));
+        assert!(!settled_with_no_error(ClimbEnding::Settled, None));
+
+        let one = StratumError::Estimated(0.1);
+        let mut slippage = none.clone();
+        if let Some(group) = slippage.slippage[0].as_mut() {
+            group.fall_off = one;
+        }
+        let mut share = none.clone();
+        share.length_spectrum[2] = one;
+        let concentration = StratumErrors {
+            concentration: one,
+            ..none.clone()
+        };
+        for errors in [slippage, share, concentration] {
+            assert!(errors.any(), "{errors:?}");
+            assert!(!settled_with_no_error(ClimbEnding::Settled, Some(&errors)));
+        }
     }
 
     /// Draw the level's curves and re-emit every level through them, as `fit_strata` does.

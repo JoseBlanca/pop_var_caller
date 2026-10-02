@@ -99,6 +99,10 @@ D's precision target and the errors step E2 writes all stand on this likelihood.
 
 ## 5. Proposed next step (for the owner)
 
+**Decided (owner, checkpoint C, 2026-10-02): the 256 points are precise enough.** The average that combines both
+point sets is not measured, and `QUADRATURE_POINTS` and `dirichlet_points` stay as they are. The proposal below is
+kept as it was made.
+
 **Recommendation: measure an average that combines both point sets** — the fixed points and the points placed by
 the reads, each tract's average taken over the two together with weights for the mixture they form (a
 "defensive" importance sample). The fixed points carry the 3-read, low-concentration cells, where placing by the
