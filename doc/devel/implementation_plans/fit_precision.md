@@ -242,7 +242,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 
 ### Milestone D — a stratum read from a subset of samples
 
-1. ☐ **D1 — the sample order.** A pure function from the cohort's sample names and a fixed seed to
+1. ✅ **D1 — the sample order.** A pure function from the cohort's sample names and a fixed seed to
    their order, tested to be the same whatever order the names arrive in. *Depends:* —. *Source:*
    spec §4.4 (the order).
 2. ☐ **D2 — the growing subset.** Fit on the first `FIRST_SUBSET` samples, add slippage groups'

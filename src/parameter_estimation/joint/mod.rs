@@ -40,6 +40,7 @@ pub mod contamination;
 pub mod fit;
 pub mod fit_trace;
 pub mod loci;
+pub mod sample_order;
 pub mod sequencing_batches;
 pub mod share_curve;
 pub mod slippage_curve;
