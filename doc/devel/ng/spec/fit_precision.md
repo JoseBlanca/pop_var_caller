@@ -490,7 +490,7 @@ gain 5.5. Five rounds were also too few at thirteen classes: 9 of 15 walks ran o
 - §4.1's description of the climb — up to 5 rounds, stopping on a gain of the mean below 10⁻⁶ — is the rule
   before this amendment.
 
-Measured with the limit at 60, against the best point the same walks reach in a longer climb with no rule: at three
+Measured with the limit at 60, against the best point the same walks reach in 60 rounds with no rule: at three
 classes every number of every fit is within 0.058 errors; at thirteen classes four of five drawn strata are within
 0.044 errors, and the fifth's winning walk stopped at a round that lost, 17.4 log-likelihood units short, and says
 it has not settled.

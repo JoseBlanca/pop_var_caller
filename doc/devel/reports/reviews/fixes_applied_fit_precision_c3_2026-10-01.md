@@ -87,8 +87,8 @@ None during the run. Mi1 and Mi8 go to the owner at checkpoint C.
   concentration left on the log scale) are killed, each by the first test (`tmp/fit_precision/c3/mut/`).
 
 ### M2 — the round limit's reason contradicted
-- **Applied.** The comparison was re-run with room to 60 rounds
-  (`tmp/fit_precision/c3/fixes_{3,13}class_60.log`). Walks that settled took 2 to 6 rounds at three classes and
+- **Applied.** The comparison was re-run with room to 60 rounds and a 60-round reference
+  (`tmp/fit_precision/c3/fixes_{3,13}class_60.log`; the reference's length confirmed by `ref60_{3,13}class.log`). Walks that settled took 2 to 6 rounds at three classes and
   6 to 36 at thirteen; one thirteen-class walk had not settled by 60, and none settled between 37 and 60.
   `DEFAULT_MAX_ROUNDS` is 40, its doc states that range and that no measurement says whether a walk settles after
   40. The spec and the report say the same, and the report gives the put-off's lengthening (17 rounds to 29 on one

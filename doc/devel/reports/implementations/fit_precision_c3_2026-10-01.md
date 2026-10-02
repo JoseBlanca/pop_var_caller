@@ -50,8 +50,8 @@ the rule the SNP/indel fit stops by since step B1.
 
 **The comparison** (`the_climbs_stop_loses_nothing_against_a_longer_climb`, ignored). Each drawn stratum is fitted
 by the rule, with room for 60 rounds. The same three walks are then climbed further with no rule, and the best
-point any of them reached is the reference: 40 rounds by the test's default, and 60 for these runs by the handoff
-note that started this session — the logs do not record which. Every number's distance is taken in the reference's standard errors
+point any of them reached is the reference, 60 rounds (re-run with the reference set to 60 explicitly,
+`tmp/fit_precision/c3/ref60_{3,13}class.log`: every line the same as the logs below). Every number's distance is taken in the reference's standard errors
 (step C1's). "Short" is how many total log-likelihood units the fit stopped below the reference. "The old rule" is
 the same walks stopped where the 10⁻⁶-a-tract rule would have, read off the same paths. Logs
 `tmp/fit_precision/c3/fixes_3class_60.log` and `fixes_13class_60.log`, run with the final code but for the round
