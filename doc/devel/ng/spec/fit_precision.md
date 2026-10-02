@@ -1,6 +1,7 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) and at plan step C3 (§4.3; 2026-10-01). Build order:
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) and at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02).
+Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
 which says only "repeat until the fitted values stop moving"), the repeat-tract fit
@@ -403,7 +404,8 @@ allele classes, and a concentration. Production pools every read group into one 
 ([`ssr_fit.rs:2457`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L2457)); the climb is
 coordinate ascent by golden section, 18 evaluations a coordinate, up to 5 rounds from each of 3
 starts, stopping when a round gains less than 10⁻⁶ on that mean
-([`ssr_fit.rs:895`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L895)).
+([`ssr_fit.rs:895`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L895)). **That was the climb
+before plan step C3**; a walk now stops as §4.3's amendment says, within 40 rounds.
 
 **Trap: the mean is over every tract in the stratum, including those with no reads**, and a tract's
 log-likelihood sums over its samples. So the same 10⁻⁶ is a looser test in a stratum where most
@@ -416,8 +418,11 @@ differences over all its numbers on the scales the climb uses (logit for the sli
 shares, log for the concentration, log-ratios for the spectrum), inverted to give the errors, then
 carried to the natural scale.
 
-- **Cost:** about 2p² evaluations for p numbers — 578 at p = 17, against about 4,600 for the climb
-  from three starts: roughly an eighth more, once per stratum at its final answer (not per start).
+- **Cost:** `1 + 2p²` evaluations over the p numbers the errors are taken over — 513 at p = 16 (one
+  slippage group and thirteen classes; the shares sum to one, so one fewer than the 17 numbers fitted),
+  against about 4,600 for the climb from three starts under the rule before plan step C3: roughly a
+  ninth more, once per stratum at its final answer (not per start). Since C3 this curvature is usually
+  the winning walk's last judgement (§4.3), and is not paid again.
 - **Why all the numbers and not only the slippage three:** a read off the reference length is either
   a slip or a real allele, so the level and the spectrum trade against each other
   ([`ssr_fit.rs`](../../../../src/parameter_estimation/joint/ssr_fit.rs) `PeriodLengthSpectrum`
@@ -537,8 +542,9 @@ subsample must be — answered per stratum by the precision target rather than o
    `bench_fixtures::draw_stratum` generator), fit each many times, and compare the spread of the
    fitted numbers with the reported errors, at 3 and at 30 reads.
 2. **The new stop loses nothing.** On drawn strata and on the 4-accession oracle cohort, the fitted
-   numbers under the new rule are within `SETTLED_FRACTION` of their errors of a climb run to 20
-   rounds.
+   numbers under the new rule are within `SETTLED_FRACTION` of their errors of a longer climb of the
+   same walks with no stopping rule (20 rounds as first written; 40 by the comparison test's default
+   since plan step C3, when the round limit itself became 40).
 3. **The subset loses little, and says how little.** On kimura's cohort (the owner's run), a handful
    of strata fitted on every sample and on the grown subset: the two levels differ by less than
    their errors, and the time saved is reported. Below 256 samples, byte-identical results to today.
@@ -614,7 +620,10 @@ a write and a read.
 - **Time.** On kimura: Part A should cut the SNP/indel fit from 9 h 25 min to roughly a third, if the
   first start converges near pass 100 and the others stop on agreement; Part B's subset should cut a
   2,169-sample stratum by roughly the ratio of samples read, 256/2,169 at the first size. Both are
-  estimates from the kimura log, not measurements.
+  estimates from the kimura log, not measurements. **Part B's stopping rule (§4.3) costs more than the
+  rule it replaced**, measured on the four-accession oracle cohort: 394 rounds against 217, and the
+  repeat-tract fit 5 min 13 s against 1 min 45 s, a ratio the host's load blurs (the unchanged SNP/indel
+  half took 8 min 24 s against 14 min 54 s in the same two runs).
 
 ---
 

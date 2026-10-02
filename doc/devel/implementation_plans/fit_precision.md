@@ -230,9 +230,15 @@ step here that moves a fitted number is its own commit, with the checksums re-re
    numbers.** Validated against a climb run to 20 rounds on drawn strata and on the oracle cohort
    (spec §4.5 item 2); checksums re-recorded in this commit with the explanation. *Depends:* C2,
    checkpoint A's `SETTLED_FRACTION`. *Source:* spec §4.3.
+   **Decided during C3 (owner, 2026-10-01):** built as specified, the projected gain stopped climbs
+   short of a longer climb ([report](../reports/implementations/fit_precision_c3_stopped_2026-10-01.md));
+   a walk now stops when a Newton step puts every number within `SETTLED_FRACTION` of its error, the
+   projection only triggering the judgement; a round that loses is undone, and the walk stops only if it
+   is stuck at an unsettled start; the round limit is 40; validated against a longer climb of the same
+   walks with no rule (spec §4.3 amended).
 
-> **Checkpoint C — pause for review.** C2's coverage, C3's comparison against 20 rounds, and the
-> rounds saved on the oracle cohort.
+> **Checkpoint C — pause for review.** C2's coverage, C3's comparison against a longer climb, and the
+> rounds and time C3 costs on the oracle cohort (more than the old rule, not fewer).
 
 ### Milestone D — a stratum read from a subset of samples
 
