@@ -42,7 +42,7 @@ use super::standard_errors::StandardError;
 /// The share of its own standard error a parameter's distance to the maximum must fall below for the
 /// parameter to count as settled — the spec's starting value, kept at checkpoint A (owner,
 /// 2026-09-28).
-pub(super) const SETTLED_FRACTION: f64 = 0.1;
+pub(in crate::parameter_estimation::joint) const SETTLED_FRACTION: f64 = 0.1;
 
 /// **How many parameters are not yet settled**: those whose distance to the maximum (`distances`, a
 /// Newton step's) is not below `fraction` of their standard error (`errors`), both in the order the

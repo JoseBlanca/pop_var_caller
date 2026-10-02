@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29) and at plan step B1 (§2, §3.3, §3.4; 2026-09-29). Build order:
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) and at plan step C3 (§4.3; 2026-10-01). Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
 which says only "repeat until the fitted values stop moving"), the repeat-tract fit
@@ -448,6 +448,47 @@ log-likelihood: Böhning et al. 1994) and stops when it is below that.
   rule a round that loses is **not** convergence: the round's worse moves are undone and the walk
   stops at the best point it held, recorded as such.
 - `max_rounds` stays as a backstop.
+
+**Amended at plan step C3 (owner, 2026-10-01): a walk stops when a Newton step says every number is
+within `SETTLED_FRACTION` of its error, not on the projected gain**, as §2 was amended for Part A. Built as
+written, the projection stopped climbs short of a longer climb of the same objective
+(`fit_precision_c3_stopped_2026-10-01.md`), for two reasons. The target bounds a sum: the 0.08 left when every
+number is a tenth of an error away can sit in one number, which is then 0.4 errors away — at three allele
+classes 21 of 195 class shares stopped 0.1 to 0.5 errors short. And the projection cannot see a climb crossing a
+plateau: at thirteen classes, gains of 13.7 and then 0.98 were projected to leave 0.076, and the walk went on to
+gain 5.5. Five rounds were also too few at thirteen classes: 9 of 15 walks ran out.
+
+**The rule, as amended.**
+
+- **The judgement.** At a point the walk has reached, the curvature and the slope of the stratum's total
+  log-likelihood (§4.2's central differences; the slope comes from the same evaluations) give each number's
+  distance to the maximum as a Newton step, `I⁻¹ g` over the numbers the curvature identifies, carried to each
+  number's own scale as its error is. **The walk has settled when every number with an error is within
+  `SETTLED_FRACTION` of it**; a number without one is settled by definition — not placed (its error on the climb's
+  scale is wider than three units of logit or log), not identified (§3.2), or a class with no share. A judgement
+  costs one curvature, `1 + 2p²` evaluations: 513 at thirteen classes, about 1.7 rounds, a round being 307
+  evaluations (17 golden sections of 18, and the score where it ends).
+- **When a walk is judged.** Once the projected remaining gain above is below ½ · p · `SETTLED_FRACTION`² — p is
+  the numbers the errors are taken over, 16 at one slippage group and thirteen classes, so 0.08 — the projection
+  being a trigger, not the test; and after a round that loses. A judgement that finds the walk unsettled puts
+  the next off by one round more each time (one, then two, then three rounds later).
+- **A round that loses** is undone back to the best point it stood at: the round's start, or a point part-way
+  through it. A point part-way through is judged unless a judgement is put off, and unless it has settled the
+  walk goes on from it. The round's start is always judged, put off or not, since a next round would repeat
+  this one exactly: settled, the walk ends settled; not, it stops there, recorded as having lost a round, not as
+  converged.
+- **`max_rounds` is 40**, from 5. Measured with the limit at 60 on drawn strata: walks that settled took 2 to 6
+  rounds at three classes and 6 to 36 at thirteen; at thirteen classes one walk of fifteen had not settled by
+  60, and none settled between 37 and 60.
+- **The winning walk's last judgement gives the stratum's errors** (§4.2) whenever its last round was judged at
+  the point it returns, settled or not, so they cost no second curvature.
+- §4.1's description of the climb — up to 5 rounds, stopping on a gain of the mean below 10⁻⁶ — is the rule
+  before this amendment.
+
+Measured with the limit at 60, against the best point the same walks reach in a longer climb with no rule: at three
+classes every number of every fit is within 0.058 errors; at thirteen classes four of five drawn strata are within
+0.044 errors, and the fifth's winning walk stopped at a round that lost, 17.4 log-likelihood units short, and says
+it has not settled.
 
 ### 4.4 A stratum read from a subset of samples
 

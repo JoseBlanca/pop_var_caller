@@ -69,7 +69,8 @@ use pop_var_caller::parameter_estimation::joint::sequencing_batches::SequencingB
 use pop_var_caller::parameter_estimation::joint::share_curve::ShareSource;
 use pop_var_caller::parameter_estimation::joint::slippage_curve::LevelSource;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
+    ClimbEnding, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+    StratumOutcome,
 };
 use pop_var_caller::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, StratumFits};
 use pop_var_caller::parameter_estimation::repeat_strata::{
@@ -882,7 +883,8 @@ fn tract_strata_describing(
                 log_likelihood_a_tract: -1.5,
                 tracts_fitted: 40,
                 borrowed: Vec::new(),
-                converged: true,
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
                 tracts_of_its_own: 40,
                 reads_crossing: 400,
                 level_provenance: vec![Some(level), Some(level)],

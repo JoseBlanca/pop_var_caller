@@ -956,7 +956,7 @@ mod tests {
     };
     use crate::parameter_estimation::joint::slippage_curve::RiseShape;
     use crate::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, PeriodLengthSpectrum, SharesProvenance, Slippage, StratumFit,
+        ClimbEnding, DerivedStratum, PeriodLengthSpectrum, SharesProvenance, Slippage, StratumFit,
         StratumOutcome, StratumRefusal,
     };
     use crate::parameter_estimation::repeat_strata::{
@@ -1182,7 +1182,8 @@ mod tests {
             log_likelihood_a_tract: -1.25,
             tracts_fitted: 900,
             borrowed: Vec::new(),
-            converged: true,
+            ending: ClimbEnding::Settled,
+            walks: Vec::new(),
             tracts_of_its_own: 900,
             reads_crossing: 19_000,
             level_provenance: vec![

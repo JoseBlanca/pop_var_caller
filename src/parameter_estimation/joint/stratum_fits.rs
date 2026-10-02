@@ -1006,7 +1006,8 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, PeriodLengthSpectrum, ShareProvenance, StratumFit, StratumRefusal,
+        ClimbEnding, DerivedStratum, PeriodLengthSpectrum, ShareProvenance, StratumFit,
+        StratumRefusal,
     };
 
     fn stratum(period: u8, reference_repeats: u64) -> Stratum {
@@ -1411,7 +1412,8 @@ mod tests {
             log_likelihood_a_tract: -1.5,
             tracts_fitted: 40,
             borrowed: Vec::new(),
-            converged: true,
+            ending: ClimbEnding::Settled,
+            walks: Vec::new(),
             tracts_of_its_own: 40,
             reads_crossing: 400,
             level_provenance: vec![Some(from_the_cell(400.0))],

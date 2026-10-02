@@ -225,7 +225,7 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 2. ✅ **C2 — the stratum errors mean what they say.** A test (ignored by default) fitting strata drawn
    at known slippage many times, at 3 and 30 reads, comparing spread with reported error. *Depends:*
    C1. *Source:* spec §4.5 item 1.
-3. ☐ **C3 — the climb stops on its projected remaining total gain**, and a round that loses is not
+3. ✅ **C3 — the climb stops on its projected remaining total gain**, and a round that loses is not
    convergence: its moves are undone and the walk stops at its best point. **Own commit; moves fitted
    numbers.** Validated against a climb run to 20 rounds on drawn strata and on the oracle cohort
    (spec §4.5 item 2); checksums re-recorded in this commit with the explanation. *Depends:* C2,

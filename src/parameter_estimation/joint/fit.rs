@@ -65,9 +65,12 @@ mod settled;
 mod standard_errors;
 
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
+/// The share of its own error a number may still be from its answer, which the repeat-tract climb's
+/// stopping rule is set by too ([`ssr_fit`](super::ssr_fit)).
+pub(in crate::parameter_estimation::joint) use settled::SETTLED_FRACTION;
 use settled::{
-    AGREEMENT_FRACTION, EarlierAnswer, SETTLED_FRACTION, agrees, describe_short_of_settled,
-    furthest, is_the_new_best, is_the_new_yardstick, not_settled,
+    AGREEMENT_FRACTION, EarlierAnswer, agrees, describe_short_of_settled, furthest,
+    is_the_new_best, is_the_new_yardstick, not_settled,
 };
 pub use settled::{FurthestFromSettled, StartEnding};
 /// The inversion that drops a parameter the data do not tell apart, which the repeat-tract fit's

@@ -7,6 +7,11 @@
 # slope) moved them to these. Steps A6, A8 and the two checkpoint A' changes moved neither. The other five lines are unchanged.
 # Window lines re-recorded 2026-09-29 after merging main (c37e14e9): main's psp format 1.1 (59454108) counts the reads the depth
 # cap discarded into window depth and did not re-record them; they were 25d388c8… / 259baf04…. Step B1 moved no line.
+# Fit lines re-recorded 2026-10-02 (fit_precision.md, plan step C3): the repeat-tract climb stops on Newton distances in its
+# numbers' errors, with up to 40 rounds where it had 5; 50 of the file's 574 lines moved, all repeat-tract rows (37 slippage rows
+# and 13 of the 15 fitted strata's length spectra), and 352 of 6,706 calls changed printed numbers only (AF in 324 by at most
+# 0.043, 326 sample GQs by at most 2, QUAL in 193 by at most 0.5), no genotype, and no record appeared, vanished or changed its
+# alleles. They were 393e7cd3… / 1f16dec8….
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -23,5 +28,5 @@ b74f3edf9026fa756621e2492baf019a  from_psps.comparable
 5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
 bc6780ff16430ca4f3e24e3fee052eec  from_alignments.windows.sorted
 6c5926ce33429b3abc927b8a8faf4cbd  from_alignments.windows.histograms
-393e7cd356811ddab00e033a42903384  fitted.parameters.toml
-1f16dec86c23eff1286c736d634f0a50  from_fit.comparable
+bf6b176ad252029989d46a7f23d2c1fb  fitted.parameters.toml
+9f5edd0e624ac4d5f7c282859cee2acc  from_fit.comparable

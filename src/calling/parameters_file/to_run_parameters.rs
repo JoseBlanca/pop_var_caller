@@ -1348,8 +1348,8 @@ mod the_north_star_round_trip {
         LevelSource, RiseShape, SlippageCurve as FittedSlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
-        StratumOutcome, StratumRefusal,
+        ClimbEnding, DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
+        StratumFit, StratumOutcome, StratumRefusal,
     };
     use crate::parameter_estimation::joint::stratum_fits::{
         LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION,
@@ -1725,7 +1725,8 @@ mod the_north_star_round_trip {
                         // **Empty, which is what a stratum that stood on its own tracts has** —
                         // this field names the neighbouring repeat counts it borrowed from.
                         borrowed: Vec::new(),
-                        converged: true,
+                        ending: ClimbEnding::Settled,
+                        walks: Vec::new(),
                         tracts_of_its_own: 100 + which_repeats,
                         reads_crossing: 5_000 + which_repeats as u64,
                         level_provenance: level,
