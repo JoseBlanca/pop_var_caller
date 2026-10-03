@@ -172,6 +172,7 @@ where
                                     },
                                     &mut failed,
                                     &|sample, index| cache.build_at(sample, starts[sample] + index),
+                                    cache.dropped_loci(),
                                 )
                             })?;
                             Ok(CalledRegion { calls, failed })

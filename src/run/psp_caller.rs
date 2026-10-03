@@ -64,6 +64,7 @@ use super::callers::{
 };
 use super::cohort_merge::observation_cache::{MergeReference, ObservationCache};
 use super::depth_ceiling::DepthCeiling;
+use super::explain::ExplainRegions;
 use super::psp_prefetch::{DEFAULT_PSP_PREFETCH_BUDGET_BYTES, PspPrefetch};
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
@@ -400,6 +401,8 @@ pub struct PspVariantCaller {
     /// The most reads one read group may have at a locus before the locus is dropped for the
     /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
     depth_ceiling: DepthCeiling,
+    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
+    explain: Option<ExplainRegions>,
 }
 
 impl PspVariantCaller {
@@ -493,7 +496,16 @@ impl PspVariantCaller {
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
             depth_ceiling: DepthCeiling::default(),
+            explain: None,
         })
+    }
+
+    /// The same caller, explaining every locus that overlaps `regions`
+    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
+    #[must_use]
+    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
+        self.explain = Some(regions);
+        self
     }
 
     /// The same caller, dropping for the whole cohort every locus where some sample has a read
@@ -647,6 +659,7 @@ impl PspVariantCaller {
             psp_prefetch_budget_bytes,
             max_reads_per_position,
             depth_ceiling,
+            explain,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -709,6 +722,7 @@ impl PspVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
+            explain: explain.as_ref(),
         };
         let CohortCallingOutcome {
             calling,

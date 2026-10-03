@@ -349,6 +349,7 @@ where
                     &mut timed_keep,
                     refused,
                     &|sample, index| cache.build_at(sample, index),
+                    cache.dropped_loci(),
                 )
             })?;
             // **The sink's own work is inside this**, where the collecting form's push was

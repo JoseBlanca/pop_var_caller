@@ -44,6 +44,7 @@
 use super::CohortLocusBuilderRegionsLen;
 use crate::locus_generation::SampleLocusObservations;
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RefSeq, RefSeqError};
+use crate::run::explain::{DroppedLoci, ExplainRegions};
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position};
 use crate::window_coverage::depth::{EvidenceForOneRecord, for_each_reported_depth};
 use crate::window_coverage::{
@@ -478,6 +479,9 @@ pub struct ObservationCache<S> {
     /// ([`PspPrefetch`](crate::run::psp_prefetch::PspPrefetch)) learns where the merge is; it is
     /// told and nothing comes back, so it cannot change what the cover draws.
     told_of_each_cover: Option<Box<dyn Fn(GenomePosition) + Send + Sync>>,
+    /// **The `--explain-loci` log of loci the merge drops**, or `None` when the run explains
+    /// nothing — which is every run that did not ask (`spec/explain_loci.md` §4.2).
+    dropped_loci: Option<DroppedLoci>,
 }
 
 /// One sample's reader and the observations drawn from it that have not been evicted.
@@ -893,7 +897,25 @@ impl<S> ObservationCache<S> {
             covered_to: None,
             keeps_evidence: false,
             told_of_each_cover: None,
+            dropped_loci: None,
         }
+    }
+
+    /// Note, in a log for the regions `regions` explains, every locus the merge drops as too
+    /// quiet or too deep there (`--explain-loci`). **What is merged does not change.**
+    pub fn explaining_drops(&mut self, regions: ExplainRegions) {
+        self.dropped_loci = Some(DroppedLoci::over(regions));
+    }
+
+    /// The log of dropped loci, when the run explains any — what the merge notes into.
+    #[must_use]
+    pub fn dropped_loci(&self) -> Option<&DroppedLoci> {
+        self.dropped_loci.as_ref()
+    }
+
+    /// Take the log once the merge is done.
+    pub fn take_dropped_loci(&mut self) -> Option<DroppedLoci> {
+        self.dropped_loci.take()
     }
 
     /// The same cache, telling `tell` the first base of every cover before the cover draws.
@@ -1561,6 +1583,7 @@ where
                 keeps_evidence: _,
                 covered_to: _,
                 told_of_each_cover: _,
+                dropped_loci: _,
             } = self;
             // **The buffer's own first position, not the ground's**, so that which contig the
             // bases are on and where they start cannot be two answers: `fetch_the_ground` is

@@ -39,6 +39,11 @@ owner set on building it (2026-10-03). Concretely:
 **On, it costs in proportion to the loci explained**, which a BED of a few hundred regions keeps
 small. A BED covering a whole genome would explain every locus and is not what the option is for.
 
+**Measured (2026-10-03)**, `call-from-psps` over four tomato accessions at about 3× and 20 regions,
+ten runs each with the files cached: `main` before this work took a median of **3.30 s** (3.25 to
+3.34), this build with the option off **3.28 s** (3.17 to 3.49), and with it on over 2 kb about
+3.24 s. The difference is inside the run-to-run spread. The three VCFs are the same file.
+
 ## 4. The output
 
 A TSV in **long form**: one row per fact, so that every kind of fact has the same columns and a

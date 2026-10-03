@@ -225,6 +225,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        explain_loci: None,
     };
     (cohort, args)
 }
@@ -561,4 +562,58 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused() {
         );
     }
     drop(cohort);
+}
+
+/// **`--explain-loci` explains and changes nothing that is called** (`spec/explain_loci.md`
+/// §2): the VCF is the same file with the option as without it, and the explanation is a TSV
+/// with the stated columns whose every row is a locus of the BED's.
+#[test]
+fn explaining_loci_writes_the_explanation_and_the_same_vcf() {
+    let (cohort, plain) = a_cohort_of_psps();
+    run_call_from_psps(&plain).expect("a cohort of stored samples calls");
+    let plain_vcf = std::fs::read_to_string(&plain.output).expect("the VCF reads");
+
+    let directory = cohort.directory.path();
+    let bed = directory.join("explain.bed");
+    let tsv = directory.join("explain.tsv");
+    std::fs::write(&bed, "chr1\t0\t100\n").expect("the BED is written");
+    let explained = CallFromPspsArgs {
+        output: directory.join("explained.vcf"),
+        explain_loci: Some(vec![bed, tsv.clone()]),
+        ..plain.clone()
+    };
+    run_call_from_psps(&explained).expect("the same cohort calls while explaining");
+    let explained_vcf = std::fs::read_to_string(&explained.output).expect("the VCF reads");
+
+    let comparable = |vcf: &str| -> Vec<String> {
+        vcf.lines()
+            .filter(|line| {
+                !line.starts_with("##commandline") && !line.starts_with("##parametersFile")
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(comparable(&explained_vcf), comparable(&plain_vcf));
+
+    let text = std::fs::read_to_string(&tsv).expect("the explanation reads");
+    assert!(text.starts_with(&format!(
+        "#explain_loci_columns_version={}\n",
+        crate::run::explain::COLUMNS_VERSION
+    )));
+    let mut lines = text.lines().filter(|line| !line.starts_with('#'));
+    assert_eq!(
+        lines.next(),
+        Some(crate::run::explain::COLUMNS.join("\t").as_str())
+    );
+    let rows: Vec<&str> = lines.collect();
+    assert!(
+        rows.iter()
+            .any(|row| row.split('\t').nth(3) == Some("outcome")),
+        "every explained locus ends in an outcome row: {rows:?}"
+    );
+    for row in &rows {
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields.len(), crate::run::explain::COLUMNS.len(), "{row}");
+        assert_eq!(fields[0], "chr1", "{row}");
+    }
 }

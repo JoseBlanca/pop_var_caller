@@ -40,6 +40,7 @@ use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
+use crate::run::explain::{DroppedLoci, MergeDrop};
 use crate::types::ChainId;
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::window_coverage::WindowCoverage;
@@ -879,6 +880,7 @@ pub fn build_region_windowed<'a, E>(
         &mut |built| cohort_observations.push(built),
         failed_locus_spans,
         build,
+        None,
     )?;
     Ok(outcome)
 }
@@ -925,6 +927,7 @@ pub fn build_region_handing_over(
         keep,
         refused,
         &|_, _| unreachable!("a window holding records never asks for one to be built"),
+        None,
     ) {
         Ok(()) => {}
         Err(never) => match never {},
@@ -932,6 +935,10 @@ pub fn build_region_handing_over(
 }
 
 /// [`build_region_handing_over`] over a window whose summaries are already in hand.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven the build has always taken, and the --explain-loci log it may note into"
+)]
 pub fn build_region_handing_over_windowed<'a, E>(
     builder_region: GenomeRegion,
     window: &WindowedCohort<'a>,
@@ -940,6 +947,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
     keep: &mut impl FnMut(CohortObservation),
     refused: &mut Vec<GenomeRegion>,
     build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
+    dropped: Option<&DroppedLoci>,
 ) -> Result<(), E> {
     if no_locus_can_begin_in(builder_region, window) {
         super::timing::REGIONS_WITH_NO_LOCUS.add(1);
@@ -1022,7 +1030,17 @@ pub fn build_region_handing_over_windowed<'a, E>(
                 }
             },
             Verdict::Failed => refused.push(locus.region),
-            Verdict::TooQuiet | Verdict::OverDepthCeiling => {}
+            // Dropped without a trace, unless the run explains the locus (`--explain-loci`).
+            Verdict::TooQuiet => {
+                if let Some(dropped) = dropped {
+                    dropped.note(locus.region, MergeDrop::TooQuiet);
+                }
+            }
+            Verdict::OverDepthCeiling => {
+                if let Some(dropped) = dropped {
+                    dropped.note(locus.region, MergeDrop::OverDepthCeiling);
+                }
+            }
         }
         // **The member vector goes back to the walk here and nowhere else.** Every arm above
         // borrows the locus rather than consuming it, so there is one place that owns the

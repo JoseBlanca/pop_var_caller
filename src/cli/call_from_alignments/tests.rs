@@ -282,6 +282,7 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        explain_loci: None,
     }
 }
 
@@ -357,6 +358,7 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        explain_loci: None,
     };
 
     let refused = segments_over(
@@ -725,6 +727,7 @@ fn a_cohort_on_disk() -> (
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        explain_loci: None,
     };
     (cohort.directory, cohort.zeta, cohort.alpha, args)
 }
