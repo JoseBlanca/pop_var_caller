@@ -638,7 +638,7 @@ fn header_for(
     provenance.record_parameters([(
         MAX_READS_PER_POSITION_KEY.to_string(),
         crate::psp::ParameterValue::Integer(i64::from(
-            inputs.locus_generator_settings.max_snp_column_depth,
+            inputs.locus_generator_settings.max_reads_per_position,
         )),
     )]);
 
@@ -819,7 +819,7 @@ mod tests {
             max_record_span: 4_321,
             // Two, against the fixture's three stacked reads — what makes an applied
             // default-substitution visible in the walk's output, not only in the header.
-            max_snp_column_depth: 2,
+            max_reads_per_position: 2,
             ..PileupGeneratorConfig::default()
         }
     }

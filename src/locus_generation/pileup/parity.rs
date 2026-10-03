@@ -365,13 +365,12 @@ fn generate(rng: &mut SplitMix64) -> Case {
     // than of the sort — which matters because the depth cap truncates in admission order.
     reads.sort_by_key(|read| (read.chrom_id, read.alignment_start));
 
-    // Most cases run the default limits. A third run tiny column caps, because the cap
+    // Most cases run the default limits. A third run a tiny column cap, because the cap
     // never fires at these depths otherwise — and "the cap is on the walk" is one of the
     // five things B2 mutates.
     let mut config = WalkerConfig::default();
     if rng.one_in(3) {
-        config.max_snp_column_depth = 1 + rng.below(4) as u32;
-        config.max_indel_column_depth = 1 + rng.below(2) as u32;
+        config.max_reads_per_position = 1 + rng.below(4) as u32;
     }
     // The window only bites when it is smaller than the gap between a first mate and the
     // next admitted read, and mates are placed within 5 bp of each other — so a window

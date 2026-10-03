@@ -189,7 +189,7 @@ pub struct CallFromPspsArgs {
     /// written: a psp stores each allele's error and mapping quality as totals, so the reads
     /// removed take their share of the totals rather than their own values. The run report
     /// says, per sample, how many positions and reads it thinned.
-    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
+    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
     pub max_reads_per_position: u32,
 
     /// The most reads one read group may have at a locus before the locus is dropped.

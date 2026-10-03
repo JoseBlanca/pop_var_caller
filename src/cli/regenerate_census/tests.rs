@@ -49,7 +49,7 @@ fn a_walk_into(psps: &Path, reference: &Path, catalog: &Path, alignments: &[Path
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
     .expect("the cohort walks into psps");
 }

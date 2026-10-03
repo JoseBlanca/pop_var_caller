@@ -1,8 +1,7 @@
 //! **ng's, not a copy** — the one number that decides which reads survive a cap.
 //!
 //! Two places in the walk have to drop reads and cannot drop all of them: the
-//! per-position depth cap ([`WalkerConfig::max_snp_column_depth`] /
-//! `max_indel_column_depth`), and the ceiling on how many reads the walk holds open
+//! per-position depth cap ([`WalkerConfig::max_reads_per_position`]), and the ceiling on how many reads the walk holds open
 //! at once (`PileupGeneratorConfig::max_active_reads`). Both used to answer the
 //! question the same way — *keep whichever came first* — and that answer has two
 //! faults the owner ruled out:
@@ -55,7 +54,7 @@
 //! Hashing it would hide the ordering dependence rather than remove it. The query name
 //! is what a BAM says the read *is*.
 //!
-//! [`WalkerConfig::max_snp_column_depth`]: super::WalkerConfig::max_snp_column_depth
+//! [`WalkerConfig::max_reads_per_position`]: super::WalkerConfig::max_reads_per_position
 
 use super::{MateRole, PreparedRead};
 

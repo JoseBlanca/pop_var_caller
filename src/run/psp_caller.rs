@@ -491,7 +491,7 @@ impl PspVariantCaller {
             candidate_selection,
             merge_parameters,
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             depth_ceiling: DepthCeiling::default(),
         })
     }
