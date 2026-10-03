@@ -15,6 +15,12 @@ regions per sample, scored against GIAB v4.2.1.
 | **3.** The three sites the paralog filter removed | **Not the filter.** The walk that writes the psps caps reads at 250 per read group at positions where some read has an insertion or deletion, but at 1,000 elsewhere. At these sites the cap thins the deletion reads to about 56%, while the reference reads are counted at the next positions, where the 1,000 cap applies. A 47–50% heterozygote is stored as 31–37%, and at 1.2–1.5 times the usual depth the filter reads that as a duplication. | A defect in our code. It is also the cause of the "known defect" the filter's D3 report put down to alignment bias. The truth set is right: no GIAB difficult-region list contains the sites, and every read has mapping quality 60. | Apply one cap to every position of an indel's record. Dropping the separate 250 cap does it: on this run it recovers the three sites and one more true deletion, and costs nothing in file size or time. |
 | **4.** "Same variant written another way" | Not lost. At five truth indels, GIAB writes an indel and a nearby SNP as two records. We write one repeat-tract record whose alleles carry both. vcfeval matches all five. Exact position-and-allele matching misses all five. | A scoring artefact, not a calling error. | Score with vcfeval, or with hap.py's `--engine=vcfeval`. No caller change. |
 
+**What happened next is in §5.** Case 3's fix is done and measured (branch `one-read-cap`). For
+case 2, every rule tried cost more right genotypes on the HG002 tandem-repeat benchmark than the
+one tract it recovers, so none is committed. Refused tracts are now listed by position in the run
+report (branch `refused-tracts-listed`). In case 2, the +6 lengths turned out to be the mapper's
+spelling, which the caller trusts; its own re-alignment measured the truth.
+
 Two corrections to the brief, both from the data:
 
 - **GIAB calls the three paralog-filter sites heterozygous (0/1), not homozygous.** Its own read
@@ -170,11 +176,18 @@ that the catalog did not include it:
 The five +6 reads are the five reads that start before the tract and end only 2 to 7 bases past
 it, by the mapper's alignment. The mapper gave each a 6-base insertion just before its end
 (`130M6I12M`, `128M6I12M2S` twice, `125M6I17M` twice). Each read's last 12 to 17 bases stand
-where the tract's 15-base right anchor should be, and that anchor sequence is itself CCTTC-like.
-So the end of the tract cannot be placed uniquely in these reads. In the stored allele, the
-measured tract runs on through the anchor sequence (16 bases past the true end of a −10 tract),
-and the read is counted as a spanning read 6 bases longer than the reference tract. The catalog only guarantees that no other *catalogued* tract lies within 15
-bases of this one. It does not guarantee that the 15 bases are unlike the motif.
+where the tract's 15-base right anchor should be, and that anchor sequence is itself CCTTC-like,
+so the mapper could not place the end of the tract in these reads.
+
+**The +6 is the mapper's spelling, not the caller's measurement.** The caller re-aligns every
+spanning read against the tract and 15 bases of flank each side, and that re-alignment measured
+all five reads at −10, the truth (a temporary print in the walk, 2026-10-03). But a complete read
+whose mapper alignment carries an insertion or deletion is *spelled* by that alignment, which
+needs to reach only one base past each end of the tract; the re-alignment then decides only
+whether the read is complete. That rule was adopted by the tract-accuracy program because the
+mapper's account keeps junction variants the re-alignment destroys. Here it kept the mapper's
+misplacement instead. The catalog only guarantees that no other *catalogued* tract lies within 15
+bases of this one, not that the 15 bases are unlike the motif.
 
 Without those five reads, the off-grid share is 3 of 50, 6%, and the tract passes.
 
@@ -192,10 +205,12 @@ an ordinary indel locus. The repeat-tract path calls it correctly once the check
 
 ### Classification and recommendation
 
-**A defect in our code, compounded by an unmeasured threshold.** The defect is in what counts as
-a spanning read. A read whose end lies inside an anchor that looks like the motif does not name a
-tract length, but it is counted as though it did. The threshold, one read in ten, is documented
-as inherited from the deleted caller and "never measured, by them or by us".
+**A defect in our code, compounded by an unmeasured threshold.** The defect is that a read whose
+end lies inside an anchor that looks like the motif is spelled by its mapper, which could not place
+it. The threshold, one read in ten, is documented as inherited from the deleted caller and "never
+measured, by them or by us".
+
+*The recommendations below were written before the repairs were measured. §5 has what happened.*
 
 Recommendations, most useful first:
 
@@ -360,6 +375,54 @@ these five correct, and no caller change is needed. Splitting tract records into
 substitutions on output would only help a comparison tool that does not compare haplotypes. It
 would also make the record no longer say that the substitution and the length change are on the
 same allele.
+
+## 5. What was done afterwards (2026-10-03)
+
+The owner asked for two of the recommendations: one read cap at every position (case 3), and, for
+case 2, counting a read as spanning only when it reaches far enough past the tract, with refused
+tracts listed by position.
+
+### Case 3 — one read cap: done, branch `one-read-cap`
+
+The walk's separate 250-read cap at positions with an indel is removed; `--max-reads-per-position`
+applies everywhere. Measured with the branch's own binary:
+
+| | before | after |
+|---|---|---|
+| this report's run, vcfeval missed / false (three samples) | 56 / 53 | 52 / 52 |
+| D3's run (HG002, 1,000 regions): true GIAB variants among what the filter removes | 19 of 280 (6.8 in 100) | 4 of 265 (1.5 in 100) |
+| … indels the filter removes, of which GIAB variants | 18, 17 | 3, 2 |
+| tomato oracle (4 accessions, about 3×): calls with default parameters | | byte-identical |
+| … with fitted parameters | | 1 fitted number moves by 2 in 100,000; no genotype or filter changes; largest QUAL change 0.1 |
+
+The D3 report carries a correction: its "alignment bias" was this cap. One case stays open and is
+recorded in spec `locus_generation_pileup.md` §4: the same imbalance returns where an anchor
+position is deeper than the cap and the positions the indel spans are not. At the defaults that
+needs more than 1,000 reads in a read group, and both calling commands drop such loci
+(`--max-read-group-depth`, 1,000).
+
+### Case 2 — no rule shipped; refused tracts listed, branch `refused-tracts-listed`
+
+Four rules were tried on GIAB's HG002 tandem-repeat benchmark (36,497 truth records), at 30× and
+50×. Each recovers this tract. Each costs more elsewhere:
+
+| rule | right genotypes gained or lost, over the four cells (30×/50×, homopolymer/period 2+) |
+|---|---|
+| use the mapper's spelling only with at least 8 bases of overhang past the tract | −12 (−9, −1, −1, −1) |
+| … only with the whole 15-base flank of overhang | −48 (−21, −6, −10, −11) |
+| count a read with less than 8 bases of overhang as partial, not spanning (the rule as recommended above) | −142, and 62 homopolymer tracts no longer called at 30× |
+| use the re-alignment's spelling where the mapper's is off the motif grid and the re-alignment's is on it | +14 (0, +6, 0, +8), with 25 and 21 more wrong calls at 30× and 50×: tracts whose truth is a sequence change, which the periodicity check had been refusing |
+
+8 bases is the least that covers all five reads here (their overhangs are 1 to 7). A rule of 4
+bases changed almost nothing (−1, +1, 0, +2) and does not recover the tract. None of the four is
+committed; the experimental code is at `tmp/sweep_rules.patch` in the branch's worktree.
+
+The second half of the recommendation is done. The run report now names refused tracts by
+position, the first five in genome order, under the count it always printed. Sorted at printing,
+so it is the same at any thread count. On this report's run it lists `chr1:206838725-206838799`
+and `chr10:68636982-68637019`. The second is a 38-base TG tract in HG004 where 201 of 254 reads
+are 3 bases short; GIAB has a 5-base deletion beside it, `chr10:68636979 CGTTGT→C` (1/1), which
+vcfeval also counts as missed. It was not traced here.
 
 ## Reproducing this
 
