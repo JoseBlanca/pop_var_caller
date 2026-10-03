@@ -2,6 +2,9 @@
 # by table lookup (portable_float.md Milestone D), identical in the Linux container (arm64, glibc) and on macOS (arm64).
 # Replace it only when the output is meant to change, and say in the commit which lines moved and why.
 # Previous: fitted.parameters.toml 502c3d5e6c53acd7da2f66c29d430545, from_fit.comparable b7cbf43308722894dd47940e1611c0af (libm exp).
+# Re-recorded 2026-10-03 (Linux container, arm64) with partial reads compared against the allele and the reference beyond it
+# (read_likelihoods.md §5.3). That moved the two default-parameter VCFs (b74f3edf → 28a750c9) and from_fit.comparable; the
+# window rows, histograms, fitted parameters and from_fit were already stale at 25bfe313 (bc6780ff, 6c5926ce, c590689d, 5cdeafd0).
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -13,10 +16,10 @@
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
 # records: 7787
-b74f3edf9026fa756621e2492baf019a  from_alignments.comparable
-b74f3edf9026fa756621e2492baf019a  from_psps.comparable
+28a750c986f50474fbb5e59c16517652  from_alignments.comparable
+28a750c986f50474fbb5e59c16517652  from_psps.comparable
 5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
-25d388c83819321a023deb57663c2208  from_alignments.windows.sorted
-259baf040610b33f7ead595da7b26a3b  from_alignments.windows.histograms
-be31e78ae91da4c09ce010136c707500  fitted.parameters.toml
-18f4fc11cda28243faa6d7cfc4e07ec9  from_fit.comparable
+bc6780ff16430ca4f3e24e3fee052eec  from_alignments.windows.sorted
+6c5926ce33429b3abc927b8a8faf4cbd  from_alignments.windows.histograms
+c590689d40eb66359b2973c2bd1cbfcd  fitted.parameters.toml
+c59cc1766b614fc55716b7314754187c  from_fit.comparable
