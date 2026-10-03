@@ -415,7 +415,8 @@ Four rules were tried on GIAB's HG002 tandem-repeat benchmark (36,497 truth reco
 
 8 bases is the least that covers all five reads here (their overhangs are 1 to 7). A rule of 4
 bases changed almost nothing (−1, +1, 0, +2) and does not recover the tract. None of the four is
-committed; the experimental code is at `tmp/sweep_rules.patch` in the branch's worktree.
+committed; the experimental code is at `tmp/sweep_rules.patch` in the branch's worktree. **The owner accepted case 2 as a known miss** (2026-10-03): the spelling rules stay, and the run
+report's list of refused tracts will show on a larger run how often it happens.
 
 The second half of the recommendation is done. The run report now names refused tracts by
 position, the first five in genome order, under the count it always printed. Sorted at printing,
