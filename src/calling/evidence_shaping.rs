@@ -69,7 +69,8 @@ use std::num::NonZeroU32;
 use super::SsrSampleEvidence;
 use super::allele_candidates::LocusSelection;
 use super::{
-    GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence, ReferenceBesideLocus,
+    GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence,
+    ReferenceBesideLocus,
 };
 use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
 use crate::run::cohort_merge::build::CohortObservation;

@@ -71,6 +71,9 @@ use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
 use super::RunError;
 use super::calling_progress::CallingProgress;
+use super::explain::{
+    ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows, too_wide_rows,
+};
 use super::records::{
     ReferenceBesideScratch, a_written_genotype_carries_an_alternative, evidence_for_output,
     padding_base_beside, reference_beside_locus,
@@ -256,6 +259,8 @@ pub struct AlignedFilesVariantCaller {
     depth_ceiling: DepthCeiling,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
+    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
+    explain: Option<ExplainRegions>,
 }
 
 impl AlignedFilesVariantCaller {
@@ -352,7 +357,16 @@ impl AlignedFilesVariantCaller {
             merge_parameters,
             locus_generator_settings: alignments.locus_generator_settings,
             depth_ceiling: DepthCeiling::default(),
+            explain: None,
         })
+    }
+
+    /// The same run, explaining every locus that overlaps `regions`
+    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
+    #[must_use]
+    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
+        self.explain = Some(regions);
+        self
     }
 
     /// The same run, dropping for the whole cohort every locus where some sample has a read
@@ -658,6 +672,8 @@ impl AlignedFilesVariantCaller {
                     genotyper,
                     &observation,
                     reference_beside,
+                    // The oracle's calls explain nothing.
+                    None,
                     &frozen,
                     &candidate_selection,
                     &tract_selection,
@@ -670,7 +686,9 @@ impl AlignedFilesVariantCaller {
                     // This entry point wants the call and nothing beside it, so the observation's
                     // remapping and leftover are dropped where they were built.
                     |inference, _remap, _unmatched, _verdict| inference,
-                ) {
+                )
+                .0
+                {
                     LocusOutcome::Called(called) => called_loci.push(called),
                     LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
                     // Both counted inside the dispatch, where the verdict that decided them is.
@@ -745,6 +763,8 @@ impl AlignedFilesVariantCaller {
         // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
         let reference_for_the_merge = self.walk_reference.accessor();
         let contigs = self.walk_reference.contigs();
+        // Taken before `walkers` consumes the run; a handful of regions.
+        let explain = self.explain.clone();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -764,6 +784,7 @@ impl AlignedFilesVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
+            explain: explain.as_ref(),
         };
         let CohortCallingOutcome {
             calling,
@@ -809,6 +830,9 @@ pub(crate) struct CohortCallingInputs<'a> {
     pub padding_reference: WindowedRefSeq,
     /// The reference's contig names, which the progress lines print the position against.
     pub contigs: &'a ContigList,
+    /// **The loci to explain, `None` when the run was asked to explain none** — the one
+    /// question each locus is asked (`doc/devel/ng/spec/explain_loci.md`).
+    pub explain: Option<&'a ExplainRegions>,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -912,7 +936,11 @@ where
         candidate_selection,
         padding_reference,
         contigs,
+        explain,
     } = inputs;
+    if let Some(regions) = explain {
+        cache.explaining_drops(regions.clone());
+    }
     // **The cohort's size is read off the cache rather than passed beside it**, so the number
     // the genotyper is told and the number of sources actually being merged cannot become two
     // different facts.
@@ -932,6 +960,7 @@ where
     let mut padding_scratch = Vec::new();
     let mut beside_scratch = ReferenceBesideScratch::default();
     let mut records_written = 0_u64;
+    let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut loci_called_but_not_written = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
@@ -979,10 +1008,11 @@ where
                         return;
                     }
                 };
-            let built = call_one_cohort_locus(
+            let (built, explanation) = call_one_cohort_locus(
                 genotyper,
                 &observation,
                 reference_beside,
+                explain,
                 &frozen,
                 candidate_selection,
                 &tract_selection,
@@ -1028,6 +1058,12 @@ where
                     Ok(Some(assemble_record(&inference, evidence)))
                 },
             );
+            if let Some(mut rows) = explanation {
+                if let Some(end) = end_of_a_called_locus(&built) {
+                    outcome_rows(&mut rows, region, end);
+                }
+                explanations.extend(rows);
+            }
             progress.locus_passed(region, records_written);
             match built {
                 LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
@@ -1074,6 +1110,13 @@ where
     // **After the two error returns, so a run that failed never finishes an accumulator.** A
     // half-walked sample's histogram would describe the ground the run reached and say nothing
     // about that, which is the same reasoning `sources`' own doc gives.
+    // The loci the merge dropped or refused, where the run explains them.
+    if let Some(dropped) = cache.take_dropped_loci() {
+        explanations.extend(dropped.into_rows());
+    }
+    if let Some(regions) = explain {
+        explanations.extend(too_wide_rows(regions, &loci_too_wide_to_assemble));
+    }
     let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
     // What this run's yardsticks are, for something outside it to check — off unless the run was
     // asked for it, beside the per-record rows (`cohort_merge::recorded_windows`).
@@ -1085,6 +1128,7 @@ where
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
+            explanations,
         },
         sources,
         window_coverage_histograms,
@@ -1184,6 +1228,12 @@ enum LocusOutcome<R> {
 /// matching it to one (`doc/devel/ng/spec/read_likelihoods.md` §4). Selection still decides the
 /// candidate list, and the leftover it produces is still what says a sample must be emitted as
 /// missing.
+///
+/// **`explain` is the run's `--explain-loci` regions, `None` when it asked for none.** A locus
+/// overlapping one comes back with its explanation rows (`doc/devel/ng/spec/explain_loci.md`):
+/// everything up to the call, which the record's own half is added to by the driver that has
+/// the record. Every other locus — every locus of a run that asked for none — comes back with
+/// `None` and costs the one question.
 #[expect(
     clippy::too_many_arguments,
     reason = "the same nine `call_one_generic_locus` takes, plus the tract path's own selection \
@@ -1194,6 +1244,7 @@ fn call_one_cohort_locus<S, G, R>(
     genotyper: &G,
     observation: &CohortObservation,
     reference_beside: ReferenceBesideLocus<'_>,
+    explain: Option<&ExplainRegions>,
     parameters: &FrozenParameters<'_>,
     candidate_selection: &CandidateSelectionConfig,
     tract_selection: &SsrSelectionConfig,
@@ -1204,11 +1255,13 @@ fn call_one_cohort_locus<S, G, R>(
     tracts: &mut TractOutcomes,
     scratch: &mut CallingScratch<S>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
-) -> LocusOutcome<R>
+) -> (LocusOutcome<R>, Option<Vec<ExplainRow>>)
 where
     G: LocusGenotyper<S>,
 {
-    match &observation.kind {
+    let mut explanation =
+        explain.and_then(|regions| regions.covers(observation.region).then(Vec::new));
+    let outcome = match &observation.kind {
         LocusKind::Generic => match call_one_generic_locus(
             genotyper,
             observation,
@@ -1219,6 +1272,7 @@ where
             run_sample_count,
             shaping,
             scratch,
+            explanation.as_mut(),
             finish,
         ) {
             Some(called) => LocusOutcome::Called(called),
@@ -1235,12 +1289,41 @@ where
             tract_shaping,
             tracts,
             scratch,
+            explanation.as_mut(),
             finish,
         ),
         LocusKind::SsrBundle => {
             tracts.bundles_set_aside += 1;
             LocusOutcome::BundleSetAside
         }
+    };
+    if let Some(rows) = explanation.as_mut() {
+        let end = match &outcome {
+            LocusOutcome::NobodyToCall => Some(LocusEnd::NobodyToCall),
+            LocusOutcome::BundleSetAside => Some(LocusEnd::BundleSetAside),
+            LocusOutcome::TractWithoutWholeRepeats => Some(LocusEnd::TractWithoutWholeRepeats),
+            // The driver holding the record says how a called locus ended.
+            LocusOutcome::Called(_) => None,
+        };
+        if let Some(end) = end {
+            outcome_rows(rows, observation.region, end);
+        }
+    }
+    (outcome, explanation)
+}
+
+/// **The explanation's outcome for a locus the caller called**, read off what the driver built
+/// from it — `None` for the outcomes `call_one_cohort_locus` explained itself.
+fn end_of_a_called_locus(
+    built: &LocusOutcome<Result<Option<VcfRecord>, RunError>>,
+) -> Option<LocusEnd<'_>> {
+    match built {
+        LocusOutcome::Called(Ok(Some(record))) => Some(LocusEnd::Written(record)),
+        LocusOutcome::Called(Ok(None)) => Some(LocusEnd::NotWritten),
+        LocusOutcome::Called(Err(_)) => Some(LocusEnd::Failed),
+        LocusOutcome::NobodyToCall
+        | LocusOutcome::BundleSetAside
+        | LocusOutcome::TractWithoutWholeRepeats => None,
     }
 }
 
@@ -1312,6 +1395,7 @@ fn call_one_ssr_locus<S, G, R>(
     tract_shaping: &mut SsrEvidenceScratch,
     tracts: &mut TractOutcomes,
     scratch: &mut CallingScratch<S>,
+    mut explanation: Option<&mut Vec<ExplainRow>>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> LocusOutcome<R>
 where
@@ -1322,6 +1406,17 @@ where
         tract_selection,
         scratch.candidate_selection_mut(),
     );
+    if let Some(rows) = explanation.as_deref_mut() {
+        // A tract's dropped lengths are not split by the ordinary bar, so the configuration
+        // handed over here is read for nothing but the rows' shape.
+        selection_rows(
+            rows,
+            observation,
+            &narrowed.selection,
+            &CandidateSelectionConfig::DEFAULT,
+            ReferenceBesideLocus::NONE,
+        );
+    }
     // **Converted before anything is shaped**, so a candidate the tract model cannot describe
     // stops the locus rather than reaching the emission as a one-repeat allele.
     let Some(repeat_counts) = repeat_counts_the_tract_model_can_take(&narrowed.repeat_counts)
@@ -1353,6 +1448,9 @@ where
     );
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    if let Some(rows) = explanation {
+        calling_rows(rows, &inference, scratch, parameters.ploidy());
+    }
     LocusOutcome::Called(finish(inference, &remap, &unmatched, verdict))
 }
 
@@ -1399,6 +1497,7 @@ fn call_one_generic_locus<S, G, R>(
     run_sample_count: usize,
     shaping: &mut GenericEvidenceScratch,
     scratch: &mut CallingScratch<S>,
+    mut explanation: Option<&mut Vec<ExplainRow>>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> Option<R>
 where
@@ -1411,6 +1510,15 @@ where
         candidate_selection,
         scratch.candidate_selection_mut(),
     );
+    if let Some(rows) = explanation.as_deref_mut() {
+        selection_rows(
+            rows,
+            observation,
+            &selection,
+            candidate_selection,
+            reference_beside,
+        );
+    }
     let mut views = Vec::new();
     let evidence = shape_generic_locus(
         shaping,
@@ -1437,6 +1545,9 @@ where
     let (alleles, verdict, unmatched, remap) = selection.into_parts();
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    if let Some(rows) = explanation {
+        calling_rows(rows, &inference, scratch, parameters.ploidy());
+    }
     Some(finish(inference, &remap, &unmatched, verdict))
 }
 
@@ -1574,6 +1685,9 @@ pub struct CohortCallingTallies {
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
     /// **What became of this run's repeat tracts** — [`CalledCohort::tracts`].
     pub tracts: TractOutcomes,
+    /// **The `--explain-loci` rows of every locus explained**, in the order the loci were met;
+    /// empty when the run explained nothing (`doc/devel/ng/spec/explain_loci.md`).
+    pub explanations: Vec<ExplainRow>,
 }
 
 impl CohortCallingTallies {
@@ -4657,6 +4771,7 @@ mod calling_joined_to_the_merge {
                     run_sample_count,
                     &mut shaping,
                     &mut scratch,
+                    None,
                     |inference, _remap, _unmatched, _verdict| inference,
                 )
                 // **This fixture's cohort leaves every locus with somebody to call**, so a
@@ -5717,6 +5832,7 @@ mod records_handed_over_as_the_run_finishes_them {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
+            explain: None,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -7024,7 +7140,11 @@ where
         candidate_selection,
         padding_reference,
         contigs,
+        explain,
     } = inputs;
+    if let Some(regions) = explain {
+        cache.explaining_drops(regions.clone());
+    }
     let run_sample_count = cache.sample_count();
     let frozen = parameters.view();
     let tract_selection = SsrSelectionConfig {
@@ -7036,6 +7156,7 @@ where
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
+    let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut progress = CallingProgress::new(contigs, segmentation.analysed_regions());
     let mut stopped: Option<RunError> = None;
 
@@ -7077,18 +7198,22 @@ where
                 match reference_beside_locus(padding_reference, &observation, beside_scratch) {
                     Ok(beside) => beside,
                     Err(source) => {
-                        return RoundLocusOutcome::CalledFailed(
-                            RunError::ReferenceBesideLocusUnreadable {
-                                locus: region,
-                                source,
-                            },
+                        return (
+                            RoundLocusOutcome::CalledFailed(
+                                RunError::ReferenceBesideLocusUnreadable {
+                                    locus: region,
+                                    source,
+                                },
+                            ),
+                            None,
                         );
                     }
                 };
-            let built = call_one_cohort_locus(
+            let (built, explanation) = call_one_cohort_locus(
                 genotyper,
                 &observation,
                 reference_beside,
+                explain,
                 frozen,
                 candidate_selection,
                 tract_selection,
@@ -7127,7 +7252,15 @@ where
                     Ok(Some(assemble_record(&inference, evidence)))
                 },
             );
-            match built {
+            // **Finished on this worker, where the record still exists**, and folded on the
+            // calling thread with the locus's own outcome, so no lock is taken.
+            let explanation = explanation.map(|mut rows| {
+                if let Some(end) = end_of_a_called_locus(&built) {
+                    outcome_rows(&mut rows, region, end);
+                }
+                rows
+            });
+            let outcome = match built {
                 LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {
                     RoundLocusOutcome::CountedInside(region)
@@ -7147,44 +7280,50 @@ where
                         source: Box::new(source),
                     }),
                 },
-            }
+            };
+            (outcome, explanation)
         },
-        &mut |outcome| match outcome {
-            RoundLocusOutcome::NobodyToCall(region) => {
-                loci_with_nobody_to_call.push(region);
-                progress.locus_passed(region, records_written);
+        &mut |(outcome, explanation): (RoundLocusOutcome<P>, Option<Vec<ExplainRow>>)| {
+            if let Some(rows) = explanation {
+                explanations.extend(rows);
             }
-            RoundLocusOutcome::CountedInside(region) => {
-                progress.locus_passed(region, records_written);
-            }
-            RoundLocusOutcome::CalledNotWritten(region) => {
-                loci_called_but_not_written += 1;
-                progress.locus_passed(region, records_written);
-            }
-            RoundLocusOutcome::CalledFailed(error) => {
-                if stopped.is_none() {
-                    stopped = Some(error);
+            match outcome {
+                RoundLocusOutcome::NobodyToCall(region) => {
+                    loci_with_nobody_to_call.push(region);
+                    progress.locus_passed(region, records_written);
                 }
-            }
-            RoundLocusOutcome::CalledRecord(ready, windows, region) => {
-                if stopped.is_some() {
-                    return;
+                RoundLocusOutcome::CountedInside(region) => {
+                    progress.locus_passed(region, records_written);
                 }
-                progress.locus_passed(region, records_written);
-                record_the_windows_at(
-                    GenomePosition {
-                        contig: region.contig,
-                        position: region.start,
-                    },
-                    &windows,
-                );
-                match hand_over(ready, &windows) {
-                    Ok(()) => records_written += 1,
-                    Err(source) => {
-                        stopped = Some(RunError::RecordNotWritten {
-                            locus: region,
-                            source: Box::new(source),
-                        });
+                RoundLocusOutcome::CalledNotWritten(region) => {
+                    loci_called_but_not_written += 1;
+                    progress.locus_passed(region, records_written);
+                }
+                RoundLocusOutcome::CalledFailed(error) => {
+                    if stopped.is_none() {
+                        stopped = Some(error);
+                    }
+                }
+                RoundLocusOutcome::CalledRecord(ready, windows, region) => {
+                    if stopped.is_some() {
+                        return;
+                    }
+                    progress.locus_passed(region, records_written);
+                    record_the_windows_at(
+                        GenomePosition {
+                            contig: region.contig,
+                            position: region.start,
+                        },
+                        &windows,
+                    );
+                    match hand_over(ready, &windows) {
+                        Ok(()) => records_written += 1,
+                        Err(source) => {
+                            stopped = Some(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            });
+                        }
                     }
                 }
             }
@@ -7210,6 +7349,13 @@ where
     let tracts = tract_totals
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The loci the merge dropped or refused, where the run explains them.
+    if let Some(dropped) = cache.take_dropped_loci() {
+        explanations.extend(dropped.into_rows());
+    }
+    if let Some(regions) = explain {
+        explanations.extend(too_wide_rows(regions, &loci_too_wide_to_assemble));
+    }
     let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
     record_the_histograms(&window_coverage_histograms);
     Ok(CohortCallingOutcome {
@@ -7219,6 +7365,7 @@ where
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
+            explanations,
         },
         sources,
         window_coverage_histograms,

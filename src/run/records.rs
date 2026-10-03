@@ -125,8 +125,7 @@ where
     if !matches!(observation.kind, LocusKind::Generic) {
         return Ok(ReferenceBesideLocus::NONE);
     }
-    let Some(shortest_allele) = observation.alleles.iter().map(|allele| allele.len()).min()
-    else {
+    let Some(shortest_allele) = observation.alleles.iter().map(|allele| allele.len()).min() else {
         return Ok(ReferenceBesideLocus::NONE);
     };
     let locus_len = LocusLen::from_positions(observation.alleles[0].len() as u64);
@@ -163,7 +162,12 @@ where
     }
     if needed_after > 0 {
         let start = region.end.get() + 1;
-        match reference.fetch_into(region.contig, start, needed_after as u64, &mut scratch.after) {
+        match reference.fetch_into(
+            region.contig,
+            start,
+            needed_after as u64,
+            &mut scratch.after,
+        ) {
             Ok(()) => {}
             Err(RefSeqError::OutOfBounds { contig_length, .. }) => {
                 let available = (contig_length + 1).saturating_sub(start);

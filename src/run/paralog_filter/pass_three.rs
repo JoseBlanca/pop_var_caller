@@ -25,6 +25,7 @@ use crate::vcf::{
 };
 
 use super::{LinePatchError, ParalogVerdicts, SpillFile, SpillFileError, rewrite_filter_and_info};
+use crate::run::explain::{ParalogExplanations, ParalogVerdictAt};
 
 /// **What the filter did to the run's records**, for the run report and spec §3.5's lines.
 ///
@@ -117,6 +118,29 @@ pub fn write_the_records_the_filter_kept(
     tag_instead_of_dropping: bool,
     writer: &mut VcfWriter,
 ) -> Result<WhatTheFilterDid, PassThreeError> {
+    write_the_records_the_filter_kept_explaining(
+        spill,
+        verdicts,
+        tag_instead_of_dropping,
+        writer,
+        None,
+    )
+}
+
+/// [`write_the_records_the_filter_kept`], also keeping the verdict of every record `explained`
+/// asks about (`--explain-loci`, `doc/devel/ng/spec/explain_loci.md`). **What is written does
+/// not depend on it**: the verdict is read where it is decided and nothing else is touched.
+///
+/// # Errors
+///
+/// As [`write_the_records_the_filter_kept`].
+pub fn write_the_records_the_filter_kept_explaining(
+    spill: &SpillFile,
+    verdicts: &ParalogVerdicts,
+    tag_instead_of_dropping: bool,
+    writer: &mut VcfWriter,
+    mut explained: Option<&mut ParalogExplanations>,
+) -> Result<WhatTheFilterDid, PassThreeError> {
     if spill.entries_written() != verdicts.ratios.len() as u64 {
         return Err(PassThreeError::RatiosDoNotMatchTheSpill {
             records: spill.entries_written(),
@@ -141,6 +165,22 @@ pub fn write_the_records_the_filter_kept(
             .expect("the spill and the ratios were counted equal before the walk");
 
         let flagged = verdicts.calibration.flags(ratio);
+        if let Some(explained) = explained.as_deref_mut()
+            && explained.wants(entry.contig, entry.position.get())
+        {
+            explained.record(ParalogVerdictAt {
+                contig: entry.contig,
+                written_at: entry.position.get(),
+                ratio,
+                posterior: if ratio.is_finite() {
+                    verdicts.calibration.posterior(ratio)
+                } else {
+                    None
+                },
+                flagged,
+                dropped: flagged && !tag_instead_of_dropping,
+            });
+        }
         if flagged && !tag_instead_of_dropping {
             did.dropped += 1;
             continue;

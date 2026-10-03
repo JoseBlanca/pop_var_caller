@@ -100,6 +100,7 @@ fn a_run(
             loci_too_wide_to_assemble: too_wide,
             loci_with_nobody_to_call: nobody,
             tracts: TractOutcomes::default(),
+            explanations: Vec::new(),
         },
         walk: CohortWalkTallies {
             per_sample,
@@ -1154,6 +1155,7 @@ fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
         loci_too_wide_to_assemble: vec![region(0, 10, 90)],
         loci_with_nobody_to_call: Vec::new(),
         tracts: TractOutcomes::default(),
+        explanations: Vec::new(),
     };
     let walked = a_run(
         calling.records_written,

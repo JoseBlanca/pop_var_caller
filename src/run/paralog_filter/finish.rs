@@ -25,8 +25,9 @@ use crate::window_coverage::SampleHistogram;
 use super::{
     CoverageFitConfigRefused, NotATargetFdr, ParalogScoringContext, ParalogVerdicts,
     PassThreeError, PassTwoError, SpillFile, TargetFdr, WhatTheFilterDid, WhatTheFitCameTo,
-    score_the_parked_records_and_resolve_the_cut, write_the_records_the_filter_kept,
+    score_the_parked_records_and_resolve_the_cut, write_the_records_the_filter_kept_explaining,
 };
+use crate::run::explain::ParalogExplanations;
 
 /// **The two knobs the operator sets, together** — because they are one decision.
 ///
@@ -193,6 +194,35 @@ pub fn fit_score_and_write_the_calls(
     metadata: VcfHeaderMetadata,
     ploidy: Ploidy,
 ) -> Result<FilteredRun, ParalogFilterError> {
+    fit_score_and_write_the_calls_explaining(
+        spill, histograms, inbreeding, asked_for, output, metadata, ploidy, None,
+    )
+}
+
+/// [`fit_score_and_write_the_calls`], also keeping the verdict of every record `explained` asks
+/// about (`--explain-loci`). **What is written does not depend on it.**
+///
+/// # Panics
+///
+/// As [`fit_score_and_write_the_calls`].
+///
+/// # Errors
+///
+/// As [`fit_score_and_write_the_calls`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fit_score_and_write_the_calls's seven and the explanation it may be asked for"
+)]
+pub fn fit_score_and_write_the_calls_explaining(
+    spill: &SpillFile,
+    histograms: Vec<SampleHistogram>,
+    inbreeding: &[InbreedingF],
+    asked_for: WhatTheOperatorAskedFor,
+    output: &Path,
+    metadata: VcfHeaderMetadata,
+    ploidy: Ploidy,
+    explained: Option<&mut ParalogExplanations>,
+) -> Result<FilteredRun, ParalogFilterError> {
     let WhatTheOperatorAskedFor {
         target_fdr,
         tag_instead_of_dropping,
@@ -252,12 +282,17 @@ pub fn fit_score_and_write_the_calls(
         }
     })?;
 
-    let did =
-        write_the_records_the_filter_kept(spill, &verdicts, tag_instead_of_dropping, &mut writer)
-            .map_err(|source| ParalogFilterError::Writing {
-            path: output.to_path_buf(),
-            source,
-        })?;
+    let did = write_the_records_the_filter_kept_explaining(
+        spill,
+        &verdicts,
+        tag_instead_of_dropping,
+        &mut writer,
+        explained,
+    )
+    .map_err(|source| ParalogFilterError::Writing {
+        path: output.to_path_buf(),
+        source,
+    })?;
 
     writer
         .finish()

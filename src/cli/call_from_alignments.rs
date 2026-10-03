@@ -69,6 +69,7 @@ use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::run::report::BoundsTheRunCalledUnder;
 use crate::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
@@ -181,6 +182,20 @@ pub struct CallFromAlignmentsArgs {
     /// how many loci were dropped this way.
     #[arg(long, default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
     pub max_read_group_depth: u32,
+
+    /// Explain, at every locus overlapping the regions of a BED, why the run decided what it
+    /// did — candidates kept and dropped, samples set aside, genotype likelihoods, GT and GQ,
+    /// how partial reads were weighed, QUAL with its penalties, and what became of the record
+    /// — and write it as a TSV. The first value is the BED, the second the TSV. **It changes
+    /// nothing that is called**, and costs nothing when not given
+    /// (doc/devel/ng/spec/explain_loci.md).
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["REGIONS_BED", "OUTPUT_TSV"],
+        help_heading = "Advanced"
+    )]
+    pub explain_loci: Option<Vec<PathBuf>>,
 
     /// The widest a locus may be, in reference bases, before the caller declines to assemble it.
     ///
@@ -307,6 +322,26 @@ pub struct CallFromAlignmentsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CallFromAlignmentsCliError {
+    /// The `--explain-loci` regions could not be read.
+    #[error("reading the --explain-loci regions in {path}")]
+    ExplainRegions {
+        /// The BED.
+        path: PathBuf,
+        /// What the BED reader hit.
+        #[source]
+        source: crate::regions::BedError,
+    },
+
+    /// The `--explain-loci` explanation could not be written.
+    #[error("writing the --explain-loci explanation to {path}")]
+    ExplanationNotWritten {
+        /// The TSV.
+        path: PathBuf,
+        /// What the write hit.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The hidden-duplication filter's target is not a false-discovery rate.
     #[error("--paralog-fdr is not a false-discovery rate")]
     ParalogTargetIsNotAFraction {
@@ -513,6 +548,20 @@ pub fn run_call_from_alignments(
             None => Arc::clone(&info),
         };
     let contigs: ContigList = info.contig_list();
+    // **Read before any work**, so a BED that will not read stops the run at once.
+    let explain = match args.explain_loci.as_deref() {
+        Some([bed, tsv]) => Some((
+            ExplainRegions::from_bed_path(bed, &contigs).map_err(|source| {
+                CallFromAlignmentsCliError::ExplainRegions {
+                    path: bed.clone(),
+                    source,
+                }
+            })?,
+            tsv.clone(),
+        )),
+        Some(_) => unreachable!("clap takes exactly two values for --explain-loci"),
+        None => None,
+    };
     let reference = OpenReference::new(info);
 
     let ground = ground_request(args);
@@ -594,6 +643,11 @@ pub fn run_call_from_alignments(
     .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(
         args.max_read_group_depth,
     ));
+    let caller = match &explain {
+        Some((regions, _)) => caller.with_explain_loci(regions.clone()),
+        None => caller,
+    };
+    let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let metadata = calling_run::header_for(
         &args.output,
@@ -659,9 +713,13 @@ pub fn run_call_from_alignments(
 
     // **Passes two and three, through the one function both subcommands call**, so direct mode
     // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
+    // The filter is asked for its verdicts on the records the explained loci wrote.
+    let mut paralog_explanations = explain
+        .as_ref()
+        .map(|_| ParalogExplanations::wanting(&written.calling.explanations));
     let filtered = match &parked {
         Some(spilling) => Some(
-            paralog_filter::fit_score_and_write_the_calls(
+            paralog_filter::fit_score_and_write_the_calls_explaining(
                 spilling.spill(),
                 // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
                 // each sample's bins are freed as its model is fitted; cloning here would defeat
@@ -675,6 +733,7 @@ pub fn run_call_from_alignments(
                 &args.output,
                 metadata,
                 ploidy,
+                paralog_explanations.as_mut(),
             )
             .map_err(|source| CallFromAlignmentsCliError::ParalogFilter { source })?,
         ),
@@ -706,6 +765,22 @@ pub fn run_call_from_alignments(
             calls: args.output.clone(),
             source,
         })?;
+
+    if let Some(verdicts) = paralog_explanations {
+        verdicts.add_to(&mut written.calling.explanations);
+    }
+    if let Some((_, tsv)) = &explain {
+        write_explanations(
+            tsv,
+            &mut std::mem::take(&mut written.calling.explanations),
+            &contigs,
+            &sample_names,
+        )
+        .map_err(|source| CallFromAlignmentsCliError::ExplanationNotWritten {
+            path: tsv.clone(),
+            source,
+        })?;
+    }
 
     // **What the filter did goes at the end of the report**, and is empty on a run with the
     // filter off — so an off run prints what it printed before the filter existed.
