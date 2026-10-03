@@ -6,6 +6,26 @@
 this step's measurement contradicts**
 **Branch:** `ng-paralog-filter`
 
+> **Correction, 2026-10-03: the third was not alignment bias.** This report explains the removed
+> indels' variant fractions of 0.32–0.37 as "reads carrying an indel are harder to place". The
+> alignment files say otherwise: at chr1:101051327, one of the 22 below, 185 of 395 fragments carry
+> the deletion (47%), and the aligner placed it at the same position in 184 of 186 reads. The third
+> was made by the walk that writes the psp. It capped reads at 250 per read group at a position
+> where a read had an indel, and at 1,000 elsewhere. The deletion's reads are folded only at its
+> anchor, but the reference reads are also folded at the positions it spans, so the deletion was
+> thinned and the reference was not (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §3).
+> The walk now uses one cap at every position (branch `one-read-cap`).
+>
+> **Re-measured on this report's file and regions**, with the filter tagging:
+>
+> | | records | removed | of which GIAB variants | indels removed | of which GIAB variants |
+> |---|---:|---:|---:|---:|---:|
+> | before the change (`25bfe313`) | 8,230 | 280 | 19 — 6.8 in 100 | 18 | 17 |
+> | one cap at every position | 8,228 | 265 | **4 — 1.5 in 100** | **3** | 2 |
+>
+> Substitutions are unchanged: 262 removed, 2 of them GIAB variants. The rest of this report is
+> left as written; its indel findings describe the capped evidence, not the reads.
+
 ## The answer
 
 **The fit accepts at three hundred reads a window. The filter's target is met on substitutions and

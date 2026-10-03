@@ -359,7 +359,22 @@ emit independently; an indel's base quality is a `min` over a padded window, bec
 carry no quality of their own; adaptor masking and `N` **silence** a base rather than flagging it;
 and the column cap depends on the column's content (250 with an indel present, else 8000),
 truncating in admission order. Every one is in the code being copied; they are listed so a reviewer
-can check the copy kept them.
+can check the copy kept them. **ng has since changed the last two:** reads are kept by a hash of the
+read name, not in admission order (2026-08-05), and **one cap applies at every position**
+(2026-10-03). The content-dependent cap biased indels. An indel's reads are folded only at its
+anchor, where 250 applied, while the reference reads are also folded at the positions the indel
+spans, where it did not — and a read kept at any position of a record folds with its whole window.
+At 300× a heterozygous deletion in 47% of fragments was stored at 31%
+(`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §3).
+
+**What one cap leaves open.** The same mechanism still works wherever a record's anchor holds more
+reads than the cap and the positions it spans do not, because a read dropped at the anchor comes
+back by folding at another position. With the cap at 1,000 reads per read group that needs a
+position deeper than 1,000, and both calling commands drop every locus where a read group exceeds
+`--max-read-group-depth` (default 1,000), so at the defaults no such locus is called. A run that
+sets `--max-reads-per-position` below `--max-read-group-depth` can reach it. The full repair is a
+record-level rule: a read the cap dropped at any position of a record's footprint is left out of
+that record.
 
 **The one invariant worth stating in prose, because it is the least obvious and was once a real
 bug:** each (record, read) pair folds exactly **once over the record's lifetime**, not once per
@@ -797,20 +812,21 @@ separating them per read costs a per-locus membership test whose only consumer i
 
 **Config.** Per `locus_generation.md` §7 a generator owns its knobs and takes them at construction.
 ng gets **its own constants**, starting at production's values but free to diverge — the same rule
-the STR generator set for its reservoir cap. All five are production's, **inherited and never
-measured by ng**; that is the map of what is safe to move.
+the STR generator set for its reservoir cap. Production had five; ng has four. Production's separate
+cap at a position with an indel (250) is removed (§4, 2026-10-03), and the read cap and the
+active-read ceiling have moved. The record span and the mate window are production's, **inherited
+and never measured by ng**.
 
 ```rust
 pub struct PileupGeneratorConfig {
-    /// Reads folded at a position with no indel anchored there. Production: 8000.
-    pub max_snp_column_depth: u32,
-    /// Reads folded at a position where any read has an indel. Production: 250.
-    pub max_indel_column_depth: u32,
+    /// Reads of one read group folded at one position, whatever they show there.
+    /// ng: 1,000 per read group (production: 8,000 per sample, and 250 at an indel).
+    pub max_reads_per_position: u32,
     /// Widest record footprint before the walk fails. Production: 5000.
     pub max_record_span: u32,
     /// How far a first mate stays available for pairing. Production: 10000.
     pub mate_lookup_window: u32,
-    /// Active-read ceiling. Production: 4096.
+    /// Active-read ceiling. ng: 32,768 (production: 4,096).
     pub max_active_reads: u32,
 }
 ```

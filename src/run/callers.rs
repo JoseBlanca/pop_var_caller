@@ -1831,12 +1831,12 @@ pub struct SampleWalkTallies {
     ///
     /// **`positions_short_of_cap` answers one question: did the read-hold ceiling cost this
     /// sample coverage?** Zero means no position was scored on fewer reads than
-    /// `max_snp_column_depth` allows *because the ceiling had already given reads up*;
+    /// `max_reads_per_position` allows *because the ceiling had already given reads up*;
     /// `short_of_cap_deficit` says how many reads those positions were missing altogether.
     ///
-    /// **It says nothing about the two per-position caps**, which is
-    /// `column_depth_truncations` — the positions where `max_snp_column_depth` or
-    /// `max_indel_column_depth` cut contributors the walk was holding. A run can have
+    /// **It says nothing about the per-position cap**, which is
+    /// `column_depth_truncations` — the positions where `max_reads_per_position` cut
+    /// contributors the walk was holding. A run can have
     /// `positions_short_of_cap` at zero and `column_depth_truncations` in the millions: the
     /// ceiling kept every read and the caps then declined to score on all of them. So "did my
     /// depth settings shape the evidence" is answered by **both**, and by neither alone.
@@ -4802,7 +4802,7 @@ mod calling_joined_to_the_merge {
     /// A run that built its generators with `PileupGeneratorConfig::default()` would read
     /// every operator's depth settings and ignore them — wrong evidence, no failure. The knob
     /// moved here is the per-position cap on reads folded at a position with no indel:
-    /// `max_snp_column_depth`, at **1**, against a shipped 8,000. The fixture's three reads
+    /// `max_reads_per_position`, at **1**, against a shipped 8,000. The fixture's three reads
     /// cover the same position, so at 1 the walk truncates that column and at the default it
     /// does not, and `column_depth_truncations` is the count that says which happened.
     ///
@@ -4822,7 +4822,7 @@ mod calling_joined_to_the_merge {
             paths,
             &reference,
             PileupGeneratorConfig {
-                max_snp_column_depth: 1,
+                max_reads_per_position: 1,
                 ..PileupGeneratorConfig::default()
             },
         )

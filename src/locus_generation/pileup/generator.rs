@@ -29,8 +29,8 @@ use crate::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
 use super::genome_walk::{PileupWalker, RegionReadSource, RunSummary};
 use super::{
-    DEFAULT_MATE_LOOKUP_WINDOW, DEFAULT_MAX_ACTIVE_READS, DEFAULT_MAX_INDEL_COLUMN_DEPTH,
-    DEFAULT_MAX_RECORD_SPAN, DEFAULT_MAX_SNP_COLUMN_DEPTH, WalkerConfig,
+    DEFAULT_MATE_LOOKUP_WINDOW, DEFAULT_MAX_ACTIVE_READS, DEFAULT_MAX_READS_PER_POSITION,
+    DEFAULT_MAX_RECORD_SPAN, WalkerConfig,
 };
 
 /// The widest `max_record_span` this generator accepts: 65,535 reference
@@ -69,7 +69,8 @@ const _: () = assert!(
 ///
 /// Raw `u32` rather than `Bp`, because the copied walker speaks production's
 /// integer widths and a port must not change types under itself (spec §3). The
-/// five are exactly production's [`WalkerConfig`] fields, reached from
+/// four are production's [`WalkerConfig`] fields less its separate cap at a
+/// position with an indel, which ng removed (2026-10-03), reached from
 /// production's own `pub const`s **by name** in [`Default`], so there is one
 /// source of truth until ng deliberately diverges and the divergence shows up as
 /// a diff.
@@ -88,12 +89,9 @@ pub struct PileupGeneratorConfig {
     // The values are named, never spelled: `Default` reaches production's
     // constants by name so a retune arrives as a diff, and a literal in the
     // prose here would go stale silently while every test stayed green (review).
-    /// Reads folded at a position with no indel anchored there. Defaults to
-    /// [`DEFAULT_MAX_SNP_COLUMN_DEPTH`](super::DEFAULT_MAX_SNP_COLUMN_DEPTH).
-    pub max_snp_column_depth: u32,
-    /// Reads folded at a position where any read has an indel. Defaults to
-    /// [`DEFAULT_MAX_INDEL_COLUMN_DEPTH`](super::DEFAULT_MAX_INDEL_COLUMN_DEPTH).
-    pub max_indel_column_depth: u32,
+    /// Reads of one read group folded at one position, whatever the reads show there.
+    /// Defaults to [`DEFAULT_MAX_READS_PER_POSITION`](super::DEFAULT_MAX_READS_PER_POSITION).
+    pub max_reads_per_position: u32,
     /// Widest record footprint before the walk fails. Defaults to
     /// [`DEFAULT_MAX_RECORD_SPAN`](super::DEFAULT_MAX_RECORD_SPAN);
     /// ng additionally rejects anything above [`MAX_RECORD_SPAN_CEILING`].
@@ -114,7 +112,7 @@ pub struct PileupGeneratorConfig {
     /// **What the ceiling is for, stated so it is not confused with the caps below.** It
     /// exists to keep a pathological pile-up from exhausting memory, and for nothing
     /// else. It is *not* a way to sample a deep position — that is
-    /// `max_snp_column_depth`'s job, and a ceiling low enough to do it leaves positions
+    /// `max_reads_per_position`'s job, and a ceiling low enough to do it leaves positions
     /// covered by fewer reads than the input had for them, which is what 4,096 was doing
     /// (19,725 reads refused on one ~130× tomato chromosome). The number to check is
     /// `positions_short_of_cap`: zero means the ceiling shaped no position's evidence.
@@ -132,19 +130,18 @@ pub struct PileupGeneratorConfig {
     /// `PendingMatesExhausted` as soon as it held more. That constant is now 1,000,000,
     /// and `pending_mates_high_water` reports how close a run came.
     ///
-    /// **It no longer subsumes `max_snp_column_depth`.** At 4,096 a position could not
-    /// gather 8,000 contributors, so the SNP cap could never fire; at 32,768 it can, and
+    /// **It no longer subsumes `max_reads_per_position`.** At 4,096 a position could not
+    /// gather 8,000 contributors, so the read cap could never fire; at 32,768 it can, and
     /// on the deepest real position it does.
     pub max_active_reads: u32,
 }
 
 impl Default for PileupGeneratorConfig {
-    /// Production's five constants, **by name** — never by literal, so a retune
+    /// The four knobs' constants, **by name** — never by literal, so a retune
     /// on production's side reaches ng as a diff rather than as drift.
     fn default() -> Self {
         Self {
-            max_snp_column_depth: DEFAULT_MAX_SNP_COLUMN_DEPTH,
-            max_indel_column_depth: DEFAULT_MAX_INDEL_COLUMN_DEPTH,
+            max_reads_per_position: DEFAULT_MAX_READS_PER_POSITION,
             max_record_span: DEFAULT_MAX_RECORD_SPAN,
             mate_lookup_window: DEFAULT_MATE_LOOKUP_WINDOW,
             // ng's copy of the constant, which `walker_vocabulary_tests` pins equal
@@ -157,15 +154,12 @@ impl Default for PileupGeneratorConfig {
 
 impl PileupGeneratorConfig {
     /// The defaults with the read cap set to `max_reads_per_position` reads of one read group
-    /// — what `--max-reads-per-position` asks for. The cap at an insertion or deletion stays at
-    /// its default unless this is lower, so it is never looser than the cap elsewhere.
+    /// — what `--max-reads-per-position` asks for.
     #[must_use]
     pub fn with_max_reads_per_position(max_reads_per_position: u32) -> Self {
-        let defaults = Self::default();
         Self {
-            max_snp_column_depth: max_reads_per_position,
-            max_indel_column_depth: defaults.max_indel_column_depth.min(max_reads_per_position),
-            ..defaults
+            max_reads_per_position,
+            ..Self::default()
         }
     }
 
@@ -184,18 +178,17 @@ impl PileupGeneratorConfig {
             });
         }
         // **Every knob has a floor as well as the one that has a ceiling** — the
-        // review measured what a zero does, and all five are bad in one of three
+        // review measured what a zero does, and all four are bad in one of three
         // ways: `max_active_reads` and `max_record_span` abort the walk on its
         // first read with an error naming a region rather than a knob;
         // `mate_lookup_window` silently fails to collapse a mate pair, so one
-        // fragment gets two chain ids; and `max_snp_column_depth` walks
+        // fragment gets two chain ids; and `max_reads_per_position` walks
         // **successfully** and returns *zero loci for a covered region*, with the
         // truncations that explain it counted into a struct the dispatcher
         // cannot read. The last is the one this module's "no silent caps"
         // principle rules out outright.
         for (knob, value) in [
-            ("max_snp_column_depth", self.max_snp_column_depth),
-            ("max_indel_column_depth", self.max_indel_column_depth),
+            ("max_reads_per_position", self.max_reads_per_position),
             ("max_record_span", self.max_record_span),
             ("mate_lookup_window", self.mate_lookup_window),
             ("max_active_reads", self.max_active_reads),
@@ -207,7 +200,7 @@ impl PileupGeneratorConfig {
         Ok(())
     }
 
-    /// The same five knobs in the shape the copied walker reads them.
+    /// The same four knobs in the shape the copied walker reads them.
     ///
     /// Written as an exhaustive struct literal rather than with `..default()`:
     /// a knob production adds to [`WalkerConfig`] is then a compile error here,
@@ -219,8 +212,7 @@ impl PileupGeneratorConfig {
     /// straight to this module's re-exported `run` (review).
     pub(super) fn to_walker_config(self) -> WalkerConfig {
         WalkerConfig {
-            max_snp_column_depth: self.max_snp_column_depth,
-            max_indel_column_depth: self.max_indel_column_depth,
+            max_reads_per_position: self.max_reads_per_position,
             max_record_span: self.max_record_span,
             mate_lookup_window: self.mate_lookup_window,
             max_active_reads: self.max_active_reads,
@@ -245,7 +237,7 @@ pub enum PileupGeneratorConfigError {
          positions_covered rather than an error"
     )]
     RecordSpanExceedsWitnessRun { max_record_span: u32, ceiling: u32 },
-    /// A knob set to zero. Each of the five means something the walk cannot do
+    /// A knob set to zero. Each of the four means something the walk cannot do
     /// at all — fold no reads at a column, allow no active reads, keep no mate
     /// pending, allow no record span — and the walk's answer to each is either a
     /// run-fatal error naming a region rather than the knob, or a plausible
@@ -1752,7 +1744,7 @@ mod tests {
             .build()
     }
 
-    /// **Three of the five defaults are production's, read from production's own
+    /// **Two of the four defaults are production's, read from production's own
     /// constants.**
     ///
     /// Asserted against production's `pub const`s by name until promotion step C18, so a knob
@@ -1764,28 +1756,32 @@ mod tests {
     /// **The other two are ng's own**, and the assertions say so rather than being deleted:
     /// `max_active_reads` is 32,768 where production's constant is 4,096 (2026-08-05), because
     /// production's value was refusing reads at the door on ordinary whole-genome data; and
-    /// the read cap `max_snp_column_depth` is 1,000 reads of one read group where production's
+    /// the read cap `max_reads_per_position` is 1,000 reads of one read group where production's
     /// was 8,000 reads of a sample (2026-09-29), because 8,000 let a collapsed-repeat pile-up of
     /// 5,669 reads a sample through to a 2,169-sample calling run. A test that merely stopped
     /// checking the knobs would let ng drift back without anybody noticing; this one fails if
     /// any number moves.
+    ///
+    /// Production's fifth knob, a tighter cap of 250 reads at a position where a read has an
+    /// insertion or deletion, is not here at all: it biased every indel's allele balance at
+    /// depth, and ng removed it (2026-10-03).
     #[test]
     fn the_default_knobs_are_productions_constants_except_two() {
         // Production's `pileup::walker` defaults at commit `d9e7b076`.
         const PRODUCTION_MAX_SNP_COLUMN_DEPTH: u32 = 8_000;
-        const PRODUCTION_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
+        // Production's indel cap, 250, is gone rather than changed: ng has one cap at every
+        // position (`DEFAULT_MAX_READS_PER_POSITION` says why).
         const PRODUCTION_MAX_RECORD_SPAN: u32 = 5_000;
         const PRODUCTION_MATE_LOOKUP_WINDOW: u32 = 10_000;
 
         let config = PileupGeneratorConfig::default();
         assert_eq!(
-            config.max_snp_column_depth, 1_000,
+            config.max_reads_per_position, 1_000,
             "ng's own, not production's"
         );
-        assert_ne!(config.max_snp_column_depth, PRODUCTION_MAX_SNP_COLUMN_DEPTH);
-        assert_eq!(
-            config.max_indel_column_depth,
-            PRODUCTION_MAX_INDEL_COLUMN_DEPTH
+        assert_ne!(
+            config.max_reads_per_position,
+            PRODUCTION_MAX_SNP_COLUMN_DEPTH
         );
         assert_eq!(config.max_record_span, PRODUCTION_MAX_RECORD_SPAN);
         assert_eq!(config.mate_lookup_window, PRODUCTION_MATE_LOOKUP_WINDOW);
@@ -1862,25 +1858,18 @@ mod tests {
 
     /// **Every knob has a floor, and the review measured why.** A zero is
     /// accepted by arithmetic and then means something the walk cannot do: two
-    /// of the five abort the walk on its first read with an error naming a
+    /// of the four abort the walk on its first read with an error naming a
     /// region rather than the knob, one silently fails to collapse a mate pair,
-    /// and `max_snp_column_depth` walks **successfully** and returns zero loci
+    /// and `max_reads_per_position` walks **successfully** and returns zero loci
     /// for a covered region.
     #[test]
     fn a_knob_set_to_zero_is_rejected_at_construction() {
         let sound = PileupGeneratorConfig::default();
         let zeroed = [
             (
-                "max_snp_column_depth",
+                "max_reads_per_position",
                 PileupGeneratorConfig {
-                    max_snp_column_depth: 0,
-                    ..sound
-                },
-            ),
-            (
-                "max_indel_column_depth",
-                PileupGeneratorConfig {
-                    max_indel_column_depth: 0,
+                    max_reads_per_position: 0,
                     ..sound
                 },
             ),
@@ -1937,22 +1926,20 @@ mod tests {
         );
     }
 
-    /// **Every knob reaches the walker, and reaches the right field.** Five
+    /// **Every knob reaches the walker, and reaches the right field.** Four
     /// deliberately distinct, non-default values: with the defaults, or with two
     /// knobs sharing a value, a transposed pair of fields in `to_walker_config`
     /// would pass.
     #[test]
     fn every_knob_reaches_the_walker_config_it_names() {
         let config = PileupGeneratorConfig {
-            max_snp_column_depth: 11,
-            max_indel_column_depth: 22,
+            max_reads_per_position: 11,
             max_record_span: 33,
             mate_lookup_window: 44,
             max_active_reads: 55,
         };
         let walker_config = config.to_walker_config();
-        assert_eq!(walker_config.max_snp_column_depth, 11);
-        assert_eq!(walker_config.max_indel_column_depth, 22);
+        assert_eq!(walker_config.max_reads_per_position, 11);
         assert_eq!(walker_config.max_record_span, 33);
         assert_eq!(walker_config.mate_lookup_window, 44);
         assert_eq!(walker_config.max_active_reads, 55);
