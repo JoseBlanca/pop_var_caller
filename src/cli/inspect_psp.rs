@@ -408,7 +408,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
         let zeta = psp_path_for(&psps, "zeta");
