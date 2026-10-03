@@ -15,6 +15,7 @@ mod cross_platform_digests;
 pub mod estimate_contamination;
 pub mod estimate_parameters;
 pub mod generate_psps;
+pub mod inspect_psp;
 pub mod mode_equivalence;
 pub mod parsers;
 pub(crate) mod provenance;
@@ -38,6 +39,7 @@ pub use estimate_parameters::{
     EstimateParametersArgs, EstimateParametersCliError, run_estimate_parameters,
 };
 pub use generate_psps::{GeneratePspsArgs, GeneratePspsCliError, run_generate_psps};
+pub use inspect_psp::{InspectPspArgs, InspectPspCliError, run_inspect_psp};
 pub use regenerate_census::{
     CensusReport, RegenerateCensusArgs, RegenerateCensusCliError, SampleCensusOutcome, SkippedPsp,
     run_regenerate_census,

@@ -23,8 +23,8 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use clap::Parser;
 use pop_var_caller::cli::{
     Cli, PopVarCallerCommand, run_call_from_alignments, run_call_from_psps,
-    run_estimate_contamination, run_estimate_parameters, run_generate_psps, run_regenerate_census,
-    run_repeat_catalog, run_typed_regions,
+    run_estimate_contamination, run_estimate_parameters, run_generate_psps, run_inspect_psp,
+    run_regenerate_census, run_repeat_catalog, run_typed_regions,
 };
 use pop_var_caller::error_render::format_error_chain;
 
@@ -54,6 +54,9 @@ fn main() {
         }
         PopVarCallerCommand::EstimateContamination(args) => {
             run_estimate_contamination(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::InspectPsp(args) => {
+            run_inspect_psp(&args).map_err(|e| format_error_chain(&e))
         }
     };
     if let Err(msg) = result {
