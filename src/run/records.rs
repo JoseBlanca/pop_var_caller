@@ -46,8 +46,8 @@
 
 use crate::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
 use crate::calling::quality::artifact_correction::correct_site_quality;
-use crate::calling::{CandidateAlleles, LocusInference, SampleGenotypeCall};
-use crate::locus_generation::LocusKind;
+use crate::calling::{CandidateAlleles, LocusInference, ReferenceBesideLocus, SampleGenotypeCall};
+use crate::locus_generation::{LocusKind, LocusLen};
 use crate::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
 use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::{GenomeRegion, Position};
@@ -84,6 +84,99 @@ pub fn a_written_genotype_carries_an_alternative(locus: &LocusInference) -> bool
                     .iter()
                     .any(|allele| !allele.is_reference())
         }
+    })
+}
+
+/// The two buffers [`reference_beside_locus`] reads the flanks into, kept by a worker across
+/// loci so a run allocates them once.
+#[derive(Debug, Default)]
+pub struct ReferenceBesideScratch {
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
+/// **The reference either side of an ordinary locus, as much as its partial reads need** — what
+/// a read that ran out inside the locus is compared against after the allele
+/// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+///
+/// A read flush to the left border shows the allele and then the reference after the locus; one
+/// flush to the right shows the reference before it and then the allele. The flank is needed only
+/// past the allele's end, so **each side is read as far as the longest such partial showed beyond
+/// the locus's shortest allele, and not at all where none did** — the ordinary case, since most
+/// loci have no partial longer than any allele. The alleles the loop is called over are always
+/// among the merge's, so the shortest of the merge's bounds them all.
+///
+/// **A repeat tract gets nothing**: its reads are re-aligned against flanks the tract carries,
+/// and this rule is the ordinary path's. A contig's end clamps the side that would run past it.
+///
+/// # Errors
+///
+/// Whatever the reference fetch refuses, other than running past the contig's end.
+pub fn reference_beside_locus<'s, R>(
+    reference: &R,
+    observation: &CohortObservation,
+    scratch: &'s mut ReferenceBesideScratch,
+) -> Result<ReferenceBesideLocus<'s>, RefSeqError>
+where
+    R: RefSeq,
+{
+    scratch.before.clear();
+    scratch.after.clear();
+    if !matches!(observation.kind, LocusKind::Generic) {
+        return Ok(ReferenceBesideLocus::NONE);
+    }
+    let Some(shortest_allele) = observation.alleles.iter().map(|allele| allele.len()).min()
+    else {
+        return Ok(ReferenceBesideLocus::NONE);
+    };
+    let locus_len = LocusLen::from_positions(observation.alleles[0].len() as u64);
+    let mut needed_before = 0_usize;
+    let mut needed_after = 0_usize;
+    for partial in observation
+        .per_sample
+        .iter()
+        .flat_map(|sample| &sample.partials)
+    {
+        let witness = &partial.witnessed_in_locus;
+        // Only a single run anchored at exactly one border is compared against a flank; every
+        // other shape is compared against the allele alone or against nothing.
+        if witness.runs().len() != 1 {
+            continue;
+        }
+        let beyond_the_shortest_allele = partial.bases.len().saturating_sub(shortest_allele);
+        match (witness.is_flush_left(), witness.is_flush_right(locus_len)) {
+            (true, false) => needed_after = needed_after.max(beyond_the_shortest_allele),
+            (false, true) => needed_before = needed_before.max(beyond_the_shortest_allele),
+            _ => {}
+        }
+    }
+
+    let region = observation.region;
+    if needed_before > 0 {
+        let first = region.start.get();
+        let start = first
+            .saturating_sub(needed_before as u64)
+            .max(FIRST_POSITION_OF_A_CONTIG.get());
+        if start < first {
+            reference.fetch_into(region.contig, start, first - start, &mut scratch.before)?;
+        }
+    }
+    if needed_after > 0 {
+        let start = region.end.get() + 1;
+        match reference.fetch_into(region.contig, start, needed_after as u64, &mut scratch.after) {
+            Ok(()) => {}
+            Err(RefSeqError::OutOfBounds { contig_length, .. }) => {
+                let available = (contig_length + 1).saturating_sub(start);
+                if available > 0 {
+                    reference.fetch_into(region.contig, start, available, &mut scratch.after)?;
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(ReferenceBesideLocus {
+        before: &scratch.before,
+        after: &scratch.after,
     })
 }
 

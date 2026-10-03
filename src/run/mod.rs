@@ -395,6 +395,22 @@ pub enum RunError {
         source: crate::ref_seq::RefSeqError,
     },
 
+    /// The reference either side of an ordinary locus, which its partial reads are compared
+    /// against after the allele, could not be read
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    ///
+    /// **Not skipped**: calling the locus without it would score a deletion's own reads as
+    /// evidence for the reference. The ordinary reachable cause is the FASTA becoming unreadable
+    /// part-way through a run.
+    #[error("the reference beside the locus at {locus} could not be read")]
+    ReferenceBesideLocusUnreadable {
+        /// The locus whose partial reads needed the flank.
+        locus: GenomeRegion,
+        /// What the reference fetch hit.
+        #[source]
+        source: crate::ref_seq::RefSeqError,
+    },
+
     /// The reference bases over a stretch of ground the merge had just drawn could not be read.
     ///
     /// **The window-coverage measurement needs the reference base at every position it counts**,
