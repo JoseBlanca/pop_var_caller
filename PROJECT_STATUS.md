@@ -22,7 +22,17 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-09-26):** **`estimate-parameters` memory, issues 1–3** ([plan](doc/devel/implementation_plans/estimation_memory.md)): the repeat-tract evidence is dropped once the fit returns; `--str-param-estimates-at-once N` (default 1) replaces the machine-memory guess; contamination no longer holds samples × positions. No fitted number moved (the cross-platform checksums are unchanged). Next: the simulated cohorts, after the owner's checkpoint.
+> - **Last completed task (2026-10-03):** **the GIAB indels nobody had explained**
+> ([report](doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md)). The walk's separate
+> 250-read cap at positions with an indel is removed (branch `one-read-cap`): it stored true
+> heterozygous deletions at a third of their reads at 300×, which the hidden-duplication filter
+> then removed. On D3's HG002 run the filter's true variants removed fall from 19 of 280 to 4 of
+> 265; GIAB trio missed 56 → 51 with the partial-read fix merged too; tomato calls unchanged at
+> default parameters. The run report now names repeat tracts refused as not periodic (branch
+> `refused-tracts-listed`). The CCTTC tract at chr1:206838736 is accepted as a known miss: four
+> repairs were measured and each lost more right genotypes than it gained.
+>
+> - **Earlier (2026-09-26):** **`estimate-parameters` memory, issues 1–3** ([plan](doc/devel/implementation_plans/estimation_memory.md)): the repeat-tract evidence is dropped once the fit returns; `--str-param-estimates-at-once N` (default 1) replaces the machine-memory guess; contamination no longer holds samples × positions. No fitted number moved (the cross-platform checksums are unchanged). Next: the simulated cohorts, after the owner's checkpoint.
 >
 > - **Earlier (2026-09-15):** **the caller writes the same bytes on macOS and Linux, and
 > at any thread count** (branch `portable-float`,
