@@ -68,7 +68,9 @@ use std::num::NonZeroU32;
 
 use super::SsrSampleEvidence;
 use super::allele_candidates::LocusSelection;
-use super::{GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence};
+use super::{
+    GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence, ReferenceBesideLocus,
+};
 use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
 use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::{AlleleId, GenomeRegion, SummedLogError};
@@ -399,17 +401,22 @@ impl GenericEvidenceScratch {
 /// [`narrow`](GenericEvidenceScratch::narrow) and
 /// [`fill_views`](GenericEvidenceScratch::fill_views) separately does not lift it. That fresh
 /// `Vec` is the per-locus allocation the module note names.
+///
+/// **`reference_beside` is the reference either side of the locus**, as much as its partial reads
+/// need (`run::records::reference_beside_locus`): the loop compares a read that ran out inside the
+/// locus against an allele followed by it (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
 #[must_use]
 pub fn shape_generic_locus<'a>(
     shaping: &'a mut GenericEvidenceScratch,
     observation: &'a CohortObservation,
     selection: &LocusSelection,
     run_sample_count: usize,
+    reference_beside: ReferenceBesideLocus<'a>,
     views: &'a mut Vec<GenericLocusSample<'a>>,
 ) -> LocusEvidence<'a> {
     shaping.narrow(observation, selection, run_sample_count);
     shaping.fill_views(observation, views);
-    LocusEvidence::generic(observation.region, views)
+    LocusEvidence::generic_beside_reference(observation.region, views, reference_beside)
 }
 
 /// **One repeat tract's evidence, per sample of the run** — the repeat-tract half of the input
@@ -1215,7 +1222,14 @@ mod tests {
         ] {
             // **Inside the body, and it has to be.**
             let mut views = Vec::new();
-            let evidence = shape_generic_locus(&mut shaping, observation, selection, 3, &mut views);
+            let evidence = shape_generic_locus(
+                &mut shaping,
+                observation,
+                selection,
+                3,
+                ReferenceBesideLocus::NONE,
+                &mut views,
+            );
             assert_eq!(evidence.sample_count(), 3);
             regions.push(evidence.region());
         }

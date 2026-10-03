@@ -38,7 +38,7 @@ use crate::calling::evidence_shaping::{
 };
 use crate::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::calling::run_parameters::RunParameters;
-use crate::calling::{CallingScratch, FrozenParameters, LocusInference};
+use crate::calling::{CallingScratch, FrozenParameters, LocusInference, ReferenceBesideLocus};
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::locus_generation::{
@@ -72,7 +72,8 @@ use crate::window_coverage::{SampleHistogram, WindowCoverage};
 use super::RunError;
 use super::calling_progress::CallingProgress;
 use super::records::{
-    a_written_genotype_carries_an_alternative, evidence_for_output, padding_base_beside,
+    ReferenceBesideScratch, a_written_genotype_carries_an_alternative, evidence_for_output,
+    padding_base_beside, reference_beside_locus,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -585,6 +586,10 @@ impl AlignedFilesVariantCaller {
         // sliding forward with the merge and shared with nothing (`spec/window_coverage.md`
         // §3.2). Taken before `walkers()` consumes the run.
         let reference_for_the_merge = self.walk_reference.accessor();
+        // The reference either side of each ordinary locus its partial reads need
+        // (`read_likelihoods.md` §5.3) — an accessor of its own, so its window does not
+        // collapse onto the merge's.
+        let reference_beside_the_loci = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -618,6 +623,10 @@ impl AlignedFilesVariantCaller {
         // Counted rather than collected: a run over tract-rich ground meets millions of these,
         // and what the report owes is how many, not where each one was.
         let mut tracts = TractOutcomes::default();
+        let mut beside_scratch = ReferenceBesideScratch::default();
+        // The merge's sink cannot fail, so the first flank that cannot be read is kept and
+        // returned once the merge does.
+        let mut stopped: Option<RunError> = None;
 
         let mut cache = ObservationCache::over(walkers, Box::new(reference_for_the_merge));
         merge_cohort_handing_each_locus_over(
@@ -627,10 +636,28 @@ impl AlignedFilesVariantCaller {
             merge_parameters.max_cohort_locus_span,
             merge_parameters.min_alt_reads,
             &mut |observation| {
+                if stopped.is_some() {
+                    return;
+                }
                 let region = observation.region;
+                let reference_beside = match reference_beside_locus(
+                    &reference_beside_the_loci,
+                    &observation,
+                    &mut beside_scratch,
+                ) {
+                    Ok(beside) => beside,
+                    Err(source) => {
+                        stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                            locus: region,
+                            source,
+                        });
+                        return;
+                    }
+                };
                 match call_one_cohort_locus(
                     genotyper,
                     &observation,
+                    reference_beside,
                     &frozen,
                     &candidate_selection,
                     &tract_selection,
@@ -652,6 +679,9 @@ impl AlignedFilesVariantCaller {
             },
             &mut loci_too_wide_to_assemble,
         )?;
+        if let Some(error) = stopped {
+            return Err(error);
+        }
 
         let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
         Ok(CalledCohort {
@@ -900,6 +930,7 @@ where
     };
     let mut scratch: CallingScratch<S> = CallingScratch::default();
     let mut padding_scratch = Vec::new();
+    let mut beside_scratch = ReferenceBesideScratch::default();
     let mut records_written = 0_u64;
     let mut loci_called_but_not_written = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
@@ -936,9 +967,22 @@ where
                 return;
             }
             let region = observation.region;
+            let reference_beside =
+                match reference_beside_locus(&padding_reference, &observation, &mut beside_scratch)
+                {
+                    Ok(beside) => beside,
+                    Err(source) => {
+                        stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                            locus: region,
+                            source,
+                        });
+                        return;
+                    }
+                };
             let built = call_one_cohort_locus(
                 genotyper,
                 &observation,
+                reference_beside,
                 &frozen,
                 candidate_selection,
                 &tract_selection,
@@ -1149,6 +1193,7 @@ enum LocusOutcome<R> {
 fn call_one_cohort_locus<S, G, R>(
     genotyper: &G,
     observation: &CohortObservation,
+    reference_beside: ReferenceBesideLocus<'_>,
     parameters: &FrozenParameters<'_>,
     candidate_selection: &CandidateSelectionConfig,
     tract_selection: &SsrSelectionConfig,
@@ -1167,6 +1212,7 @@ where
         LocusKind::Generic => match call_one_generic_locus(
             genotyper,
             observation,
+            reference_beside,
             parameters,
             candidate_selection,
             calling_loop_config,
@@ -1346,6 +1392,7 @@ where
 fn call_one_generic_locus<S, G, R>(
     genotyper: &G,
     observation: &CohortObservation,
+    reference_beside: ReferenceBesideLocus<'_>,
     parameters: &FrozenParameters<'_>,
     candidate_selection: &CandidateSelectionConfig,
     calling_loop_config: &RunnableCallingLoopConfig,
@@ -1370,6 +1417,7 @@ where
         observation,
         &selection,
         run_sample_count,
+        reference_beside,
         &mut views,
     );
     // The allele table leaves the selection by value: a discovery round appends to it and the
@@ -4582,6 +4630,9 @@ mod calling_joined_to_the_merge {
             parameters.inbreeding_coefficient_by_sample().len(),
             "the rebuilt parameters describe the same cohort as the run's own",
         );
+        // The oracle reads the flanks a locus's partial reads need the way the run does.
+        let reference_beside_the_loci = merging_first.walk_reference.accessor();
+        let mut beside_scratch = ReferenceBesideScratch::default();
         let merged = merging_first.merge_cohort().expect("merges");
         let frozen = parameters.view();
         let mut shaping = GenericEvidenceScratch::default();
@@ -4590,9 +4641,16 @@ mod calling_joined_to_the_merge {
             .cohort_observations
             .iter()
             .map(|observation| {
+                let reference_beside = reference_beside_locus(
+                    &reference_beside_the_loci,
+                    observation,
+                    &mut beside_scratch,
+                )
+                .expect("the fixture reference serves every flank");
                 call_one_generic_locus(
                     &genotyper,
                     observation,
+                    reference_beside,
                     &frozen,
                     &selection,
                     &loop_config,
@@ -6896,6 +6954,9 @@ struct RoundCallScratch<'a, S> {
     tract_shaping: SsrEvidenceScratch,
     scratch: CallingScratch<S>,
     padding_scratch: Vec<u8>,
+    /// The reference either side of the locus its partial reads need (spec
+    /// `read_likelihoods.md` §5.3), read into buffers the worker keeps.
+    beside_scratch: ReferenceBesideScratch,
     window_coverage: Vec<WindowCoverage>,
     tracts: TractOutcomes,
     totals: &'a std::sync::Mutex<TractOutcomes>,
@@ -6995,6 +7056,7 @@ where
             tract_shaping: SsrEvidenceScratch::default(),
             scratch: CallingScratch::default(),
             padding_scratch: Vec::new(),
+            beside_scratch: ReferenceBesideScratch::default(),
             window_coverage: Vec::with_capacity(run_sample_count),
             tracts: TractOutcomes::default(),
             totals: tract_totals_ref,
@@ -7006,13 +7068,27 @@ where
                 tract_shaping,
                 scratch,
                 padding_scratch,
+                beside_scratch,
                 window_coverage,
                 tracts,
                 totals: _,
             } = worker;
+            let reference_beside =
+                match reference_beside_locus(padding_reference, &observation, beside_scratch) {
+                    Ok(beside) => beside,
+                    Err(source) => {
+                        return RoundLocusOutcome::CalledFailed(
+                            RunError::ReferenceBesideLocusUnreadable {
+                                locus: region,
+                                source,
+                            },
+                        );
+                    }
+                };
             let built = call_one_cohort_locus(
                 genotyper,
                 &observation,
+                reference_beside,
                 frozen,
                 candidate_selection,
                 tract_selection,

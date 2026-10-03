@@ -1229,6 +1229,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
         LocusEvidence::Generic {
             region: _,
             per_sample,
+            reference_beside: _,
         } => Some(*per_sample),
         LocusEvidence::Ssr { .. } => None,
     };
@@ -1413,6 +1414,7 @@ fn is_callable(evidence: &LocusEvidence<'_>, run_sample: usize) -> bool {
         LocusEvidence::Generic {
             region: _,
             per_sample,
+            reference_beside: _,
         } => per_sample[run_sample].is_callable(),
         LocusEvidence::Ssr { .. } => true,
     }
@@ -1501,6 +1503,7 @@ fn weakest_warrant_at_the_locus(
         LocusEvidence::Generic {
             region: _,
             per_sample,
+            reference_beside: _,
         } => {
             for locus_sample in per_sample.iter().filter(|sample| sample.is_callable()) {
                 let read_groups = locus_sample
@@ -1550,6 +1553,7 @@ fn generic_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> &'a [GenericLocus
         LocusEvidence::Generic {
             region: _,
             per_sample,
+            reference_beside: _,
         } => per_sample,
         LocusEvidence::Ssr { region, .. } => unreachable!(
             "the repeat tract at {region} reached the SNP/indel path's evidence: its caller \
@@ -1737,6 +1741,12 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
     scratch: &mut CallingScratch<SsrEmissionScratch>,
 ) {
     let per_sample = generic_evidence_of(evidence);
+    let reference_beside = match evidence {
+        LocusEvidence::Generic {
+            reference_beside, ..
+        } => *reference_beside,
+        LocusEvidence::Ssr { .. } => unreachable!("generic_evidence_of refused a repeat tract"),
+    };
 
     // **Once per locus rather than once per sample**: how far an allele's own error mass is
     // spread across the locus's others depends on the candidate sequences and on nothing a
@@ -1754,6 +1764,7 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
         fill_generic_emissions(
             &sample,
             candidates,
+            reference_beside,
             calibration,
             scratch.generic_row_mut(row),
         );
@@ -2118,6 +2129,7 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
         LocusEvidence::Generic {
             region: _,
             per_sample,
+            reference_beside: _,
         } => *per_sample,
         LocusEvidence::Ssr { .. } => return,
     };
