@@ -34,11 +34,11 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use crate::psp::PspReadError;
 use crate::psp::block::StreamedRecord;
 use crate::psp::header::Header;
 use crate::psp::reader::PspReader;
 use crate::psp::record::RecordHead;
-use crate::psp::PspReadError;
 use crate::regions::{BedError, ContigBounds, RegionSet};
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position};
 
@@ -171,21 +171,14 @@ pub fn run_inspect_psp(args: &InspectPspArgs) -> Result<(), InspectPspCliError> 
         };
         let look_from = GenomePosition {
             contig: wanted.contig,
-            position: Position(
-                wanted
-                    .start
-                    .get()
-                    .saturating_sub(LOOK_BEHIND_BP)
-                    .max(1),
-            ),
+            position: Position(wanted.start.get().saturating_sub(LOOK_BEHIND_BP).max(1)),
         };
         let mut records = reader.records_from(look_from).map_err(psp_error)?;
         records.skipping_records_too_large_to_hold(true);
         for streamed in records {
             let streamed = streamed.map_err(psp_error)?;
             let at = streamed.head.region;
-            if at.contig > wanted.contig || (at.contig == wanted.contig && at.start > wanted.end)
-            {
+            if at.contig > wanted.contig || (at.contig == wanted.contig && at.start > wanted.end) {
                 break;
             }
             if at.contig < wanted.contig || at.end < wanted.start {
@@ -287,7 +280,10 @@ fn write_record(
         let read_group = header
             .read_groups
             .get(observation.read_group.0 as usize)
-            .map_or_else(|| observation.read_group.0.to_string(), |group| group.id.clone());
+            .map_or_else(
+                || observation.read_group.0.to_string(),
+                |group| group.id.clone(),
+            );
         let (mapq_mean, mapq_sd) = mapq_mean_and_sd(
             observation.num_obs,
             observation.mapq_sum,
@@ -328,12 +324,13 @@ fn write_locus_columns(
             String::from_utf8_lossy(&detail.left_flank).into_owned(),
             String::from_utf8_lossy(&detail.right_flank).into_owned(),
         ),
-        Some(LocusKind::SsrBundle) => ("repeat_bundle", String::new(), String::new(), String::new()),
+        Some(LocusKind::SsrBundle) => {
+            ("repeat_bundle", String::new(), String::new(), String::new())
+        }
     };
-    let reference_bases =
-        record.map_or_else(String::new, |record| {
-            String::from_utf8_lossy(&record.reference_bases).into_owned()
-        });
+    let reference_bases = record.map_or_else(String::new, |record| {
+        String::from_utf8_lossy(&record.reference_bases).into_owned()
+    });
     let reads_without_observation = record.map_or_else(String::new, |record| {
         record.reads_without_observation.to_string()
     });
