@@ -358,6 +358,8 @@ L4), so the mapper's spelling won. Four repairs were measured on the HG002 tande
 | count a read with less than 8 bases of overhang as partial, not spanning | −142 (and 62 homopolymer tracts no longer called at 30×) |
 | use the realigner's spelling where the input spelling is off the grid and the realigner's on it | +14, with about 25 more wrong calls at each depth: tracts whose truth is a sequence change the check had been refusing |
 
+**The owner accepted this miss on 2026-10-03**: the spelling rules stay as they are, and the run report's list of refused tracts is how a later run will show how often it happens.
+
 The details and the numbers per cell are in
 `doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §2.
 
