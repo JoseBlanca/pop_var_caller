@@ -336,6 +336,31 @@ everything else here, for the same reason.
 **A `NotPeriodic` locus still yields a candidate table**: the reference tract alone, verdict
 `NotPeriodic`. What the run does with it is emission's.
 
+**The run report names every refused tract by position** (the first five in genome order, then a
+count of the rest), under the count it always printed. A refused tract writes no record, so in the
+VCF it looks exactly like a tract where nobody varied, and a count alone gave a reader nothing to
+look at (2026-10-03).
+
+**A known way the check refuses a real tract, recorded rather than fixed.** On GIAB HG002 at 300×,
+`chr1:206,838,725` is a 75-base `CCTTC` tract whose truth is a 1/2 of one and two units shorter. It
+was refused with 8 of its 55 spanning reads off the grid, against the 10% allowance. Five of the
+eight are reads ending 1 to 7 bases past the tract, where the reference goes on `CTCTCTCCTTCCCTTC`.
+Their mappers spelled them six bases *longer* (`…130M6I12M`), while the realigner measured all five
+at the truth's ten bases shorter. A complete read is spelled by its input alignment wherever the
+CIGAR has an indel ([`locus_generation_ssr.md`](locus_generation_ssr.md); tract-accuracy program,
+L4), so the mapper's spelling won. Four repairs were measured on the HG002 tandem-repeat benchmark
+(36,497 truth records, 30× and 50×), and each wins this one tract and loses more elsewhere:
+
+| rule | right genotypes, summed over 30× and 50×, homopolymer and period 2+ |
+|---|---|
+| use the input spelling only with at least 8 bases of overhang past the tract | −12 |
+| … only with the whole 15-base flank of overhang | −48 |
+| count a read with less than 8 bases of overhang as partial, not spanning | −142 (and 62 homopolymer tracts no longer called at 30×) |
+| use the realigner's spelling where the input spelling is off the grid and the realigner's on it | +14, with about 25 more wrong calls at each depth: tracts whose truth is a sequence change the check had been refusing |
+
+The details and the numbers per cell are in
+`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §2.
+
 ---
 
 ## 8. What this path does *not* owe, and what it decides for others

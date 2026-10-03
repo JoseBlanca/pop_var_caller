@@ -301,11 +301,29 @@ impl<'a> RunReport<'a> {
                 tracts.built(),
                 tracts.called,
             ));
-            if tracts.not_periodic > 0 {
+            if !tracts.not_periodic.is_empty() {
                 lines.push(format!(
                     "  not called — the reads do not vary in whole motif units (notPeriodic): {}",
-                    tracts.not_periodic,
+                    tracts.not_periodic.len(),
                 ));
+                // **Sorted here, not where they are gathered**: the round driver's workers add
+                // theirs as they finish, so only a sort makes the lines the same at any thread
+                // count.
+                let mut refused = tracts.not_periodic.clone();
+                refused.sort_unstable_by_key(|tract| (tract.contig, tract.start, tract.end));
+                for tract in refused.iter().take(SPANS_A_REPORT_SHOWS) {
+                    lines.push(format!(
+                        "    {} ({} bases)",
+                        self.named(*tract),
+                        tract.len()
+                    ));
+                }
+                if refused.len() > SPANS_A_REPORT_SHOWS {
+                    lines.push(format!(
+                        "    … and {} more",
+                        refused.len() - SPANS_A_REPORT_SHOWS
+                    ));
+                }
             }
             if tracts.too_many_alleles > 0 {
                 lines.push(format!(

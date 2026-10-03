@@ -1060,12 +1060,19 @@ where
 /// not periodic is called over the reference tract alone, so every sample is homozygous
 /// reference and no record is written — in the file it is indistinguishable from a tract nobody
 /// varied at (`doc/devel/ng/spec/vcf_output.md` §9). The count is the only place it appears.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+///
+/// **So the refused tracts are kept by position, not only counted** — the report lists the first
+/// few, and a reader can look at the reads there. A count alone named nothing to look at: GIAB
+/// HG002's `chr1:206,838,725` was refused and the run said only "1"
+/// (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §2). Not `Copy` for that reason.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TractOutcomes {
     /// Scored, and carrying no repeat-tract filter.
     pub called: u64,
-    /// Scored, and refused as not varying in whole motif units — `notPeriodic`.
-    pub not_periodic: u64,
+    /// Scored, and refused as not varying in whole motif units — `notPeriodic` — each by its
+    /// tract. **In the order the run met them**, which on the round driver is the order its
+    /// workers finished: the report sorts before it prints.
+    pub not_periodic: Vec<GenomeRegion>,
     /// Scored, and carrying more candidate sequences than the cap admits — `tooManyAlleles`.
     /// The locus is still called over the ones the cap kept.
     pub too_many_alleles: u64,
@@ -1082,7 +1089,7 @@ impl TractOutcomes {
     #[must_use]
     pub fn built(&self) -> u64 {
         self.called
-            + self.not_periodic
+            + self.not_periodic.len() as u64
             + self.too_many_alleles
             + self.without_whole_repeats
             + self.bundles_set_aside
@@ -1091,7 +1098,7 @@ impl TractOutcomes {
     /// Those that were scored and then refused by a filter of their own.
     #[must_use]
     pub fn refused_by_a_filter(&self) -> u64 {
-        self.not_periodic + self.too_many_alleles
+        self.not_periodic.len() as u64 + self.too_many_alleles
     }
 }
 
@@ -1209,9 +1216,9 @@ where
 /// **A truncated tract is still called** over the sequences the cap kept, and it is counted as
 /// `tooManyAlleles` rather than as called so that the two are not summed into one number a
 /// reader would take for clean calls.
-fn count_this_tract(verdict: SelectionVerdict, tracts: &mut TractOutcomes) {
+fn count_this_tract(verdict: SelectionVerdict, tract: GenomeRegion, tracts: &mut TractOutcomes) {
     match verdict {
-        SelectionVerdict::NotPeriodic => tracts.not_periodic += 1,
+        SelectionVerdict::NotPeriodic => tracts.not_periodic.push(tract),
         SelectionVerdict::Truncated { .. } => tracts.too_many_alleles += 1,
         _ => tracts.called += 1,
     }
@@ -1285,7 +1292,7 @@ where
     };
     let SsrLocusSelection { selection, .. } = narrowed;
     let (alleles, verdict, unmatched, remap) = selection.into_parts();
-    count_this_tract(verdict, tracts);
+    count_this_tract(verdict, observation.region, tracts);
 
     let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
     // **Two per-locus allocations, and both are the borrow checker's price rather than a
@@ -6602,13 +6609,22 @@ mod records_handed_over_as_the_run_finishes_them {
     /// and is left out. So the mapping is asserted here rather than against an output.
     #[test]
     fn each_selection_verdict_lands_in_its_own_tract_outcome() {
+        let a_tract = || GenomeRegion {
+            contig: ContigId(0),
+            start: Position(11),
+            end: Position(30),
+        };
         let outcome_of = |verdict| {
             let mut tracts = TractOutcomes::default();
-            count_this_tract(verdict, &mut tracts);
+            count_this_tract(verdict, a_tract(), &mut tracts);
             tracts
         };
         assert_eq!(outcome_of(SelectionVerdict::Selected).called, 1);
-        assert_eq!(outcome_of(SelectionVerdict::NotPeriodic).not_periodic, 1);
+        assert_eq!(
+            outcome_of(SelectionVerdict::NotPeriodic).not_periodic,
+            vec![a_tract()],
+            "a refused tract is kept by its position, so the report can name it",
+        );
         assert_eq!(
             outcome_of(SelectionVerdict::Truncated { dropped: 4 }).too_many_alleles,
             1,
@@ -6908,7 +6924,7 @@ impl<S> Drop for RoundCallScratch<'_, S> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         total.called += self.tracts.called;
-        total.not_periodic += self.tracts.not_periodic;
+        total.not_periodic.append(&mut self.tracts.not_periodic);
         total.too_many_alleles += self.tracts.too_many_alleles;
         total.without_whole_repeats += self.tracts.without_whole_repeats;
         total.bundles_set_aside += self.tracts.bundles_set_aside;
