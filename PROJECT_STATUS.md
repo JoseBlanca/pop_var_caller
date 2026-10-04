@@ -31,6 +31,9 @@ Skills and agents are instructed to leave it untouched.
 > default parameters. The run report now names repeat tracts refused as not periodic (branch
 > `refused-tracts-listed`). The CCTTC tract at chr1:206838736 is accepted as a known miss: four
 > repairs were measured and each lost more right genotypes than it gained.
+> `--max-cohort-locus-span` now defaults to 100 bases (was 50): on 63 tomato accessions at about 3× it
+> builds 267 more loci at no time or memory cost, and the calls they add agree with GATK at least as
+> well as ordinary calls do; at 300× it recovers a 31-base GIAB deletion.
 >
 > - **Earlier (2026-09-26):** **`estimate-parameters` memory, issues 1–3** ([plan](doc/devel/implementation_plans/estimation_memory.md)): the repeat-tract evidence is dropped once the fit returns; `--str-param-estimates-at-once N` (default 1) replaces the machine-memory guess; contamination no longer holds samples × positions. No fitted number moved (the cross-platform checksums are unchanged). Next: the simulated cohorts, after the owner's checkpoint.
 >
