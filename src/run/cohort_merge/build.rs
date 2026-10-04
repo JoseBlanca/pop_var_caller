@@ -342,7 +342,7 @@ impl<'a> MemberPlacement<'a> {
     /// [`WitnessedLocusPositions::one_run_from_offset_and_length`] refuses too.
     ///
     /// **How wide a locus can get is not bounded at 50 bases, and an earlier draft of this
-    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 50
+    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 100
     /// reference bases but is the operator's to set and holds any `NonZeroU32`, and
     /// [`super::close::LocusCloser`] exempts repeat-tract loci from it outright — so the
     /// reachable case is a satellite tract above 65,535 bases, or a raised bound. Within a
@@ -1461,7 +1461,7 @@ pub struct PartialObservation {
 ///   questions.** It is counted against each record's own position (see `placed_left`), so
 ///   two records of one sample ask "did the read start left of here?" about different
 ///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
-///   locus's width — 50 bases at the default bound.
+///   locus's width — 100 bases at the default bound.
 ///
 /// Rounded once per row rather than per read, so the counts stay as close to whole reads as the
 /// division allows. **Per row means per `(allele, read group)` since B1, and that is a change
@@ -2171,7 +2171,7 @@ impl AlleleBacking<'_> {
     /// one. **That count is not small.** The generic mint writes a record at every covered
     /// position, so a sample can hold as many records inside a locus as the locus is wide —
     /// six inside a six-base locus, in `serial.rs`'s own minted fixture — bounded by
-    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 50 by default. What keeps it free is
+    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 100 by default. What keeps it free is
     /// the company it keeps rather than the comparison being cheap: the same locus already
     /// sorts every sighting and composes and divides every read across every record.
     ///
@@ -5296,7 +5296,7 @@ mod tests {
     /// stretch 65,536 bases to the left of where the read was.
     ///
     /// **Reachable only past the generic path.** A generic locus is bounded by
-    /// [`MaxCohortLocusSpan`], 50 reference bases by default, but repeat-tract loci are exempt
+    /// [`MaxCohortLocusSpan`], 100 reference bases by default, but repeat-tract loci are exempt
     /// from that bound and the bound itself is the operator's to raise — so the case is a
     /// satellite above 65,535 bases. The fixture is built by hand for the same reason every
     /// other fixture here is: the walk would not close this locus.

@@ -370,8 +370,8 @@ where
 mod tests {
     use super::super::build::build_region_windowed;
     use super::super::fixtures::{
-        SourceFailed, in_flight, member, refuse_any_difference, region, region_on, render,
-        source_of, three_samples_over_six_hundred_bases, width,
+        FIXTURE_BOUND, SourceFailed, in_flight, member, refuse_any_difference, region, region_on,
+        render, source_of, three_samples_over_six_hundred_bases, width,
     };
     use super::super::organise::{Organiser, RegionIndex};
     use super::super::parallel::merge_cohort_in_parallel;
@@ -392,12 +392,8 @@ mod tests {
         ];
         let analysed = [region(1, 50), region(51, 100)];
 
-        let merged = merge_cohort_serially(
-            &analysed,
-            &[&sample],
-            MaxCohortLocusSpan::DEFAULT,
-            MinAltReads::DEFAULT,
-        );
+        let merged =
+            merge_cohort_serially(&analysed, &[&sample], FIXTURE_BOUND, MinAltReads::DEFAULT);
 
         assert_eq!(
             merged
@@ -422,7 +418,7 @@ mod tests {
         let merged = merge_cohort_serially(
             &analysed,
             &[&first, &second],
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -660,7 +656,7 @@ mod tests {
         let merged = merge_cohort_serially(
             &[analysed],
             &[&first, &second],
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -770,16 +766,11 @@ mod tests {
             let analysed: Vec<_> = (0..regions)
                 .map(|piece| region(piece * width + 1, (piece + 1) * width))
                 .collect();
-            merge_cohort_serially(
-                &analysed,
-                &[&sample],
-                MaxCohortLocusSpan::DEFAULT,
-                MinAltReads::DEFAULT,
-            )
-            .cohort_observations
-            .iter()
-            .map(|observed| observed.region)
-            .collect::<Vec<_>>()
+            merge_cohort_serially(&analysed, &[&sample], FIXTURE_BOUND, MinAltReads::DEFAULT)
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>()
         };
 
         let whole = built_in(1);
@@ -804,7 +795,7 @@ mod tests {
         let _ = merge_cohort_serially(
             &[region(1, 60), region(40, 100)],
             &[&sample],
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
     }
@@ -820,7 +811,7 @@ mod tests {
         let _ = merge_cohort_serially(
             &[region(61, 100), region(1, 60)],
             &[&sample],
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
     }
@@ -832,16 +823,12 @@ mod tests {
         let sample = [member(region(12, 12), b"G", b"T")];
         let analysed = [region(1, 50)];
 
-        let built = merge_cohort_serially(
-            &analysed,
-            &[&sample],
-            MaxCohortLocusSpan::DEFAULT,
-            MinAltReads::DEFAULT,
-        );
+        let built =
+            merge_cohort_serially(&analysed, &[&sample], FIXTURE_BOUND, MinAltReads::DEFAULT);
         let too_quiet = merge_cohort_serially(
             &analysed,
             &[&sample],
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads {
                 floor: MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
                 share: MinAltReadShare::DEFAULT,
@@ -979,12 +966,7 @@ mod tests {
     fn analysing_nothing_yields_nothing() {
         let sample = [member(region(12, 12), b"G", b"T")];
 
-        let merged = merge_cohort_serially(
-            &[],
-            &[&sample],
-            MaxCohortLocusSpan::DEFAULT,
-            MinAltReads::DEFAULT,
-        );
+        let merged = merge_cohort_serially(&[], &[&sample], FIXTURE_BOUND, MinAltReads::DEFAULT);
 
         assert!(merged.cohort_observations.is_empty() && merged.failed_locus_spans.is_empty());
     }
@@ -1349,7 +1331,7 @@ mod tests {
                 &analysed,
                 &per_sample,
                 width(bases),
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
             );
             assert_eq!(
@@ -1395,7 +1377,7 @@ mod tests {
             &[region(1, 600)],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("the fixture sources hold");
@@ -1424,7 +1406,7 @@ mod tests {
             &[region(1, 600)],
             &[&deleting, &inside],
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
     }
@@ -1444,7 +1426,7 @@ mod tests {
             &analysed,
             &[&sample],
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -1514,7 +1496,7 @@ mod tests {
             &analysed,
             &[&first, &second],
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -1565,7 +1547,7 @@ mod tests {
             &[analysed],
             &[&first, &second],
             width(4),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -1605,7 +1587,7 @@ mod tests {
             &[region(1, 600)],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -1629,7 +1611,7 @@ mod tests {
             &[region(1, 60), region(40, 100)],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
     }
@@ -1663,7 +1645,7 @@ mod tests {
             &[region(1, 600)],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
@@ -1703,7 +1685,7 @@ mod tests {
                 &[region(1, 600)],
                 &mut cache,
                 width(bases),
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
             )
             .expect("the fixture source holds");
@@ -1746,14 +1728,14 @@ mod tests {
             &[region(1, 600)],
             &mut cache,
             width(100),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
         let in_memory = merge_cohort_serially(
             &[region(1, 600)],
             &per_sample,
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -1821,7 +1803,7 @@ mod tests {
             &[region(1, 1_800)],
             &mut cache,
             width(60),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -1853,7 +1835,7 @@ mod tests {
             &[inverted],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
     }
@@ -1872,7 +1854,7 @@ mod tests {
             &[region(1, 50), region(50, 100)],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
     }
@@ -1888,7 +1870,7 @@ mod tests {
             &[],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("nothing can fail");
@@ -1910,7 +1892,7 @@ mod tests {
             &[region(1, 100)],
             &mut cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("nothing can fail");
@@ -1929,7 +1911,7 @@ mod tests {
             &[region(1, 50)],
             &mut built_cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("the fixture source holds");
@@ -1938,7 +1920,7 @@ mod tests {
             &[region(1, 50)],
             &mut quiet_cache,
             width(20),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads {
                 floor: MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
                 share: MinAltReadShare::DEFAULT,
@@ -1978,7 +1960,7 @@ mod tests {
                 analysed,
                 &mut cache,
                 building_region_width,
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
                 &mut |built| cohort_observations.push(built),
                 failed_locus_spans,
@@ -2002,19 +1984,15 @@ mod tests {
     fn the_parallel_cover_gives_the_serial_drivers_answer() {
         let layouts = {
             let mut layouts = three_samples_over_six_hundred_bases();
-            // A span the 50-base default bound refuses, so the refused list is compared too.
+            // A span the fixtures' 50-base bound refuses, so the refused list is compared too.
             layouts.push(vec![member(region(420, 510), &[b'A'; 91], b"A")]);
             layouts
         };
         let analysed = [region(1, 600)];
         let per_sample: Vec<&[SampleLocusObservations]> =
             layouts.iter().map(Vec::as_slice).collect();
-        let oracle = merge_cohort_serially(
-            &analysed,
-            &per_sample,
-            MaxCohortLocusSpan::DEFAULT,
-            MinAltReads::DEFAULT,
-        );
+        let oracle =
+            merge_cohort_serially(&analysed, &per_sample, FIXTURE_BOUND, MinAltReads::DEFAULT);
         assert_eq!(
             oracle.failed_locus_spans,
             vec![region(420, 510)],
@@ -2057,7 +2035,7 @@ mod tests {
                 &[region(1, 600)],
                 &mut cache,
                 width(20),
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
                 &mut |_built| {},
                 &mut refused,
