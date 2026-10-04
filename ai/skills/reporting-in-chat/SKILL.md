@@ -202,6 +202,39 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-10-04 — a recommendation about a knob that never said what the knob is, and a table of unexplained percentages
+
+Recommending a new default for `--max-cohort-locus-span` after a tomato measurement:
+
+> ❌ "I recommend raising the locus-width limit to 100 …
+> | | our calls GATK also makes (exact genotype / allele only) | GATK's calls we make (…) |
+> | the 267 newly admitted loci | 55% / 79% | 36% / 55%, against 0% at limit 50 |"
+>
+> Owner: *"You're not giving context and explaining very badly. 'I recommend raising the
+> locus-width limit to 100' Is that for the snp/indel path? … What's the meaning of the
+> percentages? So, what would be gain what would be loose?"*
+
+> ✅ "Yes, the limit applies only to the SNP/indel path … Raising it would add, on the tomato
+> test, about 1,500 variant genotypes that GATK also calls and about 400 that GATK doesn't, with
+> no change in run time or memory." — then what a locus is and why one gets refused, what one
+> unit of the comparison is, and the gain and the loss as counts.
+
+Four failures:
+
+1. **The knob was named by a label I coined ("locus-width limit") and never explained** —
+   not which path it governs, not what a locus is, not what refusing one does. The reader had to
+   ask which caller it belonged to before the recommendation meant anything.
+2. **Percentages without their unit or their two counts.** "55% / 79%" of *what*? The unit (one
+   sample's variant call at one site), the numerator and the denominator were all in my working
+   and none in the reply. A share also hides the size of the gain: 1,506 calls is the fact, 79%
+   is a ratio of it.
+3. **A decision asked without the trade written as a trade.** The owner's question — *what would
+   we gain, what would we lose* — is exactly the D-paragraph's required content. Gain and loss in
+   the same unit, side by side, is the decision; a two-column precision/recall table is working.
+4. **The column headings were the definitions**, compressed into a table cell. A heading cannot
+   carry "allele-only means a 0/1 and a 1/1 for the same allele count as agreeing, which at 3
+   reads a position is the fairer test"; that sentence has to exist in the prose.
+
 ### 2026-09-10 — a verb phrase that parsed two ways, in the one sentence carrying a decision
 
 At a milestone checkpoint, the recommendation for the one item that needed a decision read:
