@@ -203,6 +203,17 @@ pub(super) mod fixtures {
         }
     }
 
+    /// **The width bound these fixtures were drawn against: 50 bases**, named rather than taken
+    /// from [`super::MaxCohortLocusSpan::DEFAULT`].
+    ///
+    /// The drivers' comparisons rest on a fixture locus the bound refuses — a 91-base span, so
+    /// the refused list is compared as well as the built loci. When the default rose to 100
+    /// (2026-10-04) that span stopped being refused and three tests found their fixture no
+    /// longer carried what they compare. The bound a fixture exercises is a fact about the
+    /// fixture, not about the shipped default.
+    pub(super) const FIXTURE_BOUND: super::MaxCohortLocusSpan =
+        super::MaxCohortLocusSpan(super::non_zero_default(50));
+
     /// A building-region width in reference bases.
     pub(super) fn width(bases: u32) -> super::CohortLocusBuilderRegionsLen {
         super::CohortLocusBuilderRegionsLen(
@@ -484,12 +495,24 @@ impl Default for MaxCohortLocusSpan {
     }
 }
 
-/// 50 bases — the owner's number, unmeasured and soft (spec §14 question 3).
+/// 100 bases since 2026-10-04; it was 50, the owner's unmeasured number (spec §14 question 3).
 ///
-/// Cheap to revisit: re-calling under a different bound needs no re-walk (spec §3.1),
-/// so the measurement that would settle it — how much real signal sits just above 50
-/// — can be made against records that already exist.
-pub const DEFAULT_MAX_COHORT_LOCUS_SPAN: u32 = 50;
+/// **Raised on two measurements, one at each end of the depth range** (owner, 2026-10-04):
+///
+/// - **63 tomato accessions at about 3×**, tomato1's 2 Mb. At 50, 278 loci were refused; at 100,
+///   267 of them were built and 162 records added, with the same run time (37 s) and peak memory
+///   (about 290 MB). Against GATK run on the same accessions over those loci, 1,506 of the
+///   variant genotypes they add are ones GATK also calls (same allele, either zygosity) and 394
+///   are not: 21 in 100 of the new calls disputed, against 31 in 100 at ordinary loci 20 to 50
+///   bases wide.
+/// - **GIAB HG002, HG003 and HG004 at 300×**: the one locus refused at 50 was a true 31-base
+///   heterozygous deletion, one copy of a two-copy tandem duplication, which can sit anywhere
+///   along 62 bases. At 100 it is called, and nothing else changes.
+///
+/// A deletion of one copy of a two-copy duplication needs a locus twice its length, so 50 ruled
+/// out every such deletion longer than 25 bases. Re-calling under a different bound needs no
+/// re-walk (spec §3.1). Details: `doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md`.
+pub const DEFAULT_MAX_COHORT_LOCUS_SPAN: u32 = 100;
 
 /// The fewest non-reference **reads** one sample may show at a cohort locus and still
 /// have it built — the floor half of [`MinAltReads`] (spec §4.3).
@@ -882,12 +905,12 @@ mod tests {
     /// cannot drift into printing one and running the other.
     #[test]
     fn the_defaults_are_the_documented_values() {
-        assert_eq!(DEFAULT_MAX_COHORT_LOCUS_SPAN, 50);
+        assert_eq!(DEFAULT_MAX_COHORT_LOCUS_SPAN, 100);
         assert_eq!(DEFAULT_MIN_ALT_OBS, 2);
         assert_eq!(DEFAULT_MIN_ALT_READ_SHARE, 0.02);
         assert_eq!(DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN, 500);
 
-        assert_eq!(MaxCohortLocusSpan::default().get(), 50);
+        assert_eq!(MaxCohortLocusSpan::default().get(), 100);
         assert_eq!(MinAltObs::default().get(), 2);
         assert_eq!(MinAltReadShare::default().get(), 0.02);
         assert_eq!(CohortLocusBuilderRegionsLen::default().get(), 500);

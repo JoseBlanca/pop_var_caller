@@ -288,8 +288,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::fixtures::{
-        SourceFailed, in_flight, member, refuse_any_difference, region, region_on, source_of,
-        three_samples_over_six_hundred_bases, width,
+        FIXTURE_BOUND, SourceFailed, in_flight, member, refuse_any_difference, region, region_on,
+        source_of, three_samples_over_six_hundred_bases, width,
     };
     use super::super::observation_cache::building_regions_of;
     use super::super::serial::{merge_cohort_serially, merge_cohort_through_cache};
@@ -320,7 +320,7 @@ mod tests {
             &mut cache_over(layouts),
             building_region_width,
             regions_in_flight,
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         )
         .expect("the fixture sources hold")
@@ -333,12 +333,7 @@ mod tests {
     ) -> RegionOutcome {
         let per_sample: Vec<&[SampleLocusObservations]> =
             layouts.iter().map(Vec::as_slice).collect();
-        merge_cohort_serially(
-            analysed,
-            &per_sample,
-            MaxCohortLocusSpan::DEFAULT,
-            MinAltReads::DEFAULT,
-        )
+        merge_cohort_serially(analysed, &per_sample, FIXTURE_BOUND, MinAltReads::DEFAULT)
     }
 
     /// **One region in flight is the serial driver**, and that is the base case the rest rests
@@ -393,7 +388,7 @@ mod tests {
                 &mut cache,
                 width(20),
                 in_flight(regions),
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
             )
             .expect("the fixture sources hold");
@@ -498,7 +493,7 @@ mod tests {
             &mut cache,
             width(20),
             in_flight(4),
-            MaxCohortLocusSpan::DEFAULT,
+            FIXTURE_BOUND,
             MinAltReads::DEFAULT,
         );
 
@@ -527,7 +522,7 @@ mod tests {
                 &mut cache,
                 width(20),
                 in_flight(16),
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
             )
         }));
@@ -606,7 +601,7 @@ mod tests {
                 &analysed,
                 &mut cache_over(&layouts),
                 width(bases),
-                MaxCohortLocusSpan::DEFAULT,
+                FIXTURE_BOUND,
                 MinAltReads::DEFAULT,
             )
             .expect("the fixture sources hold");
@@ -643,7 +638,7 @@ mod tests {
     ///
     /// **The fixture has to reach both shapes or the sweep proves nothing.** It carries a
     /// deletion at 305–330, which chains two samples into one locus, and a 91-base record the
-    /// 50-base default bound refuses, which puts a failed span across many regions at the
+    /// fixtures' 50-base bound refuses, which puts a failed span across many regions at the
     /// narrow widths. Both are asserted present in the oracle before the sweep, so the
     /// twenty-five comparisons cannot pass by comparing nothing.
     ///
