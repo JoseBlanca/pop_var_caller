@@ -13,6 +13,13 @@
 # records (bc6780ff → dab62245); each sample's coverage histogram holds about 5,200 fewer of its 3.8 million windows
 # (6c5926ce → 9d3fa077); fitted error multipliers move at most 0.3 in 100 and sample SRS1839219's F 0.962 → 0.969
 # (7ef6b6e4 → 68f564c5); from_fit.comparable 5c1df9fb → 6b8ac929.
+# Re-recorded 2026-10-06 (Linux container, arm64) with spellings cut short re-read as partial reads (read_likelihoods.md §5.3):
+# with default parameters 62 of 7,727 records change, 4 genotypes and no filter, mostly homozygous insertions whose QUAL and
+# GQ rise (7849294f → 574e1d1c); fitted parameters unchanged; called with them, 1,080 of 6,641 records change, 1 genotype
+# (6b8ac929 → e00ec710).
+# Re-recorded 2026-10-06 (Linux container, arm64) with spellings carrying a shorter insertion also re-read (read_likelihoods.md
+# §5.3): 3 of 7,727 default-parameter records change, 1 genotype, no filter (574e1d1c → 4e2e2004); from_fit.comparable 3 of
+# 6,641, 1 genotype (e00ec710 → 21734eb2).
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -24,10 +31,10 @@
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
 # records: 7727
-7849294fc8ab404695368d11513358c1  from_alignments.comparable
-7849294fc8ab404695368d11513358c1  from_psps.comparable
+4e2e2004f6b51a78ba3e376f085a2119  from_alignments.comparable
+4e2e2004f6b51a78ba3e376f085a2119  from_psps.comparable
 5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
 dab62245bc3d285e0c08bbf220786e42  from_alignments.windows.sorted
 9d3fa07726b5c2b62f74f7ab2e2bac2d  from_alignments.windows.histograms
 68f564c58752cf2bb08fea14bd14fdb5  fitted.parameters.toml
-6b8ac92905a5f8272c04b469a4eb8e2c  from_fit.comparable
+21734eb2145519b9dce802b379fab08f  from_fit.comparable

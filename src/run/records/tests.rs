@@ -1193,3 +1193,31 @@ fn a_spelling_one_base_shorter_than_the_longer_allele_is_left_alone() {
     );
     assert!(sample.partials.is_empty(), "{:?}", sample.partials);
 }
+
+/// **A spelling carrying a shorter insertion than the allele it was cut from is re-read.** `TCTCG`
+/// is the last five bases of `AGTCTCG`: a read that began inside the inserted bases, which the
+/// mapper fitted with two inserted bases where its carrier has four (GIAB HG002
+/// chr1:243535155, a 19-base insertion spelled as 7 by 37 reads).
+#[test]
+fn a_spelling_with_a_shorter_insertion_is_reread_at_the_left_border() {
+    let mut observation =
+        cut_short_locus(&[b"ACG", b"AGTCTCG", b"TCTCG"], &[(0, 2), (1, 10), (2, 4)]);
+    reread(&mut observation);
+    let partials = &observation.per_sample[0].partials;
+    assert_eq!(partials.len(), 1, "{partials:?}");
+    assert_eq!(
+        partials[0].sequence_may_run_on_past,
+        Some(LocusBorder::Left)
+    );
+}
+
+/// **…and one carrying a longer insertion than the other allele is not.** `AGTCGTT` is the shorter
+/// insertion `AGTCG` followed by the reference after the locus, but a read cut short spells fewer
+/// inserted bases than its carrier, never more.
+#[test]
+fn a_spelling_with_a_longer_insertion_is_left_alone() {
+    let mut observation =
+        cut_short_locus(&[b"ACG", b"AGTCG", b"AGTCGTT"], &[(0, 2), (1, 10), (2, 4)]);
+    reread(&mut observation);
+    assert!(observation.per_sample[0].partials.is_empty());
+}

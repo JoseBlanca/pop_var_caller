@@ -1786,8 +1786,8 @@ the mapper aligns it across the reference and the start of the copy comes out as
 covers every position of the locus, so it arrives complete, as an allele of its own that no
 haplotype carries. At GIAB HG003 chr15:96140584, 34 reads showed exactly the first 46 bases of a
 24-base insertion that 107 reads carried whole, and the homozygous insertion was called `1/2`. So
-before candidate selection, an alternative allele **as long as the reference** (substitutions
-alone) whose bases are exactly the start of another allele followed by the reference past the
+before candidate selection, an alternative allele **at least as long as the reference** (substitutions
+alone, or an insertion shorter than the other allele's) whose bases are exactly the start of another allele followed by the reference past the
 locus, or exactly its end preceded by the reference before it, has its complete reads turned into
 partial ones covering the whole locus and marked with that border
 (`PartialObservation::sequence_may_run_on_past`; `reread_spellings_cut_short` in `run/records.rs`).
@@ -1797,7 +1797,14 @@ two bases or more, because a one-base shift inside a homopolymer is invisible, s
 before one spells the start of a one-base insertion (without this guard, a SNP GATK calls in 52 of
 63 tomato accessions, SL4.0ch12:18047655, was re-read); and the reference is never re-read.
 The length rule is not optional: a deletion's allele is a prefix of the reference's whenever it
-removes the locus's last bases, and without it 20 true deletions at 300× were lost.
+removes the locus's last bases, and without it 20 true deletions at 300× were lost. A spelling
+longer than the reference is re-read only against a longer allele: it is a read that began inside
+an inserted copy, which the mapper fitted with fewer inserted bases (GIAB HG002 chr1:243535155,
+37 reads spelling a 19-base insertion as 7 bases, exactly the last 56 bases of the 68-base allele;
+the homozygous insertion was called `1/2`). Admitting these changed only that site on GIAB, fixed
+at 10×, 30× and 300× (missed / false 201 / 309 → 200 / 308, 50 / 165 → 49 / 164, 41 / 43 → 40 /
+42), and 49 of 225,894 tomato records, neutral against GATK there (an allele GATK also calls 2,500
+→ 2,498 sample genotypes, one it does not 3,897 → 3,913).
 
 Measured on the three GIAB samples, each over its own 100 regions (missed / false calls, vcfeval
 against v4.2.1): 5× 746 / 315 unchanged; 10× 202 / 310 → 201 / 309; 30× 54 / 168 → 50 / 165; 300×
