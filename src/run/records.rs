@@ -200,6 +200,22 @@ where
     })
 }
 
+/// **The site quality below which a called locus is not written**, by default — `--min-site-quality`.
+///
+/// The threshold reads the quality the record would carry: the site quality after the artifact
+/// correction (`calling_quality.md` §3.5, which pins that the gate and the `QUAL` column read one
+/// number). A site whose two artifact penalties outweigh its evidence is floored at zero, and
+/// those are most of the false calls this caller writes.
+///
+/// **One, not GATK's thirty, because the site quality already grows with depth.** Measured on the
+/// three GIAB samples, each over its own 100 regions (false / true calls removed): below 1 removes
+/// 141 / 15 at 5×, 215 / 17 at 10×, 142 / 2 at 30× and 32 / 3 at 300×; below 30 removes 212 / 117,
+/// 275 / 131, 148 / 18 and 33 / 3, so the extra cut costs more than a hundred true calls at each
+/// low depth for a few dozen false ones. On 50 tomato accessions at about 3×, against GATK's joint
+/// calls over all 80 regions, below 1 removes 26,696 sample genotypes GATK does not call and 382
+/// it does. **Zero turns the threshold off** — no quality is below zero.
+pub const DEFAULT_MIN_SITE_QUALITY: f32 = 1.0;
+
 /// **Re-read the reads the mapper laid straight across the reference where a longer allele began**
 /// — one ordinary locus, before candidate selection sees it (item 2 of the GIAB report on
 /// 5d2abae4; `doc/devel/ng/spec/read_likelihoods.md` §5.3).

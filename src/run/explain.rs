@@ -34,7 +34,7 @@ use crate::fasta::ContigList;
 use crate::locus_generation::{LocusKind, LocusLen};
 use crate::regions::{BedError, ContigBounds, RegionSet};
 use crate::run::cohort_merge::build::{CohortObservation, LocusBorder};
-use crate::types::{ContigId, GenomeRegion, Ploidy};
+use crate::types::{ContigId, GenomeRegion, Phred, Ploidy};
 use crate::vcf::VcfRecord;
 
 /// The layout of the TSV [`write_explanations`] writes. **Changes whenever a column is added,
@@ -500,6 +500,19 @@ pub(crate) fn outcome_rows(
             "no sample was called carrying an alternative allele, or those that were had \
              uninformative reads",
         ),
+        LocusEnd::BelowMinimumSiteQuality(quality) => {
+            rows.push(
+                ExplainRow::of(region, ExplainStep::Outcome, "below_min_site_quality").with(
+                    "why",
+                    format!(
+                        "the site quality after the artifact correction, {:.1}, is below \
+                         --min-site-quality",
+                        quality.get()
+                    ),
+                ),
+            );
+            return;
+        }
         LocusEnd::NobodyToCall => (
             "nobody_to_call",
             "every sample was set aside because the allele cap cut an allele its reads earned",
@@ -522,6 +535,7 @@ pub(crate) fn outcome_rows(
 pub(crate) enum LocusEnd<'a> {
     Written(&'a VcfRecord),
     NotWritten,
+    BelowMinimumSiteQuality(Phred),
     NobodyToCall,
     BundleSetAside,
     TractWithoutWholeRepeats,

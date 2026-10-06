@@ -844,3 +844,20 @@ pub fn print_report_with_the_filter_s_lines(
         println!("{line}");
     }
 }
+
+/// `--min-site-quality`'s parser: a finite quality, zero or more.
+///
+/// # Errors
+///
+/// A value that is not a number, is negative, or is not finite — said in the words the command
+/// line prints.
+pub fn parse_min_site_quality(value: &str) -> Result<f32, String> {
+    let quality: f32 = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number"))?;
+    crate::types::Phred::try_new(quality)
+        .map(|_| quality)
+        .map_err(|_| {
+            format!("`{value}` is not a site quality: it must be zero or more, and finite")
+        })
+}
