@@ -5861,6 +5861,7 @@ mod tests {
             bases: Box::from(b"A".as_slice()),
             num_reads: 50,
             q_sum: -100.0,
+            sequence_may_run_on_past: None,
         }];
         let per_sample = [GenericLocusSample {
             evidence: GenericSampleEvidence::new(&rows, 0.0, &partials),
@@ -9738,6 +9739,7 @@ mod tests {
             bases: Box::from(b"A".as_slice()),
             num_reads: 50,
             q_sum: -100.0,
+            sequence_may_run_on_past: None,
         }];
         let per_sample = [GenericLocusSample {
             evidence: GenericSampleEvidence::new(&rows, 0.0, &partials),

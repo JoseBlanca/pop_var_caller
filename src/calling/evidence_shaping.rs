@@ -771,6 +771,7 @@ mod tests {
             bases: Box::from(&b"ATA"[..]),
             num_reads: 3,
             q_sum: -6.0,
+            sequence_may_run_on_past: None,
         });
         let observation = merged_tract(2, vec![sample]);
         let detail = ssr_detail();
@@ -1088,6 +1089,7 @@ mod tests {
             bases: Box::from(b"A".as_slice()),
             num_reads: 3,
             q_sum: -9.0,
+            sequence_may_run_on_past: None,
         });
         let observation = merged_locus(2, vec![support]);
         let selection = selection_of(&[Some(0), Some(1)], vec![leftover(0.0, 0)]);

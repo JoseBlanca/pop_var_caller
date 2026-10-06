@@ -77,6 +77,7 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 pub use likelihood::generic::{
     ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, ReferenceBesideLocus,
     allele_is_compatible_with_partial, fill_error_spreads, genotype_log_likelihood_row,
+    partial_row_fits_allele,
 };
 pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,

@@ -1427,6 +1427,30 @@ pub struct PartialObservation {
     /// conventions rather than the type's**: the fields are public and there is no constructor,
     /// so [`partials_of_sample`] is where both hold, and where their tests point.
     pub q_sum: f64,
+    /// **Which border, if any, the reads' sequence may run on past into a longer allele**, though
+    /// their witness covers the whole locus. `None` for every partial the merge mints: a read that
+    /// ran out inside the locus says so through its witness, and that is the only shape the walk
+    /// produces.
+    ///
+    /// `Some` only for reads the calling run re-read after the merge
+    /// ([`reread_spellings_cut_short`](crate::run::records::reread_spellings_cut_short)): reads
+    /// the mapper laid straight across the reference near their end, so that the start of a longer
+    /// allele came out as substitutions. Over the locus they show exactly the start of that allele
+    /// followed by the reference past the locus (`Right`), or its end preceded by the reference
+    /// before it (`Left`), so they are compared as a read flush to that border is — compatible
+    /// with every allele whose carrier would show the same bases there
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    pub sequence_may_run_on_past: Option<LocusBorder>,
+}
+
+/// One of a locus's two borders — see
+/// [`PartialObservation::sequence_may_run_on_past`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LocusBorder {
+    /// The locus's first position.
+    Left,
+    /// The locus's last position.
+    Right,
 }
 
 /// What one sample's reads lend one allele.
@@ -1875,6 +1899,7 @@ fn partials_of_sample(
                 bases: sequence.bases.clone(),
                 num_reads: sequence.num_obs,
                 q_sum: sequence.q_sum.nats(),
+                sequence_may_run_on_past: None,
             });
         }
     }
@@ -4958,6 +4983,7 @@ mod tests {
                 bases: Box::from(&b"A"[..]),
                 num_reads: 3,
                 q_sum: -18.5,
+                sequence_may_run_on_past: None,
             }],
             "the run is 2..3 of the locus, not 0..1 of the record",
         );
@@ -5020,6 +5046,7 @@ mod tests {
                 bases: Box::from(&b"C"[..]),
                 num_reads: 1,
                 q_sum: 0.0,
+                sequence_may_run_on_past: None,
             }],
             "the record at 14 is four bases into the locus at 10",
         );

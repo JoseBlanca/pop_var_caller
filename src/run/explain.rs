@@ -28,12 +28,12 @@ use crate::calling::allele_candidates::{
 };
 use crate::calling::{
     CallingScratch, CandidateAlleles, GenotypeIdx, GenotypeTable, LocusInference,
-    ReferenceBesideLocus, SampleGenotypeCall, allele_is_compatible_with_partial,
+    ReferenceBesideLocus, SampleGenotypeCall, partial_row_fits_allele,
 };
 use crate::fasta::ContigList;
 use crate::locus_generation::{LocusKind, LocusLen};
 use crate::regions::{BedError, ContigBounds, RegionSet};
-use crate::run::cohort_merge::build::CohortObservation;
+use crate::run::cohort_merge::build::{CohortObservation, LocusBorder};
 use crate::types::{ContigId, GenomeRegion, Ploidy};
 use crate::vcf::VcfRecord;
 
@@ -321,13 +321,7 @@ pub(crate) fn selection_rows(
                     .iter()
                     .enumerate()
                     .filter(|(_, allele)| {
-                        allele_is_compatible_with_partial(
-                            &partial.witnessed_in_locus,
-                            &partial.bases,
-                            allele,
-                            reference_beside,
-                            locus_len,
-                        )
+                        partial_row_fits_allele(partial, allele, reference_beside, locus_len)
                     })
                     .map(|(candidate, _)| candidate.to_string())
                     .collect();
@@ -336,20 +330,26 @@ pub(crate) fn selection_rows(
                     .runs()
                     .map(|(start, end)| format!("{start}-{end}"))
                     .collect();
-                rows.push(
+                let row =
                     ExplainRow::of(region, ExplainStep::Partial, partial.num_reads.to_string())
                         .for_sample(sample.sample)
                         .about(spelled(&partial.bases))
-                        .with("witnessed", witnessed.join(","))
-                        .with(
-                            "fits_candidates",
-                            if fits.is_empty() {
-                                "none".to_owned()
-                            } else {
-                                fits.join(",")
-                            },
-                        ),
-                );
+                        .with("witnessed", witnessed.join(","));
+                // Only on the reads re-read after the merge: they covered the whole locus, and
+                // this is what says they were weighed as reads flush to one border.
+                let row = match partial.sequence_may_run_on_past {
+                    Some(LocusBorder::Right) => row.with("may_run_on_past", "right"),
+                    Some(LocusBorder::Left) => row.with("may_run_on_past", "left"),
+                    None => row,
+                };
+                rows.push(row.with(
+                    "fits_candidates",
+                    if fits.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        fits.join(",")
+                    },
+                ));
             }
         }
     }
