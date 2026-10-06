@@ -317,6 +317,8 @@ every sample — checkpoint D's run found 7 of 12 compared numbers beyond ±2 of
    cohort that is 52 of 188 rates, which become 0.0010 to 0.014; the other 136 do not move. (The alternatives put
    to the owner: the same half count on every rate, which moved the other 136 by a median of 25%; and the stated
    default of 1 in 1,000, which drops what the count says.) Own commit, calls move, measured on the oracle.
+   **Then (owner):** files written before the rule, which may hold zeros, are left as they are — no conversion
+   on reading, no refusal; the rule is written into spec `parameter_prepass_ssr.md` §4.2.
 2. **The cross-platform check pins the new errors**: a fixture whose file carries standard errors, recorded on
    macOS and in the Linux container. After item 1, since item 1 moves that fixture's file.
 
