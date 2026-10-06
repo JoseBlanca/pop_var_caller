@@ -534,7 +534,12 @@ reason to keep it low, and a design that raises it is not stepping outside what 
 ### 4.2 How the four numbers are fitted
 
 **The substitution rate first, because it does not need the others.** Mismatched bases over bases
-compared, per stratum. One division (§4.1).
+compared, per stratum. One division (§4.1) — **except that the rate is never exactly zero or one**
+(owner, 2026-10-06, checkpoint E of [`fit_precision.md`](../../implementation_plans/fit_precision.md)).
+Calling scores a tract's reads under this rate, and under a rate of zero a read with one disagreeing base
+is explained by no tract length at all. So a count that found no mismatch over `n` bases takes half of
+one, `0.5 / (n + 1)`, and a count where every base mismatched takes half a match, `(n + 0.5) / (n + 1)`;
+a count that saw both keeps its ratio.
 
 **Then the three slippage parameters, together, from several starting points.** The genotype is
 summed over, so the fit alternates in the shape [`parameter_prepass.md`](parameter_prepass.md) §3.1

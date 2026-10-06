@@ -35,7 +35,7 @@ use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::calling::parameters_file::{ParametersFile, beside_the_vcf};
+use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run::{self, CallingRunError};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
@@ -584,13 +584,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
 
     let digest = ReferenceDigest::of(&with_checksums)
         .map_err(|source| CallingRunError::ReferenceNotDigested { source })?;
-    let parameters_file = ParametersFile::of_run(
-        &numbers.parameters,
+    let parameters_file = numbers.parameters_file(
         cohort.read_groups(),
-        &numbers.reads_behind_each_calibration,
-        &numbers.inbreeding_by_sample,
         &digest,
-        numbers.census.clone(),
         &segmentation.inputs().repeat_tract_criteria,
     );
 

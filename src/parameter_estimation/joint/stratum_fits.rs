@@ -48,6 +48,8 @@ use crate::parameter_estimation::Provenance;
 use crate::types::ReadGroupId;
 
 use super::census::Stratum;
+use super::share_curve::ShareSource;
+use super::slippage_curve::LevelSource;
 use super::ssr_fit::{LevelProvenance, SharesProvenance, Slippage, StratumOutcome};
 
 /// What one `(read group, stratum)` cell answers with.
@@ -70,6 +72,58 @@ pub struct FittedSlippage {
     /// the three numbers are smoothed on their own curves and a stratum can take its level from
     /// a curve while keeping its own shares.
     pub shares: Option<SharesProvenance>,
+    /// **The standard error of each of the three numbers, where that number is the stratum's own
+    /// fit** (`doc/devel/ng/spec/fit_precision.md` §5.2). Calling never reads them; the parameters
+    /// file writes them for the person judging the fit.
+    pub own_fit_standard_errors: OwnFitStandardErrors,
+    /// **How many samples the stratum's own fit read**, where a large cohort's stratum was fitted
+    /// on a subset of its samples (`fit_precision.md` §4.4) — `None` where every sample was read
+    /// without a subset being drawn, or nothing was fitted here. The evidence behind the numbers —
+    /// [`LevelProvenance::slipped_reads`] among them — is that subset's.
+    pub samples_fitted_on: Option<u64>,
+}
+
+/// **The standard errors of one slippage group's three numbers in one stratum, each only where the
+/// number emitted is the stratum's own fit.**
+///
+/// A number taken from its period's curve, or blended with it, has none: the blend's own error is
+/// not computed (spec `fit_precision.md` §5.2), and the own fit's would describe a number the
+/// stratum does not emit. Also `None` where the own fit gives the number none — not told apart from
+/// the stratum's other numbers, or not placed by its tracts.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct OwnFitStandardErrors {
+    /// The slippage level's — how often a read reports a tract length other than its allele's.
+    pub level: Option<f64>,
+    /// The share of slipped reads showing a shorter tract.
+    pub shorter_share: Option<f64>,
+    /// The fall-off of two-repeat slips against one-repeat slips.
+    pub fall_off: Option<f64>,
+}
+
+impl OwnFitStandardErrors {
+    /// **The own fit's errors, kept only for the numbers the stratum emits as its own** — the
+    /// level where it came from the cell, each share where it came from the stratum. `errors` is
+    /// the own fit's for this group, `None` where none was computed.
+    fn of_the_numbers_emitted(
+        errors: Option<&super::ssr_fit::SlippageErrors>,
+        level: Option<&LevelProvenance>,
+        shares: Option<&SharesProvenance>,
+    ) -> Self {
+        let Some(errors) = errors else {
+            return Self::default();
+        };
+        Self {
+            level: level
+                .filter(|level| matches!(level.source, LevelSource::Cell))
+                .and_then(|_| errors.level.value()),
+            shorter_share: shares
+                .filter(|shares| matches!(shares.shorter_share.source, ShareSource::Stratum))
+                .and_then(|_| errors.shorter_share.value()),
+            fall_off: shares
+                .filter(|shares| matches!(shares.fall_off.source, ShareSource::Stratum))
+                .and_then(|_| errors.fall_off.value()),
+        }
+    }
 }
 
 /// Why a lookup has no numbers.
@@ -366,6 +420,10 @@ struct StratumRow {
     slippage: Vec<Option<Slippage>>,
     level: Vec<Option<LevelProvenance>>,
     shares: Vec<Option<SharesProvenance>>,
+    own_fit_standard_errors: Vec<OwnFitStandardErrors>,
+    /// Per group, as [`FittedSlippage::samples_fitted_on`] — one number for the stratum when the
+    /// fit produced it, kept a group at a time so a file read back keeps what each row said.
+    samples_fitted_on: Vec<Option<u64>>,
 }
 
 /// **Every stratum's slippage numbers, indexed by the key the caller has.**
@@ -451,10 +509,39 @@ impl StratumFits {
                 continue;
             }
             let stratum = outcome.stratum();
+            // **The own fit's errors and its samples, from a stratum that was fitted**; one
+            // furnished from its period's curves has neither.
+            let (own_fit_errors, samples_fitted_on) = match outcome {
+                StratumOutcome::Fitted(fit) => (
+                    fit.standard_errors.as_ref(),
+                    fit.samples_fitted_on
+                        .map(|samples| u64::try_from(samples).expect("a cohort's size fits a u64")),
+                ),
+                StratumOutcome::Derived(_) | StratumOutcome::Refused { .. } => (None, None),
+            };
+            let groups = outcome.slippage().len();
             let row = StratumRow {
                 slippage: outcome.slippage().to_vec(),
                 level: outcome.level_provenance().to_vec(),
                 shares: outcome.shares_provenance().to_vec(),
+                own_fit_standard_errors: (0..groups)
+                    .map(|group| {
+                        OwnFitStandardErrors::of_the_numbers_emitted(
+                            own_fit_errors
+                                .and_then(|errors| errors.slippage.get(group))
+                                .and_then(Option::as_ref),
+                            outcome
+                                .level_provenance()
+                                .get(group)
+                                .and_then(Option::as_ref),
+                            outcome
+                                .shares_provenance()
+                                .get(group)
+                                .and_then(Option::as_ref),
+                        )
+                    })
+                    .collect(),
+                samples_fitted_on: vec![samples_fitted_on; groups],
             };
             // **Checked once here rather than at every lookup.** Both of the fit's paths build
             // the three vectors from one mask in one pass, so they are the same length by
@@ -569,11 +656,20 @@ impl StratumFits {
                     slippage: Vec::with_capacity(groups.len()),
                     level: Vec::with_capacity(groups.len()),
                     shares: Vec::with_capacity(groups.len()),
+                    own_fit_standard_errors: Vec::with_capacity(groups.len()),
+                    samples_fitted_on: Vec::with_capacity(groups.len()),
                 };
                 for fitted in groups {
                     row.slippage.push(fitted.map(|fitted| fitted.slippage));
                     row.level.push(fitted.map(|fitted| fitted.level));
                     row.shares.push(fitted.and_then(|fitted| fitted.shares));
+                    row.own_fit_standard_errors.push(
+                        fitted.map_or_else(OwnFitStandardErrors::default, |fitted| {
+                            fitted.own_fit_standard_errors
+                        }),
+                    );
+                    row.samples_fitted_on
+                        .push(fitted.and_then(|fitted| fitted.samples_fitted_on));
                 }
                 (stratum, row)
             })
@@ -976,6 +1072,8 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
         slippage,
         level,
         shares: row.shares[index],
+        own_fit_standard_errors: row.own_fit_standard_errors[index],
+        samples_fitted_on: row.samples_fitted_on[index],
     })
 }
 
@@ -1006,7 +1104,8 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, PeriodLengthSpectrum, ShareProvenance, StratumFit, StratumRefusal,
+        ClimbEnding, DerivedStratum, PeriodLengthSpectrum, ShareProvenance, StratumFit,
+        StratumRefusal,
     };
 
     fn stratum(period: u8, reference_repeats: u64) -> Stratum {
@@ -1096,6 +1195,97 @@ mod tests {
             tracts_of_its_own: 4,
             reads_crossing: 40,
         }))
+    }
+
+    /// **A stratum's own-fit errors are kept only for the numbers it emits as its own, and the
+    /// samples it was fitted on travel with every group's numbers.** Group 0's level is the
+    /// cell's and its fall-off the stratum's own, its shorter share a curve's: it keeps the
+    /// level's and the fall-off's errors and not the shorter share's, though the own fit computed
+    /// all three. Group 1's level is a blend and its shares a curve's: no error at all. A stratum
+    /// derived from its period's curves, fitted on nothing, has neither errors nor a sample count.
+    #[test]
+    fn own_fit_errors_are_kept_only_for_the_numbers_the_stratum_emits_as_its_own() {
+        use crate::parameter_estimation::joint::slippage_curve::CurveReach;
+        use crate::parameter_estimation::joint::ssr_fit::{
+            SlippageErrors, StratumError, StratumErrors,
+        };
+        let errors = |level: f64, shorter_share: f64, fall_off: f64| {
+            Some(SlippageErrors {
+                level: StratumError::Estimated(level),
+                shorter_share: StratumError::Estimated(shorter_share),
+                fall_off: StratumError::Estimated(fall_off),
+            })
+        };
+        let mut shares_partly_own = shares_from_a_curve(400.0);
+        shares_partly_own.fall_off = ShareProvenance {
+            source: ShareSource::Stratum,
+            curve: None,
+            reach: None,
+        };
+        let blended = LevelProvenance {
+            source: LevelSource::Blend { curve_weight: 0.4 },
+            curve: Some(a_curve()),
+            reach: Some(CurveReach::Inside),
+            slipped_reads: Some(90.0),
+        };
+        let fitted_on_a_subset = StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: Some(StratumErrors {
+                slippage: vec![errors(0.001, 0.02, 0.03), errors(0.004, 0.05, 0.06)],
+                length_spectrum: vec![StratumError::NoShare; 3],
+                concentration: StratumError::Estimated(0.5),
+            }),
+            stratum: stratum(2, 10),
+            slippage: vec![Some(slippage(0.1)), Some(slippage(0.2))],
+            length_spectrum: leaning_short(),
+            concentration: 2.0,
+            log_likelihood_a_tract: -1.5,
+            tracts_fitted: 40,
+            borrowed: Vec::new(),
+            ending: ClimbEnding::Settled,
+            walks: Vec::new(),
+            samples_fitted_on: Some(300),
+            tracts_of_its_own: 40,
+            reads_crossing: 400,
+            level_provenance: vec![Some(from_the_cell(400.0)), Some(blended)],
+            shares_provenance: vec![Some(shares_partly_own), Some(shares_from_a_curve(90.0))],
+        }));
+        let fits = StratumFits::over(
+            &[
+                fitted_on_a_subset,
+                derived(
+                    stratum(2, 12),
+                    vec![Some(slippage(0.3))],
+                    vec![Some(from_the_cell(5.0))],
+                ),
+            ],
+            BTreeMap::from([(ReadGroupId(0), 0), (ReadGroupId(1), 1)]),
+        );
+        let cells: Vec<_> = fits.each_stratum_and_group_with_numbers().collect();
+        assert_eq!(cells.len(), 3);
+        assert_eq!(
+            cells[0].2.own_fit_standard_errors,
+            OwnFitStandardErrors {
+                level: Some(0.001),
+                shorter_share: None,
+                fall_off: Some(0.03),
+            }
+        );
+        assert_eq!(
+            cells[1].2.own_fit_standard_errors,
+            OwnFitStandardErrors::default()
+        );
+        assert_eq!(
+            (cells[0].2.samples_fitted_on, cells[1].2.samples_fitted_on),
+            (Some(300), Some(300))
+        );
+        assert_eq!(cells[2].0, stratum(2, 12));
+        assert_eq!(
+            (
+                cells[2].2.own_fit_standard_errors,
+                cells[2].2.samples_fitted_on
+            ),
+            (OwnFitStandardErrors::default(), None)
+        );
     }
 
     fn one_group() -> BTreeMap<ReadGroupId, u32> {
@@ -1403,6 +1593,7 @@ mod tests {
         concentration: f64,
     ) -> StratumOutcome {
         StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
             stratum: at,
             slippage: vec![Some(slippage(level))],
             length_spectrum,
@@ -1410,7 +1601,9 @@ mod tests {
             log_likelihood_a_tract: -1.5,
             tracts_fitted: 40,
             borrowed: Vec::new(),
-            converged: true,
+            ending: ClimbEnding::Settled,
+            walks: Vec::new(),
+            samples_fitted_on: None,
             tracts_of_its_own: 40,
             reads_crossing: 400,
             level_provenance: vec![Some(from_the_cell(400.0))],

@@ -2780,7 +2780,7 @@ mod tests {
         use crate::parameter_estimation::joint::share_curve::ShareSource;
         use crate::parameter_estimation::joint::slippage_curve::LevelSource;
         use crate::parameter_estimation::joint::ssr_fit::{
-            LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+            ClimbEnding, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
             StratumOutcome,
         };
 
@@ -2813,6 +2813,7 @@ mod tests {
         let fitted_stratum =
             |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
                 StratumOutcome::Fitted(Box::new(StratumFit {
+                    standard_errors: None,
                     stratum: Stratum {
                         period: 2,
                         reference_repeats: repeats,
@@ -2823,7 +2824,9 @@ mod tests {
                     log_likelihood_a_tract: -1.5,
                     tracts_fitted: 40,
                     borrowed: Vec::new(),
-                    converged: true,
+                    ending: ClimbEnding::Settled,
+                    walks: Vec::new(),
+                    samples_fitted_on: None,
                     tracts_of_its_own: 40,
                     reads_crossing: 400,
                     level_provenance: vec![Some(level), Some(level)],
@@ -2933,6 +2936,7 @@ mod tests {
                             .expect("a probability"),
                         provenance: Provenance::FittedHere,
                         observations: 4_000,
+                        standard_error: None,
                     },
                 );
             }
@@ -8964,6 +8968,7 @@ mod tests {
         let calibrated = [ReadGroupCalibration {
             scale: 1.0,
             provenance: Provenance::FittedHere,
+            scale_standard_error: None,
         }];
 
         let mut scratch = worker_scratch();

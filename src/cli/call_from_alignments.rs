@@ -51,7 +51,7 @@ use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::calling::parameters_file::{ParametersFile, beside_the_vcf};
+use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run;
 use crate::cli::run_ground::{self, GroundError};
 use crate::fasta::ContigList;
@@ -616,22 +616,16 @@ pub fn run_call_from_alignments(
     // run calls**: it records what the run was configured with, not what it found.
     let digest = ReferenceDigest::of(&with_checksums)
         .map_err(|source| calling_run::CallingRunError::ReferenceNotDigested { source })?;
-    let parameters_file = ParametersFile::of_run(
-        &numbers.parameters,
+    // **The census the numbers were fitted under, not this run's.** Direct mode never has one of
+    // its own (`run_streaming.md` §2) — it reads its evidence from the alignment files, builds no
+    // psp and runs no fit — so on the defaults path the file names no terms, which is how a run
+    // with no census spells itself; on the supplied path it is what the file recorded
+    // ([`TheRunsNumbers::census`]). **What this run counted as a repeat** (`parameters_file.md`
+    // §3.9) is taken from the segmentation rather than rebuilt from the flags, so the record cannot
+    // say one thing while the catalog was asked another.
+    let parameters_file = numbers.parameters_file(
         &read_groups,
-        &numbers.reads_behind_each_calibration,
-        &numbers.inbreeding_by_sample,
         &digest,
-        // **The census the numbers were fitted under, not this run's.** Direct mode never has
-        // one of its own (`run_streaming.md` §2) — it reads its evidence from the alignment
-        // files, builds no psp and runs no fit — so on the defaults path this names no terms,
-        // which is how a run with no census spells itself. On the supplied path it is what the
-        // file recorded, because a run writing its parameters out again writes back the terms it
-        // read; see [`TheRunsNumbers::census`].
-        numbers.census.clone(),
-        // **What this run counted as a repeat** (`parameters_file.md` §3.9) — taken from the
-        // segmentation rather than rebuilt from the flags, so the record cannot say one thing
-        // while the catalog was asked another.
         &segmentation.inputs().repeat_tract_criteria,
     );
 

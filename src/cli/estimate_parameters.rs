@@ -56,19 +56,20 @@ use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
+use crate::parameter_estimation::joint::census::CohortCensusEvidence;
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
 use crate::parameter_estimation::joint::ssr_fit::{DEFAULT_STRATA_AT_ONCE, SsrFitConfig};
 use crate::parameter_estimation::progress::StageProgress;
 use crate::reference_info::{
-    ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
+    ReferenceCheck, ReferenceInfo, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
 use crate::repeat_catalog::RepeatCatalogHeader;
 use crate::run::{
     CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
-    OpenPspCohort, RunError, THE_COMMAND_THAT_REBUILDS_A_CENSUS, each_census_in_the_cohorts_psps,
-    every_read_group_pooled, fit_a_cohort, fitted_inbreeding_of, parameters_file_of,
-    parameters_from_the_fit, read_groups_of, the_censuses_as_one_cohort,
+    OpenPspCohort, RunError, Segmentation, THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+    each_census_in_the_cohorts_psps, every_read_group_pooled, fit_a_cohort, fitted_inbreeding_of,
+    parameters_file_of, parameters_from_the_fit, read_groups_of, the_censuses_as_one_cohort,
     what_the_heads_say_about_every_census_in_a_cohort,
     what_the_run_says_about_every_census_in_a_cohort,
 };
@@ -394,6 +395,84 @@ fn fit_and_assemble(
         });
     }
 
+    let OpenedCensuses {
+        cohort,
+        mut evidence,
+        plan,
+        segmentation,
+        with_checksums,
+    } = open_the_censuses(args)?;
+    let contig_of = contig_id_of(&plan);
+    let pooled = every_read_group_pooled(&evidence);
+    let fit = fit_a_cohort(
+        &mut evidence,
+        &plan.loci,
+        &contig_of,
+        &pooled,
+        &ordinary_position_config(args, ploidy),
+        &repeat_tract_config(args),
+    )
+    .map_err(|source| EstimateParametersCliError::Fit {
+        source: Box::new(source),
+    })?;
+
+    let samples = evidence.len();
+    let read_groups = read_groups_of(&evidence, cohort.paths());
+    // **One list, resolved once, handed to both the run and the file.** The ladder is
+    // `DeclaredInbreeding`'s: what the operator stated, else what this fit measured, else the
+    // default — joined to the run's samples by name, and carrying which of the three it was.
+    let inbreeding =
+        declared.of_each_sample_over(&read_groups, &fitted_inbreeding_of(&fit.generic.hom_excess));
+    let parameters = parameters_from_the_fit(&fit, &evidence, &pooled, &inbreeding, ploidy);
+    let terms = evidence
+        .terms()
+        .expect("a cohort of one or more samples records terms")
+        .clone();
+    let reference = ReferenceDigest::of(&with_checksums).map_err(|source| {
+        EstimateParametersCliError::CensusNotPlanned {
+            source: Box::new(RunError::CensusNotPlanned {
+                source: Box::new(source),
+            }),
+        }
+    })?;
+    let file = parameters_file_of(
+        &parameters,
+        &read_groups,
+        &inbreeding,
+        &reference,
+        &terms,
+        &segmentation.inputs().repeat_tract_criteria,
+        &fit.generic.starts,
+    );
+    Ok((file, samples))
+}
+
+/// **A cohort's psps opened as a cohort, their censuses read, judged against this run's settings
+/// and assembled, and the reference and catalog they were walked against read and checked** —
+/// everything `estimate-parameters` does before it fits, and what the repeat-tract subset
+/// comparison (`examples/ng_ssr_subset_against_every_sample.rs`) needs too.
+pub struct OpenedCensuses {
+    /// The psps, opened together.
+    pub cohort: OpenPspCohort,
+    /// Their censuses, as one cohort.
+    pub evidence: CohortCensusEvidence,
+    /// The selection rebuilt from the reference and catalog, and the run's contigs.
+    pub plan: CensusPlan,
+    /// The ground the psps were walked over, cut by their repeat-tract criteria.
+    pub segmentation: Segmentation,
+    /// The reference, read with its checksums.
+    pub with_checksums: std::sync::Arc<ReferenceInfo>,
+}
+
+/// **Open a run's psps and their censuses**, refusing a cohort that cannot be fitted for any of the
+/// reasons `estimate-parameters` names ([`OpenedCensuses`]).
+///
+/// # Errors
+///
+/// Every refusal `estimate-parameters` makes before its fit begins.
+pub fn open_the_censuses(
+    args: &EstimateParametersArgs,
+) -> Result<OpenedCensuses, EstimateParametersCliError> {
     let paths = psps_named_by(args)?;
     // **The psps are opened as a cohort, by the opener every psp-taking command shares**: it
     // reads each header and refuses a set that was not walked as one — two files naming one
@@ -548,20 +627,12 @@ fn fit_and_assemble(
     // **What assembling can still refuse is damage**: every census now records this run's
     // settings, so two cannot disagree on them, and two psps declaring one read group were refused
     // when the cohort was opened, from their headers.
-    let mut evidence = the_censuses_as_one_cohort(censuses).map_err(|source| {
+    let evidence = the_censuses_as_one_cohort(censuses).map_err(|source| {
         EstimateParametersCliError::Cohort {
             source: Box::new(source),
         }
     })?;
 
-    let contigs = std::sync::Arc::clone(&plan.contigs);
-    let contig_of = move |name: &str| {
-        contigs
-            .entries
-            .iter()
-            .position(|entry| entry.name == name)
-            .map(|index| ContigId(index as u32))
-    };
     setup.always(|into| {
         format!(
             "censuses and reference read, {into}; {} sample(s) holding {} read group(s)",
@@ -569,47 +640,25 @@ fn fit_and_assemble(
             evidence.read_groups().len()
         )
     });
-    let pooled = every_read_group_pooled(&evidence);
-    let fit = fit_a_cohort(
-        &mut evidence,
-        &plan.loci,
-        &contig_of,
-        &pooled,
-        &ordinary_position_config(args, ploidy),
-        &repeat_tract_config(args),
-    )
-    .map_err(|source| EstimateParametersCliError::Fit {
-        source: Box::new(source),
-    })?;
+    Ok(OpenedCensuses {
+        cohort,
+        evidence,
+        plan,
+        segmentation,
+        with_checksums,
+    })
+}
 
-    let samples = evidence.len();
-    let read_groups = read_groups_of(&evidence, cohort.paths());
-    // **One list, resolved once, handed to both the run and the file.** The ladder is
-    // `DeclaredInbreeding`'s: what the operator stated, else what this fit measured, else the
-    // default — joined to the run's samples by name, and carrying which of the three it was.
-    let inbreeding =
-        declared.of_each_sample_over(&read_groups, &fitted_inbreeding_of(&fit.generic.hom_excess));
-    let parameters = parameters_from_the_fit(&fit, &evidence, &pooled, &inbreeding, ploidy);
-    let terms = evidence
-        .terms()
-        .expect("a cohort of one or more samples records terms")
-        .clone();
-    let reference = ReferenceDigest::of(&with_checksums).map_err(|source| {
-        EstimateParametersCliError::CensusNotPlanned {
-            source: Box::new(RunError::CensusNotPlanned {
-                source: Box::new(source),
-            }),
-        }
-    })?;
-    let file = parameters_file_of(
-        &parameters,
-        &read_groups,
-        &inbreeding,
-        &reference,
-        &terms,
-        &segmentation.inputs().repeat_tract_criteria,
-    );
-    Ok((file, samples))
+/// **The identifier the records use for a contig's name**, from the run's contig list.
+pub fn contig_id_of(plan: &CensusPlan) -> impl Fn(&str) -> Option<ContigId> + use<> {
+    let contigs = std::sync::Arc::clone(&plan.contigs);
+    move |name: &str| {
+        contigs
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .map(|index| ContigId(index as u32))
+    }
 }
 
 /// **The command that rebuilds this run's stale censuses, in the words it was given** — spec

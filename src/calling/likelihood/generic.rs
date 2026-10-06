@@ -1611,6 +1611,7 @@ mod tests {
             ReadGroupCalibration {
                 scale,
                 provenance: Provenance::FittedHere,
+                scale_standard_error: None,
             };
             4
         ]
@@ -2253,6 +2254,7 @@ mod tests {
             ReadGroupCalibration {
                 scale: 0.01,
                 provenance: Provenance::FittedHere,
+                scale_standard_error: None,
             },
             ReadGroupCalibration::defaulted(),
         ];

@@ -143,7 +143,7 @@ fn draw_and_fit(
             continue;
         };
         fits.push(Fitted {
-            converged: fit.converged,
+            converged: fit.ending.settled(),
             level: slippage.level,
             shorter_share: slippage.shorter_share,
             fall_off: slippage.fall_off,

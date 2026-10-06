@@ -173,14 +173,17 @@ pub(crate) struct AVaryingCohort {
     pub reference: PathBuf,
     /// The catalog built on it.
     pub catalog: PathBuf,
-    /// The samples' alignment files, in the order `one`, `two`.
+    /// The samples' alignment files, in the order of [`Self::samples`].
     pub alignments: Vec<PathBuf>,
+    /// The samples' names, `one` and `two` and any further ones, in the order of
+    /// [`Self::alignments`].
+    pub samples: Vec<String>,
     /// Holds the reference, the catalog, and anywhere a run writes its output.
     pub directory: TempDir,
     /// **Keeps the samples' alignment files alive, and is read by nothing.** A `TempDir`
     /// deletes its tree when it drops, so a fixture that did not hand these back would return
     /// paths to files that no longer exist.
-    pub _files: [TempDir; 2],
+    pub _files: Vec<TempDir>,
 }
 
 /// **A reference sequence with no repeat in it**, so the segmentation routes it to the
@@ -255,6 +258,35 @@ fn a_base_that_is_not(reference: u8) -> u8 {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(false, 0)
+}
+
+/// **The same cohort with a sequencing error in about one read in four**, at an offset and to a base
+/// hashed from the sample's name and the read, and never on the base that read's own sample varies
+/// at (another sample's site, and the tract, can take one).
+///
+/// The cohort above has no error in any read, so the fit puts every library's error rate on its
+/// lower bound and gives it no standard error, and its tract never mismatches. A file pinned from it
+/// carries the format of the fit's errors and none of their arithmetic. **This one gives the fit
+/// errors to compute**: each library's rate leaves its bound, so its multiplier carries a standard
+/// error, and the tract's substitution count is no longer zero
+/// (`cli::cross_platform_digests`, plan `fit_precision.md`, checkpoint E).
+pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(true, 0)
+}
+
+/// **The same, with `further_samples` samples beside the first two**, each read from one library
+/// and carrying one substitution of its own, at a site away from the tract and from every other
+/// sample's. For a cohort large enough that the fit computes its standard errors a sample's block
+/// at a time rather than from the whole matrix, which it does above
+/// `fit::information::FULL_MATRIX_SAMPLES` (20) samples.
+pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
+    further_samples: usize,
+) -> AVaryingCohort {
+    a_varying_cohort_built(true, further_samples)
+}
+
+fn a_varying_cohort_built(with_sequencing_errors: bool, further_samples: usize) -> AVaryingCohort {
     use crate::read::input::test_fixtures::{
         FixtureReadGroup, header_with_read_groups, indexed_named_bam,
     };
@@ -346,6 +378,37 @@ pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
                         Op::new(Kind::Match, sequence.len() - cut),
                     ];
                 }
+                // **A wrong base in some reads**, where asked for: at an offset hashed from the
+                // sample's name and the read, so that few positions collect the same wrong base
+                // from more than one read — which the caller would rightly call a variant — and
+                // never on the base the read's own sample varies at, which would turn an
+                // alternative read back into a reference one. (The comparison is in reference
+                // coordinates, which a read the tract's deletion shortened shifts past the cut;
+                // no such read covers a sample's site here.) The two constants are splitmix64's
+                // golden-ratio and mixing multipliers.
+                if with_sequencing_errors {
+                    let of_the_name = sample.bytes().fold(0_u64, |hash, byte| {
+                        (hash ^ u64::from(byte)).wrapping_mul(0xD1B5_4A32_D192_ED03)
+                    });
+                    let mut hash =
+                        (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ of_the_name;
+                    hash ^= hash >> 29;
+                    let offset = (hash % sequence.len() as u64) as usize;
+                    // About one read in four, each to one of the three other bases, so two reads
+                    // rarely err at one position and two that do rarely agree.
+                    let errs = (hash >> 40).is_multiple_of(4);
+                    if errs && start + offset != substitution {
+                        let mut others = [0_u8; 3];
+                        for (slot, base) in b"ACGT"
+                            .iter()
+                            .filter(|base| **base != sequence[offset])
+                            .enumerate()
+                        {
+                            others[slot] = *base;
+                        }
+                        sequence[offset] = others[((hash >> 20) % 3) as usize];
+                    }
+                }
                 // **Both strands, and the alternative reads lean to one of them.** The
                 // artifact test compares the alternative reads' forward share against the
                 // reference reads' own, so a fixture that split both evenly makes the two
@@ -426,11 +489,41 @@ pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
         &second_groups,
     );
 
+    let mut samples = vec!["one".to_owned(), "two".to_owned()];
+    let mut alignments = vec![first_bam, second_bam];
+    let mut files = vec![first, second];
+    // **Further samples' sites**: every 23rd base from the 31st, skipping the tract with a margin
+    // and the first two samples' sites, so no two samples share a site.
+    let mut sites = (0..)
+        .map(|n| 31 + 23 * n)
+        .filter(|site| {
+            !(TRACT.0 - 5..TRACT.1 + 5).contains(site)
+                && ![FIRST_SAMPLES_SUBSTITUTION, SECOND_SAMPLES_SUBSTITUTION].contains(site)
+        })
+        .take_while(|site| *site < length - 30);
+    for further in 0..further_samples {
+        let sample = format!("s{:02}", further + 3);
+        let site = sites
+            .next()
+            .expect("the contig holds a site for every further sample asked for");
+        let (file, bam) = file_of(
+            &sample,
+            &format!("{sample}.bam"),
+            site,
+            false,
+            &[format!("rg-{sample}")],
+        );
+        samples.push(sample);
+        alignments.push(bam);
+        files.push(file);
+    }
+
     AVaryingCohort {
         reference,
         catalog,
-        alignments: vec![first_bam, second_bam],
+        alignments,
+        samples,
         directory,
-        _files: [first, second],
+        _files: files,
     }
 }

@@ -1,0 +1,343 @@
+# **All 7 groups of numbers in this file were fitted from reads**: the
+# base-quality calibration, contamination, the inbreeding coefficients, the
+# ordinary-site prior's seed, repeat-tract slippage, repeat-tract length spectra
+# and repeat-tract substitution rates.
+#
+# **Whose reads is a second question, and only 3 of the 7 groups answer it.**
+# The base-quality calibration, the inbreeding coefficients and repeat-tract
+# substitution rates carry a `warrant` on every number: `fitted_here` means it
+# was estimated from that read group's or that sample's own reads; `borrowed`
+# means there was too little of them, so the mean of the sample's other read
+# groups was taken; `supplied` means the run was handed the number rather than
+# fitting it; `defaulted` means nothing could be fitted and nothing was
+# supplied, so a stated constant was used.
+#
+# The other 4 — contamination, the ordinary-site prior's seed, repeat-tract
+# slippage and repeat-tract length spectra — say how a number was arrived at and
+# not whose reads it came from: a smoothing origin, a rung, or which reads a
+# contamination fraction was fitted from. **So in a file whose numbers were
+# fitted over a different cohort those 4 still read as fitted**, and only the 3
+# above are marked down to `supplied`.
+#
+# A group counts as fitted where any part of it was; within one, each number's
+# own `warrant` or origin says which.
+#
+# Every number this run scored its reads under, and what each one rests on.
+#
+# A number that could be fitted carries a `warrant`: fitted_here, borrowed,
+# supplied or defaulted. **If you edit one, change its warrant to "supplied" and
+# delete its `observations`** — otherwise this file says a number you typed was
+# measured, and the run that reads it will report it that way. A `supplied`
+# number that still carries `observations` came that way from another run's
+# file, and those counts are that run's.
+#
+# **Two keys do not take every warrant.**
+# `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only
+# where this file holds a fitted stratum spectrum for it to be the median of,
+# and `defaulted` only at the built-in constant;
+# `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the
+# built-in constant. Both take `supplied` freely, which is what you write when
+# you change one. Anything else is refused, and says so.
+#
+# **What that checking reaches, and what it cannot.** It reaches those two keys
+# and nowhere else. It cannot catch a number you changed that still says
+# `fitted_here` or `borrowed`: nothing in this file can tell your value from a
+# fitted one, so the run will report it as measured, with the old `observations`
+# count still beside it. And on every other key a `defaulted` warrant is checked
+# against nothing — including the inbreeding coefficient, whose built-in number
+# is 0.0. The base-quality multiplier is not one of them: a `defaulted`
+# multiplier is **not** fixed at 1.0, and the note beside
+# `base_quality_calibration` says what it is instead. A `defaulted` substitution
+# rate is the one to avoid writing by hand, and the reason is worth stating
+# because a note further down looks like it contradicts this: the caller
+# **does** default that number, at the tract and for the cells that need it, but
+# it never writes one as a row here — so a `defaulted` warrant on a row of
+# `substitution_rate_by_stratum` is a claim no build makes.
+#
+# The slippage numbers, the prior's two concentrations and the length spectrum
+# rows carry no warrant — they say where they came from another way, and there
+# is nowhere in them to record that you changed one. Note such an edit
+# elsewhere.
+#
+# An absent key is not a zero. A missing section, a missing row and a missing
+# key each mean the thing was not measured. A zero is not automatically the
+# opposite: a zero **under a `fitted_here` or `borrowed` warrant** was measured
+# and found to be zero, and a zero under any other warrant is a stated number —
+# the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
+# The sections below say which is which where it matters.
+format_version = 1
+ploidy = 2
+
+[fitted_from]
+# What these numbers were fitted from. A run whose reference, samples or read
+# groups do not match these is refused; one whose census does not match keeps
+# the numbers and reports every one of them as supplied rather than fitted.
+#
+# The MD5 of the reference this run ran against: every contig's bases,
+# uppercased, run together in the order the FASTA holds them. So soft-masking
+# and line width do not change it and contig order does. `[fitted_from.census]`
+# below has a `reference digest` line of its own — that is this same reference
+# seen from the evidence's side, and the key that turns a run away from the
+# wrong reference is this one.
+reference_digest = "0123456789abcdef0123456789abcdef"
+samples = [
+    "TS-1",
+    "Ailsa ‘Craig’ \"×2\"",
+]
+read_groups = [
+    { read_group = 0, declared_id = "HWI.3", library = "lib3", sample = "TS-1" },
+    { read_group = 1, declared_id = "HWI.4", library = "lib4", sample = "TS-1" },
+    { read_group = 2, declared_id = "HWI.5", library = "lib5", sample = "Ailsa ‘Craig’ \"×2\"" },
+]
+
+[fitted_from.census]
+# Which store of evidence these numbers were fitted from — one line for each of
+# the things two runs' evidence has to agree on before it can be pooled, each
+# written as a digest of what that thing was rather than as the thing itself,
+# because several of them are whole tables and settings blocks.
+#
+# A run whose own evidence disagrees on any one of these lines is the demotion
+# the section above describes, and it demotes **every** number in the file
+# rather than the ones that line touches — the numbers were fitted together out
+# of this one store of evidence, so a disagreement about the evidence
+# disqualifies all of them. The run says which line differed.
+#
+# Do not edit these to make a run match. Nothing checks a digest against what it
+# claims to digest, so an edit buys a run that reports numbers as fitted from
+# its own data when they were fitted from somebody else's — and there is no way
+# to work out the right value by hand in any case. The same goes for
+# `reference_digest`, `samples` and `read_groups` above, where a mismatch is
+# turned away rather than demoted.
+terms = [
+    { term = "selection seed", digest = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a" },
+    { term = "reference digest", digest = "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b" },
+    { term = "analysed region set", digest = "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c" },
+    { term = "repeat catalog build settings", digest = "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d" },
+    { term = "STR routing criteria", digest = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e" },
+    { term = "generic target position count", digest = "6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f" },
+    { term = "STR per-stratum cap", digest = "70707070707070707070707070707070" },
+    { term = "the loci actually kept", digest = "81818181818181818181818181818181" },
+    { term = "per-stratum locus counts", digest = "92929292929292929292929292929292" },
+    { term = "per-locus read cap", digest = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3" },
+    { term = "depth ladder edges", digest = "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4" },
+    { term = "per-position depth cap", digest = "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5" },
+]
+
+[base_quality_calibration]
+# What each read's own reported error probability is multiplied by, per read
+# group. Above one says the instrument was optimistic and the reads are worse
+# than it claimed; below one says they are better; one leaves the qualities
+# exactly as reported. It is not a multiplier on the Phred score, which moves
+# the other way.
+#
+# **A `defaulted` multiplier is not 1.0 in general**, and the rows below say
+# `not calibrated` where it applies. A read group no error rate could be fitted
+# for is *charged the caller's stated rate of one error in a thousand* rather
+# than taken at the quality it reported — so its multiplier is that stated rate
+# divided by this library's own mean reported error, and rises above one
+# wherever the instrument claimed better than one in a thousand. A library
+# averaging Q36 gets 4.0: every base of it is scored four times likelier to be
+# wrong than the file it came in said. **The exception is a run that fitted
+# nothing at all**, which read nothing to take a mean over and writes 1.0.
+by_read_group = [
+    { read_group = 0, error_probability_multiplier = { value = 1.0324, warrant = "fitted_here", observations = { reads = 812344 } } },
+    # not calibrated: no usable error rate could be fitted for this read group,
+    # so it is charged the stated rate — see the note above this table
+    { read_group = 1, error_probability_multiplier = { value = 1.0, warrant = "defaulted" } },
+    { read_group = 2, error_probability_multiplier = { value = 0.87, warrant = "supplied", observations = { reads = 640918 } } },
+]
+
+[contamination]
+# How much of each read group's reads came from somebody else — one row a lane,
+# because two lanes of one library can differ: index hopping happens on a
+# flowcell, not in a tube. Three states, three different claims:
+#   - this whole section absent  -> nobody identified any contamination
+#   - a row with no `measurement` -> this lane could not be measured
+#   - a zero share with non-zero counts -> measured, and found clean
+# To stop correcting one lane, delete its `measurement = { ... }` and leave the
+# row; a library sequenced over several lanes has a row for each. Setting that
+# share to zero says something else: that it was measured and found clean.
+by_read_group = [
+    { read_group = 0, library = "lib3", measurement = { share_of_reads_from_another_sample = 0.031, markers_with_reads = 4211, reads_on_markers = 90233, fitted_from_reads_of = "this_read_groups_own_reads" } },
+    { read_group = 1, library = "lib4" },
+    { read_group = 2, library = "lib5", measurement = { share_of_reads_from_another_sample = 0.0, markers_with_reads = 2903, reads_on_markers = 64118, fitted_from_reads_of = "every_read_of_this_sample" } },
+]
+
+[sequencing_batches]
+# Who was sequenced beside whom — the population a contaminating read is drawn
+# from. `batching_was_declared = false` means nobody said, so everything went in
+# one batch. A declared batching that happens to have one batch writes identical
+# rows, and this flag is the only thing that tells those two apart.
+#
+# **A sample's read groups all go in one batch**, and it is the batch its own
+# row names — the two tables below say the same thing about a sample twice, and
+# a file in which they disagree is refused. The grain is a lane everywhere else
+# in this file precisely because two lanes of one plant can differ; here they
+# cannot, because a contaminating read is drawn against one set of neighbours
+# and a sample has one genotype to draw.
+batching_was_declared = true
+by_read_group = [
+    { read_group = 0, batch = 0 },
+    { read_group = 1, batch = 0 },
+    { read_group = 2, batch = 1 },
+]
+by_sample = [
+    { sample = "TS-1", batch = 0 },
+    { sample = "Ailsa ‘Craig’ \"×2\"", batch = 1 },
+]
+
+[inbreeding]
+# How inbred each sample is, as a fraction in [0, 1) — one row a sample, counted
+# over the reference positions that sample's reads covered.
+by_sample = [
+    { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } },
+    { sample = "Ailsa ‘Craig’ \"×2\"", inbreeding_coefficient = { value = 0.17, warrant = "borrowed", observations = { covered_positions = 9411027 } } },
+]
+
+[ordinary_site_prior]
+# What the SNP and indel prior starts from at an ordinary position: how much
+# belief the reference allele carries, and how much is shared out across
+# whatever alternative alleles a position turns out to have. `rung` says which
+# measurement the pair came off: a fitted population curve (`fitted_curve`), the
+# neutral shape at a fitted heterozygosity (`neutral_shape`), a cohort with no
+# variation at all (`zero_diversity`), or a stated heterozygosity taken from
+# human data (`stated_heterozygosity`), which is the one that rests on nothing
+# this run measured.
+reference_concentration = 1.0
+alternative_concentration_total = 0.0006
+rung = "fitted_curve"
+
+[repeat_tracts]
+# Everything about repeat tracts. A **stratum** is a class of tract, and every
+# row keyed by one spells it as `period` — how many bases one repeat unit is —
+# and `reference_repeats` — how many copies of it the reference carries. A
+# **slippage group** is a set of read groups whose reads are taken to slip
+# alike; the run declares it, and `slippage_group_by_read_group` below is that
+# declaration.
+#
+# `slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage
+# group, and a triple with no row means that group put no read in that stratum —
+# so one stratum can have a row for one group and none for another. A stratum
+# with no row in `length_spectrum_by_stratum` was never fitted on its own tracts
+# and falls to its period's pooled one, or to the flat shape below. Neither
+# absence is a zero.
+#
+# Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports
+# a tract length other than its allele's; `shorter_share` — of the reads that
+# slip, the share showing a shorter tract; `fall_off` — how fast two-repeat
+# slips fall off against one-repeat slips. `expected_slipped_reads` is
+# fractional because it is how many reads the fitted share says slipped, not a
+# count anybody labelled.
+#
+# `share_of_reads_that_slip_origin` says where the first of the three came from
+# and `shorter_share_and_fall_off_origin` where the other two did: this
+# stratum's own fit, its period's curve, or a blend of the two, with the curve
+# itself written down so an interpolation can be told from a measurement. A row
+# whose two shares were not fitted here at all has no
+# `shorter_share_and_fall_off_origin` key. Each origin carries its own
+# `expected_slipped_reads` where this stratum fitted a slip share of its own,
+# and neither carries one where the number was taken whole from a curve — so a
+# row showing the same count twice is not a duplicate, and a row showing none
+# fitted nothing of its own.
+#
+# The curves under `shorter_share_and_fall_off_origin` also record
+# `curve_fitted_on`, which says what that curve itself was fitted on: this
+# period's own strata (`this_period`), or those same strata where there were too
+# few to score the shape (`this_period_unscored`), or the other periods pooled
+# (`other_periods`), or a stated constant where no period had anything to fit
+# (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a
+# different fit and has no such key.
+#
+# `fallback_length_spectrum_concentration` is what a tract falls back to where
+# neither its own stratum nor its period was fitted: this many chromosomes'
+# worth of belief, spread flat over whatever lengths the tract offers, so a
+# larger number makes the prior harder for the reads to move. A run that fitted
+# any stratum states the median of the concentrations those fits produced and
+# marks it `fitted_here`; a run that fitted none states a built-in constant and
+# marks it `defaulted`. A run handed this file writes back the warrant it found
+# there, because a file's warrants survive being read — demoting them on every
+# read would have the same cohort report different warrants depending on which
+# way it was called. Mark it `supplied` yourself if you change the number. It
+# carries no `observations` in any of those cases — a median over strata is not
+# a measurement with a sample size.
+fallback_length_spectrum_concentration = { value = 3.5, warrant = "fitted_here" }
+slippage_group_by_read_group = [
+    { read_group = 0, slippage_group = 0 },
+    { read_group = 1, slippage_group = 0 },
+    { read_group = 2, slippage_group = 1 },
+]
+slippage_by_stratum_and_group = [
+    { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 22.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 36, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum" } },
+    { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 15 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 3.0, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 3, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } } } },
+    { period = 2, reference_repeats = 11, slippage_group = 1, share_of_reads_that_slip = 0.0913, shorter_share = 0.79, fall_off = 0.28, share_of_reads_that_slip_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 12, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 8 }, reach = "below_the_fitted_range" } } } },
+]
+# `shares_by_repeat_offset` runs from -span to +span in whole repeat units from
+# the **reference** tract length, so the middle entry is the reference length
+# itself, the count is odd, and the shares sum to one. An array read as starting
+# at zero shifts every length this stratum expects by one repeat.
+length_spectrum_by_stratum = [
+    { period = 2, reference_repeats = 6, concentration = 3.5, shares_by_repeat_offset = [0.1, 0.8, 0.1] },
+]
+length_spectrum_by_period = [
+    { period = 2, concentration = 2.75, shares_by_repeat_offset = [0.15, 0.7, 0.15] },
+]
+# How often a base reads wrong inside a tract — per read group as well as per
+# stratum, because that is a property of the chemistry, and per `ploidy` as
+# well, because that is the set of genotypes the fit scored these tracts
+# against. That third key is why a row repeats the number at the top of the
+# file: a cohort called at two ploidies carries a row for each. Counted in bases
+# compared, not reads: a read crossing a tract contributes as many bases as it
+# crosses.
+substitution_rate_by_stratum = [
+    { read_group = 0, period = 2, reference_repeats = 6, ploidy = 2, rate = { value = 0.0012, warrant = "borrowed", observations = { bases_compared = 40122 } } },
+]
+
+[stated_constants]
+# The numbers no fit produces, written out so that what a run inherited is
+# visible and editable rather than buried in the binary.
+# the share of repeat-tract reads that came from nowhere the model can explain.
+# Not measured: this value was chosen by sweeping it against genotype accuracy
+# on one human sample, so it is a stated constant rather than an estimate of
+# that share
+repeat_tract_outlier_weight = { value = 0.2, warrant = "defaulted" }
+
+[repeat_routing]
+# What this run counted as a repeat. A tandem-repeat catalog is built below
+# every floor a caller routes on, deliberately, so that a run can put its own
+# line anywhere inside that gap by filtering the file rather than scanning the
+# genome again. These are where this run put it: a stretch of reference clearing
+# all of them went to the repeat-tract caller, and one that did not is ordinary
+# sequence and went to the SNP and indel caller. Two runs over the same
+# reference and the same catalog with different numbers here analysed different
+# ground, and nothing else in this file would say so.
+#
+# `min_copies` is one floor per repeat-unit length, 1 to 6 in order, so the
+# first entry is how many bases a homopolymer needs and the last how many
+# hexamer copies. `min_purity` is how much of a tract has to match a perfect
+# tiling of its unit. `max_str_len` is where a tract stops being callable and
+# becomes a satellite, which neither caller speaks for.
+#
+# Five of the eight have flags on `call-from-alignments`, named as these keys
+# are. The other three do not, and are written because a record that left them
+# out would not say what the run actually asked the catalog for: `min_flank_bp`
+# is pinned at the catalog's own floor, since tracts nearer than that to a
+# contig's end were never written to the file; `min_score` gates a scanner's
+# output and so gates nothing in a run that reads a catalog; `bundle_threshold`
+# is how close two tracts have to be before they are one bundle rather than two
+# loci.
+#
+# A run handed a parameters file whose numbers here differ from its own says so
+# and calls on. Nothing is refused and nothing is demoted: the numbers in this
+# file are as warranted as they ever were, and only the ground they are applied
+# to has moved. What that costs is worth knowing — a tract the run admits that
+# the fit's own selection did not is scored from strata fitted over other
+# tracts, or from the stated defaults, and the warrants beside each number say
+# which.
+min_copies = [5, 5, 4, 4, 4, 3]
+min_period = 1
+max_period = 6
+max_str_len = 500
+min_purity = 0.8
+min_flank_bp = 15
+min_score = 0
+bundle_threshold = 15

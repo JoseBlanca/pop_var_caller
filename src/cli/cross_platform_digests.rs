@@ -48,7 +48,10 @@ mod tests {
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::estimate_parameters::{EstimateParametersArgs, run_estimate_parameters};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
-    use crate::cli::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
+    use crate::cli::test_fixtures::{
+        AVaryingCohort, a_larger_varying_cohort_with_sequencing_errors_on_disk,
+        a_varying_cohort_on_disk, a_varying_cohort_with_sequencing_errors_on_disk,
+    };
     use crate::region_typing::DEFAULT_MAX_STR_LEN;
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
@@ -73,7 +76,57 @@ mod tests {
     /// arithmetic, measured on four tomato accessions before it was recorded (the fit ends 40
     /// log-likelihood units higher for the same passes). Recorded in the Linux container (arm64,
     /// glibc) only; it was `3edab375185d74ad84ab52255b418c0b`.
-    const FITTED_PARAMETERS_MD5: &str = "70e634849f232de2fb32200dd21e0ab5";
+    ///
+    /// **Re-recorded 2026-09-28** when the SNP/indel fit's allele-frequency shapes began to step
+    /// along the log-likelihood's own slope in them rather than solve the digamma form
+    /// (`fit_precision.md` step A7), measured on four tomato accessions first
+    /// (`scripts/promote_ng_oracle.sh`: the fit ends 30 log-likelihood units higher, at
+    /// −7.991302 × 10⁵ against −7.991599 × 10⁵). A shape whose step would carry it past its bound is
+    /// held there and the other takes the step the curvature gives with it held, so the free shape
+    /// comes to rest where its own slope is zero. On this fixture two lines move: the ordinary-site
+    /// prior's `reference_concentration`, 3.9591 to 39.089, and `alternative_concentration_total`,
+    /// 7.30 × 10⁻¹⁰ to 6.60 × 10⁻³, both read off the fitted density, whose shapes moved from
+    /// a = 10.8, b = 47.9 to a = 0.288, b = 50.0 (its upper bound); the fit's best log-likelihood
+    /// rises from −44.919 to −44.704. Two samples over 600 bases do not place the shapes: the fit
+    /// reports neither as identified. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `70e634849f232de2fb32200dd21e0ab5`. (Plan step A6, the read groups' own error rates, moved
+    /// neither checksum: this fixture's reads carry no sequencing error, so every read group's two
+    /// rates sit on their lower bounds either way.)
+    ///
+    /// **Re-recorded 2026-09-29** when the SNP/indel fit began to stop once every parameter is within
+    /// a tenth of its standard error of the maximum, as a Newton step estimates the distance
+    /// (`fit_precision.md` step B1), measured on four tomato accessions first
+    /// (`scripts/promote_ng_oracle.sh`: every start there still runs to the 200-pass limit, and the
+    /// fit's two checksums do not move). A parameter without an error is settled by definition, and
+    /// two samples over 600 bases give almost none one — the mismapped share and the density's
+    /// shapes are not identified, the invariant and fixed shares' errors are wider than their
+    /// ranges — so every start now converges after 18 passes where it ran to the limit. Two lines
+    /// move, both read off the density, whose first shape stops at 1.546 where 200 passes took it to
+    /// 0.288 (the second at its bound, 50, both times): the ordinary-site prior's
+    /// `reference_concentration`, 39.089 to 20.047, and `alternative_concentration_total`,
+    /// 6.60 × 10⁻³ to 2.08 × 10⁻². The fit's best log-likelihood is −44.939 against −44.704.
+    /// Recorded in the Linux container (arm64, glibc) only; it was
+    /// `9d421df0bc755522f8a7b5617b4c30f8`.
+    ///
+    /// **Re-recorded 2026-10-06** when the parameters file became format version 2
+    /// (`fit_precision.md` step E2): each number's standard error, how each start of the SNP/indel
+    /// fit ended, and the notes explaining both. **No number moved**, measured first on four tomato
+    /// accessions (`scripts/promote_ng_oracle.sh`: every call unchanged, both parameters files the
+    /// old ones line for line once the version-2 keys and notes are taken out), and here: the same
+    /// taking-out turns this fixture's new file back into the bytes of
+    /// `22dda760d260572b786958e69b15b2b2`. The calls do not move. The file the review of the step
+    /// saw (`f03c0ab14192957f7f1d8404bab4249a`) differs from this one in 19 lines of its notes and
+    /// nothing else. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `22dda760d260572b786958e69b15b2b2`.
+    ///
+    /// **Re-recorded 2026-10-06** when a repeat-tract substitution rate stopped being zero (owner,
+    /// checkpoint E of `fit_precision.md`): a count that found no mismatch takes half of one. This
+    /// fixture's one stratum compared 460 bases and found none, so its three rows — one a read group
+    /// — go from 0.0 to 0.5 / 461 = 0.0010846, now with a standard error of 0.0015347; nothing else
+    /// moves but 8 lines of notes. Measured first on four tomato accessions: 52 of 188 rates move
+    /// and nothing else in the file. Recorded in the Linux container (arm64, glibc), and the same on
+    /// macOS (arm64); it was `a5e87936e968f9b855f91f88db828083`.
+    const FITTED_PARAMETERS_MD5: &str = "860c3c65f27a1700e401d102833215e1";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -86,7 +139,70 @@ mod tests {
     ///
     /// **Re-recorded 2026-09-25** with the fit above, whose different numbers this file is called
     /// with; it was `3432b4219342c6277ec1d0072945e423`.
-    const CALLS_MD5: &str = "dad5ff61fad91ca1d3d6a0e7587de946";
+    ///
+    /// **Re-recorded 2026-09-28** with the fit above (step A7): the ordinary-site prior it carries
+    /// moved, and with it three records' quality: the SNP at chrV:121 QUAL 480.2 to 541.9 and the
+    /// other sample's GQ 65 to 73, the SNP at chrV:456 QUAL 481.0 to 542.7 and the other sample's GQ
+    /// 65 to 73, the repeat tract at chrV:201 QUAL 0.0 to 7.4. No genotype moved. It was
+    /// `dad5ff61fad91ca1d3d6a0e7587de946`.
+    ///
+    /// **Re-recorded 2026-09-29** with the fit above (step B1): the same three records' quality moves
+    /// with the ordinary-site prior — the SNP at chrV:121 QUAL 541.9 to 549.5 and the other sample's
+    /// GQ 73 to 71, the SNP at chrV:456 QUAL 542.7 to 550.3 and the other sample's GQ 73 to 71, the
+    /// repeat tract at chrV:201 QUAL 7.4 to 14.3. No genotype moved. It was
+    /// `7a570c442a4060fcd62f4af85b50a4fa`.
+    ///
+    /// **Re-recorded 2026-10-06** with the fit above, whose repeat-tract substitution rate is no
+    /// longer zero: the repeat tract at chrV:201 moves, QUAL 14.3 to 14.9, AF 0.249885 to 0.249902,
+    /// and one sample's GQ 33 to 34; its genotypes do not. The two SNPs do not move. Measured by
+    /// putting the old rule back, which reproduces the old checksum exactly, and on four tomato
+    /// accessions: 4 of 6,706 calls move, all repeat tracts, QUAL by at most 0.4, no genotype. The
+    /// same in the Linux container and on macOS (both arm64). It was
+    /// `2c0a89466d21c301a1704ed4e6cd0c84`.
+    const CALLS_MD5: &str = "a2d17168b04f33a8f62a0a6cd2511df4";
+
+    /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
+    /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
+    /// standard errors, which the file above does not: there every library's rate sits on its
+    /// bound. Added at checkpoint E of `fit_precision.md` (owner, 2026-10-06), so that the errors'
+    /// arithmetic — the information summed over positions, inverted, carried to a multiplier — is
+    /// pinned across platforms and pool widths as the numbers themselves are.
+    ///
+    /// **What it carries**: each library's multiplier, 2.97 to 6.43 (an error in about one read in
+    /// four over reads claiming Q35), with a standard error of 1.42 to 17.71 — wide, since 600
+    /// positions over two samples barely place a library's rate, but computed, which is what is
+    /// pinned; and the tract's substitution rate with its binomial error. The two inbreeding
+    /// coefficients carry none: one variant a sample does not place them. The calls are the
+    /// cohort's three designed records. **Its errors come from the whole matrix**, as every cohort
+    /// of at most 20 samples' do; the next pair pins the other path. **Not every row of that matrix
+    /// reaches the file**: measured in this step's review, the cohort's score for the share of
+    /// mismapped positions can be computed differently, even doubled, without moving a byte here, so
+    /// a change confined to the cohort's own scores is not pinned by this pair. Recorded in the Linux container
+    /// (arm64, glibc) and the same on macOS (arm64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "8c71a5a95f1196e3dd8c05abdccf7355";
+
+    /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
+    const WITH_ERRORS_CALLS_MD5: &str = "943c7fa93e2a1f110e996c117e3b0808";
+
+    /// **The same cohort grown to 21 samples**
+    /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
+    /// different computation of the errors**: above 20 samples the fit keeps each sample's own block
+    /// of the information rather than the whole matrix, and inverts it a block at a time — the path
+    /// every cohort the caller is built for takes, and one a two-sample cohort never reaches. Its 22
+    /// libraries' multipliers run 0.35 to 7.97 with errors of 1.66 to 3.01; its inbreeding
+    /// coefficients carry none; its calls are the 22 records designed into it, one site a sample and
+    /// the tract. Recorded in the Linux container (arm64, glibc) and the same on macOS (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "5e3dacbf558adc6787276897935dbbf8";
+    const OF_21_SAMPLES_CALLS_MD5: &str = "4a2c9b7ef87c94f09d55261bb290bf57";
+
+    /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
+    /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
+    const SAMPLES_PAST_THE_WHOLE_MATRIX: usize = 21;
+
+    /// The 21-sample cohort.
+    fn a_cohort_past_the_whole_matrix() -> AVaryingCohort {
+        a_larger_varying_cohort_with_sequencing_errors_on_disk(SAMPLES_PAST_THE_WHOLE_MATRIX - 2)
+    }
 
     /// Hex MD5 of some bytes.
     fn md5_hex(bytes: &[u8]) -> String {
@@ -147,7 +263,8 @@ mod tests {
         run_call_from_psps(&CallFromPspsArgs {
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
-            psps: ["one", "two"]
+            psps: cohort
+                .samples
                 .iter()
                 .map(|sample| psp_path_for(&psps, sample))
                 .collect(),
@@ -183,7 +300,12 @@ mod tests {
     /// One whole run — a fresh cohort walked, fitted and called — inside a pool of `threads`
     /// threads. Hands back the parameters file's text and the comparable VCF.
     fn one_run_at(threads: usize) -> (String, String) {
-        let cohort = a_varying_cohort_on_disk();
+        one_run_of(a_varying_cohort_on_disk, threads)
+    }
+
+    /// The same, over the cohort `cohort_of` builds.
+    fn one_run_of(cohort_of: fn() -> AVaryingCohort, threads: usize) -> (String, String) {
+        let cohort = cohort_of();
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -222,6 +344,58 @@ mod tests {
         );
     }
 
+    /// **The fit's standard errors have their recorded checksums** — recorded on arm64 Linux (glibc)
+    /// and arm64 macOS; x86_64 not yet compared: the same cohort with sequencing errors in its
+    /// reads, whose file carries a standard error on every library's multiplier.
+    #[test]
+    fn a_fit_with_standard_errors_writes_the_same_bytes_on_every_platform() {
+        let (fitted, called) = one_run_of(a_varying_cohort_with_sequencing_errors_on_disk, THREADS);
+        let multipliers_with_an_error = fitted
+            .lines()
+            .filter(|line| line.contains("error_probability_multiplier = { value = "))
+            .filter(|line| line.contains("standard_error = "))
+            .count();
+        assert_eq!(
+            multipliers_with_an_error, 3,
+            "each of the three libraries' multipliers carries the error this test exists to pin:\n\
+             {fitted}"
+        );
+        let fitted_md5 = md5_hex(fitted.as_bytes());
+        let calls_md5 = md5_hex(called.as_bytes());
+        assert_eq!(
+            (fitted_md5.as_str(), calls_md5.as_str()),
+            (WITH_ERRORS_FITTED_PARAMETERS_MD5, WITH_ERRORS_CALLS_MD5),
+            "the checksums moved; read this module's documentation before re-recording them.\n\
+             --- fitted parameters ---\n{fitted}\n--- calls ---\n{called}",
+        );
+    }
+
+    /// **The errors computed a sample's block at a time have their recorded checksums too**: 21
+    /// samples, past the 20 at which the fit stops keeping the whole matrix. Every library's
+    /// multiplier carries an error.
+    #[test]
+    fn errors_computed_a_block_at_a_time_write_the_same_bytes_on_every_platform() {
+        let (fitted, called) = one_run_of(a_cohort_past_the_whole_matrix, THREADS);
+        let read_groups = SAMPLES_PAST_THE_WHOLE_MATRIX + 1;
+        let multipliers_with_an_error = fitted
+            .lines()
+            .filter(|line| line.contains("error_probability_multiplier = { value = "))
+            .filter(|line| line.contains("standard_error = "))
+            .count();
+        assert_eq!(
+            multipliers_with_an_error, read_groups,
+            "each of the {read_groups} libraries' multipliers carries an error:\n{fitted}"
+        );
+        let fitted_md5 = md5_hex(fitted.as_bytes());
+        let calls_md5 = md5_hex(called.as_bytes());
+        assert_eq!(
+            (fitted_md5.as_str(), calls_md5.as_str()),
+            (OF_21_SAMPLES_FITTED_PARAMETERS_MD5, OF_21_SAMPLES_CALLS_MD5),
+            "the checksums moved; read this module's documentation before re-recording them.\n\
+             --- fitted parameters ---\n{fitted}\n--- calls ---\n{called}",
+        );
+    }
+
     /// **The same bytes at one thread as at four and at seven**, so a machine's core count is not
     /// a reason for two fits of one cohort to differ.
     ///
@@ -229,16 +403,27 @@ mod tests {
     /// wrote three different files at one, four and eight threads.
     #[test]
     fn a_fitted_cohort_writes_the_same_bytes_at_any_pool_width() {
-        let at_four = one_run_at(THREADS);
-        for threads in [1, 7] {
-            let other = one_run_at(threads);
-            assert!(
-                other == at_four,
-                "{threads} threads wrote a different fit or different calls from {THREADS}:\n\
-                 --- fit at {threads} ---\n{}\n--- fit at {THREADS} ---\n{}",
-                other.0,
-                at_four.0,
-            );
+        // **Every cohort**: each guards against a chunk size taken from the pool's width, and the
+        // two with sequencing errors carry it through the standard errors, by the whole matrix and
+        // a block at a time. A join order chosen by the pool cannot show at the three chunks these
+        // censuses make; `fit`'s `a_census_of_many_chunks_fits_to_the_same_bits_at_any_pool_width`
+        // holds that.
+        for cohort_of in [
+            a_varying_cohort_on_disk as fn() -> AVaryingCohort,
+            a_varying_cohort_with_sequencing_errors_on_disk,
+            a_cohort_past_the_whole_matrix,
+        ] {
+            let at_four = one_run_of(cohort_of, THREADS);
+            for threads in [1, 7] {
+                let other = one_run_of(cohort_of, threads);
+                assert!(
+                    other == at_four,
+                    "{threads} threads wrote a different fit or different calls from {THREADS}:\n\
+                     --- fit at {threads} ---\n{}\n--- fit at {THREADS} ---\n{}",
+                    other.0,
+                    at_four.0,
+                );
+            }
         }
     }
 }

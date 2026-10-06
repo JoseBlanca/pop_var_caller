@@ -73,6 +73,7 @@ use crate::float;
 use crate::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
 };
+use crate::parameter_estimation::joint::fit::SETTLED_FRACTION;
 use crate::parameter_estimation::joint::loci::CensusLoci;
 use crate::parameter_estimation::progress::StageProgress;
 use crate::types::{ContigId, ReadGroupId};
@@ -228,12 +229,39 @@ pub struct StratumSubstitutionCounts {
 }
 
 impl StratumSubstitutionCounts {
-    /// Mismatching bases over bases compared — the stratum's substitution rate (spec §4.2).
+    /// Mismatching bases over bases compared — the stratum's substitution rate (spec §4.2) —
+    /// **never exactly zero or one**.
     ///
-    /// `None` where no read was compared against a tract at all.
+    /// **A count that found no mismatch takes half of one**, `0.5 / (n + 1)` over `n` bases
+    /// compared, and one where every base mismatched takes half a match, `(n + 0.5) / (n + 1)`.
+    /// Calling scores a tract's reads under this rate, and under a rate of zero a read with even one
+    /// base that disagrees is explained by no tract length at all: it falls wholly to the outlier
+    /// term and stops counting for any genotype (owner, checkpoint E of `fit_precision.md`,
+    /// 2026-10-06). Half a count keeps what the count says — no mismatch in 500 bases becomes
+    /// 0.001, no mismatch in 34 becomes 0.014 — and a count that saw both outcomes keeps its own
+    /// ratio.
+    ///
+    /// `None` where no read was compared against a tract at all. **A count of more mismatching
+    /// bases than bases compared cannot be built** — every read's bases are counted as compared
+    /// before they are compared — and is given its ratio, above one, which no rate type accepts.
     pub fn substitution_rate(&self) -> Option<f64> {
-        (self.bases_compared > 0)
-            .then(|| self.mismatching_bases as f64 / self.bases_compared as f64)
+        let bases_compared = self.bases_compared;
+        if bases_compared == 0 {
+            return None;
+        }
+        debug_assert!(
+            self.mismatching_bases <= bases_compared,
+            "{} mismatching bases of {bases_compared} compared",
+            self.mismatching_bases
+        );
+        let bases_compared_f64 = bases_compared as f64;
+        Some(if self.mismatching_bases == 0 {
+            0.5 / (bases_compared_f64 + 1.0)
+        } else if self.mismatching_bases == bases_compared {
+            (bases_compared_f64 + 0.5) / (bases_compared_f64 + 1.0)
+        } else {
+            self.mismatching_bases as f64 / bases_compared_f64
+        })
     }
 }
 
@@ -313,8 +341,8 @@ impl StratumEvidence {
             .sum()
     }
 
-    /// Mismatching bases over bases compared — the stratum's substitution rate, which is one
-    /// division and needs none of the other numbers (spec §4.2).
+    /// The stratum's substitution rate, which needs none of the other numbers (spec §4.2) — see
+    /// [`StratumSubstitutionCounts::substitution_rate`], which is never exactly zero or one.
     ///
     /// `None` where no read was compared against a tract at all.
     pub fn substitution_rate(&self) -> Option<f64> {
@@ -372,18 +400,32 @@ pub struct StratumFit {
     /// The neighbouring repeat counts this stratum borrowed tracts from, empty when it stood
     /// on its own. Same period throughout: slippage is not comparable across motif lengths.
     pub borrowed: Vec<u64>,
-    /// Whether the climb settled or ran out of rounds. **Running out is never reported as
-    /// convergence.**
-    pub converged: bool,
-    /// Tracts **this stratum itself** holds with at least one spanning read, whatever it read to
-    /// produce its answer.
+    /// **How the walk that won ended** ([`ClimbEnding`]): settled, stopped at a round that lost,
+    /// or out of rounds. **Neither of the last two is reported as convergence.**
+    pub ending: ClimbEnding,
+    /// **Every walk over the stratum**, one per starting point in [`SsrFitConfig::starting_points`]'s
+    /// order: how it ended and how many rounds it took — what the climb cost. Empty on the fixtures
+    /// tests build by hand.
+    pub walks: Vec<WalkRecord>,
+    /// **How many samples the stratum was fitted on**, when a large cohort's stratum was fitted on
+    /// a subset of them ([`fit_strata_on_sample_subsets`]) — the whole cohort's count when the
+    /// subset grew to every sample. `None` when every sample was read without a subset being drawn:
+    /// a cohort of at most [`SampleSubsets::first`] samples, or any call to [`fit_strata`]. The
+    /// evidence counts the fit carries ([`tracts_fitted`](Self::tracts_fitted),
+    /// [`tracts_of_its_own`](Self::tracts_of_its_own), [`reads_crossing`](Self::reads_crossing))
+    /// are the subset's.
+    pub samples_fitted_on: Option<usize>,
+    /// Tracts **this stratum itself** holds with at least one spanning read **among the samples it
+    /// was fitted on** — every sample unless a large cohort's stratum was fitted on a subset
+    /// ([`samples_fitted_on`](Self::samples_fitted_on)) — whatever it read to produce its answer.
     ///
     /// **Distinct from [`StratumFit::tracts_fitted`], and the difference is the whole point.** A
     /// stratum with eight tracts of its own that borrowed its way to a thousand has an answer
     /// resting on its neighbours, and a consumer told only the second number cannot see that
     /// (`str_slippage_level_curve.md` §8).
     pub tracts_of_its_own: usize,
-    /// Reads that crossed a whole tract of **this stratum itself**, over every sample and group.
+    /// Reads that crossed a whole tract of **this stratum itself**, over every group and every
+    /// sample it was fitted on ([`samples_fitted_on`](Self::samples_fitted_on)).
     pub reads_crossing: u64,
     /// Per slippage group, where that group's emitted slippage *level* came from — `None` where
     /// the group put no read in this stratum, matching [`StratumFit::slippage`] index for index.
@@ -394,6 +436,138 @@ pub struct StratumFit {
     pub level_provenance: Vec<Option<LevelProvenance>>,
     /// Per slippage group, where that group's direction split and fall-off came from.
     pub shares_provenance: Vec<Option<SharesProvenance>>,
+    /// **How precisely the stratum's own tracts determine each of its numbers**, at the answer the
+    /// climb returned (`fit_precision.md` §4.2).
+    ///
+    /// **The errors of the stratum's own fit, and only of it.** Once [`fit_strata`] has drawn the
+    /// curves, [`StratumFit::slippage`] may hold a blend of the own fit and its period's curve, and
+    /// these are not that blend's errors — a blended number has none (spec §5.2). The own fit's level
+    /// is the one [`LevelProvenance::slipped_reads`] is counted from.
+    ///
+    /// `None` where no error was computed: on the fixtures tests build by hand.
+    pub standard_errors: Option<StratumErrors>,
+}
+
+/// **The standard errors of one stratum's own fit**, each on its number's own scale, from the
+/// curvature of the stratum's total log-likelihood at the answer (`fit_precision.md` §4.2).
+///
+/// An error is how far the number would typically move were the same kind of reads drawn again. A
+/// number without one says why ([`StratumError`]); never a zero, and never a large number standing in
+/// for one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StratumErrors {
+    /// Per slippage group, its three numbers' errors — `None` where the group put no read in this
+    /// stratum, matching [`StratumFit::slippage`] index for index.
+    pub slippage: Vec<Option<SlippageErrors>>,
+    /// Per allele class, the error of its share of the stratum's chromosomes, indexed as
+    /// [`StratumFit::length_spectrum`] is.
+    pub length_spectrum: Vec<StratumError>,
+    /// The concentration's error.
+    pub concentration: StratumError,
+}
+
+/// The standard errors of one slippage group's three numbers in one stratum ([`StratumErrors`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlippageErrors {
+    pub level: StratumError,
+    pub shorter_share: StratumError,
+    pub fall_off: StratumError,
+}
+
+/// **One number's standard error in a stratum's fit, or why it has none.**
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StratumError {
+    /// The error, on the number's own scale.
+    Estimated(f64),
+    /// **The tracts do not tell it apart from the stratum's other numbers**: once they are accounted
+    /// for, the log-likelihood is not curved downwards in its direction — flat, or a saddle.
+    NotIdentified,
+    /// **The tracts do not place it**: its error on the scale the climb moves it on — logit for a
+    /// slippage number, log for the concentration, a log-ratio for a share — is above
+    /// [`NOT_PLACED`], so a one-error interval spans odds or a size hundreds of times apart. Where
+    /// the climb ran a number off towards an end of its range and stopped at the end of its reach,
+    /// the log-likelihood there is flat, and carrying its curvature to the number's own scale would
+    /// report an error hundreds of times too small. Also a number in `[0, 1]` — a slippage number or
+    /// a share — whose error, on its own scale, is wider than that whole range: the SNP/indel fit's
+    /// "wider than its range" (spec §3.2).
+    NotPlaced,
+    /// **A length class with no share at all**, held at zero and never fitted.
+    NoShare,
+}
+
+impl StratumErrors {
+    /// Whether any number of the stratum has an error.
+    pub fn any(&self) -> bool {
+        let slippage = self.slippage.iter().flatten().any(|group| {
+            [group.level, group.shorter_share, group.fall_off]
+                .iter()
+                .any(|error| error.value().is_some())
+        });
+        slippage
+            || self
+                .length_spectrum
+                .iter()
+                .any(|error| error.value().is_some())
+            || self.concentration.value().is_some()
+    }
+}
+
+impl StratumError {
+    /// The error, or `None` when there is none.
+    pub fn value(self) -> Option<f64> {
+        match self {
+            Self::Estimated(error) => Some(error),
+            Self::NotIdentified | Self::NotPlaced | Self::NoShare => None,
+        }
+    }
+}
+
+/// **The largest error, on the scale the climb moves a number on, that still places the number**:
+/// three units of logit or of log, so a one-error interval either side spans odds or a size `e⁶`,
+/// about 400 times, apart. Measured in the review of plan step C1 on drawn strata: numbers the tracts
+/// determine sat at 0.02 to 0.5 on those scales, and numbers the climb ran off to the end of its
+/// reach at 1,000 to 2,400.
+pub const NOT_PLACED: f64 = 3.0;
+
+/// **How one walk of the climb ended** (`fit_precision.md` §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClimbEnding {
+    /// **Settled**: every number is within [`SsrFitConfig::settled_fraction`] of its own standard
+    /// error of where the likelihood peaks, as a Newton step from the walk's last point estimates the
+    /// distance.
+    Settled,
+    /// **A round lowered the log-likelihood, and nothing it passed through was better than where it
+    /// began**, which was judged and had not settled. Its moves were undone and the walk stopped
+    /// there, since a next round would start from the same point and repeat it exactly. Not
+    /// convergence: the golden section that moves each number never scores the value it starts from,
+    /// so a round can leave a number somewhere worse while the others still had a way to go.
+    LostARound,
+    /// **Ran out of rounds** ([`SsrFitConfig::max_rounds`]) before it settled.
+    OutOfRounds,
+}
+
+impl ClimbEnding {
+    /// Whether the walk settled — the one ending that is convergence.
+    pub fn settled(self) -> bool {
+        self == Self::Settled
+    }
+}
+
+/// **One walk over a stratum**, from one starting point: how it ended, how many rounds it took, a
+/// round that lost included, and how many times it was judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkRecord {
+    /// How the walk ended.
+    pub ending: ClimbEnding,
+    /// How many rounds it took, a round that lost and was undone included.
+    pub rounds: u32,
+    /// How many times a point of it was judged for settling — one curvature of the stratum each.
+    pub judgements: u32,
+    /// **Whether it settled at a point where no number had a standard error**, so the judgement had
+    /// nothing to measure: settled by the spec's definition (`fit_precision.md` §4.3) and counted in
+    /// the run's log, so that such walks are seen rather than read as convergence (owner, checkpoint
+    /// C, 2026-10-02).
+    pub settled_with_no_error: bool,
 }
 
 /// Where one slippage group's level at one stratum came from, and what stood behind it.
@@ -703,11 +877,14 @@ pub struct SsrFitConfig {
     pub allele_span: i32,
     pub quadrature_points: usize,
     pub starting_points: Vec<StartingPoint>,
-    /// How many rounds of coordinate ascent one start gets.
+    /// How many rounds of coordinate ascent one start gets, at most ([`DEFAULT_MAX_ROUNDS`]).
     pub max_rounds: u32,
-    /// A round stops the climb when it improved the mean log-likelihood a tract by less than
-    /// this.
-    pub stillness: f64,
+    /// **When a walk has settled**: once every number is within this share of its own standard error
+    /// — [`SETTLED_FRACTION`], 0.1, by default — of where the likelihood peaks, as a Newton step
+    /// estimates the distance (`fit_precision.md` §4.3). A walk is judged once the gain it can still
+    /// make, projected from its last two rounds, is below `½ · p · settled_fraction²` for the
+    /// stratum's `p` numbers.
+    pub settled_fraction: f64,
     /// How the two **shares** are smoothed across repeat count once every stratum has its own
     /// answer; see [`share_curve`](super::share_curve).
     pub share_curve: ShareCurveConfig,
@@ -735,6 +912,9 @@ pub struct SsrFitConfig {
     /// grain to choose, so it always spreads the pool over that stratum's tracts whatever this
     /// says.
     pub strata_at_once: NonZeroUsize,
+    /// **How a large cohort's strata take a subset of their samples** ([`SampleSubsets`]). Read
+    /// only by [`fit_strata_on_sample_subsets`]; [`fit_strata`] fits every sample.
+    pub subsets: SampleSubsets,
 }
 
 impl Default for SsrFitConfig {
@@ -743,12 +923,66 @@ impl Default for SsrFitConfig {
             allele_span: ALLELE_SPAN,
             quadrature_points: QUADRATURE_POINTS,
             starting_points: StartingPoint::spanning_the_monomorphic_range(),
-            max_rounds: 5,
-            stillness: 1e-6,
+            max_rounds: DEFAULT_MAX_ROUNDS,
+            settled_fraction: SETTLED_FRACTION,
             share_curve: ShareCurveConfig::default(),
             refusal_floor: DEFAULT_REFUSAL_FLOOR,
             curve: SlippageCurveConfig::default(),
             strata_at_once: DEFAULT_STRATA_AT_ONCE,
+            subsets: SampleSubsets::default(),
+        }
+    }
+}
+
+/// **How many rounds a walk gets when the run says nothing: 40**, measured at plan step C3 with the
+/// limit at 60 on drawn strata (`fit_precision_c3_2026-10-01.md` §2.3). Walks that settled took 2 to
+/// 6 rounds at three allele classes and 6 to 36 at thirteen. At thirteen classes one walk of fifteen
+/// had not settled by 60, and none settled between 37 and 60. So 40 holds every walk that settled
+/// there; whether a walk ever settles after 40 is not known. It was 5, which left 9 of 15 walks at
+/// thirteen classes out of rounds.
+pub const DEFAULT_MAX_ROUNDS: u32 = 40;
+
+/// **How many samples a large cohort's repeat-tract stratum is first fitted on: 256** (spec §4.4,
+/// soft). A cohort of at most this many is fitted on every sample, exactly as before samples were subset.
+pub const FIRST_SUBSET: usize = 256;
+
+/// **How precisely a stratum's slippage level must be measured before its subset stops growing**:
+/// its standard error below 0.02 of the level itself (spec §4.4, soft). On drawn strata the level's
+/// error is close to one over the square root of the slipped reads, so this is roughly 2,500
+/// slipped reads in the subset at thirteen allele classes and 5,000 at three (the review of plan
+/// step D2, `fit_precision_d2_2026-10-02.md`).
+pub const LEVEL_RELATIVE_ERROR_TARGET: f64 = 0.02;
+
+/// **How many samples with reads of one slippage group a subset takes at least**, whenever the
+/// group put reads in the stratum: 8, or all of the group's own if it has fewer (spec §4.4, soft;
+/// amended at checkpoint D2 from "when the first samples hold none").
+pub const MIN_SAMPLES_A_GROUP: usize = 8;
+
+/// **How a large cohort's repeat-tract strata are fitted on a subset of their samples** (spec §4.4).
+/// Each stratum is fitted on the first [`first`](Self::first) samples of the cohort's fixed order
+/// ([`sample_order`](super::sample_order::sample_order)), then on twice as many, and so on, until
+/// its slippage level is measured to
+/// [`level_relative_error_target`](Self::level_relative_error_target) or every sample is in. Read
+/// only by [`fit_strata_on_sample_subsets`]; [`fit_strata`] ignores it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleSubsets {
+    /// The samples a stratum is first fitted on ([`FIRST_SUBSET`]); a cohort of no more than this
+    /// is fitted on all of them.
+    pub first: usize,
+    /// The level's standard error, as a share of the level, below which the subset stops growing
+    /// ([`LEVEL_RELATIVE_ERROR_TARGET`]). Every live slippage group's level must reach it.
+    pub level_relative_error_target: f64,
+    /// The samples with reads of a slippage group a subset takes at least, when the first samples
+    /// hold none of that group's reads ([`MIN_SAMPLES_A_GROUP`]).
+    pub min_samples_a_group: usize,
+}
+
+impl Default for SampleSubsets {
+    fn default() -> Self {
+        Self {
+            first: FIRST_SUBSET,
+            level_relative_error_target: LEVEL_RELATIVE_ERROR_TARGET,
+            min_samples_a_group: MIN_SAMPLES_A_GROUP,
         }
     }
 }
@@ -790,7 +1024,8 @@ impl Default for SsrFitConfig {
 /// from periods whose curves would then rest on strata a fifth of which said nothing.
 ///
 /// *Whether the climb "converged" is not the alarm the specification expected it to be*: at 400
-/// tracts on a 63-sample cohort only 83% of fits settle within their rounds, and that row's
+/// tracts on a 63-sample cohort only 83% of fits settle within their rounds (measured under the
+/// stopping rule before 2026-10-01: a gain of the mean below 10⁻⁶, or five rounds), and that row's
 /// median level is 1.5% from the truth. Convergence counts rounds, not quality.
 pub const DEFAULT_REFUSAL_FLOOR: usize = 8;
 
@@ -865,9 +1100,35 @@ struct Climb {
     parameters: Parameters,
     /// The mean log-likelihood a tract this walk ended at, which is what the walks are ranked on.
     score: f64,
-    /// Whether the walk stopped because it had stopped improving rather than because it ran out
-    /// of rounds.
-    converged: bool,
+    /// Why the walk stopped.
+    ending: ClimbEnding,
+    /// The rounds it took, a round that lost included.
+    rounds: u32,
+    /// How many times its points were judged ([`StratumClimb::judge`]).
+    judgements: u32,
+    /// The standard errors at the point it stopped, when its last round was judged there — settled
+    /// or not: the stratum's errors if this walk wins, without a second curvature.
+    standard_errors: Option<StratumErrors>,
+    /// Whether it settled at a point where no number had an error ([`WalkRecord`]).
+    settled_with_no_error: bool,
+}
+
+impl Climb {
+    fn record(&self) -> WalkRecord {
+        WalkRecord {
+            ending: self.ending,
+            rounds: self.rounds,
+            judgements: self.judgements,
+            settled_with_no_error: self.settled_with_no_error,
+        }
+    }
+}
+
+/// **Whether a walk settled with nothing to judge**: it ended settled, and the judgement at its last
+/// point found no number with an error — every one not placed, not identified, or a class with no
+/// share. A settled walk was always judged at the point it returns.
+fn settled_with_no_error(ending: ClimbEnding, judged_here: Option<&StratumErrors>) -> bool {
+    ending.settled() && judged_here.is_some_and(|errors| !errors.any())
 }
 
 /// **One walk uphill, from one starting point.**
@@ -884,23 +1145,280 @@ fn climb_from(
     threads: WhereTheThreadsGo,
 ) -> Climb {
     let allele_classes = (2 * config.allele_span + 1) as usize;
-    let mut parameters = Parameters::start(start, evidence.groups, allele_classes);
-    let mut scorer = Scorer::new(evidence, homozygote_excess, genotypes, config, threads);
-    let mut score = scorer.score(&parameters);
-    let mut converged = false;
-    for _ in 0..config.max_rounds {
-        let before = score;
-        climb_one_round(&mut parameters, &mut scorer, live_groups, allele_classes);
-        score = scorer.score(&parameters);
-        if score - before < config.stillness {
-            converged = true;
-            break;
-        }
-    }
-    Climb {
+    let parameters = Parameters::start(start, evidence.groups, allele_classes);
+    climb_from_parameters(
+        evidence,
+        parameters,
+        homozygote_excess,
+        genotypes,
+        live_groups,
+        config,
+        threads,
+    )
+}
+
+/// **One walk uphill from `parameters`**: [`climb_from`]'s walk, from a point given whole rather
+/// than from a starting point — a larger subset's walk starts from the smaller one's answer
+/// ([`fit_on_growing_subsets`]).
+fn climb_from_parameters(
+    evidence: &StratumEvidence,
+    parameters: Parameters,
+    homozygote_excess: &[f64],
+    genotypes: &[(usize, usize)],
+    live_groups: &[bool],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> Climb {
+    let allele_classes = (2 * config.allele_span + 1) as usize;
+    let mut climbing = StratumClimb {
+        scorer: Scorer::new(evidence, homozygote_excess, genotypes, config, threads),
+        evidence,
+        live_groups,
+        classes: allele_classes,
+        settled_fraction: config.settled_fraction,
+    };
+    let score = climbing.scorer.score(&parameters);
+    let trigger = remaining_gain_target(&parameters, live_groups, config.settled_fraction);
+    let walked = walk_until_settled(
+        &mut climbing,
         parameters,
         score,
-        converged,
+        trigger,
+        tracts_a_mean_is_over(evidence),
+        config.max_rounds,
+    );
+    Climb {
+        settled_with_no_error: settled_with_no_error(walked.ending, walked.judged_here.as_ref()),
+        parameters: walked.at,
+        score: walked.score,
+        ending: walked.ending,
+        rounds: walked.rounds,
+        judgements: walked.judgements,
+        standard_errors: walked.judged_here,
+    }
+}
+
+/// **The largest ratio of one round's gain to the last's that the projection believes**, so a walk
+/// whose gains shrink slowly is projected to have at most nineteen times its last gain still to
+/// come; and the ratio a walk's first round, with no earlier gain to compare, is projected with.
+/// The same cap the SNP/indel fit's first projection used (`fit_precision.md` §2).
+const MAX_GAIN_CONTRACTION: f64 = 0.95;
+
+/// **The projected gain still to come below which a walk is judged** (spec §4.3): `½ · p ·
+/// fraction²` over the stratum's `p` numbers — each live slippage group's three, every allele class's
+/// share but one (the shares sum to one), and the concentration; the numbers the standard errors are
+/// taken over ([`CurvatureLayout`]). Near the maximum the gain still to come is about
+/// `½ Σ (dⱼ / SEⱼ)²` for distances `dⱼ` from it, so a walk whose every number is within `fraction` of
+/// its error has at most this left — 0.08 at one slippage group, thirteen classes and a tenth.
+///
+/// **A trigger, not the test.** The converse does not hold: the same gain can sit in one number,
+/// which is then `√p` times further than `fraction`, and a projection from two rounds' gains cannot
+/// see a climb crossing a plateau (`fit_precision_c3_stopped_2026-10-01.md`). Whether a walk has
+/// settled is judged on each number by [`StratumClimb::judge`].
+fn remaining_gain_target(parameters: &Parameters, live_groups: &[bool], fraction: f64) -> f64 {
+    let numbers = CurvatureLayout::of(parameters, live_groups)
+        .coordinates
+        .len();
+    0.5 * numbers as f64 * fraction * fraction
+}
+
+/// **The total log-likelihood a walk can still gain**, projected from its last round's gain and the
+/// one before: gains that shrink by a factor λ a round leave `gain · λ / (1 − λ)` to come (Aitken's
+/// projection, applied to the log-likelihood; spec §2 and §4.3). λ is the two gains' ratio, capped at
+/// [`MAX_GAIN_CONTRACTION`], and the cap itself when there is no earlier gain.
+fn projected_remaining_gain(gain: f64, earlier: Option<f64>) -> f64 {
+    let contraction = match earlier {
+        Some(earlier) if earlier > 0.0 => (gain / earlier).min(MAX_GAIN_CONTRACTION),
+        _ => MAX_GAIN_CONTRACTION,
+    };
+    gain * contraction / (1.0 - contraction)
+}
+
+/// **The best point a walk has stood at**, and its score: where a round that loses falls back to.
+#[derive(Debug)]
+struct HeldPoint<P> {
+    at: P,
+    score: f64,
+}
+
+impl<P: Clone> HeldPoint<P> {
+    /// Hold `at` instead if it scores strictly higher.
+    fn offer(&mut self, at: &P, score: f64) {
+        if score > self.score {
+            self.at.clone_from(at);
+            self.score = score;
+        }
+    }
+}
+
+/// **One walk's climbing as its stopping rule sees it**: a round, and a judgement of whether a point
+/// has settled.
+trait Climbing {
+    type Point: Clone;
+    /// What judging a point finds, beside whether it has settled.
+    type Judgement;
+    /// Move `at` by one round, offering every point it stands at to `held`; the score where the
+    /// round ended, a mean a tract.
+    fn one_round(&mut self, at: &mut Self::Point, held: &mut HeldPoint<Self::Point>) -> f64;
+    /// Whether `at` has settled, and what judging it found.
+    fn judge(&mut self, at: &Self::Point) -> (bool, Self::Judgement);
+}
+
+/// Where a walk stopped, its score there, why, after how many rounds and judgements, and what the
+/// last judgement found when it was taken at that point.
+#[derive(Debug)]
+struct Walked<P, J> {
+    at: P,
+    score: f64,
+    ending: ClimbEnding,
+    rounds: u32,
+    judgements: u32,
+    judged_here: Option<J>,
+}
+
+/// **The climb's stopping rule, apart from what a round does and how a point is judged** (spec §4.3,
+/// as amended with the owner at plan step C3).
+///
+/// Scores are a mean a tract; `tracts` turns their differences into the total's. After each round:
+///
+/// - **a round that ended lower than it began** has its moves undone: the walk goes back to the best
+///   point it stood at — the round's start, or a point part-way through it — and that point is judged
+///   at once — when the put-off below allows, or always when nothing in the round was better than its
+///   start. A score that is not a number is a loss too;
+/// - otherwise the point the round reached is judged once the gain still to come, projected from this
+///   round's gain and the last ([`projected_remaining_gain`]), is below `trigger`;
+/// - a judged point that has settled ends the walk, settled ([`ClimbEnding::Settled`]). One that has
+///   not, after a round that lost and had nothing better than its start, ends it there
+///   ([`ClimbEnding::LostARound`]): the next round would start where this one did and repeat it
+///   exactly. Otherwise the walk goes on;
+/// - **a judgement that finds the walk unsettled puts the next one off**, by one round more each
+///   time — the walk is next judged one, then two, then three rounds later — since a judgement costs
+///   about as much as a round or two of the climb, and a walk crossing a plateau would otherwise be
+///   judged every round. A round that loses while the judgement is put off, with a better point
+///   part-way through, goes back to that point unjudged;
+/// - and it stops at `max_rounds` ([`ClimbEnding::OutOfRounds`]).
+fn walk_until_settled<C: Climbing>(
+    climbing: &mut C,
+    mut at: C::Point,
+    mut score: f64,
+    trigger: f64,
+    tracts: f64,
+    max_rounds: u32,
+) -> Walked<C::Point, C::Judgement> {
+    let mut earlier_gain = None;
+    let mut judgements = 0;
+    let mut judged_here = None;
+    // The first round a judgement may be taken at, and how many have found the walk unsettled.
+    let (mut judge_from, mut unsettled) = (1, 0);
+    for round in 1..=max_rounds {
+        let start = score;
+        let mut held = HeldPoint {
+            at: at.clone(),
+            score,
+        };
+        let after = climbing.one_round(&mut at, &mut held);
+        // Anything but at least as high is a loss, a `NaN` included.
+        let lost = !matches!(
+            after.partial_cmp(&start),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        );
+        if lost {
+            at = held.at;
+            score = held.score;
+        } else {
+            score = after;
+        }
+        let gain = (score - start) * tracts;
+        judged_here = None;
+        // A loss with nothing better than its start, a gain that is not a number included: the walk
+        // can go nowhere from here, so it is judged now whatever the put-off says.
+        let stuck = lost && !matches!(gain.partial_cmp(&0.0), Some(std::cmp::Ordering::Greater));
+        let wanted = lost || projected_remaining_gain(gain, earlier_gain) < trigger;
+        let settled = if stuck || (wanted && round >= judge_from) {
+            judgements += 1;
+            let (settled, judgement) = climbing.judge(&at);
+            judged_here = Some(judgement);
+            if !settled {
+                unsettled += 1;
+                judge_from = round + unsettled;
+            }
+            settled
+        } else {
+            false
+        };
+        let ending = if settled {
+            Some(ClimbEnding::Settled)
+        } else if stuck {
+            Some(ClimbEnding::LostARound)
+        } else {
+            None
+        };
+        if let Some(ending) = ending {
+            return Walked {
+                at,
+                score,
+                ending,
+                rounds: round,
+                judgements,
+                judged_here,
+            };
+        }
+        earlier_gain = Some(gain);
+    }
+    Walked {
+        at,
+        score,
+        ending: ClimbEnding::OutOfRounds,
+        rounds: max_rounds,
+        judgements,
+        judged_here,
+    }
+}
+
+/// **One walk over a stratum**: its scorer, and what judging a point needs.
+struct StratumClimb<'a> {
+    scorer: Scorer<'a>,
+    evidence: &'a StratumEvidence,
+    live_groups: &'a [bool],
+    classes: usize,
+    settled_fraction: f64,
+}
+
+impl Climbing for StratumClimb<'_> {
+    type Point = Parameters;
+    /// The stratum's standard errors at the judged point, which are the winning walk's when its last
+    /// round was judged at the point it returns.
+    type Judgement = StratumErrors;
+
+    fn one_round(&mut self, at: &mut Parameters, held: &mut HeldPoint<Parameters>) -> f64 {
+        climb_one_round(at, &mut self.scorer, self.live_groups, self.classes, held);
+        self.scorer.score(at)
+    }
+
+    /// **Settled when every number is within `settled_fraction` of its own standard error of where
+    /// the likelihood peaks**, as a Newton step from `at` estimates it — the rule the SNP/indel fit
+    /// stops by (spec §2's amendment), on the stratum's curvature and slope ([`curvature_at`]),
+    /// judged on each number's own scale. A number without an error is settled by definition: the
+    /// tracts do not place it, or do not tell it from the others. Costs one curvature, `1 + 2p²`
+    /// evaluations.
+    fn judge(&mut self, at: &Parameters) -> (bool, StratumErrors) {
+        let curvature = curvature_at(
+            &mut self.scorer,
+            self.evidence,
+            at,
+            self.live_groups,
+            CURVATURE_STEP,
+        );
+        let errors = errors_on_the_natural_scale(
+            &curvature.layout,
+            at,
+            self.live_groups,
+            &curvature.identified,
+        );
+        let distances = newton_distances_on_the_natural_scale(&curvature, at, self.live_groups);
+        let settled = furthest_in_errors(&errors, &distances)
+            .is_none_or(|furthest| furthest < self.settled_fraction);
+        (settled, errors)
     }
 }
 
@@ -933,11 +1451,17 @@ fn the_fit_of(
     borrowed: &[u64],
     live_groups: &[bool],
     winner: Climb,
+    walks: Vec<WalkRecord>,
+    standard_errors: Option<StratumErrors>,
 ) -> StratumFit {
     let Climb {
         parameters,
         score,
-        converged,
+        ending,
+        rounds: _,
+        judgements: _,
+        standard_errors: _,
+        settled_with_no_error: _,
     } = winner;
     StratumFit {
         stratum: evidence.stratum,
@@ -951,7 +1475,9 @@ fn the_fit_of(
         log_likelihood_a_tract: score,
         tracts_fitted: evidence.tracts_with_reads(),
         borrowed: borrowed.to_vec(),
-        converged,
+        ending,
+        walks,
+        samples_fitted_on: None,
         // **What the stratum holds on its own is not knowable here.** `evidence` may already be
         // the pooled set, so these two are placeholders that `fit_strata` replaces with the
         // receiving stratum's own counts, exactly as it replaces `stratum` and `borrowed`.
@@ -986,10 +1512,12 @@ fn the_fit_of(
                 })
             })
             .collect(),
+        standard_errors,
     }
 }
 
-/// Fit `evidence`, whose tracts may already include borrowed ones, recording where from.
+/// Fit `evidence`, whose tracts may already include borrowed ones, recording where from, with the
+/// standard errors of the answer ([`standard_errors_at`]).
 fn fit_pooled(
     evidence: &StratumEvidence,
     borrowed: &[u64],
@@ -997,6 +1525,37 @@ fn fit_pooled(
     config: &SsrFitConfig,
     threads: WhereTheThreadsGo,
 ) -> Option<StratumFit> {
+    let (mut best, walks, live_groups) =
+        the_best_walk(evidence, homozygote_excess, config, threads)?;
+    let standard_errors = best.standard_errors.take().unwrap_or_else(|| {
+        standard_errors_at(
+            evidence,
+            &best.parameters,
+            homozygote_excess,
+            &live_groups,
+            config,
+            threads,
+        )
+    });
+    Some(the_fit_of(
+        evidence,
+        borrowed,
+        &live_groups,
+        best,
+        walks,
+        Some(standard_errors),
+    ))
+}
+
+/// **The best of the walks from every starting point over `evidence`**, every walk's record in
+/// starting-point order, and which slippage groups they moved; `None` when no group put a read in
+/// it, so there is nothing to walk.
+fn the_best_walk(
+    evidence: &StratumEvidence,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> Option<(Climb, Vec<WalkRecord>, Vec<bool>)> {
     // **The one precondition on `SsrFitConfig::allele_span` that nothing else states.** It is a
     // public field with no lower bound, read from an environment variable by
     // `examples/ng_joint_records_walk.rs` and parsed with no floor, and at zero the fit returns
@@ -1016,7 +1575,7 @@ fn fit_pooled(
         return None;
     }
 
-    let best = config
+    let climbs: Vec<Climb> = config
         .starting_points
         .iter()
         .map(|start| {
@@ -1030,26 +1589,538 @@ fn fit_pooled(
                 threads,
             )
         })
-        .fold(None, the_better_walk);
-
-    Some(the_fit_of(
-        evidence,
-        borrowed,
-        &live_groups,
+        .collect();
+    let walks = climbs.iter().map(Climb::record).collect();
+    let best = climbs.into_iter().fold(None, the_better_walk);
+    Some((
         best.expect("at least one starting point"),
+        walks,
+        live_groups,
     ))
 }
 
-/// One pass of coordinate ascent over everything the stratum fits.
+// ---------------------------------------------------------------------
+// How precisely a stratum's tracts determine its answer
+// ---------------------------------------------------------------------
+
+/// **Each central difference's step**, on the climb's scales — logit, log, log-ratio — which are
+/// already relative to a number's size, so one step suits every coordinate.
+///
+/// Large enough that the objective's rounding does not reach the curvature — the quadrature's
+/// points are placed by solving Beta quantiles to 10⁻¹², which the objective carries into every
+/// tract at once — and small enough that the difference's own error, of order the step squared, is
+/// small beside it: at a third of it the errors of a drawn stratum agree to 2 in 100 (tested).
+const CURVATURE_STEP: f64 = 1e-2;
+
+/// One number of a stratum's fit as its curvature is taken: on the scale the climb moves it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CurvatureCoordinate {
+    /// Slippage group `group`'s number `which` — 0 the level, 1 the shorter share, 2 the fall-off —
+    /// on the logit scale.
+    Slippage { group: usize, which: usize },
+    /// An allele class's share of the spectrum, as the log of its ratio to the largest class's
+    /// share. The shares sum to one, so the largest is the one not moved on its own.
+    SpectrumRatio { class: usize },
+    /// The concentration, on the log scale.
+    Concentration,
+}
+
+/// The numbers one stratum's curvature is taken over, in order: each live slippage group's three,
+/// every allele class with a share but the largest, and the concentration.
+struct CurvatureLayout {
+    coordinates: Vec<CurvatureCoordinate>,
+    /// The class whose share the others are taken as ratios to.
+    largest_class: usize,
+}
+
+impl CurvatureLayout {
+    fn of(parameters: &Parameters, live_groups: &[bool]) -> Self {
+        let spectrum = &parameters.length_spectrum;
+        // PANIC-FREE: `fit_pooled` refuses an allele span below one, so a spectrum has at least three
+        // classes.
+        let largest_class = (0..spectrum.len())
+            .max_by(|&left, &right| spectrum[left].total_cmp(&spectrum[right]))
+            .expect("a spectrum has at least one class");
+        let mut coordinates = Vec::new();
+        for (group, live) in live_groups.iter().enumerate() {
+            if *live {
+                coordinates
+                    .extend((0..3).map(|which| CurvatureCoordinate::Slippage { group, which }));
+            }
+        }
+        // A class with no share at all is held at zero: its ratio has no logarithm.
+        coordinates.extend(
+            (0..spectrum.len())
+                .filter(|&class| class != largest_class && spectrum[class] > 0.0)
+                .map(|class| CurvatureCoordinate::SpectrumRatio { class }),
+        );
+        coordinates.push(CurvatureCoordinate::Concentration);
+        Self {
+            coordinates,
+            largest_class,
+        }
+    }
+
+    /// `parameters` on the climb's scales, in the layout's order.
+    fn center(&self, parameters: &Parameters) -> Vec<f64> {
+        let largest = parameters.length_spectrum[self.largest_class];
+        self.coordinates
+            .iter()
+            .map(|coordinate| match *coordinate {
+                CurvatureCoordinate::Slippage { group, which } => {
+                    let value = read_slippage(&parameters.slippage[group], which);
+                    float::ln(value / (1.0 - value))
+                }
+                CurvatureCoordinate::SpectrumRatio { class } => {
+                    float::ln(parameters.length_spectrum[class] / largest)
+                }
+                CurvatureCoordinate::Concentration => float::ln(parameters.concentration),
+            })
+            .collect()
+    }
+
+    /// `base` with every number of the layout set from `at`, on the climb's scales.
+    fn parameters_at(&self, base: &Parameters, at: &[f64]) -> Parameters {
+        let mut parameters = base.clone();
+        let mut ratios: Vec<f64> = base
+            .length_spectrum
+            .iter()
+            .map(|share| {
+                if *share > 0.0 {
+                    share / base.length_spectrum[self.largest_class]
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        ratios[self.largest_class] = 1.0;
+        for (coordinate, value) in self.coordinates.iter().zip(at) {
+            match *coordinate {
+                CurvatureCoordinate::Slippage { group, which } => {
+                    write_slippage(&mut parameters.slippage[group], which, expit(*value));
+                }
+                CurvatureCoordinate::SpectrumRatio { class } => ratios[class] = float::exp(*value),
+                CurvatureCoordinate::Concentration => parameters.concentration = float::exp(*value),
+            }
+        }
+        normalise(&mut ratios);
+        parameters.length_spectrum = ratios;
+        parameters
+    }
+}
+
+/// **The second derivatives of `total` at `center`, and its slope**, by central differences of
+/// `steps`: the curvature as a row-major `p × p` matrix, `(f(x + hⱼ) − 2 f(x) + f(x − hⱼ)) / hⱼ²` on
+/// the diagonal and `(f(+hᵢ +hⱼ) − f(+hᵢ −hⱼ) − f(−hᵢ +hⱼ) + f(−hᵢ −hⱼ)) / 4hᵢhⱼ` off it, and the slope
+/// `(f(x + hⱼ) − f(x − hⱼ)) / 2hⱼ` from the same points — `1 + 2p²` evaluations.
+///
+/// **The points are visited grouped by the coordinates `costly` names**, so a scorer that rebuilds
+/// something whenever those change — the read likelihoods, when a slippage number moves — rebuilds
+/// it once a distinct setting rather than once a point. The order changes no value.
+fn curvature_of(
+    center: &[f64],
+    steps: &[f64],
+    costly: impl Fn(usize) -> bool,
+    mut total: impl FnMut(&[f64]) -> f64,
+) -> (Vec<f64>, Vec<f64>) {
+    // One point of the differences: the coordinates it moves, and which way.
+    type Moves = Vec<(usize, i8)>;
+    let p = center.len();
+    // The centre moves none.
+    let mut points: Vec<Moves> = vec![Vec::new()];
+    for j in 0..p {
+        points.push(vec![(j, 1)]);
+        points.push(vec![(j, -1)]);
+    }
+    for i in 0..p {
+        for j in i + 1..p {
+            for (a, b) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                points.push(vec![(i, a), (j, b)]);
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..points.len()).collect();
+    order.sort_by_key(|&point| {
+        let (costly_moves, others): (Moves, Moves) =
+            points[point].iter().partition(|(j, _)| costly(*j));
+        (costly_moves, others)
+    });
+    let mut values = vec![0.0; points.len()];
+    for point in order {
+        let mut at = center.to_vec();
+        for &(j, sign) in &points[point] {
+            at[j] += f64::from(sign) * steps[j];
+        }
+        values[point] = total(&at);
+    }
+    let at_centre = values[0];
+    let mut hessian = vec![0.0; p * p];
+    let mut slope = vec![0.0; p];
+    for j in 0..p {
+        let (up, down) = (values[1 + 2 * j], values[2 + 2 * j]);
+        hessian[j * p + j] = (up - 2.0 * at_centre + down) / (steps[j] * steps[j]);
+        slope[j] = (up - down) / (2.0 * steps[j]);
+    }
+    let mut next = 1 + 2 * p;
+    for i in 0..p {
+        for j in i + 1..p {
+            let [both_up, up_down, down_up, both_down] = [
+                values[next],
+                values[next + 1],
+                values[next + 2],
+                values[next + 3],
+            ];
+            next += 4;
+            let entry = (both_up - up_down - down_up + both_down) / (4.0 * steps[i] * steps[j]);
+            hessian[i * p + j] = entry;
+            hessian[j * p + i] = entry;
+        }
+    }
+    (hessian, slope)
+}
+
+/// **The standard errors of one stratum's fit at `parameters`** (`fit_precision.md` §4.2).
+///
+/// The curvature of the stratum's **total** log-likelihood — the mean a tract the climb maximises,
+/// times the tracts it is a mean over; the mean's curvature would give every error too large by the
+/// square root of the tract count — over every number the stratum fits, on the scales the climb
+/// uses, by central differences ([`curvature_of`]). Its negative is the information, inverted over
+/// the numbers it identifies ([`invert_identified`](super::fit::invert_identified)): a number whose
+/// curvature is not negative once the others are accounted for — a flat or a saddle direction — is
+/// dropped and has no error, and the rest are inverted without it. The variances are carried to each
+/// number's own scale by its derivative: `p(1 − p)` for a slippage number, the concentration itself
+/// for its logarithm, and for a share of the spectrum the derivative of the shares in the log-ratios.
+///
+/// **Cost:** `1 + 2p²` evaluations of the stratum's likelihood for `p` numbers — 513 at one slippage
+/// group and thirteen classes — once a stratum, at the winning walk's answer.
+fn standard_errors_at(
+    evidence: &StratumEvidence,
+    parameters: &Parameters,
+    homozygote_excess: &[f64],
+    live_groups: &[bool],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> StratumErrors {
+    standard_errors_with_step(
+        evidence,
+        parameters,
+        homozygote_excess,
+        live_groups,
+        config,
+        threads,
+        CURVATURE_STEP,
+    )
+}
+
+/// [`standard_errors_at`] with the central differences' step given, which a test varies.
+fn standard_errors_with_step(
+    evidence: &StratumEvidence,
+    parameters: &Parameters,
+    homozygote_excess: &[f64],
+    live_groups: &[bool],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+    step: f64,
+) -> StratumErrors {
+    let genotypes = genotype_pairs((2 * config.allele_span + 1) as usize);
+    let mut scorer = Scorer::new(evidence, homozygote_excess, &genotypes, config, threads);
+    let curvature = curvature_at(&mut scorer, evidence, parameters, live_groups, step);
+    errors_on_the_natural_scale(
+        &curvature.layout,
+        parameters,
+        live_groups,
+        &curvature.identified,
+    )
+}
+
+/// **What turns the climb's score into the stratum's total log-likelihood**: the score is the mean a
+/// tract over every tract, those without reads included (spec §4.1's trap), so the total is it times
+/// every tract. The curvature (§4.2) and the walk's trigger (§4.3) are both in the total's units.
+fn tracts_a_mean_is_over(evidence: &StratumEvidence) -> f64 {
+    evidence.tracts.len() as f64
+}
+
+/// One stratum's curvature at a point, inverted: the numbers it is taken over, the inverse of the
+/// information over those it identifies, and the slope of the total log-likelihood in each, on the
+/// climb's scales.
+struct CurvatureAt {
+    layout: CurvatureLayout,
+    identified: super::fit::Identified,
+    slope: Vec<f64>,
+}
+
+/// **The curvature and slope of the stratum's total log-likelihood at `parameters`**, by central
+/// differences of `step` on the climb's scales ([`curvature_of`]), the information — the curvature's
+/// negative — inverted over the numbers it identifies ([`invert_identified`](super::fit::invert_identified)).
+fn curvature_at(
+    scorer: &mut Scorer<'_>,
+    evidence: &StratumEvidence,
+    parameters: &Parameters,
+    live_groups: &[bool],
+    step: f64,
+) -> CurvatureAt {
+    let layout = CurvatureLayout::of(parameters, live_groups);
+    let center = layout.center(parameters);
+    let steps = vec![step; center.len()];
+    let tracts = tracts_a_mean_is_over(evidence);
+    let (hessian, slope) = curvature_of(
+        &center,
+        &steps,
+        |j| matches!(layout.coordinates[j], CurvatureCoordinate::Slippage { .. }),
+        |at| tracts * scorer.score(&layout.parameters_at(parameters, at)),
+    );
+    let p = center.len();
+    let information: Vec<f64> = hessian.iter().map(|entry| -entry).collect();
+    let own_curvature: Vec<f64> = (0..p).map(|j| information[j * p + j]).collect();
+    let identified = super::fit::invert_identified(&information, p, &own_curvature);
+    CurvatureAt {
+        layout,
+        identified,
+        slope,
+    }
+}
+
+/// **Each number's distance to where the likelihood peaks, as a Newton step estimates it**, on the
+/// number's own scale, laid out as [`StratumErrors`] is: the step `I⁻¹ g` over the coordinates the
+/// information identifies (the others held), carried to each number's scale by the same derivatives
+/// its error is — `p(1 − p)` for a slippage number, the concentration itself, the shares' slopes in
+/// the log-ratios.
+fn newton_distances_on_the_natural_scale(
+    curvature: &CurvatureAt,
+    parameters: &Parameters,
+    live_groups: &[bool],
+) -> StratumDistances {
+    let CurvatureAt {
+        layout,
+        identified,
+        slope,
+    } = curvature;
+    let kept = identified.kept.len();
+    let mut step = vec![0.0; layout.coordinates.len()];
+    for (row, &coordinate) in identified.kept.iter().enumerate() {
+        step[coordinate] = (0..kept)
+            .map(|column| identified.inverse[row * kept + column] * slope[identified.kept[column]])
+            .sum();
+    }
+    let step_of = |wanted: CurvatureCoordinate| {
+        layout
+            .coordinates
+            .iter()
+            .position(|coordinate| *coordinate == wanted)
+            .map_or(0.0, |index| step[index])
+    };
+    let slippage = live_groups
+        .iter()
+        .enumerate()
+        .map(|(group, live)| {
+            live.then(|| {
+                let of = |which: usize| {
+                    let value = read_slippage(&parameters.slippage[group], which);
+                    value * (1.0 - value) * step_of(CurvatureCoordinate::Slippage { group, which })
+                };
+                SlippageDistances {
+                    level: of(0),
+                    shorter_share: of(1),
+                    fall_off: of(2),
+                }
+            })
+        })
+        .collect();
+    let spectrum = &parameters.length_spectrum;
+    let ratio_steps: Vec<(usize, f64)> = (0..spectrum.len())
+        .map(|class| (class, step_of(CurvatureCoordinate::SpectrumRatio { class })))
+        .collect();
+    let length_spectrum = (0..spectrum.len())
+        .map(|class| {
+            ratio_steps
+                .iter()
+                .map(|&(j, d)| {
+                    spectrum[class] * (if j == class { 1.0 } else { 0.0 } - spectrum[j]) * d
+                })
+                .sum()
+        })
+        .collect();
+    StratumDistances {
+        slippage,
+        length_spectrum,
+        concentration: parameters.concentration * step_of(CurvatureCoordinate::Concentration),
+    }
+}
+
+/// Each number's distance from where the likelihood peaks, laid out as [`StratumErrors`] is: per live
+/// slippage group the level's, the shorter share's and the fall-off's; per class its share's; the
+/// concentration's.
+struct StratumDistances {
+    slippage: Vec<Option<SlippageDistances>>,
+    length_spectrum: Vec<f64>,
+    concentration: f64,
+}
+
+/// One slippage group's three distances from the peak, named as [`SlippageErrors`] names their errors.
+#[derive(Debug, Clone, Copy)]
+struct SlippageDistances {
+    level: f64,
+    shorter_share: f64,
+    fall_off: f64,
+}
+
+/// **The furthest any number is from where the likelihood peaks, in its own errors**, over the
+/// numbers with an error; `None` when none has one.
+fn furthest_in_errors(errors: &StratumErrors, distances: &StratumDistances) -> Option<f64> {
+    let mut pairs: Vec<(StratumError, f64)> = Vec::new();
+    for (group, distance) in errors.slippage.iter().zip(&distances.slippage) {
+        if let (Some(group), Some(distance)) = (group, distance) {
+            pairs.extend([
+                (group.level, distance.level),
+                (group.shorter_share, distance.shorter_share),
+                (group.fall_off, distance.fall_off),
+            ]);
+        }
+    }
+    pairs.extend(
+        errors
+            .length_spectrum
+            .iter()
+            .copied()
+            .zip(distances.length_spectrum.iter().copied()),
+    );
+    pairs.push((errors.concentration, distances.concentration));
+    pairs
+        .into_iter()
+        .filter_map(|(error, distance)| {
+            let ratio = distance.abs() / error.value()?;
+            // A distance that is not a number is not settled.
+            Some(if ratio.is_nan() { f64::INFINITY } else { ratio })
+        })
+        .reduce(f64::max)
+}
+
+/// The errors [`standard_errors_at`] reports, from the inverse over the identified coordinates: a
+/// coordinate dropped from it, or whose variance is not positive, is [`StratumError::NotIdentified`];
+/// one whose error on the climb's scale exceeds [`NOT_PLACED`], or a number in `[0, 1]` whose error
+/// exceeds that range, is [`StratumError::NotPlaced`]; a class with no share is
+/// [`StratumError::NoShare`].
+fn errors_on_the_natural_scale(
+    layout: &CurvatureLayout,
+    parameters: &Parameters,
+    live_groups: &[bool],
+    identified: &super::fit::Identified,
+) -> StratumErrors {
+    let kept = identified.kept.len();
+    // Each layout coordinate's row in the inverse, `None` when it was dropped.
+    let row_of = |coordinate: CurvatureCoordinate| {
+        let index = layout.coordinates.iter().position(|c| *c == coordinate)?;
+        identified.kept.iter().position(|&k| k == index)
+    };
+    // A coordinate's error on the climb's scale, and what that says of the number.
+    let on_its_scale = |coordinate: CurvatureCoordinate| -> Result<f64, StratumError> {
+        let row = row_of(coordinate).ok_or(StratumError::NotIdentified)?;
+        let variance = identified.inverse[row * kept + row];
+        if !(variance.is_finite() && variance > 0.0) {
+            return Err(StratumError::NotIdentified);
+        }
+        let error = variance.sqrt();
+        if error > NOT_PLACED {
+            return Err(StratumError::NotPlaced);
+        }
+        Ok(error)
+    };
+    let estimated = |error: f64| {
+        if error.is_finite() && error > 0.0 {
+            StratumError::Estimated(error)
+        } else {
+            StratumError::NotIdentified
+        }
+    };
+    // A number in `[0, 1]` — a slippage number, a share — whose error is wider than that whole range
+    // is not placed by the tracts either (spec §3.2's rule, on the number's own scale). The largest
+    // class's share has no log-ratio of its own; its error comes through the other classes'.
+    let within_its_range = |error: StratumError| match error {
+        StratumError::Estimated(value) if value > 1.0 => StratumError::NotPlaced,
+        other => other,
+    };
+    let slippage = live_groups
+        .iter()
+        .enumerate()
+        .map(|(group, live)| {
+            live.then(|| {
+                let of = |which: usize| match on_its_scale(CurvatureCoordinate::Slippage {
+                    group,
+                    which,
+                }) {
+                    Ok(error) => {
+                        let value = read_slippage(&parameters.slippage[group], which);
+                        within_its_range(estimated(error * value * (1.0 - value)))
+                    }
+                    Err(reason) => reason,
+                };
+                SlippageErrors {
+                    level: of(0),
+                    shorter_share: of(1),
+                    fall_off: of(2),
+                }
+            })
+        })
+        .collect();
+    let spectrum = &parameters.length_spectrum;
+    // The spectrum's coordinates the inverse kept, with their rows.
+    let ratios: Vec<(usize, usize)> = (0..spectrum.len())
+        .filter_map(|class| Some((class, row_of(CurvatureCoordinate::SpectrumRatio { class })?)))
+        .collect();
+    let length_spectrum = (0..spectrum.len())
+        .map(|class| {
+            if spectrum[class] <= 0.0 {
+                return StratumError::NoShare;
+            }
+            if class != layout.largest_class {
+                // Its own log-ratio must be placed before its share can be.
+                if let Err(reason) = on_its_scale(CurvatureCoordinate::SpectrumRatio { class }) {
+                    return reason;
+                }
+            }
+            if ratios.is_empty() {
+                return StratumError::NotIdentified;
+            }
+            // The share's slope in each kept log-ratio: `s_k (δ_kj − s_j)`.
+            let slope: Vec<f64> = ratios
+                .iter()
+                .map(|&(j, _)| spectrum[class] * (if j == class { 1.0 } else { 0.0 } - spectrum[j]))
+                .collect();
+            let mut total = 0.0;
+            for (a, &(_, row_a)) in ratios.iter().enumerate() {
+                for (b, &(_, row_b)) in ratios.iter().enumerate() {
+                    total += slope[a] * identified.inverse[row_a * kept + row_b] * slope[b];
+                }
+            }
+            within_its_range(estimated(total.sqrt()))
+        })
+        .collect();
+    let concentration = match on_its_scale(CurvatureCoordinate::Concentration) {
+        Ok(error) => estimated(error * parameters.concentration),
+        Err(reason) => reason,
+    };
+    StratumErrors {
+        slippage,
+        length_spectrum,
+        concentration,
+    }
+}
+
+/// One pass of coordinate ascent over everything the stratum fits, offering each point it moves to
+/// to `held`.
 ///
 /// **The slippage numbers move first and the frequencies after**, because moving slippage is
 /// what invalidates the cached read likelihoods; doing it the other way round would rebuild
 /// them on every spectrum coordinate.
+///
+/// **Each point's score is the one its golden section measured**, at exactly the parameters it
+/// then writes, so offering it costs no evaluation.
 fn climb_one_round(
     parameters: &mut Parameters,
     scorer: &mut Scorer<'_>,
     live_groups: &[bool],
     classes: usize,
+    held: &mut HeldPoint<Parameters>,
 ) {
     for (group, live) in live_groups.iter().enumerate() {
         if !live {
@@ -1057,7 +2128,7 @@ fn climb_one_round(
         }
         for which in 0..3 {
             let current = read_slippage(&parameters.slippage[group], which);
-            let moved = climb_scalar(
+            let (moved, score) = climb_scalar(
                 |x| {
                     let mut trial = parameters.clone();
                     write_slippage(&mut trial.slippage[group], which, expit(x));
@@ -1067,13 +2138,14 @@ fn climb_one_round(
                 3.0,
             );
             write_slippage(&mut parameters.slippage[group], which, expit(moved));
+            held.offer(parameters, score);
         }
     }
 
     // The spectrum, one class at a time on a log scale, renormalised each time.
     for class in 0..classes {
         let current = float::ln(parameters.length_spectrum[class].max(1e-9));
-        let moved = climb_scalar(
+        let (moved, score) = climb_scalar(
             |x| {
                 let mut trial = parameters.clone();
                 trial.length_spectrum[class] = float::exp(x);
@@ -1085,9 +2157,10 @@ fn climb_one_round(
         );
         parameters.length_spectrum[class] = float::exp(moved);
         normalise(&mut parameters.length_spectrum);
+        held.offer(parameters, score);
     }
 
-    let moved = climb_scalar(
+    let (moved, score) = climb_scalar(
         |x| {
             let mut trial = parameters.clone();
             trial.concentration = float::exp(x);
@@ -1097,6 +2170,7 @@ fn climb_one_round(
         2.5,
     );
     parameters.concentration = float::exp(moved);
+    held.offer(parameters, score);
 }
 
 fn read_slippage(slippage: &Slippage, which: usize) -> f64 {
@@ -1126,12 +2200,317 @@ fn normalise(weights: &mut [f64]) {
 // Spending the pool on the walks rather than on the strata
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// A stratum read from a subset of samples (spec §4.4)
+// ---------------------------------------------------------------------
+
+impl StratumEvidence {
+    /// **The same stratum read from the samples `keep` marks, and no others.** Every tract is kept,
+    /// one whose readers are all left out kept empty: the score is a mean over every tract either
+    /// way (spec §4.1's trap), and a tract without reads moves no answer. The counts the fit does
+    /// not take per sample — the guard's and the substitution counts — stay the whole stratum's.
+    fn of_samples(&self, keep: &[bool]) -> StratumEvidence {
+        StratumEvidence {
+            stratum: self.stratum,
+            tracts: self
+                .tracts
+                .iter()
+                .map(|tract| TractReads {
+                    samples: tract
+                        .samples
+                        .iter()
+                        .filter(|reads| keep[reads.sample as usize])
+                        .cloned()
+                        .collect(),
+                })
+                .collect(),
+            read_span: self.read_span,
+            groups: self.groups,
+            tracts_over_guard_threshold: self.tracts_over_guard_threshold,
+            reads_reaching_not_crossing: self.reads_reaching_not_crossing,
+            guard_reads: self.guard_reads,
+            bases_compared: self.bases_compared,
+            mismatching_bases: self.mismatching_bases,
+        }
+    }
+
+    /// **Which samples put reads of each slippage group in this stratum**, a row of `samples`
+    /// flags a group.
+    fn readers_by_group(&self, samples: usize) -> Vec<Vec<bool>> {
+        let mut readers = vec![vec![false; samples]; self.groups];
+        for tract in &self.tracts {
+            for reads in &tract.samples {
+                for (group, counts) in &reads.by_group {
+                    if counts.iter().any(|count| *count > 0) {
+                        readers[*group as usize][reads.sample as usize] = true;
+                    }
+                }
+            }
+        }
+        readers
+    }
+}
+
+/// **Adds to `keep` the samples a stratum's subset of `size` holds** (spec §4.4 as amended at
+/// checkpoint D2), so a larger subset always holds the smaller one's samples: the first `size` in
+/// `order`; then, for every slippage group that put reads in the stratum, that group's readers in
+/// `order` until `min_a_group` of them are in, or all of its own.
+fn grow_subset(
+    keep: &mut [bool],
+    readers: &[Vec<bool>],
+    order: &[usize],
+    size: usize,
+    min_a_group: usize,
+) {
+    for &sample in order.iter().take(size) {
+        keep[sample] = true;
+    }
+    for group_readers in readers {
+        let mut held = group_readers
+            .iter()
+            .zip(keep.iter())
+            .filter(|(reads, kept)| **reads && **kept)
+            .count();
+        for &sample in order {
+            if held >= min_a_group {
+                break;
+            }
+            if group_readers[sample] && !keep[sample] {
+                keep[sample] = true;
+                held += 1;
+            }
+        }
+    }
+}
+
+/// **The size the next subset takes**: twice `size`, or every sample once that would hold more than
+/// three quarters of the cohort's `samples` (spec §4.4 as amended at checkpoint D2) — at 2,169
+/// samples, 256, 512 and 1,024, then every sample rather than 2,048.
+fn next_subset_size(size: usize, samples: usize) -> usize {
+    let doubled = size.saturating_mul(2);
+    if doubled.saturating_mul(4) > samples.saturating_mul(3) {
+        samples
+    } else {
+        doubled
+    }
+}
+
+/// **Whether a fitted stratum's slippage level is measured to `target`** of itself in every live
+/// slippage group that `still_growing` marks: the level's standard error below `target` times the
+/// level. A group whose level has no error, or is zero, has not reached it. A group not marked —
+/// every one of its readers already in the subset — cannot be measured better by growing, so it is
+/// not asked; with no group asked, the level is as well measured as it can be.
+fn level_is_measured_to(
+    parameters: &Parameters,
+    live_groups: &[bool],
+    errors: &StratumErrors,
+    still_growing: &[bool],
+    target: f64,
+) -> bool {
+    live_groups
+        .iter()
+        .zip(&still_growing[..live_groups.len()])
+        .enumerate()
+        .filter(|(_, (live, growing))| **live && **growing)
+        .all(|(group, _)| {
+            let level = parameters.slippage[group].level;
+            errors.slippage[group]
+                .and_then(|group| group.level.value())
+                .is_some_and(|error| {
+                    error.partial_cmp(&(target * level)) == Some(std::cmp::Ordering::Less)
+                })
+        })
+}
+
+/// **One stratum of a large cohort, fitted on a subset of its samples grown until its slippage
+/// level is measured precisely enough** (spec §4.4 as amended at checkpoint D2).
+///
+/// - **The refusal floor is judged on the whole stratum**, before any subset is drawn: a stratum
+///   whose reads are all in samples outside the first subset grows its subset rather than being
+///   refused.
+/// - The first subset is the first [`SampleSubsets::first`] samples of `order`, each slippage group
+///   with reads in the stratum topped up to [`SampleSubsets::min_samples_a_group`] of its readers
+///   ([`grow_subset`]). Each larger subset holds the smaller one's samples, doubles it, and takes
+///   every sample once it would pass three quarters of them ([`next_subset_size`]).
+/// - **A subset holding fewer tracts with reads than [`SsrFitConfig::refusal_floor`] is not
+///   fitted**; it grows.
+/// - The first subset fitted is fitted from every starting point; each later one by one walk from
+///   the last answer, which decides only whether to grow.
+/// - The subset stops growing once every live slippage group that still has readers outside it has
+///   a level with a standard error below [`SampleSubsets::level_relative_error_target`] of itself
+///   ([`level_is_measured_to`]), or once it holds every sample. **The subset the answer is taken
+///   from is fitted from every starting point and from the last answer as well**, the best walk
+///   winning: one walk from a nearby answer can settle short of the best of several.
+/// - The answer's evidence counts are that subset's, and the fit records how many samples it held
+///   ([`StratumFit::samples_fitted_on`]); its walks are that subset's.
+fn fit_on_growing_subsets(
+    evidence: &StratumEvidence,
+    order: &[usize],
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    threads: WhereTheThreadsGo,
+) -> StratumOutcome {
+    assert_eq!(
+        order.len(),
+        homozygote_excess.len(),
+        "the sample order must rank every sample the homozygote excess is given for"
+    );
+    if let Some(refused) = refused_before_any_walk(evidence, config) {
+        return refused;
+    }
+    // The precondition `the_best_walk` states, for the walks taken here directly.
+    assert!(
+        config.allele_span >= 1,
+        "`SsrFitConfig::allele_span` must be at least 1, so a tract can carry a length other than \
+         its reference's"
+    );
+    let subsets = config.subsets;
+    let samples = order.len();
+    let readers = evidence.readers_by_group(samples);
+    let genotypes = genotype_pairs(allele_classes_of(config));
+    let mut keep = vec![false; samples];
+    let mut size = subsets.first.max(1);
+    if size.saturating_mul(4) > samples.saturating_mul(3) {
+        size = samples;
+    }
+    // The last answer, which a larger subset's one walk starts from.
+    let mut last: Option<Parameters> = None;
+    loop {
+        grow_subset(
+            &mut keep,
+            &readers,
+            order,
+            size,
+            subsets.min_samples_a_group,
+        );
+        let every_sample = keep.iter().all(|kept| *kept);
+        // **The whole stratum when every sample is in**, so a stratum that grows that far holds
+        // no second copy of its evidence.
+        let copied;
+        let subset: &StratumEvidence = if every_sample {
+            evidence
+        } else {
+            copied = evidence.of_samples(&keep);
+            &copied
+        };
+        let live_groups = subset.groups_with_reads();
+        let fit_it = live_groups.iter().any(|live| *live)
+            && (every_sample || subset.tracts_with_reads() >= config.refusal_floor);
+        if fit_it {
+            let climb = |start: Parameters| {
+                climb_from_parameters(
+                    subset,
+                    start,
+                    homozygote_excess,
+                    &genotypes,
+                    &live_groups,
+                    config,
+                    threads,
+                )
+            };
+            let from_every_start = || -> Vec<Climb> {
+                config
+                    .starting_points
+                    .iter()
+                    .map(|start| {
+                        climb(Parameters::start(
+                            *start,
+                            subset.groups,
+                            allele_classes_of(config),
+                        ))
+                    })
+                    .collect()
+            };
+            let mut climbs = match &last {
+                None => from_every_start(),
+                Some(previous) => vec![climb(previous.clone())],
+            };
+            let mut best = the_best_of_the_walks(&climbs);
+            let errors_at = |climb: &mut Climb| {
+                climb.standard_errors.take().unwrap_or_else(|| {
+                    standard_errors_at(
+                        subset,
+                        &climb.parameters,
+                        homozygote_excess,
+                        &live_groups,
+                        config,
+                        threads,
+                    )
+                })
+            };
+            let mut errors = errors_at(&mut climbs[best]);
+            let still_growing: Vec<bool> = readers
+                .iter()
+                .map(|group| {
+                    group
+                        .iter()
+                        .zip(&keep)
+                        .any(|(reads, kept)| *reads && !*kept)
+                })
+                .collect();
+            let precise = level_is_measured_to(
+                &climbs[best].parameters,
+                &live_groups,
+                &errors,
+                &still_growing,
+                subsets.level_relative_error_target,
+            );
+            if precise || every_sample {
+                if last.is_some() {
+                    // The answer's subset: every starting point, then the walk from the last
+                    // answer, the best winning.
+                    let warm = climbs.remove(0);
+                    climbs = from_every_start();
+                    climbs.push(warm);
+                    best = the_best_of_the_walks(&climbs);
+                    // The walk from the last answer was judged already; a starting point's
+                    // winner needs its own errors.
+                    if best != climbs.len() - 1 {
+                        errors = errors_at(&mut climbs[best]);
+                    }
+                }
+                let walks = climbs.iter().map(Climb::record).collect();
+                let winner = climbs.swap_remove(best);
+                let mut fit = the_fit_of(subset, &[], &live_groups, winner, walks, Some(errors));
+                fit.samples_fitted_on = Some(keep.iter().filter(|kept| **kept).count());
+                return StratumOutcome::Fitted(Box::new(fit));
+            }
+            last = Some(climbs.swap_remove(best).parameters);
+        } else if every_sample {
+            return StratumOutcome::Refused {
+                stratum: evidence.stratum,
+                tracts: evidence.tracts_with_reads(),
+                reason: StratumRefusal::NoSpanningReads,
+            };
+        }
+        size = next_subset_size(size, samples);
+    }
+}
+
+/// The allele classes the climb fits, `2 × span + 1`.
+fn allele_classes_of(config: &SsrFitConfig) -> usize {
+    (2 * config.allele_span + 1) as usize
+}
+
+/// **Which of `climbs` scored highest**, the earlier winning a tie and a score that is not a number
+/// never winning — the rule [`the_better_walk`] keeps.
+fn the_best_of_the_walks(climbs: &[Climb]) -> usize {
+    let mut best = 0;
+    for (index, climb) in climbs.iter().enumerate().skip(1) {
+        if climb.score.partial_cmp(&climbs[best].score) == Some(std::cmp::Ordering::Greater) {
+            best = index;
+        }
+    }
+    best
+}
+
 /// **What a stratum's outcome is before a single walk is taken**, or `None` when it is to be
 /// fitted.
 ///
 /// Both arms of [`fit_strata`] ask this, and they must ask the same thing: a stratum refused by
 /// one and fitted by the other would make the answer depend on how the threads were spent, which
-/// is exactly what the arms are built not to do.
+/// is exactly what the arms are built not to do. [`fit_on_growing_subsets`] asks it of the whole
+/// stratum, before any subset is drawn.
 fn refused_before_any_walk(
     evidence: &StratumEvidence,
     config: &SsrFitConfig,
@@ -1157,6 +2536,10 @@ fn refused_before_any_walk(
     }
     None
 }
+
+/// A stratum whose walks are done: the slippage groups they moved, the walk that won, and every walk's
+/// record in starting-point order.
+type WalkedStratum = (Vec<bool>, Climb, Vec<WalkRecord>);
 
 /// **Every stratum's every starting point, handed to the pool as one flat list of walks.**
 ///
@@ -1271,17 +2654,46 @@ fn every_stratum_from_every_start(
     // order the walks finished in: `climbed` is in the order of `walks`, and `walks` lists a
     // stratum's starting points in the order the config gives them.
     let mut climbed = climbed.into_iter();
-    before_walking
+    let winners: Vec<Result<StratumOutcome, WalkedStratum>> = before_walking
         .into_iter()
+        .map(|entry| {
+            entry.map_err(|live| {
+                let own: Vec<Climb> = (&mut climbed).take(starts).collect();
+                let walks = own.iter().map(Climb::record).collect();
+                let best = own
+                    .into_iter()
+                    .fold(None, the_better_walk)
+                    .expect("at least one starting point");
+                (live, best, walks)
+            })
+        })
+        .collect();
+    // **Each winner's standard errors, one stratum a thread**, under the same bound as the walks: a
+    // thread holds one stratum's table at a time. Collected in stratum order.
+    winners
+        .into_par_iter()
         .enumerate()
         .map(|(index, entry)| match entry {
             Ok(outcome) => outcome,
-            Err(live) => {
-                let best = (&mut climbed)
-                    .take(starts)
-                    .fold(None, the_better_walk)
-                    .expect("at least one starting point");
-                StratumOutcome::Fitted(Box::new(the_fit_of(&strata[index], &[], &live, best)))
+            Err((live, mut best, walks)) => {
+                let standard_errors = best.standard_errors.take().unwrap_or_else(|| {
+                    standard_errors_at(
+                        &strata[index],
+                        &best.parameters,
+                        homozygote_excess,
+                        &live,
+                        config,
+                        WhereTheThreadsGo::AcrossStrata,
+                    )
+                });
+                StratumOutcome::Fitted(Box::new(the_fit_of(
+                    &strata[index],
+                    &[],
+                    &live,
+                    best,
+                    walks,
+                    Some(standard_errors),
+                )))
             }
         })
         .collect()
@@ -1374,9 +2786,45 @@ fn a_pool_for(
 /// replaced by a curve through every stratum of the period, weighted, which reaches strata
 /// neither could. Removing pooling also removed the run's expensive arm — 1,036.8 s against
 /// 155.5 s on the same cohort (`str_slippage_level_curve.md` §5.1).
+///
+/// **Every stratum is read from every sample**, whatever `config.subsets` says. A run calls
+/// [`fit_strata_on_sample_subsets`], which reads a large cohort's strata from a subset grown to the
+/// precision their levels need.
 pub fn fit_strata(
     strata: &[StratumEvidence],
     homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> Vec<StratumOutcome> {
+    fit_strata_with(strata, homozygote_excess, None, config)
+}
+
+/// **[`fit_strata`], with each stratum of a large cohort read from a subset of its samples**
+/// (spec §4.4): a cohort of more than [`SampleSubsets::first`] samples has each
+/// stratum fitted on the first samples of `sample_order`, grown until its slippage level is measured
+/// to [`SampleSubsets::level_relative_error_target`] ([`fit_on_growing_subsets`]). A cohort of no
+/// more is [`fit_strata`]'s, exactly.
+///
+/// `sample_order` is every sample of the cohort, in the fixed order
+/// [`sample_order`](super::sample_order::sample_order) gives, indexed as the evidence's
+/// [`SampleTractReads::sample`] and `homozygote_excess` are.
+pub fn fit_strata_on_sample_subsets(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    sample_order: &[usize],
+    config: &SsrFitConfig,
+) -> Vec<StratumOutcome> {
+    if sample_order.len() <= config.subsets.first {
+        return fit_strata(strata, homozygote_excess, config);
+    }
+    fit_strata_with(strata, homozygote_excess, Some(sample_order), config)
+}
+
+/// [`fit_strata`]'s work, every stratum read from every sample when `sample_order` is `None` and
+/// from a growing subset of them otherwise; everything after the strata's own answers is the same.
+fn fit_strata_with(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    sample_order: Option<&[usize]>,
     config: &SsrFitConfig,
 ) -> Vec<StratumOutcome> {
     // **Every stratum is fitted on its own tracts and no other's.** Pooling a thin stratum's
@@ -1427,24 +2875,70 @@ pub fn fit_strata(
         strata.len(),
         config.starting_points.len(),
     ));
-    let mut outcomes: Vec<StratumOutcome> = match &pool {
-        Some(pool) => pool
+    let progress = |index: usize| {
+        stage.now_and_then(|into| {
+            format!(
+                "repeat-tract fit: stratum {} of {}; {into}",
+                index + 1,
+                strata.len()
+            )
+        });
+    };
+    let mut outcomes: Vec<StratumOutcome> = match (sample_order, &pool) {
+        (None, Some(pool)) => pool
             .install(|| every_stratum_from_every_start(strata, homozygote_excess, config, &stage)),
-        None => strata
+        (None, None) => strata
             .iter()
             .enumerate()
             .map(|(index, evidence)| {
-                stage.now_and_then(|into| {
-                    format!(
-                        "repeat-tract fit: stratum {} of {}; {into}",
-                        index + 1,
-                        strata.len()
-                    )
-                });
+                progress(index);
                 one_at_a_time(evidence)
             })
             .collect(),
+        // **A subset grows one fit after another**, so a stratum's walks cannot be handed to the
+        // pool together as a whole stratum's are; the strata are, each on one thread.
+        (Some(order), Some(pool)) => pool.install(|| {
+            strata
+                .par_iter()
+                .map(|evidence| {
+                    fit_on_growing_subsets(
+                        evidence,
+                        order,
+                        homozygote_excess,
+                        config,
+                        WhereTheThreadsGo::AcrossStrata,
+                    )
+                })
+                .collect()
+        }),
+        (Some(order), None) => strata
+            .iter()
+            .enumerate()
+            .map(|(index, evidence)| {
+                progress(index);
+                fit_on_growing_subsets(
+                    evidence,
+                    order,
+                    homozygote_excess,
+                    config,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                )
+            })
+            .collect(),
     };
+
+    if let Some(order) = sample_order
+        && let Some(summary) = subsets_summary(&outcomes, order.len())
+    {
+        stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
+    }
+
+    if let Some(summary) = climb_endings_summary(&outcomes, config.max_rounds) {
+        stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
+    }
+    if let Some(summary) = standard_errors_summary(&outcomes) {
+        stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
+    }
 
     // **The curves are drawn after every stratum has its own answer, never during.** Stage one
     // is untouched by this — a stratum's own fitted numbers are the same whether curves are drawn
@@ -1466,6 +2960,146 @@ pub fn fit_strata(
     }
     stage.always(|into| format!("repeat-tract fit: done; {into}"));
     outcomes
+}
+
+/// **What the run's log says about the subsets the strata were read from** (spec §4.4): over the
+/// strata fitted on their own tracts, the fewest, the median and the most samples a stratum was
+/// fitted on, and how many grew to every sample. `None` when no fitted stratum took a subset.
+fn subsets_summary(outcomes: &[StratumOutcome], cohort: usize) -> Option<String> {
+    let mut sizes: Vec<usize> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StratumOutcome::Fitted(fit) => fit.samples_fitted_on,
+            _ => None,
+        })
+        .collect();
+    if sizes.is_empty() {
+        return None;
+    }
+    sizes.sort_unstable();
+    Some(format!(
+        "the {strata} strata fitted on their own tracts were read from a subset of the cohort's \
+         {cohort} samples: {fewest} to {most}, median {median}; {every} of them grew to every \
+         sample",
+        strata = sizes.len(),
+        fewest = sizes[0],
+        most = sizes[sizes.len() - 1],
+        median = sizes[sizes.len() / 2],
+        every = sizes.iter().filter(|size| **size >= cohort).count(),
+    ))
+}
+
+/// **What the run's log says about how the climbs ended** (`fit_precision.md` §4.3): over the strata
+/// fitted on their own tracts, how many walks settled — and how many of those at a point where no
+/// number had an error — stopped at a round that lost, or ran out of rounds, the rounds they took
+/// between them, and in how many strata the winning walk settled.
+/// `None` when no fitted stratum records its walks.
+fn climb_endings_summary(outcomes: &[StratumOutcome], max_rounds: u32) -> Option<String> {
+    let fits: Vec<&StratumFit> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StratumOutcome::Fitted(fit) if !fit.walks.is_empty() => Some(fit.as_ref()),
+            _ => None,
+        })
+        .collect();
+    if fits.is_empty() {
+        return None;
+    }
+    let walks = || fits.iter().flat_map(|fit| fit.walks.iter());
+    let ended = |ending: ClimbEnding| walks().filter(|walk| walk.ending == ending).count();
+    let rounds: u64 = walks().map(|walk| u64::from(walk.rounds)).sum();
+    Some(format!(
+        "the climbs of the {strata} strata fitted on their own tracts: of their {count} walks, \
+         {settled} settled ({no_error} of them at a point where no number had an error), {lost} \
+         stopped at a round that lost (its moves undone) and {out} ran \
+         out of their {max_rounds} rounds, {rounds} rounds in all; the winning walk settled in \
+         {winners} of the {strata}",
+        strata = fits.len(),
+        count = walks().count(),
+        settled = ended(ClimbEnding::Settled),
+        no_error = walks().filter(|walk| walk.settled_with_no_error).count(),
+        lost = ended(ClimbEnding::LostARound),
+        out = ended(ClimbEnding::OutOfRounds),
+        winners = fits.iter().filter(|fit| fit.ending.settled()).count(),
+    ))
+}
+
+/// **What the run's log says about the strata's own standard errors**, once every stratum has its
+/// answer and before any curve blends it (`fit_precision.md` §4.2): over the strata fitted on their
+/// own tracts, the median and largest error of the level and of the concentration as a percentage of
+/// the number, and of the two shares, the fall-off and the length classes' shares as they are; then
+/// how many numbers have no error, by why. `None` when no stratum carries errors.
+fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
+    let errors: Vec<(&StratumFit, &StratumErrors)> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            StratumOutcome::Fitted(fit) => Some((fit.as_ref(), fit.standard_errors.as_ref()?)),
+            _ => None,
+        })
+        .collect();
+    if errors.is_empty() {
+        return None;
+    }
+    // Per kind of number, its errors (divided by `scale`), and the numbers without one by why.
+    let mut level = Vec::new();
+    let mut shorter = Vec::new();
+    let mut fall_off = Vec::new();
+    let mut concentration = Vec::new();
+    let mut shares = Vec::new();
+    let (mut numbers, mut not_identified, mut not_placed, mut no_share) = (0, 0, 0, 0);
+    let mut count = |error: StratumError, into: &mut Vec<f64>, scale: f64| {
+        numbers += 1;
+        match error {
+            StratumError::Estimated(error) => into.push(error / scale),
+            StratumError::NotIdentified => not_identified += 1,
+            StratumError::NotPlaced => not_placed += 1,
+            StratumError::NoShare => no_share += 1,
+        }
+    };
+    for (fit, stratum) in &errors {
+        for (slippage, group) in fit.slippage.iter().zip(&stratum.slippage) {
+            let (Some(slippage), Some(group)) = (slippage, group) else {
+                continue;
+            };
+            count(group.level, &mut level, slippage.level / 100.0);
+            count(group.shorter_share, &mut shorter, 1.0);
+            count(group.fall_off, &mut fall_off, 1.0);
+        }
+        count(
+            stratum.concentration,
+            &mut concentration,
+            fit.concentration / 100.0,
+        );
+        for share in &stratum.length_spectrum {
+            count(*share, &mut shares, 1.0);
+        }
+    }
+    let described = |mut values: Vec<f64>, what: &str, relative: bool| {
+        if values.is_empty() {
+            return format!("{what}: none has an error");
+        }
+        values.sort_by(f64::total_cmp);
+        let (median, largest) = (values[values.len() / 2], values[values.len() - 1]);
+        if relative {
+            format!("{what} ± median {median:.0}% of itself (largest {largest:.0}%)")
+        } else {
+            format!("{what} ± median {median:.3} (largest {largest:.3})")
+        }
+    };
+    Some(format!(
+        "standard errors of the {} strata fitted on their own tracts, before any curve: {}; {}; {}; \
+         {}; {}; of their {numbers} numbers, {not_placed} have no error because the tracts do not \
+         place them (an error of more than {NOT_PLACED} on the climb's logit or log scale, or \
+         wider than a share's whole range), \
+         {not_identified} because the tracts cannot tell them apart from the others, and {no_share} \
+         are length classes with no share",
+        errors.len(),
+        described(level, "slippage level", true),
+        described(shorter, "shorter share", false),
+        described(fall_off, "fall-off", false),
+        described(concentration, "concentration", true),
+        described(shares, "length-class shares", false),
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -1519,8 +3153,8 @@ pub struct PeriodLengthSpectrum {
     pub tracts_fitted: usize,
     /// How many of the period's strata contributed tracts to it.
     pub strata_pooled: usize,
-    /// Whether the climb settled or ran out of rounds. **Running out is never reported as
-    /// convergence**, exactly as [`StratumFit::converged`].
+    /// Whether the climb settled. **Running out of rounds, or stopping at a round that lost, is
+    /// never reported as convergence**, exactly as [`StratumFit::ending`].
     pub converged: bool,
 }
 
@@ -1590,15 +3224,17 @@ pub fn fit_period_length_spectra(
         // independent of each other as the strata are, so this loop could be spread the other
         // way too; it is left alone because it runs over a handful of periods rather than over
         // a hundred and forty strata, and because no calling run reaches it yet.
-        let Some(fit) = fit_pooled(
+        // **No standard errors here**: only the length spectrum and the concentration are kept,
+        // and nothing reads their errors at this rung.
+        let Some((best, walks, live_groups)) = the_best_walk(
             &pooled,
-            &[],
             homozygote_excess,
             config,
             WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
         ) else {
             continue;
         };
+        let fit = the_fit_of(&pooled, &[], &live_groups, best, walks, None);
         fitted.insert(
             period,
             PeriodLengthSpectrum {
@@ -1613,7 +3249,7 @@ pub fn fit_period_length_spectra(
                     .iter()
                     .filter(|evidence| evidence.tracts_with_reads() > 0)
                     .count(),
-                converged: fit.converged,
+                converged: fit.ending.settled(),
             },
         );
     }
@@ -2745,8 +4381,10 @@ fn expit(x: f64) -> f64 {
     1.0 / (1.0 + float::exp(-x))
 }
 
-/// Golden-section on one coordinate, over a bracket of `span` either side of `start`.
-fn climb_scalar(mut score: impl FnMut(f64) -> f64, start: f64, span: f64) -> f64 {
+/// Golden-section on one coordinate, over a bracket of `span` either side of `start`: the point it
+/// ends on, and its score there. **It never scores `start` itself**, so the point it returns can
+/// score lower than `start` did.
+fn climb_scalar(mut score: impl FnMut(f64) -> f64, start: f64, span: f64) -> (f64, f64) {
     const GOLDEN: f64 = 0.618_033_988_749_895;
     let (mut low, mut high) = (start - span, start + span);
     let (mut left, mut right) = (high - GOLDEN * (high - low), low + GOLDEN * (high - low));
@@ -2766,7 +4404,11 @@ fn climb_scalar(mut score: impl FnMut(f64) -> f64, start: f64, span: f64) -> f64
             at_right = score(right);
         }
     }
-    if at_left > at_right { left } else { right }
+    if at_left > at_right {
+        (left, at_left)
+    } else {
+        (right, at_right)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3214,6 +4856,24 @@ mod tests {
         assert_eq!(counts.substitution_rate(), Some(3.0 / 4_000.0));
     }
 
+    /// **A count with one outcome only takes half a count of the other**, so no substitution rate
+    /// is exactly zero or one (owner, checkpoint E): no mismatch in 459 bases gives 0.5 / 460,
+    /// every base mismatched gives 459.5 / 460, and a count that saw both keeps its ratio.
+    #[test]
+    fn a_count_with_one_outcome_only_takes_half_a_count_of_the_other() {
+        let only = |mismatching_bases: u64| StratumSubstitutionCounts {
+            stratum: Stratum {
+                period: 3,
+                reference_repeats: 7,
+            },
+            bases_compared: 459,
+            mismatching_bases,
+        };
+        assert_eq!(only(0).substitution_rate(), Some(0.5 / 460.0));
+        assert_eq!(only(459).substitution_rate(), Some(459.5 / 460.0));
+        assert_eq!(only(1).substitution_rate(), Some(1.0 / 459.0));
+    }
+
     // -----------------------------------------------------------------
     // The answer does not depend on how the work was divided
     // -----------------------------------------------------------------
@@ -3261,6 +4921,30 @@ mod tests {
         }
     }
 
+    /// A fitted stratum's standard errors laid out flat, each absent one as a negative code saying
+    /// why — so a schedule's errors are compared as the numbers are. A fit must carry them.
+    fn every_error(fit: &StratumFit) -> Vec<f64> {
+        let errors = fit
+            .standard_errors
+            .as_ref()
+            .expect("a fitted stratum carries its errors");
+        let code = |error: &StratumError| match error {
+            StratumError::Estimated(error) => *error,
+            StratumError::NotIdentified => -1.0,
+            StratumError::NotPlaced => -2.0,
+            StratumError::NoShare => -3.0,
+        };
+        let mut flat: Vec<f64> = errors.length_spectrum.iter().map(code).collect();
+        flat.push(code(&errors.concentration));
+        for group in &errors.slippage {
+            match group {
+                Some(it) => flat.extend([&it.level, &it.shorter_share, &it.fall_off].map(code)),
+                None => flat.extend([-4.0; 3]),
+            }
+        }
+        flat
+    }
+
     /// Every number a fitted class carries, laid out flat so two runs can be compared value by
     /// value rather than by a derived `PartialEq` the type does not have.
     fn every_fitted_number(outcomes: &[StratumOutcome]) -> Vec<f64> {
@@ -3272,6 +4956,22 @@ mod tests {
                     flat.push(fit.concentration);
                     flat.push(fit.log_likelihood_a_tract);
                     flat.extend(fit.length_spectrum.iter().copied());
+                    flat.extend(every_error(fit));
+                    // How the winner ended, and every walk's ending, rounds and judgements.
+                    let code = |ending: ClimbEnding| match ending {
+                        ClimbEnding::Settled => 1.0,
+                        ClimbEnding::LostARound => 2.0,
+                        ClimbEnding::OutOfRounds => 3.0,
+                    };
+                    flat.push(code(fit.ending));
+                    for walk in &fit.walks {
+                        flat.extend([
+                            code(walk.ending),
+                            f64::from(walk.rounds),
+                            f64::from(walk.judgements),
+                            f64::from(u8::from(walk.settled_with_no_error)),
+                        ]);
+                    }
                     for slippage in &fit.slippage {
                         match slippage {
                             Some(it) => flat.extend([it.level, it.shorter_share, it.fall_off]),
@@ -3640,10 +5340,2161 @@ mod tests {
         );
     }
 
+    /// **Central differences return a quadratic's second derivatives and its slope**, off the
+    /// diagonal as on it, in `1 + 2p²` evaluations — whichever order the points are visited in.
+    #[test]
+    fn central_differences_give_a_quadratics_second_derivatives() {
+        let curvature = [
+            [4.0, 1.0, -0.5, 0.2],
+            [1.0, 3.0, 0.3, 0.0],
+            [-0.5, 0.3, 2.0, -0.7],
+            [0.2, 0.0, -0.7, 5.0],
+        ];
+        let slope = [0.3, -1.1, 0.7, 2.0];
+        let center = [0.5, -2.0, 1.5, 0.1];
+        let mut evaluations = 0;
+        let (hessian, slope_found) = curvature_of(
+            &center,
+            &[0.01, 0.02, 0.03, 0.04],
+            |j| j == 2,
+            |at| {
+                evaluations += 1;
+                let mut value = 7.0;
+                for i in 0..4 {
+                    value += slope[i] * at[i];
+                    for j in 0..4 {
+                        value -= 0.5 * at[i] * curvature[i][j] * at[j];
+                    }
+                }
+                value
+            },
+        );
+        assert_eq!(evaluations, 1 + 2 * 4 * 4);
+        for i in 0..4 {
+            let truth = slope[i] - (0..4).map(|j| curvature[i][j] * center[j]).sum::<f64>();
+            assert!(
+                (slope_found[i] - truth).abs() < 1e-8,
+                "slope {i}: {} against {truth}",
+                slope_found[i]
+            );
+            for j in 0..4 {
+                assert!(
+                    (hessian[i * 4 + j] + curvature[i][j]).abs() < 1e-8,
+                    "({i}, {j}): {} against {}",
+                    hessian[i * 4 + j],
+                    -curvature[i][j]
+                );
+            }
+        }
+    }
+
+    /// **Each variance is carried to its number's own scale**: a slippage number's by `p(1 − p)`, the
+    /// concentration's by itself, a share's by the shares' slopes in the log-ratios, the largest
+    /// class's included; a dropped coordinate leaves its number with no error, and the others keep
+    /// theirs.
+    #[test]
+    fn the_errors_are_carried_to_each_numbers_own_scale() {
+        let parameters = Parameters {
+            slippage: vec![Slippage {
+                level: 0.1,
+                shorter_share: 0.8,
+                fall_off: 0.3,
+            }],
+            length_spectrum: vec![0.2, 0.5, 0.3],
+            concentration: 2.0,
+        };
+        let layout = CurvatureLayout::of(&parameters, &[true]);
+        assert_eq!(layout.largest_class, 1);
+        assert_eq!(layout.coordinates.len(), 6);
+        // Variances 0.01 … 0.06 on the diagonal, and a covariance between the two log-ratios.
+        let n = 6;
+        let mut inverse = vec![0.0; n * n];
+        for j in 0..n {
+            inverse[j * n + j] = 0.01 * (j + 1) as f64;
+        }
+        inverse[3 * n + 4] = 0.01;
+        inverse[4 * n + 3] = 0.01;
+        let identified = crate::parameter_estimation::joint::fit::Identified {
+            kept: (0..n).collect(),
+            dropped: Vec::new(),
+            inverse: inverse.clone(),
+        };
+        let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
+        let group = errors.slippage[0].expect("a live group");
+        let close = |got: StratumError, expected: f64| {
+            let got = got.value().expect("an error");
+            assert!((got - expected).abs() < 1e-12, "{got} against {expected}");
+        };
+        close(group.level, 0.01_f64.sqrt() * 0.1 * 0.9);
+        close(group.shorter_share, 0.02_f64.sqrt() * 0.8 * 0.2);
+        close(group.fall_off, 0.03_f64.sqrt() * 0.3 * 0.7);
+        close(errors.concentration, 0.06_f64.sqrt() * 2.0);
+        // The shares' slopes in (log-ratio of class 0, log-ratio of class 2).
+        let s = [0.2, 0.5, 0.3];
+        let (v0, v2, c) = (0.04, 0.05, 0.01);
+        let share_error =
+            |g0: f64, g2: f64| (g0 * g0 * v0 + 2.0 * g0 * g2 * c + g2 * g2 * v2).sqrt();
+        close(
+            errors.length_spectrum[0],
+            share_error(s[0] * (1.0 - s[0]), -s[0] * s[2]),
+        );
+        close(
+            errors.length_spectrum[1],
+            share_error(-s[1] * s[0], -s[1] * s[2]),
+        );
+        close(
+            errors.length_spectrum[2],
+            share_error(-s[2] * s[0], s[2] * (1.0 - s[2])),
+        );
+
+        // Class 2's log-ratio dropped: its share has no error, class 0's and the largest's keep one
+        // from class 0's ratio alone.
+        let kept: Vec<usize> = vec![0, 1, 2, 3, 5];
+        let dropped_inverse: Vec<f64> = kept
+            .iter()
+            .flat_map(|&row| kept.iter().map(move |&column| (row, column)))
+            .map(|(row, column)| inverse[row * n + column])
+            .collect();
+        let identified = crate::parameter_estimation::joint::fit::Identified {
+            kept,
+            dropped: vec![4],
+            inverse: dropped_inverse,
+        };
+        let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
+        assert_eq!(errors.length_spectrum[2], StratumError::NotIdentified);
+        close(errors.length_spectrum[0], (s[0] * (1.0 - s[0])) * v0.sqrt());
+        close(errors.length_spectrum[1], (s[1] * s[0]) * v0.sqrt());
+        close(errors.concentration, 0.06_f64.sqrt() * 2.0);
+
+        // Class 2's log-ratio kept but its variance 10⁶: that ratio is not placed, and the shares
+        // whose errors it enters come out wider than their whole range, so they are not placed either.
+        let mut wide = inverse.clone();
+        wide[4 * n + 4] = 1e6;
+        let identified = crate::parameter_estimation::joint::fit::Identified {
+            kept: (0..n).collect(),
+            dropped: Vec::new(),
+            inverse: wide,
+        };
+        let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
+        assert_eq!(
+            errors.length_spectrum,
+            [StratumError::NotPlaced; 3],
+            "class 2 on its own scale, classes 0 and 1 wider than the range"
+        );
+        close(
+            errors.slippage[0].expect("a live group").level,
+            0.01_f64.sqrt() * 0.1 * 0.9,
+        );
+    }
+
+    /// **A stratum's errors are its total log-likelihood's, not the mean's**: on drawn strata of 400
+    /// and of 1,600 tracts, every number has an error, the level's shrinks by about half as the tracts
+    /// quadruple — the mean's curvature would leave it unchanged — and the fitted level lies within
+    /// three of its errors of the truth it was drawn at.
+    #[test]
+    fn a_stratums_errors_shrink_as_its_tracts_grow() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let spectrum = spectrum_of(3);
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let level_error = |tracts: usize| {
+            let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, tracts, 20, 6, 1, 29);
+            let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+            let errors = fitted
+                .standard_errors
+                .as_ref()
+                .expect("a fit computes its errors");
+            let group = errors.slippage[0].expect("the one group has reads");
+            assert!(
+                [group.level, group.shorter_share, group.fall_off]
+                    .iter()
+                    .all(|error| error.value().is_some()),
+                "{group:?}"
+            );
+            assert!(errors.concentration.value().is_some(), "{errors:?}");
+            assert!(
+                errors
+                    .length_spectrum
+                    .iter()
+                    .all(|error| error.value().is_some()),
+                "{errors:?}"
+            );
+            let level = fitted.slippage[0].expect("fitted").level;
+            let error = group.level.value().expect("checked");
+            eprintln!("{tracts} tracts: level {level:.5} ± {error:.5}; {errors:?}");
+            assert!(
+                (level - truth.level).abs() < 3.0 * error,
+                "{tracts} tracts: level {level} ± {error} against a truth of {}",
+                truth.level
+            );
+            error
+        };
+        let (few, many) = (level_error(400), level_error(1_600));
+        let ratio = many / few;
+        assert!(
+            (0.35..0.65).contains(&ratio),
+            "the level's error went from {few} to {many}, a ratio of {ratio}"
+        );
+    }
+
+    /// **The errors do not depend on the differences' step**: at the default step and at a third of
+    /// it, every error of a drawn stratum's fit agrees to within 2 in 100.
+    #[test]
+    fn a_stratums_errors_do_not_depend_on_the_difference_step() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let spectrum = spectrum_of(3);
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 600, 20, 6, 1, 31);
+        let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+        let parameters = Parameters {
+            slippage: vec![fitted.slippage[0].expect("fitted")],
+            length_spectrum: fitted.length_spectrum.clone(),
+            concentration: fitted.concentration,
+        };
+        let at = |step: f64| {
+            standard_errors_with_step(
+                &evidence,
+                &parameters,
+                &[0.4; 20],
+                &[true],
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                step,
+            )
+        };
+        let (default, finer) = (at(CURVATURE_STEP), at(CURVATURE_STEP / 3.0));
+        let flatten = |errors: &StratumErrors| {
+            let group = errors.slippage[0].expect("a live group");
+            let mut all = vec![
+                group.level,
+                group.shorter_share,
+                group.fall_off,
+                errors.concentration,
+            ];
+            all.extend(errors.length_spectrum.iter().copied());
+            all.into_iter().map(StratumError::value).collect::<Vec<_>>()
+        };
+        for (index, (a, b)) in flatten(&default)
+            .into_iter()
+            .zip(flatten(&finer))
+            .enumerate()
+        {
+            let (a, b) = (a.expect("an error"), b.expect("an error"));
+            assert!((a - b).abs() < 0.02 * a, "number {index}: {a} against {b}");
+        }
+        assert_eq!(
+            fitted.standard_errors,
+            Some(default),
+            "the fit's errors are the default step's"
+        );
+    }
+
+    /// **A number the climb left at the end of its reach is not placed**, where carrying its flat
+    /// curvature to its own scale would report an error hundreds of times too small (review of plan
+    /// step C1): on three thin drawn strata the fall-off runs towards zero, the shorter share towards
+    /// one, and the concentration off to millions — each stops where the climb stopped, still rising
+    /// (the fall-off at 5 × 10⁻⁵ against a truth of 0.25, the shorter share at 0.9999 against 0.83, the
+    /// concentration at 8 × 10⁴ against 50), and each comes back without an error, the others of the
+    /// stratum keeping theirs.
+    #[test]
+    fn a_number_the_climb_left_at_the_end_of_its_reach_is_not_placed() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let spectrum = spectrum_of(3);
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let fit = |tracts: usize, samples: usize, depth: u32, seed: u64, concentration: f64| {
+            let evidence = draw_stratum(
+                truth,
+                &spectrum,
+                concentration,
+                0.4,
+                tracts,
+                samples,
+                depth,
+                1,
+                seed,
+            );
+            let fitted =
+                fit_stratum(&evidence, &vec![0.4; samples], &config).expect("reads were drawn");
+            eprintln!(
+                "{tracts} x {samples} x {depth}: {:?}, concentration {}; {:?}",
+                fitted.slippage[0], fitted.concentration, fitted.standard_errors
+            );
+            fitted
+        };
+        let errors_of = |fitted: &StratumFit| {
+            fitted
+                .standard_errors
+                .clone()
+                .expect("a fit computes its errors")
+        };
+
+        let fall_off_run_off = fit(10, 8, 6, 16, 0.5);
+        assert!(fall_off_run_off.slippage[0].expect("fitted").fall_off < 1e-3);
+        let group = errors_of(&fall_off_run_off).slippage[0].expect("fitted");
+        assert_eq!(group.fall_off, StratumError::NotPlaced);
+        assert!(group.level.value().is_some(), "{group:?}");
+
+        let share_run_off = fit(15, 4, 3, 6, 0.5);
+        assert!(share_run_off.slippage[0].expect("fitted").shorter_share > 1.0 - 1e-3);
+        let group = errors_of(&share_run_off).slippage[0].expect("fitted");
+        assert_eq!(group.shorter_share, StratumError::NotPlaced);
+
+        let concentration_run_off = fit(200, 4, 3, 8, 50.0);
+        assert!(concentration_run_off.concentration > 1e4);
+        let errors = errors_of(&concentration_run_off);
+        assert_eq!(errors.concentration, StratumError::NotPlaced);
+        assert!(
+            errors.slippage[0].expect("fitted").level.value().is_some(),
+            "{errors:?}"
+        );
+    }
+
+    /// **Tracts no sample read change no error**: they add a factor of one to the likelihood, so the
+    /// total — the mean a tract times every tract, those without reads included — is the same, and so
+    /// is its curvature, whichever count the mean is taken over.
+    #[test]
+    fn tracts_without_reads_change_no_error() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 20, 6, 1, 37);
+        let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+        let parameters = Parameters {
+            slippage: vec![fitted.slippage[0].expect("fitted")],
+            length_spectrum: fitted.length_spectrum.clone(),
+            concentration: fitted.concentration,
+        };
+        let mut padded = evidence.clone();
+        padded
+            .tracts
+            .extend(std::iter::repeat_n(TractReads::default(), 300));
+        let errors = |evidence: &StratumEvidence| {
+            standard_errors_at(
+                evidence,
+                &parameters,
+                &[0.4; 20],
+                &[true],
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+            )
+        };
+        let (plain, with_empty) = (errors(&evidence), errors(&padded));
+        let flat = |errors: &StratumErrors| {
+            let group = errors.slippage[0].expect("a live group");
+            let mut all = vec![
+                group.level,
+                group.shorter_share,
+                group.fall_off,
+                errors.concentration,
+            ];
+            all.extend(errors.length_spectrum.iter().copied());
+            all.into_iter()
+                .map(|error| error.value().expect("an error"))
+                .collect::<Vec<f64>>()
+        };
+        for (a, b) in flat(&plain).into_iter().zip(flat(&with_empty)) {
+            assert!((a - b).abs() <= 1e-6 * a, "{a} against {b}");
+        }
+    }
+
+    /// **The curvature is taken at the fitted answer**: the layout's centre, set back through
+    /// `parameters_at`, is the answer the climb returned, every number to within 10⁻¹² of itself.
+    #[test]
+    fn the_curvatures_centre_is_the_fitted_answer() {
+        let parameters = Parameters {
+            slippage: vec![
+                Slippage {
+                    level: 0.05,
+                    shorter_share: 0.83,
+                    fall_off: 0.25,
+                },
+                Slippage {
+                    level: 0.2,
+                    shorter_share: 0.4,
+                    fall_off: 0.6,
+                },
+            ],
+            length_spectrum: vec![0.1, 0.05, 0.6, 0.2, 0.05],
+            concentration: 3.7,
+        };
+        let layout = CurvatureLayout::of(&parameters, &[true, true]);
+        let back = layout.parameters_at(&parameters, &layout.center(&parameters));
+        let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-12 * b.abs(), "{a} against {b}");
+        for (a, b) in back.slippage.iter().zip(&parameters.slippage) {
+            close(a.level, b.level);
+            close(a.shorter_share, b.shorter_share);
+            close(a.fall_off, b.fall_off);
+        }
+        for (a, b) in back.length_spectrum.iter().zip(&parameters.length_spectrum) {
+            close(*a, *b);
+        }
+        close(back.concentration, parameters.concentration);
+    }
+
+    /// **The log's summary**: the level's and the concentration's errors as a percentage of the
+    /// number, the others as they are, the median and the largest, and the numbers without an error
+    /// counted by why.
+    #[test]
+    fn the_summary_gives_each_kinds_errors_and_counts_the_missing_by_why() {
+        let with_errors = |level: f64, level_error: StratumError, concentration: StratumError| {
+            let StratumOutcome::Fitted(mut fit) = fitted_at(2, 10, level, 1_000) else {
+                unreachable!("fitted_at builds a fit")
+            };
+            fit.standard_errors = Some(StratumErrors {
+                slippage: vec![Some(SlippageErrors {
+                    level: level_error,
+                    shorter_share: StratumError::Estimated(0.05),
+                    fall_off: StratumError::NotPlaced,
+                })],
+                length_spectrum: vec![StratumError::Estimated(0.01)],
+                concentration,
+            });
+            StratumOutcome::Fitted(fit)
+        };
+        let outcomes = [
+            with_errors(
+                0.1,
+                StratumError::Estimated(0.02),
+                StratumError::Estimated(0.3),
+            ),
+            with_errors(
+                0.04,
+                StratumError::Estimated(0.004),
+                StratumError::NotIdentified,
+            ),
+            with_errors(0.2, StratumError::NotIdentified, StratumError::NotPlaced),
+        ];
+        let summary = standard_errors_summary(&outcomes).expect("errors were carried");
+        for part in [
+            "the 3 strata",
+            "slippage level ± median 20% of itself (largest 20%)",
+            "shorter share ± median 0.050 (largest 0.050)",
+            "fall-off: none has an error",
+            "concentration ± median 50% of itself (largest 50%)",
+            "of their 15 numbers, 4 have no error because the tracts do not place them",
+            "2 because the tracts cannot tell them apart",
+            "and 0 are length classes with no share",
+        ] {
+            assert!(summary.contains(part), "{part:?} in {summary}");
+        }
+        assert_eq!(
+            standard_errors_summary(&[fitted_at(2, 10, 0.1, 1_000)]),
+            None
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Whether a stratum's errors mean what they say (plan step C2)
+    // -----------------------------------------------------------------
+
+    /// How often one kind of number lands within one and two of its errors of the truth, over many
+    /// drawn strata, and how many came back without an error.
+    #[derive(Debug, Default)]
+    struct StratumCoverage {
+        /// Each estimate's distance from the truth in its own errors, signed.
+        distances: Vec<f64>,
+        not_identified: usize,
+        not_placed: usize,
+    }
+
+    impl StratumCoverage {
+        fn record(&mut self, estimate: f64, truth: f64, error: StratumError) {
+            match error {
+                StratumError::Estimated(error) => self.distances.push((estimate - truth) / error),
+                StratumError::NotIdentified => self.not_identified += 1,
+                StratumError::NotPlaced => self.not_placed += 1,
+                StratumError::NoShare => {}
+            }
+        }
+
+        fn share_within(&self, errors: f64) -> f64 {
+            self.distances
+                .iter()
+                .filter(|distance| distance.abs() <= errors)
+                .count() as f64
+                / self.distances.len().max(1) as f64
+        }
+
+        fn mean(&self) -> f64 {
+            self.distances.iter().sum::<f64>() / self.distances.len().max(1) as f64
+        }
+
+        fn spread(&self) -> f64 {
+            let mean = self.mean();
+            (self
+                .distances
+                .iter()
+                .map(|distance| (distance - mean) * (distance - mean))
+                .sum::<f64>()
+                / (self.distances.len().max(2) - 1) as f64)
+                .sqrt()
+        }
+    }
+
+    /// How many strata each regime draws by default, and the variable that overrides it.
+    const STRATUM_DRAWS: usize = 100;
+    const STRATUM_DRAWS_VARIABLE: &str = "NG_FIT_PRECISION_STRATUM_DRAWS";
+
+    /// Draw `draws` strata of one regime from known numbers, fit each, and tally every estimate's
+    /// distance from the truth in its own errors, by kind; how many fits converged; and how many
+    /// draws gave nothing to tally — no fit, or no errors — which the test requires to be none.
+    #[allow(clippy::too_many_arguments)]
+    fn stratum_coverage_of(
+        truth: Slippage,
+        classes: usize,
+        concentration: f64,
+        tracts: usize,
+        samples: usize,
+        depth: u32,
+        draws: usize,
+        seed: u64,
+    ) -> (BTreeMap<&'static str, StratumCoverage>, usize, usize) {
+        let span = (classes / 2) as i32;
+        let spectrum = spectrum_of(classes);
+        let config = SsrFitConfig {
+            allele_span: span,
+            ..SsrFitConfig::default()
+        };
+        let mut tally: BTreeMap<&'static str, StratumCoverage> = BTreeMap::new();
+        let mut converged = 0;
+        let mut skipped = 0;
+        for draw in 0..draws {
+            let evidence = draw_stratum(
+                truth,
+                &spectrum,
+                concentration,
+                0.4,
+                tracts,
+                samples,
+                depth,
+                span,
+                seed + draw as u64,
+            );
+            let Some(fitted) = fit_stratum(&evidence, &vec![0.4; samples], &config) else {
+                skipped += 1;
+                continue;
+            };
+            converged += usize::from(fitted.ending.settled());
+            let errors = fitted
+                .standard_errors
+                .as_ref()
+                .expect("a fit computes its errors");
+            let (Some(slippage), Some(group)) = (fitted.slippage[0], errors.slippage[0]) else {
+                skipped += 1;
+                continue;
+            };
+            for (kind, estimate, truth, error) in [
+                ("slippage level", slippage.level, truth.level, group.level),
+                (
+                    "shorter share",
+                    slippage.shorter_share,
+                    truth.shorter_share,
+                    group.shorter_share,
+                ),
+                (
+                    "fall-off",
+                    slippage.fall_off,
+                    truth.fall_off,
+                    group.fall_off,
+                ),
+                (
+                    "concentration",
+                    fitted.concentration,
+                    concentration,
+                    errors.concentration,
+                ),
+            ] {
+                tally
+                    .entry(kind)
+                    .or_default()
+                    .record(estimate, truth, error);
+            }
+            for (class, (estimate, error)) in fitted
+                .length_spectrum
+                .iter()
+                .zip(&errors.length_spectrum)
+                .enumerate()
+            {
+                let kind = if class == span as usize {
+                    "reference-length share"
+                } else {
+                    "other length shares"
+                };
+                tally
+                    .entry(kind)
+                    .or_default()
+                    .record(*estimate, spectrum[class], *error);
+            }
+        }
+        (tally, converged, skipped)
+    }
+
+    /// **A stratum's errors mean what they say** (plan step C2, spec §4.5 item 1): strata drawn from
+    /// known slippage, a known length spectrum and concentration, many times in each regime, each
+    /// fitted by the fit's own rule; of every estimate with an error, the share within one error of
+    /// the truth and within two — about 68 in 100 and 95 in 100 for an error that means what it says —
+    /// with the mean distance (a bias, in errors) and the spread of the distances (about one). At
+    /// three allele classes over 300 tracts of 20 samples, at 3 reads a sample and at 30; and at the
+    /// production span, thirteen classes, over 200 tracts at 3 reads, on a quarter as many draws.
+    ///
+    /// **What it measured** (100 draws, `fit_precision_c2` report). At three classes the slippage
+    /// numbers and the concentration land within one error 61 to 76 times in 100 and within two 91 to
+    /// 99, their mean distance from the truth under a quarter of an error; the class shares are
+    /// covered less well at 30 reads (47 to 53 in 100 within one, spread 1.6). **At thirteen classes
+    /// the estimate itself is off** — the reference-length share a mean of 18 errors from its truth,
+    /// the concentration 8 — because the fixed 256-point integral over a tract's length frequencies
+    /// misrepresents the likelihood there (refitting one stratum at 1,024 and 4,096 points moved the
+    /// share from 0.17 to 0.23 and 0.31, against 0.30, and in review no point count up to 65,536 was
+    /// shown to suffice); so that regime is printed and not held to anything. The three-class regimes
+    /// are held to [`hold_to_the_three_class_bounds`] at the default count of draws.
+    ///
+    /// Ignored by default: 20 to 40 minutes in the container. `scripts/dev.sh env
+    /// NG_FIT_PRECISION_STRATUM_DRAWS=10 cargo test --release --lib a_stratums_errors_mean_what_they_say
+    /// -- --ignored --nocapture` shortens it, and checks nothing but that it runs.
+    #[test]
+    #[ignore = "a measurement over hundreds of fitted strata; run at a checkpoint"]
+    fn a_stratums_errors_mean_what_they_say() {
+        let draws = match std::env::var(STRATUM_DRAWS_VARIABLE) {
+            Err(std::env::VarError::NotPresent) => STRATUM_DRAWS,
+            Err(std::env::VarError::NotUnicode(value)) => {
+                panic!("{STRATUM_DRAWS_VARIABLE}={value:?} is not a positive whole number")
+            }
+            Ok(value) => value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|&count: &usize| count > 0)
+                .unwrap_or_else(|| {
+                    panic!("{STRATUM_DRAWS_VARIABLE}={value:?} is not a positive whole number")
+                }),
+        };
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        for (classes, tracts, depth, regime_draws) in [
+            (3, 300, 3, draws),
+            (3, 300, 30, draws),
+            (13, 200, 3, draws.div_ceil(4)),
+        ] {
+            let (tally, converged, skipped) = stratum_coverage_of(
+                truth,
+                classes,
+                0.5,
+                tracts,
+                20,
+                depth,
+                regime_draws,
+                0xC2C0_7E7A_0000_0000 + (classes as u64) * 1_000 + u64::from(depth),
+            );
+            let regime = format!("{classes} classes, {tracts} tracts x 20 samples x {depth} reads");
+            eprintln!(
+                "STRATUM COVERAGE {regime}: {converged} of {regime_draws} climbs settled within \
+                 their rounds; {skipped} draw(s) gave nothing to tally"
+            );
+            assert_eq!(
+                skipped, 0,
+                "{regime}: every draw is fitted and carries errors"
+            );
+            // Every kind printed before any is held to its bounds, so a failure shows the whole
+            // regime.
+            for (kind, coverage) in &tally {
+                eprintln!(
+                    "STRATUM COVERAGE {regime}, {kind}: {} estimates with an error, {} not \
+                     identified, {} not placed; within one error {:.3}, within two {:.3}; mean \
+                     distance {:+.3}, spread {:.3}",
+                    coverage.distances.len(),
+                    coverage.not_identified,
+                    coverage.not_placed,
+                    coverage.share_within(1.0),
+                    coverage.share_within(2.0),
+                    coverage.mean(),
+                    coverage.spread(),
+                );
+            }
+            if classes == 3 && regime_draws >= STRATUM_DRAWS {
+                for (kind, coverage) in &tally {
+                    hold_to_the_three_class_bounds(&regime, kind, coverage, regime_draws);
+                }
+            }
+        }
+    }
+
+    /// **The bounds a three-class regime is held to** at [`STRATUM_DRAWS`] draws or more, from the
+    /// runs of plan step C2 (report `fit_precision_c2`) with a margin: every draw gives every kind an
+    /// estimate, and every estimate an error; the slippage numbers and the concentration land within
+    /// one error 55 to 82 times in 100 and within two at least 88, their distances spread 0.85 to 1.2
+    /// times their errors, the mean distance under 0.4 errors — the shorter share sits +0.22 errors
+    /// high in every run; the class shares within one at least 40 in 100 and within two 75, which
+    /// accepts their measured under-coverage at 30 reads, due at least in part to the 256-point
+    /// integral (report §3).
+    ///
+    /// **What they cannot see**: every error scaled by 0.88 to 1.18 passes, and the class shares'
+    /// errors by much more (measured in review).
+    fn hold_to_the_three_class_bounds(
+        regime: &str,
+        kind: &str,
+        coverage: &StratumCoverage,
+        draws: usize,
+    ) {
+        let shares = kind.contains("length");
+        let expected = if kind == "other length shares" {
+            2 * draws
+        } else {
+            draws
+        };
+        assert_eq!(
+            (
+                coverage.distances.len(),
+                coverage.not_identified,
+                coverage.not_placed
+            ),
+            (expected, 0, 0),
+            "{regime}, {kind}: every estimate has an error"
+        );
+        let (one, two) = (coverage.share_within(1.0), coverage.share_within(2.0));
+        let (least_within_one, least_within_two) = if shares { (0.40, 0.75) } else { (0.55, 0.88) };
+        assert!(
+            one >= least_within_one && one <= 0.82 && two >= least_within_two,
+            "{regime}, {kind}: within one error {one:.3}, within two {two:.3}"
+        );
+        if !shares {
+            let spread = coverage.spread();
+            assert!(
+                (0.85..=1.2).contains(&spread),
+                "{regime}, {kind}: the distances spread {spread:.3} times the errors"
+            );
+            assert!(
+                coverage.mean().abs() < 0.4,
+                "{regime}, {kind}: the estimates sit {:+.3} errors from the truth",
+                coverage.mean()
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // When the climb stops (plan step C3)
+    // -----------------------------------------------------------------
+
+    /// Scripted rounds for the stopping rule: each round's best point part-way through, if any, and
+    /// where it ends, both as a mean a tract; and the points that have settled when judged. A walk
+    /// stands at the label `round` at a round's end and `round - 0.5` part-way through it.
+    struct Scripted<'a> {
+        rounds: std::slice::Iter<'a, (Option<f64>, f64)>,
+        settled_at: &'a [f64],
+        judged: Vec<f64>,
+    }
+
+    impl Climbing for Scripted<'_> {
+        type Point = f64;
+        type Judgement = f64;
+
+        fn one_round(&mut self, at: &mut f64, held: &mut HeldPoint<f64>) -> f64 {
+            let (part_way, end) = self
+                .rounds
+                .next()
+                .expect("a scripted round for every round walked");
+            if let Some(part_way) = part_way {
+                held.offer(&(*at + 0.5), *part_way);
+            }
+            *at += 1.0;
+            held.offer(at, *end);
+            *end
+        }
+
+        fn judge(&mut self, at: &f64) -> (bool, f64) {
+            self.judged.push(*at);
+            (self.settled_at.contains(at), *at)
+        }
+    }
+
+    /// Walk `rounds` from a score of `start`, and the points that were judged on the way.
+    fn scripted_walk(
+        start: f64,
+        rounds: &[(Option<f64>, f64)],
+        settled_at: &[f64],
+        trigger: f64,
+        tracts: f64,
+        max_rounds: u32,
+    ) -> (Walked<f64, f64>, Vec<f64>) {
+        let mut scripted = Scripted {
+            rounds: rounds.iter(),
+            settled_at,
+            judged: Vec::new(),
+        };
+        let walked = walk_until_settled(&mut scripted, 0.0, start, trigger, tracts, max_rounds);
+        (walked, scripted.judged)
+    }
+
+    /// Scores rising by `gains`, as a mean a tract over one tract.
+    fn rising_by(gains: &[f64]) -> Vec<(Option<f64>, f64)> {
+        gains
+            .iter()
+            .scan(0.0, |score, gain| {
+                *score += gain;
+                Some((None, *score))
+            })
+            .collect()
+    }
+
+    /// **The projection**: gains shrinking by a factor λ leave `gain · λ / (1 − λ)` to come; λ is
+    /// capped at 0.95, and is the cap on a first round, with no gain before it.
+    #[test]
+    fn the_gain_still_to_come_is_projected_from_the_last_two() {
+        assert!((projected_remaining_gain(1.0, Some(2.0)) - 1.0).abs() < 1e-15);
+        assert!((projected_remaining_gain(1.0, Some(4.0)) - 1.0 / 3.0).abs() < 1e-15);
+        // Gains that do not shrink are projected at the cap, nineteen times the last.
+        assert!((projected_remaining_gain(1.0, Some(0.5)) - 19.0).abs() < 1e-12);
+        assert!((projected_remaining_gain(1.0, None) - 19.0).abs() < 1e-12);
+        assert_eq!(projected_remaining_gain(0.0, Some(3.0)), 0.0);
+    }
+
+    /// **A walk is judged once the gain it can still make is below the trigger, and stops only when
+    /// a judged point has settled**: gains halving from 8 leave as much again to come, so at a
+    /// trigger of 0.6 the first point judged is the fifth round's; settled there, the walk stops
+    /// there; settled only at the eighth, it is judged at the fifth, the sixth and — the second
+    /// unsettled verdict putting the next off by a round — the eighth. A first round
+    /// is projected at the cap, so one gaining 0.003 is judged at once below a trigger of 0.08
+    /// (19 × 0.003 = 0.057) and one gaining 0.005 is not (0.095).
+    #[test]
+    fn a_walk_is_judged_once_its_projected_gain_is_small_and_stops_when_settled() {
+        let halving = rising_by(&[8.0, 4.0, 2.0, 1.0, 0.5, 0.25, 0.125, 0.0625]);
+        let (walked, judged) = scripted_walk(0.0, &halving, &[5.0], 0.6, 1.0, 10);
+        assert_eq!(
+            (walked.ending, walked.rounds, walked.at, walked.judgements),
+            (ClimbEnding::Settled, 5, 5.0, 1)
+        );
+        assert_eq!((judged, walked.judged_here), (vec![5.0], Some(5.0)));
+        assert!((walked.score - 15.5).abs() < 1e-12);
+
+        let (later, judged) = scripted_walk(0.0, &halving, &[8.0], 0.6, 1.0, 10);
+        assert_eq!(
+            (later.ending, later.rounds, later.judgements),
+            (ClimbEnding::Settled, 8, 3)
+        );
+        assert_eq!(judged, vec![5.0, 6.0, 8.0]);
+
+        let (quick, judged) = scripted_walk(0.0, &rising_by(&[0.003, 1.0]), &[1.0], 0.08, 1.0, 10);
+        assert_eq!(
+            (quick.ending, quick.rounds, judged),
+            (ClimbEnding::Settled, 1, vec![1.0])
+        );
+        let (not_quick, judged) =
+            scripted_walk(0.0, &rising_by(&[0.005, 0.0]), &[2.0], 0.08, 1.0, 10);
+        assert_eq!(
+            (not_quick.ending, not_quick.rounds, judged),
+            (ClimbEnding::Settled, 2, vec![2.0])
+        );
+    }
+
+    /// **The trigger is in the total's units**: the same mean gains, halving from 10⁻³, have a walk
+    /// of one tract judged on its first round (19 × 10⁻³ to come, below 0.08) and a walk of a
+    /// thousand tracts, whose total gains are a thousand times larger, only on the fifth (0.0625).
+    #[test]
+    fn the_trigger_is_on_the_total_log_likelihood_not_the_mean() {
+        let means = rising_by(&[1e-3, 5e-4, 2.5e-4, 1.25e-4, 6.25e-5, 3.125e-5]);
+        let every_point: Vec<f64> = (1..=6).map(f64::from).collect();
+        let (one, _) = scripted_walk(0.0, &means, &every_point, 0.08, 1.0, 10);
+        assert_eq!((one.ending, one.rounds), (ClimbEnding::Settled, 1));
+        let (thousand, _) = scripted_walk(0.0, &means, &every_point, 0.08, 1_000.0, 10);
+        assert_eq!(
+            (thousand.ending, thousand.rounds),
+            (ClimbEnding::Settled, 5)
+        );
+    }
+
+    /// **A round that loses is undone, and its best point judged at once**: back to a point part-way
+    /// through it when that was better than its start, and the walk goes on from there unless that
+    /// point has settled; back to its start when nothing was better, and if that has not settled the
+    /// walk stops there, having nowhere new to go. A round whose score is not a number is a loss.
+    #[test]
+    fn a_round_that_loses_is_undone_and_its_best_point_judged() {
+        // A trigger no gain reaches, so only the losing rounds are judged.
+        let trigger = 1e-12;
+        let part_way_better = [(None, 5.0), (None, 6.0), (Some(6.5), 5.5), (Some(6.4), 6.2)];
+        let (walked, judged) = scripted_walk(0.0, &part_way_better, &[], trigger, 1.0, 10);
+        assert_eq!(
+            (walked.ending, walked.rounds, walked.at, walked.score),
+            (ClimbEnding::LostARound, 4, 2.5, 6.5)
+        );
+        assert_eq!(judged, vec![2.5, 2.5]);
+
+        let (settles, _) = scripted_walk(0.0, &part_way_better, &[2.5], trigger, 1.0, 10);
+        assert_eq!(
+            (settles.ending, settles.rounds, settles.at, settles.score),
+            (ClimbEnding::Settled, 3, 2.5, 6.5)
+        );
+
+        let not_a_number = [(None, 5.0), (None, f64::NAN)];
+        let (walked, judged) = scripted_walk(0.0, &not_a_number, &[], trigger, 1.0, 10);
+        assert_eq!(
+            (walked.ending, walked.rounds, walked.at, walked.score),
+            (ClimbEnding::LostARound, 2, 1.0, 5.0)
+        );
+        assert_eq!(judged, vec![1.0]);
+    }
+
+    /// **Each unsettled verdict puts the next judgement off by one round more**: a walk whose every
+    /// round wants judging and that never settles is judged at rounds 1, 2, 4 and 7 of ten. A round
+    /// that loses while the judgement is put off, with nothing better than its start, is judged all
+    /// the same, and ends the walk.
+    #[test]
+    fn an_unsettled_verdict_puts_the_next_judgement_off() {
+        let (walked, judged) = scripted_walk(0.0, &rising_by(&[1e-3; 10]), &[], 1.0, 1.0, 10);
+        assert_eq!(
+            (walked.ending, walked.rounds, walked.judgements),
+            (ClimbEnding::OutOfRounds, 10, 4)
+        );
+        assert_eq!(judged, vec![1.0, 2.0, 4.0, 7.0]);
+        assert_eq!(walked.judged_here, None);
+
+        let losing_while_put_off = [(None, 1e-3), (None, 2e-3), (None, 1e-3)];
+        let (walked, judged) = scripted_walk(0.0, &losing_while_put_off, &[], 1.0, 1.0, 10);
+        assert_eq!(
+            (walked.ending, walked.rounds, walked.at, walked.score),
+            (ClimbEnding::LostARound, 3, 2.0, 2e-3)
+        );
+        assert_eq!(judged, vec![1.0, 2.0, 2.0]);
+        assert_eq!(walked.judged_here, Some(2.0));
+    }
+
+    /// The parameters a fitted stratum returned, every slippage group live.
+    fn parameters_of(fit: &StratumFit) -> Parameters {
+        Parameters {
+            slippage: fit
+                .slippage
+                .iter()
+                .map(|group| group.expect("every group live"))
+                .collect(),
+            length_spectrum: fit.length_spectrum.clone(),
+            concentration: fit.concentration,
+        }
+    }
+
+    /// **The winning walk's last judgement is the stratum's errors**, and they are exactly the
+    /// errors computed afresh at its answer, in both schedules (review of plan step C3).
+    #[test]
+    fn the_winning_walks_errors_are_the_errors_at_its_answer_in_both_schedules() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let mut strata = Vec::new();
+        for (repeats, seed) in [(10_u64, 41_u64), (11, 43)] {
+            let mut evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 20, 6, 1, seed);
+            evidence.stratum = Stratum {
+                period: 2,
+                reference_repeats: repeats,
+            };
+            strata.push(evidence);
+        }
+        let excess = [0.4; 20];
+        let mut config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        config.curve.draw_curves = false;
+        let fits_of = |at_once: usize| -> Vec<StratumFit> {
+            let config = SsrFitConfig {
+                strata_at_once: NonZeroUsize::new(at_once).expect("positive"),
+                ..config.clone()
+            };
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .expect("a pool");
+            pool.install(|| fit_strata(&strata, &excess, &config))
+                .into_iter()
+                .map(|outcome| match outcome {
+                    StratumOutcome::Fitted(fit) => *fit,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        let (serial, several) = (fits_of(1), fits_of(2));
+        for ((one, two), evidence) in serial.iter().zip(&several).zip(&strata) {
+            assert_eq!(one.ending, ClimbEnding::Settled, "{:?}", one.walks);
+            assert_eq!((&one.walks, one.ending), (&two.walks, two.ending));
+            let at = parameters_of(one);
+            for (fit, threads) in [
+                (one, WhereTheThreadsGo::AcrossTheTractsOfOneStratum),
+                (two, WhereTheThreadsGo::AcrossStrata),
+            ] {
+                let fresh = standard_errors_at(evidence, &at, &excess, &[true], &config, threads);
+                assert_eq!(fit.standard_errors.as_ref(), Some(&fresh));
+            }
+        }
+    }
+
+    /// **A walk at two slippage groups is judged on both**: on a drawn stratum whose samples read in
+    /// two groups, the point a long climb reached has settled; with group 1's level moved by one of its
+    /// errors, group 1's level is about one error away, group 0's is not, and the point has not
+    /// settled.
+    #[test]
+    fn a_walk_at_two_slippage_groups_is_judged_on_both() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let mut evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 40, 6, 1, 47);
+        for tract in &mut evidence.tracts {
+            for sample in tract
+                .samples
+                .iter_mut()
+                .filter(|sample| sample.sample >= 20)
+            {
+                for (group, _) in &mut sample.by_group {
+                    *group = 1;
+                }
+            }
+        }
+        evidence.groups = 2;
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let excess = [0.4; 40];
+        let genotypes = genotype_pairs(3);
+        let live = [true, true];
+        let path = trajectory_of(&evidence, &excess, config.starting_points[1], &config, 20);
+        let peak = the_best_of(path.iter()).0.clone();
+        let mut climbing = StratumClimb {
+            scorer: Scorer::new(
+                &evidence,
+                &excess,
+                &genotypes,
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+            ),
+            evidence: &evidence,
+            live_groups: &live,
+            classes: 3,
+            settled_fraction: SETTLED_FRACTION,
+        };
+        let (settled, errors) = climbing.judge(&peak);
+        assert!(settled, "{errors:?}");
+        let error_of = |group: usize| {
+            errors.slippage[group]
+                .expect("a live group")
+                .level
+                .value()
+                .expect("an error")
+        };
+        let mut moved = peak.clone();
+        moved.slippage[1].level += error_of(1);
+        let curvature = curvature_at(
+            &mut climbing.scorer,
+            &evidence,
+            &moved,
+            &live,
+            CURVATURE_STEP,
+        );
+        let distances = newton_distances_on_the_natural_scale(&curvature, &moved, &live);
+        let away =
+            |group: usize| distances.slippage[group].expect("a live group").level / error_of(group);
+        assert!((-1.3..-0.7).contains(&away(1)), "group 1: {}", away(1));
+        assert!(away(0).abs() < 0.3, "group 0: {}", away(0));
+        assert!(!climbing.judge(&moved).0);
+    }
+
+    /// **The furthest number counts every kind, and a distance that is not a number has not
+    /// settled**: the slippage numbers, a share and the concentration each set the furthest when they
+    /// are; numbers without an error are passed over; none with an error is `None`.
+    #[test]
+    fn the_furthest_number_counts_every_kind_and_a_distance_not_a_number_is_unsettled() {
+        let one = StratumError::Estimated(1.0);
+        let errors = StratumErrors {
+            slippage: vec![Some(SlippageErrors {
+                level: one,
+                shorter_share: one,
+                fall_off: StratumError::NotPlaced,
+            })],
+            length_spectrum: vec![one, one, StratumError::NoShare],
+            concentration: one,
+        };
+        let distances = |level: f64| StratumDistances {
+            slippage: vec![Some(SlippageDistances {
+                level,
+                shorter_share: 0.01,
+                fall_off: 1e9,
+            })],
+            length_spectrum: vec![0.02, 0.03, 1e9],
+            concentration: 0.04,
+        };
+        assert_eq!(furthest_in_errors(&errors, &distances(0.05)), Some(0.05));
+        let mut share_far = distances(0.05);
+        share_far.length_spectrum[1] = -0.5;
+        assert_eq!(furthest_in_errors(&errors, &share_far), Some(0.5));
+        let mut concentration_far = distances(0.05);
+        concentration_far.concentration = 0.7;
+        assert_eq!(furthest_in_errors(&errors, &concentration_far), Some(0.7));
+        let mut shorter_far = distances(0.05);
+        if let Some(group) = shorter_far.slippage[0].as_mut() {
+            group.shorter_share = 0.9;
+        }
+        assert_eq!(furthest_in_errors(&errors, &shorter_far), Some(0.9));
+        assert_eq!(
+            furthest_in_errors(&errors, &distances(f64::NAN)),
+            Some(f64::INFINITY)
+        );
+        let none = StratumErrors {
+            slippage: vec![None],
+            length_spectrum: vec![StratumError::NotIdentified; 3],
+            concentration: StratumError::NotPlaced,
+        };
+        assert_eq!(furthest_in_errors(&none, &distances(5.0)), None);
+    }
+
+    /// **The Newton step is carried to each number's scale as its error is**: from a given inverse
+    /// and slope, `I⁻¹ g` over the kept coordinates, then `p(1 − p)` for each slippage number, the
+    /// concentration itself, and for each share its slopes in the log-ratios, the largest class's
+    /// included — with every coordinate kept and with one dropped (held).
+    #[test]
+    fn newton_distances_are_carried_to_each_numbers_scale_like_the_errors() {
+        let parameters = Parameters {
+            slippage: vec![Slippage {
+                level: 0.1,
+                shorter_share: 0.8,
+                fall_off: 0.3,
+            }],
+            length_spectrum: vec![0.2, 0.5, 0.3],
+            concentration: 2.0,
+        };
+        let n = 6;
+        let inverse: Vec<f64> = (0..n * n)
+            .map(|index| {
+                let (i, j) = (index / n, index % n);
+                if i == j {
+                    0.1 * (i + 1) as f64
+                } else {
+                    0.01 * ((i + j) % 4 + 1) as f64
+                }
+            })
+            .collect();
+        let slope = vec![1.0, -2.0, 0.5, 3.0, -1.5, 0.7];
+        let inverse = &inverse;
+        let check = |kept: Vec<usize>| {
+            let layout = CurvatureLayout::of(&parameters, &[true]);
+            // The layout: three slippage numbers, the log-ratios of classes 0 and 2 to the largest
+            // (class 1), the concentration.
+            assert_eq!(layout.largest_class, 1);
+            let k = kept.len();
+            let sub: Vec<f64> = kept
+                .iter()
+                .flat_map(|&r| kept.iter().map(move |&c| inverse[r * n + c]))
+                .collect();
+            let mut step = vec![0.0; n];
+            for (row, &r) in kept.iter().enumerate() {
+                step[r] = (0..k)
+                    .map(|col| sub[row * k + col] * slope[kept[col]])
+                    .sum();
+            }
+            let dropped = (0..n).filter(|i| !kept.contains(i)).collect();
+            let curvature = CurvatureAt {
+                layout,
+                identified: crate::parameter_estimation::joint::fit::Identified {
+                    kept,
+                    dropped,
+                    inverse: sub,
+                },
+                slope: slope.clone(),
+            };
+            let distances = newton_distances_on_the_natural_scale(&curvature, &parameters, &[true]);
+            let close =
+                |got: f64, want: f64| assert!((got - want).abs() < 1e-12, "{got} against {want}");
+            let group = distances.slippage[0].expect("live");
+            close(group.level, 0.1 * 0.9 * step[0]);
+            close(group.shorter_share, 0.8 * 0.2 * step[1]);
+            close(group.fall_off, 0.3 * 0.7 * step[2]);
+            close(distances.concentration, 2.0 * step[5]);
+            let shares = [0.2, 0.5, 0.3];
+            let ratio_steps = [(0, step[3]), (2, step[4])];
+            for class in 0..3 {
+                let want: f64 = ratio_steps
+                    .iter()
+                    .map(|&(j, d)| {
+                        shares[class] * (if j == class { 1.0 } else { 0.0 } - shares[j]) * d
+                    })
+                    .sum();
+                close(distances.length_spectrum[class], want);
+            }
+            close(distances.length_spectrum.iter().sum::<f64>(), 0.0);
+        };
+        check((0..n).collect());
+        check(vec![0, 1, 2, 3, 5]);
+    }
+
+    /// **The settled fraction is the config's**: at a fraction of 10⁻⁷ no walk of a drawn stratum
+    /// settles within eight rounds, where at the default every one does.
+    #[test]
+    fn the_settled_fraction_is_read_from_the_config() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 20, 6, 1, 41);
+        let fit = |settled_fraction: f64| {
+            let config = SsrFitConfig {
+                allele_span: 1,
+                max_rounds: 8,
+                settled_fraction,
+                ..SsrFitConfig::default()
+            };
+            fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn")
+        };
+        let strict = fit(1e-7);
+        assert!(
+            strict.walks.iter().all(|walk| !walk.ending.settled()),
+            "{:?}",
+            strict.walks
+        );
+        let default = fit(SETTLED_FRACTION);
+        assert!(
+            default.walks.iter().all(|walk| walk.ending.settled()),
+            "{:?}",
+            default.walks
+        );
+    }
+
+    /// **A point whose score is not a number is not judged settled.**
+    #[test]
+    fn a_point_that_scores_not_a_number_is_not_judged_settled() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 50, 8, 6, 1, 43);
+        let excess = [0.4; 8];
+        let genotypes = genotype_pairs(3);
+        let mut climbing = StratumClimb {
+            scorer: Scorer::new(
+                &evidence,
+                &excess,
+                &genotypes,
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+            ),
+            evidence: &evidence,
+            live_groups: &[true],
+            classes: 3,
+            settled_fraction: SETTLED_FRACTION,
+        };
+        let mut at = Parameters::start(config.starting_points[1], 1, 3);
+        at.concentration = f64::NAN;
+        let (settled, errors) = climbing.judge(&at);
+        assert!(!settled, "{errors:?}");
+    }
+
+    /// **The point a round holds scores what it held**: over four rounds from each starting point of
+    /// a drawn stratum, the best point a round passed through, scored afresh, is the score it was held
+    /// with to the bit, at least the round's start and at least where the round ended.
+    #[test]
+    fn the_held_point_scores_what_it_holds() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 100, 10, 3, 1, 53);
+        let excess = [0.4; 10];
+        let genotypes = genotype_pairs(3);
+        let mut scorer = Scorer::new(
+            &evidence,
+            &excess,
+            &genotypes,
+            &config,
+            WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+        );
+        for start in &config.starting_points {
+            let mut at = Parameters::start(*start, 1, 3);
+            for _ in 0..4 {
+                let start_score = scorer.score(&at);
+                let mut held = HeldPoint {
+                    at: at.clone(),
+                    score: start_score,
+                };
+                climb_one_round(&mut at, &mut scorer, &[true], 3, &mut held);
+                let rescored = scorer.score(&held.at);
+                assert_eq!(
+                    held.score.to_bits(),
+                    rescored.to_bits(),
+                    "{} against {rescored}",
+                    held.score
+                );
+                assert!(held.score >= start_score);
+                assert!(held.score >= scorer.score(&at));
+            }
+        }
+    }
+
+    /// **A walk from a start that scores not a number** loses its first round with nothing better,
+    /// is judged there, and ends as having lost a round.
+    #[test]
+    fn a_walk_from_a_start_that_is_not_a_number_lost_a_round() {
+        let rounds = [(None, f64::NAN); 6];
+        let (walked, judged) = scripted_walk(f64::NAN, &rounds, &[], 0.08, 1.0, 6);
+        assert_eq!((walked.ending, walked.rounds), (ClimbEnding::LostARound, 1));
+        assert_eq!(judged, vec![0.0]);
+    }
+
+    /// **A walk still gaining at its last round ran out, and says so**, at the point its last round
+    /// reached, never judged.
+    #[test]
+    fn a_walk_still_gaining_at_its_last_round_ran_out() {
+        let (walked, judged) = scripted_walk(0.0, &rising_by(&[1.0; 4]), &[], 0.08, 1.0, 4);
+        assert_eq!(
+            (walked.ending, walked.rounds, walked.at, walked.score),
+            (ClimbEnding::OutOfRounds, 4, 4.0, 4.0)
+        );
+        assert!(judged.is_empty());
+        assert_eq!(walked.judged_here, None);
+    }
+
+    /// **The judge**: on a drawn stratum, at the answer a long climb reached every number is within a
+    /// tenth of its error of where the likelihood peaks, and the point has settled; with the level
+    /// moved by one of its errors, the level is about one error away and the point has not settled.
+    #[test]
+    fn a_point_one_error_from_the_peak_has_not_settled() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 20, 6, 1, 43);
+        let excess = [0.4; 20];
+        let genotypes = genotype_pairs(3);
+        let path = trajectory_of(&evidence, &excess, config.starting_points[1], &config, 20);
+        let peak = the_best_of(path.iter()).0.clone();
+        let mut climbing = StratumClimb {
+            scorer: Scorer::new(
+                &evidence,
+                &excess,
+                &genotypes,
+                &config,
+                WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+            ),
+            evidence: &evidence,
+            live_groups: &[true],
+            classes: 3,
+            settled_fraction: SETTLED_FRACTION,
+        };
+        let (settled, errors) = climbing.judge(&peak);
+        assert!(settled, "{errors:?}");
+        let level_error = errors.slippage[0]
+            .expect("the one group")
+            .level
+            .value()
+            .expect("an error");
+        let mut moved = peak.clone();
+        moved.slippage[0].level += level_error;
+        let curvature = curvature_at(
+            &mut climbing.scorer,
+            &evidence,
+            &moved,
+            &[true],
+            CURVATURE_STEP,
+        );
+        let distances = newton_distances_on_the_natural_scale(&curvature, &moved, &[true]);
+        let level_distance = distances.slippage[0].expect("the one group").level / level_error;
+        assert!(
+            (-1.3..-0.7).contains(&level_distance),
+            "the level is {level_distance} of its errors from the peak"
+        );
+        let (settled, _) = climbing.judge(&moved);
+        assert!(!settled);
+    }
+
+    /// **The target is `½ · p · fraction²` over the numbers the errors are taken over**: at one live
+    /// slippage group of two and thirteen classes, p = 3 + 12 + 1 = 16 and the target at a tenth is
+    /// 0.08.
+    #[test]
+    fn the_target_counts_the_numbers_the_errors_are_taken_over() {
+        let parameters = Parameters::start(
+            StartingPoint {
+                slippage_level: 0.02,
+                concentration: 0.3,
+            },
+            2,
+            13,
+        );
+        let target = remaining_gain_target(&parameters, &[true, false], SETTLED_FRACTION);
+        assert!((target - 0.08).abs() < 1e-15, "{target}");
+        let both = remaining_gain_target(&parameters, &[true, true], SETTLED_FRACTION);
+        assert!((both - 0.095).abs() < 1e-15, "{both}");
+    }
+
+    /// **Tracts no sample read do not move where a walk stops**: they leave the total log-likelihood
+    /// as it was, and the rule is on the total, so a stratum padded with as many again takes the same
+    /// rounds to the same answer.
+    #[test]
+    fn tracts_without_reads_do_not_move_where_a_walk_stops() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 20, 6, 1, 41);
+        let mut padded = evidence.clone();
+        padded
+            .tracts
+            .extend(std::iter::repeat_n(TractReads::default(), 300));
+        let plain = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
+        let with_empty = fit_stratum(&padded, &[0.4; 20], &config).expect("reads were drawn");
+        assert_eq!(plain.walks, with_empty.walks);
+        assert_eq!(plain.walks.len(), 3);
+        let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-9 * a.abs(), "{a} against {b}");
+        let (a, b) = (
+            plain.slippage[0].expect("fitted"),
+            with_empty.slippage[0].expect("fitted"),
+        );
+        close(a.level, b.level);
+        close(a.shorter_share, b.shorter_share);
+        close(a.fall_off, b.fall_off);
+        close(plain.concentration, with_empty.concentration);
+        for (a, b) in plain
+            .length_spectrum
+            .iter()
+            .zip(&with_empty.length_spectrum)
+        {
+            close(*a, *b);
+        }
+    }
+
+    /// One walk run for `rounds` rounds whatever it gains — the climb with no stopping rule — as the
+    /// point and the mean log-likelihood a tract after every round, the start first.
+    fn trajectory_of(
+        evidence: &StratumEvidence,
+        homozygote_excess: &[f64],
+        start: StartingPoint,
+        config: &SsrFitConfig,
+        rounds: u32,
+    ) -> Vec<(Parameters, f64)> {
+        let classes = (2 * config.allele_span + 1) as usize;
+        let genotypes = genotype_pairs(classes);
+        let live = evidence.groups_with_reads();
+        let mut scorer = Scorer::new(
+            evidence,
+            homozygote_excess,
+            &genotypes,
+            config,
+            WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+        );
+        let mut parameters = Parameters::start(start, evidence.groups, classes);
+        let score = scorer.score(&parameters);
+        let mut path = vec![(parameters.clone(), score)];
+        for _ in 0..rounds {
+            let mut held = HeldPoint {
+                at: parameters.clone(),
+                score,
+            };
+            climb_one_round(&mut parameters, &mut scorer, &live, classes, &mut held);
+            let score = scorer.score(&parameters);
+            path.push((parameters.clone(), score));
+        }
+        path
+    }
+
+    /// The round the rule before plan step C3 stopped a walk at: the first whose gain of the mean a
+    /// tract was below 10⁻⁶ — a loss included — or the fifth.
+    fn where_the_rule_before_stopped(path: &[(Parameters, f64)]) -> usize {
+        (1..=5)
+            .find(|&round| path[round].1 - path[round - 1].1 < 1e-6)
+            .unwrap_or(5)
+    }
+
+    /// The highest-scoring of `points`, the first among equals — the rule [`the_better_walk`] ranks
+    /// walks by.
+    fn the_best_of<'a>(
+        points: impl Iterator<Item = &'a (Parameters, f64)>,
+    ) -> &'a (Parameters, f64) {
+        points
+            .fold(None::<&(Parameters, f64)>, |best, point| match best {
+                Some(best) if point.1.partial_cmp(&best.1) != Some(std::cmp::Ordering::Greater) => {
+                    Some(best)
+                }
+                _ => Some(point),
+            })
+            .expect("at least one point")
+    }
+
+    /// Each number of a one-group stratum's answer with its kind, in the order [`errors_by_number`]
+    /// lists their errors.
+    fn numbers_of(parameters: &Parameters) -> Vec<(&'static str, f64)> {
+        let slippage = parameters.slippage[0];
+        let mut numbers = vec![
+            ("slippage level", slippage.level),
+            ("shorter share", slippage.shorter_share),
+            ("fall-off", slippage.fall_off),
+            ("concentration", parameters.concentration),
+        ];
+        numbers.extend(
+            parameters
+                .length_spectrum
+                .iter()
+                .map(|share| ("length shares", *share)),
+        );
+        numbers
+    }
+
+    fn errors_by_number(errors: &StratumErrors) -> Vec<StratumError> {
+        let group = errors.slippage[0].expect("the one group has reads");
+        let mut all = vec![
+            group.level,
+            group.shorter_share,
+            group.fall_off,
+            errors.concentration,
+        ];
+        all.extend(errors.length_spectrum.iter().copied());
+        all
+    }
+
+    /// The largest distance of one kind of number from the reference answer, in that answer's
+    /// errors, and how many lie further than a tenth of an error.
+    #[derive(Debug, Default)]
+    struct Shortfall {
+        largest: f64,
+        beyond_a_tenth: usize,
+        compared: usize,
+    }
+
+    /// Every number's distance from `reference`, in `errors`, tallied by kind; numbers without an
+    /// error are not compared.
+    fn tally_distances(
+        tally: &mut BTreeMap<&'static str, Shortfall>,
+        at: &Parameters,
+        reference: &Parameters,
+        errors: &StratumErrors,
+    ) -> f64 {
+        let mut largest: f64 = 0.0;
+        for (((kind, value), (_, truth)), error) in numbers_of(at)
+            .into_iter()
+            .zip(numbers_of(reference))
+            .zip(errors_by_number(errors))
+        {
+            let StratumError::Estimated(error) = error else {
+                continue;
+            };
+            let distance = (value - truth).abs() / error;
+            let entry = tally.entry(kind).or_default();
+            entry.largest = entry.largest.max(distance);
+            entry.beyond_a_tenth += usize::from(distance > SETTLED_FRACTION);
+            entry.compared += 1;
+            largest = largest.max(distance);
+        }
+        largest
+    }
+
+    /// The draws a regime of the comparison takes by default, and the variable that overrides it.
+    const CLIMB_DRAWS: usize = 20;
+    const CLIMB_DRAWS_VARIABLE: &str = "NG_FIT_PRECISION_CLIMB_DRAWS";
+
+    /// **The climb's stop loses nothing against a longer climb** (plan step C3, spec §4.5 item 2): on
+    /// strata drawn at known numbers, the fit's answer under its stopping rule against the best point
+    /// the same walks reach in a fixed number of rounds with no rule (40 by default), every number's
+    /// distance in that answer's standard errors, and the log-likelihood the fit is short of it; the
+    /// rounds and judgements the rule took, and the rounds the rule before it (a gain of the mean below
+    /// 10⁻⁶, or five rounds) took, with that rule's distances too.
+    ///
+    /// Ignored by default: an hour in the container. `NG_FIT_PRECISION_CLIMB_DRAWS` sets the
+    /// three-class regimes' draws, the 63-sample and thirteen-class ones taking a quarter as many;
+    /// `NG_FIT_PRECISION_CLIMB_CLASSES` keeps the regimes of one class count;
+    /// `NG_FIT_PRECISION_CLIMB_MAX_ROUNDS` and `NG_FIT_PRECISION_CLIMB_REFERENCE_ROUNDS` set the fit's
+    /// round limit and the reference's rounds. At the default draws, every fit whose winning walk
+    /// settled is held within a tenth of an error of the reference on every number and within
+    /// ½ · p · 0.1² of its log-likelihood.
+    #[test]
+    #[ignore = "a measurement over many fitted strata, each also climbed to a longer reference"]
+    fn the_climbs_stop_loses_nothing_against_a_longer_climb() {
+        let draws = match std::env::var(CLIMB_DRAWS_VARIABLE) {
+            Err(_) => CLIMB_DRAWS,
+            Ok(value) => value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|&count: &usize| count > 0)
+                .unwrap_or_else(|| {
+                    panic!("{CLIMB_DRAWS_VARIABLE}={value:?} is not a positive whole number")
+                }),
+        };
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        let count_from = |variable: &str, default: u32| -> u32 {
+            std::env::var(variable).ok().map_or(default, |value| {
+                value
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{variable}={value:?} is not a whole number"))
+            })
+        };
+        // The fit's own round limit, and the reference climb's, both settable to measure how many
+        // rounds a walk needs.
+        let max_rounds = count_from(
+            "NG_FIT_PRECISION_CLIMB_MAX_ROUNDS",
+            SsrFitConfig::default().max_rounds,
+        );
+        let reference_rounds = count_from("NG_FIT_PRECISION_CLIMB_REFERENCE_ROUNDS", 40);
+        let only_classes = std::env::var("NG_FIT_PRECISION_CLIMB_CLASSES")
+            .ok()
+            .map(|value| value.trim().parse::<usize>().expect("a class count"));
+        for (classes, tracts, samples, depth, regime_draws) in [
+            (3, 30, 8, 3, draws),
+            (3, 300, 20, 3, draws),
+            (3, 300, 20, 30, draws),
+            (3, 400, 63, 3, draws.div_ceil(4)),
+            (13, 200, 20, 3, draws.div_ceil(4)),
+        ] {
+            if only_classes.is_some_and(|only| only != classes) {
+                continue;
+            }
+            let regime =
+                format!("{classes} classes, {tracts} tracts x {samples} samples x {depth} reads");
+            let span = (classes / 2) as i32;
+            let spectrum = spectrum_of(classes);
+            let config = SsrFitConfig {
+                allele_span: span,
+                max_rounds,
+                ..SsrFitConfig::default()
+            };
+            let excess = vec![0.4; samples];
+            let (mut now, mut before) = (BTreeMap::new(), BTreeMap::new());
+            let (mut now_settled, mut before_settled) = (BTreeMap::new(), BTreeMap::new());
+            let mut endings: BTreeMap<String, usize> = BTreeMap::new();
+            let (mut rounds_now, mut rounds_before, mut walks) = (0_u64, 0_u64, 0_u64);
+            let mut judgements_now = 0_u64;
+            let (mut short_now, mut short_before) = (0.0_f64, 0.0_f64);
+            let mut winners_settled = 0;
+            // Each draw whose winning walk settled: its furthest number in errors, and how far short.
+            let mut settled_draws: Vec<(usize, f64, f64)> = Vec::new();
+            for draw in 0..regime_draws {
+                let seed = 0xC3C0_0000_0000_0000
+                    + (classes as u64) * 100_000
+                    + (samples as u64) * 1_000
+                    + u64::from(depth) * 10
+                    + draw as u64;
+                let evidence = draw_stratum(
+                    truth, &spectrum, 0.5, 0.4, tracts, samples, depth, span, seed,
+                );
+                let fitted = fit_stratum(&evidence, &excess, &config).expect("reads were drawn");
+                let paths: Vec<Vec<(Parameters, f64)>> = config
+                    .starting_points
+                    .iter()
+                    .map(|start| {
+                        trajectory_of(&evidence, &excess, *start, &config, reference_rounds)
+                    })
+                    .collect();
+                let reference = the_best_of(paths.iter().flatten());
+                let before_rule = the_best_of(
+                    paths
+                        .iter()
+                        .map(|path| &path[where_the_rule_before_stopped(path)]),
+                );
+                let errors = standard_errors_at(
+                    &evidence,
+                    &reference.0,
+                    &excess,
+                    &[true],
+                    &config,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                );
+                let answer = Parameters {
+                    slippage: vec![fitted.slippage[0].expect("the one group has reads")],
+                    length_spectrum: fitted.length_spectrum.clone(),
+                    concentration: fitted.concentration,
+                };
+                let settled = fitted.ending.settled();
+                winners_settled += usize::from(settled);
+                let worst_now = tally_distances(&mut now, &answer, &reference.0, &errors);
+                if settled {
+                    tally_distances(&mut now_settled, &answer, &reference.0, &errors);
+                }
+                let worst_before =
+                    tally_distances(&mut before, &before_rule.0, &reference.0, &errors);
+                let before_converged = paths.iter().any(|path| {
+                    let stop = where_the_rule_before_stopped(path);
+                    path[stop].1 - path[stop - 1].1 < 1e-6
+                });
+                if before_converged {
+                    tally_distances(&mut before_settled, &before_rule.0, &reference.0, &errors);
+                }
+                let total = evidence.tracts.len() as f64;
+                short_now = short_now.max((reference.1 - fitted.log_likelihood_a_tract) * total);
+                short_before = short_before.max((reference.1 - before_rule.1) * total);
+                for walk in &fitted.walks {
+                    *endings.entry(format!("{:?}", walk.ending)).or_default() += 1;
+                    rounds_now += u64::from(walk.rounds);
+                    judgements_now += u64::from(walk.judgements);
+                }
+                rounds_before += paths
+                    .iter()
+                    .map(|path| where_the_rule_before_stopped(path) as u64)
+                    .sum::<u64>();
+                walks += fitted.walks.len() as u64;
+                eprintln!(
+                    "CLIMB STOP {regime}, draw {draw}: {:?} with (ending, rounds, judgements) {:?}; furthest \
+                     number {:.3} errors from the reference climb (the rule before: {:.3}); total \
+                     log-likelihood short by {:.4} (before: {:.4})",
+                    fitted.ending,
+                    fitted
+                        .walks
+                        .iter()
+                        .map(|walk| (walk.ending, walk.rounds, walk.judgements))
+                        .collect::<Vec<_>>(),
+                    worst_now,
+                    worst_before,
+                    (reference.1 - fitted.log_likelihood_a_tract) * total,
+                    (reference.1 - before_rule.1) * total,
+                );
+                if settled {
+                    settled_draws.push((
+                        draw,
+                        worst_now,
+                        (reference.1 - fitted.log_likelihood_a_tract) * total,
+                    ));
+                }
+            }
+            eprintln!(
+                "CLIMB STOP {regime}: {regime_draws} draws, {walks} walks ended {endings:?}; the \
+                 winning walk settled in {winners_settled}; rounds {rounds_now} (and {judgements_now} \
+                 judgements) against {rounds_before} \
+                 under the rule before; the total log-likelihood at most {short_now:.4} short of \
+                 the reference climb (before: {short_before:.4})"
+            );
+            // **Held at the default draws**: a fit whose winning walk settled is within a tenth of an
+            // error of the reference on every number, and within ½ · p · 0.1² of its log-likelihood
+            // (0.08 at thirteen classes); a winner that did not settle says so and is not held.
+            if draws == CLIMB_DRAWS {
+                let tolerance = 0.5 * (classes + 3) as f64 * SETTLED_FRACTION * SETTLED_FRACTION;
+                for (draw, furthest, short) in &settled_draws {
+                    assert!(
+                        *furthest <= SETTLED_FRACTION && *short <= tolerance,
+                        "{regime}, draw {draw}: settled {furthest:.3} errors and {short:.4} units \
+                         short of the reference climb"
+                    );
+                }
+            }
+            for (label, tally) in [
+                ("every draw, this rule", &now),
+                ("draws whose winner settled, this rule", &now_settled),
+                ("every draw, the rule before", &before),
+                ("draws the rule before called converged", &before_settled),
+            ] {
+                for (kind, shortfall) in tally {
+                    eprintln!(
+                        "CLIMB STOP {regime}, {label}, {kind}: {} compared, {} beyond a tenth of an \
+                         error, the furthest {:.3}",
+                        shortfall.compared, shortfall.beyond_a_tenth, shortfall.largest
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // How far the 256-point average is from the truth (after plan step C2)
+    // -----------------------------------------------------------------
+
+    /// A reproducible stream of uniforms, normals, and Gamma and Dirichlet draws kept in logs.
+    struct Stream(u64);
+
+    impl Stream {
+        fn uniform(&mut self) -> f64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64 + 0.5) / (1_u64 << 53) as f64
+        }
+
+        fn normal(&mut self) -> f64 {
+            let (u1, u2) = (self.uniform(), self.uniform());
+            (-2.0 * float::ln(u1)).sqrt() * float::cos(std::f64::consts::TAU * u2)
+        }
+
+        /// The logarithm of a Gamma(`shape`, 1) draw, kept in logs so a tiny shape does not
+        /// underflow to zero.
+        fn ln_gamma_draw(&mut self, shape: f64) -> f64 {
+            if shape < 1.0 {
+                let u = self.uniform();
+                return self.ln_gamma_draw(shape + 1.0) + float::ln(u) / shape;
+            }
+            let d = shape - 1.0 / 3.0;
+            let c = 1.0 / (9.0 * d).sqrt();
+            loop {
+                let x = self.normal();
+                let v = float::powi(1.0 + c * x, 3);
+                if v <= 0.0 {
+                    continue;
+                }
+                if float::ln(self.uniform()) < 0.5 * x * x + d - d * v + d * float::ln(v) {
+                    return float::ln(d * v);
+                }
+            }
+        }
+
+        /// The logarithms of one Dirichlet(`alpha`) draw's coordinates.
+        fn ln_dirichlet(&mut self, alpha: &[f64]) -> Vec<f64> {
+            let draws: Vec<f64> = alpha.iter().map(|a| self.ln_gamma_draw(*a)).collect();
+            let total = ln_sum_exp(&draws);
+            draws.into_iter().map(|draw| draw - total).collect()
+        }
+    }
+
+    fn ln_dirichlet_density(alpha: &[f64], ln_frequencies: &[f64]) -> f64 {
+        let total: f64 = alpha.iter().sum();
+        ln_gamma(total)
+            + alpha
+                .iter()
+                .zip(ln_frequencies)
+                .map(|(a, ln_f)| (a - 1.0) * ln_f - ln_gamma(*a))
+                .sum::<f64>()
+    }
+
+    /// `ln` of one tract's likelihood at the length frequencies `frequencies` — the thing the
+    /// average is taken over, term for term as [`ln_tract`] computes it.
+    fn ln_integrand(
+        likelihoods: &TractLikelihoods,
+        frequencies: &[f64],
+        genotypes: &[(usize, usize)],
+    ) -> f64 {
+        let mut total = likelihoods.ln_offset;
+        for (row, excess) in likelihoods
+            .scaled
+            .chunks_exact(likelihoods.width)
+            .zip(&likelihoods.homozygote_excess)
+        {
+            let (mut at_random, mut by_descent) = (0.0, 0.0);
+            for (slot, (first, second)) in genotypes.iter().enumerate() {
+                if first == second {
+                    at_random += frequencies[*first] * frequencies[*first] * row[slot];
+                    by_descent += frequencies[*first] * row[slot];
+                } else {
+                    at_random += 2.0 * frequencies[*first] * frequencies[*second] * row[slot];
+                }
+            }
+            let sum = excess * by_descent + (1.0 - excess) * at_random;
+            if sum <= 0.0 {
+                return f64::NEG_INFINITY;
+            }
+            total += float::ln(sum);
+        }
+        total
+    }
+
+    /// How many copies of each allele class one tract's reads put in its samples, by each sample's
+    /// genotype posterior under the stratum's mean frequencies: where a tract's reads say its
+    /// frequencies are.
+    fn copies_the_reads_say(
+        likelihoods: &TractLikelihoods,
+        spectrum: &[f64],
+        genotypes: &[(usize, usize)],
+    ) -> Vec<f64> {
+        let mut copies = vec![0.0; spectrum.len()];
+        for (row, excess) in likelihoods
+            .scaled
+            .chunks_exact(likelihoods.width)
+            .zip(&likelihoods.homozygote_excess)
+        {
+            let weights: Vec<f64> = genotypes
+                .iter()
+                .enumerate()
+                .map(|(slot, (first, second))| {
+                    let prior = if first == second {
+                        excess * spectrum[*first]
+                            + (1.0 - excess) * spectrum[*first] * spectrum[*first]
+                    } else {
+                        (1.0 - excess) * 2.0 * spectrum[*first] * spectrum[*second]
+                    };
+                    prior * row[slot]
+                })
+                .collect();
+            let total: f64 = weights.iter().sum();
+            for (weight, (first, second)) in weights.iter().zip(genotypes) {
+                copies[*first] += weight / total;
+                copies[*second] += weight / total;
+            }
+        }
+        copies
+    }
+
+    /// `ln` of a tract's average by importance sampling, and that logarithm's standard error: `draws`
+    /// points from a mixture — a tenth from the stratum's own Dirichlet, the rest in three equal
+    /// parts from Dirichlets moved all, half and a quarter of the way to the copies the tract's reads
+    /// say it carries — each weighted by the target's density over the mixture's.
+    fn importance_average(
+        likelihoods: &TractLikelihoods,
+        genotypes: &[(usize, usize)],
+        alpha: &[f64],
+        towards: &[f64],
+        draws: usize,
+        stream: &mut Stream,
+    ) -> (f64, f64) {
+        let moved = |share: f64| -> Vec<f64> {
+            alpha
+                .iter()
+                .zip(towards)
+                .map(|(a, t)| a + share * (t - a))
+                .collect()
+        };
+        let parts: Vec<(f64, Vec<f64>)> = vec![
+            (0.1, alpha.to_vec()),
+            (0.3, moved(1.0)),
+            (0.3, moved(0.5)),
+            (0.3, moved(0.25)),
+        ];
+        let ln_weights: Vec<f64> = (0..draws)
+            .map(|_| {
+                let mut u = stream.uniform();
+                let mut chosen = parts.len() - 1;
+                for (index, (weight, _)) in parts.iter().enumerate() {
+                    if u < *weight {
+                        chosen = index;
+                        break;
+                    }
+                    u -= weight;
+                }
+                let ln_f = stream.ln_dirichlet(&parts[chosen].1);
+                let frequencies: Vec<f64> = ln_f.iter().map(|ln| float::exp(*ln)).collect();
+                let ln_target = ln_dirichlet_density(alpha, &ln_f);
+                let ln_proposal = ln_sum_exp(
+                    &parts
+                        .iter()
+                        .map(|(weight, shape)| {
+                            float::ln(*weight) + ln_dirichlet_density(shape, &ln_f)
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                ln_integrand(likelihoods, &frequencies, genotypes) + ln_target - ln_proposal
+            })
+            .collect();
+        let ln_mean = ln_sum_exp(&ln_weights) - float::ln(draws as f64);
+        let variance = ln_weights
+            .iter()
+            .map(|ln_w| {
+                let ratio = float::exp(ln_w - ln_mean) - 1.0;
+                ratio * ratio
+            })
+            .sum::<f64>()
+            / draws as f64;
+        (ln_mean, (variance / draws as f64).sqrt())
+    }
+
+    /// **How far the fixed-point average over a tract's length frequencies is from the truth**
+    /// (the investigation decided after plan step C2): on strata drawn at known numbers, each
+    /// tract's log-likelihood at those numbers, averaged over the fit's own point set at 256 to
+    /// 65,536 points, against a reference by importance sampling with its standard error; at 3 to
+    /// 13 allele classes, concentrations 0.1 to 10, 3 and 30 reads, 4 to 63 samples. Also the same
+    /// importance sampler at 256 and 4,096 points, a first look at placing a tract's points where
+    /// its reads say its frequencies are. Results: `fit_precision_quadrature_average_2026-10-01.md`.
+    ///
+    /// Ignored by default: two to five minutes in the container. `NG_AVERAGE_REFERENCE_DRAWS` sets the
+    /// reference's points a tract (20,000; the report's 3-read cells at 9 and 13 classes used
+    /// 200,000), `NG_AVERAGE_DEPTH` keeps the cells at one depth, and `NG_AVERAGE_LEAST_CLASSES` drops
+    /// the cells below a class count.
+    #[test]
+    #[ignore = "a measurement; run by hand"]
+    fn the_average_over_a_tracts_frequencies_against_the_truth() {
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        let tracts = 60;
+        let mut cells = Vec::new();
+        for classes in [3_usize, 5, 9, 13] {
+            for concentration in [0.1, 0.5, 2.0, 10.0] {
+                for depth in [3_u32, 30] {
+                    cells.push((classes, concentration, 20_usize, depth));
+                }
+            }
+        }
+        cells.extend([
+            (13, 0.5, 4, 3),
+            (13, 0.5, 63, 3),
+            (13, 0.5, 4, 30),
+            (13, 0.5, 63, 30),
+        ]);
+        let reference_draws: usize = std::env::var("NG_AVERAGE_REFERENCE_DRAWS")
+            .ok()
+            .map_or(20_000, |value| value.parse().expect("a count"));
+        let only_depth: Option<u32> = std::env::var("NG_AVERAGE_DEPTH")
+            .ok()
+            .map(|value| value.parse().expect("a depth"));
+        let least_classes: usize = std::env::var("NG_AVERAGE_LEAST_CLASSES")
+            .ok()
+            .map_or(0, |value| value.parse().expect("a count"));
+        for (cell, (classes, concentration, samples, depth)) in cells.into_iter().enumerate() {
+            if only_depth.is_some_and(|only| only != depth) || classes < least_classes {
+                continue;
+            }
+            let span = (classes / 2) as i32;
+            let spectrum = spectrum_of(classes);
+            let excess = vec![0.4; samples];
+            let evidence = draw_stratum(
+                truth,
+                &spectrum,
+                concentration,
+                0.4,
+                tracts,
+                samples,
+                depth,
+                span,
+                0xA7E0_0000 + cell as u64,
+            );
+            let genotypes = genotype_pairs(classes);
+            let per_allele: Vec<Vec<Vec<f64>>> = vec![
+                (-span..=span)
+                    .map(|allele| truth.read_probabilities(allele, span))
+                    .collect(),
+            ];
+            let likelihoods: Vec<TractLikelihoods> = evidence
+                .tracts
+                .iter()
+                .map(|tract| TractLikelihoods::of(tract, &per_allele, &genotypes, &excess))
+                .collect();
+            let alpha: Vec<f64> = spectrum.iter().map(|share| concentration * share).collect();
+            let mut stream = Stream(0x5EED + cell as u64);
+            let reference: Vec<(f64, f64)> = likelihoods
+                .iter()
+                .map(|tract| {
+                    let towards: Vec<f64> = alpha
+                        .iter()
+                        .zip(copies_the_reads_say(tract, &spectrum, &genotypes))
+                        .map(|(a, copies)| a + copies)
+                        .collect();
+                    importance_average(
+                        tract,
+                        &genotypes,
+                        &alpha,
+                        &towards,
+                        reference_draws,
+                        &mut stream,
+                    )
+                })
+                .collect();
+            let reference_error = reference.iter().map(|(_, se)| *se).fold(0.0, f64::max);
+            let unsure = reference.iter().filter(|(_, se)| *se > 0.05).count();
+            let mut line = format!(
+                "AVERAGE {classes} classes, concentration {concentration}, {samples} samples x \
+                 {depth} reads: reference {:.3} a tract (largest standard error {reference_error:.4}, \
+                 {unsure} tracts above 0.05);",
+                reference.iter().map(|(ln, _)| ln).sum::<f64>() / tracts as f64
+            );
+            for points in [256_usize, 1_024, 4_096, 16_384, 65_536] {
+                let quadrature = dirichlet_points(
+                    &spectrum,
+                    concentration,
+                    points,
+                    &genotypes,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                );
+                let gaps: Vec<f64> = likelihoods
+                    .iter()
+                    .zip(&reference)
+                    .map(|(tract, (truth, _))| ln_tract(tract, &quadrature, &genotypes) - truth)
+                    .collect();
+                if points == 256 {
+                    // The integrand is the one `ln_tract` averages.
+                    let first = &likelihoods[0];
+                    let terms: Vec<f64> = quadrature
+                        .frequencies
+                        .chunks_exact(classes)
+                        .map(|point| ln_integrand(first, point, &genotypes) + quadrature.ln_weight)
+                        .collect();
+                    let by_hand = ln_sum_exp(&terms);
+                    let by_fit = ln_tract(first, &quadrature, &genotypes);
+                    assert!(
+                        (by_hand - by_fit).abs() < 1e-8,
+                        "{by_hand} against {by_fit}"
+                    );
+                }
+                let mean = gaps.iter().sum::<f64>() / tracts as f64;
+                let worst = gaps.iter().copied().fold(0.0_f64, |a, b| a.min(b));
+                line.push_str(&format!(" {points} points {mean:+.3} (worst {worst:+.2});"));
+            }
+            for draws in [256_usize, 4_096] {
+                let gaps: Vec<f64> = likelihoods
+                    .iter()
+                    .zip(&reference)
+                    .map(|(tract, (truth, _))| {
+                        let towards: Vec<f64> = alpha
+                            .iter()
+                            .zip(copies_the_reads_say(tract, &spectrum, &genotypes))
+                            .map(|(a, copies)| a + copies)
+                            .collect();
+                        importance_average(tract, &genotypes, &alpha, &towards, draws, &mut stream)
+                            .0
+                            - truth
+                    })
+                    .collect();
+                let mean = gaps.iter().sum::<f64>() / tracts as f64;
+                let spread = (gaps
+                    .iter()
+                    .map(|gap| (gap - mean) * (gap - mean))
+                    .sum::<f64>()
+                    / tracts as f64)
+                    .sqrt();
+                line.push_str(&format!(" placed {draws} {mean:+.3} (spread {spread:.3});"));
+            }
+            eprintln!("{line}");
+        }
+    }
+
     /// A stratum fitted on its own tracts, built directly so the smoothing can be exercised
     /// without paying for the climb.
     fn fitted_at(period: u8, repeats: u64, level: f64, reads: u64) -> StratumOutcome {
         StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
             stratum: Stratum {
                 period,
                 reference_repeats: repeats,
@@ -3658,7 +7509,9 @@ mod tests {
             log_likelihood_a_tract: -1.0,
             tracts_fitted: 500,
             borrowed: Vec::new(),
-            converged: true,
+            ending: ClimbEnding::Settled,
+            walks: Vec::new(),
+            samples_fitted_on: None,
             tracts_of_its_own: 500,
             reads_crossing: reads,
             level_provenance: vec![Some(LevelProvenance {
@@ -3669,6 +7522,107 @@ mod tests {
             })],
             shares_provenance: vec![Some(SharesProvenance::own(level * reads as f64))],
         }))
+    }
+
+    /// **The log's line about the climbs**: over the strata that recorded their walks, how many walks
+    /// ended each way, the rounds between them, and in how many strata the winner settled; a
+    /// hand-built fit with no walks is not counted.
+    #[test]
+    fn the_climb_summary_counts_each_ending() {
+        let walk = |ending, rounds| WalkRecord {
+            ending,
+            rounds,
+            judgements: 1,
+            settled_with_no_error: false,
+        };
+        let with = |ending, walks: Vec<WalkRecord>| {
+            let mut outcome = fitted_at(2, 10, 0.1, 1_000);
+            if let StratumOutcome::Fitted(fit) = &mut outcome {
+                fit.ending = ending;
+                fit.walks = walks;
+            }
+            outcome
+        };
+        let outcomes = [
+            with(
+                ClimbEnding::Settled,
+                vec![
+                    walk(ClimbEnding::Settled, 4),
+                    walk(ClimbEnding::LostARound, 7),
+                    walk(ClimbEnding::OutOfRounds, 30),
+                ],
+            ),
+            with(
+                ClimbEnding::LostARound,
+                vec![
+                    walk(ClimbEnding::LostARound, 5),
+                    walk(ClimbEnding::Settled, 3),
+                    WalkRecord {
+                        settled_with_no_error: true,
+                        ..walk(ClimbEnding::Settled, 2)
+                    },
+                ],
+            ),
+            fitted_at(2, 11, 0.1, 1_000),
+        ];
+        let summary = climb_endings_summary(&outcomes, 30).expect("walks recorded");
+        for part in [
+            "the 2 strata",
+            "of their 6 walks, 3 settled (1 of them at a point where no number had an error), 2 \
+             stopped",
+            "and 1 ran out of their 30 rounds, 51 rounds in all",
+            "settled in 1 of the 2",
+        ] {
+            assert!(summary.contains(part), "{part:?} in {summary}");
+        }
+        assert_eq!(climb_endings_summary(&[fitted_at(2, 10, 0.1, 1)], 30), None);
+    }
+
+    /// **A walk settled with nothing to judge only when it settled and its last judgement found no
+    /// number with an error**: one error anywhere — a slippage number, a share or the concentration —
+    /// makes it an ordinary settled walk, and a walk that did not settle is never counted.
+    #[test]
+    fn a_walk_settled_with_no_error_only_when_no_number_had_one() {
+        let none = StratumErrors {
+            slippage: vec![
+                Some(SlippageErrors {
+                    level: StratumError::NotIdentified,
+                    shorter_share: StratumError::NotPlaced,
+                    fall_off: StratumError::NotPlaced,
+                }),
+                None,
+            ],
+            length_spectrum: vec![
+                StratumError::NotIdentified,
+                StratumError::NoShare,
+                StratumError::NotPlaced,
+            ],
+            concentration: StratumError::NotPlaced,
+        };
+        assert!(!none.any());
+        assert!(settled_with_no_error(ClimbEnding::Settled, Some(&none)));
+        assert!(!settled_with_no_error(ClimbEnding::LostARound, Some(&none)));
+        assert!(!settled_with_no_error(
+            ClimbEnding::OutOfRounds,
+            Some(&none)
+        ));
+        assert!(!settled_with_no_error(ClimbEnding::Settled, None));
+
+        let one = StratumError::Estimated(0.1);
+        let mut slippage = none.clone();
+        if let Some(group) = slippage.slippage[0].as_mut() {
+            group.fall_off = one;
+        }
+        let mut share = none.clone();
+        share.length_spectrum[2] = one;
+        let concentration = StratumErrors {
+            concentration: one,
+            ..none.clone()
+        };
+        for errors in [slippage, share, concentration] {
+            assert!(errors.any(), "{errors:?}");
+            assert!(!settled_with_no_error(ClimbEnding::Settled, Some(&errors)));
+        }
     }
 
     /// Draw the level's curves and re-emit every level through them, as `fit_strata` does.
@@ -4333,7 +8287,7 @@ mod tests {
     /// rounds is a real answer and it must not come back as convergence.
     ///
     /// One round is far too few for 600 tracts, so this pins the `false` arm; the positive
-    /// control above reaches the `true` one at the default five.
+    /// control above reaches the `true` one at the default limit.
     #[test]
     fn a_pool_that_ran_out_of_rounds_does_not_report_convergence() {
         let spectrum = spectrum_of(3);
@@ -4401,6 +8355,479 @@ mod tests {
         more_groups.groups = 2;
         let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 99), more_groups];
         let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+    }
+
+    // -----------------------------------------------------------------
+    // A stratum read from a subset of samples (plan step D2)
+    // -----------------------------------------------------------------
+
+    /// The slippage the subset tests draw at.
+    fn subset_truth() -> Slippage {
+        Slippage {
+            level: 0.08,
+            shorter_share: 0.83,
+            fall_off: 0.25,
+        }
+    }
+
+    /// A config whose first subset is `first` samples and whose level target is `target`.
+    fn subset_config(first: usize, target: f64) -> SsrFitConfig {
+        let mut config = SsrFitConfig {
+            allele_span: 1,
+            subsets: SampleSubsets {
+                first,
+                level_relative_error_target: target,
+                min_samples_a_group: MIN_SAMPLES_A_GROUP,
+            },
+            ..SsrFitConfig::default()
+        };
+        config.curve.draw_curves = false;
+        config
+    }
+
+    fn fitted(outcome: &StratumOutcome) -> &StratumFit {
+        match outcome {
+            StratumOutcome::Fitted(fit) => fit,
+            other => panic!("not fitted: {other:?}"),
+        }
+    }
+
+    /// **A cohort no larger than the first subset is fitted whole, and one sample more takes a
+    /// subset**: with a first subset of 20, twenty samples give `fit_strata`'s outcome with no subset
+    /// recorded; twenty-one are read from a subset.
+    #[test]
+    fn a_cohort_no_larger_than_the_first_subset_is_fitted_whole() {
+        let config = subset_config(20, 10.0);
+        for (samples, seed, subset) in [(20_usize, 51_u64, false), (21, 52, true)] {
+            let evidence = draw_stratum(
+                subset_truth(),
+                &spectrum_of(3),
+                0.5,
+                0.4,
+                100,
+                samples,
+                6,
+                1,
+                seed,
+            );
+            let order: Vec<usize> = (0..samples).collect();
+            let excess = vec![0.4; samples];
+            let strata = [evidence];
+            let outcomes = fit_strata_on_sample_subsets(&strata, &excess, &order, &config);
+            assert_eq!(
+                fitted(&outcomes[0]).samples_fitted_on.is_some(),
+                subset,
+                "{samples} samples"
+            );
+            if !subset {
+                assert_eq!(outcomes, fit_strata(&strata, &excess, &config));
+            }
+        }
+    }
+
+    /// **The subset stops growing once the level is measured to the target, and otherwise grows to
+    /// every sample, whose answer is the best of every starting point and the last answer**: on 64
+    /// drawn samples with a first subset of 8, a target no fit reaches takes all 64 and four walks,
+    /// scoring at least what three starts on every sample score; a target the first fit meets stops
+    /// at 8 from three walks, with the subset's own, smaller, evidence counts.
+    #[test]
+    fn a_subset_grows_until_the_level_is_measured_or_every_sample_is_in() {
+        let evidence = draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 300, 64, 6, 1, 53);
+        let order: Vec<usize> = (0..64).collect();
+        let excess = [0.4; 64];
+        let strata = [evidence];
+
+        let unreachable =
+            fit_strata_on_sample_subsets(&strata, &excess, &order, &subset_config(8, 1e-9));
+        let every = fitted(&unreachable[0]);
+        assert_eq!(every.samples_fitted_on, Some(64));
+        assert_eq!(every.walks.len(), 4, "{:?}", every.walks);
+        let whole = fit_stratum(&strata[0], &excess, &subset_config(8, 1e-9)).expect("reads");
+        assert_eq!(every.reads_crossing, whole.reads_crossing);
+        assert!(every.log_likelihood_a_tract >= whole.log_likelihood_a_tract);
+
+        let met = fit_strata_on_sample_subsets(&strata, &excess, &order, &subset_config(8, 10.0));
+        let first = fitted(&met[0]);
+        assert_eq!(first.samples_fitted_on, Some(8));
+        assert_eq!(first.walks.len(), 3);
+        assert!(first.reads_crossing < whole.reads_crossing);
+        assert_eq!(first.tracts_fitted, first.tracts_of_its_own);
+    }
+
+    /// **A subset doubles, and takes every sample once doubling would pass three quarters of them.**
+    #[test]
+    fn the_subset_doubles_until_three_quarters_of_the_cohort() {
+        assert_eq!(next_subset_size(256, 2_169), 512);
+        assert_eq!(next_subset_size(512, 2_169), 1_024);
+        assert_eq!(next_subset_size(1_024, 2_169), 2_169);
+        assert_eq!(next_subset_size(16, 64), 32);
+        assert_eq!(next_subset_size(32, 64), 64);
+        assert_eq!(next_subset_size(64, 64), 64);
+    }
+
+    /// **A larger subset holds the smaller one's samples, and every slippage group has eight of its
+    /// readers in**: group 1 read by samples 2, 5, 7 and 20 to 29; the first eight samples hold three
+    /// of them, so five more are added in order; doubling keeps every one of them.
+    #[test]
+    fn a_subset_tops_up_a_thin_group_and_keeps_its_samples_as_it_grows() {
+        let samples = 40;
+        let order: Vec<usize> = (0..samples).collect();
+        let mut readers = vec![vec![true; samples], vec![false; samples]];
+        for sample in [2, 5, 7].into_iter().chain(20..30) {
+            readers[1][sample] = true;
+        }
+        let mut keep = vec![false; samples];
+        grow_subset(&mut keep, &readers, &order, 8, MIN_SAMPLES_A_GROUP);
+        let kept: Vec<usize> = (0..samples).filter(|&sample| keep[sample]).collect();
+        assert_eq!(kept, (0..8).chain(20..25).collect::<Vec<_>>());
+        let before = keep.clone();
+        grow_subset(&mut keep, &readers, &order, 16, MIN_SAMPLES_A_GROUP);
+        assert!(before.iter().zip(&keep).all(|(was, is)| !*was || *is));
+        let kept: Vec<usize> = (0..samples).filter(|&sample| keep[sample]).collect();
+        assert_eq!(kept, (0..16).chain(20..25).collect::<Vec<_>>());
+    }
+
+    /// **The refusal floor is judged on the whole stratum, and a subset with fewer tracts than the
+    /// floor grows rather than being fitted**: forty tracts each read by one sample, a first subset
+    /// of 4 holding 4 tracts — not refused, and not fitted on 4 tracts: it grows to the 8 samples that
+    /// read 8. Six such tracts are refused, below the floor of 8.
+    #[test]
+    fn the_floor_is_judged_on_the_whole_stratum_and_a_thin_subset_grows() {
+        let read_by_one = |tracts: usize| {
+            let mut evidence =
+                draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 40, 40, 6, 1, 57);
+            for (index, tract) in evidence.tracts.iter_mut().enumerate() {
+                tract
+                    .samples
+                    .retain(|reads| reads.sample as usize == index && index < tracts);
+            }
+            evidence
+        };
+        let order: Vec<usize> = (0..40).collect();
+        // One reader a group at least, so the top-up leaves the first subset at its 4 tracts.
+        let mut config = subset_config(4, 10.0);
+        config.subsets.min_samples_a_group = 1;
+        let outcomes =
+            fit_strata_on_sample_subsets(&[read_by_one(40)], &[0.4; 40], &order, &config);
+        let fit = fitted(&outcomes[0]);
+        assert_eq!(fit.samples_fitted_on, Some(8));
+        assert_eq!(fit.tracts_fitted, 8);
+        let thin = fit_strata_on_sample_subsets(&[read_by_one(6)], &[0.4; 40], &order, &config);
+        assert!(
+            matches!(
+                thin[0],
+                StratumOutcome::Refused {
+                    reason: StratumRefusal::BelowTheFloor { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            thin[0]
+        );
+    }
+
+    /// **The subset is the same samples whatever order they arrive in**: with the cohort's indices
+    /// shuffled and the evidence relabelled to match, the subset holds the same names, a slippage
+    /// group the first samples lack topped up with three of its readers.
+    #[test]
+    fn the_subset_is_the_same_samples_whatever_order_they_arrive_in() {
+        use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
+        let names: Vec<String> = (0..40).map(|i| format!("accession_{i}")).collect();
+        // Group 1 reads in the samples ranked twentieth or later, so the first eight hold none.
+        let mut rank = vec![0; 40];
+        for (place, sample) in sample_order(&names, SAMPLE_ORDER_SEED)
+            .into_iter()
+            .enumerate()
+        {
+            rank[sample] = place;
+        }
+        let mut evidence =
+            draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 100, 40, 6, 1, 59);
+        for tract in &mut evidence.tracts {
+            for reads in tract
+                .samples
+                .iter_mut()
+                .filter(|reads| rank[reads.sample as usize] >= 20)
+            {
+                for (group, _) in &mut reads.by_group {
+                    *group = 1;
+                }
+            }
+        }
+        evidence.groups = 2;
+        let members_by_name = |evidence: &StratumEvidence, names: &[String]| {
+            let order = sample_order(names, SAMPLE_ORDER_SEED);
+            let mut keep = vec![false; names.len()];
+            grow_subset(
+                &mut keep,
+                &evidence.readers_by_group(names.len()),
+                &order,
+                8,
+                3,
+            );
+            let mut kept: Vec<String> = (0..names.len())
+                .filter(|&sample| keep[sample])
+                .map(|sample| names[sample].clone())
+                .collect();
+            kept.sort();
+            kept
+        };
+        let before = members_by_name(&evidence, &names);
+        // Sample `i` arrives at index `(7 i + 3) mod 40`.
+        let moved = |sample: usize| (7 * sample + 3) % 40;
+        let mut shuffled_names = vec![String::new(); 40];
+        for (sample, name) in names.iter().enumerate() {
+            shuffled_names[moved(sample)] = name.clone();
+        }
+        let mut shuffled = evidence.clone();
+        for tract in &mut shuffled.tracts {
+            for reads in &mut tract.samples {
+                reads.sample = moved(reads.sample as usize) as u32;
+            }
+        }
+        assert_eq!(members_by_name(&shuffled, &shuffled_names), before);
+        assert_eq!(
+            before.len(),
+            8 + 3,
+            "three group-1 readers added: {before:?}"
+        );
+    }
+
+    /// **Both schedules give the same bits on subsets**: two strata of 40 samples, a first subset of
+    /// 8, one stratum at a time and both at once.
+    #[test]
+    fn the_two_schedules_give_the_same_bits_on_subsets() {
+        let strata: Vec<StratumEvidence> = [(10_u64, 61_u64), (11, 63)]
+            .into_iter()
+            .map(|(repeats, seed)| {
+                let mut evidence = draw_stratum(
+                    subset_truth(),
+                    &spectrum_of(3),
+                    0.5,
+                    0.4,
+                    150,
+                    40,
+                    6,
+                    1,
+                    seed,
+                );
+                evidence.stratum = Stratum {
+                    period: 2,
+                    reference_repeats: repeats,
+                };
+                evidence
+            })
+            .collect();
+        let order: Vec<usize> = (0..40).rev().collect();
+        let outcomes_at = |at_once: usize| {
+            let config = SsrFitConfig {
+                strata_at_once: NonZeroUsize::new(at_once).expect("positive"),
+                ..subset_config(8, LEVEL_RELATIVE_ERROR_TARGET)
+            };
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .expect("a pool");
+            pool.install(|| fit_strata_on_sample_subsets(&strata, &[0.4; 40], &order, &config))
+        };
+        let (one, two) = (outcomes_at(1), outcomes_at(2));
+        let bits = |outcomes: &[StratumOutcome]| -> Vec<u64> {
+            every_fitted_number(outcomes)
+                .into_iter()
+                .map(f64::to_bits)
+                .collect()
+        };
+        assert_eq!(bits(&one), bits(&two));
+        assert_eq!(one, two);
+        assert!(fitted(&one[0]).samples_fitted_on.is_some());
+    }
+
+    /// **The level is measured to the target when every live group that can still grow is**: two
+    /// groups at 1% and 5% of their levels; a target of 2% is met only when the second has no
+    /// readers left outside, or neither has; a group without an error that can grow has not met it.
+    #[test]
+    fn the_level_is_judged_only_in_groups_that_can_still_grow() {
+        let mut parameters = Parameters::start(
+            StartingPoint {
+                slippage_level: 0.1,
+                concentration: 0.5,
+            },
+            2,
+            3,
+        );
+        parameters.slippage[1].level = 0.1;
+        let group = |error: f64| SlippageErrors {
+            level: StratumError::Estimated(error),
+            shorter_share: StratumError::Estimated(0.1),
+            fall_off: StratumError::Estimated(0.1),
+        };
+        let mut errors = StratumErrors {
+            slippage: vec![Some(group(0.001)), Some(group(0.005))],
+            length_spectrum: vec![StratumError::Estimated(0.1); 3],
+            concentration: StratumError::Estimated(0.1),
+        };
+        let live = [true, true];
+        let judged = |errors: &StratumErrors, growing: [bool; 2]| {
+            level_is_measured_to(&parameters, &live, errors, &growing, 0.02)
+        };
+        assert!(!judged(&errors, [true, true]));
+        assert!(judged(&errors, [true, false]));
+        assert!(judged(&errors, [false, false]));
+        errors.slippage[0] = Some(SlippageErrors {
+            level: StratumError::NotIdentified,
+            ..group(0.001)
+        });
+        assert!(!judged(&errors, [true, false]));
+        assert!(judged(&errors, [false, false]));
+    }
+
+    /// **One read makes a reader**: a sample whose buckets hold one read reads the group, one whose
+    /// buckets are all empty does not.
+    #[test]
+    fn one_read_makes_a_sample_a_reader_of_its_group() {
+        let evidence = StratumEvidence {
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 10,
+            },
+            tracts: vec![TractReads {
+                samples: vec![
+                    SampleTractReads {
+                        sample: 0,
+                        by_group: vec![(0, vec![0, 1, 0])],
+                    },
+                    SampleTractReads {
+                        sample: 2,
+                        by_group: vec![(0, vec![0, 0, 0])],
+                    },
+                ],
+            }],
+            read_span: 1,
+            groups: 1,
+            tracts_over_guard_threshold: 0,
+            reads_reaching_not_crossing: 0,
+            guard_reads: 0,
+            bases_compared: 0,
+            mismatching_bases: 0,
+        };
+        assert_eq!(evidence.readers_by_group(3), vec![vec![true, false, false]]);
+    }
+
+    /// **The log's line about the subsets**: the fewest, the median and the most samples a stratum
+    /// was read from, and how many grew to every sample; no line when no stratum took a subset.
+    #[test]
+    fn the_subsets_summary_counts_the_sizes() {
+        let with = |size: Option<usize>| {
+            let mut outcome = fitted_at(2, 10, 0.1, 1_000);
+            if let StratumOutcome::Fitted(fit) = &mut outcome {
+                fit.samples_fitted_on = size;
+            }
+            outcome
+        };
+        let outcomes = [
+            with(Some(256)),
+            with(Some(2_169)),
+            with(Some(512)),
+            with(None),
+        ];
+        let summary = subsets_summary(&outcomes, 2_169).expect("subsets taken");
+        for part in [
+            "the 3 strata",
+            "256 to 2169, median 512",
+            "1 of them grew to every sample",
+        ] {
+            assert!(summary.contains(part), "{part:?} in {summary}");
+        }
+        assert_eq!(subsets_summary(&[with(None)], 2_169), None);
+    }
+
+    /// **The subset against every sample** (plan step D2, spec §4.5 item 3 on drawn cohorts): strata
+    /// drawn at a known level over a cohort larger than the first subset, fitted on every sample and
+    /// on the grown subset; each line gives the samples the subset reached, both levels and their
+    /// errors, how far apart the two levels are in the whole fit's errors, and both times.
+    ///
+    /// Ignored by default: minutes in the container. `NG_FIT_PRECISION_SUBSET_DRAWS` sets the draws a
+    /// regime (default 3).
+    #[test]
+    #[ignore = "a measurement over cohorts larger than the first subset, each fitted twice"]
+    fn the_subset_against_every_sample() {
+        let draws: u64 = std::env::var("NG_FIT_PRECISION_SUBSET_DRAWS")
+            .ok()
+            .map_or(3, |value| {
+                value.trim().parse().expect("a whole number of draws")
+            });
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.3,
+        };
+        for (classes, tracts, samples, depth) in [
+            (3, 300, 1_024, 3),
+            (3, 1_000, 1_024, 3),
+            (3, 300, 1_024, 30),
+            (13, 200, 600, 3),
+        ] {
+            let span = (classes / 2) as i32;
+            let config = SsrFitConfig {
+                allele_span: span,
+                ..SsrFitConfig::default()
+            };
+            let excess = vec![0.4; samples];
+            let order: Vec<usize> = (0..samples).collect();
+            for draw in 0..draws {
+                let seed = 0xD200_0000 + (classes as u64) * 10_000 + tracts as u64 + draw;
+                let evidence = draw_stratum(
+                    truth,
+                    &spectrum_of(classes),
+                    0.5,
+                    0.4,
+                    tracts,
+                    samples,
+                    depth,
+                    span,
+                    seed,
+                );
+                let started = std::time::Instant::now();
+                let whole = fit_stratum(&evidence, &excess, &config).expect("reads were drawn");
+                let whole_time = started.elapsed();
+                let started = std::time::Instant::now();
+                let outcome = fit_on_growing_subsets(
+                    &evidence,
+                    &order,
+                    &excess,
+                    &config,
+                    WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+                );
+                let subset_time = started.elapsed();
+                let StratumOutcome::Fitted(subset) = outcome else {
+                    panic!("not fitted: {outcome:?}");
+                };
+                let level_and_error = |fit: &StratumFit| {
+                    let level = fit.slippage[0].expect("live").level;
+                    let error = fit
+                        .standard_errors
+                        .as_ref()
+                        .and_then(|errors| errors.slippage[0])
+                        .and_then(|group| group.level.value());
+                    (level, error)
+                };
+                let (whole_level, whole_error) = level_and_error(&whole);
+                let (subset_level, subset_error) = level_and_error(&subset);
+                let apart = whole_error.map(|error| (subset_level - whole_level) / error);
+                eprintln!(
+                    "SUBSET {classes} classes, {tracts} tracts x {samples} samples x {depth} reads, \
+                     draw {draw}: subset {:?} samples; level every sample {whole_level:.5} \
+                     ± {:.5}, subset {subset_level:.5} ± {:.5} ({:.2} of the whole fit's errors \
+                     apart); {:.1} s against {:.1} s",
+                    subset.samples_fitted_on,
+                    whole_error.unwrap_or(f64::NAN),
+                    subset_error.unwrap_or(f64::NAN),
+                    apart.unwrap_or(f64::NAN),
+                    subset_time.as_secs_f64(),
+                    whole_time.as_secs_f64(),
+                );
+            }
+        }
     }
 }
 

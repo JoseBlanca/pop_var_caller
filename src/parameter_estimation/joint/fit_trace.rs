@@ -13,6 +13,17 @@
 //! and `value` is where the maximisation after that pass left the parameter. Values are
 //! printed with seventeen significant digits so a relative change of one in a million survives.
 //! Nothing here changes what the fit computes.
+//!
+//! **Once a fit has chosen its best start, it writes what it returns**, under that start and
+//! `pass` one after its last: one row a parameter with the value the fit returns — which is not
+//! always the last pass's, since a start whose last accelerated step is refused at the pass limit
+//! returns the step before it — and one row a parameter with its standard error, named
+//! `standard_error:` and the parameter's name, NaN where it has none. Their `log_likelihood` is
+//! the final pass's, at the returned values. So each pass's move can be read in units of the
+//! parameter's own error, against the values the fit returned.
+//!
+//! The file is one a process: a process that fits twice writes both fits' rows under the same
+//! start numbers. `estimate-parameters` fits once.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -39,9 +50,35 @@ fn sink() -> Option<&'static Mutex<BufWriter<File>>> {
     .as_ref()
 }
 
+/// One row of the trace as a test captures it: start, pass, log-likelihood, parameter, value.
+#[cfg(test)]
+pub(super) type TraceRow = (usize, u32, f64, String, f64);
+
+#[cfg(test)]
+thread_local! {
+    /// The rows this thread's fit writes, while a test captures them ([`captured`]).
+    static CAPTURED: std::cell::RefCell<Option<Vec<TraceRow>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `fit` with this thread's trace captured instead of written, and return its rows with its
+/// result. The fit writes its rows from the thread that calls it — each pass's from the
+/// alternation, the returned values' once it has chosen — so a capture on that thread sees them all.
+#[cfg(test)]
+pub(super) fn captured<R>(fit: impl FnOnce() -> R) -> (R, Vec<TraceRow>) {
+    CAPTURED.with(|rows| *rows.borrow_mut() = Some(Vec::new()));
+    let result = fit();
+    let rows = CAPTURED.with(|rows| rows.borrow_mut().take().unwrap_or_default());
+    (result, rows)
+}
+
 /// Whether a trace is being written — asked before the rows are built, so a run without one
 /// builds nothing.
 pub(super) fn is_on() -> bool {
+    #[cfg(test)]
+    if CAPTURED.with(|rows| rows.borrow().is_some()) {
+        return true;
+    }
     sink().is_some()
 }
 
@@ -52,6 +89,21 @@ pub(super) fn write_the_pass(
     log_likelihood: f64,
     parameters: &[(String, f64)],
 ) {
+    #[cfg(test)]
+    if CAPTURED
+        .with(|rows| {
+            rows.borrow_mut().as_mut().map(|rows| {
+                rows.extend(
+                    parameters
+                        .iter()
+                        .map(|(name, value)| (start, pass, log_likelihood, name.clone(), *value)),
+                );
+            })
+        })
+        .is_some()
+    {
+        return;
+    }
     let Some(sink) = sink() else {
         return;
     };

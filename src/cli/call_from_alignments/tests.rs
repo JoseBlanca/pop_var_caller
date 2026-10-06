@@ -6,7 +6,7 @@ use clap::Parser;
 use std::path::Path;
 
 use crate::calling::parameters_file::{
-    CensusIdentity, DeclaredInbreeding, ReadsBehindEachCalibration,
+    CensusIdentity, DeclaredInbreeding, ParametersFile, ReadsBehindEachCalibration,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::cli::calling_run;

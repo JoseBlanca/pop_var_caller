@@ -565,6 +565,50 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused() {
     drop(cohort);
 }
 
+/// **A calling run writes back the SNP/indel fit's starts that the file it read carried** — the
+/// whole command, from a supplied file on disk to the file it writes beside its VCF. A file read and
+/// written again without them would drop the record of how the fit behind its numbers ended.
+#[test]
+fn a_run_writes_back_the_starts_its_file_carried() {
+    use crate::calling::parameters_file::{ParametersFile, SnpIndelFitStart, StartOutcome};
+    let (cohort, mut args) = a_cohort_of_psps();
+    run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
+    let supplied = cohort.directory.path().join("supplied.parameters.toml");
+    let mut file = ParametersFile::from_toml(
+        &std::fs::read_to_string(beside_the_vcf(&args.output)).expect("the run wrote its file"),
+    )
+    .expect("and it parses");
+    assert_eq!(
+        file.fitted_from.snp_indel_fit_starts, None,
+        "no fit stands behind a defaults run"
+    );
+    let starts = vec![
+        SnpIndelFitStart {
+            start: 1,
+            ended: StartOutcome::Converged,
+            passes: 9,
+            agreed_with_start: None,
+        },
+        SnpIndelFitStart {
+            start: 2,
+            ended: StartOutcome::AgreedWithAnEarlierStart,
+            passes: 3,
+            agreed_with_start: Some(1),
+        },
+    ];
+    file.fitted_from.snp_indel_fit_starts = Some(starts.clone());
+    std::fs::write(&supplied, file.to_toml()).expect("the supplied file is written");
+    std::fs::remove_file(beside_the_vcf(&args.output)).expect("the first run's file is removed");
+    args.parameters = Some(supplied);
+    args.defaults = false;
+    run_call_from_psps(&args).expect("a run handed its own kind of file binds it");
+    let written = ParametersFile::from_toml(
+        &std::fs::read_to_string(beside_the_vcf(&args.output)).expect("the run wrote its file"),
+    )
+    .expect("and it parses");
+    assert_eq!(written.fitted_from.snp_indel_fit_starts, Some(starts));
+}
+
 /// **`--explain-loci` explains and changes nothing that is called** (`spec/explain_loci.md`
 /// §2): the VCF is the same file with the option as without it, and the explanation is a TSV
 /// with the stated columns whose every row is a locus of the BED's.

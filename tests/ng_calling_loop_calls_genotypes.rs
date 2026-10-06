@@ -70,7 +70,8 @@ use pop_var_caller::parameter_estimation::joint::sequencing_batches::SequencingB
 use pop_var_caller::parameter_estimation::joint::share_curve::ShareSource;
 use pop_var_caller::parameter_estimation::joint::slippage_curve::LevelSource;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
+    ClimbEnding, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+    StratumOutcome,
 };
 use pop_var_caller::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, StratumFits};
 use pop_var_caller::parameter_estimation::repeat_strata::{
@@ -519,6 +520,7 @@ fn the_locus_carries_the_weakest_warrant_of_the_parameters_that_reached_it() {
     let calibration = vec![ReadGroupCalibration {
         scale: 1.0,
         provenance: Provenance::FittedHere,
+        scale_standard_error: None,
     }];
     let inbreeding = vec![InbreedingF::try_new(0.0).expect("an outbred sample"); 2];
     let strata = StratumFits::over(&[], BTreeMap::new());
@@ -708,6 +710,7 @@ fn the_locus_takes_the_weakest_warrant_of_two_read_groups() {
                 } else {
                     Provenance::FittedHere
                 },
+                scale_standard_error: None,
             })
             .collect();
         let inference = call_with_calibration(&per_sample, &calibration);
@@ -735,6 +738,7 @@ fn a_locus_whose_read_groups_were_all_fitted_says_so() {
         ReadGroupCalibration {
             scale: 1.0,
             provenance: Provenance::FittedHere,
+            scale_standard_error: None,
         };
         2
     ];
@@ -863,6 +867,7 @@ fn tract_strata_describing(
     let fitted_stratum =
         |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
             StratumOutcome::Fitted(Box::new(StratumFit {
+                standard_errors: None,
                 stratum: FitStratum {
                     period: 2,
                     reference_repeats: repeats,
@@ -884,7 +889,9 @@ fn tract_strata_describing(
                 log_likelihood_a_tract: -1.5,
                 tracts_fitted: 40,
                 borrowed: Vec::new(),
-                converged: true,
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+                samples_fitted_on: None,
                 tracts_of_its_own: 40,
                 reads_crossing: 400,
                 level_provenance: vec![Some(level), Some(level)],
@@ -942,6 +949,7 @@ fn tract_substitution_rates_over(libraries: usize) -> BTreeMap<StratumKey, Estim
                     value: ErrorRate::try_new(0.001 * f64::from(repeats)).expect("a probability"),
                     provenance: Provenance::FittedHere,
                     observations: 4_000,
+                    standard_error: None,
                 },
             );
         }

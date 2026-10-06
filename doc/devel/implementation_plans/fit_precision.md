@@ -1,6 +1,9 @@
 # Fitting to the precision the data support — implementation plan
 
-*Status: plan, 2026-09-27. Nothing here is built yet.*
+*Status: plan, 2026-09-27; Milestone A built. **Amended at checkpoint A (owner, 2026-09-28)**: three
+steps added before Milestone B (§4, Milestone A′), and the checkpoint's decisions recorded under it.
+Milestone A′ built; **checkpoint A′'s decisions (owner, 2026-09-29)** recorded under it, with two
+small changes before Milestone B and a case added to step E2.*
 
 This plan turns [`doc/devel/ng/spec/fit_precision.md`](../ng/spec/fit_precision.md) into build
 order. **It is not a place for new design**: every step cites the spec section it builds, and a
@@ -14,6 +17,9 @@ question the spec does not settle goes back to the spec. It follows
 
 - **A** — standard errors for the SNP/indel fit (spec §3.2–3.3), first as a diagnostic that changes
   no fitted number;
+- **A′** — three corrections checkpoint A found, made before the errors are used to stop the fit:
+  each library's reads scored with its own error rates, the allele-frequency shapes' update made to
+  maximise the likelihood the fit computes, and the full information matrix at small cohorts;
 - **B** — the SNP/indel stopping rule in units of those errors, and stopping a start that agrees with
   an earlier one (spec §2, §3.3–3.5);
 - **C** — standard errors for each repeat-tract stratum and the climb's new stopping rule (spec
@@ -34,7 +40,7 @@ repeat-tract guard.
 - **The error's oracle first.** Every error is checked against something independent: finite
   differences of the total log-likelihood, the full matrix on a small cohort, and the spread of the
   estimates over many drawn cohorts.
-- **Isolate the steps that move a fitted number.** B1, B2, C3 and D2 each change results silently;
+- **Isolate the steps that move a fitted number.** A6, A7, B1, B2, C3 and D2 each change results silently;
   each is **its own commit, never bundled**, with the cross-platform checksum's movement explained in
   its commit before the checksum is re-recorded
   ([`cross_platform_digests.rs`](../../../src/cli/cross_platform_digests.rs) module doc: re-record
@@ -56,23 +62,23 @@ repeat-tract guard.
 
 ### Milestone A — the SNP/indel fit's standard errors, as a diagnostic
 
-1. ☐ **A1 — the per-position scores.** For each parameter kind of spec §3.2's table, the observed-data
+1. ✅ **A1 — the per-position scores.** For each parameter kind of spec §3.2's table, the observed-data
    score at one position (the posterior expectation of the complete-data score). Unit-tested against
    a central finite difference of the total log-likelihood on a small drawn cohort, one test per
    kind. *Depends:* —. *Source:* spec §3.2.
-2. ☐ **A2 — the block information.** `SampleInformationBlock` ((k + 8)² per sample) and the cohort's
+2. ✅ **A2 — the block information.** `SampleInformationBlock` ((k + 8)² per sample) and the cohort's
    8 × 8 block, accumulated in an E-pass when asked for, in the fit's fixed chunk order. The fit's
    iterating passes do not ask; nothing moves. *Depends:* A1. *Source:* spec §3.2 (the block
    approximation), §3.6 item 5.
-3. ☐ **A3 — errors from the blocks.** The Schur-complement errors for each sample's parameters and
+3. ✅ **A3 — errors from the blocks.** The Schur-complement errors for each sample's parameters and
    the cohort's; `None` for a parameter with no information. Tested against the full outer-product
    matrix on drawn cohorts of 4 and 20 samples (the full matrix is small there), reporting the
    difference per parameter kind. *Depends:* A2. *Source:* spec §3.2, §3.6 item 2.
-4. ☐ **A4 — the errors mean what they say.** A test (ignored by default for its length, run at the
+4. ✅ **A4 — the errors mean what they say.** A test (ignored by default for its length, run at the
    checkpoint) drawing 200 cohorts from known parameters at 3 and at 30 reads a position, reporting
    the share of estimates within one and two errors of the truth, per parameter kind. *Depends:* A3.
    *Source:* spec §3.6 item 3.
-5. ☐ **A5 — compute and print them at the end of a fit.** The final pass accumulates the blocks; the
+5. ✅ **A5 — compute and print them at the end of a fit.** The final pass accumulates the blocks; the
    fit prints, per parameter kind, the median and largest error, and the count with none. No fitted
    number moves; **the checksums pass unchanged.** *Depends:* A3. *Source:* spec §3.3 (the final
    pass), §3.5.
@@ -83,19 +89,125 @@ repeat-tract guard.
 > shows the outer-product errors are not trustworthy for some kind, that goes back to spec question 3
 > before B starts.
 
+**Decided at checkpoint A (owner, 2026-09-28).** The measurements are in the
+[A4](../reports/implementations/fit_precision_a4_2026-09-27.md) and
+[A5](../reports/implementations/fit_precision_a5_2026-09-27.md) reports.
+
+1. **Each library's reads are scored with that library's own error rates** (step A6). A sample's
+   genotype stays shared across its libraries; each library's reads are weighed by its own rates.
+   Today the fit adds a sample's libraries together and scores them all with the first library's
+   rates, then gives every library that same fitted number — though two libraries are separate
+   experiments, and one's error rate says nothing about another's, any more than a library of another
+   sample would. The copied rates are not written with a shared error: this replaces the proposal to
+   do so.
+2. **The allele-frequency shapes' update is fixed before the stopping rule** (step A7). It solves
+   the digamma form, not the slope of the likelihood the fit computes, so the fit stops beside the
+   likelihood's maximum: on drawn cohorts the shapes and the invariant share sit 0.4 to 3.1 errors
+   above the truth, and the gap, in errors, grows as the square root of the positions.
+3. **Spec question 3: the outer-product estimator stands; at small cohorts the full matrix replaces
+   the blocks** (step A8), up to 20 samples. At 4 samples and 3 reads the estimates scatter 1.23 to
+   1.67 times the blocks' errors and 0.89 to 1.02 times the full matrix's; at 20 samples the two are
+   about 10% apart.
+4. **`SETTLED_FRACTION` = 0.1**, the spec's starting value. The oracle cohort could not decide it —
+   its fit stops at the 200-pass limit — so step B1's comparison against 1,000 passes is its check.
+
+### Milestone A′ — the corrections checkpoint A found
+
+Before the errors are used to stop the fit, the fit must estimate what the errors describe. Each
+step here that moves a fitted number is its own commit, with the checksums re-recorded after
+`scripts/promote_ng_oracle.sh` has measured the change.
+
+1. ✅ **A6 — each library's reads under its own error rates.** At a position, a sample's likelihood
+   given its genotype becomes the product over its libraries of each library's reads under that
+   library's two rates; the genotype, and everything above it, stays one a sample. Today every stage
+   assumes one set of counts and one rate pair a sample, so the step reaches each of them:
+   - the per-position reader keeps each library's counts and depth range apart, where it now adds
+     them (`EvidenceCursor::next_position`);
+   - the likelihood reads each library's own rates (`one_position`, which now reads
+     `group_index[s][0]`'s);
+   - each library's read tallies are credited with its own reads only, so the maximisation fits
+     each library's rates from its own evidence (today every library of a sample is credited with
+     the sample's pooled reads, which is why the fitted rates come out identical);
+   - the scores, the information and the errors of steps A1–A3 carry each library's two rates: a
+     sample with k libraries has 1 + 2k parameters of its own, as spec §3.2 sizes it, where they now
+     carry three whatever k. The test that pins a second library's rates as having no slope
+     (`a_second_read_groups_rates_have_no_slope`) is replaced by one that finite-differences them.
+
+   A library with no reads has no information and is written `defaulted` at E2, per spec question 1;
+   the count of "read groups after a sample's first" leaves the log. **Own commit; moves fitted
+   numbers for samples with more than one library only** (up to 482 of kimura's 2,651 read groups).
+   The oracle cohort has one library a sample (4 read groups over 4 samples), so its checksums are
+   expected not to move, which is checked; the cross-platform fixture has two read groups in one
+   sample (`cli::test_fixtures`), so its checksums are expected to move, and are re-recorded in this
+   commit with the explanation. Validated on drawn cohorts whose samples carry two libraries at
+   different rates: each library's rate recovered within its errors, and the
+   scores against finite differences per library. Work per position grows with the libraries rather
+   than the samples (2,651 against 2,169 on kimura). *If the step is larger than one reviewed commit,
+   it splits at the scores: the likelihood first, with a multi-library sample's errors reported
+   absent until the second part.* *Depends:* A5. *Source:* checkpoint A decision 1; spec §3.2's
+   per-library block.
+2. ✅ **A7 — the allele-frequency shapes maximise the likelihood the fit computes.** The update of
+   the density's two Beta shapes, and of the carrier Beta's, which uses the same form
+   (`fit_beta_shapes`), is replaced by one whose fixed point is where the likelihood's own slope in
+   the shapes is zero: Newton steps on the slopes the quadrature rule gives (`RuleSlopes`, step A1),
+   kept within the shapes' bounds and never lowering the log-likelihood. More quadrature nodes are not
+   the fix: the likelihood itself is already exact at 16 nodes, and at 96 the gap was still 0.16 to
+   0.88 errors. **Own commit; moves fitted numbers.** Validated by A4's coverage test: the flat-point
+   column near zero for the shapes and the invariant share, their coverage near nominal at 20
+   samples, and the test's bounds re-recorded from the new run; the oracle's change measured and
+   explained before the checksums are re-recorded. *Depends:* A6. *Source:* checkpoint A decision 2.
+3. ✅ **A8 — the full matrix at small cohorts.** When a cohort has at most `FULL_MATRIX_SAMPLES` = 20
+   samples, the errors come from the full outer-product matrix — every parameter paired with every
+   other, two samples' included — and from the blocks above that. No fitted number moves. Validated by
+   A4's coverage test, whose 2- and 4-sample regimes at 3 reads then report the full matrix's
+   coverage as the fit's, and by the cost of the final pass at 20 samples, measured. *Depends:* A6.
+   *Source:* checkpoint A decision 3.
+
+> **Checkpoint A′ — pause for review.** A6's and A7's changes on the oracle cohort, A4's coverage
+> re-run, and the kimura run of the A5 build if the owner has made it.
+
+**Decided at checkpoint A′ (owner, 2026-09-29).** The measurements are in the
+[A7](../reports/implementations/fit_precision_a7_2026-09-28.md) and
+[A8](../reports/implementations/fit_precision_a8_2026-09-28.md) reports.
+
+1. **"Never lowering the log-likelihood" is measured, not enforced.** Over 10,020 plain passes on 17
+   drawn cohorts, none on cohorts with the shapes inside their bounds lowered it, and on cohorts
+   with a shape at its bound 161 lowered it by at most 3 × 10⁻¹¹ units, the rounding of a
+   log-likelihood that has stopped moving.
+2. **The shapes' step is accepted though it takes more passes** where the shapes are inside their
+   bounds (18 to 30 accelerated passes at 20 samples × 3 reads, against 12 to 18). Step B's
+   stopping rule will show whether the shapes are the last parameters to settle; if they are,
+   several Newton steps a pass is the fix.
+3. **The whole matrix is also limited to 188 parameters** — 20 samples of four libraries, 18 MB in
+   the final pass — so a cohort of samples with more libraries takes the blocks rather than
+   gigabytes (20 samples of 16 libraries would hold 231 MB). Built before step B, no fitted number
+   moving.
+4. **Spec §1.3 and §3.2 amended** to what was built (A6, A7, the arrow inverse, the four reasons an
+   error is absent, the whole matrix), and the oracle baseline's fit lines re-recorded in their own
+   commit.
+5. **A census whose depth cap leaves one stored depth code wider than the fit's 32 depths is refused
+   before a section is read** (a cap of 157 or more; the shipped cap is 124), where the pass used to
+   stop with a panic. Built before step B.
+
 ### Milestone B — the SNP/indel fit stops by its errors
 
-1. ☐ **B1 — the settled test replaces the relative-move rule.** The log-likelihood trigger, the
+1. ✅ **B1 — the settled test replaces the relative-move rule.** The log-likelihood trigger, the
    information pass when it first holds and every `ERROR_REFRESH_CYCLES` after, the per-parameter
    projection with `MAX_CONTRACTION`, and convergence when every parameter is settled.
    `largest_relative_move` no longer stops the fit. **Own commit; moves fitted numbers.** Validated by
    spec §3.6 item 4: the oracle cohort fitted under the new rule and run to 1,000 passes agree within
    `SETTLED_FRACTION` of each error; the passes saved are reported. The checksums are re-recorded in
-   this commit, with the explanation. *Depends:* checkpoint A. *Source:* spec §2, §3.3.
-2. ☐ **B2 — a later start stops when it agrees.** The agreement test on projected endpoints against
+   this commit, with the explanation. `SETTLED_FRACTION` = 0.1 (checkpoint A). *Depends:* A8,
+   checkpoint A′. *Source:* spec §2, §3.3.
+   **Decided during B1 (owner, 2026-09-29):** built as specified, the projection stopped the oracle
+   cohort's fit 74 log-likelihood units short of a 1,000-pass fit
+   ([report](../reports/implementations/fit_precision_b1_stopped_2026-09-29.md)); the distance still to
+   travel is now the Newton step the cycle's information pass gives, judged every cycle once the
+   trigger has held (spec §2, §3.3, §3.4 amended).
+2. ✅ **B2 — a later start stops when it agrees.** The agreement test on projected endpoints against
    the best converged earlier start. **Own commit; moves passes, and moves numbers only where a start
    that would have won by a hair now stops.** *Depends:* B1. *Source:* spec §3.4.
-3. ☐ **B3 — reporting.** Per start: converged, at the limit, or agreed; and when not converged, the
+3. ✅ **B3 — reporting.** Per start: converged, at the limit, or agreed; and when not converged, the
    parameter furthest from settled with its distance in errors. The per-cycle progress line gains the
    count not yet settled. `JointFit` gains the per-start record. *Depends:* B2. *Source:* spec §3.5.
 
@@ -106,34 +218,45 @@ repeat-tract guard.
 
 ### Milestone C — each stratum's errors and the climb's stopping rule
 
-1. ☐ **C1 — a stratum's curvature errors.** The central-difference curvature of the stratum's total
+1. ✅ **C1 — a stratum's curvature errors.** The central-difference curvature of the stratum's total
    log-likelihood over all its numbers, at its final answer, on the climb's scales, carried to the
    natural scale; `None` where the curvature is not negative-definite in that direction. Computed and
    carried in `StratumFit`, printed as a summary; **no number moves.** *Depends:* —. *Source:* spec §4.2.
-2. ☐ **C2 — the stratum errors mean what they say.** A test (ignored by default) fitting strata drawn
+2. ✅ **C2 — the stratum errors mean what they say.** A test (ignored by default) fitting strata drawn
    at known slippage many times, at 3 and 30 reads, comparing spread with reported error. *Depends:*
    C1. *Source:* spec §4.5 item 1.
-3. ☐ **C3 — the climb stops on its projected remaining total gain**, and a round that loses is not
+3. ✅ **C3 — the climb stops on its projected remaining total gain**, and a round that loses is not
    convergence: its moves are undone and the walk stops at its best point. **Own commit; moves fitted
    numbers.** Validated against a climb run to 20 rounds on drawn strata and on the oracle cohort
    (spec §4.5 item 2); checksums re-recorded in this commit with the explanation. *Depends:* C2,
    checkpoint A's `SETTLED_FRACTION`. *Source:* spec §4.3.
+   **Decided during C3 (owner, 2026-10-01):** built as specified, the projected gain stopped climbs
+   short of a longer climb ([report](../reports/implementations/fit_precision_c3_stopped_2026-10-01.md));
+   a walk now stops when a Newton step puts every number within `SETTLED_FRACTION` of its error, the
+   projection only triggering the judgement; a round that loses is undone, and the walk stops only if it
+   is stuck at an unsettled start; the round limit is 40; validated against a longer climb of the same
+   walks with no rule (spec §4.3 amended).
 
-> **Checkpoint C — pause for review.** C2's coverage, C3's comparison against 20 rounds, and the
-> rounds saved on the oracle cohort.
+> **Checkpoint C — pause for review.** C2's coverage, C3's comparison against a longer climb, and the
+> rounds and time C3 costs on the oracle cohort (more than the old rule, not fewer).
 
 ### Milestone D — a stratum read from a subset of samples
 
-1. ☐ **D1 — the sample order.** A pure function from the cohort's sample names and a fixed seed to
+1. ✅ **D1 — the sample order.** A pure function from the cohort's sample names and a fixed seed to
    their order, tested to be the same whatever order the names arrive in. *Depends:* —. *Source:*
    spec §4.4 (the order).
-2. ☐ **D2 — the growing subset.** Fit on the first `FIRST_SUBSET` samples, add slippage groups'
+2. ✅ **D2 — the growing subset.** Fit on the first `FIRST_SUBSET` samples, add slippage groups'
    samples to `MIN_SAMPLES_A_GROUP`, double until the level's relative error is below
    `LEVEL_RELATIVE_ERROR_TARGET` or every sample is in, each climb warm-started from the last; the
    refusal floor judged on the whole stratum. Evidence counts from the subset. **Own commit.** At 256
    samples or fewer it must be byte-identical to C3's result: **the checksums pass unchanged.**
    *Depends:* D1, C1, C3. *Source:* spec §4.4.
-3. ☐ **D3 — the comparison tool.** An example fitting chosen strata of a cohort both on every sample
+   **Decided during D2 (owner, 2026-10-02):** after the step's review, the subsets nest, every slippage
+   group is topped up to `MIN_SAMPLES_A_GROUP` readers, the subset takes every sample past three quarters,
+   a subset thinner than the refusal floor grows, the target is judged only on groups with readers still
+   outside, and the answer's subset is fitted from every starting point and the last answer (spec §4.4
+   amended); E2 writes how many samples each stratum was fitted on.
+3. ✅ **D3 — the comparison tool.** An example fitting chosen strata of a cohort both on every sample
    and on the grown subset, printing each stratum's three numbers, their errors, the subset size
    reached and the time, for the owner to run on kimura. *Depends:* D2. *Source:* spec §4.5 item 3.
 
@@ -141,27 +264,70 @@ repeat-tract guard.
 > include the largest. **Decide `FIRST_SUBSET`, `LEVEL_RELATIVE_ERROR_TARGET` and spec question 5**
 > (which number carries the target) from it.
 
+**Decided at checkpoint D (owner, 2026-10-06): the settings stay — `FIRST_SUBSET` = 256,
+`LEVEL_RELATIVE_ERROR_TARGET` = 0.02, on the slippage level — because the subset's fits are good enough as
+priors.** The owner's run of D3 on kimura (2,169 samples, `--inbreeding` 0.96 for every sample, `c6c10718`):
+
+- **Cost:** 49 min on the subsets against 9 h 4 min on every sample, 9% of the time; 9 h 58 min in all, peak
+  27.8 GB. Two of the five default strata (1:30, 2:26) had 6 and 2 tracts with reads and were refused by both
+  fits; the tool's default now skips strata below the floor.
+- **The three strata compared** reached 256, 256 and 512 samples. The slippage level was 0.7, 6.4 and 4.4 of the
+  spread drawing a subset gives away from the whole cohort's (1:8, 1:16, 2:7); the concentration came out lower
+  on the subset in all three, by 29%, 10% and 6%, the gap shrinking as the subset grows; 7 of the 12 numbers
+  compared (three slippage numbers and the concentration, three strata) were beyond ±2 of that spread, where
+  about one is expected by chance. So the stated errors understate how far a subset's
+  answer can sit from the whole cohort's.
+- **Left as possible improvements, not done:** judging the target on the concentration as well as the level, and
+  measuring the scatter directly with disjoint 256-sample subsets of the same strata.
+
 ### Milestone E — the errors in the file
 
-1. ☐ **E1 — `Estimate` gains `standard_error: Option<f64>`**, its "no uncertainty interval" note
+**Decided before E (owner, 2026-10-06):** start E; and in E2 the file's explanatory text says, in one
+sentence, that a subset-fitted stratum's error describes the subset's own fit, not its distance from a fit on
+every sample — checkpoint D's run found 7 of 12 compared numbers beyond ±2 of that error.
+
+1. ✅ **E1 — `Estimate` gains `standard_error: Option<f64>`**, its "no uncertainty interval" note
    rewritten (spec §5.1); every constructor sets it, `None` where no error is computed. No output
    changes. *Depends:* B3, C1. *Source:* spec §5.1.
-2. ☐ **E2 — the parameters file, version 2.** `standard_error` in the value tables and
+2. ✅ **E2 — the parameters file, version 2.** `standard_error` in the value tables and
    `own_fit_standard_error` in the slippage origin blocks (spec §5.2's table), each start's outcome
    in `fitted_from`, `FORMAT_VERSION` = 2, the reader accepting versions 1 and 2, the golden files
    updated; a parameter with no information written as `defaulted` with the default value (spec
-   question 1). The fitted-parameters checksum is re-recorded (the key and the version move it; no fitted
+   question 1) — after A6, a library with no reads; no library's rate is copied from another's.
+   **The same for a read group no sample lends ordinary-position evidence for** (owner, checkpoint
+   A′): a sample whose walk wrote repeat-tract sections and no ordinary one leaves its read groups in
+   the fit's list with nothing scored, and they are written `defaulted` with zero observations — not
+   fitted, with the run's position count — with a test on a tracts-only sample.
+   **And how many samples each repeat-tract stratum was fitted on** (owner, at D2): a large cohort's
+   stratum fitted on a subset writes `StratumFit::samples_fitted_on` beside its origin block, and the
+   file's text for `expected_slipped_reads` says the reads are among the samples the stratum was fitted on.
+   The fitted-parameters checksum is re-recorded (the key and the version move it; no fitted
    number does — the commit shows the file's diff). *Depends:* E1.
    *Source:* spec §5.2–5.3.
 
 > **Checkpoint E — pause for review.** The written file on the oracle cohort, and the owner's full
 > kimura run with the finished build: wall time of each half against the kimura log, and the file.
 
+**Decided at checkpoint E (owner, 2026-10-06):**
+
+1. **A repeat-tract substitution rate is never exactly zero.** Calling scores a tract's reads under it, and a
+   rate of zero gives a read with one mismatched base no likelihood under any length — a prior no read can move.
+   A count that found no mismatch takes half of one, `0.5 / (n + 1)` over `n` bases compared, and one where every
+   base mismatched half a match, `(n + 0.5) / (n + 1)`; a count that saw both keeps its own ratio. On the oracle
+   cohort that is 52 of 188 rates, which become 0.0010 to 0.014; the other 136 do not move. (The alternatives put
+   to the owner: the same half count on every rate, which moved the other 136 by a median of 25%; and the stated
+   default of 1 in 1,000, which drops what the count says.) Own commit, calls move, measured on the oracle.
+   **Then (owner):** files written before the rule, which may hold zeros, are left as they are — no conversion
+   on reading, no refusal; the rule is written into spec `parameter_prepass_ssr.md` §4.2.
+2. **The cross-platform check pins the new errors**: a fixture whose file carries standard errors, recorded on
+   macOS and in the Linux container. After item 1, since item 1 moves that fixture's file.
+
 ## 5. Verification summary
 
 | milestone | proven by |
 |---|---|
 | A | scores against finite differences; block errors against the full matrix at 4 and 20 samples; coverage over 200 drawn cohorts at 3 and 30 reads; checksums unchanged |
+| A′ | each library's rate recovered on drawn two-library cohorts, and its scores against finite differences; the shapes' flat-point column near zero and their coverage re-run; the full matrix's coverage at 2 and 4 samples; each moved checksum measured and explained |
 | B | the oracle cohort under the new rule against 1,000 passes, within `SETTLED_FRACTION` of each error; kimura rerun (owner) |
 | C | coverage over drawn strata; the new stop against 20 rounds; checksums re-recorded with explanation |
 | D | order independence; byte-identical at ≤ 256 samples; full against subset on kimura strata (owner) |
