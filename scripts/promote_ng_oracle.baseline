@@ -19,6 +19,11 @@
 # 144 standard errors (4 multipliers, 4 inbreeding coefficients, 136 substitution rates; the other 52 rates are zero and carry
 # none), one own-fit error (the one stratum of 37 whose level is its own fit) and three starts, all at the pass limit.
 # They were 5e6d874d… / bf6b176a….
+# Three lines re-recorded 2026-10-06 (fit_precision.md, checkpoint E): a repeat-tract substitution rate is never zero — a
+# count with no mismatch takes half of one. 52 of the fitted file's 188 rates move (to 0.0010-0.014) and gain the
+# standard error they lacked, so every rate now carries one; nothing else moves but notes; 4 of 6,706 calls with the fit move, all repeat tracts — QUAL by at most 0.4, AF by at most 0.00046
+# — with no genotype changed and no record appearing or vanishing. The defaults run's file moves in 8 note lines.
+# They were 70a98909… / 351f244e… / 9f5edd0e….
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -32,8 +37,8 @@ slice: 20 regions, 4 alignments
 # records: 7787
 b74f3edf9026fa756621e2492baf019a  from_alignments.comparable
 b74f3edf9026fa756621e2492baf019a  from_psps.comparable
-70a98909ab34b51aefe722f0b3206530  from_alignments.parameters.toml
+b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
 bc6780ff16430ca4f3e24e3fee052eec  from_alignments.windows.sorted
 6c5926ce33429b3abc927b8a8faf4cbd  from_alignments.windows.histograms
-351f244ed46271bd656ee237bb26c595  fitted.parameters.toml
-9f5edd0e624ac4d5f7c282859cee2acc  from_fit.comparable
+e77b4bbcd9d2b96e4cf77927671fa573  fitted.parameters.toml
+b05941de78a12d828fa9d17f20bff6a0  from_fit.comparable

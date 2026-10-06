@@ -229,12 +229,39 @@ pub struct StratumSubstitutionCounts {
 }
 
 impl StratumSubstitutionCounts {
-    /// Mismatching bases over bases compared — the stratum's substitution rate (spec §4.2).
+    /// Mismatching bases over bases compared — the stratum's substitution rate (spec §4.2) —
+    /// **never exactly zero or one**.
     ///
-    /// `None` where no read was compared against a tract at all.
+    /// **A count that found no mismatch takes half of one**, `0.5 / (n + 1)` over `n` bases
+    /// compared, and one where every base mismatched takes half a match, `(n + 0.5) / (n + 1)`.
+    /// Calling scores a tract's reads under this rate, and under a rate of zero a read with even one
+    /// base that disagrees is explained by no tract length at all: it falls wholly to the outlier
+    /// term and stops counting for any genotype (owner, checkpoint E of `fit_precision.md`,
+    /// 2026-10-06). Half a count keeps what the count says — no mismatch in 500 bases becomes
+    /// 0.001, no mismatch in 34 becomes 0.014 — and a count that saw both outcomes keeps its own
+    /// ratio.
+    ///
+    /// `None` where no read was compared against a tract at all. **A count of more mismatching
+    /// bases than bases compared cannot be built** — every read's bases are counted as compared
+    /// before they are compared — and is given its ratio, above one, which no rate type accepts.
     pub fn substitution_rate(&self) -> Option<f64> {
-        (self.bases_compared > 0)
-            .then(|| self.mismatching_bases as f64 / self.bases_compared as f64)
+        let bases_compared = self.bases_compared;
+        if bases_compared == 0 {
+            return None;
+        }
+        debug_assert!(
+            self.mismatching_bases <= bases_compared,
+            "{} mismatching bases of {bases_compared} compared",
+            self.mismatching_bases
+        );
+        let bases_compared_f64 = bases_compared as f64;
+        Some(if self.mismatching_bases == 0 {
+            0.5 / (bases_compared_f64 + 1.0)
+        } else if self.mismatching_bases == bases_compared {
+            (bases_compared_f64 + 0.5) / (bases_compared_f64 + 1.0)
+        } else {
+            self.mismatching_bases as f64 / bases_compared_f64
+        })
     }
 }
 
@@ -314,8 +341,8 @@ impl StratumEvidence {
             .sum()
     }
 
-    /// Mismatching bases over bases compared — the stratum's substitution rate, which is one
-    /// division and needs none of the other numbers (spec §4.2).
+    /// The stratum's substitution rate, which needs none of the other numbers (spec §4.2) — see
+    /// [`StratumSubstitutionCounts::substitution_rate`], which is never exactly zero or one.
     ///
     /// `None` where no read was compared against a tract at all.
     pub fn substitution_rate(&self) -> Option<f64> {
@@ -4827,6 +4854,24 @@ mod tests {
             }
         );
         assert_eq!(counts.substitution_rate(), Some(3.0 / 4_000.0));
+    }
+
+    /// **A count with one outcome only takes half a count of the other**, so no substitution rate
+    /// is exactly zero or one (owner, checkpoint E): no mismatch in 459 bases gives 0.5 / 460,
+    /// every base mismatched gives 459.5 / 460, and a count that saw both keeps its ratio.
+    #[test]
+    fn a_count_with_one_outcome_only_takes_half_a_count_of_the_other() {
+        let only = |mismatching_bases: u64| StratumSubstitutionCounts {
+            stratum: Stratum {
+                period: 3,
+                reference_repeats: 7,
+            },
+            bases_compared: 459,
+            mismatching_bases,
+        };
+        assert_eq!(only(0).substitution_rate(), Some(0.5 / 460.0));
+        assert_eq!(only(459).substitution_rate(), Some(459.5 / 460.0));
+        assert_eq!(only(1).substitution_rate(), Some(1.0 / 459.0));
     }
 
     // -----------------------------------------------------------------

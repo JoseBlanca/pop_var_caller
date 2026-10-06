@@ -370,12 +370,10 @@ pub fn parameters_from_the_fit(
         };
         let repeats = RepeatCount(repeats);
         // **A counted rate's error is the binomial one**, √(p(1 − p)/n) over the bases compared:
-        // each base compared either matched or did not. **None where no base mismatched, or
-        // every one did**: there the formula gives zero, which would claim the rate known exactly
-        // from a count that found only one outcome.
-        let standard_error = (counts.mismatching_bases > 0
-            && counts.mismatching_bases < counts.bases_compared)
-            .then(|| (rate.get() * (1.0 - rate.get()) / counts.bases_compared as f64).sqrt());
+        // each base compared either matched or did not. The rate is never zero or one
+        // (`StratumSubstitutionCounts::substitution_rate`), so the error is never zero either.
+        let standard_error =
+            Some((rate.get() * (1.0 - rate.get()) / counts.bases_compared as f64).sqrt());
         for group in cohort.read_groups() {
             ssr_substitution_rate.insert(
                 StratumKey {
@@ -1004,13 +1002,14 @@ mod writing_the_parameters_file {
     /// own**, for every read group, counted over the bases it compared.
     ///
     /// The fixture's one stratum compares 460 bases and finds none disagreeing, so on its own it
-    /// reaches neither case: its rate is zero and no stratum lacks one. Three strata are added to
-    /// the fit's counts before the file is assembled — one with nothing compared, which must be
-    /// skipped rather than written as a fitted zero, one with 3 disagreeing in 4,000, and one whose
-    /// 5 bases all disagree. The fixture's own zero rate and the third stratum's rate of one carry
-    /// no standard error; the stratum with 3 in 4,000 carries its binomial error.
+    /// reaches neither case: none of its bases disagree, and no stratum lacks a rate. Three strata
+    /// are added to the fit's counts before the file is assembled — one with nothing compared,
+    /// which must be skipped rather than written as a fitted zero, one with 3 disagreeing in 4,000,
+    /// and one whose 5 bases all disagree. A count that saw one outcome only takes half a count of
+    /// the other, so the fixture's own rate is half a mismatch over its bases and the third
+    /// stratum's half a match short of one; each rate carries its binomial error.
     #[test]
-    fn a_stratum_with_nothing_compared_gets_no_rate_and_one_with_mismatches_gets_its_own() {
+    fn every_stratum_with_bases_compared_gets_a_rate_and_its_binomial_error() {
         use crate::parameter_estimation::joint::census::Stratum as CensusStratum;
 
         let nothing = CensusStratum {
@@ -1059,19 +1058,24 @@ mod writing_the_parameters_file {
             !fixtures_own.is_empty(),
             "the fixture's own stratum is written, which is what the count below is measured by"
         );
-        // **A count that found no mismatch gives a rate of zero and no error**, not an error of
-        // zero, which would claim the rate known exactly.
+        // **A count that found no mismatch takes half of one**, not a rate of zero — which would
+        // give a read with one mismatched base no likelihood at all — and the rate's binomial error.
+        let binomial = |rate: f64, compared: u64| (rate * (1.0 - rate) / compared as f64).sqrt();
         for (_, estimate) in &fixtures_own {
-            assert_eq!(estimate.value.get(), 0.0);
-            assert!(estimate.observations > 0);
-            assert_eq!(estimate.standard_error, None);
+            let compared = estimate.observations;
+            assert!(compared > 0);
+            assert_eq!(estimate.value.get(), 0.5 / (compared as f64 + 1.0));
+            assert_eq!(
+                estimate.standard_error,
+                Some(binomial(estimate.value.get(), compared))
+            );
         }
-        // Nor does one where every base compared mismatched.
+        // **Nor one**, where every base compared mismatched: half a match short of it.
         let every_base = of_period(5);
         assert_eq!(every_base.len(), fixtures_own.len());
         for (_, estimate) in every_base {
-            assert_eq!(estimate.value.get(), 1.0);
-            assert_eq!(estimate.standard_error, None);
+            assert_eq!(estimate.value.get(), 5.5 / 6.0);
+            assert_eq!(estimate.standard_error, Some(binomial(5.5 / 6.0, 5)));
         }
         let added = of_period(4);
         assert_eq!(

@@ -136,13 +136,12 @@ pub struct Estimate<T> {
     ///
     /// `None` where nothing determined the value — no information, a defaulted value or one a
     /// person typed (a number supplied from another run's file keeps that run's error), a value the
-    /// fit held at its start, or a rate counted with no mismatch or nothing but, where
-    /// the formula's zero would claim it known exactly; where the data did not place it — not told
-    /// apart from the fit's other numbers, or an error wider than the value's whole range; and
-    /// where the value is one this design computes no error for: one made of several numbers (a frequency density, a
-    /// library's two error rates together) or one computed from other fitted numbers (a sample's
-    /// genotype rates). A value that is another under a second name — the inbreeding coefficient
-    /// is the homozygote excess — keeps that value's error.
+    /// fit held at its start; where the data did not place it — not told apart from the fit's other
+    /// numbers, or an error wider than the value's whole range; and where the value is one this
+    /// design computes no error for: one made of several numbers (a frequency density, a library's
+    /// two error rates together) or one computed from other fitted numbers (a sample's genotype
+    /// rates). A value that is another under a second name — the inbreeding coefficient is the
+    /// homozygote excess — keeps that value's error.
     pub standard_error: Option<f64>,
 }
 

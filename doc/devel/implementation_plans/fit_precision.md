@@ -308,6 +308,18 @@ every sample — checkpoint D's run found 7 of 12 compared numbers beyond ±2 of
 > **Checkpoint E — pause for review.** The written file on the oracle cohort, and the owner's full
 > kimura run with the finished build: wall time of each half against the kimura log, and the file.
 
+**Decided at checkpoint E (owner, 2026-10-06):**
+
+1. **A repeat-tract substitution rate is never exactly zero.** Calling scores a tract's reads under it, and a
+   rate of zero gives a read with one mismatched base no likelihood under any length — a prior no read can move.
+   A count that found no mismatch takes half of one, `0.5 / (n + 1)` over `n` bases compared, and one where every
+   base mismatched half a match, `(n + 0.5) / (n + 1)`; a count that saw both keeps its own ratio. On the oracle
+   cohort that is 52 of 188 rates, which become 0.0010 to 0.014; the other 136 do not move. (The alternatives put
+   to the owner: the same half count on every rate, which moved the other 136 by a median of 25%; and the stated
+   default of 1 in 1,000, which drops what the count says.) Own commit, calls move, measured on the oracle.
+2. **The cross-platform check pins the new errors**: a fixture whose file carries standard errors, recorded on
+   macOS and in the Linux container. After item 1, since item 1 moves that fixture's file.
+
 ## 5. Verification summary
 
 | milestone | proven by |

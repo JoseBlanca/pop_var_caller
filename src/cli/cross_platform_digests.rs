@@ -115,7 +115,15 @@ mod tests {
     /// saw (`f03c0ab14192957f7f1d8404bab4249a`) differs from this one in 19 lines of its notes and
     /// nothing else. Recorded in the Linux container (arm64, glibc) only; it was
     /// `22dda760d260572b786958e69b15b2b2`.
-    const FITTED_PARAMETERS_MD5: &str = "a5e87936e968f9b855f91f88db828083";
+    ///
+    /// **Re-recorded 2026-10-06** when a repeat-tract substitution rate stopped being zero (owner,
+    /// checkpoint E of `fit_precision.md`): a count that found no mismatch takes half of one. This
+    /// fixture's one stratum compared 460 bases and found none, so its three rows — one a read group
+    /// — go from 0.0 to 0.5 / 461 = 0.0010846, now with a standard error of 0.0015347; nothing else
+    /// moves but 8 lines of notes. Measured first on four tomato accessions: 52 of 188 rates move
+    /// and nothing else in the file. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `a5e87936e968f9b855f91f88db828083`.
+    const FITTED_PARAMETERS_MD5: &str = "860c3c65f27a1700e401d102833215e1";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -140,7 +148,14 @@ mod tests {
     /// GQ 73 to 71, the SNP at chrV:456 QUAL 542.7 to 550.3 and the other sample's GQ 73 to 71, the
     /// repeat tract at chrV:201 QUAL 7.4 to 14.3. No genotype moved. It was
     /// `7a570c442a4060fcd62f4af85b50a4fa`.
-    const CALLS_MD5: &str = "2c0a89466d21c301a1704ed4e6cd0c84";
+    ///
+    /// **Re-recorded 2026-10-06** with the fit above, whose repeat-tract substitution rate is no
+    /// longer zero: the repeat tract at chrV:201 moves, QUAL 14.3 to 14.9, AF 0.249885 to 0.249902,
+    /// and one sample's GQ 33 to 34; its genotypes do not. The two SNPs do not move. Measured by
+    /// putting the old rule back, which reproduces the old checksum exactly, and on four tomato
+    /// accessions: 4 of 6,706 calls move, all repeat tracts, QUAL by at most 0.4, no genotype. It
+    /// was `2c0a89466d21c301a1704ed4e6cd0c84`.
+    const CALLS_MD5: &str = "a2d17168b04f33a8f62a0a6cd2511df4";
 
     /// Hex MD5 of some bytes.
     fn md5_hex(bytes: &[u8]) -> String {
