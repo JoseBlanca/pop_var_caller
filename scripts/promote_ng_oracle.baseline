@@ -20,6 +20,9 @@
 # Re-recorded 2026-10-06 (Linux container, arm64) with spellings carrying a shorter insertion also re-read (read_likelihoods.md
 # §5.3): 3 of 7,727 default-parameter records change, 1 genotype, no filter (574e1d1c → 4e2e2004); from_fit.comparable 3 of
 # 6,641, 1 genotype (e00ec710 → 21734eb2).
+# Re-recorded 2026-10-06 (Linux container, arm64) with --min-site-quality defaulting to 1 (site_quality_threshold.md):
+# 288 of 7,727 default-parameter records have a site quality below 1 and are no longer written (4e2e2004 → 1e8c4570, 7,439
+# records); window rows follow them (dab62245 → be16bc49); fitted parameters unchanged; from_fit.comparable 21734eb2 → 2210e52e.
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -30,11 +33,11 @@
 #   SRR5079878.p1.bench.cram
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
-# records: 7727
-4e2e2004f6b51a78ba3e376f085a2119  from_alignments.comparable
-4e2e2004f6b51a78ba3e376f085a2119  from_psps.comparable
+# records: 7439
+1e8c4570ab4c47b14a90de99395bff4e  from_alignments.comparable
+1e8c4570ab4c47b14a90de99395bff4e  from_psps.comparable
 5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
-dab62245bc3d285e0c08bbf220786e42  from_alignments.windows.sorted
+be16bc4912c6067b08621ef4929d5385  from_alignments.windows.sorted
 9d3fa07726b5c2b62f74f7ab2e2bac2d  from_alignments.windows.histograms
 68f564c58752cf2bb08fea14bd14fdb5  fitted.parameters.toml
-21734eb2145519b9dce802b379fab08f  from_fit.comparable
+2210e52eb25a4844b50059bd64559879  from_fit.comparable

@@ -97,6 +97,7 @@ fn a_run(
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
+            loci_below_minimum_site_quality: 0,
             loci_too_wide_to_assemble: too_wide,
             loci_with_nobody_to_call: nobody,
             tracts: TractOutcomes::default(),
@@ -1185,6 +1186,7 @@ fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
     let calling = CohortCallingTallies {
         records_written: 120,
         loci_called_but_not_written: 45,
+        loci_below_minimum_site_quality: 0,
         loci_too_wide_to_assemble: vec![region(0, 10, 90)],
         loci_with_nobody_to_call: Vec::new(),
         tracts: TractOutcomes::default(),

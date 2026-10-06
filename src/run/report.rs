@@ -205,6 +205,12 @@ impl<'a> RunReport<'a> {
             self.calling.records_written,
             self.calling.loci_called_but_not_written,
         ));
+        if self.calling.loci_below_minimum_site_quality > 0 {
+            lines.push(format!(
+                "loci left out for a site quality below --min-site-quality: {}",
+                self.calling.loci_below_minimum_site_quality,
+            ));
+        }
     }
 
     /// **The ground this run could not speak for, and why** — three different kinds of nothing,

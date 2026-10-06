@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::records::DEFAULT_MIN_SITE_QUALITY;
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
 use crate::calling::run_parameters::RunParameters;
@@ -49,7 +50,7 @@ use crate::read::input::read_groups::{
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
-use crate::types::{Bp, ReadGroupId};
+use crate::types::{Bp, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
@@ -403,6 +404,8 @@ pub struct PspVariantCaller {
     depth_ceiling: DepthCeiling,
     /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
     explain: Option<ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`).
+    min_site_quality: Phred,
 }
 
 impl PspVariantCaller {
@@ -497,7 +500,17 @@ impl PspVariantCaller {
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             depth_ceiling: DepthCeiling::default(),
             explain: None,
+            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
+                .expect("the default threshold is a valid quality"),
         })
+    }
+
+    /// The same caller, writing no locus whose site quality falls below `quality`
+    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
+    #[must_use]
+    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
+        self.min_site_quality = quality;
+        self
     }
 
     /// The same caller, explaining every locus that overlaps `regions`
@@ -660,6 +673,7 @@ impl PspVariantCaller {
             max_reads_per_position,
             depth_ceiling,
             explain,
+            min_site_quality,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -723,6 +737,7 @@ impl PspVariantCaller {
             padding_reference,
             contigs: &contigs,
             explain: explain.as_ref(),
+            min_site_quality,
         };
         let CohortCallingOutcome {
             calling,
@@ -2301,7 +2316,9 @@ mod tests {
         );
         assert_eq!(
             tallies.loci_called(),
-            tallies.records_written + tallies.loci_called_but_not_written,
+            tallies.records_written
+                + tallies.loci_called_but_not_written
+                + tallies.loci_below_minimum_site_quality,
         );
         assert!(
             tallies.loci_called() >= 2,

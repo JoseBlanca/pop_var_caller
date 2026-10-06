@@ -661,6 +661,8 @@ bug in the other.
   [`ng_proposal.md`](ng_proposal.md), which have no document. This one supplies the number and
   pins one thing about the consumer: **the threshold reads the field the stage of §3.4 wrote**,
   never a value recomputed from the baseline. **Home:** step 11's spec, when it is written.
+  > *Settled 2026-10-06 for the threshold:* [`site_quality_threshold.md`](site_quality_threshold.md)
+  > — `--min-site-quality`, default 1, below it a locus is dropped; it reads the corrected quality.
 - **Uncertainty beyond a point estimate** — a confidence interval on a repeat count, an expansion
   probability, the `REPCI`/`STDERR`/`QEXP` family GangSTR emits. Nothing here produces them and no
   consumer has asked. **Home:** the repeat-tract sibling of §8, where they would mean something.

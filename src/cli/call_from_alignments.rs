@@ -216,6 +216,19 @@ pub struct CallFromAlignmentsArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
     pub max_candidate_alleles: u16,
 
+    /// The site quality below which a called locus is not written: the `QUAL` the record would
+    /// carry, after the artifact correction. **Zero writes every called locus.** The default, 1,
+    /// drops the sites whose artifact penalties outweigh their evidence — most of the false calls
+    /// measured on GIAB from 5× to 300× and on 63 tomato accessions at about 3× — and costs few
+    /// true ones; GATK's 30 costs more than a hundred true calls at 5× and 10× on GIAB.
+    #[arg(
+        long,
+        default_value_t = crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+        value_parser = crate::cli::calling_run::parse_min_site_quality,
+        help_heading = "Advanced"
+    )]
+    pub min_site_quality: f32,
+
     /// Target false-discovery rate among the records the hidden-duplication filter removes —
     /// calls better explained by two reference-collapsed copies piling their reads onto one
     /// position than by a real variant. **Zero turns the filter off**, and a run with it off
@@ -647,6 +660,10 @@ pub fn run_call_from_alignments(
         Some((regions, _)) => caller.with_explain_loci(regions.clone()),
         None => caller,
     };
+    let caller = caller.with_min_site_quality(
+        crate::types::Phred::try_new(args.min_site_quality)
+            .expect("`parse_min_site_quality` admits only valid qualities"),
+    );
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let metadata = calling_run::header_for(

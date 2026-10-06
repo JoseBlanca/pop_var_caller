@@ -64,7 +64,7 @@ use crate::run::cohort_merge::{
     MinAltReads,
 };
 use crate::run::depth_ceiling::DepthCeiling;
-use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
+use crate::types::{GenomePosition, GenomeRegion, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::vcf::assemble::assemble_record;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
@@ -75,8 +75,8 @@ use super::explain::{
     ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows, too_wide_rows,
 };
 use super::records::{
-    ReferenceBesideScratch, a_written_genotype_carries_an_alternative, evidence_for_output,
-    padding_base_beside, reference_beside_locus, reread_spellings_cut_short,
+    DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
+    evidence_for_output, padding_base_beside, reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -261,6 +261,8 @@ pub struct AlignedFilesVariantCaller {
     assembly_check: AssemblyCheckOutcome,
     /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
     explain: Option<ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`).
+    min_site_quality: Phred,
 }
 
 impl AlignedFilesVariantCaller {
@@ -358,6 +360,8 @@ impl AlignedFilesVariantCaller {
             locus_generator_settings: alignments.locus_generator_settings,
             depth_ceiling: DepthCeiling::default(),
             explain: None,
+            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
+                .expect("the default threshold is a valid quality"),
         })
     }
 
@@ -366,6 +370,14 @@ impl AlignedFilesVariantCaller {
     #[must_use]
     pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
         self.explain = Some(regions);
+        self
+    }
+
+    /// The same run, writing no locus whose site quality falls below `quality`
+    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
+    #[must_use]
+    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
+        self.min_site_quality = quality;
         self
     }
 
@@ -777,6 +789,7 @@ impl AlignedFilesVariantCaller {
         let contigs = self.walk_reference.contigs();
         // Taken before `walkers` consumes the run; a handful of regions.
         let explain = self.explain.clone();
+        let min_site_quality = self.min_site_quality;
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -797,6 +810,7 @@ impl AlignedFilesVariantCaller {
             padding_reference,
             contigs: &contigs,
             explain: explain.as_ref(),
+            min_site_quality,
         };
         let CohortCallingOutcome {
             calling,
@@ -845,6 +859,8 @@ pub(crate) struct CohortCallingInputs<'a> {
     /// **The loci to explain, `None` when the run was asked to explain none** — the one
     /// question each locus is asked (`doc/devel/ng/spec/explain_loci.md`).
     pub explain: Option<&'a ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`).
+    pub min_site_quality: Phred,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -949,6 +965,7 @@ where
         padding_reference,
         contigs,
         explain,
+        min_site_quality,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -974,6 +991,7 @@ where
     let mut records_written = 0_u64;
     let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut loci_called_but_not_written = 0_u64;
+    let mut loci_below_minimum_site_quality = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     // Counted rather than collected — see the other driver.
@@ -1050,7 +1068,7 @@ where
                     // **Asked before the reference is read**, so a locus that establishes
                     // no variant costs no fetch and no evidence gathering.
                     if !a_written_genotype_carries_an_alternative(&inference) {
-                        return Ok(None);
+                        return Ok(CalledLocus::NoAlternative);
                     }
                     let alleles = inference.alleles();
                     let padding = padding_base_beside(
@@ -1071,6 +1089,15 @@ where
                         verdict,
                         padding,
                     );
+                    // **The gate reads the quality the record would carry**, after the artifact
+                    // correction, and before the windows are taken: a locus below it is not
+                    // written, so nothing of it reaches the file or the filter after
+                    // (`calling_quality.md` §3.5).
+                    if evidence.corrected_site_quality < min_site_quality {
+                        return Ok(CalledLocus::BelowMinimumSiteQuality(
+                            evidence.corrected_site_quality,
+                        ));
+                    }
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -1079,7 +1106,7 @@ where
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(Some(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
                 },
             );
             if let Some(mut rows) = explanation {
@@ -1094,8 +1121,13 @@ where
                 // Both counted inside the dispatch, where the verdict that decided them is.
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
                 LocusOutcome::Called(Err(error)) => stopped = Some(error),
-                LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
-                LocusOutcome::Called(Ok(Some(record))) => {
+                LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
+                    loci_called_but_not_written += 1;
+                }
+                LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
+                    loci_below_minimum_site_quality += 1;
+                }
+                LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
                     // **What this run read, at every record it writes** — off unless the run was
                     // asked for it, and the only thing outside the run that can see whether the
                     // cover's look-ahead works, since the measurement changes no VCF byte
@@ -1149,6 +1181,7 @@ where
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
+            loci_below_minimum_site_quality,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
@@ -1343,14 +1376,28 @@ where
     (outcome, explanation)
 }
 
+/// **What became of a called locus at the record-building stage** — the drivers' answer for each
+/// locus that reached a call.
+pub(crate) enum CalledLocus {
+    /// A record, for the file.
+    Written(VcfRecord),
+    /// No written genotype carried an alternative allele.
+    NoAlternative,
+    /// The site quality after the artifact correction, below `--min-site-quality`.
+    BelowMinimumSiteQuality(Phred),
+}
+
 /// **The explanation's outcome for a locus the caller called**, read off what the driver built
 /// from it — `None` for the outcomes `call_one_cohort_locus` explained itself.
 fn end_of_a_called_locus(
-    built: &LocusOutcome<Result<Option<VcfRecord>, RunError>>,
+    built: &LocusOutcome<Result<CalledLocus, RunError>>,
 ) -> Option<LocusEnd<'_>> {
     match built {
-        LocusOutcome::Called(Ok(Some(record))) => Some(LocusEnd::Written(record)),
-        LocusOutcome::Called(Ok(None)) => Some(LocusEnd::NotWritten),
+        LocusOutcome::Called(Ok(CalledLocus::Written(record))) => Some(LocusEnd::Written(record)),
+        LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => Some(LocusEnd::NotWritten),
+        LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(quality))) => {
+            Some(LocusEnd::BelowMinimumSiteQuality(*quality))
+        }
         LocusOutcome::Called(Err(_)) => Some(LocusEnd::Failed),
         LocusOutcome::NobodyToCall
         | LocusOutcome::BundleSetAside
@@ -1708,6 +1755,10 @@ pub struct CohortCallingTallies {
     /// file. Add this to [`Self::records_written`] for the loci that were called —
     /// [`loci_called`](Self::loci_called) does it.
     pub loci_called_but_not_written: u64,
+    /// **Loci called with an alternative but a site quality below `--min-site-quality`**, after
+    /// the artifact correction, and so left out of the file. Counted in
+    /// [`loci_called`](Self::loci_called).
+    pub loci_below_minimum_site_quality: u64,
     /// **The ground of the loci the merge declined to assemble for being wider than
     /// `max_cohort_locus_span`**, in genome order — [`CalledCohort::loci_too_wide_to_assemble`].
     pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
@@ -1728,6 +1779,7 @@ impl CohortCallingTallies {
     pub fn loci_called(&self) -> u64 {
         self.records_written
             .saturating_add(self.loci_called_but_not_written)
+            .saturating_add(self.loci_below_minimum_site_quality)
     }
 }
 
@@ -5864,6 +5916,7 @@ mod records_handed_over_as_the_run_finishes_them {
             padding_reference,
             contigs: &contigs,
             explain: None,
+            min_site_quality: Phred::ZERO,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -7140,6 +7193,8 @@ enum RoundLocusOutcome<P> {
     CountedInside(GenomeRegion),
     /// Called, and no written genotype carried an alternative.
     CalledNotWritten(GenomeRegion),
+    /// Called with an alternative, at a site quality below `--min-site-quality`.
+    CalledBelowMinimumSiteQuality(GenomeRegion),
     /// The padding fetch refused.
     CalledFailed(RunError),
     /// A record got ready for its output, its per-sample windows, and the locus it came from.
@@ -7181,6 +7236,7 @@ where
         padding_reference,
         contigs,
         explain,
+        min_site_quality,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -7193,6 +7249,7 @@ where
     };
     let mut records_written = 0_u64;
     let mut loci_called_but_not_written = 0_u64;
+    let mut loci_below_minimum_site_quality = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
@@ -7277,7 +7334,7 @@ where
                 scratch,
                 |inference, remap, unmatched, verdict| {
                     if !a_written_genotype_carries_an_alternative(&inference) {
-                        return Ok(None);
+                        return Ok(CalledLocus::NoAlternative);
                     }
                     let alleles = inference.alleles();
                     let padding = padding_base_beside(
@@ -7298,10 +7355,19 @@ where
                         verdict,
                         padding,
                     );
+                    // **The gate reads the quality the record would carry**, after the artifact
+                    // correction, and before the windows are taken: a locus below it is not
+                    // written, so nothing of it reaches the file or the filter after
+                    // (`calling_quality.md` §3.5).
+                    if evidence.corrected_site_quality < min_site_quality {
+                        return Ok(CalledLocus::BelowMinimumSiteQuality(
+                            evidence.corrected_site_quality,
+                        ));
+                    }
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(Some(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
                 },
             );
             // **Finished on this worker, where the record still exists**, and folded on the
@@ -7318,20 +7384,29 @@ where
                     RoundLocusOutcome::CountedInside(region)
                 }
                 LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
-                LocusOutcome::Called(Ok(None)) => RoundLocusOutcome::CalledNotWritten(region),
-                LocusOutcome::Called(Ok(Some(record))) => match prepare(record, window_coverage) {
-                    Ok(ready) => RoundLocusOutcome::CalledRecord(
-                        ready,
-                        std::mem::take(window_coverage),
-                        region,
-                    ),
-                    // Reported where the calling thread reaches this locus, in genome order, as a
-                    // refusal of `hand_over` would be.
-                    Err(source) => RoundLocusOutcome::CalledFailed(RunError::RecordNotWritten {
-                        locus: region,
-                        source: Box::new(source),
-                    }),
-                },
+                LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
+                    RoundLocusOutcome::CalledNotWritten(region)
+                }
+                LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
+                    RoundLocusOutcome::CalledBelowMinimumSiteQuality(region)
+                }
+                LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
+                    match prepare(record, window_coverage) {
+                        Ok(ready) => RoundLocusOutcome::CalledRecord(
+                            ready,
+                            std::mem::take(window_coverage),
+                            region,
+                        ),
+                        // Reported where the calling thread reaches this locus, in genome order, as a
+                        // refusal of `hand_over` would be.
+                        Err(source) => {
+                            RoundLocusOutcome::CalledFailed(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            })
+                        }
+                    }
+                }
             };
             (outcome, explanation)
         },
@@ -7349,6 +7424,10 @@ where
                 }
                 RoundLocusOutcome::CalledNotWritten(region) => {
                     loci_called_but_not_written += 1;
+                    progress.locus_passed(region, records_written);
+                }
+                RoundLocusOutcome::CalledBelowMinimumSiteQuality(region) => {
+                    loci_below_minimum_site_quality += 1;
                     progress.locus_passed(region, records_written);
                 }
                 RoundLocusOutcome::CalledFailed(error) => {
@@ -7414,6 +7493,7 @@ where
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
+            loci_below_minimum_site_quality,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
