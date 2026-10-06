@@ -2924,6 +2924,7 @@ mod tests {
                             .expect("a probability"),
                         provenance: Provenance::FittedHere,
                         observations: 4_000,
+                        standard_error: None,
                     },
                 );
             }

@@ -334,23 +334,7 @@ pub fn parameters_from_the_fit(
     // **The clean class's rate is the sequencing error rate.** The fit models two: how often a
     // read misreads a base at an ordinary position, and how often a read disagrees with the
     // reference at a mismapped one. Only the first is chemistry.
-    let error_rate_by_read_group: BTreeMap<ReadGroupId, Estimate<ErrorRate>> = fit
-        .generic
-        .noise
-        .iter()
-        .filter_map(|(group, estimate)| {
-            ErrorRate::try_new(estimate.value.clean).ok().map(|rate| {
-                (
-                    *group,
-                    Estimate {
-                        value: rate,
-                        provenance: estimate.provenance,
-                        observations: estimate.observations,
-                    },
-                )
-            })
-        })
-        .collect();
+    let error_rate_by_read_group = fit.generic.sequencing_error_rates();
 
     // Per sample, per read group — and a read group belongs to one sample, so flattening cannot
     // collide.
@@ -383,6 +367,13 @@ pub fn parameters_from_the_fit(
             continue;
         };
         let repeats = RepeatCount(repeats);
+        // **A counted rate's error is the binomial one**, √(p(1 − p)/n) over the bases compared:
+        // each base compared either matched or did not. **None where no base mismatched, or
+        // every one did**: there the formula gives zero, which would claim the rate known exactly
+        // from a count that found only one outcome.
+        let standard_error = (counts.mismatching_bases > 0
+            && counts.mismatching_bases < counts.bases_compared)
+            .then(|| (rate.get() * (1.0 - rate.get()) / counts.bases_compared as f64).sqrt());
         for group in cohort.read_groups() {
             ssr_substitution_rate.insert(
                 StratumKey {
@@ -394,6 +385,7 @@ pub fn parameters_from_the_fit(
                     value: rate,
                     provenance: Provenance::FittedHere,
                     observations: counts.bases_compared,
+                    standard_error,
                 },
             );
         }
@@ -475,6 +467,8 @@ pub fn fitted_inbreeding_of(
                             // apart.
                             provenance: excess.provenance,
                             observations: excess.observations,
+                            // The coefficient is the excess itself, so its error is the excess's.
+                            standard_error: excess.standard_error,
                         },
                     )
                 })
@@ -524,6 +518,7 @@ mod fitted_inbreeding_tests {
             value: HomozygoteExcess::try_new(value).expect("a fraction in [0, 1]"),
             provenance,
             observations: 1_806,
+            standard_error: None,
         }
     }
 
@@ -543,6 +538,11 @@ mod fitted_inbreeding_tests {
         ]
         .into_iter()
         .collect();
+        let mut hom_excess = hom_excess;
+        hom_excess
+            .get_mut("identified")
+            .expect("inserted above")
+            .standard_error = Some(0.031);
 
         let coefficients = fitted_inbreeding_of(&hom_excess);
 
@@ -551,7 +551,11 @@ mod fitted_inbreeding_tests {
         assert!((identified.value.get() - 0.78).abs() < 1e-15);
         assert_eq!(identified.provenance, Provenance::FittedHere);
         assert_eq!(identified.observations, 1_806);
+        // The coefficient is the excess, so it keeps the excess's error, and an excess with none
+        // stays without one.
+        assert_eq!(identified.standard_error, Some(0.031));
         assert_eq!(coefficients["one_sample"].provenance, Provenance::Defaulted);
+        assert_eq!(coefficients["one_sample"].standard_error, None);
     }
 
     /// **An excess of exactly one has no coefficient to become, so that sample is left out** and
@@ -949,9 +953,11 @@ mod writing_the_parameters_file {
     /// own**, for every read group, counted over the bases it compared.
     ///
     /// The fixture's one stratum compares 460 bases and finds none disagreeing, so on its own it
-    /// reaches neither case: its rate is zero and no stratum lacks one. Two strata are added to
+    /// reaches neither case: its rate is zero and no stratum lacks one. Three strata are added to
     /// the fit's counts before the file is assembled — one with nothing compared, which must be
-    /// skipped rather than written as a fitted zero, and one with 3 disagreeing in 4,000.
+    /// skipped rather than written as a fitted zero, one with 3 disagreeing in 4,000, and one whose
+    /// 5 bases all disagree. The fixture's own zero rate and the third stratum's rate of one carry
+    /// no standard error; the stratum with 3 in 4,000 carries its binomial error.
     #[test]
     fn a_stratum_with_nothing_compared_gets_no_rate_and_one_with_mismatches_gets_its_own() {
         use crate::parameter_estimation::joint::census::Stratum as CensusStratum;
@@ -964,6 +970,10 @@ mod writing_the_parameters_file {
             period: 4,
             reference_repeats: 6,
         };
+        let all = CensusStratum {
+            period: 5,
+            reference_repeats: 5,
+        };
         let (parameters, _) = a_fitted_cohorts_parameters_with(&[
             StratumSubstitutionCounts {
                 stratum: nothing,
@@ -974,6 +984,11 @@ mod writing_the_parameters_file {
                 stratum: some,
                 bases_compared: 4_000,
                 mismatching_bases: 3,
+            },
+            StratumSubstitutionCounts {
+                stratum: all,
+                bases_compared: 5,
+                mismatching_bases: 5,
             },
         ]);
         let rates: Vec<_> = parameters.ssr_substitution_rate().collect();
@@ -993,6 +1008,20 @@ mod writing_the_parameters_file {
             !fixtures_own.is_empty(),
             "the fixture's own stratum is written, which is what the count below is measured by"
         );
+        // **A count that found no mismatch gives a rate of zero and no error**, not an error of
+        // zero, which would claim the rate known exactly.
+        for (_, estimate) in &fixtures_own {
+            assert_eq!(estimate.value.get(), 0.0);
+            assert!(estimate.observations > 0);
+            assert_eq!(estimate.standard_error, None);
+        }
+        // Nor does one where every base compared mismatched.
+        let every_base = of_period(5);
+        assert_eq!(every_base.len(), fixtures_own.len());
+        for (_, estimate) in every_base {
+            assert_eq!(estimate.value.get(), 1.0);
+            assert_eq!(estimate.standard_error, None);
+        }
         let added = of_period(4);
         assert_eq!(
             added.len(),
@@ -1004,6 +1033,15 @@ mod writing_the_parameters_file {
             assert_eq!(estimate.value.get(), 3.0 / 4_000.0);
             assert_eq!(estimate.observations, 4_000);
             assert_eq!(estimate.provenance, Provenance::FittedHere);
+            // **The binomial error of 3 mismatches in 4,000 bases**, √(p(1 − p)/n): 0.000433,
+            // about the rate over √3 — one over the square root of the mismatches, as a count's
+            // error is.
+            let rate: f64 = 3.0 / 4_000.0;
+            let error = estimate
+                .standard_error
+                .expect("a counted rate has an error");
+            assert_eq!(error, (rate * (1.0 - rate) / 4_000.0).sqrt());
+            assert!((error - 0.000_433).abs() < 1e-6, "{error}");
         }
     }
 
@@ -1066,6 +1104,7 @@ mod writing_the_parameters_file {
                 value: declared,
                 provenance: Provenance::Supplied,
                 observations: 0,
+                standard_error: None,
             })
             .collect();
 

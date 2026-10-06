@@ -352,6 +352,7 @@ impl ParametersFile {
                 value,
                 provenance: row.inbreeding_coefficient.warrant.into(),
                 observations: an_evidence_count(row.inbreeding_coefficient.observations),
+                standard_error: None,
             });
         }
         Ok(by_sample
@@ -499,6 +500,7 @@ impl ParametersFile {
                     value,
                     provenance: row.rate.warrant.into(),
                     observations: an_evidence_count(row.rate.observations),
+                    standard_error: None,
                 },
             );
         }
@@ -1458,6 +1460,7 @@ mod the_north_star_round_trip {
                         _ => Provenance::Supplied,
                     },
                     observations: 100_000 + group as u64 * 7_919,
+                    standard_error: None,
                 },
             );
             let reads = 1_000 + group as u32 * 13;
@@ -1525,6 +1528,7 @@ mod the_north_star_round_trip {
                     Provenance::Borrowed
                 },
                 observations: 180_000_000 + sample as u64 * 1_009,
+                standard_error: None,
             })
             .collect()
     }
@@ -1813,6 +1817,7 @@ mod the_north_star_round_trip {
                             // **A count at the size a real one has**, because the width of this
                             // number is part of what the file's largest axis costs a cohort.
                             observations: 172_000_000 + group as u64 * 1_009,
+                            standard_error: None,
                         },
                     );
                 }

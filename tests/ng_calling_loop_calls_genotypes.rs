@@ -943,6 +943,7 @@ fn tract_substitution_rates_over(libraries: usize) -> BTreeMap<StratumKey, Estim
                     value: ErrorRate::try_new(0.001 * f64::from(repeats)).expect("a probability"),
                     provenance: Provenance::FittedHere,
                     observations: 4_000,
+                    standard_error: None,
                 },
             );
         }

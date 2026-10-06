@@ -49,7 +49,9 @@ use crate::float;
 use crate::parameter_estimation::depth_bins::{DepthBin, DepthBinEdges};
 use crate::parameter_estimation::progress::StageProgress;
 use crate::parameter_estimation::{Estimate, Provenance};
-use crate::types::{ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId};
+use crate::types::{
+    ErrorRate, ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId,
+};
 
 use super::census::{
     CensusError, CohortCensusEvidence, CohortRefusal, DepthCap, DepthCode, SampleGenericSections,
@@ -285,6 +287,12 @@ pub struct SampleGenotypeRates {
 pub struct JointFit {
     /// Chemistry: two rates per read group.
     pub noise: BTreeMap<ReadGroupId, Estimate<SiteClassNoise>>,
+    /// **The standard error of each read group's error rate at an ordinary position**, read through
+    /// [`Self::sequencing_error_rates`]. Beside `noise` rather than in it, because there a
+    /// library's two rates are one [`Estimate`] and one error cannot describe both. The mismapped
+    /// rate's error is not carried: nothing reads it. Private so that it is built only beside
+    /// `noise`, over the same read groups.
+    clean_rate_standard_error: BTreeMap<ReadGroupId, Option<f64>>,
     /// The share of positions drawn from the noisy class. **One number for the cohort**, not
     /// one per read group: a position is mismapped or it is not, and it cannot be mismapped
     /// for one library and clean for another at the same position. *This departs from spec
@@ -389,7 +397,9 @@ pub struct JointFit {
     /// the order the census lists them: its first library's two error rates, its homozygote excess,
     /// then each further library's two rates ([`sample`](information::sample)).
     ///
-    /// Private until each [`Estimate`] carries its own error (plan step E1), which reads it.
+    /// What a reader of the fit needs from it is on each [`Estimate`] — a sample's homozygote
+    /// excess — and [`Self::sequencing_error_rates`]; this keeps the rest for the log and the
+    /// tests.
     standard_errors: StandardErrors,
 }
 
@@ -413,6 +423,49 @@ pub struct StartRecord {
 }
 
 impl JointFit {
+    /// **Each read group's sequencing error rate — its rate at an ordinary position — with that
+    /// rate's own standard error.** The fit models two rates a library: how often a read misreads
+    /// a base at an ordinary position, and how often a read disagrees with the reference at a
+    /// mismapped one. Only the first is chemistry.
+    ///
+    /// The error is `None` where the fit gives it none: no reads, not told apart from the other
+    /// parameters, or an error wider than the rate's whole range. A rate that is not a probability
+    /// is left out, as no rate rather than a coerced one.
+    ///
+    /// # Panics
+    ///
+    /// When a read group has rates and no entry for its error: the two are built over the same
+    /// read groups, so one without the other is a wiring bug, and answering `None` would read as
+    /// *fitted, with no error*.
+    #[must_use]
+    pub fn sequencing_error_rates(&self) -> BTreeMap<ReadGroupId, Estimate<ErrorRate>> {
+        self.noise
+            .iter()
+            .filter_map(|(group, estimate)| {
+                let standard_error =
+                    *self
+                        .clean_rate_standard_error
+                        .get(group)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "read group {group:?} has error rates and no entry for their errors"
+                            )
+                        });
+                ErrorRate::try_new(estimate.value.clean).ok().map(|rate| {
+                    (
+                        *group,
+                        Estimate {
+                            value: rate,
+                            provenance: estimate.provenance,
+                            observations: estimate.observations,
+                            standard_error,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// **The population's expected heterozygosity, in the type the caller's genotype prior
     /// takes** — how often two copies of an ordinary site drawn at random from the population
     /// differ (`doc/devel/ng/spec/population_diversity.md` §3.1, §3.2).
@@ -1810,6 +1863,7 @@ pub fn fit_jointly(
         trace,
         contamination,
         standard_errors,
+        clean_rate_standard_error,
     } = cohort.with_generic(&groups, |lent| {
         // Which read group each sample's own groups are, in the order the cursor visits them.
         let group_index: Vec<Vec<usize>> = lent
@@ -2058,6 +2112,15 @@ pub fn fit_jointly(
             });
             not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
         };
+        // **Each read group's ordinary-position rate's error, found through its sample**: the
+        // errors are laid out a sample at a time, and a read group is one section of one sample.
+        let mut clean_rate_standard_error = vec![None; groups.len()];
+        for (s, own) in group_index.iter().enumerate() {
+            for (section, &group) in own.iter().enumerate() {
+                clean_rate_standard_error[group] =
+                    standard_errors.samples[s][information::sample::rate(section, 0)].value();
+            }
+        }
         FittedCohort {
             parameters,
             statistics,
@@ -2067,6 +2130,7 @@ pub fn fit_jointly(
             trace,
             contamination,
             standard_errors,
+            clean_rate_standard_error,
         }
     })?;
     stage.always(|into| format!("SNP/indel fit: done; {into}"));
@@ -2089,6 +2153,7 @@ pub fn fit_jointly(
                     },
                     provenance: Provenance::FittedHere,
                     observations,
+                    standard_error: None,
                 },
             )
         })
@@ -2108,6 +2173,11 @@ pub fn fit_jointly(
                         Provenance::Defaulted
                     },
                     observations: statistics.with_reads[s],
+                    // `None` where the fit gives it none — at one sample, where the fit holds the
+                    // excess at its start, among others ([`StandardErrors`]).
+                    standard_error: standard_errors.samples[s]
+                        [information::sample::HOMOZYGOTE_EXCESS]
+                        .value(),
                 },
             )
         })
@@ -2128,6 +2198,7 @@ pub fn fit_jointly(
                     },
                     provenance: Provenance::FittedHere,
                     observations: statistics.with_reads[s],
+                    standard_error: None,
                 },
             )
         })
@@ -2136,11 +2207,17 @@ pub fn fit_jointly(
 
     Ok(JointFit {
         noise,
+        clean_rate_standard_error: groups
+            .iter()
+            .copied()
+            .zip(clean_rate_standard_error)
+            .collect(),
         noisy_share: parameters.noisy_share,
         density: Estimate {
             value: parameters.density,
             provenance: Provenance::FittedHere,
             observations,
+            standard_error: None,
         },
         hom_excess,
         rates,
@@ -2151,6 +2228,7 @@ pub fn fit_jointly(
             value,
             provenance: Provenance::FittedHere,
             observations,
+            standard_error: None,
         }),
         noisy_posterior: statistics.noisy_posterior,
         genotype_posterior,
@@ -2575,6 +2653,8 @@ struct FittedCohort {
     trace: Vec<PassSummary>,
     contamination: Vec<SampleContaminationEstimates>,
     standard_errors: StandardErrors,
+    /// Each read group's, in the order of the fit's list of read groups.
+    clean_rate_standard_error: Vec<Option<f64>>,
 }
 
 /// The plain alternation's one step — a pass over the data, then every parameter maximised
@@ -4663,11 +4743,13 @@ mod tests {
         JointFit {
             census_moments: CensusMomentSums::over(1),
             noise: BTreeMap::new(),
+            clean_rate_standard_error: BTreeMap::new(),
             noisy_share: 0.0,
             density: Estimate {
                 value: density,
                 provenance: Provenance::FittedHere,
                 observations: 1_000,
+                standard_error: None,
             },
             duplicated: None,
             hom_excess: BTreeMap::new(),
@@ -5839,6 +5921,10 @@ mod whole_fit_tests {
         )
         .expect("one sample is a cohort of one");
         assert_eq!(fit.hom_excess["s0"].provenance, Provenance::Defaulted);
+        assert_eq!(
+            fit.hom_excess["s0"].standard_error, None,
+            "an excess the fit held at its start has no error"
+        );
         // One sample, one library, so one entry — and it says there is no panel rather than
         // giving a number, which is the point.
         assert!(
@@ -6001,6 +6087,15 @@ mod whole_fit_tests {
         );
         // A sample's positions with reads count its libraries' reads together.
         for (s, name) in fit.rates.keys().enumerate() {
+            // Its homozygote excess carries the fit's own error for it.
+            let excess_error = fit.standard_errors.samples[s]
+                [super::information::sample::HOMOZYGOTE_EXCESS]
+                .value();
+            assert!(
+                excess_error.is_some(),
+                "sample {name}'s excess has an error"
+            );
+            assert_eq!(fit.hom_excess[name].standard_error, excess_error);
             let rates = &fit.rates[name].value;
             assert_eq!(
                 (rates.positions_with_reads, rates.positions_with_two_reads),
@@ -6019,10 +6114,13 @@ mod whole_fit_tests {
                     [super::information::sample::rate(section, 0)]
                 .value()
                 .expect("each library's rate has an error");
-                let fitted = fit.noise
-                    [&ReadGroupId(u32::try_from(group).expect("twelve libraries"))]
-                    .value
-                    .clean;
+                let id = ReadGroupId(u32::try_from(group).expect("twelve libraries"));
+                // **The error a reader of the fit is given is this library's own**, found through
+                // its sample: a sibling's would differ (below).
+                let rate = &fit.sequencing_error_rates()[&id];
+                assert_eq!(rate.standard_error, Some(error));
+                assert_eq!(rate.value.get(), fit.noise[&id].value.clean);
+                let fitted = fit.noise[&id].value.clean;
                 let distance = (fitted - cohort.per_library_clean[group]) / error;
                 eprintln!("library {group}: {distance:+.2} errors from its drawn clean rate");
                 assert!(

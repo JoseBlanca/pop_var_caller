@@ -990,6 +990,7 @@ mod tests {
             value: ErrorRate::try_new(value).expect("a legal error rate"),
             provenance,
             observations,
+            standard_error: None,
         }
     }
 
@@ -1100,6 +1101,7 @@ mod tests {
             value: InbreedingF::try_new(value).expect("a legal coefficient"),
             provenance,
             observations,
+            standard_error: None,
         }
     }
 

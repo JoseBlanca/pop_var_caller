@@ -1239,6 +1239,7 @@ mod tests {
                             .expect("a valid rate"),
                         provenance: Provenance::FittedHere,
                         observations: 40_000,
+                        standard_error: None,
                     },
                 );
             }
@@ -2074,6 +2075,7 @@ mod tests {
                             .expect("a valid rate"),
                         provenance: Provenance::FittedHere,
                         observations: 40_000,
+                        standard_error: None,
                     },
                 );
             }

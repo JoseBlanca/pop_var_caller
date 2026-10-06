@@ -2597,6 +2597,7 @@ mod tests {
             value: ErrorRate::try_new(rate).expect("a fixture rate is a probability"),
             provenance: Provenance::FittedHere,
             observations: 84_113,
+            standard_error: None,
         }
     }
 
@@ -2607,6 +2608,7 @@ mod tests {
             value: ErrorRate::try_new(rate).expect("a fixture rate is a probability"),
             provenance: Provenance::Borrowed,
             observations: 311,
+            standard_error: None,
         }
     }
 

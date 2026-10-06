@@ -282,7 +282,11 @@ priors.** The owner's run of D3 on kimura (2,169 samples, `--inbreeding` 0.96 fo
 
 ### Milestone E — the errors in the file
 
-1. ☐ **E1 — `Estimate` gains `standard_error: Option<f64>`**, its "no uncertainty interval" note
+**Decided before E (owner, 2026-10-06):** start E; and in E2 the file's explanatory text says, in one
+sentence, that a subset-fitted stratum's error describes the subset's own fit, not its distance from a fit on
+every sample — checkpoint D's run found 7 of 12 compared numbers beyond ±2 of that error.
+
+1. ✅ **E1 — `Estimate` gains `standard_error: Option<f64>`**, its "no uncertainty interval" note
    rewritten (spec §5.1); every constructor sets it, `None` where no error is computed. No output
    changes. *Depends:* B3, C1. *Source:* spec §5.1.
 2. ☐ **E2 — the parameters file, version 2.** `standard_error` in the value tables and

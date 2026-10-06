@@ -335,6 +335,7 @@ impl DeclaredInbreeding {
                         value: *coefficient,
                         provenance: Provenance::Supplied,
                         observations: 0,
+                        standard_error: None,
                     },
                     None => fitted
                         .get(sample.sample.as_ref())
@@ -344,6 +345,7 @@ impl DeclaredInbreeding {
                                 .expect("zero is a coefficient in [0, 1)"),
                             provenance: Provenance::Defaulted,
                             observations: 0,
+                            standard_error: None,
                         }),
                 }
             })
@@ -932,6 +934,7 @@ mod tests {
                             value: a_coefficient(coefficient),
                             provenance: Provenance::FittedHere,
                             observations: 1_806,
+                            standard_error: None,
                         },
                     )
                 })
@@ -1401,6 +1404,7 @@ mod tests {
                     value: ErrorRate::try_new(0.0012).expect("a probability"),
                     provenance: Provenance::FittedHere,
                     observations: 40_122,
+                    standard_error: None,
                 },
             ),
             (
@@ -1413,6 +1417,7 @@ mod tests {
                     value: ErrorRate::try_new(0.0007).expect("a probability"),
                     provenance: Provenance::FittedHere,
                     observations: 5_000,
+                    standard_error: None,
                 },
             ),
         ]);
