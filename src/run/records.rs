@@ -211,8 +211,9 @@ where
 /// bases of a 24-base insertion, against 107 that carry the insertion whole. That sequence is
 /// then a candidate allele no haplotype carries, and the homozygous insertion is called `1/2`.
 ///
-/// **The rule.** An alternative allele `S` as long as the reference — a spelling of substitutions
-/// alone — whose bases are exactly the start of another allele
+/// **The rule.** An alternative allele `S` at least as long as the reference — a spelling of
+/// substitutions alone, or of an insertion shorter than `A`'s — whose bases are exactly the start
+/// of another allele
 /// `A` followed by the reference past the locus, or exactly the end of `A` preceded by the
 /// reference before it, is a spelling of `A` cut short rather than evidence of its own. Its
 /// complete rows become partial rows covering the whole locus and marked to run on past that
@@ -263,11 +264,10 @@ where
     let reference_len = observation.alleles[0].len();
     let mut cut_short: Vec<Option<LocusBorder>> = vec![None; observation.alleles.len()];
     for (spelling, bases) in observation.alleles.iter().enumerate().skip(1) {
-        // **Only a spelling as long as the reference**: substitutions alone, which is what a read
-        // laid straight across shows. A read carrying an indel crossed the locus with it, and a
-        // deletion's own allele is a prefix of the reference's whenever it removes the locus's
-        // last bases — trying it here re-read 20 true deletions at 300x on GIAB.
-        if complete_reads[spelling] == 0 || bases.len() != reference_len {
+        // **Never a spelling shorter than the reference.** A deletion's own allele is a prefix of
+        // the reference's whenever it removes the locus's last bases, and a read carrying it
+        // crossed the locus with it — trying it here re-read 20 true deletions at 300x on GIAB.
+        if complete_reads[spelling] == 0 || bases.len() < reference_len {
             continue;
         }
         for (longer, allele) in observation.alleles.iter().enumerate() {
@@ -282,6 +282,14 @@ where
             // spells exactly the start of a one-base insertion there. On 63 tomato accessions
             // that re-read a SNP GATK calls in 52 of them (SL4.0ch12:18047655).
             if allele.len().abs_diff(bases.len()) < 2 {
+                continue;
+            }
+            // **A spelling that carries an insertion is read only as a shorter insertion than the
+            // allele it was cut from**: a read starting inside an inserted copy, which the mapper
+            // fitted with fewer inserted bases. At GIAB HG002 chr1:243535155, 37 reads showed
+            // exactly the last 56 bases of a 68-base allele carrying a 19-base insertion. Against
+            // a shorter allele it would be a longer insertion, which no read cut short spells.
+            if bases.len() > reference_len && allele.len() < bases.len() {
                 continue;
             }
             if carrier_sequence_starts_with(allele, &scratch.after, bases) {
