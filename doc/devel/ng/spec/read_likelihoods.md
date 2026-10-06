@@ -1780,6 +1780,34 @@ because every allele replaces the same reference span and leaves what follows it
   > placement (`locus_generation_pileup.md` §4), so a read that crossed it has crossed the whole
   > stretch the indel can slide along.
 
+**A read the mapper laid straight across a longer allele is compared as a read flush to one border
+(2026-10-06).** A read that ends a few bases into an inserted copy cannot be placed with a gap, so
+the mapper aligns it across the reference and the start of the copy comes out as substitutions. It
+covers every position of the locus, so it arrives complete, as an allele of its own that no
+haplotype carries. At GIAB HG003 chr15:96140584, 34 reads showed exactly the first 46 bases of a
+24-base insertion that 107 reads carried whole, and the homozygous insertion was called `1/2`. So
+before candidate selection, an alternative allele **as long as the reference** (substitutions
+alone) whose bases are exactly the start of another allele followed by the reference past the
+locus, or exactly its end preceded by the reference before it, has its complete reads turned into
+partial ones covering the whole locus and marked with that border
+(`PartialObservation::sequence_may_run_on_past`; `reread_spellings_cut_short` in `run/records.rs`).
+They are then compared exactly as a read flush to that border is, above. Three guards: the longer
+allele needs at least as many complete reads across the cohort; the two must differ in length by
+two bases or more, because a one-base shift inside a homopolymer is invisible, so a real SNP just
+before one spells the start of a one-base insertion (without this guard, a SNP GATK calls in 52 of
+63 tomato accessions, SL4.0ch12:18047655, was re-read); and the reference is never re-read.
+The length rule is not optional: a deletion's allele is a prefix of the reference's whenever it
+removes the locus's last bases, and without it 20 true deletions at 300× were lost.
+
+Measured on the three GIAB samples, each over its own 100 regions (missed / false calls, vcfeval
+against v4.2.1): 5× 746 / 315 unchanged; 10× 202 / 310 → 201 / 309; 30× 54 / 168 → 50 / 165; 300×
+44 / 45 → 41 / 43. Every site that changed was fixed, none broken; the report's three sites
+(HG003 chr15:96140584, HG004 chr9:11024723 and chr15:65223392) are all among them. On 63 tomato accessions at about 3× it
+changes 23 of 225,917 records; at those loci, against GATK HaplotypeCaller run on the same CRAMs
+(vcfeval per sample, an allele in either zygosity counting as agreement), 87 variant genotypes GATK
+does not call are removed and 62 it does call are lost, some of the latter at sites where neither
+build writes a record within 150 bases, i.e. vcfeval matching a neighbouring haplotype differently.
+
 **The flank matters only when the read showed more bases than the allele has.** While the read's
 bases fit inside the allele, the extended comparison and the comparison against the allele alone
 give the same answer. So the reference beyond the locus has to be read only for a locus that has

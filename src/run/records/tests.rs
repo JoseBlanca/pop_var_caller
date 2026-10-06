@@ -582,6 +582,7 @@ fn a_read_that_stopped_inside_the_locus_is_in_dp_and_in_no_ad_slot() {
         bases: Box::from(b"A".as_slice()),
         num_reads: 5,
         q_sum: -5.0,
+        sequence_may_run_on_past: None,
     }];
     let observation = observed(&[b"A", b"C"], vec![sample]);
     let (remap, unmatched) = selected(&observation);
@@ -874,6 +875,7 @@ fn the_three_kinds_of_unexplained_read_are_added_together() {
         bases: Box::from(b"A".as_slice()),
         num_reads: 5,
         q_sum: -5.0,
+        sequence_may_run_on_past: None,
     }];
     let observation = observed(&[b"A", b"C", b"G"], vec![sample]);
     let (remap, unmatched) = selected(&observation);
@@ -1042,4 +1044,152 @@ fn a_tracts_filter_comes_from_selection_unless_the_loop_did_not_settle() {
         FilterVerdict::Pass,
         "`tooManyAlleles` is a tract filter, and a truncated SNP/indel locus is still a PASS",
     );
+}
+
+// ---------------------------------------------------------------------
+// Spellings cut short: reads the mapper laid straight across a longer allele.
+// ---------------------------------------------------------------------
+
+/// `TTTTT`, then the locus `ACG` at 6..=8, then `TTTTT`.
+const CUT_SHORT_CONTIG: &[u8] = b"TTTTTACGTTTTT";
+
+/// One sample over the locus at 6..=8, its complete reads `(allele, reads)`.
+fn cut_short_locus(alleles: &[&[u8]], rows: &[(usize, u32)]) -> CohortObservation {
+    let mut observation = observed(
+        alleles,
+        vec![covering(
+            0,
+            rows.iter()
+                .map(|&(allele, reads)| row(allele, reads, 60 * reads))
+                .collect(),
+        )],
+    );
+    observation.region = region(6, 8);
+    observation
+}
+
+fn reread(observation: &mut CohortObservation) {
+    reread_spellings_cut_short(
+        &reference_of(CUT_SHORT_CONTIG),
+        observation,
+        &mut ReferenceBesideScratch::default(),
+    )
+    .expect("the fixture reference serves every flank");
+}
+
+/// **Reads showing exactly the start of a longer allele are re-read as partial**, marked to run on
+/// past the right border, and then fit that allele and not the reference. `AGG` is the first three
+/// bases of the insertion allele `AGGCG`: what a carrier's read laid straight across the locus
+/// shows, as two substitutions.
+#[test]
+fn a_spelling_that_is_the_start_of_a_longer_allele_is_reread_as_partial() {
+    let mut observation = cut_short_locus(&[b"ACG", b"AGGCG", b"AGG"], &[(0, 6), (1, 10), (2, 4)]);
+    reread(&mut observation);
+
+    let sample = &observation.per_sample[0];
+    assert_eq!(
+        sample
+            .supported
+            .iter()
+            .map(|row| row.allele)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the cut-short spelling no longer has complete reads",
+    );
+    let [partial] = sample.partials.as_slice() else {
+        panic!("one re-read row: {:?}", sample.partials);
+    };
+    assert_eq!(partial.sequence_may_run_on_past, Some(LocusBorder::Right));
+    assert_eq!((&*partial.bases, partial.num_reads), (&b"AGG"[..], 4));
+
+    let mut scratch = ReferenceBesideScratch::default();
+    let beside =
+        reference_beside_locus(&reference_of(CUT_SHORT_CONTIG), &observation, &mut scratch)
+            .expect("the fixture reference serves every flank");
+    let fits = |allele: &[u8]| {
+        crate::calling::partial_row_fits_allele(
+            partial,
+            allele,
+            beside,
+            crate::locus_generation::LocusLen::from_positions(3),
+        )
+    };
+    assert!(
+        fits(b"AGGCG"),
+        "a carrier of the insertion shows AGG over the locus"
+    );
+    assert!(!fits(b"ACG"), "the reference shows ACG there");
+}
+
+/// **The mirror image, at the left border**: `TCG` is the last three bases of `ATTCG`, what a
+/// carrier's read that began inside the insertion shows.
+#[test]
+fn a_spelling_that_is_the_end_of_a_longer_allele_is_reread_at_the_left_border() {
+    let mut observation = cut_short_locus(&[b"ACG", b"ATTCG", b"TCG"], &[(0, 6), (1, 10), (2, 4)]);
+    reread(&mut observation);
+    let partials = &observation.per_sample[0].partials;
+    assert_eq!(partials.len(), 1, "{partials:?}");
+    assert_eq!(
+        partials[0].sequence_may_run_on_past,
+        Some(LocusBorder::Left)
+    );
+}
+
+/// **A spelling better supported than the allele it would be cut from is left alone**: a few odd
+/// reads must not re-read an allele most of the cohort's reads show whole.
+#[test]
+fn a_spelling_with_more_reads_than_the_longer_allele_is_left_alone() {
+    let mut observation = cut_short_locus(&[b"ACG", b"AGGCG", b"AGG"], &[(0, 6), (1, 3), (2, 9)]);
+    reread(&mut observation);
+    let sample = &observation.per_sample[0];
+    assert_eq!(
+        sample
+            .supported
+            .iter()
+            .map(|row| row.allele)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "every complete row stays where it was",
+    );
+    assert!(sample.partials.is_empty(), "{:?}", sample.partials);
+}
+
+/// **A deletion is never re-read, though its allele is a prefix of the reference's.** `A` is the
+/// anchor alone, what every read carrying the two-base deletion shows over the locus, and it is
+/// the start of `ACG`. A read that carried the deletion crossed the locus with it; only a spelling
+/// as long as the reference is a read laid straight across.
+#[test]
+fn a_deletion_allele_is_not_reread_as_a_cut_short_reference() {
+    let mut observation = cut_short_locus(&[b"ACG", b"A", b"AGG"], &[(0, 20), (1, 10), (2, 1)]);
+    reread(&mut observation);
+    let sample = &observation.per_sample[0];
+    assert_eq!(
+        sample
+            .supported
+            .iter()
+            .map(|row| row.allele)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "every complete row stays where it was",
+    );
+    assert!(sample.partials.is_empty(), "{:?}", sample.partials);
+}
+
+/// **A spelling one base shorter than the longer allele is left alone.** `AGT` is the start of the
+/// one-base insertion `AGTG`, but a one-base shift is invisible inside a homopolymer, so a real
+/// SNP just before one spells exactly this (SL4.0ch12:18047655 on the tomato panel).
+#[test]
+fn a_spelling_one_base_shorter_than_the_longer_allele_is_left_alone() {
+    let mut observation = cut_short_locus(&[b"ACG", b"AGTG", b"AGT"], &[(0, 6), (1, 10), (2, 4)]);
+    reread(&mut observation);
+    let sample = &observation.per_sample[0];
+    assert_eq!(
+        sample
+            .supported
+            .iter()
+            .map(|row| row.allele)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+    );
+    assert!(sample.partials.is_empty(), "{:?}", sample.partials);
 }

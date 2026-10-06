@@ -8,6 +8,7 @@ use super::MAX_PLOIDY_COPIES;
 use crate::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
 use crate::float;
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
+use crate::run::cohort_merge::build::{LocusBorder, PartialObservation};
 use crate::types::{AlleleId, LogProb};
 
 /// How many bases a misread could have gone to — **three, and it is a physical fact rather
@@ -435,6 +436,39 @@ pub fn allele_is_compatible_with_partial(
     }
 }
 
+/// **Whether a carrier of `allele` could have shown what one partial row of the merge shows** —
+/// [`allele_is_compatible_with_partial`], read off the row, and honouring the row's
+/// [`sequence_may_run_on_past`](crate::run::cohort_merge::build::PartialObservation::sequence_may_run_on_past).
+///
+/// A row marked to run on past a border covers the whole locus, but is compared as a read flush to
+/// that border alone is: the allele and then the reference past the locus must start with its
+/// bases (`Right`), or the reference before the locus and then the allele must end with them
+/// (`Left`). Its witness would make it a read that crossed both borders, compared against the
+/// allele alone, and the mark exists because these reads did not (spec §5.3).
+#[must_use]
+pub fn partial_row_fits_allele(
+    partial: &PartialObservation,
+    allele: &[u8],
+    beside: ReferenceBesideLocus<'_>,
+    locus_len: LocusLen,
+) -> bool {
+    match partial.sequence_may_run_on_past {
+        Some(LocusBorder::Right) => {
+            carrier_sequence_starts_with(allele, beside.after, &partial.bases)
+        }
+        Some(LocusBorder::Left) => {
+            carrier_sequence_ends_with(beside.before, allele, &partial.bases)
+        }
+        None => allele_is_compatible_with_partial(
+            &partial.witnessed_in_locus,
+            &partial.bases,
+            allele,
+            beside,
+            locus_len,
+        ),
+    }
+}
+
 /// **The reference on either side of an ordinary locus** — what a carrier's sequence continues
 /// into past the locus's borders, and so what a read that ran out inside the locus may have shown
 /// after the allele (spec §5.3).
@@ -462,7 +496,7 @@ impl ReferenceBesideLocus<'_> {
 
 /// Whether a carrier of `allele` shows `bases` from the locus's left border onwards: the allele,
 /// then `after`.
-fn carrier_sequence_starts_with(allele: &[u8], after: &[u8], bases: &[u8]) -> bool {
+pub(crate) fn carrier_sequence_starts_with(allele: &[u8], after: &[u8], bases: &[u8]) -> bool {
     match bases.split_at_checked(allele.len()) {
         Some((within_allele, beyond)) => within_allele == allele && after.starts_with(beyond),
         None => allele.starts_with(bases),
@@ -471,7 +505,7 @@ fn carrier_sequence_starts_with(allele: &[u8], after: &[u8], bases: &[u8]) -> bo
 
 /// Whether a carrier of `allele` shows `bases` ending at the locus's right border: `before`, then
 /// the allele.
-fn carrier_sequence_ends_with(before: &[u8], allele: &[u8], bases: &[u8]) -> bool {
+pub(crate) fn carrier_sequence_ends_with(before: &[u8], allele: &[u8], bases: &[u8]) -> bool {
     match bases.len().checked_sub(allele.len()) {
         Some(beyond_len) => {
             let (beyond, within_allele) = bases.split_at(beyond_len);
@@ -729,13 +763,7 @@ pub fn fill_generic_emissions(
             scratch.set_compatible(
                 partial_at,
                 AlleleId(allele_at as u16),
-                allele_is_compatible_with_partial(
-                    &partial.witnessed_in_locus,
-                    &partial.bases,
-                    allele_bases,
-                    beside,
-                    locus_len,
-                ),
+                partial_row_fits_allele(partial, allele_bases, beside, locus_len),
             );
         }
     }
@@ -3384,6 +3412,7 @@ mod tests {
             bases: bases.into(),
             num_reads,
             q_sum,
+            sequence_may_run_on_past: None,
         }
     }
 

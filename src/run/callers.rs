@@ -76,7 +76,7 @@ use super::explain::{
 };
 use super::records::{
     ReferenceBesideScratch, a_written_genotype_carries_an_alternative, evidence_for_output,
-    padding_base_beside, reference_beside_locus,
+    padding_base_beside, reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -654,6 +654,18 @@ impl AlignedFilesVariantCaller {
                     return;
                 }
                 let region = observation.region;
+                let mut observation = observation;
+                if let Err(source) = reread_spellings_cut_short(
+                    &reference_beside_the_loci,
+                    &mut observation,
+                    &mut beside_scratch,
+                ) {
+                    stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                        locus: region,
+                        source,
+                    });
+                    return;
+                }
                 let reference_beside = match reference_beside_locus(
                     &reference_beside_the_loci,
                     &observation,
@@ -996,6 +1008,18 @@ where
                 return;
             }
             let region = observation.region;
+            let mut observation = observation;
+            if let Err(source) = reread_spellings_cut_short(
+                &padding_reference,
+                &mut observation,
+                &mut beside_scratch,
+            ) {
+                stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                    locus: region,
+                    source,
+                });
+                return;
+            }
             let reference_beside =
                 match reference_beside_locus(&padding_reference, &observation, &mut beside_scratch)
                 {
@@ -7210,6 +7234,18 @@ where
                 tracts,
                 totals: _,
             } = worker;
+            let mut observation = observation;
+            if let Err(source) =
+                reread_spellings_cut_short(padding_reference, &mut observation, beside_scratch)
+            {
+                return (
+                    RoundLocusOutcome::CalledFailed(RunError::ReferenceBesideLocusUnreadable {
+                        locus: region,
+                        source,
+                    }),
+                    None,
+                );
+            }
             let reference_beside =
                 match reference_beside_locus(padding_reference, &observation, beside_scratch) {
                     Ok(beside) => beside,

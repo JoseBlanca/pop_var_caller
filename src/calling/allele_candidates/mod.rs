@@ -1285,6 +1285,7 @@ pub(super) mod fixtures {
             bases: Box::from(b"AC".as_slice()),
             num_reads,
             q_sum: -3.0,
+            sequence_may_run_on_past: None,
         }
     }
 
