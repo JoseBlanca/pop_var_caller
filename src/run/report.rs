@@ -211,6 +211,12 @@ impl<'a> RunReport<'a> {
                 self.calling.loci_below_minimum_site_quality,
             ));
         }
+        if self.calling.loci_at_or_above_strand_bias_cutoff > 0 {
+            lines.push(format!(
+                "loci left out for a strand bias at or above --max-strand-bias: {}",
+                self.calling.loci_at_or_above_strand_bias_cutoff,
+            ));
+        }
     }
 
     /// **The ground this run could not speak for, and why** — three different kinds of nothing,

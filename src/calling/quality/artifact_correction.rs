@@ -521,6 +521,242 @@ pub fn strand_and_read_position_penalty(counts: &ArtifactTestCounts) -> Phred {
     as_penalty(unramped * bias_test_power(counts.alternative_reads))
 }
 
+// ---------------------------------------------------------------------------------------
+// The strand-bias cutoff: the same question, with the reference reads' share as an estimate
+// ---------------------------------------------------------------------------------------
+
+/// **How improbable the alternative reads' strand and within-read placement are, judged against
+/// what the reference reads say about them *and how sure the reference reads can be*** — as a
+/// Phred, read by the strand-bias cutoff (`--max-strand-bias`, spec §6.5), and subtracted from
+/// nothing.
+///
+/// # The question is [`strand_and_read_position_penalty`]'s; the expectation is not
+///
+/// That penalty takes the reference reads' forward-strand share as the probability every
+/// alternative read had of being forward, as though it were known exactly. **It is an estimate
+/// from however many reference reads there were, and at a homozygous-variant site there are none
+/// or one.** With none the penalty assumes an even split, which is wrong for the placed-left share
+/// — nearly every read starts left of the site — and with one it clamps to 99 in 100. Measured at
+/// 300× over GIAB's benchmark regions, 848 of 2,320 true calls are homozygous sites charged 100
+/// Phred or more that way. It cost no call there, because their baseline is in the thousands, but
+/// it makes that number useless for a cutoff.
+///
+/// Here the alternative reads' count is a **beta-binomial**: each alternative read was forward with
+/// a probability that is itself uncertain, its beta distribution the reference reads' counts plus
+/// a prior worth [`STRAND_BIAS_PRIOR_READS`] reads. With many reference reads that is the
+/// reference share, as before; with few, it falls back to the prior:
+///
+/// - **for strand, an even split**, which is what sequencing both strands of a fragment gives; it is
+///   also what lets a site whose few reference reads are all on one strand be weighed at all;
+/// - **for read position, the site's own pooled share**, reference and alternative reads together,
+///   because how many reads start left of a site depends on read length and on the record's width,
+///   and no constant knows it.
+///
+/// **The same ramp** ([`bias_test_power`]): at three alternative reads or fewer it charges nothing.
+pub fn strand_bias(counts: &ArtifactTestCounts) -> Phred {
+    if counts.alternative_reads < 1.0 {
+        return NO_PENALTY;
+    }
+    let reference_reverse = (counts.reference_reads - counts.reference_forward_reads).max(0.0);
+    let forward = beta_binomial_two_sided_tail_phred(
+        counts.alternative_forward_reads,
+        counts.alternative_reads,
+        counts.reference_forward_reads + STRAND_BIAS_PRIOR_READS * 0.5,
+        reference_reverse + STRAND_BIAS_PRIOR_READS * 0.5,
+    );
+    let all_reads = counts.reference_reads + counts.alternative_reads;
+    let pooled_placed_left =
+        ((counts.reference_placed_left_reads + counts.alternative_placed_left_reads) / all_reads)
+            .clamp(POOLED_SHARE_FLOOR, 1.0 - POOLED_SHARE_FLOOR);
+    let reference_not_placed_left =
+        (counts.reference_reads - counts.reference_placed_left_reads).max(0.0);
+    let placed_left = beta_binomial_two_sided_tail_phred(
+        counts.alternative_placed_left_reads,
+        counts.alternative_reads,
+        counts.reference_placed_left_reads + STRAND_BIAS_PRIOR_READS * pooled_placed_left,
+        reference_not_placed_left + STRAND_BIAS_PRIOR_READS * (1.0 - pooled_placed_left),
+    );
+    as_penalty(forward.max(placed_left) * bias_test_power(counts.alternative_reads))
+}
+
+/// **How many reads the prior on the expected share is worth** in [`strand_bias`].
+///
+/// Large enough that a homozygous-variant site's zero or one reference read does not set the
+/// expectation by itself (at 10, one forward reference read moves the expected forward share from
+/// 0.5 to 0.55), and small enough that a site with dozens of reference reads is judged by them. At
+/// 300× on GIAB this took the largest charge on a true call from 3,000 Phred, the most the tail
+/// can express, to 75, and left the false calls past the default cutoff at 126 to 393.
+pub const STRAND_BIAS_PRIOR_READS: f64 = 10.0;
+
+/// The pooled placed-left share is held off zero and one, so neither beta parameter of the prior
+/// is zero, where the beta function is infinite.
+const POOLED_SHARE_FLOOR: f64 = 0.001;
+
+/// **The two-sided (Sterne) tail of a beta-binomial**, as a Phred: the probability of every count
+/// no more likely than `observed` of `total`, when each read's probability is drawn from
+/// `Beta(alpha, beta)`.
+///
+/// # Why it is cheap at cohort depth
+///
+/// `total` is the pooled alternative-read count, which at a common variant in a cohort of thousands
+/// is in the hundreds of thousands, so summing every outcome is out. The distribution here is
+/// unimodal — log-concave when both parameters are at least one, and monotone when one is below
+/// one, which is the only other case [`strand_bias`] produces, since their sum is at least
+/// [`STRAND_BIAS_PRIOR_READS`] — so "no more likely than observed" is two flanks. The mode and
+/// the far flank's edge are each a binary search on the log-probability, and each flank is summed
+/// outward from its edge only until a term no longer moves the sum.
+fn beta_binomial_two_sided_tail_phred(observed: f64, total: f64, alpha: f64, beta: f64) -> f64 {
+    if total < 1.0 {
+        return 0.0;
+    }
+    let n = total.round() as u64;
+    let k_observed = observed.round().clamp(0.0, n as f64) as u64;
+    let distribution = BetaBinomial::new(n, alpha, beta);
+    let mode = distribution.mode();
+    if k_observed == mode {
+        return 0.0;
+    }
+    // The same slack the binomial tail compares with, for the same reason: two outcomes of equal
+    // probability can differ in their last bits.
+    let threshold = distribution.ln_probability(k_observed) + 1e-7;
+    let (near, far) = if k_observed < mode {
+        // Far flank: the first count right of the mode no more likely than the observed one.
+        let (mut low, mut high) = (mode, n + 1);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if distribution.ln_probability(middle) <= threshold {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        (
+            distribution.flank_sum(k_observed, Direction::Down),
+            if low > n {
+                0.0
+            } else {
+                distribution.flank_sum(low, Direction::Up)
+            },
+        )
+    } else {
+        // Far flank: the last count left of the mode no more likely than the observed one.
+        let (mut low, mut high) = (0_u64, mode + 1);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if distribution.ln_probability(middle) > threshold {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        (
+            distribution.flank_sum(k_observed, Direction::Up),
+            if low == 0 {
+                0.0
+            } else {
+                distribution.flank_sum(low - 1, Direction::Down)
+            },
+        )
+    };
+    (-10.0 * float::log10((near + far).clamp(1e-300, 1.0))).max(0.0)
+}
+
+/// Which way a flank runs from its edge.
+#[derive(Clone, Copy)]
+enum Direction {
+    Up,
+    Down,
+}
+
+/// A beta-binomial on `n` reads, held as the constants its log-probability needs.
+struct BetaBinomial {
+    n: u64,
+    alpha: f64,
+    beta: f64,
+    /// `ln Γ(n + 1) − ln B(alpha, beta)`, the part of every log-probability that does not depend
+    /// on the count.
+    ln_constant: f64,
+}
+
+impl BetaBinomial {
+    fn new(n: u64, alpha: f64, beta: f64) -> Self {
+        let ln_beta_function = lgamma(alpha) + lgamma(beta) - lgamma(alpha + beta);
+        Self {
+            n,
+            alpha,
+            beta,
+            ln_constant: lgamma(n as f64 + 1.0) - ln_beta_function,
+        }
+    }
+
+    /// `ln P(X = k)`.
+    fn ln_probability(&self, k: u64) -> f64 {
+        let (k, n) = (k as f64, self.n as f64);
+        self.ln_constant - lgamma(k + 1.0) - lgamma(n - k + 1.0)
+            + lgamma(k + self.alpha)
+            + lgamma(n - k + self.beta)
+            - lgamma(n + self.alpha + self.beta)
+    }
+
+    /// The most likely count: the first `k` whose successor is less likely, found by a binary
+    /// search that is exact because the distribution is unimodal.
+    fn mode(&self) -> u64 {
+        let (mut low, mut high) = (0_u64, self.n);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.ln_probability(middle + 1) > self.ln_probability(middle) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    /// `P(X = edge) + P(X = edge ± 1) + …` out to the end, stopping once a term is too small to
+    /// change the sum. Each step multiplies by the ratio of successive probabilities, so one
+    /// logarithm is taken per term, not six.
+    fn flank_sum(&self, edge: u64, direction: Direction) -> f64 {
+        let n = self.n as f64;
+        let first = self.ln_probability(edge);
+        // Terms are summed relative to the first, which is the flank's largest, and scaled back
+        // at the end.
+        let mut relative_sum = 1.0;
+        let mut ln_term = 0.0;
+        let mut k = edge;
+        loop {
+            let kf = k as f64;
+            let ln_ratio = match direction {
+                Direction::Up => {
+                    if k == self.n {
+                        break;
+                    }
+                    k += 1;
+                    float::ln(
+                        ((n - kf) * (kf + self.alpha)) / ((kf + 1.0) * (n - kf - 1.0 + self.beta)),
+                    )
+                }
+                Direction::Down => {
+                    if k == 0 {
+                        break;
+                    }
+                    k -= 1;
+                    float::ln(
+                        (kf * (n - kf + self.beta)) / ((n - kf + 1.0) * (kf - 1.0 + self.alpha)),
+                    )
+                }
+            };
+            ln_term += ln_ratio;
+            let term = float::exp(ln_term);
+            relative_sum += term;
+            if term < relative_sum * 1e-17 {
+                break;
+            }
+        }
+        float::exp(first) * relative_sum
+    }
+}
+
 /// **What share of the reference reads did the thing** — the expectation the alternative reads
 /// are weighed against.
 ///
@@ -1202,5 +1438,129 @@ mod tests {
         };
         assert_eq!(penalties.allele_balance.get(), 12.5);
         assert_eq!(penalties.strand_and_read_position.get(), 0.0);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The strand-bias cutoff's test
+    // -------------------------------------------------------------------------------------
+
+    /// Counts with every field named, for the strand-bias tests: reference reads, of them
+    /// forward and placed left; alternative reads, of them forward and placed left.
+    fn counts_with(reference: (f64, f64, f64), alternative: (f64, f64, f64)) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: reference.0,
+            reference_forward_reads: reference.1,
+            reference_placed_left_reads: reference.2,
+            alternative_reads: alternative.0,
+            alternative_forward_reads: alternative.1,
+            alternative_placed_left_reads: alternative.2,
+            total_reads: reference.0 + alternative.0,
+            genotype_expected_alternative_reads: alternative.0,
+        }
+    }
+
+    /// **The naive beta-binomial tail**, every outcome summed — the oracle for the two binary
+    /// searches and the truncated flank sums.
+    fn exact_beta_binomial_tail_phred(observed: u64, total: u64, alpha: f64, beta: f64) -> f64 {
+        let distribution = BetaBinomial::new(total, alpha, beta);
+        let threshold = distribution.ln_probability(observed) + 1e-7;
+        let tail: f64 = (0..=total)
+            .map(|k| distribution.ln_probability(k))
+            .filter(|&l| l <= threshold)
+            .map(float::exp)
+            .sum();
+        (-10.0 * float::log10(tail.clamp(1e-300, 1.0))).max(0.0)
+    }
+
+    /// **The searched and truncated tail agrees with the full sum**, across read totals, every
+    /// outcome, and beta parameters from the J-shaped (one below one) to the concentrated — the
+    /// shapes [`strand_bias`] produces.
+    #[test]
+    fn the_beta_binomial_tail_agrees_with_the_full_sum() {
+        for total in [1_u64, 2, 5, 17, 60, 233] {
+            for (alpha, beta) in [
+                (5.0, 5.0),
+                (38.0, 104.0),
+                (0.05, 9.95),
+                (9.95, 0.05),
+                (140.0, 2.0),
+            ] {
+                for observed in 0..=total {
+                    let fast = beta_binomial_two_sided_tail_phred(
+                        observed as f64,
+                        total as f64,
+                        alpha,
+                        beta,
+                    );
+                    let exact = exact_beta_binomial_tail_phred(observed, total, alpha, beta);
+                    assert!(
+                        (fast - exact).abs() < 1e-6 * exact.max(1.0),
+                        "{observed} of {total} at Beta({alpha}, {beta}): {fast} against {exact}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A homozygous-variant site with no reference reads is charged far below the cutoff.**
+    /// 247 variant reads, 125 forward and 245 starting left of the site, the shape of GIAB HG002
+    /// chr1:4909882 at 300×. The penalty charges it hundreds of Phred, because with no reference
+    /// read it assumes half the reads start left of the site.
+    #[test]
+    fn a_homozygous_site_with_no_reference_reads_is_charged_far_below_the_cutoff() {
+        let counts = counts_with((0.0, 0.0, 0.0), (247.0, 125.0, 245.0));
+        assert!(strand_and_read_position_penalty(&counts).get() > 100.0);
+        assert!(
+            strand_bias(&counts).get() < 20.0,
+            "{:?}",
+            strand_bias(&counts)
+        );
+    }
+
+    /// **One reference read does not set the expectation.** It is forward, and half of 200
+    /// variant reads are: the penalty clamps the expected share to 99 in 100 and charges
+    /// well past the cutoff; here the one read moves an even prior a little.
+    #[test]
+    fn one_reference_read_does_not_set_the_expectation() {
+        let counts = counts_with((1.0, 1.0, 1.0), (200.0, 100.0, 199.0));
+        assert!(strand_and_read_position_penalty(&counts).get() > 100.0);
+        assert!(
+            strand_bias(&counts).get() < 20.0,
+            "{:?}",
+            strand_bias(&counts)
+        );
+    }
+
+    /// **Variant reads all on one strand, against reference reads on both, are past the default
+    /// cutoff** — GIAB HG004 chr3:107848623 at 300×: 61 of 61 variant reads forward, 33 of 132
+    /// reference reads.
+    #[test]
+    fn variant_reads_on_one_strand_against_reference_reads_on_both_pass_the_cutoff() {
+        let counts = counts_with((132.0, 33.0, 131.0), (61.0, 61.0, 61.0));
+        assert!(
+            strand_bias(&counts).get() >= crate::run::records::DEFAULT_MAX_STRAND_BIAS,
+            "{:?}",
+            strand_bias(&counts)
+        );
+    }
+
+    /// **A site whose few reference reads share the variant reads' strand is still weighed**,
+    /// against the even prior — GIAB HG003 chr7:63498962 at 300×: every one of 7 reference and 26
+    /// variant reads is forward. The penalty charges nothing there; this charges something, and
+    /// far less than the cutoff, because the reference reads agree with the variant reads.
+    #[test]
+    fn a_site_whose_few_reference_reads_share_the_strand_is_still_weighed() {
+        let counts = counts_with((7.0, 7.0, 7.0), (26.0, 26.0, 26.0));
+        assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
+        let bias = strand_bias(&counts).get();
+        assert!(bias > 10.0 && bias < 40.0, "{bias}");
+    }
+
+    /// **At three variant reads or fewer nothing is charged**, the same ramp as the penalty.
+    #[test]
+    fn three_variant_reads_are_charged_nothing() {
+        let counts = counts_with((100.0, 50.0, 99.0), (3.0, 3.0, 3.0));
+        assert_eq!(strand_bias(&counts).get(), 0.0);
     }
 }

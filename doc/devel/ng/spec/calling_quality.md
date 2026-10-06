@@ -497,6 +497,89 @@ reads collapse into the reference allele
 ([`gt_concordance_vs_giab_2026-07-04.md`](../../reports/gt_concordance_vs_giab_2026-07-04.md)).
 Nothing this document does will move them.
 
+### 6.5 The strand-bias cutoff (2026-10-06)
+
+**A called locus whose strand bias is at least `--max-strand-bias` is not written.** The default is
+100 Phred; zero turns the cutoff off. Like `--min-site-quality`
+([`site_quality_threshold.md`](site_quality_threshold.md)), the locus is dropped rather than
+tagged, the run report counts those left out, and `--explain-loci` names the outcome
+`strand_bias_at_or_above_cutoff`. Repeat tracts carry no artifact counts (§8), so the cutoff never
+applies to them.
+
+**Why a cutoff, when §6.2 already charges strand bias.** The penalty is subtracted from a baseline
+that grows with every variant read, and an artifact's variant reads grow with depth like a real
+variant's. The penalty grows too, but more slowly. At 300× on GIAB HG004 chr3:107848623 all 61
+variant reads are forward, against 33 of 132 reference reads; GIAB has no variant there. The
+penalty is 367 Phred, the baseline about 440, and 8 is left, so the site is written. A larger
+penalty would not fix this; the evidence the baseline counts is the very thing the artifact
+supplies. So the cutoff does not subtract: past it, the shape of the evidence decides the site
+whatever its amount.
+
+**What the cutoff reads is not the penalty.** The penalty takes the reference reads'
+forward-strand share as the probability every variant read had of being forward, as though it were
+known. It is an estimate, and at a homozygous-variant site it rests on no reference read or one.
+With none, §6.2 assumes an even split, which is wrong for the placed-left share (nearly every read
+starts left of the site); with one, the share is clamped to 99 in 100. At 300× on GIAB, 848 of
+the 2,320 true calls are homozygous sites charged 100 Phred or more that way, up to 3,000. No call
+was lost to it, because their baseline is in the thousands, but a cutoff on that number would
+remove them all.
+
+So the cutoff reads the same two questions with the expectation treated as uncertain
+(`strand_bias` in `calling/quality/artifact_correction.rs`). The variant reads' forward count is
+beta-binomial: each read's probability of being forward is drawn from a beta distribution whose
+parameters are the reference reads' forward and reverse counts plus a prior worth 10 reads. The
+prior is centred on an even split for strand. For read position it is centred on the site's own
+pooled share, reference and variant reads together, because how many reads start left of a site
+depends on read length and record width. With dozens of reference reads the answer is the
+penalty's; with none or one it falls back to the prior. The larger of the two tails is taken, and
+the same ramp as §6.2 applies (nothing at three variant reads or fewer). The tail is the two-sided
+Sterne tail, found by binary search for the mode and for the far flank's edge, and summed outward
+from each edge only while a term still changes the sum, so a pooled count in the hundreds of
+thousands costs tens of terms, not all of them.
+
+**Why 100 Phred.** Measured on the three GIAB samples (HG002, HG003, HG004), each over its own 100
+benchmark regions, at 5×, 10×, 30× and 300×, against GIAB v4.2.1 with vcfeval. Below 300× no
+written call scores 40 or more. At 300× the false calls scoring 100 or more are three of the 11
+(chr3:107848623 at 254, chr1:179296064 at 264, and chr10:68636979 at 126, the in-region half of a
+deletion crossing a repeat tract's edge), and no true call reaches it: the largest is 75, a
+homozygous SNP called with 34 reference reads against 260 variant ones (HG004
+chr3:107844949). GATK's hard cutoff on its own strand
+test, 60, would cost that call. With the cutoff, GIAB missed / false calls, SNPs and indels
+together: 5× 761 / 174, 10× 217 / 94 and 30× 50 / 23 unchanged; 300× 40 / 11 → 40 / 8, the three
+sites above and no other change at any depth.
+
+**In a cohort it removes far more, and they look like artifacts.** On 63 tomato accessions at about
+3× over tomato1's 80 regions, records go from 193,893 to 190,674: the cutoff leaves out 5,014 loci,
+3,166 of the 3,219 records lost are SNPs, and their median site quality is 468. A cohort pools its
+reads, so a site with 60 accessions at 3× has the evidence of one sample at 180×, and the cutoff
+behaves there as it does on GIAB at 300×. Over a one-in-eight sample of the removed sites (399),
+the variant reads are lopsided on their own, at 30 Phred or more against an even split, at 382:
+median forward share 0.71 for the variant reads against 0.49 for the reference reads, in a median
+of 32 accessions that show both alleles, which an almost wholly inbred panel seldom does at a real
+SNP. GATK HaplotypeCaller's joint call over 50 of the same accessions has a record at 1,780 of the
+3,219 sites, and its own recommended strand filters (FS above 60 or SOR above 3) would remove 1,217
+of those; among all its records they remove 6 in 100. Compared sample by sample with vcfeval over
+the 783 changed stretches, the cutoff removes 39,047 variant genotypes GATK does not call and 14,897
+it does. Most of the second are at sites GATK's own filters flag. The rest, 563 sites GATK calls
+without a strand flag, include stretches such as SL4.0ch01:32.95–32.98 Mb where ng's variant reads
+are still nine in ten on one strand; with no truth set, whether those are real is not settled.
+
+**What it does not do.** HG002 chr1:206201838 (11 variant reads, all reverse, against 11 of 16
+reference reads forward) scores 35 and is still written; at 27 reads its evidence is not decisive.
+Sites where every read, reference and variant, is on one strand (HG003 chr7:63498962, 63498974 and
+63499006 at 300×, 23 to 33 reads, all forward) score 6 to 19: the reference reads agree with the
+variant reads, so this test has nothing to object to. The signal there is the whole site, every
+read on one strand at a tenth of the sample's depth; the most one-sided true call at 300× still has
+12 reads in 100 on its minor strand. Left for now (owner, 2026-10-06): three sites in one cluster in
+one sample are too few to set a threshold from.
+
+**Open.** The cutoff is a fixed Phred, and the tail of a fixed effect grows with pooled depth. A
+cohort of thousands pools far more reads per site than either benchmark, so a true site with a mild,
+innocent imbalance could reach 100 there; that has not been measured. A test stratified by sample —
+each sample's variant reads against its own reference reads, combined — would not grow with the
+number of samples the way a pooled one does; it needs the per-sample counts, which the pooled
+summary (§3.3) does not keep.
+
 ---
 
 ## 7. One sample, and three thousand
@@ -663,6 +746,8 @@ bug in the other.
   never a value recomputed from the baseline. **Home:** step 11's spec, when it is written.
   > *Settled 2026-10-06 for the threshold:* [`site_quality_threshold.md`](site_quality_threshold.md)
   > — `--min-site-quality`, default 1, below it a locus is dropped; it reads the corrected quality.
+  > *And for strand bias, 2026-10-06:* §6.5 — `--max-strand-bias`, default 100 Phred, at or above it
+  > a locus is dropped.
 - **Uncertainty beyond a point estimate** — a confidence interval on a repeat count, an expansion
   probability, the `REPCI`/`STDERR`/`QEXP` family GangSTR emits. Nothing here produces them and no
   consumer has asked. **Home:** the repeat-tract sibling of §8, where they would mean something.

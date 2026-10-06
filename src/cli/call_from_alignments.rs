@@ -229,6 +229,20 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub min_site_quality: f32,
 
+    /// The strand bias at or above which a called locus is not written, in Phred: how improbable
+    /// the variant reads' strand, or their position within the read, is against the reference
+    /// reads' at the same site. **Zero writes every called locus.** The default, 100, removes
+    /// the sites whose variant reads all come off one strand at depth, which the artifact
+    /// correction's penalty cannot remove once the variant reads are many — and no true call
+    /// measured on GIAB from 5× to 300× reaches it. Repeat tracts are never cut by it.
+    #[arg(
+        long,
+        default_value_t = crate::run::records::DEFAULT_MAX_STRAND_BIAS,
+        value_parser = crate::cli::calling_run::parse_max_strand_bias,
+        help_heading = "Advanced"
+    )]
+    pub max_strand_bias: f32,
+
     /// Target false-discovery rate among the records the hidden-duplication filter removes —
     /// calls better explained by two reference-collapsed copies piling their reads onto one
     /// position than by a real variant. **Zero turns the filter off**, and a run with it off
@@ -664,6 +678,10 @@ pub fn run_call_from_alignments(
         crate::types::Phred::try_new(args.min_site_quality)
             .expect("`parse_min_site_quality` admits only valid qualities"),
     );
+    let caller = caller.with_max_strand_bias((args.max_strand_bias > 0.0).then(|| {
+        crate::types::Phred::try_new(args.max_strand_bias)
+            .expect("`parse_max_strand_bias` admits only valid Phreds")
+    }));
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let metadata = calling_run::header_for(

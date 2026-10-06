@@ -163,6 +163,7 @@ mod tests {
             // Off: this test pins that platforms write the same bytes, over a fixture whose three
             // variant sites include low-quality ones; the threshold is pinned elsewhere.
             min_site_quality: 0.0,
+            max_strand_bias: 0.0,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,

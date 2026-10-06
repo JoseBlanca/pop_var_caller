@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::records::DEFAULT_MIN_SITE_QUALITY;
+use super::records::{DEFAULT_MAX_STRAND_BIAS, DEFAULT_MIN_SITE_QUALITY};
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
 use crate::calling::run_parameters::RunParameters;
@@ -406,6 +406,9 @@ pub struct PspVariantCaller {
     explain: Option<ExplainRegions>,
     /// The site quality below which a called locus is not written (`--min-site-quality`).
     min_site_quality: Phred,
+    /// The strand bias at or above which a called locus is not written (`--max-strand-bias`);
+    /// `None` writes every called locus whatever its strand bias.
+    max_strand_bias: Option<Phred>,
 }
 
 impl PspVariantCaller {
@@ -502,6 +505,10 @@ impl PspVariantCaller {
             explain: None,
             min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
                 .expect("the default threshold is a valid quality"),
+            max_strand_bias: Some(
+                Phred::try_new(DEFAULT_MAX_STRAND_BIAS)
+                    .expect("the default cutoff is a valid Phred"),
+            ),
         })
     }
 
@@ -510,6 +517,14 @@ impl PspVariantCaller {
     #[must_use]
     pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
         self.min_site_quality = quality;
+        self
+    }
+
+    /// The same caller, writing no locus whose strand bias reaches `cutoff`
+    /// ([`DEFAULT_MAX_STRAND_BIAS`] unless set; `None` writes every called locus).
+    #[must_use]
+    pub fn with_max_strand_bias(mut self, cutoff: Option<Phred>) -> Self {
+        self.max_strand_bias = cutoff;
         self
     }
 
@@ -674,6 +689,7 @@ impl PspVariantCaller {
             depth_ceiling,
             explain,
             min_site_quality,
+            max_strand_bias,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -738,6 +754,7 @@ impl PspVariantCaller {
             contigs: &contigs,
             explain: explain.as_ref(),
             min_site_quality,
+            max_strand_bias,
         };
         let CohortCallingOutcome {
             calling,
@@ -2318,7 +2335,8 @@ mod tests {
             tallies.loci_called(),
             tallies.records_written
                 + tallies.loci_called_but_not_written
-                + tallies.loci_below_minimum_site_quality,
+                + tallies.loci_below_minimum_site_quality
+                + tallies.loci_at_or_above_strand_bias_cutoff,
         );
         assert!(
             tallies.loci_called() >= 2,
