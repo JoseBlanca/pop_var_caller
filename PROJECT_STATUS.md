@@ -22,7 +22,14 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-06):** **an indel's record reaches its right-most placement in a
+> - **Last completed task (2026-10-06):** **`--min-site-quality`, default 1** (branch
+> `min-site-quality`, spec `site_quality_threshold.md`): a called site whose quality after the
+> artifact correction is below it is not written; zero writes everything. GIAB missed / false:
+> 5× 746/315 → 761/173, 10× 200/308 → 217/93, 30× 49/164 → 51/22, 300× 40/42 → 43/10; GATK's 30
+> would cost over a hundred true calls at 5× and 10×. Tomato 63 accessions: 225,894 → 220,382
+> records; on 50 of them, 26,696 genotypes GATK does not call removed against 382 it does.
+>
+> - **Earlier (2026-10-06):** **an indel's record reaches its right-most placement in a
 > repeat** (branch `giab-indels-oct`, spec `locus_generation_pileup.md` §4), item 1 of the user's
 > GIAB report on 5d2abae4. A reference read that stopped partway along a repeat used to count as a
 > complete vote for the reference, which made homozygous indels heterozygous once about 9 reads in
@@ -33,7 +40,8 @@ Skills and agents are instructed to leave it untouched.
 > an inserted copy spelled as substitutions) is now compared as a partial read, not as an allele of
 > its own (spec `read_likelihoods.md` §5.3): GIAB missed / false at 10× 202/310 → 201/309, 30×
 > 54/168 → 50/165, 300× 44/45 → 41/43, the report's three sites fixed, nothing broken; tomato 23 of
-> 225,917 records change. Items 3, 5 and 7 of that report were already fixed. Item 4 (indels
+> 225,917 records change; a spelling carrying a shorter insertion is re-read too (GIAB HG002
+> chr1:243535155). Items 3, 5 and 7 of that report were already fixed. Item 4 (indels
 > crossing a repeat-tract boundary) is left: the generic and tract loci are called independently.
 > Item 6 (no locus in repeat clusters or arrays over 100 bp) is deferred by the owner. The tomato
 > CRAMs' BAQ-rewritten qualities (`samtools calmd -Ar`) make indels in repeats count for nothing
