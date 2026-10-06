@@ -104,7 +104,18 @@ mod tests {
     /// 6.60 × 10⁻³ to 2.08 × 10⁻². The fit's best log-likelihood is −44.939 against −44.704.
     /// Recorded in the Linux container (arm64, glibc) only; it was
     /// `9d421df0bc755522f8a7b5617b4c30f8`.
-    const FITTED_PARAMETERS_MD5: &str = "22dda760d260572b786958e69b15b2b2";
+    ///
+    /// **Re-recorded 2026-10-06** when the parameters file became format version 2
+    /// (`fit_precision.md` step E2): each number's standard error, how each start of the SNP/indel
+    /// fit ended, and the notes explaining both. **No number moved**, measured first on four tomato
+    /// accessions (`scripts/promote_ng_oracle.sh`: every call unchanged, both parameters files the
+    /// old ones line for line once the version-2 keys and notes are taken out), and here: the same
+    /// taking-out turns this fixture's new file back into the bytes of
+    /// `22dda760d260572b786958e69b15b2b2`. The calls do not move. The file the review of the step
+    /// saw (`f03c0ab14192957f7f1d8404bab4249a`) differs from this one in 19 lines of its notes and
+    /// nothing else. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `22dda760d260572b786958e69b15b2b2`.
+    const FITTED_PARAMETERS_MD5: &str = "a5e87936e968f9b855f91f88db828083";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.

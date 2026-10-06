@@ -8955,6 +8955,7 @@ mod tests {
         let calibrated = [ReadGroupCalibration {
             scale: 1.0,
             provenance: Provenance::FittedHere,
+            scale_standard_error: None,
         }];
 
         let mut scratch = worker_scratch();

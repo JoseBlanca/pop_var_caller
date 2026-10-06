@@ -2202,6 +2202,7 @@ mod the_fourth_binding_demotes {
             value: 0.02,
             warrant: Warrant::Supplied,
             observations: None,
+            standard_error: None,
         };
         assert_eq!(
             chosen

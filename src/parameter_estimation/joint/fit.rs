@@ -48,7 +48,7 @@ use std::sync::Arc;
 use crate::float;
 use crate::parameter_estimation::depth_bins::{DepthBin, DepthBinEdges};
 use crate::parameter_estimation::progress::StageProgress;
-use crate::parameter_estimation::{Estimate, Provenance};
+use crate::parameter_estimation::{DEFAULT_ERROR_RATE, Estimate, Provenance};
 use crate::types::{
     ErrorRate, ExpectedAlternativeFrequency, ExpectedHeterozygosity, Ploidy, ReadGroupId,
 };
@@ -78,7 +78,7 @@ pub use settled::{FurthestFromSettled, StartEnding};
 /// The inversion that drops a parameter the data do not tell apart, which the repeat-tract fit's
 /// stratum errors use too ([`ssr_fit`](super::ssr_fit)).
 pub(in crate::parameter_estimation::joint) use standard_errors::{Identified, invert_identified};
-use standard_errors::{StandardErrors, newton_step};
+use standard_errors::{StandardError, StandardErrors, newton_step};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -282,6 +282,11 @@ pub struct SampleGenotypeRates {
     pub positions_with_two_reads: u64,
 }
 
+/// **The homozygote excess a sample with no reads at an ordinary position is given**: none —
+/// random mating — which is the coefficient calling states when nothing is known
+/// (`calling::parameters_file::DEFAULT_INBREEDING_COEFFICIENT`, held equal by a test there).
+pub const DEFAULTED_HOMOZYGOTE_EXCESS: f64 = 0.0;
+
 /// Every parameter this route produces, for the whole cohort, in one value.
 #[derive(Clone, PartialEq, Debug)]
 pub struct JointFit {
@@ -429,8 +434,10 @@ impl JointFit {
     /// mismapped one. Only the first is chemistry.
     ///
     /// The error is `None` where the fit gives it none: no reads, not told apart from the other
-    /// parameters, or an error wider than the rate's whole range. A rate that is not a probability
-    /// is left out, as no rate rather than a coerced one.
+    /// parameters, or an error wider than the rate's whole range. A read group with no reads at an
+    /// ordinary position comes out `Defaulted` at [`DEFAULT_ERROR_RATE`] from no observation, as
+    /// [`Self::noise`] holds it. A rate that is not a probability is left out, as no rate rather
+    /// than a coerced one.
     ///
     /// # Panics
     ///
@@ -2113,12 +2120,14 @@ pub fn fit_jointly(
             not_identified_anywhere(lent, NotIdentifiedReason::NotAsked)
         };
         // **Each read group's ordinary-position rate's error, found through its sample**: the
-        // errors are laid out a sample at a time, and a read group is one section of one sample.
-        let mut clean_rate_standard_error = vec![None; groups.len()];
+        // errors are laid out a sample at a time, and a read group is one section of one sample. A
+        // read group no sample lends an ordinary-position section for — a sample whose census
+        // holds repeat tracts only — keeps no information: nothing scored it.
+        let mut clean_rate_standard_error = vec![StandardError::NoInformation; groups.len()];
         for (s, own) in group_index.iter().enumerate() {
             for (section, &group) in own.iter().enumerate() {
                 clean_rate_standard_error[group] =
-                    standard_errors.samples[s][information::sample::rate(section, 0)].value();
+                    standard_errors.samples[s][information::sample::rate(section, 0)];
             }
         }
         FittedCohort {
@@ -2140,19 +2149,34 @@ pub fn fit_jointly(
     let duplicated_posterior = std::mem::take(&mut statistics.duplicated_posterior);
 
     let observations = statistics.positions as u64;
+    // **A read group the data never touched is a default, not a fit** (spec `fit_precision.md` §8,
+    // question 1): no position depends on its rates — a library with no reads, or one whose sample
+    // lent no ordinary-position section at all. Its rates are the start's, and calling them fitted
+    // from the run's every position would be the confident-and-wrong case the project rules out.
+    // So it is `Defaulted`, from no observation, at the stated rate; its mismapped rate, read by
+    // nothing, stays where the fit held it.
     let noise = groups
         .iter()
         .enumerate()
         .map(|(g, id)| {
+            let informed = clean_rate_standard_error[g] != StandardError::NoInformation;
             (
                 *id,
                 Estimate {
                     value: SiteClassNoise {
-                        clean: parameters.clean[g],
+                        clean: if informed {
+                            parameters.clean[g]
+                        } else {
+                            DEFAULT_ERROR_RATE
+                        },
                         noisy: parameters.noisy[g],
                     },
-                    provenance: Provenance::FittedHere,
-                    observations,
+                    provenance: if informed {
+                        Provenance::FittedHere
+                    } else {
+                        Provenance::Defaulted
+                    },
+                    observations: if informed { observations } else { 0 },
                     standard_error: None,
                 },
             )
@@ -2162,17 +2186,34 @@ pub fn fit_jointly(
         .iter()
         .enumerate()
         .map(|(s, name)| {
+            // **A sample with no reads at an ordinary position has no excess to measure**, so it
+            // is `Defaulted` at no excess, from no observation — as a read group with no reads is
+            // above — rather than written as fitted. **The default value is written, not the fit's**:
+            // no read informs the excess, yet the fit's accelerated steps can still move it off its
+            // start, so the fit's value is not the default.
+            let informed = standard_errors.samples[s][information::sample::HOMOZYGOTE_EXCESS]
+                != StandardError::NoInformation;
             (
                 name.clone(),
                 Estimate {
-                    value: HomozygoteExcess::try_new(parameters.hom_excess[s])
-                        .expect("the maximisation is confined to [0, 1]"),
-                    provenance: if fits_homozygote_excess(names.len()) {
+                    value: HomozygoteExcess::try_new(if informed {
+                        parameters.hom_excess[s]
+                    } else {
+                        DEFAULTED_HOMOZYGOTE_EXCESS
+                    })
+                    .expect("the maximisation is confined to [0, 1]"),
+                    provenance: if informed
+                        && fits_homozygote_excess(samples_with_reads(&statistics))
+                    {
                         Provenance::FittedHere
                     } else {
                         Provenance::Defaulted
                     },
-                    observations: statistics.with_reads[s],
+                    observations: if informed {
+                        statistics.with_reads[s]
+                    } else {
+                        0
+                    },
                     // `None` where the fit gives it none — at one sample, where the fit holds the
                     // excess at its start, among others ([`StandardErrors`]).
                     standard_error: standard_errors.samples[s]
@@ -2210,7 +2251,7 @@ pub fn fit_jointly(
         clean_rate_standard_error: groups
             .iter()
             .copied()
-            .zip(clean_rate_standard_error)
+            .zip(clean_rate_standard_error.iter().map(|error| error.value()))
             .collect(),
         noisy_share: parameters.noisy_share,
         density: Estimate {
@@ -2654,7 +2695,7 @@ struct FittedCohort {
     contamination: Vec<SampleContaminationEstimates>,
     standard_errors: StandardErrors,
     /// Each read group's, in the order of the fit's list of read groups.
-    clean_rate_standard_error: Vec<Option<f64>>,
+    clean_rate_standard_error: Vec<StandardError>,
 }
 
 /// The plain alternation's one step — a pass over the data, then every parameter maximised
@@ -4044,7 +4085,7 @@ fn maximisation(
     // separates "this individual is inbred" from "the population's frequencies are what they
     // are" when there is one individual, so a fit that searched it anyway would wander without
     // converging and hand back a plausible number. `fit_jointly` marks it as not fitted.
-    if fits_homozygote_excess(statistics.genotypes.len()) {
+    if fits_homozygote_excess(samples_with_reads(statistics)) {
         for (s, counts) in statistics.genotypes.iter().enumerate() {
             let fitted = maximise_hom_excess(counts, &quadrature, parameters.hom_excess[s]);
             note(parameters.hom_excess[s], fitted);
@@ -4088,12 +4129,25 @@ fn maximise_error_rate(
     golden_section(&score, bounds.0, bounds.1)
 }
 
-/// **Whether the fit moves each sample's homozygote excess**: only with two samples or more. At one
-/// sample nothing separates an inbred individual from a population whose frequencies are what they
-/// are, so the excess is held where it starts — and, holding it, the fit has no standard error
-/// for it either ([`standard_errors`]).
-fn fits_homozygote_excess(samples: usize) -> bool {
-    samples >= 2
+/// **Whether the fit moves each sample's homozygote excess**: only with two samples or more that
+/// carry reads at an ordinary position. At one sample nothing separates an inbred individual from a
+/// population whose frequencies are what they are, so the excess is held where it starts — and,
+/// holding it, the fit has no standard error for it either ([`standard_errors`]). **A sample with no
+/// such read is not counted**: one sample with reads beside one whose census holds repeat tracts
+/// only is a one-sample cohort, and counting both had the first sample's excess come back fitted,
+/// with an error, where alone it is held.
+fn fits_homozygote_excess(samples_with_reads: usize) -> bool {
+    samples_with_reads >= 2
+}
+
+/// How many samples have at least one read at an ordinary position — what
+/// [`fits_homozygote_excess`] counts.
+fn samples_with_reads(statistics: &Statistics) -> usize {
+    statistics
+        .with_reads
+        .iter()
+        .filter(|&&reads| reads > 0)
+        .count()
 }
 
 /// The homozygote excess that best explains one sample's expected genotype counts.
@@ -6184,6 +6238,250 @@ mod whole_fit_tests {
                 "sample {s}: the mismapped rates came back in the wrong order: {noisy:?}"
             );
         }
+    }
+
+    /// **A read group no sample lends ordinary-position evidence for, and a sample with no reads
+    /// there, come out defaulted** (spec `fit_precision.md` §8 question 1; the owner at checkpoint
+    /// A′). Four samples drawn as usual and a fifth whose census holds no ordinary-position section
+    /// — the shape a sample whose walk wrote repeat-tract sections only leaves: its read group is
+    /// in the fit's list with nothing scored. Its rates come out `Defaulted` at the stated rate,
+    /// from no observation, with no error, and its sample's excess `Defaulted` at none, from no
+    /// observation — not fitted from the run's every position, at values no read informed. The
+    /// four drawn samples keep fitted numbers with errors.
+    #[test]
+    fn a_sample_with_no_ordinary_positions_and_its_read_group_come_out_defaulted() {
+        let mut cohort = draw_cohort(
+            4,
+            2_000,
+            6.0,
+            (0.003, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0E20_0000_0001,
+        );
+        let terms = as_cohort(&cohort.samples)
+            .terms()
+            .expect("a drawn cohort records terms")
+            .clone();
+        cohort.samples.push(
+            crate::parameter_estimation::joint::census::SampleCensusEvidence::resident(
+                "tracts_only".to_string(),
+                terms,
+                crate::parameter_estimation::joint::census::NamedReadGroup::drawn_for(
+                    "tracts_only",
+                    [ReadGroupId(4)],
+                ),
+                BTreeMap::new(),
+                // **One repeat-tract section and no ordinary one**: the read group is the census's,
+                // and nothing the SNP/indel fit reads holds a read of it.
+                BTreeMap::from([(
+                    crate::parameter_estimation::joint::census::SectionKey::Ssr(
+                        ReadGroupId(4),
+                        crate::parameter_estimation::joint::census::Stratum {
+                            period: 2,
+                            reference_repeats: 6,
+                        },
+                    ),
+                    crate::parameter_estimation::joint::census::Section::Ssr(
+                        crate::parameter_estimation::joint::census::SsrEvidence::never_walked(0),
+                    ),
+                )]),
+            ),
+        );
+        let fit = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                quadrature_nodes: 8,
+                max_passes: 40,
+                duplicated_positions: false,
+                estimate_contamination: false,
+                starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+                ..JointFitConfig::default()
+            },
+        )
+        .expect("four drawn samples identify the cohort's numbers");
+
+        let silent = ReadGroupId(4);
+        let noise = &fit.noise[&silent];
+        assert_eq!(
+            (noise.provenance, noise.observations, noise.value.clean),
+            (Provenance::Defaulted, 0, DEFAULT_ERROR_RATE),
+            "a read group nothing scored is a default, not a fit"
+        );
+        let rate = &fit.sequencing_error_rates()[&silent];
+        assert_eq!(
+            (
+                rate.provenance,
+                rate.observations,
+                rate.value.get(),
+                rate.standard_error
+            ),
+            (Provenance::Defaulted, 0, DEFAULT_ERROR_RATE, None)
+        );
+        let excess = &fit.hom_excess["tracts_only"];
+        assert_eq!(
+            (
+                excess.provenance,
+                excess.observations,
+                excess.value.get(),
+                excess.standard_error
+            ),
+            (Provenance::Defaulted, 0, DEFAULTED_HOMOZYGOTE_EXCESS, None),
+            "a sample with no reads at an ordinary position has no excess to measure"
+        );
+        for s in 0..4 {
+            let group = ReadGroupId(u32::try_from(s).expect("four samples"));
+            let rate = &fit.sequencing_error_rates()[&group];
+            assert_eq!(rate.provenance, Provenance::FittedHere, "read group {s}");
+            assert!(rate.standard_error.is_some(), "read group {s} has an error");
+            let excess = &fit.hom_excess[&format!("s{s}")];
+            assert_eq!(excess.provenance, Provenance::FittedHere, "sample s{s}");
+            assert!(
+                excess.observations > 0 && excess.standard_error.is_some(),
+                "sample s{s}"
+            );
+        }
+    }
+
+    /// **One sample with reads beside a sample with none is a one-sample cohort**: the excess is held,
+    /// as it is for that sample alone, and written `Defaulted` with no error. Counting the sample whose
+    /// census holds repeat tracts only would have the excess fitted across "two samples", one of
+    /// which no read informs.
+    #[test]
+    fn one_sample_with_reads_beside_a_tracts_only_sample_holds_its_excess() {
+        let draw = || {
+            draw_cohort(
+                1,
+                2_000,
+                6.0,
+                (0.003, 0.06, 0.02),
+                FrequencyDensity {
+                    p_invariant: 0.90,
+                    p_fixed_alt: 0.01,
+                    a: 0.7,
+                    b: 2.5,
+                },
+                0.2,
+                0x5EED_0E20_0000_0003,
+            )
+        };
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            max_passes: 40,
+            duplicated_positions: false,
+            estimate_contamination: false,
+            starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+            ..JointFitConfig::default()
+        };
+        let alone = fit_jointly(&mut as_cohort(&draw().samples), &config).expect("one sample fits");
+        let mut beside = draw();
+        let terms = as_cohort(&beside.samples)
+            .terms()
+            .expect("a drawn cohort records terms")
+            .clone();
+        beside.samples.push(
+            crate::parameter_estimation::joint::census::SampleCensusEvidence::resident(
+                "tracts_only".to_string(),
+                terms,
+                crate::parameter_estimation::joint::census::NamedReadGroup::drawn_for(
+                    "tracts_only",
+                    [ReadGroupId(1)],
+                ),
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    crate::parameter_estimation::joint::census::SectionKey::Ssr(
+                        ReadGroupId(1),
+                        crate::parameter_estimation::joint::census::Stratum {
+                            period: 2,
+                            reference_repeats: 6,
+                        },
+                    ),
+                    crate::parameter_estimation::joint::census::Section::Ssr(
+                        crate::parameter_estimation::joint::census::SsrEvidence::never_walked(0),
+                    ),
+                )]),
+            ),
+        );
+        let fit = fit_jointly(&mut as_cohort(&beside.samples), &config).expect("it fits");
+        for (which, fitted) in [("alone", &alone), ("beside a tracts-only sample", &fit)] {
+            let excess = &fitted.hom_excess["s0"];
+            assert_eq!(
+                (excess.provenance, excess.standard_error),
+                (Provenance::Defaulted, None),
+                "the one sample with reads, {which}"
+            );
+        }
+    }
+
+    /// **A library with no reads beside one with reads, in one sample, comes out defaulted**, and
+    /// only it: its sibling keeps its fitted rate and error, and its sample, which has reads through
+    /// the sibling, keeps a fitted excess. Three samples of two libraries each; the first sample's
+    /// second library is drawn at no depth.
+    #[test]
+    fn a_library_with_no_reads_beside_one_with_reads_comes_out_defaulted() {
+        let library = |mean_depth: f64| DrawnLibrary {
+            clean: 0.004,
+            noisy: 0.06,
+            mean_depth,
+        };
+        let cohort = draw_cohort_of_libraries(
+            &[
+                vec![library(6.0), library(0.0)],
+                vec![library(6.0), library(6.0)],
+                vec![library(6.0), library(6.0)],
+            ],
+            0.02,
+            2_000,
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0.0,
+            0x5EED_0E20_0000_0004,
+        );
+        let fit = fit_jointly(
+            &mut as_cohort(&cohort.samples),
+            &JointFitConfig {
+                quadrature_nodes: 8,
+                max_passes: 40,
+                duplicated_positions: false,
+                estimate_contamination: false,
+                starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+                ..JointFitConfig::default()
+            },
+        )
+        .expect("three samples fit");
+        let rates = fit.sequencing_error_rates();
+        let silent = &rates[&ReadGroupId(1)];
+        assert_eq!(
+            (
+                silent.provenance,
+                silent.observations,
+                silent.value.get(),
+                silent.standard_error
+            ),
+            (Provenance::Defaulted, 0, DEFAULT_ERROR_RATE, None)
+        );
+        for group in [0, 2, 3, 4, 5] {
+            let rate = &rates[&ReadGroupId(group)];
+            assert_eq!(
+                rate.provenance,
+                Provenance::FittedHere,
+                "read group {group}"
+            );
+            assert!(rate.standard_error.is_some(), "read group {group}");
+        }
+        let excess = &fit.hom_excess["s0"];
+        assert_eq!(excess.provenance, Provenance::FittedHere);
+        assert!(excess.standard_error.is_some());
     }
 
     /// **No plain pass lowers the log-likelihood** — the shapes' update included, which steps along

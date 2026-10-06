@@ -289,7 +289,7 @@ every sample — checkpoint D's run found 7 of 12 compared numbers beyond ±2 of
 1. ✅ **E1 — `Estimate` gains `standard_error: Option<f64>`**, its "no uncertainty interval" note
    rewritten (spec §5.1); every constructor sets it, `None` where no error is computed. No output
    changes. *Depends:* B3, C1. *Source:* spec §5.1.
-2. ☐ **E2 — the parameters file, version 2.** `standard_error` in the value tables and
+2. ✅ **E2 — the parameters file, version 2.** `standard_error` in the value tables and
    `own_fit_standard_error` in the slippage origin blocks (spec §5.2's table), each start's outcome
    in `fitted_from`, `FORMAT_VERSION` = 2, the reader accepting versions 1 and 2, the golden files
    updated; a parameter with no information written as `defaulted` with the default value (spec

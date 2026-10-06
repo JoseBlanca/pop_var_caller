@@ -64,3 +64,55 @@ fn a_small_cohort_gets_the_ceiling() {
 fn the_tomato_cohorts_width_is_the_one_that_was_measured() {
     assert_eq!(round_width_for(63).get(), 7_936);
 }
+
+/// **A calling run writes back the SNP/indel fit's starts it read**, through the one door both
+/// calling commands write their file through. A file it read carried how each start of the fit
+/// behind its numbers ended; the file it writes must say the same, or every calling run would
+/// strip that record from the numbers it passes on.
+#[test]
+fn a_calling_run_writes_back_the_fit_starts_it_read() {
+    use crate::calling::parameters_file::{SnpIndelFitStart, StartOutcome};
+    let read_groups = ReadGroups::of_lanes(&[("HWI.3", "TS-1", "lib3")]);
+    let ploidy = Ploidy::try_new(2).expect("diploid");
+    let inbreeding = DeclaredInbreeding::nothing_said();
+    let starts = vec![
+        SnpIndelFitStart {
+            start: 1,
+            ended: StartOutcome::Converged,
+            passes: 41,
+            agreed_with_start: None,
+        },
+        SnpIndelFitStart {
+            start: 2,
+            ended: StartOutcome::AgreedWithAnEarlierStart,
+            passes: 9,
+            agreed_with_start: Some(1),
+        },
+    ];
+    let numbers = TheRunsNumbers {
+        parameters: RunParameters::of_defaults(&read_groups, ploidy, &inbreeding),
+        reads_behind_each_calibration: ReadsBehindEachCalibration::nothing_was_fitted(
+            read_groups.len(),
+        ),
+        inbreeding_by_sample: inbreeding.of_each_sample(&read_groups),
+        census: CensusIdentity::of_a_run_with_no_census(),
+        snp_indel_fit_starts: Some(starts.clone()),
+    };
+    let written = numbers.parameters_file(
+        &read_groups,
+        &ReferenceDigest([3; 16]),
+        &StrRepeatCriteria::default(),
+    );
+    assert_eq!(written.fitted_from.snp_indel_fit_starts, Some(starts));
+
+    let with_none = TheRunsNumbers {
+        snp_indel_fit_starts: None,
+        ..numbers
+    };
+    let written = with_none.parameters_file(
+        &read_groups,
+        &ReferenceDigest([3; 16]),
+        &StrRepeatCriteria::default(),
+    );
+    assert_eq!(written.fitted_from.snp_indel_fit_starts, None);
+}

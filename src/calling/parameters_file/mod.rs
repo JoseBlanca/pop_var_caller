@@ -54,7 +54,7 @@
 //! actually emits:
 //!
 //! ```toml
-//! format_version = 1
+//! format_version = 2
 //! ploidy = 2
 //!
 //! [fitted_from]                    # §3.1 — and what a mismatch refuses
@@ -67,6 +67,7 @@
 //! [base_quality_calibration]       # §3.3
 //! by_read_group = [ { read_group = 0,
 //!                     error_probability_multiplier = { value = 1.0324,
+//!                                                      standard_error = 0.0071,
 //!                                                      warrant = "fitted_here",
 //!                                                      observations = { reads = 812344 } } } ]
 //!
@@ -183,9 +184,12 @@ use serde::{Deserialize, Serialize};
 
 /// **Which version of this format this build writes.**
 ///
-/// Carried from the start so that a reader has something to branch on if there is ever an older
-/// file; what it *does* with one is deferred until there is one (spec §11).
-pub const FORMAT_VERSION: u32 = 1;
+/// Carried from the start so that a reader has something to branch on. **Version 2** added each
+/// number's standard error, each stratum's own-fit errors and how many samples it was fitted on,
+/// and how each start of the SNP/indel fit ended (`doc/devel/ng/spec/fit_precision.md` §5.2). Every
+/// key it added is optional, so this build reads a version-1 file as it reads a version-2 file
+/// with those keys absent; a version-1 build refuses a version-2 file as written by a newer build.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -412,6 +416,12 @@ pub struct WarrantedValue {
     /// How much data stood behind it, **naming the unit it counts in** — absent where no fit
     /// produced a count, never zero.
     pub observations: Option<EvidenceCount>,
+    /// **How far the value would typically move if the same kind of data were drawn again**, on
+    /// the value's own scale — absent where nothing determined the value or no error is computed
+    /// for it (`doc/devel/ng/spec/fit_precision.md` §5.2). It comes from the curvature of the
+    /// fit's log-likelihood, or for a counted rate from the binomial spread of the count, and near
+    /// a bound of the value's range it is not the spread of a normal distribution.
+    pub standard_error: Option<f64>,
 }
 
 /// **How much data stood behind a number, in the unit that number counts in.**
@@ -629,6 +639,43 @@ pub struct InputsFittedFrom {
     pub read_groups: Vec<ReadGroupRow>,
     /// Which census produced these numbers. **Demotes rather than refuses.**
     pub census: CensusIdentity,
+    /// **How each start of the SNP/indel fit ended**, in the order the fit ran them
+    /// (`doc/devel/ng/spec/fit_precision.md` §3.5, §5.2) — absent where no SNP/indel fit stands
+    /// behind the file: the defaults run, or a file written before version 2. **Not a binding**:
+    /// nothing is checked against it; it says how settled the numbers below were when written.
+    pub snp_indel_fit_starts: Option<Vec<SnpIndelFitStart>>,
+}
+
+/// **One start of the SNP/indel fit, and how it ended.**
+///
+/// The fit runs from several starting points and keeps the best that did not stop early; a start
+/// that ran out of passes is not convergence, and the file says which (spec `fit_precision.md`
+/// §3.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnpIndelFitStart {
+    /// Counted from one, in the order the fit ran its starts.
+    pub start: u32,
+    /// How it ended.
+    pub ended: StartOutcome,
+    /// Passes over the data, the final pass not counted — as the run's log prints them.
+    pub passes: u32,
+    /// For a start that stopped as heading where an earlier one converged, which start that was;
+    /// absent otherwise.
+    pub agreed_with_start: Option<u32>,
+}
+
+/// How one start of the SNP/indel fit ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartOutcome {
+    /// Every number came within a tenth of its standard error of the likelihood's maximum.
+    Converged,
+    /// It ran out of passes first. Not convergence.
+    AtThePassLimit,
+    /// It was heading where an earlier start had converged and stopped there; it does not compete
+    /// to be the fit's answer.
+    AgreedWithAnEarlierStart,
 }
 
 /// One read group of the run: its dense index, and the three names the alignment file gave it.
@@ -1063,6 +1110,12 @@ pub struct SlippageRow {
     /// share's**, because the three numbers are smoothed on their own curves and a stratum can
     /// take its slip share from a curve while keeping its own two shares.
     pub shorter_share_and_fall_off_origin: Option<SharesOrigin>,
+    /// **How many samples this stratum's own fit read**, where a large cohort's stratum was fitted
+    /// on a subset of its samples (`fit_precision.md` §4.4) — absent where every sample was read
+    /// without a subset being drawn, or nothing was fitted here. The `expected_slipped_reads`
+    /// beside it are among these samples, and the own-fit errors describe the subset's own fit,
+    /// not its distance from a fit on every sample.
+    pub samples_fitted_on: Option<u64>,
 }
 
 /// Where a stratum's slippage **level** came from — the file's spelling of
@@ -1076,6 +1129,10 @@ pub struct LevelOrigin {
     /// How many of this stratum's own reads **its own fitted level** said slipped, and absent
     /// where the stratum has no level of its own because it borrowed. **Absent is not zero.**
     pub expected_slipped_reads: Option<f64>,
+    /// **The level's standard error, only where the level written is the stratum's own fit**
+    /// (`smoothing = "this_stratum"`). A level from its period's curve, or blended with it, has
+    /// none: the blend's own error is not computed (`fit_precision.md` §5.2).
+    pub own_fit_standard_error: Option<f64>,
 }
 
 /// Where a stratum's direction split and fall-off came from — the file's spelling of
@@ -1097,6 +1154,12 @@ pub struct SharesOrigin {
     pub shorter_share_smoothing: ShareSmoothing,
     /// Where the fall-off came from.
     pub fall_off_smoothing: ShareSmoothing,
+    /// **The shorter share's standard error, only where that share is the stratum's own fit** —
+    /// one key a share rather than one for the block, because the two are smoothed separately and
+    /// either can come from a curve while the other is the stratum's own.
+    pub shorter_share_own_fit_standard_error: Option<f64>,
+    /// The fall-off's, on the same terms.
+    pub fall_off_own_fit_standard_error: Option<f64>,
 }
 
 /// How much of a period's curve went into a stratum's slippage **level**, and which curve.
@@ -1497,6 +1560,27 @@ mod tests {
                     },
                 ],
                 census: a_census_a_run_could_have_fitted_under(),
+                snp_indel_fit_starts: Some(vec![
+                    // **All three endings**, so the writer, the reader and the checks meet each.
+                    SnpIndelFitStart {
+                        start: 1,
+                        ended: StartOutcome::Converged,
+                        passes: 41,
+                        agreed_with_start: None,
+                    },
+                    SnpIndelFitStart {
+                        start: 2,
+                        ended: StartOutcome::AgreedWithAnEarlierStart,
+                        passes: 12,
+                        agreed_with_start: Some(1),
+                    },
+                    SnpIndelFitStart {
+                        start: 3,
+                        ended: StartOutcome::AtThePassLimit,
+                        passes: 200,
+                        agreed_with_start: None,
+                    },
+                ]),
             },
             base_quality_calibration: BaseQualityCalibration {
                 by_read_group: vec![
@@ -1506,6 +1590,7 @@ mod tests {
                             value: 1.0324,
                             warrant: Warrant::FittedHere,
                             observations: Some(EvidenceCount::Reads(812_344)),
+                            standard_error: Some(0.0071),
                         },
                     },
                     // A multiplier of exactly one that was *not* fitted — the state the warrant
@@ -1523,6 +1608,7 @@ mod tests {
                             value: 1.0,
                             warrant: Warrant::Defaulted,
                             observations: None,
+                            standard_error: None,
                         },
                     },
                     BaseQualityCalibrationRow {
@@ -1531,6 +1617,7 @@ mod tests {
                             value: 0.87,
                             warrant: Warrant::Supplied,
                             observations: Some(EvidenceCount::Reads(640_918)),
+                            standard_error: Some(0.0093),
                         },
                     },
                 ],
@@ -1615,6 +1702,7 @@ mod tests {
                             value: 0.42,
                             warrant: Warrant::FittedHere,
                             observations: Some(EvidenceCount::CoveredPositions(180_600_412)),
+                            standard_error: Some(0.012),
                         },
                     },
                     InbreedingRow {
@@ -1623,6 +1711,7 @@ mod tests {
                             value: 0.17,
                             warrant: Warrant::Borrowed,
                             observations: Some(EvidenceCount::CoveredPositions(9_411_027)),
+                            standard_error: None,
                         },
                     },
                 ],
@@ -1645,6 +1734,7 @@ mod tests {
                     value: 3.5,
                     warrant: Warrant::FittedHere,
                     observations: None,
+                    standard_error: None,
                 },
                 slippage_group_by_read_group: vec![
                     SlippageGroupRow {
@@ -1677,6 +1767,7 @@ mod tests {
                         share_of_reads_that_slip_origin: LevelOrigin {
                             smoothing: LevelSmoothing::ThisStratum,
                             expected_slipped_reads: Some(12_040.25),
+                            own_fit_standard_error: Some(0.0021),
                         },
                         shorter_share_and_fall_off_origin: Some(SharesOrigin {
                             expected_slipped_reads: Some(12_040.25),
@@ -1686,7 +1777,11 @@ mod tests {
                                 reach: CurveReach::InsideTheFittedRange,
                             },
                             fall_off_smoothing: ShareSmoothing::ThisStratum,
+                            shorter_share_own_fit_standard_error: None,
+                            fall_off_own_fit_standard_error: Some(0.018),
                         }),
+                        // One of the fixture's two samples: a subset, as a large cohort's is.
+                        samples_fitted_on: Some(1),
                     },
                     SlippageRow {
                         period: 2,
@@ -1702,6 +1797,7 @@ mod tests {
                                 reach: CurveReach::InsideTheFittedRange,
                             },
                             expected_slipped_reads: Some(8_000.5),
+                            own_fit_standard_error: None,
                         },
                         shorter_share_and_fall_off_origin: Some(SharesOrigin {
                             expected_slipped_reads: Some(8_000.5),
@@ -1710,7 +1806,10 @@ mod tests {
                                 curve: a_share_curve_fitted_over(2, 4),
                                 reach: CurveReach::AboveTheFittedRange,
                             },
+                            shorter_share_own_fit_standard_error: Some(0.011),
+                            fall_off_own_fit_standard_error: None,
                         }),
+                        samples_fitted_on: None,
                     },
                     SlippageRow {
                         period: 2,
@@ -1727,8 +1826,10 @@ mod tests {
                             // Absent, not zero: this stratum borrowed and has no level of its
                             // own to count slipped reads against.
                             expected_slipped_reads: None,
+                            own_fit_standard_error: None,
                         },
                         shorter_share_and_fall_off_origin: None,
+                        samples_fitted_on: None,
                     },
                 ],
                 length_spectrum_by_stratum: vec![StratumLengthSpectrumRow {
@@ -1751,6 +1852,7 @@ mod tests {
                         value: 0.0012,
                         warrant: Warrant::Borrowed,
                         observations: Some(EvidenceCount::BasesCompared(40_122)),
+                        standard_error: Some(0.000_173),
                     },
                 }],
             },
@@ -1759,6 +1861,7 @@ mod tests {
                     value: DEFAULT_OUTLIER_WEIGHT,
                     warrant: Warrant::Defaulted,
                     observations: None,
+                    standard_error: None,
                 },
             },
             // The shape, not a recommendation: what a run that routed on the catalog's own
@@ -1944,11 +2047,12 @@ mod tests {
     /// variant must not silently re-interpret a file on disk. Neither the round trip nor the
     /// golden file above can stand in for this one — the round trip moves both sides of a rename
     /// at once, and the golden file only sees the variants the fixture happens to use, which is
-    /// **fourteen of these twenty-two**. (Counted by grepping the golden file for each spelling
+    /// **seventeen of these twenty-five**. (Counted by grepping the golden file for each spelling
     /// asserted below: the eight it never writes are the seed's other three rungs, three of the
     /// share curve's four, and two of the share shape's three. The earlier **numerator** here —
     /// eleven — was a guess and the true figure was fourteen; the denominator moved from
-    /// twenty-one to twenty-two because step B1 added a variant, not because it was miscounted.)
+    /// twenty-one to twenty-two because step B1 added a variant, not because it was miscounted, and
+    /// to twenty-five when the file's version 2 added a start's three outcomes, all in the fixture.)
     #[test]
     fn every_enum_variant_spells_as_the_file_says() {
         assert_eq!(spelling(Warrant::FittedHere), "fitted_here");
@@ -2000,6 +2104,12 @@ mod tests {
 
         assert_eq!(spelling(LevelSmoothing::ThisStratum), "this_stratum");
         assert_eq!(spelling(ShareSmoothing::ThisStratum), "this_stratum");
+        assert_eq!(spelling(StartOutcome::Converged), "converged");
+        assert_eq!(spelling(StartOutcome::AtThePassLimit), "at_the_pass_limit");
+        assert_eq!(
+            spelling(StartOutcome::AgreedWithAnEarlierStart),
+            "agreed_with_an_earlier_start"
+        );
         // `EvidenceCount`'s three variants carry a number, so they spell as a one-key table
         // rather than a bare string; `an_evidence_count_names_its_unit_and_is_absent_where_there_is_none`
         // is what pins them, and the fixture uses all three.
@@ -2072,6 +2182,8 @@ mod tests {
             expected_slipped_reads: None,
             shorter_share_smoothing: ShareSmoothing::ThisStratum,
             fall_off_smoothing: ShareSmoothing::ThisStratum,
+            shorter_share_own_fit_standard_error: None,
+            fall_off_own_fit_standard_error: None,
         });
         let value = toml::Value::try_from(&row).expect("a slippage row is a TOML value");
         let shares = value
@@ -2170,8 +2282,8 @@ mod tests {
             );
             for key in table.keys() {
                 assert!(
-                    ["value", "warrant", "observations"].contains(&key.as_str()),
-                    "{path} carries the key {key}, which is not one of the three a warranted \
+                    ["value", "standard_error", "warrant", "observations"].contains(&key.as_str()),
+                    "{path} carries the key {key}, which is not one of the four a warranted \
                      number is written with"
                 );
             }
@@ -2297,6 +2409,7 @@ mod tests {
                     value: 1.0,
                     warrant,
                     observations: None,
+                    standard_error: None,
                 };
         }
         assert_ne!(
@@ -2484,6 +2597,7 @@ mod tests {
                 value: 1.0,
                 warrant,
                 observations: None,
+                standard_error: None,
             };
             let text = toml::to_string(&file).expect("serialises");
             let read: ParametersFile = toml::from_str(&text).expect("parses");
@@ -2640,9 +2754,9 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_one() {
-        assert_eq!(FORMAT_VERSION, 1);
-        assert_eq!(a_file_using_every_shape().format_version, 1);
+    fn the_format_version_this_build_writes_is_two() {
+        assert_eq!(FORMAT_VERSION, 2);
+        assert_eq!(a_file_using_every_shape().format_version, 2);
     }
 
     /// **Every `reach` in the fixture is true of the repeat count printed beside it.**

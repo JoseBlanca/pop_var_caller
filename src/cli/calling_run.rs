@@ -33,7 +33,7 @@ use crate::calling::inference::{CallingLoopConfig, DiscoveryMode, RunnableCallin
 use crate::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, ParametersFile, ParametersFileError,
-    ReadsBehindEachCalibration, beside_the_vcf,
+    ReadsBehindEachCalibration, SnpIndelFitStart, beside_the_vcf,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
@@ -606,6 +606,39 @@ pub struct TheRunsNumbers {
     /// degrade by one hop through direct mode, silently, which is exactly the divergence spec
     /// §2.1 exists to prevent.
     pub census: CensusIdentity,
+    /// **How each start of the SNP/indel fit behind these numbers ended, as the file that carried
+    /// them recorded it** — `None` on the defaults path, or a file that recorded none. Carried
+    /// rather than dropped for the census's reason: a run writing its parameters out again writes
+    /// back what it read.
+    pub snp_indel_fit_starts: Option<Vec<SnpIndelFitStart>>,
+}
+
+impl TheRunsNumbers {
+    /// **The parameters file this run writes** — what it scored with, and everything the file it
+    /// read said about where those numbers came from: the counts behind each multiplier, each
+    /// coefficient's warrant, the census, and how each start of the fit behind them ended.
+    ///
+    /// **The one door both calling commands write through**, so that neither can drop something
+    /// it read: [`ParametersFile::of_run`] writes no fit starts, and a writer that forgot
+    /// [`ParametersFile::with_snp_indel_fit_starts`] would compile and lose them.
+    #[must_use]
+    pub fn parameters_file(
+        &self,
+        read_groups: &ReadGroups,
+        reference: &ReferenceDigest,
+        repeat_routing: &StrRepeatCriteria,
+    ) -> ParametersFile {
+        ParametersFile::of_run(
+            &self.parameters,
+            read_groups,
+            &self.reads_behind_each_calibration,
+            &self.inbreeding_by_sample,
+            reference,
+            self.census.clone(),
+            repeat_routing,
+        )
+        .with_snp_indel_fit_starts(self.snp_indel_fit_starts.clone())
+    }
 }
 
 /// The numbers this run scores with — a supplied file, or the defaults compiled in.
@@ -642,6 +675,7 @@ pub fn run_parameters(
             // Nothing was fitted, so no census produced these numbers — and that is a fact
             // about them rather than a gap.
             census: CensusIdentity::of_a_run_with_no_census(),
+            snp_indel_fit_starts: None,
         });
     };
     let text =
@@ -696,6 +730,7 @@ pub fn run_parameters(
         ),
         inbreeding_by_sample: from_file.inbreeding_by_sample,
         census: file.fitted_from.census.clone(),
+        snp_indel_fit_starts: file.fitted_from.snp_indel_fit_starts.clone(),
     })
 }
 

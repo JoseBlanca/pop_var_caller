@@ -134,8 +134,9 @@ pub struct Estimate<T> {
     /// rate counted directly, from the binomial spread of the count; near a bound of the value's
     /// range it is not the spread of a normal distribution.
     ///
-    /// `None` where nothing determined the value — no information, a defaulted or supplied value, a
-    /// value the fit held at its start, or a rate counted with no mismatch or nothing but, where
+    /// `None` where nothing determined the value — no information, a defaulted value or one a
+    /// person typed (a number supplied from another run's file keeps that run's error), a value the
+    /// fit held at its start, or a rate counted with no mismatch or nothing but, where
     /// the formula's zero would claim it known exactly; where the data did not place it — not told
     /// apart from the fit's other numbers, or an error wider than the value's whole range; and
     /// where the value is one this design computes no error for: one made of several numbers (a frequency density, a

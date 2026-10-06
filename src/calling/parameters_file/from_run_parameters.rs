@@ -20,8 +20,8 @@ use super::{
     OrdinarySitePrior, ParametersFile, PeriodLengthSpectrumRow, ReadGroupBatchRow, ReadGroupRow,
     RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve,
     ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
-    SlippageRow, StatedConstants, StratumLengthSpectrumRow, SubstitutionRateRow, Warrant,
-    WarrantedValue,
+    SlippageRow, SnpIndelFitStart, StatedConstants, StratumLengthSpectrumRow, SubstitutionRateRow,
+    Warrant, WarrantedValue,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -80,6 +80,15 @@ impl ReadsBehindEachCalibration {
     /// an empty rate set — said as a source rather than as an absence.
     #[must_use]
     pub fn nothing_was_fitted(read_group_count: usize) -> Self {
+        Self(vec![None; read_group_count])
+    }
+
+    /// **A fit whose count behind each rate is not in reads**: the census fit keeps, beside a
+    /// library's rate, the census positions it read, and the file counts a multiplier's evidence in
+    /// reads. So no read group states a count, while each multiplier keeps its own warrant and
+    /// standard error — `fitted_here` where the rate was fitted.
+    #[must_use]
+    pub fn no_count_in_reads(read_group_count: usize) -> Self {
         Self(vec![None; read_group_count])
     }
 
@@ -268,11 +277,16 @@ impl ParametersFile {
     /// derived from the numbers themselves rather than recorded — see
     /// [`ParametersFile::what_the_run_fitted`].
     ///
-    /// **Six arguments rather than a bundle type**, on the same grounds
+    /// **Seven arguments rather than a bundle type**, on the same grounds
     /// [`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble)
-    /// gives for its nine: the list is the point, a struct naming the same six things would be a
-    /// second place for them to go out of step with the run, and no two of the six share a type,
+    /// gives for its nine: the list is the point, a struct naming the same seven things would be a
+    /// second place for them to go out of step with the run, and no two of the seven share a type,
     /// so no pair can be exchanged at a call site.
+    ///
+    /// **It writes no `snp_indel_fit_starts`.** A run that has a fit's starts — the fit itself, or
+    /// a calling run writing back a file it read — adds them with
+    /// [`Self::with_snp_indel_fit_starts`]; the calling commands do it through
+    /// `TheRunsNumbers::parameters_file`, so neither can forget.
     ///
     /// # Panics
     ///
@@ -378,6 +392,7 @@ impl ParametersFile {
                     })
                     .collect(),
                 census,
+                snp_indel_fit_starts: None,
             },
             base_quality_calibration: BaseQualityCalibration {
                 by_read_group: calibration_rows(
@@ -414,9 +429,22 @@ impl ParametersFile {
                     value: run.repeat_tract_outlier_weight().value(),
                     warrant: run.repeat_tract_outlier_weight().provenance().into(),
                     observations: None,
+                    standard_error: None,
                 },
             },
         }
+    }
+
+    /// **Record how each start of the SNP/indel fit behind these numbers ended** — `None` where no
+    /// fit stands behind them (spec `fit_precision.md` §5.2).
+    ///
+    /// **A builder beside [`Self::of_run`] rather than an eighth argument to it**: a fit's starts
+    /// are not part of what calling scored with, and only the two runs that have them — the fit
+    /// that made them, and a calling run writing back the file it read — have anything to say.
+    #[must_use]
+    pub fn with_snp_indel_fit_starts(mut self, starts: Option<Vec<SnpIndelFitStart>>) -> Self {
+        self.fitted_from.snp_indel_fit_starts = starts;
+        self
     }
 }
 
@@ -445,8 +473,18 @@ fn calibration_rows(
                         value: calibration.scale,
                         warrant: calibration.provenance.into(),
                         observations: None,
+                        standard_error: calibration
+                            .scale_standard_error
+                            .filter(|_| calibration.provenance != Provenance::Defaulted),
                     },
-                    |count| warranted_value(calibration.scale, calibration.provenance, count),
+                    |count| {
+                        warranted_value(
+                            calibration.scale,
+                            calibration.provenance,
+                            count,
+                            calibration.scale_standard_error,
+                        )
+                    },
                 ),
             }
         })
@@ -572,6 +610,7 @@ fn inbreeding_of(
                         estimate.value.get(),
                         estimate.provenance,
                         EvidenceCount::CoveredPositions(estimate.observations),
+                        estimate.standard_error,
                     ),
                 }
             })
@@ -599,6 +638,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
             value: fits.stated_concentration(),
             warrant: fits.stated_concentration_warrant().into(),
             observations: None,
+            standard_error: None,
         },
         // **One row a read group the run declared a slippage group for.** A read group the
         // declaration does not name has no row, which is what the fit itself says about it —
@@ -627,6 +667,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                 fall_off: fitted.slippage.fall_off,
                 share_of_reads_that_slip_origin: level_origin_of(
                     fitted.level,
+                    fitted.own_fit_standard_errors.level,
                     stratum,
                     slippage_group,
                 ),
@@ -644,7 +685,12 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                         slippage_group,
                         "the fall-off",
                     ),
+                    shorter_share_own_fit_standard_error: fitted
+                        .own_fit_standard_errors
+                        .shorter_share,
+                    fall_off_own_fit_standard_error: fitted.own_fit_standard_errors.fall_off,
                 }),
+                samples_fitted_on: fitted.samples_fitted_on,
             })
             .collect(),
         length_spectrum_by_stratum: fits
@@ -693,6 +739,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                         rate.value.get(),
                         rate.provenance,
                         EvidenceCount::BasesCompared(rate.observations),
+                        rate.standard_error,
                     ),
                 }
             })
@@ -714,6 +761,7 @@ fn warranted_value(
     value: f64,
     provenance: Provenance,
     observations: EvidenceCount,
+    standard_error: Option<f64>,
 ) -> WarrantedValue {
     let warrant = Warrant::from(provenance);
     WarrantedValue {
@@ -742,12 +790,15 @@ fn warranted_value(
         observations: (warrant != Warrant::Defaulted
             && !(warrant == Warrant::Supplied && observations.count() == 0))
             .then_some(observations),
+        // **A defaulted value has no error either**, by the same rule: nothing determined it.
+        standard_error: standard_error.filter(|_| warrant != Warrant::Defaulted),
     }
 }
 
 /// Where one `(stratum × slippage group)`'s level came from.
 fn level_origin_of(
     provenance: LevelProvenance,
+    own_fit_standard_error: Option<f64>,
     stratum: Stratum,
     slippage_group: u32,
 ) -> LevelOrigin {
@@ -770,6 +821,7 @@ fn level_origin_of(
             },
         },
         expected_slipped_reads: provenance.slipped_reads,
+        own_fit_standard_error,
     }
 }
 
@@ -1589,6 +1641,27 @@ mod tests {
         );
     }
 
+    /// **A `defaulted` number is written with no standard error, whatever it was handed**, by the
+    /// rule it is written with no count: nothing determined a stated constant. A `supplied` number
+    /// keeps its error, as it keeps its count — a file demoted to `supplied` was fitted on some
+    /// cohort, and its errors are that fit's.
+    #[test]
+    fn a_defaulted_number_is_written_with_no_error_and_a_supplied_one_keeps_its_own() {
+        let count = EvidenceCount::Reads(4_242);
+        assert_eq!(
+            warranted_value(1.0, Provenance::Defaulted, count, Some(0.1)).standard_error,
+            None
+        );
+        assert_eq!(
+            warranted_value(0.9, Provenance::Supplied, count, Some(0.1)).standard_error,
+            Some(0.1)
+        );
+        assert_eq!(
+            warranted_value(0.9, Provenance::FittedHere, count, Some(0.1)).standard_error,
+            Some(0.1)
+        );
+    }
+
     /// **A *fitted* count of zero is a count, and the warrant is what makes one absent** — with
     /// the one exception step E2 added.
     ///
@@ -1606,14 +1679,16 @@ mod tests {
     #[test]
     fn an_evidence_count_of_zero_is_written_and_is_not_absence() {
         assert_eq!(
-            warranted_value(0.5, Provenance::FittedHere, EvidenceCount::Reads(0)).observations,
+            warranted_value(0.5, Provenance::FittedHere, EvidenceCount::Reads(0), None)
+                .observations,
             Some(EvidenceCount::Reads(0))
         );
         assert_eq!(
             warranted_value(
                 0.5,
                 Provenance::Supplied,
-                EvidenceCount::CoveredPositions(u64::MAX)
+                EvidenceCount::CoveredPositions(u64::MAX),
+                None
             )
             .observations,
             Some(EvidenceCount::CoveredPositions(u64::MAX)),
@@ -1624,7 +1699,8 @@ mod tests {
             warranted_value(
                 0.9,
                 Provenance::Supplied,
-                EvidenceCount::CoveredPositions(0)
+                EvidenceCount::CoveredPositions(0),
+                None
             )
             .observations,
             None,
@@ -1632,7 +1708,13 @@ mod tests {
              claims a measurement over no genome"
         );
         assert_eq!(
-            warranted_value(1.0, Provenance::Defaulted, EvidenceCount::Reads(4_242)).observations,
+            warranted_value(
+                1.0,
+                Provenance::Defaulted,
+                EvidenceCount::Reads(4_242),
+                None
+            )
+            .observations,
             None
         );
     }
@@ -1974,6 +2056,7 @@ mod tests {
                 reach: None,
                 slipped_reads: Some(412.0),
             },
+            None,
             Stratum {
                 period: 2,
                 reference_repeats: 6,
@@ -2641,6 +2724,7 @@ mod tests {
                 reach: Some(FittedCurveReach::Inside),
                 slipped_reads: None,
             },
+            None,
             Stratum {
                 period: 2,
                 reference_repeats: 6,
@@ -2659,6 +2743,7 @@ mod tests {
                 reach: None,
                 slipped_reads: None,
             },
+            None,
             Stratum {
                 period: 2,
                 reference_repeats: 6,
@@ -2740,7 +2825,8 @@ mod one_writer_three_sources {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone());
 
         assert_eq!(written, supplied);
     }
@@ -2764,7 +2850,8 @@ mod one_writer_three_sources {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone());
 
         let counts: Vec<(Warrant, Option<EvidenceCount>)> = written
             .base_quality_calibration
@@ -2864,7 +2951,8 @@ mod one_writer_three_sources {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone());
 
         assert_eq!(
             written.fitted_from.census, supplied.fitted_from.census,
@@ -2901,7 +2989,8 @@ mod one_writer_three_sources {
                 &THE_REFERENCE_A_RUN_FITTED_AGAINST,
                 written.fitted_from.census.clone(),
                 &StrRepeatCriteria::default(),
-            ),
+            )
+            .with_snp_indel_fit_starts(written.fitted_from.snp_indel_fit_starts.clone()),
             written
         );
     }
@@ -2936,7 +3025,8 @@ mod one_writer_three_sources {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             supplied.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone());
 
         assert_eq!(
             written.base_quality_calibration.by_read_group[0].error_probability_multiplier,

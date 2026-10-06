@@ -230,7 +230,7 @@ impl StandardErrors {
     /// are paired, the two ways drop the same parameters and give the same errors.
     fn of_the_whole_matrix(full: &FullInformation) -> Self {
         let samples = full.samples();
-        let excess_is_fitted = fits_homozygote_excess(samples);
+        let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess_in(full));
         let mut errors = Self {
             cohort: [StandardError::NoInformation; COHORT_PARAMETERS],
             samples: (0..samples)
@@ -293,7 +293,7 @@ impl StandardErrors {
     /// **The errors from the blocks**: the arrow inverted block by block (module doc).
     pub(super) fn of_the_blocks(sums: &InformationSums) -> Self {
         let samples = sums.sample_blocks.len();
-        let excess_is_fitted = fits_homozygote_excess(samples);
+        let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess(sums));
         let mut errors = Self {
             cohort: [StandardError::NoInformation; COHORT_PARAMETERS],
             samples: (0..samples)
@@ -794,7 +794,7 @@ fn information_times(sums: &InformationSums, layout: &Layout, vector: &[f64]) ->
 /// `I⁻¹ g` on the whole matrix, over the parameters [`StandardErrors::of_the_whole_matrix`] inverts
 /// less those `held`, from the flat `slope`; flat, `None` for the rest.
 fn whole_matrix_solve(full: &FullInformation, slope: &[f64], held: &[bool]) -> Vec<Option<f64>> {
-    let excess_is_fitted = fits_homozygote_excess(full.samples());
+    let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess_in(full));
     let mut solved: Vec<usize> = Vec::with_capacity(full.side());
     for s in 0..full.samples() {
         for (slot, row) in full.rows_of_sample(s).enumerate() {
@@ -842,7 +842,7 @@ fn arrow_solve(
     held: &[bool],
 ) -> Vec<Option<f64>> {
     let samples = sums.sample_blocks.len();
-    let excess_is_fitted = fits_homozygote_excess(samples);
+    let excess_is_fitted = fits_homozygote_excess(samples_informing_their_excess(sums));
     let mut step = vec![None; layout.side];
     let cohort_informed: Vec<usize> = (0..COHORT_PARAMETERS)
         .filter(|&i| has_information(sums.cohort[i * COHORT_PARAMETERS + i]) && !held[i])
@@ -1002,6 +1002,30 @@ struct SampleBlockInverse {
 /// Whether a diagonal entry of the information says the parameter was informed at all.
 fn has_information(diagonal: f64) -> bool {
     diagonal > 0.0 && diagonal.is_finite()
+}
+
+/// **How many samples carry information on their own homozygote excess**, from the blocks — the
+/// count the excess is fitted across ([`fits_homozygote_excess`]). A sample with no read at an
+/// ordinary position carries none, and does not make a one-sample cohort a two-sample one.
+pub(super) fn samples_informing_their_excess(sums: &InformationSums) -> usize {
+    (0..sums.sample_blocks.len())
+        .filter(|&s| {
+            let n = sums.own_parameters_of(s);
+            has_information(
+                sums.sample_blocks[s][sample::HOMOZYGOTE_EXCESS * n + sample::HOMOZYGOTE_EXCESS],
+            )
+        })
+        .count()
+}
+
+/// The same, from the whole matrix.
+fn samples_informing_their_excess_in(full: &FullInformation) -> usize {
+    (0..full.samples())
+        .filter(|&s| {
+            let row = full.rows_of_sample(s).start + sample::HOMOZYGOTE_EXCESS;
+            has_information(full.entry(row, row))
+        })
+        .count()
 }
 
 /// The standard error a variance gives, for a parameter the fit keeps within `bounds`. A variance
@@ -1880,10 +1904,12 @@ mod tests {
     }
 
     /// **A diagonal entry that is not finite counts as no information**: an infinite and a NaN
-    /// diagonal say `NoInformation`, and every other error equals the arrow's without them.
+    /// diagonal say `NoInformation`, and every other error equals the arrow's without them. Three
+    /// samples, so that with the second's excess uninformed two still inform theirs and the excess
+    /// stays fitted ([`fits_homozygote_excess`]).
     #[test]
     fn a_diagonal_that_is_not_finite_is_no_information() {
-        let samples = 2;
+        let samples = 3;
         let (mut sums, full) = an_arrow(samples, 79);
         let n = COHORT_PARAMETERS + ONE_LIBRARY_SAMPLE_PARAMETERS * samples;
         let at = cohort::DENSITY_B;
@@ -1898,6 +1924,20 @@ mod tests {
             &errors,
             &dense_errors_without(&full, n, |i| i == at || i == excess_of_one),
         );
+    }
+
+    /// **Two samples, one of which informs nothing about its excess, hold the other's excess**: the
+    /// excess is fitted across the samples that inform theirs, and one is not enough. On both ways
+    /// of inverting, the informed sample's excess is held fixed.
+    #[test]
+    fn one_sample_informing_its_excess_holds_it() {
+        let excess = sample::HOMOZYGOTE_EXCESS;
+        let (mut sums, _) = an_arrow(2, 79);
+        sums.sample_blocks[1][excess * ONE_LIBRARY_SAMPLE_PARAMETERS + excess] = 0.0;
+        assert_eq!(samples_informing_their_excess(&sums), 1);
+        let errors = StandardErrors::of(&sums);
+        assert_eq!(errors.samples[0][excess], StandardError::HeldFixed);
+        assert_eq!(errors.samples[1][excess], StandardError::NoInformation);
     }
 
     /// A fit's parameters over `groups` read groups and `samples` samples, with or without the

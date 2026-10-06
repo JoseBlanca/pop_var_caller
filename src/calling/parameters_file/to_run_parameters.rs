@@ -76,7 +76,7 @@ use crate::parameter_estimation::joint::ssr_fit::{
     LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
 };
 use crate::parameter_estimation::joint::stratum_fits::{
-    FittedLengthSpectrum, FittedSlippage, StratumFits,
+    FittedLengthSpectrum, FittedSlippage, OwnFitStandardErrors, StratumFits,
 };
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::parameter_estimation::{Estimate, Provenance};
@@ -228,6 +228,7 @@ impl ParametersFile {
             calibration_by_read_group[at] = Some(ReadGroupCalibration {
                 scale: row.error_probability_multiplier.value,
                 provenance: row.error_probability_multiplier.warrant.into(),
+                scale_standard_error: row.error_probability_multiplier.standard_error,
             });
             reads_behind_each_calibration[at] = row.error_probability_multiplier.observations;
         }
@@ -352,7 +353,7 @@ impl ParametersFile {
                 value,
                 provenance: row.inbreeding_coefficient.warrant.into(),
                 observations: an_evidence_count(row.inbreeding_coefficient.observations),
-                standard_error: None,
+                standard_error: row.inbreeding_coefficient.standard_error,
             });
         }
         Ok(by_sample
@@ -420,6 +421,18 @@ impl ParametersFile {
                     },
                     level,
                     shares,
+                    own_fit_standard_errors: OwnFitStandardErrors {
+                        level: row.share_of_reads_that_slip_origin.own_fit_standard_error,
+                        shorter_share: row
+                            .shorter_share_and_fall_off_origin
+                            .as_ref()
+                            .and_then(|origin| origin.shorter_share_own_fit_standard_error),
+                        fall_off: row
+                            .shorter_share_and_fall_off_origin
+                            .as_ref()
+                            .and_then(|origin| origin.fall_off_own_fit_standard_error),
+                    },
+                    samples_fitted_on: row.samples_fitted_on,
                 });
         }
 
@@ -500,7 +513,7 @@ impl ParametersFile {
                     value,
                     provenance: row.rate.warrant.into(),
                     observations: an_evidence_count(row.rate.observations),
-                    standard_error: None,
+                    standard_error: row.rate.standard_error,
                 },
             );
         }
@@ -857,7 +870,8 @@ pub(super) mod tests {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
         assert_eq!(written, file);
     }
 
@@ -905,7 +919,8 @@ pub(super) mod tests {
                 &THE_REFERENCE_A_RUN_FITTED_AGAINST,
                 file.fitted_from.census.clone(),
                 &StrRepeatCriteria::default(),
-            );
+            )
+            .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
             assert_eq!(
                 written
                     .repeat_tracts
@@ -935,7 +950,8 @@ pub(super) mod tests {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(read.fitted_from.snp_indel_fit_starts.clone());
         assert_eq!(written.to_toml(), text);
     }
 
@@ -1072,6 +1088,7 @@ pub(super) mod tests {
             value: STATED_FLAT_CONCENTRATION,
             warrant: Warrant::Defaulted,
             observations: None,
+            standard_error: None,
         };
 
         let run = small
@@ -1907,7 +1924,8 @@ mod the_north_star_round_trip {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             read.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(read.fitted_from.snp_indel_fit_starts.clone());
         assert_eq!(again, first, "and the parameters are the file again");
         // **Implied by the line above except in one place**: the shape's `PartialEq` compares
         // floats with `==`, and `-0.0 == 0.0` while the two are written differently. That one
@@ -2114,6 +2132,7 @@ mod the_north_star_round_trip {
                     value: STATED_FLAT_CONCENTRATION,
                     warrant: super::super::Warrant::Defaulted,
                     observations: None,
+                    standard_error: None,
                 };
             small
         };
@@ -2132,7 +2151,8 @@ mod the_north_star_round_trip {
             &THE_REFERENCE_A_RUN_FITTED_AGAINST,
             file.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
-        );
+        )
+        .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
         assert_eq!(again, file);
         assert_eq!(
             back.parameters.ssr_slippage_fits().at(ReadGroupId(0), 2, 6),

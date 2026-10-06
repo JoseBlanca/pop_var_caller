@@ -442,6 +442,7 @@ fn fit_and_assemble(
         &reference,
         &terms,
         &segmentation.inputs().repeat_tract_criteria,
+        &fit.generic.starts,
     );
     Ok((file, samples))
 }

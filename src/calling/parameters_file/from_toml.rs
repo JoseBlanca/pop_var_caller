@@ -354,6 +354,52 @@ mod tests {
         assert_eq!(read, a_file_using_every_shape());
     }
 
+    /// **A file written by a version-1 build still reads, as the same numbers with no errors.**
+    ///
+    /// `testdata/version_1_as_written.toml` is the fixture as the last version-1 build wrote it,
+    /// kept unregenerated. Every key version 2 added is optional, so it reads back as today's
+    /// fixture with those keys absent and the version it was written under; and it passes the
+    /// checks a run applies before using a file.
+    #[test]
+    fn a_file_a_version_one_build_wrote_reads_back_without_the_new_keys() {
+        let read = ParametersFile::from_toml(include_str!("testdata/version_1_as_written.toml"))
+            .expect("a version-1 file is a parameters file");
+        assert_eq!(read.format_version, 1);
+        read.validate()
+            .expect("a version-1 file passes the checks a run applies");
+        assert_eq!(read, the_fixture_without_what_version_two_added());
+    }
+
+    /// Today's fixture with every key version 2 added taken out, and marked version 1.
+    fn the_fixture_without_what_version_two_added() -> ParametersFile {
+        let mut file = a_file_using_every_shape();
+        file.format_version = 1;
+        file.fitted_from.snp_indel_fit_starts = None;
+        for row in &mut file.base_quality_calibration.by_read_group {
+            row.error_probability_multiplier.standard_error = None;
+        }
+        for row in &mut file.inbreeding.by_sample {
+            row.inbreeding_coefficient.standard_error = None;
+        }
+        let tracts = &mut file.repeat_tracts;
+        tracts.fallback_length_spectrum_concentration.standard_error = None;
+        for row in &mut tracts.substitution_rate_by_stratum {
+            row.rate.standard_error = None;
+        }
+        for row in &mut tracts.slippage_by_stratum_and_group {
+            row.samples_fitted_on = None;
+            row.share_of_reads_that_slip_origin.own_fit_standard_error = None;
+            if let Some(shares) = &mut row.shorter_share_and_fall_off_origin {
+                shares.shorter_share_own_fit_standard_error = None;
+                shares.fall_off_own_fit_standard_error = None;
+            }
+        }
+        file.stated_constants
+            .repeat_tract_outlier_weight
+            .standard_error = None;
+        file
+    }
+
     /// **The same fixture in serde's own layout reads back to the same value.**
     ///
     /// The two golden files are one fixture written by two writers — array-of-table headers

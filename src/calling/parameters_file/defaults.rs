@@ -507,6 +507,19 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
+    /// **The fit's default excess and calling's default coefficient are one number.** A sample
+    /// with no reads at an ordinary position is given
+    /// [`DEFAULTED_HOMOZYGOTE_EXCESS`](crate::parameter_estimation::joint::fit::DEFAULTED_HOMOZYGOTE_EXCESS)
+    /// by the fit, which cannot import this module; the run states this one where nothing is known.
+    /// A sample's coefficient must not depend on which of the two it fell to.
+    #[test]
+    fn the_fits_defaulted_excess_is_the_runs_default_coefficient() {
+        assert_eq!(
+            crate::parameter_estimation::joint::fit::DEFAULTED_HOMOZYGOTE_EXCESS,
+            DEFAULT_INBREEDING_COEFFICIENT
+        );
+    }
+
     /// The cohort every `of_defaults` test below assembles over: **two lanes of one plant and one
     /// lane of another**, so the read-group axis (three) and the sample axis (two) have different
     /// lengths and a projection that worked only because they were equal would show.
@@ -752,6 +765,8 @@ mod tests {
         row.error_probability_multiplier.warrant = Warrant::Defaulted;
         row.error_probability_multiplier.value = DEFAULT_ERROR_PROBABILITY_MULTIPLIER;
         row.error_probability_multiplier.observations = None;
+        // A stated constant has no error either, which `validate` holds as it holds the count.
+        row.error_probability_multiplier.standard_error = None;
 
         file.stated_constants.repeat_tract_outlier_weight.warrant = Warrant::Defaulted;
         file.stated_constants.repeat_tract_outlier_weight.value = DEFAULT_OUTLIER_WEIGHT;
@@ -1472,6 +1487,8 @@ mod tests {
                         slipped_reads: Some(120.0),
                     },
                     shares: None,
+                    own_fit_standard_errors: crate::parameter_estimation::joint::stratum_fits::OwnFitStandardErrors::default(),
+                    samples_fitted_on: None,
                 })],
             )]),
             BTreeMap::new(),
