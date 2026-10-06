@@ -1772,6 +1772,14 @@ because every allele replaces the same reference span and leaves what follows it
   as before. It crossed both borders, so whatever it showed inside the locus lies between the two
   flanks it matched, and no flank base can be among its bases.
 
+  > *Made true 2026-10-06.* On the generic path a border is the record's own first or last
+  > position, and until then an indel's record covered only its left-most placement. Inside a
+  > repeat a reference read could reach that border and stop partway along the repeat, where a
+  > carrier shows the same bases, and still be compared as complete. On GIAB HG002 at 300× that
+  > made five homozygous indels heterozygous. The record now reaches the indel's right-most
+  > placement (`locus_generation_pileup.md` §4), so a read that crossed it has crossed the whole
+  > stretch the indel can slide along.
+
 **The flank matters only when the read showed more bases than the allele has.** While the read's
 bases fit inside the allele, the extended comparison and the comparison against the allele alone
 give the same answer. So the reference beyond the locus has to be read only for a locus that has
@@ -1876,6 +1884,12 @@ reference reads.** Three consequences, and each follows from the table rather th
   ([`cohort_merge.md`](cohort_merge.md) §3.1) — width stays 1, so every read covering the anchor is
   complete. *(A read that ran out inside a long inserted sequence is a different problem — a
   truncated allele sequence, not a partial witness — and it belongs to read preparation, not here.)*
+
+  > *Out of date.* Since 2026-09-11 an insertion's record covers `inserted_len + 1` positions, and
+  > since 2026-10-06 it reaches the first base past the insertion's right-most placement in a
+  > repeat (`locus_generation_pileup.md` §4). So an insertion does have partial reads now: reads that
+  > stop before the far side of the record, which is the ground they needed to cross to tell the
+  > insertion from the reference.
 - **A deletion has them, and they come from both alleles.** A read whose alignment carries the
   deletion crosses every deleted reference position without spending a single read base. So it
   reaches the far side of the locus far more cheaply than a reference read does, and it is complete.

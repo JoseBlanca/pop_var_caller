@@ -523,7 +523,7 @@ mod tests {
         use crate::read::filtering::ReadFilterConfig;
         use crate::read::input::SampleReads;
         use crate::read::input::test_fixtures::{
-            fixture_reference, fixture_reference_bases, header, indexed_bam, matching_contigs,
+            fixture_reference, header, indexed_bam, matching_contigs,
         };
         use std::sync::Arc;
 
@@ -541,8 +541,8 @@ mod tests {
                 .expect("the fixture sample opens");
 
         let mut generator = PileupGenerator::new(
-            Arc::new(fixture_reference_bases()),
-            fixture_reference_bases,
+            Arc::new(minted_reference()),
+            minted_reference,
             ReadsAsTheyArrive,
             PileupGeneratorConfig::default(),
         )
@@ -559,6 +559,41 @@ mod tests {
         (reference_dir, bam_dir, loci)
     }
 
+    /// The first base after the five-base deletion these fixtures carry (chr2, 1-based).
+    const SLIDE_STOP: usize = 115;
+
+    /// The fixture reference with one change: chr2 reads `G` at [`SLIDE_STOP`].
+    ///
+    /// On the all-`A` fixture a deletion of five `A`s is the same haplotype wherever it sits
+    /// along the run, so the walk widens its record to the run's end (`indel_record_span` in
+    /// `pileup/open_record.rs`) — correctly, and beyond the reads these fixtures carry. The `G`
+    /// ends the run where the deletion's own footprint ends, so the record stays the anchor
+    /// plus the five bases it removes, which is the shape these tests are about.
+    fn minted_reference() -> crate::ref_seq::InMemoryRefSeq {
+        use crate::read::input::test_fixtures::FIXTURE_CONTIGS;
+        crate::ref_seq::InMemoryRefSeq::from_named_contigs(
+            FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| {
+                    let mut bases = vec![b'A'; *length];
+                    if *name == "chr2" {
+                        bases[SLIDE_STOP - 1] = b'G';
+                    }
+                    ((*name).to_string(), bases)
+                })
+                .collect(),
+        )
+    }
+
+    /// The bases of [`minted_reference`]'s chr2 at 1-based `from`, `len` of them.
+    fn chr2_bases(from: usize, len: usize) -> Vec<u8> {
+        let mut bases = vec![b'A'; len];
+        if (from..from + len).contains(&SLIDE_STOP) {
+            bases[SLIDE_STOP - from] = b'G';
+        }
+        bases
+    }
+
     /// A 30-base read at `start` on chr2, all reference except one base.
     fn read_with_a_substitution(
         name: &str,
@@ -569,7 +604,7 @@ mod tests {
         use noodles_sam::alignment::record_buf::Sequence;
 
         let mut record = read_named_with_length(name, 1, start, 30);
-        let mut bases = vec![b'A'; 30];
+        let mut bases = chr2_bases(start, 30);
         bases[offset_into_read] = b'C';
         *record.sequence_mut() = Sequence::from(bases);
         record
@@ -595,7 +630,13 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        *record.sequence_mut() = Sequence::from(vec![b'A'; before + after]);
+        *record.sequence_mut() = Sequence::from(
+            [
+                chr2_bases(start, before),
+                chr2_bases(start + before + 5, after),
+            ]
+            .concat(),
+        );
         *record.quality_scores_mut() = QualityScores::from(vec![30u8; before + after]);
         record
     }

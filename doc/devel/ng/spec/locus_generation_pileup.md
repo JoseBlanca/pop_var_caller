@@ -376,6 +376,51 @@ sets `--max-reads-per-position` below `--max-read-group-depth` can reach it. The
 record-level rule: a read the cap dropped at any position of a record's footprint is left out of
 that record.
 
+**How wide a record is: through the indel's right-most placement (2026-10-06).** A read is complete
+at a record only if it witnessed every one of the record's positions, so the record's width decides
+which reads may vote outright. Reads arrive with every indel left-aligned, so a record opens at the
+indel's left-most placement. Inside a repeat the same indel can be written at any placement along
+it: deleting the first `AT` of `TATATATAG` or the last gives one haplotype. A record only as wide as
+the left-most placement lets a reference read that stops, or is soft-clipped, partway along the
+repeat count as a **complete** reference observation, although a carrier shows the same bases there.
+At a homozygous indel each such read costs the homozygous genotype a sequencing error, roughly ln ε
+against ln ½ for the heterozygote, so once about 9 reads in 100 are of this kind the call becomes
+heterozygous at any depth. On GIAB at 300× that was 5 of the 8 wrong indel genotypes at ordinary
+loci, and across the 59 right homozygous calls 86 of every 100 reference reads covering the locus
+ended inside the repeat. So the record reaches the right-most placement (`indel_record_span` in
+`open_record.rs`):
+
+- **a deletion** of `L` bases slides right `s` places while the base it would uncover equals the
+  base it would remove, and its record covers `L + 1 + s` positions. A reference read that reaches
+  the last of them has shown more of the repeat than any carrier can, so no base past the slide is
+  needed;
+- **an insertion** slides right `s` places while its inserted sequence, read cyclically, matches the
+  reference after the anchor. A reference read and a carrier first differ on the base after the
+  slide, so the record reaches `anchor + s + 1`: at least `s + 2` positions, and never fewer than the
+  `inserted_len + 1` it had before.
+
+Where the indel cannot slide (`s = 0`) the width is unchanged. The reads the wider record sets aside
+become partial, and the partial rule (`read_likelihoods.md` §5.3) finds them compatible with every
+allele they could belong to. This is not realignment: every read keeps the placement its mapper
+gave it, and only the ground it is compared over changes. Three limits, each a guard rather than a
+policy: an indel anchored **before** the region keeps its unslid width, because the generator drops
+records anchored outside the region and a slid one would take the region's first positions with it
+(a SNP after an `A10` tract on GIAB HG003, chr21:43019420, was lost that way in the first version);
+the slide never pushes a record past `max_record_span`, which would end the walk; and it is followed
+at most 512 bases.
+
+Measured with the three GIAB samples, each over its own 100 regions, against GIAB v4.2.1 with
+vcfeval (missed / false calls, SNPs and indels together): at 5× 749 / 318 → 746 / 315; at 10×
+210 / 318 → 202 / 310; at 30× 61 / 176 → 54 / 168; at 300× 50 / 51 → 44 / 45. No call right before
+the change is wrong after it, at any of the four depths. Those are single-sample calls. The other
+corner, 63 tomato accessions at about 3× over tomato1's 80 regions (8 Mb), has no truth set, so it
+was compared with GATK HaplotypeCaller run jointly on the same CRAMs over every locus whose calls
+changed, sample by sample with vcfeval, an allele in either zygosity counting as agreement, over
+the 1,056 such loci on chromosomes 1–5. The change removes 3,488 variant genotypes GATK does not
+call and loses 1,156 that it does (83,175 → 79,687 and 72,257 → 71,101); the share of ng's calls
+there that GATK also makes goes from 46.5 to 47.2 in 100. Records written fall from 227,797 to
+225,917, and the run took 2 min 11 s against 2 min 34 s.
+
 **The one invariant worth stating in prose, because it is the least obvious and was once a real
 bug:** each (record, read) pair folds exactly **once over the record's lifetime**, not once per
 position — a six-base footprint would otherwise count a spanning read six times. The mechanism is

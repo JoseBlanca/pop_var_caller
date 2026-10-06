@@ -1911,7 +1911,13 @@ fn prepared_read_length_checks_seq_bq_before_cigar() {
 /// A 60-base reference, `ACGT` fifteen times. The pattern only has to make the reads'
 /// matched bases distinguishable from each other; every read below agrees with it, so the
 /// fixture's subject is the *shape* of a witness and never an allele.
-const SPLICED_REF: &str = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+/// `ACGT` repeated, except **position 49 reads `T`**, not `A`. A 20-base deletion from 29 is five
+/// whole units of the repeat, so on the unbroken repeat it is the same haplotype wherever it sits
+/// and the walk widens its record to the contig's end (`indel_record_span` in `open_record.rs`).
+/// The `T` is the first base after the deletion, so it ends the slide where the deletion's own
+/// footprint ends and the record stays `28 ..= 48`. The 17- and 18-base deletions are not whole
+/// units and never slide.
+const SPLICED_REF: &str = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTCGTACGTACGT";
 
 /// The reference bases at 1-based inclusive `from..=to`.
 fn spliced_ref_bases(from: usize, to: usize) -> Vec<u8> {

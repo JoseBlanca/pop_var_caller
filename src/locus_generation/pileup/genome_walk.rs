@@ -487,6 +487,11 @@ where
     ) -> Result<(), I::Error> {
         self.reads.move_to_region(region)?;
         self.state.begin_region(Some(stop_after), junction_start);
+        // After `begin_region`, which resets the table. A start past `u32::MAX` cannot be
+        // walked, so it leaves the table unbounded on the left rather than wrong.
+        self.state
+            .open_records
+            .begin_region(u32::try_from(region.start.get()).ok());
         // Records produced by the region being left and never collected. The per-region
         // walker took them to the grave; so does this.
         self.pending.clear();
