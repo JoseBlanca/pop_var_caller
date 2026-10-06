@@ -22,7 +22,17 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-06):** **`--min-site-quality`, default 1** (branch
+> - **Last completed task (2026-10-06):** **a deletion reaching into a region from before it is
+> the region's** (branch `junction-deletion`, spec `locus_generation_pileup.md` §2). Such a
+> deletion used to open its record outside the region, take the region's first base with it, and
+> be dropped: at 300× over the GIAB benchmark regions, 98 of the 872 ordinary regions after repeat
+> ground had no record on their first base; now none. GIAB missed / false: 5× 761/173 → 761/174,
+> 10× 217/93 → 217/94, 30× 51/22 → 50/23, 300× 43/10 → 40/11; the added false call is the
+> in-region half of a deletion crossing a tract's edge (HG003 chr10:5596764). Tomato 63
+> accessions: 193,856 → 193,893 records; against GATK at the changed loci, agreeing calls
+> 9,266 → 9,496, calls GATK does not make 9,315 → 9,501.
+>
+> - **Earlier (2026-10-06):** **`--min-site-quality`, default 1** (branch
 > `min-site-quality`, spec `site_quality_threshold.md`): a called site whose quality after the
 > artifact correction is below it is not written; zero writes everything. GIAB missed / false:
 > 5× 746/315 → 761/173, 10× 200/308 → 217/93, 30× 49/164 → 51/22, 300× 40/42 → 43/10; GATK's 30
