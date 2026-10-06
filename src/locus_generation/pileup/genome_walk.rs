@@ -811,6 +811,13 @@ struct WalkerState {
     /// time the next position is reached the table is empty, and a locus held here is the
     /// only thing outstanding. That is also why emitting it first is always coordinate
     /// order.
+    ///
+    /// **One exception, before a region's first base, and it keeps the order.** A deletion
+    /// anchored before the region that reaches into it opens its record on the region's first
+    /// base, ahead of the walker (`deletion_claimed_at_region_start` in `open_record.rs`).
+    /// While the walker crosses the deleted bases before the region, that record is open and
+    /// starts *after* any column the fast lane builds there, so the held locus still goes out
+    /// first.
     sealed: Option<SampleLocusObservations>,
 }
 

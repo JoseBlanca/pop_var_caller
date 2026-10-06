@@ -1354,13 +1354,17 @@ pub(super) struct OpenPileupRecordTable {
     /// pointed at one (unit tests). Region-scoped: set by
     /// [`begin_region`](Self::begin_region).
     ///
-    /// Read only by the indel slide ([`indel_record_span`]). The walk also folds events
-    /// anchored *before* the region — reads begin there — and the generator drops every record
-    /// anchored outside it. A slid record anchored there would reach into the region, take its
-    /// first positions into a record that is then dropped, and lose whatever they held: an
-    /// insertion before an `A10` tract slides to the base after it, and the SNP on that base
-    /// went with it (GIAB HG003 chr21:43019420). So an event anchored before this base keeps
-    /// its unslid width.
+    /// The walk also folds events anchored *before* the region — reads begin there — and the
+    /// generator drops every record anchored outside it. A record anchored there that reaches
+    /// into the region takes its first positions into a record that is then dropped, and loses
+    /// whatever they held. So no record anchored before this base may reach it:
+    ///
+    /// - an indel anchored before it keeps its unslid width ([`indel_record_span`]): an
+    ///   insertion before an `A10` tract slides to the base after it, and the SNP on that base
+    ///   went with it (GIAB HG003 chr21:43019420);
+    /// - a deletion whose deleted run reaches it is claimed by the region
+    ///   ([`deletion_claimed_at_region_start`]);
+    /// - any other event anchored before it stops short of it.
     region_first_base: Option<u32>,
 }
 
@@ -2610,6 +2614,58 @@ fn claimed_junction_insertion(event: &ReadEvent, junction: Option<JunctionAtRegi
         && seq.last() != Some(&junction.repeat_last_base)
 }
 
+/// **The region's first base, when this event is a deletion the region must claim** — one
+/// anchored before the region whose deleted run reaches into it. `None` for every other event,
+/// and wherever the table was never pointed at a region.
+///
+/// # Why the region has to claim it
+///
+/// The walk folds events anchored before its region, because reads begin there, and the
+/// generator drops every record anchored outside the region. A deletion anchored on the base
+/// before the region, removing the region's first base, opened a record anchored outside —
+/// and every other read's base at the region's first position folded into that same record,
+/// because it covered that position. The record was dropped and the position with it: no
+/// record in the psp, nothing called there. Measured over the three GIAB samples' benchmark
+/// regions at 300×, 98 of the 872 ordinary regions that follow repeat ground lost that base,
+/// 97 of them this way; three were GIAB truth SNPs (HG002 chr1:157974730, where three reads
+/// of about 200 delete the `G` after an `A16` tract).
+///
+/// # What the claim gives the record
+///
+/// The record starts on the region's first base and covers only the deleted bases inside the
+/// region; [`apply_events_into`] already spells a deletion anchored before its record as those
+/// bases removed, with no anchor base. This is the region's *end* rule read from the other
+/// side: there a footprint is stopped at the region's last base, and the bases past it are the
+/// next region's to explain (owner, 2026-09-02, `WalkerState::region_end`); here the bases
+/// before the region are the previous region's, and the ones inside are this one's.
+///
+/// # Why at every region start and not only beside repeat ground
+///
+/// Unlike [`claimed_junction_insertion`], this needs no [`JunctionAtRegionStart`]. The
+/// insertion claim settles which of two paths owns one event, so it has to match the repeat
+/// path's spelling convention; a deletion's bases inside the region have no other owner
+/// whatever lies before the edge. At a requested-region edge the lost base is lost the same
+/// way and nothing else will explain it, and at a contig's first base no read can be anchored
+/// before it.
+fn deletion_claimed_at_region_start(
+    event: &ReadEvent,
+    region_first_base: Option<u32>,
+) -> Option<u32> {
+    let first = region_first_base?;
+    let ReadEvent::Deletion {
+        anchor_ref_pos,
+        deleted_len,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let reach = anchor_ref_pos
+        .saturating_add(1)
+        .saturating_add(*deleted_len);
+    (*anchor_ref_pos < first && reach > first).then_some(first)
+}
+
 /// The events of `read` that fold into a record at `[rec_pos, rec_end)`: everything
 /// overlapping the footprint and — when the record sits on a junction's first base — the
 /// junction insertion the region claims from the base before it
@@ -2899,22 +2955,47 @@ pub(super) fn process_position(
             // fold spells the inserted bases before it. Every other event keeps its
             // anchor.
             let claimed = claimed_junction_insertion(ev, junction);
+            // **A deletion reaching into the region from before it is the region's too**
+            // (`deletion_claimed_at_region_start`): its record starts on the region's first
+            // base and covers only the deleted bases inside the region.
+            let claimed_deletion_start =
+                deletion_claimed_at_region_start(ev, open.region_first_base);
             let event_start = if claimed {
                 ev.anchor_pos().saturating_add(1)
+            } else if let Some(first) = claimed_deletion_start {
+                first
             } else {
                 ev.anchor_pos()
             };
             if inserted_past_the_regions_last_base(ev, region_end) {
                 continue;
             }
+            // The width the event's own footprint gives the record from `event_start`: for a
+            // claimed deletion only the part of it inside the region.
+            let unslid_span = match claimed_deletion_start {
+                Some(first) => ev
+                    .anchor_pos()
+                    .saturating_add(record_span(ev))
+                    .saturating_sub(first),
+                None => record_span(ev),
+            };
+            // **An event anchored before the region stops at the region's first base.** It is
+            // in the halo, and the generator drops its record; a footprint reaching in would
+            // take the region's first positions into that record and lose them with it. Only
+            // an insertion the region does not claim can still reach that far here — a match
+            // is one base wide, and a deletion that reaches in has been claimed above.
+            let unslid_span = match open.region_first_base {
+                Some(first) if event_start < first => unslid_span.min(first - event_start),
+                _ => unslid_span,
+            };
             // A claimed junction insertion is re-homed onto the region's first base and keeps
             // its own width there; every other indel's record reaches its right-most placement.
             let before_region = open
                 .region_first_base
-                .is_some_and(|first| event_start < first);
+                .is_some_and(|first| ev.anchor_pos() < first);
             let span = match ev {
-                ReadEvent::Match { .. } => record_span(ev),
-                _ if claimed || before_region => record_span(ev),
+                ReadEvent::Match { .. } => unslid_span,
+                _ if claimed || before_region => unslid_span,
                 ReadEvent::Insertion {
                     anchor_ref_pos,
                     seq,
@@ -2980,7 +3061,7 @@ pub(super) fn process_position(
             // The table is keyed by anchor, so the record the event joins starts at `k`.
             let unslid_end = clamped_to_region(
                 event_start,
-                event_start.saturating_add(record_span(ev)),
+                event_start.saturating_add(unslid_span),
                 region_end,
             );
             let event_end = if event_end > unslid_end {
@@ -6412,7 +6493,9 @@ mod tests {
     /// **An indel anchored before the region keeps the width its own bases give it.** The
     /// generator drops every record anchored outside its region, so a slid record anchored
     /// there would take the region's first positions down with it — what lost a SNP after an
-    /// `A10` tract on GIAB HG003 (chr21:43019420).
+    /// `A10` tract on GIAB HG003 (chr21:43019420). The region starts at 7, the first base past
+    /// the deleted run: a region starting inside it would claim the deletion instead
+    /// (`a_deletion_crossing_the_regions_first_base_keeps_only_its_bases_inside_the_region`).
     #[test]
     fn an_indel_anchored_before_the_region_does_not_slide_into_it() {
         let open = walked_over_the_repeat(
@@ -6423,7 +6506,7 @@ mod tests {
                 vec![CigarOp::Match(4), CigarOp::Deletion(2), CigarOp::Match(6)],
                 [slide_bases(1, 4), slide_bases(7, 12)].concat(),
             )],
-            Some(5),
+            Some(7),
         );
         let record = open.records.get(&4).expect("the deletion's record at 4");
         assert_eq!(record.ref_span(), 3, "the anchor and the two deleted bases");
@@ -6431,5 +6514,227 @@ mod tests {
             open.records.get(&7).is_some(),
             "position 7, inside the region, keeps a record of its own",
         );
+    }
+
+    /// The bases each read's observation spells in `record`, sorted.
+    fn spellings(record: &OpenPileupRecord) -> Vec<Vec<u8>> {
+        let mut bases: Vec<Vec<u8>> = record
+            .keyed_observations(record.footprint_end_exclusive())
+            .into_iter()
+            .map(|observation| observation.key.bases)
+            .collect();
+        bases.sort();
+        bases
+    }
+
+    /// No record anchored before `first` reaches it — the generator would drop that record and
+    /// the region's first positions with it.
+    fn assert_nothing_before_reaches(open: &OpenPileupRecordTable, first: u32) {
+        for (pos, record) in open.records.range_below(first) {
+            assert!(
+                record.footprint_end_exclusive() <= first,
+                "the record at {pos} reaches position {}, past the region's first base {first}",
+                record.footprint_end_exclusive() - 1,
+            );
+        }
+    }
+
+    /// **A deletion anchored on the base before the region, removing the region's first base,
+    /// is the region's.** `SLIDE_CONTIG`'s `TATATAT` at 4..=10 stands in for the repeat tract
+    /// and the region begins on the `G` at 11, as at GIAB HG002 chr1:157974730. The deletion of
+    /// that `G` used to open a record at 10, outside the region; the reference read's `G`
+    /// folded into it, the generator dropped it, and position 11 had no record at all. Claimed,
+    /// the record sits on 11 alone and holds both reads: the deleter's empty allele and the
+    /// reference read's `G`.
+    #[test]
+    fn a_deletion_of_the_regions_first_base_is_claimed_by_the_region() {
+        let open = walked_over_the_repeat(
+            vec![
+                plain_read(
+                    "deleter",
+                    1,
+                    12,
+                    vec![CigarOp::Match(10), CigarOp::Deletion(1), CigarOp::Match(1)],
+                    [slide_bases(1, 10), slide_bases(12, 12)].concat(),
+                ),
+                plain_read(
+                    "reference",
+                    1,
+                    12,
+                    vec![CigarOp::Match(12)],
+                    slide_bases(1, 12),
+                ),
+            ],
+            Some(11),
+        );
+        let record = open
+            .records
+            .get(&11)
+            .expect("a record on the region's first base");
+        assert_eq!(
+            record.ref_span(),
+            1,
+            "the one deleted base inside the region"
+        );
+        assert_eq!(spellings(record), vec![b"".to_vec(), b"G".to_vec()]);
+        assert_nothing_before_reaches(&open, 11);
+    }
+
+    /// **A deletion crossing the region's edge keeps only its bases inside the region.** The
+    /// deleter removes `TG` at 10..=11, from an anchor at 9: the `T` is the previous region's
+    /// to explain and the `G` this one's, so the record is position 11 alone, spelled empty
+    /// for the deleter — the owner's ruling of 2026-09-02 on a deletion crossing a tract's
+    /// edge, which the region's end already applied.
+    #[test]
+    fn a_deletion_crossing_the_regions_first_base_keeps_only_its_bases_inside_the_region() {
+        let open = walked_over_the_repeat(
+            vec![
+                plain_read(
+                    "deleter",
+                    1,
+                    12,
+                    vec![CigarOp::Match(9), CigarOp::Deletion(2), CigarOp::Match(1)],
+                    [slide_bases(1, 9), slide_bases(12, 12)].concat(),
+                ),
+                plain_read(
+                    "reference",
+                    1,
+                    12,
+                    vec![CigarOp::Match(12)],
+                    slide_bases(1, 12),
+                ),
+            ],
+            Some(11),
+        );
+        let record = open
+            .records
+            .get(&11)
+            .expect("a record on the region's first base");
+        assert_eq!(record.ref_span(), 1);
+        assert_eq!(spellings(record), vec![b"".to_vec(), b"G".to_vec()]);
+        assert_nothing_before_reaches(&open, 11);
+    }
+
+    /// **A claimed deletion reaching further in covers every deleted base inside the region**,
+    /// and a SNP at the region's first base lands in the same record. The deleter removes
+    /// 11..=12 from an anchor at 10, and a third read shows `C` for the `G` at 11.
+    #[test]
+    fn a_claimed_deletion_covers_every_deleted_base_inside_the_region() {
+        let open = walked_over_the_repeat(
+            vec![
+                plain_read(
+                    "deleter",
+                    1,
+                    14,
+                    vec![CigarOp::Match(10), CigarOp::Deletion(2), CigarOp::Match(2)],
+                    [slide_bases(1, 10), slide_bases(13, 14)].concat(),
+                ),
+                plain_read(
+                    "reference",
+                    1,
+                    14,
+                    vec![CigarOp::Match(14)],
+                    slide_bases(1, 14),
+                ),
+                plain_read(
+                    "snp",
+                    1,
+                    14,
+                    vec![CigarOp::Match(14)],
+                    [slide_bases(1, 10), b"C".to_vec(), slide_bases(12, 14)].concat(),
+                ),
+            ],
+            Some(11),
+        );
+        let record = open
+            .records
+            .get(&11)
+            .expect("a record on the region's first base");
+        assert_eq!(
+            record.ref_span(),
+            2,
+            "11 ..= 12, the deleted bases inside the region"
+        );
+        assert_eq!(
+            spellings(record),
+            vec![b"".to_vec(), b"CC".to_vec(), b"GC".to_vec()]
+        );
+        assert_nothing_before_reaches(&open, 11);
+    }
+
+    /// **A deletion anchored before the region that stops short of it is not claimed** — its
+    /// record stays in the halo, where the generator drops it, and the region's first base
+    /// keeps a record of its own.
+    #[test]
+    fn a_deletion_ending_before_the_region_is_not_claimed() {
+        let open = walked_over_the_repeat(
+            vec![plain_read(
+                "deleter",
+                1,
+                12,
+                vec![CigarOp::Match(8), CigarOp::Deletion(2), CigarOp::Match(2)],
+                [slide_bases(1, 8), slide_bases(11, 12)].concat(),
+            )],
+            Some(11),
+        );
+        assert_eq!(
+            open.records.get(&8).map(OpenPileupRecord::ref_span),
+            Some(3),
+            "the deletion keeps its anchor at 8 and its footprint 8 ..= 10",
+        );
+        let record = open
+            .records
+            .get(&11)
+            .expect("a record on the region's first base");
+        assert_eq!(spellings(record), vec![b"G".to_vec()]);
+    }
+
+    /// **Without a region, nothing is claimed**: a deletion keeps its anchor, as it does in a
+    /// walk that owns the whole source.
+    #[test]
+    fn without_a_region_a_deletion_keeps_its_anchor() {
+        let open = walked_over_the_repeat(
+            vec![plain_read(
+                "deleter",
+                1,
+                12,
+                vec![CigarOp::Match(10), CigarOp::Deletion(1), CigarOp::Match(1)],
+                [slide_bases(1, 10), slide_bases(12, 12)].concat(),
+            )],
+            None,
+        );
+        assert_eq!(
+            open.records.get(&10).map(OpenPileupRecord::ref_span),
+            Some(2)
+        );
+        assert!(open.records.get(&11).is_none());
+    }
+
+    /// **An insertion anchored before the region that the region does not claim stops short of
+    /// it.** Its record would be the inserted length plus one wide, reaching 8 + 6 − 1 = 13,
+    /// and take the region's first base into a record the generator drops. Stopped at 10, the
+    /// `G` at 11 keeps a record of its own.
+    #[test]
+    fn an_insertion_anchored_before_the_region_stops_short_of_it() {
+        let open = walked_over_the_repeat(
+            vec![plain_read(
+                "inserter",
+                1,
+                12,
+                vec![CigarOp::Match(8), CigarOp::Insertion(5), CigarOp::Match(4)],
+                [slide_bases(1, 8), b"GGGGG".to_vec(), slide_bases(9, 12)].concat(),
+            )],
+            Some(11),
+        );
+        assert_eq!(
+            open.records.get(&8).map(OpenPileupRecord::ref_span),
+            Some(3)
+        );
+        let record = open
+            .records
+            .get(&11)
+            .expect("a record on the region's first base");
+        assert_eq!(spellings(record), vec![b"G".to_vec()]);
+        assert_nothing_before_reaches(&open, 11);
     }
 }
