@@ -1957,6 +1957,37 @@ pub fn read_record_head<'a>(
     live_reads: &mut LiveSetReader,
     layout: &RecordLayout,
 ) -> Result<LocatedRecord<'a>, RecordDecodeError> {
+    let (head, head_bytes) =
+        read_the_head_in_front_of_its_body(bytes, contig, measured_from, live_reads, layout)?;
+    let mut reader = FieldReader::new(bytes);
+    reader.skip(head_bytes);
+    let body = reader.take(head.body_bytes as usize, RECORD_BODY_BYTE_COUNT)?;
+    Ok(LocatedRecord {
+        head,
+        body,
+        record_bytes: reader.bytes_read(),
+    })
+}
+
+/// Read one record's head **and nothing of its body**: the head, and how many bytes it took.
+///
+/// [`read_record_head`] is this and then the body's bounds. It is its own function for the one
+/// reader that cannot hold the body at all — a record larger than the walk's buffer ceiling,
+/// which a walk told to skip such records advances past by the head's
+/// [`body_bytes`](RecordHead::body_bytes) without ever holding them
+/// (`BlockStream::skipping_records_too_large_to_hold`). The chain ids' changes are parsed and
+/// left waiting, exactly as [`read_record_head`] leaves them.
+///
+/// # Errors
+///
+/// As [`read_record_head`], except that a body the bytes stop inside is not an error here.
+pub fn read_the_head_in_front_of_its_body(
+    bytes: &[u8],
+    contig: ContigId,
+    measured_from: OffsetBase,
+    live_reads: &mut LiveSetReader,
+    layout: &RecordLayout,
+) -> Result<(RecordHead, usize), RecordDecodeError> {
     let mut reader = FieldReader::new(bytes);
 
     let offset = reader.read_varint(POSITION_OFFSET)?;
@@ -2045,10 +2076,8 @@ pub fn read_record_head<'a>(
         .map_err(|fault| fault.further_in(reader.bytes_read()))?;
     reader.skip(changes_bytes);
 
-    let body = reader.take(body_bytes as usize, RECORD_BODY_BYTE_COUNT)?;
-
-    Ok(LocatedRecord {
-        head: RecordHead {
+    Ok((
+        RecordHead {
             region: GenomeRegion {
                 contig,
                 start: Position(start),
@@ -2059,9 +2088,8 @@ pub fn read_record_head<'a>(
             reads_discarded_by_cap,
             body_bytes,
         },
-        body,
-        record_bytes: reader.bytes_read(),
-    })
+        reader.bytes_read(),
+    ))
 }
 
 /// One whole record, read back.

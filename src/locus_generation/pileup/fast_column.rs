@@ -201,13 +201,13 @@ pub(super) fn try_ordinary_column(
     open_records: &OpenPileupRecordTable,
     reference: &dyn RefSeq,
     scratch: &mut FastColumnScratch,
-    max_snp_column_depth: usize,
+    max_reads_per_position: usize,
     may_have_mate_overlap: bool,
     junction: Option<JunctionAtRegionStart>,
 ) -> Result<FastColumn, WalkerError> {
     // The contributor count is at most the active-read count, so this bounds the column
     // cap from above without knowing which reads contribute.
-    if active_reads.len() > max_snp_column_depth || active_reads.is_empty() {
+    if active_reads.len() > max_reads_per_position || active_reads.is_empty() {
         return Ok(FastColumn::Fallback);
     }
     // A record already covering this base is a widen, a re-fold, or a footprint wider than

@@ -411,3 +411,68 @@ fn a_record_every_sample_no_calls_keeps_its_alternatives() {
     );
     assert_eq!(sample_columns(&record, diploid()), "./.:.:4:0,0,0");
 }
+
+/// Reference `A` against the SNP `T` and the deletion of the `A` itself, which the table holds
+/// as an empty allele and the file writes behind a padding base.
+fn snp_and_deletion() -> CandidateAlleles {
+    let mut table = CandidateAlleles::new(b"A".to_vec().into_boxed_slice(), LocusKind::Generic);
+    table.admit(b"T".to_vec().into_boxed_slice());
+    table.admit(Vec::new().into_boxed_slice());
+    table
+}
+
+fn padded_record(calls: Vec<SampleGenotypeCall>, reads: Vec<u32>) -> VcfRecord {
+    let table = snp_and_deletion();
+    let copies = vec![1.0; 3];
+    let expected = ExpectedAlleleCopies::new(copies, &table);
+    let locus = LocusInference::new(
+        region(),
+        table,
+        calls,
+        expected,
+        true,
+        3,
+        Provenance::FittedHere,
+        None,
+        quality(0.0),
+        None,
+    );
+    let evidence = LocusEvidenceForOutput {
+        padding_base: Some(PaddingBase::Left(b'C')),
+        ..evidence_over_three(vec![sample(reads, 0)])
+    };
+    assemble_record(&locus, evidence)
+}
+
+/// **A deletion no sample calls takes its padding base with it.**
+///
+/// The padding base is resolved over the whole candidate table, before any sample is called,
+/// and the table here needs one because the deletion is empty. The sample is called `0/1` on
+/// the SNP, so the deletion is dropped and every allele left spells bases: a record carrying
+/// the base anyway is one `VcfRecord::new` refuses. This is what stopped the 2,169-sample
+/// tomato run on 2026-09-30 at about SL4.0ch01:78 Mb.
+#[test]
+fn a_dropped_deletion_leaves_a_record_with_no_padding_base() {
+    let record = padded_record(vec![called(&[0, 1], 40.0)], vec![9, 8, 2]);
+
+    assert_eq!(
+        record.alleles().len(),
+        2,
+        "the uncalled deletion is dropped"
+    );
+    assert_eq!(
+        record.padding_base(),
+        None,
+        "a SNP record needs no padding base once the deletion that needed one is gone",
+    );
+}
+
+/// **A deletion some sample calls keeps its padding base.** The guard against a fix that drops
+/// the base whenever anything is dropped.
+#[test]
+fn a_called_deletion_keeps_its_padding_base() {
+    let record = padded_record(vec![called(&[0, 2], 40.0)], vec![9, 2, 8]);
+
+    assert_eq!(record.alleles().len(), 2, "the uncalled SNP is dropped");
+    assert_eq!(record.padding_base(), Some(PaddingBase::Left(b'C')));
+}

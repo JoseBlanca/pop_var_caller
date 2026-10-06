@@ -8,6 +8,7 @@ use super::call_from_psps::CallFromPspsArgs;
 use super::estimate_contamination::EstimateContaminationArgs;
 use super::estimate_parameters::EstimateParametersArgs;
 use super::generate_psps::GeneratePspsArgs;
+use super::inspect_psp::InspectPspArgs;
 use super::regenerate_census::RegenerateCensusArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
@@ -136,4 +137,13 @@ pub enum PopVarCallerCommand {
     /// the allele frequencies it judges each sample against are fitted from
     /// the run itself and no outside panel.
     EstimateContamination(EstimateContaminationArgs),
+
+    /// Dump what one psp file stored over the regions of a BED, as a TSV with one row per
+    /// locus and observation.
+    ///
+    /// For tracing a missing variant: whether its reads reached the psp, with how many reads,
+    /// from which read group, and whether they covered the whole locus. Everything a calling
+    /// run decides afterwards is not here. The column names are stable, and the header names
+    /// the psp format version and the column layout version.
+    InspectPsp(InspectPspArgs),
 }

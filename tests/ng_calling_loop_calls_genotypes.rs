@@ -57,7 +57,8 @@ use pop_var_caller::calling::likelihood::ssr_emission::{
 };
 use pop_var_caller::calling::{
     CallingScratch, CandidateAlleles, ContaminationView, FrozenParameters, GenericLocusSample,
-    LocusInference, ReadGroupCalibration, RepeatTractProvenance, SsrSampleEvidence,
+    LocusInference, ReadGroupCalibration, ReferenceBesideLocus, RepeatTractProvenance,
+    SsrSampleEvidence,
 };
 use pop_var_caller::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
@@ -273,6 +274,7 @@ fn call_with_calibration(
         &merged,
         &selection,
         per_sample.len(),
+        ReferenceBesideLocus::NONE,
         &mut views,
     );
 
@@ -512,6 +514,7 @@ fn the_locus_carries_the_weakest_warrant_of_the_parameters_that_reached_it() {
         &merged,
         &selection,
         per_sample.len(),
+        ReferenceBesideLocus::NONE,
         &mut views,
     );
     let calibration = vec![ReadGroupCalibration {

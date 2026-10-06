@@ -64,6 +64,7 @@ fn walked(
         // sample with no reads in the analysed ground reports — and the case the "with none"
         // line is about.
         snp_indel: None,
+        loci_over_the_depth_ceiling: 0,
     }
 }
 
@@ -96,9 +97,11 @@ fn a_run(
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
+            loci_below_minimum_site_quality: 0,
             loci_too_wide_to_assemble: too_wide,
             loci_with_nobody_to_call: nobody,
             tracts: TractOutcomes::default(),
+            explanations: Vec::new(),
         },
         walk: CohortWalkTallies {
             per_sample,
@@ -780,9 +783,19 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     );
 
     let mut some_built = a_run(3, 0, Vec::new(), Vec::new(), ground.clone());
+    // Seven refused tracts, **out of genome order** as the round driver's workers can hand
+    // them in, so that the listing below is checked for its sort as well as its cap.
+    let refused_at = |start: u64| GenomeRegion {
+        contig: ContigId(0),
+        start: Position(start),
+        end: Position(start + 19),
+    };
     some_built.calling.tracts = TractOutcomes {
         called: 40,
-        not_periodic: 5,
+        not_periodic: [700, 100, 600, 200, 500, 300, 400]
+            .into_iter()
+            .map(refused_at)
+            .collect(),
         too_many_alleles: 3,
         without_whole_repeats: 1,
         bundles_set_aside: 7,
@@ -792,12 +805,12 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     // **The headline is the sum and the share of it that was called**, so a reader who stops
     // after one line still knows how much of the tract ground the run spoke for.
     assert!(
-        text.contains("repeat tracts: 56 built, of which 40 called"),
+        text.contains("repeat tracts: 58 built, of which 40 called"),
         "the five outcomes sum to the tracts built: {text}",
     );
     for (line, what) in [
         (
-            "(notPeriodic): 5",
+            "(notPeriodic): 7",
             "the reads do not vary in whole motif units",
         ),
         (
@@ -818,6 +831,24 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
             "the report says {what} and how many, and got: {text}",
         );
     }
+    // **The refused tracts are named, sorted, and capped** like the too-wide loci: the count
+    // alone gave a reader nothing to look at.
+    let listed: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("    chr1:"))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            "    chr1:100-119 (20 bases)",
+            "    chr1:200-219 (20 bases)",
+            "    chr1:300-319 (20 bases)",
+            "    chr1:400-419 (20 bases)",
+            "    chr1:500-519 (20 bases)",
+        ],
+        "the first five refused tracts in genome order: {text}",
+    );
+    assert!(text.contains("    … and 2 more"), "{text}");
     assert!(
         text.contains("called: 950 bases (95.0%)"),
         "the tract's bases are called ground — which is exactly why the lines above have to \
@@ -850,9 +881,14 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
 /// one of them, which is what makes the headline's sum a fact rather than an addition.
 #[test]
 fn the_tract_outcomes_sum_to_the_tracts_built() {
+    let a_tract = |start: u64| GenomeRegion {
+        contig: ContigId(0),
+        start: Position(start),
+        end: Position(start + 9),
+    };
     let outcomes = TractOutcomes {
         called: 40,
-        not_periodic: 5,
+        not_periodic: (1..=5).map(|i| a_tract(100 * i)).collect(),
         too_many_alleles: 3,
         without_whole_repeats: 1,
         bundles_set_aside: 7,
@@ -881,6 +917,8 @@ fn a_stored_sample(
             reads_compared_with_reference,
             loci_thinned_to_the_read_cap: 0,
             reads_thinned_by_the_read_cap: 0,
+            loci_over_the_depth_ceiling: 0,
+            loci_too_large_to_read: 0,
         },
         read_filters_the_walk_applied: min_mapq
             .map(|floor| {
@@ -1148,9 +1186,11 @@ fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
     let calling = CohortCallingTallies {
         records_written: 120,
         loci_called_but_not_written: 45,
+        loci_below_minimum_site_quality: 0,
         loci_too_wide_to_assemble: vec![region(0, 10, 90)],
         loci_with_nobody_to_call: Vec::new(),
         tracts: TractOutcomes::default(),
+        explanations: Vec::new(),
     };
     let walked = a_run(
         calling.records_written,

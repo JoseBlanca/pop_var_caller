@@ -311,11 +311,10 @@ mod parity;
 // its consumers are production's `read_processor.rs` and ng's own `src/alignment/`,
 // neither of which is part of the walk.
 //
-// `DEFAULT_MAX_SNP_COLUMN_DEPTH` / `DEFAULT_MAX_INDEL_COLUMN_DEPTH` are deliberately
-// absent: no copied file reaches them through `super::` (production's `WalkerConfig`
-// holds the column caps and comes with its own defaults), and an unused re-export is
-// invisible to the compiler, so carrying them would be shape without substance.
-// `PileupGeneratorConfig` names them in plan 3, from production directly.
+// `DEFAULT_MAX_READS_PER_POSITION` is deliberately absent: no copied file reaches it
+// through `super::` (production's `WalkerConfig` holds the read cap and comes with its
+// own default), and an unused re-export is invisible to the compiler, so carrying it
+// would be shape without substance. `PileupGeneratorConfig` names it directly.
 pub(crate) use crate::bam::alignment_input::CigarOp;
 pub(crate) use crate::read::prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
@@ -338,23 +337,27 @@ pub(crate) const DEFAULT_MAX_RECORD_SPAN: u32 = 5_000;
 /// lose the pairing quietly rather than loudly.
 pub(crate) const DEFAULT_MATE_LOOKUP_WINDOW: u32 = 10_000;
 
-/// How many reads **of one read group** the walk will fold into one position that carries no
-/// insertion or deletion — the default of `--max-reads-per-position`.
+/// How many reads **of one read group** the walk will fold into one position — the default of
+/// `--max-reads-per-position`.
 ///
 /// **1,000 since 2026-09-29; it was samtools' `MPLP_MAX_DEPTH`, 8,000, per sample.** At 8,000
 /// the cap never fired at the collapsed-repeat pile-up that stopped the 2,169-sample tomato run
 /// (a median of 5,669 reads a position in each 3× sample), so every one of those reads reached
 /// the stored files and the calling that read them. 1,000 is the owner's choice: far above any
 /// position's honest depth at the coverages the caller is for, low enough to bound a pile-up.
-pub(crate) const DEFAULT_MAX_SNP_COLUMN_DEPTH: u32 = 1_000;
+pub(crate) const DEFAULT_MAX_READS_PER_POSITION: u32 = 1_000;
 
-/// How many reads **of one read group** the walk will fold into one position that carries an
-/// insertion or deletion.
-///
-/// samtools' `MPLP_MAX_INDEL_DEPTH`, and far tighter than the SNP cap for a reason: indel
-/// evidence in a homopolymer saturates long before the likelihood gains anything from more of
-/// it.
-pub(crate) const DEFAULT_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
+// **There is no second, tighter cap at a position where a read has an insertion or deletion.**
+// There was one until 2026-10-03 — 250 reads, samtools' `MPLP_MAX_INDEL_DEPTH` — and it biased
+// every indel the walk recorded at depth. An indel's record spans more than one position: the
+// deletion's reads are folded at the position the deletion is anchored on, where the tighter
+// cap applied, but the reference reads are also folded at the positions the deletion covers,
+// where it did not. So above 250 reads the deletion lost reads and the reference kept nearly
+// all of its own. At 300× a true heterozygous deletion in 47% of fragments was stored at 31%,
+// and the hidden-duplication filter then removed it as a collapsed repeat
+// (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §3). The tighter cap saved no
+// measurable work there either: the psps came out 0.2% smaller without it and the calling took
+// the same time.
 
 /// The four limits the walk reads as it runs.
 ///
@@ -369,11 +372,9 @@ pub(crate) const DEFAULT_MAX_INDEL_COLUMN_DEPTH: u32 = 250;
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub(crate) struct WalkerConfig {
-    /// Reads folded at a position with no insertion or deletion. See
-    /// [`DEFAULT_MAX_SNP_COLUMN_DEPTH`].
-    pub max_snp_column_depth: u32,
-    /// Reads folded at a position carrying one. See [`DEFAULT_MAX_INDEL_COLUMN_DEPTH`].
-    pub max_indel_column_depth: u32,
+    /// Reads of one read group folded at one position, whatever the reads show there. See
+    /// [`DEFAULT_MAX_READS_PER_POSITION`].
+    pub max_reads_per_position: u32,
     /// How wide one record may get. See [`DEFAULT_MAX_RECORD_SPAN`].
     pub max_record_span: u32,
     /// How far to look for a mate. See [`DEFAULT_MATE_LOOKUP_WINDOW`].
@@ -390,8 +391,7 @@ impl Default for WalkerConfig {
     /// limits a run walks under and builds its own — so it is the fixtures that see it.
     fn default() -> Self {
         Self {
-            max_snp_column_depth: DEFAULT_MAX_SNP_COLUMN_DEPTH,
-            max_indel_column_depth: DEFAULT_MAX_INDEL_COLUMN_DEPTH,
+            max_reads_per_position: DEFAULT_MAX_READS_PER_POSITION,
             max_record_span: DEFAULT_MAX_RECORD_SPAN,
             mate_lookup_window: DEFAULT_MATE_LOOKUP_WINDOW,
             max_active_reads: DEFAULT_MAX_ACTIVE_READS,

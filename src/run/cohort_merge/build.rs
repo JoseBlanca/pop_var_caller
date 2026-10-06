@@ -40,6 +40,7 @@ use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::locus_generation::{
     LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
+use crate::run::explain::{DroppedLoci, MergeDrop};
 use crate::types::ChainId;
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::window_coverage::WindowCoverage;
@@ -341,7 +342,7 @@ impl<'a> MemberPlacement<'a> {
     /// [`WitnessedLocusPositions::one_run_from_offset_and_length`] refuses too.
     ///
     /// **How wide a locus can get is not bounded at 50 bases, and an earlier draft of this
-    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 50
+    /// comment said it was.** [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan) defaults to 100
     /// reference bases but is the operator's to set and holds any `NonZeroU32`, and
     /// [`super::close::LocusCloser`] exempts repeat-tract loci from it outright — so the
     /// reachable case is a satellite tract above 65,535 bases, or a raised bound. Within a
@@ -879,6 +880,7 @@ pub fn build_region_windowed<'a, E>(
         &mut |built| cohort_observations.push(built),
         failed_locus_spans,
         build,
+        None,
     )?;
     Ok(outcome)
 }
@@ -925,6 +927,7 @@ pub fn build_region_handing_over(
         keep,
         refused,
         &|_, _| unreachable!("a window holding records never asks for one to be built"),
+        None,
     ) {
         Ok(()) => {}
         Err(never) => match never {},
@@ -932,6 +935,10 @@ pub fn build_region_handing_over(
 }
 
 /// [`build_region_handing_over`] over a window whose summaries are already in hand.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven the build has always taken, and the --explain-loci log it may note into"
+)]
 pub fn build_region_handing_over_windowed<'a, E>(
     builder_region: GenomeRegion,
     window: &WindowedCohort<'a>,
@@ -940,6 +947,7 @@ pub fn build_region_handing_over_windowed<'a, E>(
     keep: &mut impl FnMut(CohortObservation),
     refused: &mut Vec<GenomeRegion>,
     build: &dyn Fn(usize, usize) -> Result<SampleLocusObservations, E>,
+    dropped: Option<&DroppedLoci>,
 ) -> Result<(), E> {
     if no_locus_can_begin_in(builder_region, window) {
         super::timing::REGIONS_WITH_NO_LOCUS.add(1);
@@ -1022,7 +1030,17 @@ pub fn build_region_handing_over_windowed<'a, E>(
                 }
             },
             Verdict::Failed => refused.push(locus.region),
-            Verdict::TooQuiet => {}
+            // Dropped without a trace, unless the run explains the locus (`--explain-loci`).
+            Verdict::TooQuiet => {
+                if let Some(dropped) = dropped {
+                    dropped.note(locus.region, MergeDrop::TooQuiet);
+                }
+            }
+            Verdict::OverDepthCeiling => {
+                if let Some(dropped) = dropped {
+                    dropped.note(locus.region, MergeDrop::OverDepthCeiling);
+                }
+            }
         }
         // **The member vector goes back to the walk here and nowhere else.** Every arm above
         // borrows the locus rather than consuming it, so there is one place that owns the
@@ -1409,6 +1427,30 @@ pub struct PartialObservation {
     /// conventions rather than the type's**: the fields are public and there is no constructor,
     /// so [`partials_of_sample`] is where both hold, and where their tests point.
     pub q_sum: f64,
+    /// **Which border, if any, the reads' sequence may run on past into a longer allele**, though
+    /// their witness covers the whole locus. `None` for every partial the merge mints: a read that
+    /// ran out inside the locus says so through its witness, and that is the only shape the walk
+    /// produces.
+    ///
+    /// `Some` only for reads the calling run re-read after the merge
+    /// ([`reread_spellings_cut_short`](crate::run::records::reread_spellings_cut_short)): reads
+    /// the mapper laid straight across the reference near their end, so that the start of a longer
+    /// allele came out as substitutions. Over the locus they show exactly the start of that allele
+    /// followed by the reference past the locus (`Right`), or its end preceded by the reference
+    /// before it (`Left`), so they are compared as a read flush to that border is — compatible
+    /// with every allele whose carrier would show the same bases there
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    pub sequence_may_run_on_past: Option<LocusBorder>,
+}
+
+/// One of a locus's two borders — see
+/// [`PartialObservation::sequence_may_run_on_past`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LocusBorder {
+    /// The locus's first position.
+    Left,
+    /// The locus's last position.
+    Right,
 }
 
 /// What one sample's reads lend one allele.
@@ -1443,7 +1485,7 @@ pub struct PartialObservation {
 ///   questions.** It is counted against each record's own position (see `placed_left`), so
 ///   two records of one sample ask "did the read start left of here?" about different
 ///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
-///   locus's width — 50 bases at the default bound.
+///   locus's width — 100 bases at the default bound.
 ///
 /// Rounded once per row rather than per read, so the counts stay as close to whole reads as the
 /// division allows. **Per row means per `(allele, read group)` since B1, and that is a change
@@ -1857,6 +1899,7 @@ fn partials_of_sample(
                 bases: sequence.bases.clone(),
                 num_reads: sequence.num_obs,
                 q_sum: sequence.q_sum.nats(),
+                sequence_may_run_on_past: None,
             });
         }
     }
@@ -2153,7 +2196,7 @@ impl AlleleBacking<'_> {
     /// one. **That count is not small.** The generic mint writes a record at every covered
     /// position, so a sample can hold as many records inside a locus as the locus is wide —
     /// six inside a six-base locus, in `serial.rs`'s own minted fixture — bounded by
-    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 50 by default. What keeps it free is
+    /// [`MaxCohortLocusSpan`](super::MaxCohortLocusSpan), 100 by default. What keeps it free is
     /// the company it keeps rather than the comparison being cheap: the same locus already
     /// sorts every sighting and composes and divides every read across every record.
     ///
@@ -4940,6 +4983,7 @@ mod tests {
                 bases: Box::from(&b"A"[..]),
                 num_reads: 3,
                 q_sum: -18.5,
+                sequence_may_run_on_past: None,
             }],
             "the run is 2..3 of the locus, not 0..1 of the record",
         );
@@ -5002,6 +5046,7 @@ mod tests {
                 bases: Box::from(&b"C"[..]),
                 num_reads: 1,
                 q_sum: 0.0,
+                sequence_may_run_on_past: None,
             }],
             "the record at 14 is four bases into the locus at 10",
         );
@@ -5278,7 +5323,7 @@ mod tests {
     /// stretch 65,536 bases to the left of where the read was.
     ///
     /// **Reachable only past the generic path.** A generic locus is bounded by
-    /// [`MaxCohortLocusSpan`], 50 reference bases by default, but repeat-tract loci are exempt
+    /// [`MaxCohortLocusSpan`], 100 reference bases by default, but repeat-tract loci are exempt
     /// from that bound and the bound itself is the operator's to raise — so the case is a
     /// satellite above 65,535 bases. The fixture is built by hand for the same reason every
     /// other fixture here is: the walk would not close this locus.

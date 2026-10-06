@@ -117,7 +117,7 @@ path; §4.4 says so at the point it matters.
   ([`cohort_integration.rs:46-48`](../../../../src/var_calling/cohort_integration.rs)).
 - **`max_cohort_locus_span` / `max_cohort_locus_span`** — the *policy* constant: the widest cohort
   locus the
-  caller undertakes to build. Default 50 bases. §3 is its section
+  caller undertakes to build. Default 100 bases (50 until 2026-10-04). §3 is its section
   derivations only.
 - **the reach ceiling** — the *physical* constant: the widest reference span any minted
   observation can have — the generic generator's `max_record_span`
@@ -181,8 +181,8 @@ sample and writes everything; there is no cohort to merge and no variability to 
 ### 3.1 What it is and what it buys
 
 **`max_cohort_locus_span` is the widest cohort observation this component will build, measured in
-reference bases. A command-line parameter, default 50.** The default is the owner's number,
-unmeasured — soft; open question 3 (§14) names the measurement. A run over long reads is expected
+reference bases. A command-line parameter, default 100.** It was 50, the owner's unmeasured
+number, until 2026-10-04; open question 3 (§14) records the measurement that raised it. A run over long reads is expected
 to set it higher, since the widest event worth merging into one locus grows with the reads.
 
 
@@ -222,7 +222,8 @@ showed.
 > Owner, 2026-08-17: *"Then that locus can't be built, it has to be counted as a failed locus,
 > not built and not sent downstream."*
 
-**If a cohort locus comes out wider than 50 bases, it is not emitted.** Nothing goes downstream
+**If a cohort locus comes out wider than `max_cohort_locus_span` (100 bases by default), it is
+not emitted.** Nothing goes downstream
 over the ground it covers, and the run counts it as a failure.
 
 **In every other respect it is an ordinary locus.** It is grouped like one, it owns its ground like
@@ -288,7 +289,8 @@ indistinguishable from "analysed and found nothing", which is exactly why the ru
 **What is lost, stated flatly: every locus wider than `max_cohort_locus_span`, for the whole cohort
 — the wide
 event and every bystander variant chained into it.** At the default that means no deletion longer
-than 50 bases is ever called, at any depth, any cohort size. If those events are ever wanted, the
+than 100 bases is ever called, at any depth, any cohort size — and, because a deletion of one copy
+of a two-copy duplication can sit anywhere across both copies, no such deletion longer than 50. If those events are ever wanted, the
 home is a separate pass over the emitted records — the same home
 [`run_streaming.md`](run_streaming.md) §4.3 gives cross-segment events — never a coupling between
 in-flight regions (§13).
@@ -533,6 +535,39 @@ samples cannot grow what is resident beyond one bounded window per sample, and
 
 **The observations themselves are not the builder's to hold, though — they live in a cache the
 organiser owns (§6.4), and that cache is this module's real memory.**
+
+### 4.6 The depth ceiling: a pile-up is dropped for every sample — decided 2026-09-29
+
+**A locus where any sample has a read group deeper than `--max-read-group-depth` (default 1,000
+reads) is not built, for any sample** (owner, 2026-09-29). Such depth, in a sample whose usual
+depth is a small fraction of it, is almost always a collapsed repeat — many copies of a sequence
+mapped onto one — and nothing called there can be trusted. It is also what ran the 2,169-sample
+tomato run out of memory at SL4.0ch00:1,504,001, where each 3× sample had a median of 5,669 reads
+a position ([`report`](../../reports/psp_pileup_memory_2026-09-28/report.md)).
+
+**The record is dropped by its sample's source as it is read, not by the builder**, because the
+point is not to hold it. The source hands the cache a stand-in carrying only the record's region
+(`LocusSummary::over_depth_ceiling`); the closing walk chains through it like any member, so the
+whole overlap-union it belongs to (§4.1) closes, and judges that locus `OverDepthCeiling` ahead of
+every other verdict. It is dropped like a quiet locus: nothing assembled, not counted as failed
+(§3.3). A stored sample's source decodes a record's body to count its reads only where the file
+cannot rule the record out from its head — see `DepthCeiling::may_be_exceeded_at`.
+
+**How deep a read group is**, from what a record stores: the reads of that group across the
+record's observations, and — for the record's deepest group — the reads that covered the locus but
+showed nothing and the reads the walk's own cap discarded, since neither carries a read group.
+
+**What it is not: the read cap** (`--max-reads-per-position`), which keeps a locus and scores it
+on at most that many reads of a group. At their two defaults, both 1,000, a locus the ceiling
+keeps is never thinned by the cap.
+
+**What each end of the range gets.** At **one sample** the rule drops that sample's own pile-ups,
+which is the whole of what it can do. At **several thousand samples** a single sample over the
+ceiling silences the locus for all of them: that is the owner's choice, on the reasoning that a
+pile-up in one sample marks ground no sample's reads can be trusted on. At **3 reads a position**
+the default is over 300 times the usual depth. At **several hundred reads a position** it is
+within a small factor: a read group sequenced at 400× will lose ordinary loci to its own depth,
+and a run at that depth has to raise it.
 
 ---
 
@@ -1197,12 +1232,17 @@ for the run).
    production — compound only on chain evidence, constituents-independent otherwise, and the
    fallback recorded rather than silent. **Settled by:** deciding it before the builder is coded,
    because it changes what a projected allele *is*; it is not a tuning question.
-3. **Is 50 the right default bound?** — OPEN; the value is the owner's, unmeasured — soft, and
-   cheap to revisit because re-calling under a new bound needs no re-walk (§3.1). **Settled by:**
-   counting, in one walk of a tomato sample and HG002, reads carrying deletions wider than 50
-   bases (the events the caller gives up) and the length distribution just below — how much real
-   signal sits within reach of a larger bound, against §8's assembly window growing with
-   `max_cohort_locus_span`.
+3. **Is 50 the right default bound?** — **SETTLED 2026-10-04: raised to 100** (owner), on two
+   measurements. *Tomato1, 63 accessions at about 3×, 2 Mb:* at 50, 278 loci were refused; at 100,
+   267 were built and 162 records added, with run time (37 s) and peak memory (about 290 MB)
+   unchanged — so §8's concern, the assembly window growing with the bound, costs nothing
+   measurable there. Against GATK run on the same accessions over those loci, the variant
+   genotypes they add agree with GATK's in 1,506 cases (same allele, either zygosity) and are
+   disputed in 394: 21 in 100, against 31 in 100 at ordinary loci 20–50 bases wide. *GIAB trio at
+   300×:* the only refused locus was a true 31-base deletion of one copy of a two-copy
+   duplication, which needs 62 bases; at 100 it is called and nothing else changes
+   (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md`). Eleven tomato loci are still
+   wider than 100.
 4. **Does the far end need a cohort-scaled keep threshold?** — **SETTLED 2026-08-19, and the
    answer is no in both directions.** The measurement this asked for was made (§7.3): the
    cohort-*sum* rule it was written about had the defect from the other side — its bar was fixed

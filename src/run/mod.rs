@@ -35,6 +35,8 @@ pub mod census_fit;
 pub mod census_freshness;
 pub mod census_from_psp;
 pub mod cohort_merge;
+pub mod depth_ceiling;
+pub mod explain;
 pub mod gatherer;
 pub mod paralog_filter;
 pub mod psp_caller;
@@ -389,6 +391,22 @@ pub enum RunError {
     #[error("the reference base beside the locus at {locus} could not be read")]
     PaddingBaseUnreadable {
         /// The locus whose record needed the base.
+        locus: GenomeRegion,
+        /// What the reference fetch hit.
+        #[source]
+        source: crate::ref_seq::RefSeqError,
+    },
+
+    /// The reference either side of an ordinary locus, which its partial reads are compared
+    /// against after the allele, could not be read
+    /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    ///
+    /// **Not skipped**: calling the locus without it would score a deletion's own reads as
+    /// evidence for the reference. The ordinary reachable cause is the FASTA becoming unreadable
+    /// part-way through a run.
+    #[error("the reference beside the locus at {locus} could not be read")]
+    ReferenceBesideLocusUnreadable {
+        /// The locus whose partial reads needed the flank.
         locus: GenomeRegion,
         /// What the reference fetch hit.
         #[source]

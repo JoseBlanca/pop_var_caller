@@ -8,6 +8,7 @@ use super::MAX_PLOIDY_COPIES;
 use crate::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
 use crate::float;
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
+use crate::run::cohort_merge::build::{LocusBorder, PartialObservation};
 use crate::types::{AlleleId, LogProb};
 
 /// How many bases a misread could have gone to — **three, and it is a physical fact rather
@@ -342,9 +343,29 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 ///
 /// What it may be used for is the one thing it settles: **which end of the allele the read is
 /// anchored to.** A read flush to the locus's left border showed the start of its carrier's
-/// sequence, so its bases are a **prefix** of that carrier's allele; one flush to the right
+/// sequence, so its bases are a **prefix** of that carrier's sequence; one flush to the right
 /// border, a **suffix**. `WitnessedLocusPositions`' two predicates are documented as exactly
 /// these constraints, and this is their consumer.
+///
+/// # A carrier's sequence does not stop at the border
+///
+/// **After the allele comes the reference beyond the locus**, because every allele replaces the
+/// same reference span and leaves what follows alone. So a read flush left is a prefix of the
+/// allele *followed by* `beside.after`, and one flush right a suffix of `beside.before`
+/// *followed by* the allele. The flank is consulted only when the read showed more bases than the
+/// allele has; while they fit inside it, this is the comparison against the allele alone.
+///
+/// **This is what a deletion's own reads need** (spec §5.3, corrected 2026-10-03). A deletion's
+/// allele is usually its one anchor base. A read from its carrier ending a few bases past the
+/// anchor is aligned straight across by the mapper, so it arrives as a partial showing the anchor
+/// and then the reference *beyond* the deletion. Compared against `C` alone, `CTTA` matches
+/// nothing and read as evidence for the reference: on GIAB HG002 at 300× that called homozygous
+/// deletions heterozygous at GQ 99. Against `C` followed by the flank it matches, as it should.
+///
+/// **A flank shorter than the read needs makes the allele incompatible**, which is right at a
+/// contig's end — a carrier's read cannot run past it — and is why the caller must read as much as
+/// the locus's partials need (`run::records::reference_beside_locus`). Passing
+/// [`ReferenceBesideLocus::NONE`] is the comparison against the allele alone.
 ///
 /// # The rule, and why the cases are the cases
 ///
@@ -352,8 +373,10 @@ fn differ_by_one_substitution(left: &[u8], right: &[u8]) -> bool {
 /// a border.** That is the whole rule, and the four shapes below are what satisfy it rather than
 /// a list to remember:
 ///
-/// - **One run, flush left** — every base is in it, and it is anchored left: a **prefix**.
-/// - **One run, flush right** — a **suffix**.
+/// - **One run, flush left** — every base is in it, and it is anchored left: a **prefix** of the
+///   allele followed by the reference after the locus.
+/// - **One run, flush right** — a **suffix** of the reference before the locus followed by the
+///   allele.
 /// - **One run, flush both** — the read witnessed every position, so it showed its carrier's
 ///   whole sequence: **equality**.
 /// - **Two runs, flush both** — the bases divide into a prefix and a suffix which between them
@@ -390,6 +413,7 @@ pub fn allele_is_compatible_with_partial(
     witnessed_in_locus: &WitnessedLocusPositions,
     bases: &[u8],
     allele: &[u8],
+    beside: ReferenceBesideLocus<'_>,
     locus_len: LocusLen,
 ) -> bool {
     assert!(
@@ -403,12 +427,91 @@ pub fn allele_is_compatible_with_partial(
     ) {
         // Saw every position, so it showed its carrier's whole sequence.
         (1, true, true) => allele == bases,
-        (1, true, false) => allele.starts_with(bases),
-        (1, false, true) => allele.ends_with(bases),
+        (1, true, false) => carrier_sequence_starts_with(allele, beside.after, bases),
+        (1, false, true) => carrier_sequence_ends_with(beside.before, allele, bases),
         (2, true, true) => splits_into_a_prefix_and_a_suffix(bases, allele),
         // Some run is anchored to neither border, so the bases it holds are unconstrained and
         // absorb any disagreement: the test is vacuous rather than merely weak. See above.
         _ => true,
+    }
+}
+
+/// **Whether a carrier of `allele` could have shown what one partial row of the merge shows** —
+/// [`allele_is_compatible_with_partial`], read off the row, and honouring the row's
+/// [`sequence_may_run_on_past`](crate::run::cohort_merge::build::PartialObservation::sequence_may_run_on_past).
+///
+/// A row marked to run on past a border covers the whole locus, but is compared as a read flush to
+/// that border alone is: the allele and then the reference past the locus must start with its
+/// bases (`Right`), or the reference before the locus and then the allele must end with them
+/// (`Left`). Its witness would make it a read that crossed both borders, compared against the
+/// allele alone, and the mark exists because these reads did not (spec §5.3).
+#[must_use]
+pub fn partial_row_fits_allele(
+    partial: &PartialObservation,
+    allele: &[u8],
+    beside: ReferenceBesideLocus<'_>,
+    locus_len: LocusLen,
+) -> bool {
+    match partial.sequence_may_run_on_past {
+        Some(LocusBorder::Right) => {
+            carrier_sequence_starts_with(allele, beside.after, &partial.bases)
+        }
+        Some(LocusBorder::Left) => {
+            carrier_sequence_ends_with(beside.before, allele, &partial.bases)
+        }
+        None => allele_is_compatible_with_partial(
+            &partial.witnessed_in_locus,
+            &partial.bases,
+            allele,
+            beside,
+            locus_len,
+        ),
+    }
+}
+
+/// **The reference on either side of an ordinary locus** — what a carrier's sequence continues
+/// into past the locus's borders, and so what a read that ran out inside the locus may have shown
+/// after the allele (spec §5.3).
+///
+/// `before` ends at the base just before the locus's first position; `after` starts at the base
+/// just after its last. **Each holds only as much as the locus's partial reads need**, which is
+/// usually nothing: a flank is read only where some partial showed more bases than the shortest
+/// allele has, and a contig's end clamps it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceBesideLocus<'a> {
+    /// The reference ending just before the locus's first position.
+    pub before: &'a [u8],
+    /// The reference starting just after the locus's last position.
+    pub after: &'a [u8],
+}
+
+impl ReferenceBesideLocus<'_> {
+    /// No flank at all: every partial is compared against the allele alone, which is the right
+    /// comparison for every read whose bases fit inside the allele it is tested against.
+    pub const NONE: ReferenceBesideLocus<'static> = ReferenceBesideLocus {
+        before: &[],
+        after: &[],
+    };
+}
+
+/// Whether a carrier of `allele` shows `bases` from the locus's left border onwards: the allele,
+/// then `after`.
+pub(crate) fn carrier_sequence_starts_with(allele: &[u8], after: &[u8], bases: &[u8]) -> bool {
+    match bases.split_at_checked(allele.len()) {
+        Some((within_allele, beyond)) => within_allele == allele && after.starts_with(beyond),
+        None => allele.starts_with(bases),
+    }
+}
+
+/// Whether a carrier of `allele` shows `bases` ending at the locus's right border: `before`, then
+/// the allele.
+pub(crate) fn carrier_sequence_ends_with(before: &[u8], allele: &[u8], bases: &[u8]) -> bool {
+    match bases.len().checked_sub(allele.len()) {
+        Some(beyond_len) => {
+            let (beyond, within_allele) = bases.split_at(beyond_len);
+            within_allele == allele && before.ends_with(beyond)
+        }
+        None => allele.ends_with(bases),
     }
 }
 
@@ -515,10 +618,14 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 /// # Reads that saw only part of the locus
 ///
 /// They are scored beside the complete observations, by spec §5.3's compatibility rule:
-/// **an allele could have produced a partial read when the read's bases are a prefix of it (the
-/// read reached the locus's left border) or a suffix (the right)**, since an allele is the whole
-/// locus as a carrier has it and a read from a carrier shows the start or the end of that
-/// carrier's sequence. A partial the genotype's carried alleles can all have produced
+/// **an allele could have produced a partial read when the read's bases are a prefix of the
+/// allele followed by the reference after the locus (the read reached the locus's left border)
+/// or a suffix of the reference before it followed by the allele (the right)**, since an allele
+/// is the whole locus as a carrier has it and a read from a carrier shows the start or the end of
+/// that carrier's sequence. **This convenience row passes no flank**
+/// ([`ReferenceBesideLocus::NONE`]), so a partial longer than an allele is compared against the
+/// allele alone; the calling loop fills through [`fill_generic_emissions`] with the locus's
+/// flanks. A partial the genotype's carried alleles can all have produced
 /// contributes `Σ k_a/P` over them; one none of them can is charged as an error **with no
 /// spread**, because a read disagreeing over several positions has no finite set of wrong
 /// outcomes to divide by. [`allele_is_compatible_with_partial`] carries the rule and what it declines to
@@ -552,7 +659,13 @@ pub fn genotype_log_likelihood_row(
     scratch: &mut super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
-    fill_generic_emissions(evidence, alleles, read_groups.calibrations(), scratch);
+    fill_generic_emissions(
+        evidence,
+        alleles,
+        ReferenceBesideLocus::NONE,
+        read_groups.calibrations(),
+        scratch,
+    );
     assemble_genotype_log_likelihood_row(
         evidence,
         genotypes,
@@ -604,6 +717,7 @@ pub fn genotype_log_likelihood_row(
 pub fn fill_generic_emissions(
     evidence: &super::GenericSampleEvidence<'_>,
     alleles: &CandidateAlleles,
+    beside: ReferenceBesideLocus<'_>,
     calibration: super::ReadGroupCalibrations<'_>,
     scratch: &mut super::GenericRowScratch,
 ) {
@@ -649,12 +763,7 @@ pub fn fill_generic_emissions(
             scratch.set_compatible(
                 partial_at,
                 AlleleId(allele_at as u16),
-                allele_is_compatible_with_partial(
-                    &partial.witnessed_in_locus,
-                    &partial.bases,
-                    allele_bases,
-                    locus_len,
-                ),
+                partial_row_fits_allele(partial, allele_bases, beside, locus_len),
             );
         }
     }
@@ -2333,6 +2442,7 @@ mod tests {
         fill_generic_emissions(
             &GenericSampleEvidence::new(&supported, 0.0, &[]),
             &alleles,
+            ReferenceBesideLocus::NONE,
             crate::calling::likelihood::ReadGroupCalibrations::over(&calibration),
             &mut GenericRowScratch::default(),
         );
@@ -2354,6 +2464,7 @@ mod tests {
         fill_generic_emissions(
             &GenericSampleEvidence::empty(),
             &wide,
+            ReferenceBesideLocus::NONE,
             crate::calling::likelihood::ReadGroupCalibrations::over(&calibration),
             &mut scratch,
         );
@@ -2385,6 +2496,7 @@ mod tests {
         fill_generic_emissions(
             &GenericSampleEvidence::new(&filled, 0.0, &[]),
             &alleles,
+            ReferenceBesideLocus::NONE,
             crate::calling::likelihood::ReadGroupCalibrations::over(&calibration),
             &mut scratch,
         );
@@ -2428,6 +2540,7 @@ mod tests {
         fill_generic_emissions(
             &evidence,
             &alleles,
+            ReferenceBesideLocus::NONE,
             crate::calling::likelihood::ReadGroupCalibrations::over(&calibration),
             &mut scratch,
         );
@@ -2476,6 +2589,7 @@ mod tests {
         fill_generic_emissions(
             &evidence,
             &alleles,
+            ReferenceBesideLocus::NONE,
             crate::calling::likelihood::ReadGroupCalibrations::over(&calibration),
             &mut scratch,
         );
@@ -2547,6 +2661,7 @@ mod tests {
         fill_generic_emissions(
             &evidence,
             &alleles,
+            ReferenceBesideLocus::NONE,
             crate::calling::likelihood::ReadGroupCalibrations::over(&calibration),
             &mut scratch,
         );
@@ -3299,6 +3414,7 @@ mod tests {
             bases: bases.into(),
             num_reads,
             q_sum,
+            sequence_may_run_on_past: None,
         }
     }
 
@@ -3585,6 +3701,7 @@ mod tests {
             &witness,
             b"AXCT",
             b"AXCGT",
+            ReferenceBesideLocus::NONE,
             LocusLen::from_positions(4)
         ));
         // And the same read refuses a carrier that differs where it did look.
@@ -3592,8 +3709,215 @@ mod tests {
             &witness,
             b"AXCT",
             b"AYCGT",
+            ReferenceBesideLocus::NONE,
             LocusLen::from_positions(4)
         ));
+    }
+
+    /// GIAB HG002's `CTTACAT → C` at chr1:21,684,679, whose reference continues `TTAAGTCTTT`
+    /// after the locus — the locus spec §5.3's correction is about.
+    const GIAB_DELETION_REF: &[u8] = b"CTTACAT";
+    const GIAB_DELETION_ALT: &[u8] = b"C";
+    const GIAB_DELETION_AFTER: &[u8] = b"TTAAGTCTTT";
+
+    fn after_the_giab_deletion() -> ReferenceBesideLocus<'static> {
+        ReferenceBesideLocus {
+            before: &[],
+            after: GIAB_DELETION_AFTER,
+        }
+    }
+
+    /// **A read from the deletion's carrier that ran three bases past the anchor fits both
+    /// alleles**, because past the anchor the carrier shows the reference beyond the deletion,
+    /// and `TTA` is where both the deleted bases and that reference begin. Compared against the
+    /// one-base allele alone it fitted the reference only, which is the defect spec §5.3 records:
+    /// the read then counted against the deletion.
+    #[test]
+    fn a_read_that_ran_past_a_deletions_anchor_into_the_flank_fits_the_deletion() {
+        let flush_left_four = WitnessedLocusPositions::from_half_open_runs([(0, 4)])
+            .expect("the fixture's runs are a witness");
+        let seven = LocusLen::from_positions(7);
+        let beside = after_the_giab_deletion();
+
+        assert!(allele_is_compatible_with_partial(
+            &flush_left_four,
+            b"CTTA",
+            GIAB_DELETION_ALT,
+            beside,
+            seven
+        ));
+        assert!(allele_is_compatible_with_partial(
+            &flush_left_four,
+            b"CTTA",
+            GIAB_DELETION_REF,
+            beside,
+            seven
+        ));
+        // The old comparison, against the allele alone, refused the deletion's own read.
+        assert!(!allele_is_compatible_with_partial(
+            &flush_left_four,
+            b"CTTA",
+            GIAB_DELETION_ALT,
+            ReferenceBesideLocus::NONE,
+            seven
+        ));
+    }
+
+    /// **One base further and the read tells the two apart, in the deletion's favour**: the
+    /// carrier of the deletion shows `CTTAA`, the reference `CTTAC`.
+    #[test]
+    fn a_read_that_ran_far_enough_past_a_deletion_is_evidence_for_it() {
+        let flush_left_five = WitnessedLocusPositions::from_half_open_runs([(0, 5)])
+            .expect("the fixture's runs are a witness");
+        let seven = LocusLen::from_positions(7);
+        let beside = after_the_giab_deletion();
+
+        assert!(allele_is_compatible_with_partial(
+            &flush_left_five,
+            b"CTTAA",
+            GIAB_DELETION_ALT,
+            beside,
+            seven
+        ));
+        assert!(!allele_is_compatible_with_partial(
+            &flush_left_five,
+            b"CTTAA",
+            GIAB_DELETION_REF,
+            beside,
+            seven
+        ));
+        // And a reference read the same length fits the reference alone.
+        assert!(allele_is_compatible_with_partial(
+            &flush_left_five,
+            b"CTTAC",
+            GIAB_DELETION_REF,
+            beside,
+            seven
+        ));
+        assert!(!allele_is_compatible_with_partial(
+            &flush_left_five,
+            b"CTTAC",
+            GIAB_DELETION_ALT,
+            beside,
+            seven
+        ));
+    }
+
+    /// **The right border is the mirror**: a read that entered the locus from the right and ran
+    /// out going left shows the reference *before* the locus and then the allele.
+    #[test]
+    fn a_read_flush_right_is_compared_against_the_reference_before_then_the_allele() {
+        let flush_right_four = WitnessedLocusPositions::from_half_open_runs([(3, 7)])
+            .expect("the fixture's runs are a witness");
+        let seven = LocusLen::from_positions(7);
+        let beside = ReferenceBesideLocus {
+            before: b"GGAAGT",
+            after: &[],
+        };
+
+        assert!(allele_is_compatible_with_partial(
+            &flush_right_four,
+            b"AGTC",
+            GIAB_DELETION_ALT,
+            beside,
+            seven
+        ));
+        assert!(!allele_is_compatible_with_partial(
+            &flush_right_four,
+            b"AGTC",
+            GIAB_DELETION_REF,
+            beside,
+            seven
+        ));
+        assert!(allele_is_compatible_with_partial(
+            &flush_right_four,
+            b"ACAT",
+            GIAB_DELETION_REF,
+            beside,
+            seven
+        ));
+    }
+
+    /// **A flank shorter than the read refuses the allele**: a carrier's read cannot run past a
+    /// contig's end, and a caller that read too little flank must not be read as agreement.
+    #[test]
+    fn a_read_longer_than_the_allele_and_the_flank_together_fits_neither() {
+        let flush_left_five = WitnessedLocusPositions::from_half_open_runs([(0, 5)])
+            .expect("the fixture's runs are a witness");
+        let beside = ReferenceBesideLocus {
+            before: &[],
+            after: b"TTA",
+        };
+
+        assert!(!allele_is_compatible_with_partial(
+            &flush_left_five,
+            b"CTTAA",
+            GIAB_DELETION_ALT,
+            beside,
+            LocusLen::from_positions(7)
+        ));
+    }
+
+    /// **The call the correction exists for, at its real sizes.** HG002 at 300× showed 232
+    /// complete reads carrying the deletion, none carrying the reference, and 27 reads that ran
+    /// out a few bases past the anchor. Compared against the allele alone those 27 fitted the
+    /// reference only, and the heterozygote outscored the homozygous deletion. With the flank
+    /// they fit both alleles, and the homozygous deletion wins by the complete reads' margin.
+    #[test]
+    fn the_giab_homozygous_deletion_is_called_homozygous_once_partials_see_the_flank() {
+        let alleles = locus(&[GIAB_DELETION_REF, GIAB_DELETION_ALT]);
+        let table = diploid(2);
+        let view = table.view();
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+        // Base quality 30 throughout: ln(10⁻³) per read.
+        let q30 = float::ln(1e-3);
+        let complete = [observation(1, 0, 232, 232.0 * q30)];
+        let ran_past_the_anchor = [partial(&[(0, 4)], b"CTTA", 27, 27.0 * q30)];
+        let evidence = GenericSampleEvidence::new(&complete, 0.0, &ran_past_the_anchor);
+        let calibration = uncalibrated();
+        let spreads = spreads(&alleles, &table);
+
+        let row = |beside: ReferenceBesideLocus<'_>| {
+            let mut scratch = GenericRowScratch::default();
+            let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+            let read_groups =
+                ReadGroupParameters::new(&calibration, ContaminationMixture::uncontaminated());
+            fill_generic_emissions(
+                &evidence,
+                &alleles,
+                beside,
+                read_groups.calibrations(),
+                &mut scratch,
+            );
+            assemble_genotype_log_likelihood_row(
+                &evidence,
+                &view,
+                read_groups,
+                ErrorSpreadTable::over(&spreads, &view),
+                &scratch,
+                &mut out,
+            );
+            out.into_iter().map(LogProb::get).collect::<Vec<f64>>()
+        };
+
+        let without_flank = row(ReferenceBesideLocus::NONE);
+        assert!(
+            without_flank[het] > without_flank[hom_alt],
+            "the defect: against the allele alone the heterozygote wins, {without_flank:?}"
+        );
+        let with_flank = row(after_the_giab_deletion());
+        assert!(
+            with_flank[hom_alt] > with_flank[het],
+            "with the flank the homozygous deletion wins, {with_flank:?}"
+        );
+        // The partials now fit both alleles, so they cost nothing under either genotype and the
+        // margin is the complete reads' alone: 232 × ln 2.
+        let margin = with_flank[hom_alt] - with_flank[het];
+        assert!(
+            (margin - 232.0 * std::f64::consts::LN_2).abs() < 1e-9,
+            "{margin}"
+        );
     }
 
     /// **The locus's length is the reference's, not the longest allele's.** A carrier with an

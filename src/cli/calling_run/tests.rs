@@ -116,3 +116,18 @@ fn a_calling_run_writes_back_the_fit_starts_it_read() {
     );
     assert_eq!(written.fitted_from.snp_indel_fit_starts, None);
 }
+
+/// **`--min-site-quality` takes zero and any finite positive quality, and refuses the rest** —
+/// zero is how a user turns the threshold off, so it must parse.
+#[test]
+fn the_min_site_quality_parser_takes_zero_and_refuses_a_negative_or_non_number() {
+    assert_eq!(parse_min_site_quality("0"), Ok(0.0));
+    assert_eq!(parse_min_site_quality("1"), Ok(1.0));
+    assert_eq!(parse_min_site_quality("30.5"), Ok(30.5));
+    for refused in ["-1", "inf", "NaN", "high"] {
+        assert!(
+            parse_min_site_quality(refused).is_err(),
+            "`{refused}` must be refused"
+        );
+    }
+}

@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use super::records::DEFAULT_MIN_SITE_QUALITY;
 use crate::calling::inference::LocusGenotyper;
 use crate::calling::inference::RunnableCallingLoopConfig;
 use crate::calling::run_parameters::RunParameters;
@@ -49,7 +50,7 @@ use crate::read::input::read_groups::{
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::GenomeRegions;
-use crate::types::{Bp, ReadGroupId};
+use crate::types::{Bp, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
@@ -63,6 +64,8 @@ use super::callers::{
     refuse_two_references_that_are_not_one,
 };
 use super::cohort_merge::observation_cache::{MergeReference, ObservationCache};
+use super::depth_ceiling::DepthCeiling;
+use super::explain::ExplainRegions;
 use super::psp_prefetch::{DEFAULT_PSP_PREFETCH_BUDGET_BYTES, PspPrefetch};
 use super::psp_source::{PspSummarySource, StoredSampleTallies};
 use super::walker::WalkReference;
@@ -396,6 +399,13 @@ pub struct PspVariantCaller {
     /// written under a looser cap is thinned to it as its records are decoded
     /// ([`read_cap`](super::psp_source::read_cap)).
     max_reads_per_position: u32,
+    /// The most reads one read group may have at a locus before the locus is dropped for the
+    /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    depth_ceiling: DepthCeiling,
+    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
+    explain: Option<ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`).
+    min_site_quality: Phred,
 }
 
 impl PspVariantCaller {
@@ -487,8 +497,36 @@ impl PspVariantCaller {
             candidate_selection,
             merge_parameters,
             psp_prefetch_budget_bytes: DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            depth_ceiling: DepthCeiling::default(),
+            explain: None,
+            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
+                .expect("the default threshold is a valid quality"),
         })
+    }
+
+    /// The same caller, writing no locus whose site quality falls below `quality`
+    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
+    #[must_use]
+    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
+        self.min_site_quality = quality;
+        self
+    }
+
+    /// The same caller, explaining every locus that overlaps `regions`
+    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
+    #[must_use]
+    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
+        self.explain = Some(regions);
+        self
+    }
+
+    /// The same caller, dropping for the whole cohort every locus where some sample has a read
+    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
+    #[must_use]
+    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
+        self.depth_ceiling = ceiling;
+        self
     }
 
     /// The same caller, keeping at most `reads` reads of one read group at a position: a psp
@@ -592,6 +630,37 @@ impl PspVariantCaller {
         S: Default + Send,
         E: std::error::Error + Send + Sync + 'static,
     {
+        self.call_cohort_preparing_each_record(
+            genotyper,
+            &|record, _| Ok(record),
+            &mut |record: VcfRecord, windows| hand_over(&record, windows),
+        )
+    }
+
+    /// [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over), with
+    /// each record **got ready by `prepare` on the thread that called its locus** and then taken
+    /// by `hand_over` on the calling thread, in genome order, beside every sample's window.
+    ///
+    /// What `prepare` does is whatever of the output's work needs no file — encoding the record's
+    /// spill entry, with the hidden-duplication filter on — so that the one thread writing in
+    /// genome order does not do it while the others wait.
+    ///
+    /// # Errors
+    ///
+    /// As [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over),
+    /// and the first record `prepare` refuses.
+    pub fn call_cohort_preparing_each_record<S, G, P, E>(
+        self,
+        genotyper: &G,
+        prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+        hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
+    ) -> Result<(CohortCallingTallies, StoredCohortTallies), RunError>
+    where
+        G: LocusGenotyper<S> + Sync,
+        S: Default + Send,
+        P: Send,
+        E: std::error::Error + Send + Sync + 'static,
+    {
         let Self {
             cohort,
             segmentation,
@@ -602,6 +671,9 @@ impl PspVariantCaller {
             merge_parameters,
             psp_prefetch_budget_bytes,
             max_reads_per_position,
+            depth_ceiling,
+            explain,
+            min_site_quality,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -649,7 +721,11 @@ impl PspVariantCaller {
             let read_cap =
                 super::psp_source::read_cap::needs_thinning(psp.header(), max_reads_per_position)
                     .then_some(max_reads_per_position);
-            sources.push(PspSummarySource::over(psp, &sample.read_groups)?.with_read_cap(read_cap));
+            sources.push(
+                PspSummarySource::over(psp, &sample.read_groups)?
+                    .with_read_cap(read_cap)
+                    .with_depth_ceiling(Some(depth_ceiling)),
+            );
         }
 
         let inputs = CohortCallingInputs {
@@ -660,6 +736,8 @@ impl PspVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
+            explain: explain.as_ref(),
+            min_site_quality,
         };
         let CohortCallingOutcome {
             calling,
@@ -681,6 +759,7 @@ impl PspVariantCaller {
                 cache_over(sources, Box::new(reference_for_the_merge), prefetch),
                 inputs,
                 genotyper,
+                prepare,
                 hand_over,
             )?
         } else {
@@ -688,6 +767,7 @@ impl PspVariantCaller {
                 cache_over(sources, Box::new(reference_for_the_merge), prefetch),
                 inputs,
                 genotyper,
+                prepare,
                 hand_over,
             )?
         };
@@ -2236,7 +2316,9 @@ mod tests {
         );
         assert_eq!(
             tallies.loci_called(),
-            tallies.records_written + tallies.loci_called_but_not_written,
+            tallies.records_written
+                + tallies.loci_called_but_not_written
+                + tallies.loci_below_minimum_site_quality,
         );
         assert!(
             tallies.loci_called() >= 2,

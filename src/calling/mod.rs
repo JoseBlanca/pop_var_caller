@@ -75,8 +75,9 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
 pub use likelihood::generic::{
-    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, allele_is_compatible_with_partial,
-    fill_error_spreads, genotype_log_likelihood_row,
+    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, ReferenceBesideLocus,
+    allele_is_compatible_with_partial, fill_error_spreads, genotype_log_likelihood_row,
+    partial_row_fits_allele,
 };
 pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
@@ -397,6 +398,11 @@ pub enum LocusEvidence<'a> {
         region: GenomeRegion,
         /// One entry per run sample, in run order.
         per_sample: &'a [GenericLocusSample<'a>],
+        /// **The reference on either side of the locus**, as much as its partial reads need to
+        /// be compared against an allele followed by what lies beyond it
+        /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3). Empty unless some partial showed
+        /// more bases than the shortest allele has.
+        reference_beside: ReferenceBesideLocus<'a>,
     },
     /// A repeat tract, or a repeat bundle: what each sample showed, and the tract's motif
     /// and flanks.
@@ -449,7 +455,35 @@ impl<'a> LocusEvidence<'a> {
              evidence that went missing rather than a locus nobody covered — a sample with \
              no reads gets GenericSampleEvidence::empty()"
         );
-        Self::Generic { region, per_sample }
+        Self::Generic {
+            region,
+            per_sample,
+            reference_beside: ReferenceBesideLocus::NONE,
+        }
+    }
+
+    /// A SNP/indel locus's evidence **with the reference beside it** — what the run hands the
+    /// loop, so that a read that ran out inside the locus is compared against an allele
+    /// followed by the reference beyond it (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+    /// [`Self::generic`] is this with no flank.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::generic`].
+    #[must_use]
+    pub fn generic_beside_reference(
+        region: GenomeRegion,
+        per_sample: &'a [GenericLocusSample<'a>],
+        reference_beside: ReferenceBesideLocus<'a>,
+    ) -> Self {
+        match Self::generic(region, per_sample) {
+            Self::Generic { .. } => Self::Generic {
+                region,
+                per_sample,
+                reference_beside,
+            },
+            Self::Ssr { .. } => unreachable!("Self::generic builds the SNP/indel variant"),
+        }
     }
 
     /// A repeat tract's or repeat bundle's evidence.

@@ -1261,15 +1261,14 @@ fn chain_ids_persist_across_chromosome_boundaries() {
 fn column_depth_cap_truncates_snp_only_column_when_over_cap() {
     // Five SNP-only reads anchored at pos 1, each spanning 5
     // bases. Every column has 5 contributors and only Match
-    // events, so the SNP cap applies. With max_snp_column_depth=3
+    // events, so the cap applies. With max_reads_per_position=3
     // we expect every column to truncate to 3 contributors.
     let fa = MockFasta::new("ACGTA");
     let reads: Vec<_> = (0..5)
         .map(|i| snp_read(&format!("r{i}"), 1, b"ACGTA", &[30; 5]))
         .collect();
     let cfg = WalkerConfig {
-        max_snp_column_depth: 3,
-        max_indel_column_depth: 99,
+        max_reads_per_position: 3,
         ..WalkerConfig::default()
     };
     let (records, summary) = drive_walker_with_config(reads, fa, &cfg);
@@ -1317,8 +1316,7 @@ fn column_depth_cap_keeps_the_smallest_sampling_keys() {
         snp_read("r4", 1, b"C", &[30]),
     ];
     let cfg = WalkerConfig {
-        max_snp_column_depth: 2,
-        max_indel_column_depth: 99,
+        max_reads_per_position: 2,
         ..WalkerConfig::default()
     };
 
@@ -1387,8 +1385,7 @@ fn column_depth_cap_applies_to_each_read_group_separately() {
         read
     };
     let cfg = WalkerConfig {
-        max_snp_column_depth: 2,
-        max_indel_column_depth: 99,
+        max_reads_per_position: 2,
         ..WalkerConfig::default()
     };
     let kept_by_group = |records: &[_]| -> Vec<(u32, u32)> {
@@ -1421,57 +1418,72 @@ fn column_depth_cap_applies_to_each_read_group_separately() {
     assert_eq!(records[0].reads_discarded_by_cap, 0);
 }
 
+/// **A position where reads carry a deletion is capped like every other position** — the
+/// regression this pins was a heterozygous deletion stored at a third of its reads.
+///
+/// Until 2026-10-03 the walk used a tighter cap, 250, at any position where a read had an
+/// insertion or deletion. A deletion's reads are folded only at its anchor, where that cap
+/// applied; the reference reads are also folded at the deleted positions, where it did not,
+/// and a read kept at any position of a record folds with its whole window. So above 250 reads
+/// the deletion lost reads at the anchor and the reference kept all of its own: on GIAB HG004 at
+/// 300×, 174 deletion fragments in 355 were stored as 118 against 199
+/// (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §3).
+///
+/// 300 reads of each allele, 600 at the anchor, under the default cap: nothing is truncated and
+/// both alleles keep every read. With the old cap the anchor would have kept 250 of 600, and the
+/// deletion about 125 of its 300.
 #[test]
-fn column_depth_cap_uses_indel_cap_when_any_indel_event_present() {
-    // Four SNP-only reads + one indel-bearing read, all anchored
-    // at pos 1. At column pos 1 the indel-bearing read contributes
-    // an Insertion event — the column flips to "indel column" and
-    // the tighter indel cap applies. At pos 2 onward only Match
-    // events remain, so the (much higher) SNP cap applies and
-    // does not fire.
-    let fa = MockFasta::new("AAAACGT");
-    let mut reads: Vec<PreparedRead> = (0..4)
-        .map(|i| snp_read(&format!("snp{i}"), 1, b"AAAACGT", &[30; 7]))
+fn a_deletion_position_is_capped_like_every_other_position() {
+    // Reference ACGTAC (1..6). Reference reads: 5M from 1. Deletion reads: 1M3D1M from 2,
+    // anchored at 2, the record's footprint 2..5 (`deletion_record_does_not_double_count_ref_reads`).
+    let fa = MockFasta::new("ACGTAC");
+    let mut reads: Vec<PreparedRead> = (0..300)
+        .map(|i| snp_read(&format!("ref{i}"), 1, b"ACGTA", &[30; 5]))
         .collect();
-    // Indel read: 1M 2I 5M starting at pos 1; anchor of the
-    // insertion is pos 1.
-    let indel = PreparedRead {
+    reads.extend((0..300).map(|i| PreparedRead {
         chrom_id: 0,
-        alignment_start: 1,
+        alignment_start: 2,
         alignment_end: 6,
-        cigar: vec![CigarOp::Match(1), CigarOp::Insertion(2), CigarOp::Match(5)],
-        seq: b"AXXAAACG".to_vec(),
-        bq_baq: vec![30; 8],
+        cigar: vec![CigarOp::Match(1), CigarOp::Deletion(3), CigarOp::Match(1)],
+        seq: b"CC".to_vec(),
+        bq_baq: vec![30; 2],
         mq_log_err: -3.0,
         is_reverse_strand: false,
-        qname: Arc::from("indel"),
+        qname: Arc::from(format!("del{i}")),
         mate_role: MateRole::Solo,
         adaptor_boundary: None,
         read_group: ReadGroupId(0),
 
         mapq: 60,
-    };
-    reads.push(indel);
+    }));
 
-    let cfg = WalkerConfig {
-        max_snp_column_depth: 99,  // far above 5; SNP-only cols don't fire
-        max_indel_column_depth: 2, // below 5; indel col at pos 1 fires
-        ..WalkerConfig::default()
-    };
-    let (_records, summary) = drive_walker_with_config(reads, fa, &cfg);
+    let (records, summary) = drive_walker_with_config(reads, fa, &WalkerConfig::default());
 
-    // Exactly one column carried an indel event (pos 1), and that
-    // column had 5 contributors > indel cap of 2 → one truncation.
     assert_eq!(
-        summary.column_depth_truncations, 1,
-        "indel cap should fire exactly once at the indel-anchor column",
+        summary.column_depth_truncations, 0,
+        "600 reads at the anchor is under the default cap of 1,000"
+    );
+    let anchor = records
+        .iter()
+        .find(|record| record.anchor() == 2)
+        .expect("the deletion's record is anchored on the base before it");
+    let deletion = anchor
+        .observations
+        .iter()
+        .find(|observation| observation.bases.as_ref() == b"C")
+        .expect("the deletion allele is the anchor base alone");
+    assert_eq!(deletion.num_obs, 300, "every deletion read is kept");
+    assert_eq!(
+        anchor.reference_observation().num_obs,
+        300,
+        "every reference read is kept"
     );
 }
 
 #[test]
 fn column_depth_cap_does_not_fire_below_threshold() {
-    // Two SNP-only reads, default config (caps 8000 and 250).
-    // Far below either cap → no truncation, every contributor
+    // Two SNP-only reads, default config (a cap of 1,000).
+    // Far below the cap → no truncation, every contributor
     // folds.
     let fa = MockFasta::new("ACGTA");
     let r1 = snp_read("r1", 1, b"ACGTA", &[30; 5]);
@@ -1899,7 +1911,13 @@ fn prepared_read_length_checks_seq_bq_before_cigar() {
 /// A 60-base reference, `ACGT` fifteen times. The pattern only has to make the reads'
 /// matched bases distinguishable from each other; every read below agrees with it, so the
 /// fixture's subject is the *shape* of a witness and never an allele.
-const SPLICED_REF: &str = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+/// `ACGT` repeated, except **position 49 reads `T`**, not `A`. A 20-base deletion from 29 is five
+/// whole units of the repeat, so on the unbroken repeat it is the same haplotype wherever it sits
+/// and the walk widens its record to the contig's end (`indel_record_span` in `open_record.rs`).
+/// The `T` is the first base after the deletion, so it ends the slide where the deletion's own
+/// footprint ends and the record stays `28 ..= 48`. The 17- and 18-base deletions are not whole
+/// units and never slide.
+const SPLICED_REF: &str = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTTCGTACGTACGT";
 
 /// The reference bases at 1-based inclusive `from..=to`.
 fn spliced_ref_bases(from: usize, to: usize) -> Vec<u8> {

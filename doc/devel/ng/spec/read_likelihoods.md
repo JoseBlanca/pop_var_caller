@@ -1759,8 +1759,99 @@ type's own documentation names.
 > identity exactly as a single run would be, so every read pooled into one observation witnessed the
 > same positions and gets the same verdict.
 
-**The rule: an allele is compatible with a partial observation when the allele's projection,
-restricted to the positions the read witnessed, equals the read's bases.** Then, for genotype `g`:
+**The rule: an allele is compatible with a partial observation when the sequence a carrier of that
+allele has, read from the border the read is anchored at, starts with the read's bases.** A carrier's
+sequence does not stop at the locus's border. After the allele comes the reference beyond the locus,
+because every allele replaces the same reference span and leaves what follows it alone. So:
+
+- **a read flush to the left border** is compared against **the allele followed by the reference to
+  the right of the locus**, and its bases must be a prefix of that;
+- **a read flush to the right border** is compared against **the reference to the left of the locus
+  followed by the allele**, and its bases must be a suffix of that;
+- **a read that witnessed both borders**, as one run or as two, is compared against the allele alone,
+  as before. It crossed both borders, so whatever it showed inside the locus lies between the two
+  flanks it matched, and no flank base can be among its bases.
+
+  > *Made true 2026-10-06.* On the generic path a border is the record's own first or last
+  > position, and until then an indel's record covered only its left-most placement. Inside a
+  > repeat a reference read could reach that border and stop partway along the repeat, where a
+  > carrier shows the same bases, and still be compared as complete. On GIAB HG002 at 300× that
+  > made five homozygous indels heterozygous. The record now reaches the indel's right-most
+  > placement (`locus_generation_pileup.md` §4), so a read that crossed it has crossed the whole
+  > stretch the indel can slide along.
+
+**A read the mapper laid straight across a longer allele is compared as a read flush to one border
+(2026-10-06).** A read that ends a few bases into an inserted copy cannot be placed with a gap, so
+the mapper aligns it across the reference and the start of the copy comes out as substitutions. It
+covers every position of the locus, so it arrives complete, as an allele of its own that no
+haplotype carries. At GIAB HG003 chr15:96140584, 34 reads showed exactly the first 46 bases of a
+24-base insertion that 107 reads carried whole, and the homozygous insertion was called `1/2`. So
+before candidate selection, an alternative allele **at least as long as the reference** (substitutions
+alone, or an insertion shorter than the other allele's) whose bases are exactly the start of another allele followed by the reference past the
+locus, or exactly its end preceded by the reference before it, has its complete reads turned into
+partial ones covering the whole locus and marked with that border
+(`PartialObservation::sequence_may_run_on_past`; `reread_spellings_cut_short` in `run/records.rs`).
+They are then compared exactly as a read flush to that border is, above. Three guards: the longer
+allele needs at least as many complete reads across the cohort; the two must differ in length by
+two bases or more, because a one-base shift inside a homopolymer is invisible, so a real SNP just
+before one spells the start of a one-base insertion (without this guard, a SNP GATK calls in 52 of
+63 tomato accessions, SL4.0ch12:18047655, was re-read); and the reference is never re-read.
+The length rule is not optional: a deletion's allele is a prefix of the reference's whenever it
+removes the locus's last bases, and without it 20 true deletions at 300× were lost. A spelling
+longer than the reference is re-read only against a longer allele: it is a read that began inside
+an inserted copy, which the mapper fitted with fewer inserted bases (GIAB HG002 chr1:243535155,
+37 reads spelling a 19-base insertion as 7 bases, exactly the last 56 bases of the 68-base allele;
+the homozygous insertion was called `1/2`). Admitting these changed only that site on GIAB, fixed
+at 10×, 30× and 300× (missed / false 201 / 309 → 200 / 308, 50 / 165 → 49 / 164, 41 / 43 → 40 /
+42), and 49 of 225,894 tomato records, neutral against GATK there (an allele GATK also calls 2,500
+→ 2,498 sample genotypes, one it does not 3,897 → 3,913).
+
+Measured on the three GIAB samples, each over its own 100 regions (missed / false calls, vcfeval
+against v4.2.1): 5× 746 / 315 unchanged; 10× 202 / 310 → 201 / 309; 30× 54 / 168 → 50 / 165; 300×
+44 / 45 → 41 / 43. Every site that changed was fixed, none broken; the report's three sites
+(HG003 chr15:96140584, HG004 chr9:11024723 and chr15:65223392) are all among them. On 63 tomato accessions at about 3× it
+changes 23 of 225,917 records; at those loci, against GATK HaplotypeCaller run on the same CRAMs
+(vcfeval per sample, an allele in either zygosity counting as agreement), 87 variant genotypes GATK
+does not call are removed and 62 it does call are lost, some of the latter at sites where neither
+build writes a record within 150 bases, i.e. vcfeval matching a neighbouring haplotype differently.
+
+**The flank matters only when the read showed more bases than the allele has.** While the read's
+bases fit inside the allele, the extended comparison and the comparison against the allele alone
+give the same answer. So the reference beyond the locus has to be read only for a locus that has
+such a read. At most it is as many bases as the longest such read showed beyond the shortest allele,
+which is bounded by the widest locus the merge builds.
+
+> **What this rule used to say, and what it cost** *(corrected 2026-10-03, owner; found by a user
+> tracing GIAB false negatives)*. It compared the read's bases against the allele alone: *"the
+> allele's projection, restricted to the positions the read witnessed, equals the read's bases"*.
+> **That is wrong for every allele shorter than what the read showed, and a deletion's allele is
+> usually its single anchor base.**
+>
+> Take the deletion `CTTACAT → C` at chr1:21,684,679. The sequence after it is `TTAAG…`. A read from
+> the deletion's carrier that ends three bases after the anchor shows `CTTA`. A mapper does not open
+> a six-base gap to place three bases. It aligns the read straight across, where `CTTA` matches the
+> reference without a single mismatch, so the read reaches the locus as a partial flush left with
+> bases `CTTA`. Against the reference allele `CTTACAT`, `CTTA` is a prefix, so it is compatible.
+> Against the deletion's allele `C` it is not, since `CTTA` cannot be a prefix of one base. **So a
+> read from the deletion counted as evidence for the reference.** Under the homozygous-deletion
+> genotype it was charged as a sequencing error, about 6 log-likelihood units at base quality 30,
+> against the 0.7 units the heterozygous genotype pays for it.
+>
+> Each complete read carrying the deletion favours the homozygous genotype by only 0.7 units, so
+> about one such partial for every nine complete deletion reads is enough to tip the call to
+> heterozygous. GIAB HG002 at 300× has 27 of them at this locus, against 232 complete deletion reads
+> and no complete reference read. It was called `0/1` with GQ 99. At chr1:106,818,720
+> (`GACTTAAA → G`) the deleted bases repeat in the right flank, so a read from the deletion stays
+> mismatch-free for seven bases. 32 of them gave `0/1`, GQ 99, against 219 complete deletion reads.
+> Under the extended comparison, `CTTA` is a prefix of both `CTTACAT` and `C` followed by `TTAAG…`,
+> so it says nothing. A read that showed `CTTAA` is now evidence *for* the deletion, which is what it
+> is.
+>
+> The error grows with depth, because the number of such reads grows with it, while the cost of
+> each stays the same. At one sample and three reads a position, a locus rarely has enough of them
+> to move a call. At several hundred, it routinely does.
+
+Then, for genotype `g`:
 
 ```text
 term(o | g)  =  Σ  ( k_a / P )   over the alleles a in g that are compatible with o
@@ -1778,6 +1869,8 @@ positions and gets the same compatibility verdict.
 **What it gives up.** A partial that is compatible with two of the genotype's alleles contributes
 `(k_a + k_b)/P`, which is 1 for a diploid heterozygote — no information, correctly. A read that
 witnessed one base of a ten-base deletion says almost nothing and is scored as saying almost nothing.
+A read that ran past where the deletion's allele ends, into the reference beyond it, is evidence for
+the deletion and is scored as such.
 **The model gains nothing at ordinary sites, where nearly every read spans the single position, and
 gains at exactly the loci where reads run out: long deletions and wide overlapping-variant groups.**
 
@@ -1826,11 +1919,26 @@ reference reads.** Three consequences, and each follows from the table rather th
   ([`cohort_merge.md`](cohort_merge.md) §3.1) — width stays 1, so every read covering the anchor is
   complete. *(A read that ran out inside a long inserted sequence is a different problem — a
   truncated allele sequence, not a partial witness — and it belongs to read preparation, not here.)*
-- **A deletion has them, and they carry the reference allele preferentially.** A read carrying the
-  deletion crosses every deleted reference position without spending a single read base, so it
-  reaches the far side of a wide locus far more cheaply than a read carrying the reference does.
-  **The alternative evidence at a deletion is therefore biased towards complete and the partial reads
-  towards reference.**
+
+  > *Out of date.* Since 2026-09-11 an insertion's record covers `inserted_len + 1` positions, and
+  > since 2026-10-06 it reaches the first base past the insertion's right-most placement in a
+  > repeat (`locus_generation_pileup.md` §4). So an insertion does have partial reads now: reads that
+  > stop before the far side of the record, which is the ground they needed to cross to tell the
+  > insertion from the reference.
+- **A deletion has them, and they come from both alleles.** A read whose alignment carries the
+  deletion crosses every deleted reference position without spending a single read base. So it
+  reaches the far side of the locus far more cheaply than a reference read does, and it is complete.
+  **But a read from the deletion's carrier that ends a few bases past the anchor carries no deletion
+  in its alignment**: the mapper aligns it straight across, because a gap costs more than the few
+  bases it would place. That read is partial, and its bases past the anchor are the reference
+  *beyond* the deletion. So the partial reads at a deletion are a mix of reference reads and
+  deletion reads that the mapper could not place. Telling them apart is what §5.3's comparison
+  against the allele followed by the flank is for.
+  
+  > *Corrected 2026-10-03 (owner).* This bullet used to say the partial reads at a deletion "carry
+  > the reference allele preferentially", and §5.3's comparison against the allele alone was
+  > consistent with that belief. On GIAB HG002 at 300× it turned homozygous deletions into
+  > heterozygous calls (§5.3).
 
 **The repeat path is where the table's bottom row lives, and it is the opposite case.** A tract's
 locus is as wide as the tract — up to 100 bases — so over half of the overlapping reads are partial

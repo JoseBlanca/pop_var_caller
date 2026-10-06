@@ -134,6 +134,7 @@ mod tests {
             max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
             max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             paralog_fdr: 0.0,
+            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             threads: 0,
@@ -142,7 +143,9 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            explain_loci: None,
         }
     }
 
@@ -184,7 +187,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
         psps
@@ -215,6 +218,7 @@ mod tests {
             max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
             max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             paralog_fdr: 0.0,
+            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
@@ -224,7 +228,9 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            explain_loci: None,
         }
     }
 
@@ -798,7 +804,7 @@ mod tests {
                 max_str_len: DEFAULT_MAX_STR_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
                 max_reads_per_position:
-                    crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+                    crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             })
             .expect("one sample walks on its own");
             apart.push(psp_path_for(&directory, sample));
@@ -845,7 +851,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
 
@@ -897,6 +903,7 @@ mod tests {
             max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
             max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             paralog_fdr: 0.0,
+            min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
@@ -906,7 +913,9 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            explain_loci: None,
         }
     }
 }

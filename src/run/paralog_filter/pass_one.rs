@@ -25,7 +25,8 @@ use crate::vcf::{HeaderContig, VcfRecord, VcfWriteError, VcfWriter};
 use crate::window_coverage::WindowCoverage;
 
 use super::{
-    GenericLocusSample, RepeatTractSample, SpillEntry, SpillFile, SpillFileError, SpilledSamples,
+    EncodedSpillEntry, GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillFile,
+    SpillFileError, SpilledSamples,
 };
 
 /// **The spill entry for one finished record**, ready to append.
@@ -140,6 +141,15 @@ impl SpillingSink {
         &self.spill
     }
 
+    /// What turns a record into this sink's entry, for the threads that call the loci.
+    #[must_use]
+    pub fn encoder(&self) -> RecordPreparer {
+        RecordPreparer::ForTheSpill {
+            contigs: self.contigs.clone(),
+            ploidy: self.ploidy,
+        }
+    }
+
     /// Stop appending and make the bytes durable, so passes two and three can read them.
     ///
     /// # Errors
@@ -169,6 +179,44 @@ impl CalledRecordSink {
         }
     }
 
+    /// **What the threads that call the loci use to get each record ready for this sink** —
+    /// owned, so they can hold it while this sink stays with the thread that writes.
+    #[must_use]
+    pub fn preparer(&self) -> RecordPreparer {
+        match self {
+            Self::StraightToTheVcf(_) => RecordPreparer::ForTheVcf,
+            Self::ParkedOnTheSpill(sink) => sink.encoder(),
+        }
+    }
+
+    /// Take one record that [`preparer`](Self::preparer) got ready — what [`accept`](Self::accept)
+    /// does, with the work that needs no file already done.
+    ///
+    /// # Errors
+    ///
+    /// As [`accept`](Self::accept).
+    ///
+    /// # Panics
+    ///
+    /// If the record was prepared for the other sink: the preparer and the sink are taken from
+    /// one another once, when the run starts, so a mismatch is a wiring error.
+    pub fn accept_prepared(&mut self, prepared: PreparedRecord) -> Result<(), PassOneError> {
+        match (self, prepared) {
+            (Self::StraightToTheVcf(writer), PreparedRecord::ForTheVcf(record)) => {
+                writer.write_record(&record).map_err(PassOneError::Vcf)
+            }
+            (Self::ParkedOnTheSpill(sink), PreparedRecord::ForTheSpill(entry)) => sink
+                .spill
+                .append_encoded(&entry)
+                .map_err(PassOneError::Spill),
+            (Self::StraightToTheVcf(_), PreparedRecord::ForTheSpill(_))
+            | (Self::ParkedOnTheSpill(_), PreparedRecord::ForTheVcf(_)) => panic!(
+                "a record prepared for one sink reached the other; the preparer is taken from the \
+                 sink when the run starts, so this is a defect in ng"
+            ),
+        }
+    }
+
     /// Take one finished record.
     ///
     /// # Errors
@@ -195,6 +243,56 @@ impl CalledRecordSink {
 }
 
 /// What can go wrong taking a record in pass one.
+/// **How a finished record is got ready for its sink on the thread that called its locus**, so
+/// that the one thread writing in genome order only writes.
+///
+/// With the filter on that is the whole spill entry — the record's VCF line and every sample's
+/// row, encoded to bytes; at 2,169 samples, the largest share of what the writing thread did.
+/// With it off the record goes to the VCF writer as it is.
+#[derive(Debug, Clone)]
+pub enum RecordPreparer {
+    /// The filter is off: nothing to do before the writer.
+    ForTheVcf,
+    /// The filter is on: encode the spill entry.
+    ForTheSpill {
+        /// The contigs the record's line is written against.
+        contigs: Vec<HeaderContig>,
+        /// The ploidy its genotypes are written at.
+        ploidy: Ploidy,
+    },
+}
+
+/// A record got ready by [`RecordPreparer::prepare`], for [`CalledRecordSink::accept_prepared`].
+#[derive(Debug)]
+pub enum PreparedRecord {
+    /// The record itself, for the VCF writer.
+    ForTheVcf(Box<VcfRecord>),
+    /// Its spill entry, encoded.
+    ForTheSpill(EncodedSpillEntry),
+}
+
+impl RecordPreparer {
+    /// Get `record` ready for the sink this came from; `windows` as [`entry_for`] takes them.
+    ///
+    /// # Errors
+    ///
+    /// If the spill entry cannot be encoded ([`EncodedSpillEntry::of`]).
+    pub fn prepare(
+        &self,
+        record: VcfRecord,
+        windows: &[WindowCoverage],
+    ) -> Result<PreparedRecord, PassOneError> {
+        match self {
+            Self::ForTheVcf => Ok(PreparedRecord::ForTheVcf(Box::new(record))),
+            Self::ForTheSpill { contigs, ploidy } => {
+                EncodedSpillEntry::of(&entry_for(&record, windows, contigs, *ploidy))
+                    .map(PreparedRecord::ForTheSpill)
+                    .map_err(PassOneError::SpillEntry)
+            }
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PassOneError {
@@ -204,6 +302,9 @@ pub enum PassOneError {
     /// The record could not be parked on the spill — the filter-on path.
     #[error("the record could not be parked for the hidden-duplication filter")]
     Spill(#[source] SpillFileError),
+    /// The record's spill entry could not be encoded — the filter-on path, before any file.
+    #[error("the record's entry for the hidden-duplication filter could not be encoded")]
+    SpillEntry(#[source] SpillError),
 }
 
 #[cfg(test)]

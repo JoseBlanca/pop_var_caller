@@ -45,11 +45,14 @@
 //! which position it could not read.
 
 use crate::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
+use crate::calling::likelihood::generic::{
+    carrier_sequence_ends_with, carrier_sequence_starts_with,
+};
 use crate::calling::quality::artifact_correction::correct_site_quality;
-use crate::calling::{CandidateAlleles, LocusInference, SampleGenotypeCall};
-use crate::locus_generation::LocusKind;
+use crate::calling::{CandidateAlleles, LocusInference, ReferenceBesideLocus, SampleGenotypeCall};
+use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::ref_seq::{EvictableRefSeq, RefSeq, RefSeqError};
-use crate::run::cohort_merge::build::CohortObservation;
+use crate::run::cohort_merge::build::{CohortObservation, LocusBorder, PartialObservation};
 use crate::types::{GenomeRegion, Position};
 use crate::vcf::assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput};
 use crate::vcf::{FilterVerdict, MapqPool, PaddingBase, TractAnnotation};
@@ -85,6 +88,315 @@ pub fn a_written_genotype_carries_an_alternative(locus: &LocusInference) -> bool
                     .any(|allele| !allele.is_reference())
         }
     })
+}
+
+/// The two buffers [`reference_beside_locus`] reads the flanks into, kept by a worker across
+/// loci so a run allocates them once.
+#[derive(Debug, Default)]
+pub struct ReferenceBesideScratch {
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
+/// **The reference either side of an ordinary locus, as much as its partial reads need** — what
+/// a read that ran out inside the locus is compared against after the allele
+/// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
+///
+/// A read flush to the left border shows the allele and then the reference after the locus; one
+/// flush to the right shows the reference before it and then the allele. The flank is needed only
+/// past the allele's end, so **each side is read as far as the longest such partial showed beyond
+/// the locus's shortest allele, and not at all where none did** — the ordinary case, since most
+/// loci have no partial longer than any allele. The alleles the loop is called over are always
+/// among the merge's, so the shortest of the merge's bounds them all.
+///
+/// **A repeat tract gets nothing**: its reads are re-aligned against flanks the tract carries,
+/// and this rule is the ordinary path's. A contig's end clamps the side that would run past it.
+///
+/// # Errors
+///
+/// Whatever the reference fetch refuses, other than running past the contig's end.
+pub fn reference_beside_locus<'s, R>(
+    reference: &R,
+    observation: &CohortObservation,
+    scratch: &'s mut ReferenceBesideScratch,
+) -> Result<ReferenceBesideLocus<'s>, RefSeqError>
+where
+    R: RefSeq,
+{
+    scratch.before.clear();
+    scratch.after.clear();
+    if !matches!(observation.kind, LocusKind::Generic) {
+        return Ok(ReferenceBesideLocus::NONE);
+    }
+    let Some(shortest_allele) = observation.alleles.iter().map(|allele| allele.len()).min() else {
+        return Ok(ReferenceBesideLocus::NONE);
+    };
+    let locus_len = LocusLen::from_positions(observation.alleles[0].len() as u64);
+    let mut needed_before = 0_usize;
+    let mut needed_after = 0_usize;
+    for partial in observation
+        .per_sample
+        .iter()
+        .flat_map(|sample| &sample.partials)
+    {
+        let witness = &partial.witnessed_in_locus;
+        let beyond_the_shortest_allele = partial.bases.len().saturating_sub(shortest_allele);
+        // A row re-read after the merge is compared as a read flush to the border it is marked
+        // with, whatever its witness ([`reread_spellings_cut_short`]).
+        match partial.sequence_may_run_on_past {
+            Some(LocusBorder::Right) => {
+                needed_after = needed_after.max(beyond_the_shortest_allele);
+                continue;
+            }
+            Some(LocusBorder::Left) => {
+                needed_before = needed_before.max(beyond_the_shortest_allele);
+                continue;
+            }
+            None => {}
+        }
+        // Only a single run anchored at exactly one border is compared against a flank; every
+        // other shape is compared against the allele alone or against nothing.
+        if witness.runs().len() != 1 {
+            continue;
+        }
+        match (witness.is_flush_left(), witness.is_flush_right(locus_len)) {
+            (true, false) => needed_after = needed_after.max(beyond_the_shortest_allele),
+            (false, true) => needed_before = needed_before.max(beyond_the_shortest_allele),
+            _ => {}
+        }
+    }
+
+    let region = observation.region;
+    if needed_before > 0 {
+        let first = region.start.get();
+        let start = first
+            .saturating_sub(needed_before as u64)
+            .max(FIRST_POSITION_OF_A_CONTIG.get());
+        if start < first {
+            reference.fetch_into(region.contig, start, first - start, &mut scratch.before)?;
+        }
+    }
+    if needed_after > 0 {
+        let start = region.end.get() + 1;
+        match reference.fetch_into(
+            region.contig,
+            start,
+            needed_after as u64,
+            &mut scratch.after,
+        ) {
+            Ok(()) => {}
+            Err(RefSeqError::OutOfBounds { contig_length, .. }) => {
+                let available = (contig_length + 1).saturating_sub(start);
+                if available > 0 {
+                    reference.fetch_into(region.contig, start, available, &mut scratch.after)?;
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(ReferenceBesideLocus {
+        before: &scratch.before,
+        after: &scratch.after,
+    })
+}
+
+/// **The site quality below which a called locus is not written**, by default — `--min-site-quality`.
+///
+/// The threshold reads the quality the record would carry: the site quality after the artifact
+/// correction (`calling_quality.md` §3.5, which pins that the gate and the `QUAL` column read one
+/// number). A site whose two artifact penalties outweigh its evidence is floored at zero, and
+/// those are most of the false calls this caller writes.
+///
+/// **One, not GATK's thirty, because the site quality already grows with depth.** Measured on the
+/// three GIAB samples, each over its own 100 regions (false / true calls removed): below 1 removes
+/// 141 / 15 at 5×, 215 / 17 at 10×, 142 / 2 at 30× and 32 / 3 at 300×; below 30 removes 212 / 117,
+/// 275 / 131, 148 / 18 and 33 / 3, so the extra cut costs more than a hundred true calls at each
+/// low depth for a few dozen false ones. On 50 tomato accessions at about 3×, against GATK's joint
+/// calls over all 80 regions, below 1 removes 26,696 sample genotypes GATK does not call and 382
+/// it does. **Zero turns the threshold off** — no quality is below zero.
+pub const DEFAULT_MIN_SITE_QUALITY: f32 = 1.0;
+
+/// **Re-read the reads the mapper laid straight across the reference where a longer allele began**
+/// — one ordinary locus, before candidate selection sees it (item 2 of the GIAB report on
+/// 5d2abae4; `doc/devel/ng/spec/read_likelihoods.md` §5.3).
+///
+/// A read that ends a few bases into an inserted copy cannot be placed with a gap, so the mapper
+/// aligns it straight across the reference, and the start of the copy comes out as substitutions.
+/// It covers every position of the locus, so the merge stores it as a **complete** observation of
+/// a sequence of its own — at GIAB HG003 chr15:96140584, 34 reads showing exactly the first 46
+/// bases of a 24-base insertion, against 107 that carry the insertion whole. That sequence is
+/// then a candidate allele no haplotype carries, and the homozygous insertion is called `1/2`.
+///
+/// **The rule.** An alternative allele `S` at least as long as the reference — a spelling of
+/// substitutions alone, or of an insertion shorter than `A`'s — whose bases are exactly the start
+/// of another allele
+/// `A` followed by the reference past the locus, or exactly the end of `A` preceded by the
+/// reference before it, is a spelling of `A` cut short rather than evidence of its own. Its
+/// complete rows become partial rows covering the whole locus and marked to run on past that
+/// border ([`PartialObservation::sequence_may_run_on_past`]), so they count for every allele a
+/// carrier of which would have shown the same bases. Three guards: `A` must have at least as many
+/// complete reads across the cohort as `S`, so a handful of odd reads cannot re-read a
+/// well-supported allele; `A` and `S` must differ in length by two bases or more, because a
+/// one-base shift inside a homopolymer is invisible and a real SNP just before one spells the
+/// start of a one-base insertion; and the reference is never re-read, since it is the allele every
+/// genotype is measured against and the slide in the walk already covers its ambiguous reads.
+///
+/// `S`'s entry in the allele table is kept with no complete reads behind it, which candidate
+/// selection's admission rule then declines. A locus where nothing qualifies is left untouched,
+/// which is every locus whose alleles are all one length and every locus the reference before or
+/// after cannot be read for.
+///
+/// # Errors
+///
+/// Whatever the reference fetch refuses, other than running past the contig's end.
+pub fn reread_spellings_cut_short<R>(
+    reference: &R,
+    observation: &mut CohortObservation,
+    scratch: &mut ReferenceBesideScratch,
+) -> Result<(), RefSeqError>
+where
+    R: RefSeq,
+{
+    if !matches!(observation.kind, LocusKind::Generic) || observation.alleles.len() < 3 {
+        return Ok(());
+    }
+    let lengths = observation.alleles.iter().map(|allele| allele.len());
+    let (shortest, longest) =
+        lengths.fold((usize::MAX, 0), |(lo, hi), len| (lo.min(len), hi.max(len)));
+    // A spelling and the allele it was cut from differ in length, and the flank needed to tell
+    // them apart is at most that difference.
+    let flank = longest - shortest;
+    if flank == 0 {
+        return Ok(());
+    }
+    let mut complete_reads = vec![0_u64; observation.alleles.len()];
+    for sample in &observation.per_sample {
+        for row in &sample.supported {
+            complete_reads[row.allele] += u64::from(row.support.num_reads);
+        }
+    }
+    fetch_flanks(reference, observation.region, flank, scratch)?;
+
+    let reference_len = observation.alleles[0].len();
+    let mut cut_short: Vec<Option<LocusBorder>> = vec![None; observation.alleles.len()];
+    for (spelling, bases) in observation.alleles.iter().enumerate().skip(1) {
+        // **Never a spelling shorter than the reference.** A deletion's own allele is a prefix of
+        // the reference's whenever it removes the locus's last bases, and a read carrying it
+        // crossed the locus with it — trying it here re-read 20 true deletions at 300x on GIAB.
+        if complete_reads[spelling] == 0 || bases.len() < reference_len {
+            continue;
+        }
+        for (longer, allele) in observation.alleles.iter().enumerate() {
+            if longer == spelling
+                || allele.len() == bases.len()
+                || complete_reads[longer] < complete_reads[spelling]
+            {
+                continue;
+            }
+            // **Two bases or more apart in length.** A one-base indel shifts what follows by
+            // one, which inside a homopolymer cannot be seen: a SNP just before a run of `A`s
+            // spells exactly the start of a one-base insertion there. On 63 tomato accessions
+            // that re-read a SNP GATK calls in 52 of them (SL4.0ch12:18047655).
+            if allele.len().abs_diff(bases.len()) < 2 {
+                continue;
+            }
+            // **A spelling that carries an insertion is read only as a shorter insertion than the
+            // allele it was cut from**: a read starting inside an inserted copy, which the mapper
+            // fitted with fewer inserted bases. At GIAB HG002 chr1:243535155, 37 reads showed
+            // exactly the last 56 bases of a 68-base allele carrying a 19-base insertion. Against
+            // a shorter allele it would be a longer insertion, which no read cut short spells.
+            if bases.len() > reference_len && allele.len() < bases.len() {
+                continue;
+            }
+            if carrier_sequence_starts_with(allele, &scratch.after, bases) {
+                cut_short[spelling] = Some(LocusBorder::Right);
+                break;
+            }
+            if carrier_sequence_ends_with(&scratch.before, allele, bases) {
+                cut_short[spelling] = Some(LocusBorder::Left);
+                break;
+            }
+        }
+    }
+    if cut_short.iter().all(Option::is_none) {
+        return Ok(());
+    }
+
+    let positions = u16::try_from(observation.alleles[0].len())
+        .expect("an ordinary locus is bounded by --max-cohort-locus-span, far inside u16");
+    let whole_locus = WitnessedLocusPositions::one_run_from_offset_and_length(0, positions)
+        .expect("a locus covers at least its reference base, and its length fits in u16");
+    for sample in &mut observation.per_sample {
+        let mut moved = false;
+        sample.supported.retain(|row| {
+            let Some(border) = cut_short[row.allele] else {
+                return true;
+            };
+            sample.partials.push(PartialObservation {
+                witnessed_in_locus: whole_locus.clone(),
+                read_group: row.read_group,
+                bases: observation.alleles[row.allele].clone(),
+                num_reads: row.support.num_reads,
+                q_sum: row.support.q_sum,
+                sequence_may_run_on_past: Some(border),
+            });
+            moved = true;
+            false
+        });
+        if moved {
+            // The order the merge sorts partials in, with the mark last so the key stays total:
+            // a re-read row covers the whole locus, which no row the merge minted does.
+            sample.partials.sort_unstable_by(|left, right| {
+                (
+                    &left.witnessed_in_locus,
+                    left.read_group,
+                    &left.bases,
+                    left.sequence_may_run_on_past,
+                )
+                    .cmp(&(
+                        &right.witnessed_in_locus,
+                        right.read_group,
+                        &right.bases,
+                        right.sequence_may_run_on_past,
+                    ))
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The reference `flank` bases either side of `region`, into `scratch`, each stopped at the
+/// contig's ends.
+fn fetch_flanks<R>(
+    reference: &R,
+    region: GenomeRegion,
+    flank: usize,
+    scratch: &mut ReferenceBesideScratch,
+) -> Result<(), RefSeqError>
+where
+    R: RefSeq,
+{
+    scratch.before.clear();
+    scratch.after.clear();
+    let first = region.start.get();
+    let start = first
+        .saturating_sub(flank as u64)
+        .max(FIRST_POSITION_OF_A_CONTIG.get());
+    if start < first {
+        reference.fetch_into(region.contig, start, first - start, &mut scratch.before)?;
+    }
+    let start = region.end.get() + 1;
+    match reference.fetch_into(region.contig, start, flank as u64, &mut scratch.after) {
+        Ok(()) => Ok(()),
+        Err(RefSeqError::OutOfBounds { contig_length, .. }) => {
+            let available = (contig_length + 1).saturating_sub(start);
+            if available > 0 {
+                reference.fetch_into(region.contig, start, available, &mut scratch.after)?;
+            }
+            Ok(())
+        }
+        Err(other) => Err(other),
+    }
 }
 
 /// **The reference base a record with an empty allele is padded with**, or `None` where every

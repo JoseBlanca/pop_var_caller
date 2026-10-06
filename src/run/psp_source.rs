@@ -46,7 +46,8 @@ use crate::psp::{PspReadError, PspReader, RecordIter, StreamedRecord};
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
-use super::cohort_merge::observation_cache::{Drawn, LocusSummary};
+use super::cohort_merge::observation_cache::{Drawn, LocusSummary, StandIn};
+use super::depth_ceiling::DepthCeiling;
 use crate::psp::LiveSet;
 use crate::psp::RecordHead;
 use crate::psp::record::{LocatedRecord, RecordLayout, decode_the_body_of};
@@ -273,8 +274,27 @@ pub struct PspSummarySource<'a> {
     /// be counted once. Behind a lock because builds run on several threads at once; it is only
     /// taken where a record was actually thinned.
     thinned: std::sync::Mutex<ThinnedSoFar>,
+    /// The run's depth ceiling, or `None` for a walk that keeps every record
+    /// ([`depth_ceiling`](super::depth_ceiling)). A record over it is dropped as it is read.
+    depth_ceiling: Option<DepthCeiling>,
     /// What this sample contributed, for the run report.
     read: StoredSampleTallies,
+}
+
+/// One stored record as the walk leaves it: summarised with its body kept, or dropped for its
+/// depth with nothing kept but where it lay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Summarised {
+    /// Kept, to be built if a locus asks for it.
+    Kept(KeptRecord),
+    /// Over the run's depth ceiling: no body and no live set held.
+    OverDepthCeiling {
+        /// The ground the record covered.
+        region: GenomeRegion,
+        /// Where the next kept body will begin, in the file's terms — the empty range the
+        /// merge holds in the record's slot.
+        next_body_at: usize,
+    },
 }
 
 /// One stored record, summarised, with its body waiting in the source's arena.
@@ -316,6 +336,22 @@ impl<'a> PspSummarySource<'a> {
         self
     }
 
+    /// Drop, as they are read, the records with a read group deeper than `ceiling`, or keep every
+    /// record for `None` ([`depth_ceiling`](super::depth_ceiling)).
+    ///
+    /// **A record too large for the reader to hold is dropped too, as though it were over the
+    /// ceiling** (owner, 2026-09-30). Its reads cannot be counted without holding it, and a record
+    /// past the reader's buffer ceiling holds far more reads than any honest depth: the one that
+    /// stopped the 2,169-sample tomato run had 10,151 over 142 bases. Without a ceiling such a
+    /// record still stops the run, since the run has promised to call every locus.
+    #[must_use]
+    pub fn with_depth_ceiling(mut self, ceiling: Option<DepthCeiling>) -> Self {
+        self.depth_ceiling = ceiling;
+        self.walk
+            .skipping_records_too_large_to_hold(ceiling.is_some());
+        self
+    }
+
     /// Walk `psp` from its first record, keeping every body.
     ///
     /// # Errors
@@ -341,6 +377,7 @@ impl<'a> PspSummarySource<'a> {
             live: HeldLiveSets::default(),
             read_cap: None,
             thinned: std::sync::Mutex::new(ThinnedSoFar::default()),
+            depth_ceiling: None,
             read: StoredSampleTallies::default(),
         })
     }
@@ -407,38 +444,90 @@ impl<'a> PspSummarySource<'a> {
         &self.kept[from..from + body.len()]
     }
 
-    /// The next record's summary, its body appended to the arena.
+    /// The next record's summary, its body appended to the arena — or, for a record over the
+    /// run's depth ceiling, only where it lay.
     ///
     /// # Errors
     ///
-    /// Whatever the walk refuses — a damaged block, or a record that will not parse.
-    pub fn next_summary(&mut self) -> Option<Result<KeptRecord, PspReadError>> {
-        match self.walk.next_keeping(&mut self.kept) {
-            Some(Ok(streamed)) => {
-                let body = streamed
-                    .body
-                    .expect("a walk that builds nothing keeps every body");
-                // **Shifted from the buffer's terms into the file's**, which is what makes a
-                // range outlive the release that moves the bytes it names.
-                let body = body.start + self.released..body.end + self.released;
-                // **After the step, so the changes this record's head carried are in.** The
-                // walk parses a head's live-set changes and applies them before handing the
-                // record over, so this is the set as of this record and not as of the one
-                // before it.
-                let ordinal = self.live.push(
-                    self.walk.live_reads(),
-                    self.walk.live_changes(),
-                    self.walk.blocks_begun(),
-                );
-                Some(Ok(KeptRecord {
-                    summary: LocusSummary::from(&streamed.head),
-                    body,
-                    ordinal,
-                }))
-            }
-            Some(Err(failed)) => Some(Err(failed)),
-            None => None,
+    /// Whatever the walk refuses — a damaged block, or a record that will not parse — and a body
+    /// that will not decode, for the records deep enough that the ceiling has to count their
+    /// reads.
+    pub fn next_summary(&mut self) -> Option<Result<Summarised, RunError>> {
+        let streamed = match self.walk.next_keeping(&mut self.kept)? {
+            Ok(streamed) => streamed,
+            Err(failed) => return Some(Err(self.refuse(failed))),
+        };
+        if streamed.too_large_to_hold {
+            // Nothing of it reached the arena, and its reads' changes are applied in the walk.
+            self.live.skip();
+            self.read.loci_too_large_to_read += 1;
+            return Some(Ok(Summarised::OverDepthCeiling {
+                region: streamed.head.region,
+                next_body_at: self.released + self.kept.len(),
+            }));
         }
+        let in_buffer = streamed
+            .body
+            .expect("a walk that builds nothing keeps every body");
+        match self.is_over_the_depth_ceiling(&streamed.head, in_buffer.clone()) {
+            Ok(false) => {}
+            Ok(true) => {
+                // **Nothing of it is held.** Its bytes leave the arena, and its reads are not
+                // written into the held live sets — which the next kept record then cannot be
+                // stored as a step from, so it is stored whole ([`HeldLiveSets::skip`]).
+                self.kept.truncate(in_buffer.start);
+                self.live.skip();
+                return Some(Ok(Summarised::OverDepthCeiling {
+                    region: streamed.head.region,
+                    next_body_at: self.released + self.kept.len(),
+                }));
+            }
+            Err(failed) => return Some(Err(failed)),
+        }
+        // **Shifted from the buffer's terms into the file's**, which is what makes a range
+        // outlive the release that moves the bytes it names.
+        let body = in_buffer.start + self.released..in_buffer.end + self.released;
+        // **After the step, so the changes this record's head carried are in.** The walk parses
+        // a head's live-set changes and applies them before handing the record over, so this is
+        // the set as of this record and not as of the one before it.
+        let ordinal = self.live.push(
+            self.walk.live_reads(),
+            self.walk.live_changes(),
+            self.walk.blocks_begun(),
+        );
+        Some(Ok(Summarised::Kept(KeptRecord {
+            summary: LocusSummary::from(&streamed.head),
+            body,
+            ordinal,
+        })))
+    }
+
+    /// Whether the record just walked has a read group deeper than the run's depth ceiling.
+    ///
+    /// **Decoded only where it could be.** Most records are never decoded at all, and the head
+    /// walk already knows how many read fragments span this one, which bounds how many reads it
+    /// can hold ([`DepthCeiling::may_be_exceeded_at`]). Only a record over that bound is decoded
+    /// to count its reads by read group — at a pile-up, all of them, once each, and then dropped.
+    fn is_over_the_depth_ceiling(
+        &self,
+        head: &RecordHead,
+        in_buffer: core::ops::Range<usize>,
+    ) -> Result<bool, RunError> {
+        let Some(ceiling) = self.depth_ceiling else {
+            return Ok(false);
+        };
+        let live = self.walk.live_reads();
+        if !ceiling.may_be_exceeded_at(live.len(), head.reads_discarded_by_cap) {
+            return Ok(false);
+        }
+        let found = LocatedRecord {
+            head: *head,
+            body: &self.kept[in_buffer.clone()],
+            record_bytes: in_buffer.len(),
+        };
+        let decoded = decode_the_body_of(&found, live.ids(), &self.layout)
+            .map_err(|source| self.refuse(source))?;
+        Ok(ceiling.is_exceeded_by(&decoded.record))
     }
 }
 
@@ -509,6 +598,14 @@ pub struct StoredSampleTallies {
     pub loci_thinned_to_the_read_cap: u64,
     /// Reads those records lost to the thinning.
     pub reads_thinned_by_the_read_cap: u64,
+    /// **Records dropped as they were read because a read group there was deeper than the run's
+    /// depth ceiling** (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)). Not
+    /// in [`loci_read`](Self::loci_read). No locus was called over their ground, for any sample.
+    pub loci_over_the_depth_ceiling: u64,
+    /// **Of those, the records too large for the psp reader to hold** — dropped without their
+    /// reads being counted, on the assumption that a record that size is a pile-up
+    /// ([`PspSummarySource::with_depth_ceiling`]).
+    pub loci_too_large_to_read: u64,
 }
 
 impl StoredSampleTallies {
@@ -669,6 +766,9 @@ impl ObservationSource for PspSummarySource<'_> {
         match self.next_drawn(spare)? {
             Ok(Drawn::Kept { body, .. }) => Some(self.build(body)),
             Ok(Drawn::Built(record)) => Some(Ok(record)),
+            // A walk that wants every record is never handed a ceiling, so never meets one; if it
+            // did, the record is not there to give, and the next one is.
+            Ok(Drawn::OverDepthCeiling { .. }) => self.next_observation(None),
             Err(failed) => Some(Err(failed)),
         }
     }
@@ -679,8 +779,20 @@ impl ObservationSource for PspSummarySource<'_> {
     ) -> Option<Result<Drawn, RunError>> {
         drop(spare);
         let kept = match self.next_summary()? {
-            Ok(kept) => kept,
-            Err(failed) => return Some(Err(self.refuse(failed))),
+            Ok(Summarised::Kept(kept)) => kept,
+            Ok(Summarised::OverDepthCeiling {
+                region,
+                next_body_at,
+            }) => {
+                self.reached =
+                    WalkProgress::After(LocusSummary::over_depth_ceiling(region).reach_position());
+                self.read.loci_over_the_depth_ceiling += 1;
+                return Some(Ok(Drawn::OverDepthCeiling {
+                    region,
+                    stand_in: StandIn::Body(next_body_at..next_body_at),
+                }));
+            }
+            Err(failed) => return Some(Err(failed)),
         };
         self.reached = WalkProgress::After(kept.summary.reach_position());
         self.read.loci_read += 1;
@@ -853,6 +965,8 @@ where
             block: _,
             // This adapter builds every body, so nothing is ever kept for later.
             body: _,
+            // Its walk is never told to skip a record, so a record too large is refused instead.
+            too_large_to_hold: _,
             head,
             record,
         } = match self.walk.next()? {
@@ -1626,7 +1740,12 @@ mod tests {
             PspSummarySource::over(&mut psp, &as_walked()).expect("the summary walk starts");
         let mut kept = Vec::new();
         while let Some(next) = source.next_summary() {
-            kept.push(next.expect("the fixture reads back"));
+            match next.expect("the fixture reads back") {
+                Summarised::Kept(record) => kept.push(record),
+                Summarised::OverDepthCeiling { .. } => {
+                    unreachable!("a source with no depth ceiling drops nothing")
+                }
+            }
         }
 
         assert_eq!(
@@ -1701,6 +1820,7 @@ mod tests {
             match next.expect("the fixture reads back") {
                 Drawn::Kept { summary, body } => drawn.push((summary, body)),
                 Drawn::Built(_) => panic!("this source keeps every body"),
+                Drawn::OverDepthCeiling { .. } => panic!("this source has no depth ceiling"),
             }
         }
 
@@ -1752,6 +1872,7 @@ mod tests {
             match next.expect("the fixture reads back") {
                 Drawn::Kept { body, .. } => bodies.push(body),
                 Drawn::Built(_) => panic!("this source keeps every body"),
+                Drawn::OverDepthCeiling { .. } => panic!("this source has no depth ceiling"),
             }
         }
         let mut thinned_records = 0u64;
@@ -1792,6 +1913,181 @@ mod tests {
             at += 1;
         }
         assert_eq!(uncapped.read().loci_thinned_to_the_read_cap, 0);
+    }
+
+    /// **A source given a depth ceiling hands over the records over it as stand-ins, holding
+    /// nothing of them, and every record it keeps still builds as written.**
+    ///
+    /// Every observation carries three reads that stay live from record to record, so each
+    /// record's live set is a small step from the one before. At the record in the middle those
+    /// three are replaced by three others that stay live to the end, and that record is taken over
+    /// a ceiling of 20 by thirty reads the walk's cap discarded. Its step is the one the source
+    /// does not hold, and the record after it changes nothing — so it can only be rebuilt if the
+    /// source stored it whole. A source that did not would build it against the three old reads.
+    #[test]
+    fn a_depth_ceiling_drops_the_deep_record_and_keeps_the_rest_building() {
+        let mut records = a_sample();
+        // **Inside a block, not at its start**: the fixture holds five records a block, and a
+        // block's first record is stored whole whatever came before it, which would hide the
+        // step this test is about.
+        let deep = 22;
+        for (at, record) in records.iter_mut().enumerate() {
+            for (j, observation) in record.observations.iter_mut().enumerate() {
+                // From the deep record on, a new set of three: reads that arrive at the dropped
+                // record and stay live after it, which is the step a held set must not miss.
+                let first = 1_000 * (j as u64 + 1) + if at >= deep { 500 } else { 0 };
+                observation.chain_ids = vec![first, first + 1, first + 2];
+                observation.num_obs = 3;
+            }
+            if at == deep {
+                record.reads_discarded_by_cap = 30;
+            }
+        }
+        let (_dir, path) = a_psp_of(&records);
+        let groups = as_walked();
+        let ceiling = DepthCeiling::at(20);
+
+        let built: Vec<_> = {
+            let mut psp = PspReader::open(&path).expect("the file opens");
+            let mut source =
+                PspObservationSource::over(&mut psp, &groups).expect("the walk starts");
+            std::iter::from_fn(|| source.next_observation(None))
+                .map(|next| next.expect("the fixture reads back"))
+                .collect()
+        };
+        let over: Vec<bool> = built.iter().map(|r| ceiling.is_exceeded_by(r)).collect();
+        assert_eq!(
+            over.iter().filter(|over| **over).count(),
+            1,
+            "only the deep record is over the ceiling"
+        );
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut source = PspSummarySource::over(&mut psp, &groups)
+            .expect("the walk starts")
+            .with_depth_ceiling(Some(ceiling));
+        let mut drawn = Vec::new();
+        while let Some(next) = source.next_drawn(None) {
+            drawn.push(next.expect("the fixture reads back"));
+        }
+        assert_eq!(
+            drawn.len(),
+            built.len(),
+            "one draw a record, dropped or kept"
+        );
+        for (at, (draw, record)) in drawn.iter().zip(&built).enumerate() {
+            match draw {
+                Drawn::OverDepthCeiling { region, stand_in } => {
+                    assert!(
+                        over[at],
+                        "record {at} was dropped but is within the ceiling"
+                    );
+                    assert_eq!(*region, record.region);
+                    let StandIn::Body(body) = stand_in else {
+                        panic!("a stored sample's stand-in is a body range")
+                    };
+                    assert!(body.is_empty(), "nothing of a dropped record is held");
+                }
+                Drawn::Kept { body, .. } => {
+                    assert!(!over[at], "record {at} is over the ceiling but was kept");
+                    assert_eq!(
+                        source.build(body.clone()).expect("a kept body builds"),
+                        *record,
+                        "record {at} builds as written"
+                    );
+                }
+                Drawn::Built(_) => panic!("this source keeps every body"),
+            }
+        }
+        assert_eq!(source.read().loci_over_the_depth_ceiling, 1);
+        assert_eq!(
+            source.read().loci_read,
+            built.len() as u64 - 1,
+            "a dropped record is not a locus read"
+        );
+    }
+
+    /// **A source given a depth ceiling drops a record too large for the reader to hold, as
+    /// though it were over the ceiling**, and the records after it still build against the
+    /// right reads.
+    ///
+    /// The fixture is the one the test above uses: at the record in the middle three reads are
+    /// replaced by three others that stay live to the end, so the record after it can only be
+    /// rebuilt if the source applied the skipped record's changes and stored the next set whole.
+    /// That record is made too large by one observation of 600,000 bases, over the reader's
+    /// 524,288-byte ceiling, while no read group anywhere comes near the depth ceiling.
+    #[test]
+    fn a_depth_ceiling_drops_a_record_too_large_to_read() {
+        let mut records = a_sample();
+        let deep = 22;
+        for (at, record) in records.iter_mut().enumerate() {
+            for (j, observation) in record.observations.iter_mut().enumerate() {
+                let first = 1_000 * (j as u64 + 1) + if at >= deep { 500 } else { 0 };
+                observation.chain_ids = vec![first, first + 1, first + 2];
+                observation.num_obs = 3;
+            }
+        }
+        records[deep].observations[0].bases = vec![b'A'; 600_000].into_boxed_slice();
+        let (_dir, path) = a_psp_of(&records);
+        let groups = as_walked();
+
+        let built: Vec<_> = {
+            let mut psp = PspReader::open(&path)
+                .expect("the file opens")
+                .with_a_record_buffer_ceiling(16 * 1024 * 1024)
+                .expect("a ceiling over the buffer");
+            let mut source =
+                PspObservationSource::over(&mut psp, &groups).expect("the walk starts");
+            std::iter::from_fn(|| source.next_observation(None))
+                .map(|next| next.expect("the fixture reads back under a raised ceiling"))
+                .collect()
+        };
+
+        let mut psp = PspReader::open(&path).expect("the file opens again");
+        let mut source = PspSummarySource::over(&mut psp, &groups)
+            .expect("the walk starts")
+            .with_depth_ceiling(Some(DepthCeiling::default()));
+        let mut drawn = Vec::new();
+        while let Some(next) = source.next_drawn(None) {
+            drawn.push(next.expect("a record too large is dropped, not refused"));
+        }
+        assert_eq!(
+            drawn.len(),
+            built.len(),
+            "one draw a record, dropped or kept"
+        );
+        for (at, (draw, record)) in drawn.iter().zip(&built).enumerate() {
+            match draw {
+                Drawn::OverDepthCeiling { region, stand_in } => {
+                    assert_eq!(at, deep, "record {at} was dropped");
+                    assert_eq!(*region, record.region);
+                    let StandIn::Body(body) = stand_in else {
+                        panic!("a stored sample's stand-in is a body range")
+                    };
+                    assert!(body.is_empty(), "nothing of a dropped record is held");
+                }
+                Drawn::Kept { body, .. } => {
+                    assert_ne!(at, deep, "the record too large to read was kept");
+                    assert_eq!(
+                        source.build(body.clone()).expect("a kept body builds"),
+                        *record,
+                        "record {at} builds as written"
+                    );
+                }
+                Drawn::Built(_) => panic!("this source keeps every body"),
+            }
+        }
+        assert_eq!(source.read().loci_over_the_depth_ceiling, 1);
+        assert_eq!(source.read().loci_too_large_to_read, 1);
+
+        // Without a depth ceiling the run has promised to call every locus, so it still stops.
+        let mut psp = PspReader::open(&path).expect("the file opens a third time");
+        let mut source = PspSummarySource::over(&mut psp, &groups).expect("the walk starts");
+        let refused = std::iter::from_fn(|| source.next_drawn(None)).find_map(Result::err);
+        assert!(
+            refused.is_some(),
+            "a record too large stops a run with no ceiling"
+        );
     }
 
     /// **What the merge has passed stops costing memory, and what it still holds still builds.**
@@ -1840,6 +2136,7 @@ mod tests {
             match next.expect("the fixture reads back") {
                 Drawn::Kept { body, .. } => bodies.push(body),
                 Drawn::Built(_) => panic!("this source keeps every body"),
+                Drawn::OverDepthCeiling { .. } => panic!("this source has no depth ceiling"),
             }
         }
         assert!(

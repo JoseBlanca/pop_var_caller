@@ -52,6 +52,7 @@ use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
+use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::run::report::BoundsTheRunCalledUnder;
 use crate::run::{OpenPspCohort, PspVariantCaller, RunError, RunReport, StoredCohortInputs};
@@ -140,6 +141,19 @@ pub struct CallFromPspsArgs {
     #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
     pub max_candidate_alleles: u16,
 
+    /// The site quality below which a called locus is not written: the `QUAL` the record would
+    /// carry, after the artifact correction. **Zero writes every called locus.** The default, 1,
+    /// drops the sites whose artifact penalties outweigh their evidence — most of the false calls
+    /// measured on GIAB from 5× to 300× and on 63 tomato accessions at about 3× — and costs few
+    /// true ones; GATK's 30 costs more than a hundred true calls at 5× and 10× on GIAB.
+    #[arg(
+        long,
+        default_value_t = crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+        value_parser = crate::cli::calling_run::parse_min_site_quality,
+        help_heading = "Advanced"
+    )]
+    pub min_site_quality: f32,
+
     /// Target false-discovery rate among the records the hidden-duplication filter removes —
     /// calls better explained by two reference-collapsed copies piling their reads onto one
     /// position than by a real variant. **Zero turns the filter off**, and a run with it off
@@ -189,8 +203,33 @@ pub struct CallFromPspsArgs {
     /// written: a psp stores each allele's error and mapping quality as totals, so the reads
     /// removed take their share of the totals rather than their own values. The run report
     /// says, per sample, how many positions and reads it thinned.
-    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
+    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
     pub max_reads_per_position: u32,
+
+    /// The most reads one read group may have at a locus before the locus is dropped.
+    ///
+    /// Where any sample has a read group deeper than this, **no variant is called there for any
+    /// sample**, and none of that ground's evidence is held in memory. Such depth, far above a
+    /// sample's usual coverage, is almost always a collapsed repeat: many copies of a sequence
+    /// mapped onto one. Reads the read cap (`--max-reads-per-position`) discarded and reads that
+    /// showed nothing are counted with the deepest read group. The run report says, per sample,
+    /// how many loci were dropped this way.
+    #[arg(long, default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
+    pub max_read_group_depth: u32,
+
+    /// Explain, at every locus overlapping the regions of a BED, why the run decided what it
+    /// did — candidates kept and dropped, samples set aside, genotype likelihoods, GT and GQ,
+    /// how partial reads were weighed, QUAL with its penalties, and what became of the record
+    /// — and write it as a TSV. The first value is the BED, the second the TSV. **It changes
+    /// nothing that is called**, and costs nothing when not given
+    /// (doc/devel/ng/spec/explain_loci.md).
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["REGIONS_BED", "OUTPUT_TSV"],
+        help_heading = "Advanced"
+    )]
+    pub explain_loci: Option<Vec<PathBuf>>,
 
     /// How many threads to use. Zero means every core.
     ///
@@ -259,6 +298,26 @@ pub struct CallFromPspsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CallFromPspsCliError {
+    /// The `--explain-loci` regions could not be read.
+    #[error("reading the --explain-loci regions in {path}")]
+    ExplainRegions {
+        /// The BED.
+        path: PathBuf,
+        /// What the BED reader hit.
+        #[source]
+        source: crate::regions::BedError,
+    },
+
+    /// The `--explain-loci` explanation could not be written.
+    #[error("writing the --explain-loci explanation to {path}")]
+    ExplanationNotWritten {
+        /// The TSV.
+        path: PathBuf,
+        /// What the write hit.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The hidden-duplication filter's target is not a false-discovery rate.
     #[error("--paralog-fdr is not a false-discovery rate")]
     ParalogTargetIsNotAFraction {
@@ -482,6 +541,20 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         None => std::sync::Arc::clone(&info),
     };
     let contigs: ContigList = info.contig_list();
+    // **Read before any work**, so a BED that will not read stops the run at once.
+    let explain = match args.explain_loci.as_deref() {
+        Some([bed, tsv]) => Some((
+            ExplainRegions::from_bed_path(bed, &contigs).map_err(|source| {
+                CallFromPspsCliError::ExplainRegions {
+                    path: bed.clone(),
+                    source,
+                }
+            })?,
+            tsv.clone(),
+        )),
+        Some(_) => unreachable!("clap takes exactly two values for --explain-loci"),
+        None => None,
+    };
     let reference = OpenReference::new(info);
 
     // **The cohort is opened before the segmentation is built, because the cohort is what says
@@ -531,7 +604,19 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     )
     .map_err(|source| CallFromPspsCliError::Run { source })?
     .with_psp_prefetch_budget(args.psp_prefetch_bytes)
-    .with_max_reads_per_position(args.max_reads_per_position);
+    .with_max_reads_per_position(args.max_reads_per_position)
+    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(
+        args.max_read_group_depth,
+    ));
+    let caller = match &explain {
+        Some((regions, _)) => caller.with_explain_loci(regions.clone()),
+        None => caller,
+    };
+    let caller = caller.with_min_site_quality(
+        crate::types::Phred::try_new(args.min_site_quality)
+            .expect("`parse_min_site_quality` admits only valid qualities"),
+    );
+    let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let read_groups = caller.read_groups().clone();
     let metadata = calling_run::header_for(
@@ -566,10 +651,14 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         )
     };
 
-    let (calling, mut stored) = caller
-        .call_cohort_handing_each_record_over(
+    // **The record's spill entry is encoded on the thread that called its locus** — the preparer
+    // is the sink's, taken once here — and the sink only appends it, in genome order.
+    let preparer = sink.preparer();
+    let (mut calling, mut stored) = caller
+        .call_cohort_preparing_each_record(
             &SummariseConditionLoop::new(StutterSubstitutionEmission, MarginalizedDirichletPrior),
-            &mut |record, window_coverage| sink.accept(record, window_coverage),
+            &|record, window_coverage| preparer.prepare(record, window_coverage),
+            &mut |prepared, _| sink.accept_prepared(prepared),
         )
         .map_err(|source| CallFromPspsCliError::Run { source })?;
 
@@ -598,9 +687,13 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
 
     // **Passes two and three, through the one function both subcommands call**, so direct mode
     // and psp mode cannot drift into filtering differently (spec §1.1 goal 2).
+    // The filter is asked for its verdicts on the records the explained loci wrote.
+    let mut paralog_explanations = explain
+        .as_ref()
+        .map(|_| ParalogExplanations::wanting(&calling.explanations));
     let filtered = match &parked {
         Some(spilling) => Some(
-            paralog_filter::fit_score_and_write_the_calls(
+            paralog_filter::fit_score_and_write_the_calls_explaining(
                 spilling.spill(),
                 // **Taken, not cloned.** `ParalogScoringContext::new` consumes the histograms so
                 // each sample's bins are freed as its model is fitted; cloning here would defeat
@@ -614,6 +707,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 &args.output,
                 metadata,
                 ploidy,
+                paralog_explanations.as_mut(),
             )
             .map_err(|source| CallFromPspsCliError::ParalogFilter { source })?,
         ),
@@ -637,6 +731,22 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
             calls: args.output.clone(),
             source,
         })?;
+
+    if let Some(verdicts) = paralog_explanations {
+        verdicts.add_to(&mut calling.explanations);
+    }
+    if let Some((_, tsv)) = &explain {
+        write_explanations(
+            tsv,
+            &mut std::mem::take(&mut calling.explanations),
+            &contigs,
+            &sample_names,
+        )
+        .map_err(|source| CallFromPspsCliError::ExplanationNotWritten {
+            path: tsv.clone(),
+            source,
+        })?;
+    }
 
     // **What the filter did goes at the end of the report**, and is empty on a run with the
     // filter off — so an off run prints what it printed before the filter existed.

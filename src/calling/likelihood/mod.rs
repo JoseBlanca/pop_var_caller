@@ -2212,6 +2212,7 @@ mod tests {
             bases: b"ACGTTAA"[..].into(),
             num_reads,
             q_sum,
+            sequence_may_run_on_past: None,
         }
     }
 

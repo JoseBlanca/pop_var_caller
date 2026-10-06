@@ -137,6 +137,56 @@ driver does (`(start..=end).contains(&record.pos)`,
 regions tile the genome gap-free and disjointly, every record is emitted by exactly one region — no
 duplicates, no holes.
 
+**No record may reach across either edge of its region, or the clamp makes holes.** A record
+anchored outside the region whose footprint reaches inside it takes every position it covers with it
+when the clamp drops it: the reads at those positions folded into that record, because it covered
+them, and no other record holds them. So each edge stops footprints, and each region explains only
+its own bases:
+
+- **At the region's end** (2026-09-02), a footprint stops at the region's last base. A deletion
+  anchored there is written as the deletion of the bases inside the region, and the bases past it
+  are the next region's to explain. The owner's ruling: a deletion crossing a repeat tract's edge is
+  two alleles in two loci, *"the STR tract is only the tandem repeat"*.
+- **At the region's start** (2026-10-06), a deletion anchored before the region whose deleted run
+  reaches into it is the region's: its record starts on the region's first base and covers only the
+  deleted bases inside the region. A read carrying it spells those bases as absent, with no anchor
+  base, and the VCF writer pads the empty allele with the base to its left. Any other event anchored
+  before the region stops short of the region's first base — a match is one base wide, so in
+  practice this is an insertion anchored inside the previous region whose record, `inserted_len + 1`
+  wide, would reach in. (`deletion_claimed_at_region_start` in `open_record.rs`.)
+- **An insertion anchored on a repeat tract's last base** whose spelling the repeat path's junction
+  convention refuses is claimed by the region beginning beside it: its record sits on the region's
+  first base and the inserted bases are spelled before it (`claimed_junction_insertion`). This one
+  holds only beside repeat ground, because it decides which of two paths owns one event, and must
+  agree with the other path's convention.
+
+The deletion rule holds at **every** region start, not only beside repeat ground: the bases a
+deletion removes inside the region have no other owner whatever lies before the edge. At a
+requested-region edge the base is lost the same way, and nothing else will explain it; at a contig's
+first base no read is anchored before it.
+
+What the start rule fixed, measured with the three GIAB samples over their benchmark regions. At
+300×, the first base of an ordinary region that follows repeat ground had no record at 98 of 872
+such edges: 40 of 353 in HG002, 22 of 248 in HG003 and 36 of 271 in HG004. At 30× it was 15 of the
+same 872. With the rule, none is lost at either depth. 97 of the 98 come back through the deletion
+claim and one through the insertion stop. The base *before* repeat ground was never lost. Scored
+with vcfeval against GIAB v4.2.1 (missed / false calls, SNPs and indels together): 5× 761 / 173 →
+761 / 174, 10× 217 / 93 → 217 / 94, 30× 51 / 22 → 50 / 23, 300× 43 / 10 → 40 / 11. The calls
+gained are three true SNPs on a region's first base (HG002 chr1:157974730 and chr1:193371946, HG003
+chr22:17321937); no call right before is wrong after. The one false call added, at every depth, is
+HG003 chr10:5596764: GIAB's 10-base deletion at chr10:5596759 crosses a tract's edge, and its part
+inside the ordinary region is now called on its own. That is the two-loci consequence of the ruling
+above, and it was a missed call before as well.
+
+At the other corner, 63 tomato accessions at about 3× over tomato1's 80 regions, records written go
+from 193,856 to 193,893. There is no truth set, so the 50 accessions GATK HaplotypeCaller called
+jointly were compared with vcfeval, sample by sample, over every locus whose record or any genotype
+changed, padded by 150 bases (268 stretches). Variant calls GATK also makes go from 9,266 to 9,496;
+calls it does not make from 9,315 to 9,501; and GATK calls ng misses from 1,423 to 1,188. Twelve of
+the changed records are not the walk's doing: the hidden-duplication filter is fitted over the whole
+run, the extra records move its posteriors in the fourth decimal, and records with a posterior
+between 0.60 and its cutoff of about 0.656 are written or not either way (4 lost, 8 gained).
+
 **The evidence behind those records is a separate question, and the naive query gets it wrong.** A
 record anchored inside a region can have a footprint reaching up to `max_record_span` (5000) past
 the region's end — a long deletion does exactly that. Reads that fold into it may lie **entirely
@@ -359,7 +409,67 @@ emit independently; an indel's base quality is a `min` over a padded window, bec
 carry no quality of their own; adaptor masking and `N` **silence** a base rather than flagging it;
 and the column cap depends on the column's content (250 with an indel present, else 8000),
 truncating in admission order. Every one is in the code being copied; they are listed so a reviewer
-can check the copy kept them.
+can check the copy kept them. **ng has since changed the last two:** reads are kept by a hash of the
+read name, not in admission order (2026-08-05), and **one cap applies at every position**
+(2026-10-03). The content-dependent cap biased indels. An indel's reads are folded only at its
+anchor, where 250 applied, while the reference reads are also folded at the positions the indel
+spans, where it did not — and a read kept at any position of a record folds with its whole window.
+At 300× a heterozygous deletion in 47% of fragments was stored at 31%
+(`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §3).
+
+**What one cap leaves open.** The same mechanism still works wherever a record's anchor holds more
+reads than the cap and the positions it spans do not, because a read dropped at the anchor comes
+back by folding at another position. With the cap at 1,000 reads per read group that needs a
+position deeper than 1,000, and both calling commands drop every locus where a read group exceeds
+`--max-read-group-depth` (default 1,000), so at the defaults no such locus is called. A run that
+sets `--max-reads-per-position` below `--max-read-group-depth` can reach it. The full repair is a
+record-level rule: a read the cap dropped at any position of a record's footprint is left out of
+that record.
+
+**How wide a record is: through the indel's right-most placement (2026-10-06).** A read is complete
+at a record only if it witnessed every one of the record's positions, so the record's width decides
+which reads may vote outright. Reads arrive with every indel left-aligned, so a record opens at the
+indel's left-most placement. Inside a repeat the same indel can be written at any placement along
+it: deleting the first `AT` of `TATATATAG` or the last gives one haplotype. A record only as wide as
+the left-most placement lets a reference read that stops, or is soft-clipped, partway along the
+repeat count as a **complete** reference observation, although a carrier shows the same bases there.
+At a homozygous indel each such read costs the homozygous genotype a sequencing error, roughly ln ε
+against ln ½ for the heterozygote, so once about 9 reads in 100 are of this kind the call becomes
+heterozygous at any depth. On GIAB at 300× that was 5 of the 8 wrong indel genotypes at ordinary
+loci, and across the 59 right homozygous calls 86 of every 100 reference reads covering the locus
+ended inside the repeat. So the record reaches the right-most placement (`indel_record_span` in
+`open_record.rs`):
+
+- **a deletion** of `L` bases slides right `s` places while the base it would uncover equals the
+  base it would remove, and its record covers `L + 1 + s` positions. A reference read that reaches
+  the last of them has shown more of the repeat than any carrier can, so no base past the slide is
+  needed;
+- **an insertion** slides right `s` places while its inserted sequence, read cyclically, matches the
+  reference after the anchor. A reference read and a carrier first differ on the base after the
+  slide, so the record reaches `anchor + s + 1`: at least `s + 2` positions, and never fewer than the
+  `inserted_len + 1` it had before.
+
+Where the indel cannot slide (`s = 0`) the width is unchanged. The reads the wider record sets aside
+become partial, and the partial rule (`read_likelihoods.md` §5.3) finds them compatible with every
+allele they could belong to. This is not realignment: every read keeps the placement its mapper
+gave it, and only the ground it is compared over changes. Three limits, each a guard rather than a
+policy: an indel anchored **before** the region keeps its unslid width, because the generator drops
+records anchored outside the region and a slid one would take the region's first positions with it
+(a SNP after an `A10` tract on GIAB HG003, chr21:43019420, was lost that way in the first version);
+the slide never pushes a record past `max_record_span`, which would end the walk; and it is followed
+at most 512 bases.
+
+Measured with the three GIAB samples, each over its own 100 regions, against GIAB v4.2.1 with
+vcfeval (missed / false calls, SNPs and indels together): at 5× 749 / 318 → 746 / 315; at 10×
+210 / 318 → 202 / 310; at 30× 61 / 176 → 54 / 168; at 300× 50 / 51 → 44 / 45. No call right before
+the change is wrong after it, at any of the four depths. Those are single-sample calls. The other
+corner, 63 tomato accessions at about 3× over tomato1's 80 regions (8 Mb), has no truth set, so it
+was compared with GATK HaplotypeCaller run jointly on the same CRAMs over every locus whose calls
+changed, sample by sample with vcfeval, an allele in either zygosity counting as agreement, over
+the 1,056 such loci on chromosomes 1–5. The change removes 3,488 variant genotypes GATK does not
+call and loses 1,156 that it does (83,175 → 79,687 and 72,257 → 71,101); the share of ng's calls
+there that GATK also makes goes from 46.5 to 47.2 in 100. Records written fall from 227,797 to
+225,917, and the run took 2 min 11 s against 2 min 34 s.
 
 **The one invariant worth stating in prose, because it is the least obvious and was once a real
 bug:** each (record, read) pair folds exactly **once over the record's lifetime**, not once per
@@ -797,20 +907,21 @@ separating them per read costs a per-locus membership test whose only consumer i
 
 **Config.** Per `locus_generation.md` §7 a generator owns its knobs and takes them at construction.
 ng gets **its own constants**, starting at production's values but free to diverge — the same rule
-the STR generator set for its reservoir cap. All five are production's, **inherited and never
-measured by ng**; that is the map of what is safe to move.
+the STR generator set for its reservoir cap. Production had five; ng has four. Production's separate
+cap at a position with an indel (250) is removed (§4, 2026-10-03), and the read cap and the
+active-read ceiling have moved. The record span and the mate window are production's, **inherited
+and never measured by ng**.
 
 ```rust
 pub struct PileupGeneratorConfig {
-    /// Reads folded at a position with no indel anchored there. Production: 8000.
-    pub max_snp_column_depth: u32,
-    /// Reads folded at a position where any read has an indel. Production: 250.
-    pub max_indel_column_depth: u32,
+    /// Reads of one read group folded at one position, whatever they show there.
+    /// ng: 1,000 per read group (production: 8,000 per sample, and 250 at an indel).
+    pub max_reads_per_position: u32,
     /// Widest record footprint before the walk fails. Production: 5000.
     pub max_record_span: u32,
     /// How far a first mate stays available for pairing. Production: 10000.
     pub mate_lookup_window: u32,
-    /// Active-read ceiling. Production: 4096.
+    /// Active-read ceiling. ng: 32,768 (production: 4,096).
     pub max_active_reads: u32,
 }
 ```

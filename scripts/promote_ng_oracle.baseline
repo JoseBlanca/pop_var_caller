@@ -24,6 +24,39 @@
 # standard error they lacked, so every rate now carries one; nothing else moves but notes; 4 of 6,706 calls with the fit move, all repeat tracts — QUAL by at most 0.4, AF by at most 0.00046
 # — with no genotype changed and no record appearing or vanishing. The defaults run's file moves in 8 note lines.
 # They were 70a98909… / 351f244e… / 9f5edd0e….
+# Re-recorded 2026-10-03 (Linux container, arm64) with partial reads compared against the allele and the reference beyond it
+# (read_likelihoods.md §5.3). That moved the two default-parameter VCFs (b74f3edf → 28a750c9) and from_fit.comparable; the
+# window rows, histograms, fitted parameters and from_fit were already stale at 25bfe313 (bc6780ff, 6c5926ce, c590689d, 5cdeafd0).
+# Re-recorded 2026-10-03 (Linux container, arm64) with one read cap at every position (locus_generation_pileup.md §4):
+# read group 1's fitted base-quality multiplier moved 2.672221 → 2.672171, so fitted.parameters.toml (c590689d → 7ef6b6e4)
+# and from_fit.comparable (c59cc176 → 5c1df9fb) moved: 233 of 6,695 records in printed decimals, no genotype or filter.
+# Re-recorded 2026-10-06 (Linux container, arm64) with an indel's record reaching its right-most placement in a repeat
+# (locus_generation_pileup.md §4). Default-parameter VCFs 28a750c9 → 7849294f (7,787 → 7,727 records); window rows follow the
+# records (bc6780ff → dab62245); each sample's coverage histogram holds about 5,200 fewer of its 3.8 million windows
+# (6c5926ce → 9d3fa077); fitted error multipliers move at most 0.3 in 100 and sample SRS1839219's F 0.962 → 0.969
+# (7ef6b6e4 → 68f564c5); from_fit.comparable 5c1df9fb → 6b8ac929.
+# Re-recorded 2026-10-06 (Linux container, arm64) with spellings cut short re-read as partial reads (read_likelihoods.md §5.3):
+# with default parameters 62 of 7,727 records change, 4 genotypes and no filter, mostly homozygous insertions whose QUAL and
+# GQ rise (7849294f → 574e1d1c); fitted parameters unchanged; called with them, 1,080 of 6,641 records change, 1 genotype
+# (6b8ac929 → e00ec710).
+# Re-recorded 2026-10-06 (Linux container, arm64) with spellings carrying a shorter insertion also re-read (read_likelihoods.md
+# §5.3): 3 of 7,727 default-parameter records change, 1 genotype, no filter (574e1d1c → 4e2e2004); from_fit.comparable 3 of
+# 6,641, 1 genotype (e00ec710 → 21734eb2).
+# Re-recorded 2026-10-06 (Linux container, arm64) with --min-site-quality defaulting to 1 (site_quality_threshold.md):
+# 288 of 7,727 default-parameter records have a site quality below 1 and are no longer written (4e2e2004 → 1e8c4570, 7,439
+# records); window rows follow them (dab62245 → be16bc49); fitted parameters unchanged; from_fit.comparable 21734eb2 → 2210e52e.
+# Re-recorded 2026-10-06 (Linux container, arm64) with a deletion reaching into a region from before it claimed by the region
+# (locus_generation_pileup.md §2): the region's first base keeps a record. Default-parameter VCFs 1e8c4570 → ae07091c (7,439 →
+# 7,451 records); window rows follow the records (be16bc49 → a07ec5c5, 30,296 → 30,348 rows) and so do the coverage histograms
+# (9d3fa077 → ec08c16f); fitted error multipliers move at most 1 part in 3,000, each sample's F at most 0.0005, and the
+# slippage table's per-tract values move with them (68f564c5 → 3f618451); from_fit.comparable 2210e52e → 65105ad0 (6,631 → 6,642).
+# Merged 2026-10-06: branch fit-precision (the lines above under fit_precision.md) brought main in. Measured on the merged
+# code (Linux container, arm64): the default-parameter VCFs, window rows and histograms are main's exactly; the defaults
+# run's parameters file is fit-precision's (b7c0a262: main's numbers, in format version 2 with its notes); the fit and the
+# calls made with it are neither parent's — fit-precision's fit over main's walk. Against fit-precision's last run, 65 of
+# the fitted file's 344 non-note lines move (37 slippage rows, 15 length spectra, 4 multipliers, 4 inbreeding coefficients,
+# 3 concentrations, 2 starts' pass counts); the fit's calls go from 6,706 to 6,645 records, 17 genotypes changing among
+# those both hold. They were main's 5e6d874d… / 3f618451… / 65105ad0….
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -34,11 +67,11 @@
 #   SRR5079878.p1.bench.cram
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
-# records: 7787
-b74f3edf9026fa756621e2492baf019a  from_alignments.comparable
-b74f3edf9026fa756621e2492baf019a  from_psps.comparable
+# records: 7451
+ae07091c6dc555de7b7e520492540707  from_alignments.comparable
+ae07091c6dc555de7b7e520492540707  from_psps.comparable
 b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
-bc6780ff16430ca4f3e24e3fee052eec  from_alignments.windows.sorted
-6c5926ce33429b3abc927b8a8faf4cbd  from_alignments.windows.histograms
-e77b4bbcd9d2b96e4cf77927671fa573  fitted.parameters.toml
-b05941de78a12d828fa9d17f20bff6a0  from_fit.comparable
+a07ec5c5b95a22e83aaf3ee86e787fae  from_alignments.windows.sorted
+ec08c16f7e7e2956fdf8ab3a3e27da8d  from_alignments.windows.histograms
+3338658ce23b0ea15e77030840c1732a  fitted.parameters.toml
+07de643d526c2dd32123ca0cf162d5db  from_fit.comparable

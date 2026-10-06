@@ -38,7 +38,7 @@ use crate::calling::evidence_shaping::{
 };
 use crate::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::calling::run_parameters::RunParameters;
-use crate::calling::{CallingScratch, FrozenParameters, LocusInference};
+use crate::calling::{CallingScratch, FrozenParameters, LocusInference, ReferenceBesideLocus};
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::locus_generation::{
@@ -63,15 +63,20 @@ use crate::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads,
 };
-use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
+use crate::run::depth_ceiling::DepthCeiling;
+use crate::types::{GenomePosition, GenomeRegion, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::vcf::assemble::assemble_record;
 use crate::window_coverage::{SampleHistogram, WindowCoverage};
 
 use super::RunError;
 use super::calling_progress::CallingProgress;
+use super::explain::{
+    ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows, too_wide_rows,
+};
 use super::records::{
-    a_written_genotype_carries_an_alternative, evidence_for_output, padding_base_beside,
+    DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
+    evidence_for_output, padding_base_beside, reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -249,8 +254,15 @@ pub struct AlignedFilesVariantCaller {
     /// The settings every one of this run's locus generators is built with — checked at
     /// `open`, so building a generator from them cannot fail later.
     locus_generator_settings: PileupGeneratorConfig,
+    /// The most reads one read group may have at a locus before the locus is dropped for the
+    /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    depth_ceiling: DepthCeiling,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
+    /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
+    explain: Option<ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`).
+    min_site_quality: Phred,
 }
 
 impl AlignedFilesVariantCaller {
@@ -346,7 +358,35 @@ impl AlignedFilesVariantCaller {
             candidate_selection,
             merge_parameters,
             locus_generator_settings: alignments.locus_generator_settings,
+            depth_ceiling: DepthCeiling::default(),
+            explain: None,
+            min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
+                .expect("the default threshold is a valid quality"),
         })
+    }
+
+    /// The same run, explaining every locus that overlaps `regions`
+    /// (`doc/devel/ng/spec/explain_loci.md`). **What is called does not change.**
+    #[must_use]
+    pub fn with_explain_loci(mut self, regions: ExplainRegions) -> Self {
+        self.explain = Some(regions);
+        self
+    }
+
+    /// The same run, writing no locus whose site quality falls below `quality`
+    /// ([`DEFAULT_MIN_SITE_QUALITY`] unless set; zero writes every called locus).
+    #[must_use]
+    pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
+        self.min_site_quality = quality;
+        self
+    }
+
+    /// The same run, dropping for the whole cohort every locus where some sample has a read
+    /// group deeper than `ceiling` ([`depth_ceiling`](super::depth_ceiling)).
+    #[must_use]
+    pub fn with_depth_ceiling(mut self, ceiling: DepthCeiling) -> Self {
+        self.depth_ceiling = ceiling;
+        self
     }
 
     /// How many samples this run calls — the length every per-sample row downstream has.
@@ -470,11 +510,10 @@ impl AlignedFilesVariantCaller {
                 // the criteria the ground was actually cut with, by construction.
                 self.segmentation.inputs(),
             )?;
-            walkers.push(AlignmentFilesWalker::over(
-                Arc::clone(&self.segmentation),
-                reads,
-                generators,
-            ));
+            walkers.push(
+                AlignmentFilesWalker::over(Arc::clone(&self.segmentation), reads, generators)
+                    .with_depth_ceiling(Some(self.depth_ceiling)),
+            );
         }
         Ok(RunReadyToWalk {
             segmentation: self.segmentation,
@@ -573,6 +612,10 @@ impl AlignedFilesVariantCaller {
         // sliding forward with the merge and shared with nothing (`spec/window_coverage.md`
         // §3.2). Taken before `walkers()` consumes the run.
         let reference_for_the_merge = self.walk_reference.accessor();
+        // The reference either side of each ordinary locus its partial reads need
+        // (`read_likelihoods.md` §5.3) — an accessor of its own, so its window does not
+        // collapse onto the merge's.
+        let reference_beside_the_loci = self.walk_reference.accessor();
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -606,6 +649,10 @@ impl AlignedFilesVariantCaller {
         // Counted rather than collected: a run over tract-rich ground meets millions of these,
         // and what the report owes is how many, not where each one was.
         let mut tracts = TractOutcomes::default();
+        let mut beside_scratch = ReferenceBesideScratch::default();
+        // The merge's sink cannot fail, so the first flank that cannot be read is kept and
+        // returned once the merge does.
+        let mut stopped: Option<RunError> = None;
 
         let mut cache = ObservationCache::over(walkers, Box::new(reference_for_the_merge));
         merge_cohort_handing_each_locus_over(
@@ -615,10 +662,42 @@ impl AlignedFilesVariantCaller {
             merge_parameters.max_cohort_locus_span,
             merge_parameters.min_alt_reads,
             &mut |observation| {
+                if stopped.is_some() {
+                    return;
+                }
                 let region = observation.region;
+                let mut observation = observation;
+                if let Err(source) = reread_spellings_cut_short(
+                    &reference_beside_the_loci,
+                    &mut observation,
+                    &mut beside_scratch,
+                ) {
+                    stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                        locus: region,
+                        source,
+                    });
+                    return;
+                }
+                let reference_beside = match reference_beside_locus(
+                    &reference_beside_the_loci,
+                    &observation,
+                    &mut beside_scratch,
+                ) {
+                    Ok(beside) => beside,
+                    Err(source) => {
+                        stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                            locus: region,
+                            source,
+                        });
+                        return;
+                    }
+                };
                 match call_one_cohort_locus(
                     genotyper,
                     &observation,
+                    reference_beside,
+                    // The oracle's calls explain nothing.
+                    None,
                     &frozen,
                     &candidate_selection,
                     &tract_selection,
@@ -631,7 +710,9 @@ impl AlignedFilesVariantCaller {
                     // This entry point wants the call and nothing beside it, so the observation's
                     // remapping and leftover are dropped where they were built.
                     |inference, _remap, _unmatched, _verdict| inference,
-                ) {
+                )
+                .0
+                {
                     LocusOutcome::Called(called) => called_loci.push(called),
                     LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
                     // Both counted inside the dispatch, where the verdict that decided them is.
@@ -640,6 +721,9 @@ impl AlignedFilesVariantCaller {
             },
             &mut loci_too_wide_to_assemble,
         )?;
+        if let Some(error) = stopped {
+            return Err(error);
+        }
 
         let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
         Ok(CalledCohort {
@@ -703,6 +787,9 @@ impl AlignedFilesVariantCaller {
         // callers sliding a single window in two directions (`spec/window_coverage.md` §3.2).
         let reference_for_the_merge = self.walk_reference.accessor();
         let contigs = self.walk_reference.contigs();
+        // Taken before `walkers` consumes the run; a handful of regions.
+        let explain = self.explain.clone();
+        let min_site_quality = self.min_site_quality;
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -722,6 +809,8 @@ impl AlignedFilesVariantCaller {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
+            explain: explain.as_ref(),
+            min_site_quality,
         };
         let CohortCallingOutcome {
             calling,
@@ -731,7 +820,8 @@ impl AlignedFilesVariantCaller {
             ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
             inputs,
             genotyper,
-            hand_over,
+            &|record, _| Ok(record),
+            &mut |record: VcfRecord, windows| hand_over(&record, windows),
         )?;
         Ok(WrittenCohort {
             calling,
@@ -766,6 +856,11 @@ pub(crate) struct CohortCallingInputs<'a> {
     pub padding_reference: WindowedRefSeq,
     /// The reference's contig names, which the progress lines print the position against.
     pub contigs: &'a ContigList,
+    /// **The loci to explain, `None` when the run was asked to explain none** — the one
+    /// question each locus is asked (`doc/devel/ng/spec/explain_loci.md`).
+    pub explain: Option<&'a ExplainRegions>,
+    /// The site quality below which a called locus is not written (`--min-site-quality`).
+    pub min_site_quality: Phred,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -837,15 +932,23 @@ pub(crate) struct CohortCallingOutcome<S> {
 /// # Errors
 ///
 /// The first sample whose source fails ends the run ([`RunError::SourceFailed`]); so does the
-/// first record `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding base the
-/// reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot fail: a
-/// locus whose loop did not settle comes back with `converged` false and is written on the
-/// `EMNoConv` filter.
-pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, E>(
+/// first record `prepare` or `hand_over` refuses ([`RunError::RecordNotWritten`]) and a padding
+/// base the reference will not serve ([`RunError::PaddingBaseUnreadable`]). Calling itself cannot
+/// fail: a locus whose loop did not settle comes back with `converged` false and is written on
+/// the `EMNoConv` filter.
+///
+/// # A record reaches its output in two steps
+///
+/// `prepare` gets it ready — whatever of the output's work needs no file — and `hand_over` takes
+/// it, in genome order, with every sample's window. Here the two run back to back; the round
+/// driver ([`call_cohort_from_sources_in_rounds`]) runs `prepare` on the thread that called the
+/// locus, which is why the split exists.
+pub(crate) fn call_cohort_from_sources_handing_each_record_over<Source, S, G, P, E>(
     mut cache: ObservationCache<Source>,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
-    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+    prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send,
@@ -861,7 +964,12 @@ where
         candidate_selection,
         padding_reference,
         contigs,
+        explain,
+        min_site_quality,
     } = inputs;
+    if let Some(regions) = explain {
+        cache.explaining_drops(regions.clone());
+    }
     // **The cohort's size is read off the cache rather than passed beside it**, so the number
     // the genotyper is told and the number of sources actually being merged cannot become two
     // different facts.
@@ -879,8 +987,11 @@ where
     };
     let mut scratch: CallingScratch<S> = CallingScratch::default();
     let mut padding_scratch = Vec::new();
+    let mut beside_scratch = ReferenceBesideScratch::default();
     let mut records_written = 0_u64;
+    let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut loci_called_but_not_written = 0_u64;
+    let mut loci_below_minimum_site_quality = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     // Counted rather than collected — see the other driver.
@@ -915,9 +1026,35 @@ where
                 return;
             }
             let region = observation.region;
-            let built = call_one_cohort_locus(
+            let mut observation = observation;
+            if let Err(source) = reread_spellings_cut_short(
+                &padding_reference,
+                &mut observation,
+                &mut beside_scratch,
+            ) {
+                stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                    locus: region,
+                    source,
+                });
+                return;
+            }
+            let reference_beside =
+                match reference_beside_locus(&padding_reference, &observation, &mut beside_scratch)
+                {
+                    Ok(beside) => beside,
+                    Err(source) => {
+                        stopped = Some(RunError::ReferenceBesideLocusUnreadable {
+                            locus: region,
+                            source,
+                        });
+                        return;
+                    }
+                };
+            let (built, explanation) = call_one_cohort_locus(
                 genotyper,
                 &observation,
+                reference_beside,
+                explain,
                 &frozen,
                 candidate_selection,
                 &tract_selection,
@@ -931,7 +1068,7 @@ where
                     // **Asked before the reference is read**, so a locus that establishes
                     // no variant costs no fetch and no evidence gathering.
                     if !a_written_genotype_carries_an_alternative(&inference) {
-                        return Ok(None);
+                        return Ok(CalledLocus::NoAlternative);
                     }
                     let alleles = inference.alleles();
                     let padding = padding_base_beside(
@@ -952,6 +1089,15 @@ where
                         verdict,
                         padding,
                     );
+                    // **The gate reads the quality the record would carry**, after the artifact
+                    // correction, and before the windows are taken: a locus below it is not
+                    // written, so nothing of it reaches the file or the filter after
+                    // (`calling_quality.md` §3.5).
+                    if evidence.corrected_site_quality < min_site_quality {
+                        return Ok(CalledLocus::BelowMinimumSiteQuality(
+                            evidence.corrected_site_quality,
+                        ));
+                    }
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -960,17 +1106,28 @@ where
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(Some(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
                 },
             );
+            if let Some(mut rows) = explanation {
+                if let Some(end) = end_of_a_called_locus(&built) {
+                    outcome_rows(&mut rows, region, end);
+                }
+                explanations.extend(rows);
+            }
             progress.locus_passed(region, records_written);
             match built {
                 LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
                 // Both counted inside the dispatch, where the verdict that decided them is.
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
                 LocusOutcome::Called(Err(error)) => stopped = Some(error),
-                LocusOutcome::Called(Ok(None)) => loci_called_but_not_written += 1,
-                LocusOutcome::Called(Ok(Some(record))) => {
+                LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
+                    loci_called_but_not_written += 1;
+                }
+                LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
+                    loci_below_minimum_site_quality += 1;
+                }
+                LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
                     // **What this run read, at every record it writes** — off unless the run was
                     // asked for it, and the only thing outside the run that can see whether the
                     // cover's look-ahead works, since the measurement changes no VCF byte
@@ -984,7 +1141,9 @@ where
                         },
                         &window_coverage,
                     );
-                    match hand_over(&record, &window_coverage) {
+                    match prepare(record, &window_coverage)
+                        .and_then(|ready| hand_over(ready, &window_coverage))
+                    {
                         Ok(()) => records_written += 1,
                         Err(source) => {
                             stopped = Some(RunError::RecordNotWritten {
@@ -1007,6 +1166,13 @@ where
     // **After the two error returns, so a run that failed never finishes an accumulator.** A
     // half-walked sample's histogram would describe the ground the run reached and say nothing
     // about that, which is the same reasoning `sources`' own doc gives.
+    // The loci the merge dropped or refused, where the run explains them.
+    if let Some(dropped) = cache.take_dropped_loci() {
+        explanations.extend(dropped.into_rows());
+    }
+    if let Some(regions) = explain {
+        explanations.extend(too_wide_rows(regions, &loci_too_wide_to_assemble));
+    }
     let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
     // What this run's yardsticks are, for something outside it to check — off unless the run was
     // asked for it, beside the per-record rows (`cohort_merge::recorded_windows`).
@@ -1015,9 +1181,11 @@ where
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
+            loci_below_minimum_site_quality,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
+            explanations,
         },
         sources,
         window_coverage_histograms,
@@ -1037,12 +1205,19 @@ where
 /// not periodic is called over the reference tract alone, so every sample is homozygous
 /// reference and no record is written — in the file it is indistinguishable from a tract nobody
 /// varied at (`doc/devel/ng/spec/vcf_output.md` §9). The count is the only place it appears.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+///
+/// **So the refused tracts are kept by position, not only counted** — the report lists the first
+/// few, and a reader can look at the reads there. A count alone named nothing to look at: GIAB
+/// HG002's `chr1:206,838,725` was refused and the run said only "1"
+/// (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §2). Not `Copy` for that reason.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TractOutcomes {
     /// Scored, and carrying no repeat-tract filter.
     pub called: u64,
-    /// Scored, and refused as not varying in whole motif units — `notPeriodic`.
-    pub not_periodic: u64,
+    /// Scored, and refused as not varying in whole motif units — `notPeriodic` — each by its
+    /// tract. **In the order the run met them**, which on the round driver is the order its
+    /// workers finished: the report sorts before it prints.
+    pub not_periodic: Vec<GenomeRegion>,
     /// Scored, and carrying more candidate sequences than the cap admits — `tooManyAlleles`.
     /// The locus is still called over the ones the cap kept.
     pub too_many_alleles: u64,
@@ -1059,7 +1234,7 @@ impl TractOutcomes {
     #[must_use]
     pub fn built(&self) -> u64 {
         self.called
-            + self.not_periodic
+            + self.not_periodic.len() as u64
             + self.too_many_alleles
             + self.without_whole_repeats
             + self.bundles_set_aside
@@ -1068,7 +1243,7 @@ impl TractOutcomes {
     /// Those that were scored and then refused by a filter of their own.
     #[must_use]
     pub fn refused_by_a_filter(&self) -> u64 {
-        self.not_periodic + self.too_many_alleles
+        self.not_periodic.len() as u64 + self.too_many_alleles
     }
 }
 
@@ -1117,6 +1292,12 @@ enum LocusOutcome<R> {
 /// matching it to one (`doc/devel/ng/spec/read_likelihoods.md` §4). Selection still decides the
 /// candidate list, and the leftover it produces is still what says a sample must be emitted as
 /// missing.
+///
+/// **`explain` is the run's `--explain-loci` regions, `None` when it asked for none.** A locus
+/// overlapping one comes back with its explanation rows (`doc/devel/ng/spec/explain_loci.md`):
+/// everything up to the call, which the record's own half is added to by the driver that has
+/// the record. Every other locus — every locus of a run that asked for none — comes back with
+/// `None` and costs the one question.
 #[expect(
     clippy::too_many_arguments,
     reason = "the same nine `call_one_generic_locus` takes, plus the tract path's own selection \
@@ -1126,6 +1307,8 @@ enum LocusOutcome<R> {
 fn call_one_cohort_locus<S, G, R>(
     genotyper: &G,
     observation: &CohortObservation,
+    reference_beside: ReferenceBesideLocus<'_>,
+    explain: Option<&ExplainRegions>,
     parameters: &FrozenParameters<'_>,
     candidate_selection: &CandidateSelectionConfig,
     tract_selection: &SsrSelectionConfig,
@@ -1136,20 +1319,24 @@ fn call_one_cohort_locus<S, G, R>(
     tracts: &mut TractOutcomes,
     scratch: &mut CallingScratch<S>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
-) -> LocusOutcome<R>
+) -> (LocusOutcome<R>, Option<Vec<ExplainRow>>)
 where
     G: LocusGenotyper<S>,
 {
-    match &observation.kind {
+    let mut explanation =
+        explain.and_then(|regions| regions.covers(observation.region).then(Vec::new));
+    let outcome = match &observation.kind {
         LocusKind::Generic => match call_one_generic_locus(
             genotyper,
             observation,
+            reference_beside,
             parameters,
             candidate_selection,
             calling_loop_config,
             run_sample_count,
             shaping,
             scratch,
+            explanation.as_mut(),
             finish,
         ) {
             Some(called) => LocusOutcome::Called(called),
@@ -1166,12 +1353,55 @@ where
             tract_shaping,
             tracts,
             scratch,
+            explanation.as_mut(),
             finish,
         ),
         LocusKind::SsrBundle => {
             tracts.bundles_set_aside += 1;
             LocusOutcome::BundleSetAside
         }
+    };
+    if let Some(rows) = explanation.as_mut() {
+        let end = match &outcome {
+            LocusOutcome::NobodyToCall => Some(LocusEnd::NobodyToCall),
+            LocusOutcome::BundleSetAside => Some(LocusEnd::BundleSetAside),
+            LocusOutcome::TractWithoutWholeRepeats => Some(LocusEnd::TractWithoutWholeRepeats),
+            // The driver holding the record says how a called locus ended.
+            LocusOutcome::Called(_) => None,
+        };
+        if let Some(end) = end {
+            outcome_rows(rows, observation.region, end);
+        }
+    }
+    (outcome, explanation)
+}
+
+/// **What became of a called locus at the record-building stage** — the drivers' answer for each
+/// locus that reached a call.
+pub(crate) enum CalledLocus {
+    /// A record, for the file.
+    Written(VcfRecord),
+    /// No written genotype carried an alternative allele.
+    NoAlternative,
+    /// The site quality after the artifact correction, below `--min-site-quality`.
+    BelowMinimumSiteQuality(Phred),
+}
+
+/// **The explanation's outcome for a locus the caller called**, read off what the driver built
+/// from it — `None` for the outcomes `call_one_cohort_locus` explained itself.
+fn end_of_a_called_locus(
+    built: &LocusOutcome<Result<CalledLocus, RunError>>,
+) -> Option<LocusEnd<'_>> {
+    match built {
+        LocusOutcome::Called(Ok(CalledLocus::Written(record))) => Some(LocusEnd::Written(record)),
+        LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => Some(LocusEnd::NotWritten),
+        LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(quality))) => {
+            Some(LocusEnd::BelowMinimumSiteQuality(*quality))
+        }
+        LocusOutcome::Called(Err(_)) => Some(LocusEnd::Failed),
+        LocusOutcome::NobodyToCall
+        | LocusOutcome::BundleSetAside
+        | LocusOutcome::TractWithoutWholeRepeats => None,
     }
 }
 
@@ -1186,9 +1416,9 @@ where
 /// **A truncated tract is still called** over the sequences the cap kept, and it is counted as
 /// `tooManyAlleles` rather than as called so that the two are not summed into one number a
 /// reader would take for clean calls.
-fn count_this_tract(verdict: SelectionVerdict, tracts: &mut TractOutcomes) {
+fn count_this_tract(verdict: SelectionVerdict, tract: GenomeRegion, tracts: &mut TractOutcomes) {
     match verdict {
-        SelectionVerdict::NotPeriodic => tracts.not_periodic += 1,
+        SelectionVerdict::NotPeriodic => tracts.not_periodic.push(tract),
         SelectionVerdict::Truncated { .. } => tracts.too_many_alleles += 1,
         _ => tracts.called += 1,
     }
@@ -1243,6 +1473,7 @@ fn call_one_ssr_locus<S, G, R>(
     tract_shaping: &mut SsrEvidenceScratch,
     tracts: &mut TractOutcomes,
     scratch: &mut CallingScratch<S>,
+    mut explanation: Option<&mut Vec<ExplainRow>>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> LocusOutcome<R>
 where
@@ -1253,6 +1484,17 @@ where
         tract_selection,
         scratch.candidate_selection_mut(),
     );
+    if let Some(rows) = explanation.as_deref_mut() {
+        // A tract's dropped lengths are not split by the ordinary bar, so the configuration
+        // handed over here is read for nothing but the rows' shape.
+        selection_rows(
+            rows,
+            observation,
+            &narrowed.selection,
+            &CandidateSelectionConfig::DEFAULT,
+            ReferenceBesideLocus::NONE,
+        );
+    }
     // **Converted before anything is shaped**, so a candidate the tract model cannot describe
     // stops the locus rather than reaching the emission as a one-repeat allele.
     let Some(repeat_counts) = repeat_counts_the_tract_model_can_take(&narrowed.repeat_counts)
@@ -1262,7 +1504,7 @@ where
     };
     let SsrLocusSelection { selection, .. } = narrowed;
     let (alleles, verdict, unmatched, remap) = selection.into_parts();
-    count_this_tract(verdict, tracts);
+    count_this_tract(verdict, observation.region, tracts);
 
     let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
     // **Two per-locus allocations, and both are the borrow checker's price rather than a
@@ -1284,6 +1526,9 @@ where
     );
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    if let Some(rows) = explanation {
+        calling_rows(rows, &inference, scratch, parameters.ploidy());
+    }
     LocusOutcome::Called(finish(inference, &remap, &unmatched, verdict))
 }
 
@@ -1323,12 +1568,14 @@ where
 fn call_one_generic_locus<S, G, R>(
     genotyper: &G,
     observation: &CohortObservation,
+    reference_beside: ReferenceBesideLocus<'_>,
     parameters: &FrozenParameters<'_>,
     candidate_selection: &CandidateSelectionConfig,
     calling_loop_config: &RunnableCallingLoopConfig,
     run_sample_count: usize,
     shaping: &mut GenericEvidenceScratch,
     scratch: &mut CallingScratch<S>,
+    mut explanation: Option<&mut Vec<ExplainRow>>,
     finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
 ) -> Option<R>
 where
@@ -1341,12 +1588,22 @@ where
         candidate_selection,
         scratch.candidate_selection_mut(),
     );
+    if let Some(rows) = explanation.as_deref_mut() {
+        selection_rows(
+            rows,
+            observation,
+            &selection,
+            candidate_selection,
+            reference_beside,
+        );
+    }
     let mut views = Vec::new();
     let evidence = shape_generic_locus(
         shaping,
         observation,
         &selection,
         run_sample_count,
+        reference_beside,
         &mut views,
     );
     // The allele table leaves the selection by value: a discovery round appends to it and the
@@ -1366,6 +1623,9 @@ where
     let (alleles, verdict, unmatched, remap) = selection.into_parts();
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    if let Some(rows) = explanation {
+        calling_rows(rows, &inference, scratch, parameters.ploidy());
+    }
     Some(finish(inference, &remap, &unmatched, verdict))
 }
 
@@ -1495,6 +1755,10 @@ pub struct CohortCallingTallies {
     /// file. Add this to [`Self::records_written`] for the loci that were called —
     /// [`loci_called`](Self::loci_called) does it.
     pub loci_called_but_not_written: u64,
+    /// **Loci called with an alternative but a site quality below `--min-site-quality`**, after
+    /// the artifact correction, and so left out of the file. Counted in
+    /// [`loci_called`](Self::loci_called).
+    pub loci_below_minimum_site_quality: u64,
     /// **The ground of the loci the merge declined to assemble for being wider than
     /// `max_cohort_locus_span`**, in genome order — [`CalledCohort::loci_too_wide_to_assemble`].
     pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
@@ -1503,6 +1767,9 @@ pub struct CohortCallingTallies {
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
     /// **What became of this run's repeat tracts** — [`CalledCohort::tracts`].
     pub tracts: TractOutcomes,
+    /// **The `--explain-loci` rows of every locus explained**, in the order the loci were met;
+    /// empty when the run explained nothing (`doc/devel/ng/spec/explain_loci.md`).
+    pub explanations: Vec<ExplainRow>,
 }
 
 impl CohortCallingTallies {
@@ -1512,6 +1779,7 @@ impl CohortCallingTallies {
     pub fn loci_called(&self) -> u64 {
         self.records_written
             .saturating_add(self.loci_called_but_not_written)
+            .saturating_add(self.loci_below_minimum_site_quality)
     }
 }
 
@@ -1598,6 +1866,7 @@ impl CohortWalkTallies {
                         Some(GeneratorCounts::Pileup(counts)) => Some(*counts),
                         Some(_) | None => None,
                     },
+                    loci_over_the_depth_ceiling: walker.loci_over_the_depth_ceiling(),
                     sample_name,
                 })
                 .collect(),
@@ -1645,16 +1914,20 @@ pub struct SampleWalkTallies {
     ///
     /// **`positions_short_of_cap` answers one question: did the read-hold ceiling cost this
     /// sample coverage?** Zero means no position was scored on fewer reads than
-    /// `max_snp_column_depth` allows *because the ceiling had already given reads up*;
+    /// `max_reads_per_position` allows *because the ceiling had already given reads up*;
     /// `short_of_cap_deficit` says how many reads those positions were missing altogether.
     ///
-    /// **It says nothing about the two per-position caps**, which is
-    /// `column_depth_truncations` — the positions where `max_snp_column_depth` or
-    /// `max_indel_column_depth` cut contributors the walk was holding. A run can have
+    /// **It says nothing about the per-position cap**, which is
+    /// `column_depth_truncations` — the positions where `max_reads_per_position` cut
+    /// contributors the walk was holding. A run can have
     /// `positions_short_of_cap` at zero and `column_depth_truncations` in the millions: the
     /// ceiling kept every read and the caps then declined to score on all of them. So "did my
     /// depth settings shape the evidence" is answered by **both**, and by neither alone.
     pub snp_indel: Option<PileupGeneratorCounts>,
+    /// **Loci this sample's walk dropped because a read group there was deeper than the run's
+    /// depth ceiling** (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)). No
+    /// locus was called over their ground, for any sample.
+    pub loci_over_the_depth_ceiling: u64,
 }
 
 /// **The sample names and the sizes, not the contents.** A derived `Debug` would print every
@@ -4554,6 +4827,9 @@ mod calling_joined_to_the_merge {
             parameters.inbreeding_coefficient_by_sample().len(),
             "the rebuilt parameters describe the same cohort as the run's own",
         );
+        // The oracle reads the flanks a locus's partial reads need the way the run does.
+        let reference_beside_the_loci = merging_first.walk_reference.accessor();
+        let mut beside_scratch = ReferenceBesideScratch::default();
         let merged = merging_first.merge_cohort().expect("merges");
         let frozen = parameters.view();
         let mut shaping = GenericEvidenceScratch::default();
@@ -4562,15 +4838,23 @@ mod calling_joined_to_the_merge {
             .cohort_observations
             .iter()
             .map(|observation| {
+                let reference_beside = reference_beside_locus(
+                    &reference_beside_the_loci,
+                    observation,
+                    &mut beside_scratch,
+                )
+                .expect("the fixture reference serves every flank");
                 call_one_generic_locus(
                     &genotyper,
                     observation,
+                    reference_beside,
                     &frozen,
                     &selection,
                     &loop_config,
                     run_sample_count,
                     &mut shaping,
                     &mut scratch,
+                    None,
                     |inference, _remap, _unmatched, _verdict| inference,
                 )
                 // **This fixture's cohort leaves every locus with somebody to call**, so a
@@ -4601,7 +4885,7 @@ mod calling_joined_to_the_merge {
     /// A run that built its generators with `PileupGeneratorConfig::default()` would read
     /// every operator's depth settings and ignore them — wrong evidence, no failure. The knob
     /// moved here is the per-position cap on reads folded at a position with no indel:
-    /// `max_snp_column_depth`, at **1**, against a shipped 8,000. The fixture's three reads
+    /// `max_reads_per_position`, at **1**, against a shipped 8,000. The fixture's three reads
     /// cover the same position, so at 1 the walk truncates that column and at the default it
     /// does not, and `column_depth_truncations` is the count that says which happened.
     ///
@@ -4621,7 +4905,7 @@ mod calling_joined_to_the_merge {
             paths,
             &reference,
             PileupGeneratorConfig {
-                max_snp_column_depth: 1,
+                max_reads_per_position: 1,
                 ..PileupGeneratorConfig::default()
             },
         )
@@ -5631,12 +5915,15 @@ mod records_handed_over_as_the_run_finishes_them {
             candidate_selection: &candidate_selection,
             padding_reference,
             contigs: &contigs,
+            explain: None,
+            min_site_quality: Phred::ZERO,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
             ObservationCache::over(vec![drawn.into_iter()], Box::new(reference_for_the_merge)),
             inputs,
             &the_shipped_genotyper(),
+            &|record, _| Ok::<_, std::io::Error>(record),
             &mut |_record, _window_coverage| {
                 handed += 1;
                 Err::<(), std::io::Error>(std::io::Error::other("the disk is full"))
@@ -6573,13 +6860,22 @@ mod records_handed_over_as_the_run_finishes_them {
     /// and is left out. So the mapping is asserted here rather than against an output.
     #[test]
     fn each_selection_verdict_lands_in_its_own_tract_outcome() {
+        let a_tract = || GenomeRegion {
+            contig: ContigId(0),
+            start: Position(11),
+            end: Position(30),
+        };
         let outcome_of = |verdict| {
             let mut tracts = TractOutcomes::default();
-            count_this_tract(verdict, &mut tracts);
+            count_this_tract(verdict, a_tract(), &mut tracts);
             tracts
         };
         assert_eq!(outcome_of(SelectionVerdict::Selected).called, 1);
-        assert_eq!(outcome_of(SelectionVerdict::NotPeriodic).not_periodic, 1);
+        assert_eq!(
+            outcome_of(SelectionVerdict::NotPeriodic).not_periodic,
+            vec![a_tract()],
+            "a refused tract is kept by its position, so the report can name it",
+        );
         assert_eq!(
             outcome_of(SelectionVerdict::Truncated { dropped: 4 }).too_many_alleles,
             1,
@@ -6867,6 +7163,9 @@ struct RoundCallScratch<'a, S> {
     tract_shaping: SsrEvidenceScratch,
     scratch: CallingScratch<S>,
     padding_scratch: Vec<u8>,
+    /// The reference either side of the locus its partial reads need (spec
+    /// `read_likelihoods.md` §5.3), read into buffers the worker keeps.
+    beside_scratch: ReferenceBesideScratch,
     window_coverage: Vec<WindowCoverage>,
     tracts: TractOutcomes,
     totals: &'a std::sync::Mutex<TractOutcomes>,
@@ -6879,7 +7178,7 @@ impl<S> Drop for RoundCallScratch<'_, S> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         total.called += self.tracts.called;
-        total.not_periodic += self.tracts.not_periodic;
+        total.not_periodic.append(&mut self.tracts.not_periodic);
         total.too_many_alleles += self.tracts.too_many_alleles;
         total.without_whole_repeats += self.tracts.without_whole_repeats;
         total.bundles_set_aside += self.tracts.bundles_set_aside;
@@ -6887,38 +7186,45 @@ impl<S> Drop for RoundCallScratch<'_, S> {
 }
 
 /// What a worker made of one locus — everything the calling thread has to do with it.
-enum RoundLocusOutcome {
+enum RoundLocusOutcome<P> {
     /// No sample of the run can be called here; the span goes in the run's list.
     NobodyToCall(GenomeRegion),
     /// Counted inside the dispatch, nothing for the calling thread to do but count the locus.
     CountedInside(GenomeRegion),
     /// Called, and no written genotype carried an alternative.
     CalledNotWritten(GenomeRegion),
+    /// Called with an alternative, at a site quality below `--min-site-quality`.
+    CalledBelowMinimumSiteQuality(GenomeRegion),
     /// The padding fetch refused.
     CalledFailed(RunError),
-    /// A record, its per-sample windows, and the locus it came from.
-    CalledRecord(Box<VcfRecord>, Vec<WindowCoverage>, GenomeRegion),
+    /// A record got ready for its output, its per-sample windows, and the locus it came from.
+    CalledRecord(P, Vec<WindowCoverage>, GenomeRegion),
 }
 
 /// [`call_cohort_from_sources_handing_each_record_over`], with **each round of building regions
 /// built and genotyped on the pool** and the records folded back in genome order.
 ///
 /// The sink stays on the calling thread and sees genome order, which is what makes the VCF
-/// identical to the streaming driver's.
+/// identical to the streaming driver's. **`prepare` runs on the thread that called the locus**:
+/// with the hidden-duplication filter on it encodes the record's spill entry, which at 2,169
+/// samples was most of what the calling thread did while every other thread waited for the
+/// next round.
 ///
 /// # Errors
 ///
 /// The streaming driver's.
-pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, E>(
+pub(crate) fn call_cohort_from_sources_in_rounds<Source, S, G, P, E>(
     mut cache: ObservationCache<Source>,
     inputs: CohortCallingInputs<'_>,
     genotyper: &G,
-    hand_over: &mut impl FnMut(&VcfRecord, &[WindowCoverage]) -> Result<(), E>,
+    prepare: &(impl Fn(VcfRecord, &[WindowCoverage]) -> Result<P, E> + Sync),
+    hand_over: &mut impl FnMut(P, &[WindowCoverage]) -> Result<(), E>,
 ) -> Result<CohortCallingOutcome<Source>, RunError>
 where
     Source: ObservationSource<Error = RunError> + Send + Sync,
     G: LocusGenotyper<S> + Sync,
     S: Default + Send,
+    P: Send,
     E: std::error::Error + Send + Sync + 'static,
 {
     let CohortCallingInputs {
@@ -6929,7 +7235,12 @@ where
         candidate_selection,
         padding_reference,
         contigs,
+        explain,
+        min_site_quality,
     } = inputs;
+    if let Some(regions) = explain {
+        cache.explaining_drops(regions.clone());
+    }
     let run_sample_count = cache.sample_count();
     let frozen = parameters.view();
     let tract_selection = SsrSelectionConfig {
@@ -6938,9 +7249,11 @@ where
     };
     let mut records_written = 0_u64;
     let mut loci_called_but_not_written = 0_u64;
+    let mut loci_below_minimum_site_quality = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
+    let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut progress = CallingProgress::new(contigs, segmentation.analysed_regions());
     let mut stopped: Option<RunError> = None;
 
@@ -6961,6 +7274,7 @@ where
             tract_shaping: SsrEvidenceScratch::default(),
             scratch: CallingScratch::default(),
             padding_scratch: Vec::new(),
+            beside_scratch: ReferenceBesideScratch::default(),
             window_coverage: Vec::with_capacity(run_sample_count),
             tracts: TractOutcomes::default(),
             totals: tract_totals_ref,
@@ -6972,13 +7286,43 @@ where
                 tract_shaping,
                 scratch,
                 padding_scratch,
+                beside_scratch,
                 window_coverage,
                 tracts,
                 totals: _,
             } = worker;
-            let built = call_one_cohort_locus(
+            let mut observation = observation;
+            if let Err(source) =
+                reread_spellings_cut_short(padding_reference, &mut observation, beside_scratch)
+            {
+                return (
+                    RoundLocusOutcome::CalledFailed(RunError::ReferenceBesideLocusUnreadable {
+                        locus: region,
+                        source,
+                    }),
+                    None,
+                );
+            }
+            let reference_beside =
+                match reference_beside_locus(padding_reference, &observation, beside_scratch) {
+                    Ok(beside) => beside,
+                    Err(source) => {
+                        return (
+                            RoundLocusOutcome::CalledFailed(
+                                RunError::ReferenceBesideLocusUnreadable {
+                                    locus: region,
+                                    source,
+                                },
+                            ),
+                            None,
+                        );
+                    }
+                };
+            let (built, explanation) = call_one_cohort_locus(
                 genotyper,
                 &observation,
+                reference_beside,
+                explain,
                 frozen,
                 candidate_selection,
                 tract_selection,
@@ -6990,7 +7334,7 @@ where
                 scratch,
                 |inference, remap, unmatched, verdict| {
                     if !a_written_genotype_carries_an_alternative(&inference) {
-                        return Ok(None);
+                        return Ok(CalledLocus::NoAlternative);
                     }
                     let alleles = inference.alleles();
                     let padding = padding_base_beside(
@@ -7011,62 +7355,106 @@ where
                         verdict,
                         padding,
                     );
+                    // **The gate reads the quality the record would carry**, after the artifact
+                    // correction, and before the windows are taken: a locus below it is not
+                    // written, so nothing of it reaches the file or the filter after
+                    // (`calling_quality.md` §3.5).
+                    if evidence.corrected_site_quality < min_site_quality {
+                        return Ok(CalledLocus::BelowMinimumSiteQuality(
+                            evidence.corrected_site_quality,
+                        ));
+                    }
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
-                    Ok(Some(assemble_record(&inference, evidence)))
+                    Ok(CalledLocus::Written(assemble_record(&inference, evidence)))
                 },
             );
-            match built {
+            // **Finished on this worker, where the record still exists**, and folded on the
+            // calling thread with the locus's own outcome, so no lock is taken.
+            let explanation = explanation.map(|mut rows| {
+                if let Some(end) = end_of_a_called_locus(&built) {
+                    outcome_rows(&mut rows, region, end);
+                }
+                rows
+            });
+            let outcome = match built {
                 LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
                 LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {
                     RoundLocusOutcome::CountedInside(region)
                 }
                 LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
-                LocusOutcome::Called(Ok(None)) => RoundLocusOutcome::CalledNotWritten(region),
-                LocusOutcome::Called(Ok(Some(record))) => RoundLocusOutcome::CalledRecord(
-                    Box::new(record),
-                    std::mem::take(window_coverage),
-                    region,
-                ),
-            }
+                LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
+                    RoundLocusOutcome::CalledNotWritten(region)
+                }
+                LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
+                    RoundLocusOutcome::CalledBelowMinimumSiteQuality(region)
+                }
+                LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
+                    match prepare(record, window_coverage) {
+                        Ok(ready) => RoundLocusOutcome::CalledRecord(
+                            ready,
+                            std::mem::take(window_coverage),
+                            region,
+                        ),
+                        // Reported where the calling thread reaches this locus, in genome order, as a
+                        // refusal of `hand_over` would be.
+                        Err(source) => {
+                            RoundLocusOutcome::CalledFailed(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            })
+                        }
+                    }
+                }
+            };
+            (outcome, explanation)
         },
-        &mut |outcome| match outcome {
-            RoundLocusOutcome::NobodyToCall(region) => {
-                loci_with_nobody_to_call.push(region);
-                progress.locus_passed(region, records_written);
+        &mut |(outcome, explanation): (RoundLocusOutcome<P>, Option<Vec<ExplainRow>>)| {
+            if let Some(rows) = explanation {
+                explanations.extend(rows);
             }
-            RoundLocusOutcome::CountedInside(region) => {
-                progress.locus_passed(region, records_written);
-            }
-            RoundLocusOutcome::CalledNotWritten(region) => {
-                loci_called_but_not_written += 1;
-                progress.locus_passed(region, records_written);
-            }
-            RoundLocusOutcome::CalledFailed(error) => {
-                if stopped.is_none() {
-                    stopped = Some(error);
+            match outcome {
+                RoundLocusOutcome::NobodyToCall(region) => {
+                    loci_with_nobody_to_call.push(region);
+                    progress.locus_passed(region, records_written);
                 }
-            }
-            RoundLocusOutcome::CalledRecord(record, windows, region) => {
-                if stopped.is_some() {
-                    return;
+                RoundLocusOutcome::CountedInside(region) => {
+                    progress.locus_passed(region, records_written);
                 }
-                progress.locus_passed(region, records_written);
-                record_the_windows_at(
-                    GenomePosition {
-                        contig: region.contig,
-                        position: region.start,
-                    },
-                    &windows,
-                );
-                match hand_over(&record, &windows) {
-                    Ok(()) => records_written += 1,
-                    Err(source) => {
-                        stopped = Some(RunError::RecordNotWritten {
-                            locus: region,
-                            source: Box::new(source),
-                        });
+                RoundLocusOutcome::CalledNotWritten(region) => {
+                    loci_called_but_not_written += 1;
+                    progress.locus_passed(region, records_written);
+                }
+                RoundLocusOutcome::CalledBelowMinimumSiteQuality(region) => {
+                    loci_below_minimum_site_quality += 1;
+                    progress.locus_passed(region, records_written);
+                }
+                RoundLocusOutcome::CalledFailed(error) => {
+                    if stopped.is_none() {
+                        stopped = Some(error);
+                    }
+                }
+                RoundLocusOutcome::CalledRecord(ready, windows, region) => {
+                    if stopped.is_some() {
+                        return;
+                    }
+                    progress.locus_passed(region, records_written);
+                    record_the_windows_at(
+                        GenomePosition {
+                            contig: region.contig,
+                            position: region.start,
+                        },
+                        &windows,
+                    );
+                    match hand_over(ready, &windows) {
+                        Ok(()) => records_written += 1,
+                        Err(source) => {
+                            stopped = Some(RunError::RecordNotWritten {
+                                locus: region,
+                                source: Box::new(source),
+                            });
+                        }
                     }
                 }
             }
@@ -7092,15 +7480,24 @@ where
     let tracts = tract_totals
         .into_inner()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // The loci the merge dropped or refused, where the run explains them.
+    if let Some(dropped) = cache.take_dropped_loci() {
+        explanations.extend(dropped.into_rows());
+    }
+    if let Some(regions) = explain {
+        explanations.extend(too_wide_rows(regions, &loci_too_wide_to_assemble));
+    }
     let (sources, window_coverage_histograms) = cache.into_sources_and_histograms();
     record_the_histograms(&window_coverage_histograms);
     Ok(CohortCallingOutcome {
         calling: CohortCallingTallies {
             records_written,
             loci_called_but_not_written,
+            loci_below_minimum_site_quality,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
+            explanations,
         },
         sources,
         window_coverage_histograms,

@@ -241,7 +241,7 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
 
@@ -277,6 +277,9 @@ mod tests {
             // The shipped false-discovery target, so the hidden-duplication filter scores and
             // writes its two fields: it computes with `ln`, `exp` and `ln_1p` as well.
             paralog_fdr: 0.01,
+            // Off: this test pins that platforms write the same bytes, over a fixture whose three
+            // variant sites include low-quality ones; the threshold is pinned elsewhere.
+            min_site_quality: 0.0,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
@@ -286,7 +289,9 @@ mod tests {
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_SNP_COLUMN_DEPTH,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            explain_loci: None,
         })
         .expect("the cohort calls with its own fit");
         (parameters, calls)

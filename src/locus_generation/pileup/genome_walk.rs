@@ -487,6 +487,11 @@ where
     ) -> Result<(), I::Error> {
         self.reads.move_to_region(region)?;
         self.state.begin_region(Some(stop_after), junction_start);
+        // After `begin_region`, which resets the table. A start past `u32::MAX` cannot be
+        // walked, so it leaves the table unbounded on the left rather than wrong.
+        self.state
+            .open_records
+            .begin_region(u32::try_from(region.start.get()).ok());
         // Records produced by the region being left and never collected. The per-region
         // walker took them to the grave; so does this.
         self.pending.clear();
@@ -542,9 +547,8 @@ pub struct RunSummary {
     pub active_reads_high_water: u32,
     pub mate_lookup_evictions: u64,
     /// Number of columns where the contributor list was truncated
-    /// because depth exceeded the applicable per-column cap (see
-    /// `WalkerConfig::max_snp_column_depth` /
-    /// `max_indel_column_depth`). A non-zero value flags
+    /// because depth exceeded the per-column cap (see
+    /// `WalkerConfig::max_reads_per_position`). A non-zero value flags
     /// pathologically deep regions; QC pipelines may want to look
     /// at those samples / regions specifically.
     pub column_depth_truncations: u64,
@@ -807,6 +811,13 @@ struct WalkerState {
     /// time the next position is reached the table is empty, and a locus held here is the
     /// only thing outstanding. That is also why emitting it first is always coordinate
     /// order.
+    ///
+    /// **One exception, before a region's first base, and it keeps the order.** A deletion
+    /// anchored before the region that reaches into it opens its record on the region's first
+    /// base, ahead of the walker (`deletion_claimed_at_region_start` in `open_record.rs`).
+    /// While the walker crosses the deleted bases before the region, that record is open and
+    /// starts *after* any column the fast lane builds there, so the held locus still goes out
+    /// first.
     sealed: Option<SampleLocusObservations>,
 }
 
@@ -1159,7 +1170,7 @@ impl WalkerState {
                 &self.open_records,
                 reference,
                 &mut self.fast_column_buf,
-                self.config.max_snp_column_depth as usize,
+                self.config.max_reads_per_position as usize,
                 may_have_mate_overlap,
                 self.junction,
             )?
@@ -1268,10 +1279,11 @@ impl WalkerState {
         // Step 2b: per-column depth cap. Adopted from samtools'
         // mpileup (see `WalkerConfig` doc-comment). Apply *after*
         // mate-overlap so the cap counts genuine post-collapse
-        // observations, not per-mate. Detect "indel column" from
-        // the post-collapse contributor events — any Insertion or
-        // Deletion at this anchor flips the column to the tighter
-        // indel cap.
+        // observations, not per-mate. **One cap at every position**,
+        // whatever the reads show there: a tighter cap where a read
+        // has an indel thinned the indel's reads at its anchor while
+        // the reference reads kept their full number at the positions
+        // the indel spans (see `DEFAULT_MAX_READS_PER_POSITION`).
         //
         // **Which reads survive is a fact about the reads** (ng's, 2026-08-05). It used
         // to be `contributors.truncate(cap)` — keep the first `cap` in whatever order the
@@ -1288,7 +1300,7 @@ impl WalkerState {
         // happens before step 3, so a dropped read opens and widens nothing and is
         // invisible to every record it would have reached. They are candidates rather than
         // a count — see `OpenPileupRecord::reads_discarded_by_cap`.
-        let cap = column_depth_cap(contributors, &self.config);
+        let cap = self.config.max_reads_per_position as usize;
         let depth = contributors.len();
         if depth as u32 > self.summary.column_depth_high_water {
             self.summary.column_depth_high_water = depth as u32;
@@ -2102,22 +2114,6 @@ fn sample_to_cap(
     contributors.truncate(cap);
 }
 
-/// Per-column depth cap. Returns the lower indel cap if any
-/// contributor reports an Insertion or Deletion at this anchor;
-/// otherwise the SNP/REF cap.
-fn column_depth_cap(contributors: &[ReadContribution], config: &WalkerConfig) -> usize {
-    let any_indel = contributors.iter().any(|c| {
-        c.events_at_pos
-            .iter()
-            .any(|e| matches!(e, ReadEvent::Insertion { .. } | ReadEvent::Deletion { .. },))
-    });
-    if any_indel {
-        config.max_indel_column_depth as usize
-    } else {
-        config.max_snp_column_depth as usize
-    }
-}
-
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -2144,7 +2140,7 @@ mod tests {
         use crate::locus_generation::pileup::tests::{MockFasta, snp_read};
 
         let config = WalkerConfig {
-            max_snp_column_depth: 2,
+            max_reads_per_position: 2,
             ..WalkerConfig::default()
         };
         let reads: Vec<_> = (0..6)
@@ -2338,7 +2334,7 @@ mod tests {
     /// **No position is left short of the cap while reads covering it exist** — the
     /// owner's own test of the change, as a test.
     ///
-    /// Forty reads over one base against a hold ceiling of eight and a SNP cap of eight.
+    /// Forty reads over one base against a hold ceiling of eight and a read cap of eight.
     /// Every position must fold exactly eight, and `positions_short_of_cap` must be zero:
     /// the ceiling and the cap are the same number here, so the ceiling can shed as much
     /// as it likes and every position still reaches the cap.
@@ -2358,7 +2354,7 @@ mod tests {
 
         let at_the_cap = WalkerConfig {
             max_active_reads: 8,
-            max_snp_column_depth: 8,
+            max_reads_per_position: 8,
             ..WalkerConfig::default()
         };
         let mut walker = run(reads(), &reference, &at_the_cap);
@@ -2411,7 +2407,7 @@ mod tests {
     #[test]
     fn the_kept_set_does_not_depend_on_the_order_the_set_holds_reads_in() {
         let config = WalkerConfig {
-            max_snp_column_depth: 5,
+            max_reads_per_position: 5,
             ..WalkerConfig::default()
         };
         let reference = MockFasta::new("ACG");
@@ -2927,21 +2923,6 @@ mod tests {
         v
     }
 
-    fn indel_ins_evs(anchor: u32, bq: u8) -> EventsAt {
-        let mut v = EventsAt::new();
-        v.push(ReadEvent::Match {
-            ref_pos: anchor,
-            base: b'A',
-            bq_baq: bq,
-        });
-        v.push(ReadEvent::Insertion {
-            anchor_ref_pos: anchor,
-            seq: b"A".to_vec(),
-            bq_proxy: bq,
-        });
-        v
-    }
-
     // --- M19: pick_* tertiary tie-break tests --------------------
     //
     // All three pick functions fall through to comparing
@@ -3008,26 +2989,5 @@ mod tests {
         assert_eq!(scale_bq_by_0_8(5), 4); // 4.0 exact
         assert_eq!(scale_bq_by_0_8(7), 5); // 5.6 → trunc 5 (round would give 6)
         assert_eq!(scale_bq_by_0_8(30), 24); // 24.0
-    }
-
-    // --- column_depth_cap: any-indel rule ------------------------
-
-    #[test]
-    fn column_depth_cap_returns_indel_cap_when_only_some_contributors_have_indel() {
-        // Mixed SNP + one indel contributor at the same anchor.
-        // The "any" rule must flip the column to the indel cap.
-        let cfg = WalkerConfig {
-            max_snp_column_depth: 8000,
-            max_indel_column_depth: 2,
-            ..WalkerConfig::default()
-        };
-        let v = vec![
-            contribution(30, true, 1, match_evs(1, b'A', 30)),
-            contribution(30, true, 1, indel_ins_evs(1, 30)),
-            contribution(30, true, 1, match_evs(1, b'A', 30)),
-            contribution(30, true, 1, match_evs(1, b'A', 30)),
-            contribution(30, true, 1, match_evs(1, b'A', 30)),
-        ];
-        assert_eq!(column_depth_cap(&v, &cfg), 2);
     }
 }

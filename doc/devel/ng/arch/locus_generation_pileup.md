@@ -169,20 +169,21 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> {
 /// safe to move (spec §7). Raw `u32`, not `Bp`: the copied walker speaks production's integer
 /// widths and a port must not change types under itself (§3).
 pub struct PileupGeneratorConfig {
-    pub max_snp_column_depth: u32,
-    pub max_indel_column_depth: u32,
+    pub max_reads_per_position: u32,
     pub max_record_span: u32,
     pub mate_lookup_window: u32,
     pub max_active_reads: u32,
 }
 ```
 
-`Default` takes all five straight from production's own `pub const`s —
-`DEFAULT_MAX_SNP_COLUMN_DEPTH` and siblings
+`Default` takes all four from named constants — `DEFAULT_MAX_READS_PER_POSITION` and siblings.
+Production had a fifth, a tighter cap of 250 at a position where a read has an indel; ng removed it
+on 2026-10-03 because it biased every indel's allele balance at depth (spec §4). The rest started as
+production's
 ([walker/mod.rs:67-89](../../../../src/pileup/walker/mod.rs#L67),
 [chain_id_allocator.rs:41](../../../../src/pileup/walker/chain_id_allocator.rs#L41)) — **by name, not
 by literal**, so there is one source of truth until ng deliberately diverges and the divergence shows
-up as a diff. **There is no sixth knob** — the walk is bounded by the region, not by a window size
+up as a diff. **There is no fifth knob** — the walk is bounded by the region, not by a window size
 (§2.2), so nothing here tunes how far it reaches.
 
 ```rust

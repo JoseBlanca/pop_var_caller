@@ -60,7 +60,8 @@ use crate::ref_seq::WindowedRefSeq;
 use crate::region_typing::TypedRegion;
 use crate::types::Bp;
 
-use super::cohort_merge::observation_cache::ObservationSource;
+use super::cohort_merge::observation_cache::{Drawn, ObservationSource, StandIn};
+use super::depth_ceiling::DepthCeiling;
 use super::{RunError, Segmentation, WalkProgress};
 
 /// One sample's observations, read from its open alignment files.
@@ -94,6 +95,11 @@ pub struct AlignmentFilesWalker<T> {
     /// How far the walk has got — the second half of locating a failure (spec §9).
     reached: WalkProgress,
     loci: SampleLocusObservationsIterator<T>,
+    /// The run's depth ceiling, or `None` for a walk that hands over every record
+    /// ([`depth_ceiling`](super::depth_ceiling)).
+    depth_ceiling: Option<DepthCeiling>,
+    /// Records handed over as over the depth ceiling, for the run report.
+    loci_over_the_depth_ceiling: u64,
 }
 
 impl<T> AlignmentFilesWalker<T> {
@@ -106,7 +112,23 @@ impl<T> AlignmentFilesWalker<T> {
             sample: reads.sample_name().to_string(),
             reached: WalkProgress::NothingYet,
             loci: SampleLocusObservationsIterator::new(regions, reads, generators),
+            depth_ceiling: None,
+            loci_over_the_depth_ceiling: 0,
         }
+    }
+
+    /// Hand over the records with a read group deeper than `ceiling` as dropped, or every record
+    /// as it is for `None` ([`depth_ceiling`](super::depth_ceiling)).
+    #[must_use]
+    pub fn with_depth_ceiling(mut self, ceiling: Option<DepthCeiling>) -> Self {
+        self.depth_ceiling = ceiling;
+        self
+    }
+
+    /// How many records this walk handed over as over the depth ceiling.
+    #[must_use]
+    pub fn loci_over_the_depth_ceiling(&self) -> u64 {
+        self.loci_over_the_depth_ceiling
     }
 
     /// The individual this walk is of.
@@ -242,6 +264,32 @@ where
                 source: Box::new(source),
             })),
         }
+    }
+
+    /// **Every record built, as the default does, and then judged against the depth ceiling.**
+    /// One over it goes to the merge emptied of its observations — the window holds a record per
+    /// summary, and the closing walk still reads the record's kind — so nothing of its evidence is
+    /// held.
+    fn next_drawn(
+        &mut self,
+        spare: Option<SampleLocusObservations>,
+    ) -> Option<Result<Drawn, RunError>> {
+        let mut record = match self.next_observation(spare)? {
+            Ok(record) => record,
+            Err(failed) => return Some(Err(failed)),
+        };
+        let Some(ceiling) = self.depth_ceiling else {
+            return Some(Ok(Drawn::Built(record)));
+        };
+        if !ceiling.is_exceeded_by(&record) {
+            return Some(Ok(Drawn::Built(record)));
+        }
+        self.loci_over_the_depth_ceiling += 1;
+        record.observations = Vec::new();
+        Some(Ok(Drawn::OverDepthCeiling {
+            region: record.region,
+            stand_in: StandIn::Record(record),
+        }))
     }
 }
 

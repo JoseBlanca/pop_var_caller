@@ -192,6 +192,12 @@ impl<'a> RecordIter<'a> {
         self.stream.live_changes()
     }
 
+    /// Advance past a record larger than the buffer ceiling instead of refusing it — see
+    /// [`BlockStream::skipping_records_too_large_to_hold`](super::block::BlockStream::skipping_records_too_large_to_hold).
+    pub fn skipping_records_too_large_to_hold(&mut self, skip: bool) {
+        self.stream.skipping_records_too_large_to_hold(skip);
+    }
+
     /// How many blocks this walk has opened, the one it is inside included.
     ///
     /// **Not how many it has finished**, so a walk that has handed back one record of the first
