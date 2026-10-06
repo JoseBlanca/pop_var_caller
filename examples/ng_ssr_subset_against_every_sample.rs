@@ -21,7 +21,8 @@
 //!   fair whichever is given; tomato is mostly inbred, so give its usual value there.
 //! - **Which strata**: `STRATA=1:8,2:10` (period in bases, reference repeats), or by default five
 //!   spread across the cohort's sizes: the stratum with the most tracts with reads and those an
-//!   eighth, a quarter, a half and three quarters of the way down.
+//!   eighth, a quarter, a half and three quarters of the way down, among the strata holding at
+//!   least the 8 tracts with reads a fit needs.
 //! - `FIRST_SUBSET`, `MIN_SAMPLES_A_GROUP` and `TARGET` set the first subset's size (256), the
 //!   readers a slippage group is topped up to (8) and the level's relative error the subset grows to
 //!   (0.02), so the tool can be tried on a small cohort.
@@ -52,7 +53,7 @@ use pop_var_caller::cli::estimate_parameters::{
 };
 use pop_var_caller::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    SsrFitConfig, StratumError, StratumEvidence, StratumFit, StratumOutcome,
+    DEFAULT_REFUSAL_FLOOR, SsrFitConfig, StratumError, StratumEvidence, StratumFit, StratumOutcome,
     fit_strata_on_sample_subsets, fit_stratum,
 };
 use pop_var_caller::run::{
@@ -133,13 +134,14 @@ fn format_error(error: Option<f64>) -> String {
 
 /// **The strata compared when `STRATA` is not set: five spread across the cohort's sizes** — the
 /// one holding the most tracts with reads, and those an eighth, a quarter, a half and three
-/// quarters of the way down the ranking. The largest strata cost the most to fit on every sample,
-/// and the ones that grow their subset past the first are the ones `FIRST_SUBSET` is chosen from,
-/// so a spread shows both.
+/// quarters of the way down the ranking of those with at least the refusal floor's tracts with reads
+/// ([`DEFAULT_REFUSAL_FLOOR`]): a thinner stratum is refused by both fits and shows nothing. The
+/// largest strata cost the most to fit on every sample, and the ones that grow their subset past
+/// the first are the ones `FIRST_SUBSET` is chosen from, so a spread shows both.
 fn spread_across_sizes(strata: &[StratumEvidence]) -> Vec<&StratumEvidence> {
     let mut by_size: Vec<&StratumEvidence> = strata
         .iter()
-        .filter(|evidence| evidence.tracts_with_reads() > 0)
+        .filter(|evidence| evidence.tracts_with_reads() >= DEFAULT_REFUSAL_FLOOR)
         .collect();
     by_size.sort_by_key(|evidence| std::cmp::Reverse(evidence.tracts_with_reads()));
     let count = by_size.len();

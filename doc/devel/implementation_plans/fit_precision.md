@@ -264,6 +264,22 @@ step here that moves a fitted number is its own commit, with the checksums re-re
 > include the largest. **Decide `FIRST_SUBSET`, `LEVEL_RELATIVE_ERROR_TARGET` and spec question 5**
 > (which number carries the target) from it.
 
+**Decided at checkpoint D (owner, 2026-10-06): the settings stay — `FIRST_SUBSET` = 256,
+`LEVEL_RELATIVE_ERROR_TARGET` = 0.02, on the slippage level — because the subset's fits are good enough as
+priors.** The owner's run of D3 on kimura (2,169 samples, `--inbreeding` 0.96 for every sample, `c6c10718`):
+
+- **Cost:** 49 min on the subsets against 9 h 4 min on every sample, 9% of the time; 9 h 58 min in all, peak
+  27.8 GB. Two of the five default strata (1:30, 2:26) had 6 and 2 tracts with reads and were refused by both
+  fits; the tool's default now skips strata below the floor.
+- **The three strata compared** reached 256, 256 and 512 samples. The slippage level was 0.7, 6.4 and 4.4 of the
+  spread drawing a subset gives away from the whole cohort's (1:8, 1:16, 2:7); the concentration came out lower
+  on the subset in all three, by 29%, 10% and 6%, the gap shrinking as the subset grows; 7 of the 12 numbers
+  compared (three slippage numbers and the concentration, three strata) were beyond ±2 of that spread, where
+  about one is expected by chance. So the stated errors understate how far a subset's
+  answer can sit from the whole cohort's.
+- **Left as possible improvements, not done:** judging the target on the concentration as well as the level, and
+  measuring the scatter directly with disjoint 256-sample subsets of the same strata.
+
 ### Milestone E — the errors in the file
 
 1. ☐ **E1 — `Estimate` gains `standard_error: Option<f64>`**, its "no uncertainty interval" note
