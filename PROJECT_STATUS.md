@@ -22,7 +22,22 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-03):** **the GIAB indels nobody had explained**
+> - **Last completed task (2026-10-06):** **an indel's record reaches its right-most placement in a
+> repeat** (branch `giab-indels-oct`, spec `locus_generation_pileup.md` §4), item 1 of the user's
+> GIAB report on 5d2abae4. A reference read that stopped partway along a repeat used to count as a
+> complete vote for the reference, which made homozygous indels heterozygous once about 9 reads in
+> 100 were of that kind. GIAB trio, missed / false: 5× 749/318 → 746/315, 10× 210/318 → 202/310,
+> 30× 61/176 → 54/168, 300× 50/51 → 44/45, no right call turned wrong. 63 tomato accessions at
+> about 3×, against GATK over the changed loci: 3,488 calls GATK does not make removed, 1,156 it
+> makes lost. Items 3, 5 and 7 of that report were already fixed; items 2 (a spurious allele from
+> reads the mapper laid across a duplicated copy) and 4 (indels crossing a repeat-tract boundary)
+> are open; item 6 (no locus in repeat clusters or arrays over 100 bp) is deferred by the owner.
+> **Found, not fixed:** the tomato CRAMs were made with `samtools calmd -Ar`, which rewrites base
+> qualities to BAQ, and ng takes an indel read's error from the lowest base quality around the
+> indel, so on them indels in repeats carry Q0 and count for nothing (about 3,400 of 199,000 PASS
+> records at QUAL 0); GIAB's files have no such step.
+>
+> - **Earlier (2026-10-03):** **the GIAB indels nobody had explained**
 > ([report](doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md)). The walk's separate
 > 250-read cap at positions with an indel is removed (branch `one-read-cap`): it stored true
 > heterozygous deletions at a third of their reads at 300×, which the hidden-duplication filter
