@@ -137,6 +137,56 @@ driver does (`(start..=end).contains(&record.pos)`,
 regions tile the genome gap-free and disjointly, every record is emitted by exactly one region — no
 duplicates, no holes.
 
+**No record may reach across either edge of its region, or the clamp makes holes.** A record
+anchored outside the region whose footprint reaches inside it takes every position it covers with it
+when the clamp drops it: the reads at those positions folded into that record, because it covered
+them, and no other record holds them. So each edge stops footprints, and each region explains only
+its own bases:
+
+- **At the region's end** (2026-09-02), a footprint stops at the region's last base. A deletion
+  anchored there is written as the deletion of the bases inside the region, and the bases past it
+  are the next region's to explain. The owner's ruling: a deletion crossing a repeat tract's edge is
+  two alleles in two loci, *"the STR tract is only the tandem repeat"*.
+- **At the region's start** (2026-10-06), a deletion anchored before the region whose deleted run
+  reaches into it is the region's: its record starts on the region's first base and covers only the
+  deleted bases inside the region. A read carrying it spells those bases as absent, with no anchor
+  base, and the VCF writer pads the empty allele with the base to its left. Any other event anchored
+  before the region stops short of the region's first base — a match is one base wide, so in
+  practice this is an insertion anchored inside the previous region whose record, `inserted_len + 1`
+  wide, would reach in. (`deletion_claimed_at_region_start` in `open_record.rs`.)
+- **An insertion anchored on a repeat tract's last base** whose spelling the repeat path's junction
+  convention refuses is claimed by the region beginning beside it: its record sits on the region's
+  first base and the inserted bases are spelled before it (`claimed_junction_insertion`). This one
+  holds only beside repeat ground, because it decides which of two paths owns one event, and must
+  agree with the other path's convention.
+
+The deletion rule holds at **every** region start, not only beside repeat ground: the bases a
+deletion removes inside the region have no other owner whatever lies before the edge. At a
+requested-region edge the base is lost the same way, and nothing else will explain it; at a contig's
+first base no read is anchored before it.
+
+What the start rule fixed, measured with the three GIAB samples over their benchmark regions. At
+300×, the first base of an ordinary region that follows repeat ground had no record at 98 of 872
+such edges: 40 of 353 in HG002, 22 of 248 in HG003 and 36 of 271 in HG004. At 30× it was 15 of the
+same 872. With the rule, none is lost at either depth. 97 of the 98 come back through the deletion
+claim and one through the insertion stop. The base *before* repeat ground was never lost. Scored
+with vcfeval against GIAB v4.2.1 (missed / false calls, SNPs and indels together): 5× 761 / 173 →
+761 / 174, 10× 217 / 93 → 217 / 94, 30× 51 / 22 → 50 / 23, 300× 43 / 10 → 40 / 11. The calls
+gained are three true SNPs on a region's first base (HG002 chr1:157974730 and chr1:193371946, HG003
+chr22:17321937); no call right before is wrong after. The one false call added, at every depth, is
+HG003 chr10:5596764: GIAB's 10-base deletion at chr10:5596759 crosses a tract's edge, and its part
+inside the ordinary region is now called on its own. That is the two-loci consequence of the ruling
+above, and it was a missed call before as well.
+
+At the other corner, 63 tomato accessions at about 3× over tomato1's 80 regions, records written go
+from 193,856 to 193,893. There is no truth set, so the 50 accessions GATK HaplotypeCaller called
+jointly were compared with vcfeval, sample by sample, over every locus whose record or any genotype
+changed, padded by 150 bases (268 stretches). Variant calls GATK also makes go from 9,266 to 9,496;
+calls it does not make from 9,315 to 9,501; and GATK calls ng misses from 1,423 to 1,188. Twelve of
+the changed records are not the walk's doing: the hidden-duplication filter is fitted over the whole
+run, the extra records move its posteriors in the fourth decimal, and records with a posterior
+between 0.60 and its cutoff of about 0.656 are written or not either way (4 lost, 8 gained).
+
 **The evidence behind those records is a separate question, and the naive query gets it wrong.** A
 record anchored inside a region can have a footprint reaching up to `max_record_span` (5000) past
 the region's end — a long deletion does exactly that. Reads that fold into it may lie **entirely
