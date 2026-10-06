@@ -29,13 +29,15 @@ Skills and agents are instructed to leave it untouched.
 > 100 were of that kind. GIAB trio, missed / false: 5× 749/318 → 746/315, 10× 210/318 → 202/310,
 > 30× 61/176 → 54/168, 300× 50/51 → 44/45, no right call turned wrong. 63 tomato accessions at
 > about 3×, against GATK over the changed loci: 3,488 calls GATK does not make removed, 1,156 it
-> makes lost. Items 3, 5 and 7 of that report were already fixed; items 2 (a spurious allele from
-> reads the mapper laid across a duplicated copy) and 4 (indels crossing a repeat-tract boundary)
-> are open; item 6 (no locus in repeat clusters or arrays over 100 bp) is deferred by the owner.
-> **Found, not fixed:** the tomato CRAMs were made with `samtools calmd -Ar`, which rewrites base
-> qualities to BAQ, and ng takes an indel read's error from the lowest base quality around the
-> indel, so on them indels in repeats carry Q0 and count for nothing (about 3,400 of 199,000 PASS
-> records at QUAL 0); GIAB's files have no such step.
+> makes lost. **Item 2 too:** a read the mapper laid straight across a longer allele (the start of
+> an inserted copy spelled as substitutions) is now compared as a partial read, not as an allele of
+> its own (spec `read_likelihoods.md` §5.3): GIAB missed / false at 10× 202/310 → 201/309, 30×
+> 54/168 → 50/165, 300× 44/45 → 41/43, the report's three sites fixed, nothing broken; tomato 23 of
+> 225,917 records change. Items 3, 5 and 7 of that report were already fixed. Item 4 (indels
+> crossing a repeat-tract boundary) is left: the generic and tract loci are called independently.
+> Item 6 (no locus in repeat clusters or arrays over 100 bp) is deferred by the owner. The tomato
+> CRAMs' BAQ-rewritten qualities (`samtools calmd -Ar`) make indels in repeats count for nothing
+> there; the owner ruled it a property of those old files, not a defect to fix.
 >
 > - **Earlier (2026-10-03):** **the GIAB indels nobody had explained**
 > ([report](doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md)). The walk's separate
