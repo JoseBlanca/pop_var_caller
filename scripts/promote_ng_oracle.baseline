@@ -57,6 +57,11 @@
 # the fitted file's 344 non-note lines move (37 slippage rows, 15 length spectra, 4 multipliers, 4 inbreeding coefficients,
 # 3 concentrations, 2 starts' pass counts); the fit's calls go from 6,706 to 6,645 records, 17 genotypes changing among
 # those both hold. They were main's 5e6d874d… / 3f618451… / 65105ad0….
+# Re-recorded 2026-10-07 (Linux container, arm64) with the strand and read-position penalty four times a beta-binomial
+# tail (calling_quality.md §6.5): default-parameter VCFs ae07091c → 6b86f72c, still 7,451 records, one SNP dropped and one
+# insertion added, QUAL moved at 4,492 of the 7,450 shared records (−72 to +554, the rises homozygous sites the old test
+# overcharged), no genotype moved; window rows follow the records (a07ec5c5 → 470161a3); fitted parameters and coverage
+# histograms unchanged; from_fit.comparable 07de643d → 42d02245.
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -68,10 +73,10 @@
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
 # records: 7451
-ae07091c6dc555de7b7e520492540707  from_alignments.comparable
-ae07091c6dc555de7b7e520492540707  from_psps.comparable
+6b86f72cfde268c8b673509c965f56e3  from_alignments.comparable
+6b86f72cfde268c8b673509c965f56e3  from_psps.comparable
 b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
-a07ec5c5b95a22e83aaf3ee86e787fae  from_alignments.windows.sorted
+470161a35712f391682f2a27e5087308  from_alignments.windows.sorted
 ec08c16f7e7e2956fdf8ab3a3e27da8d  from_alignments.windows.histograms
 3338658ce23b0ea15e77030840c1732a  fitted.parameters.toml
-07de643d526c2dd32123ca0cf162d5db  from_fit.comparable
+42d022451614ae26f70c3106b5bb4c69  from_fit.comparable
