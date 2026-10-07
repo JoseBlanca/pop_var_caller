@@ -1841,7 +1841,7 @@ fn write_cell_table(
                     slippage.fall_off,
                     fitted.concentration,
                     fitted.log_likelihood_a_tract,
-                    u8::from(fitted.converged),
+                    u8::from(fitted.ending.settled()),
                     fitted.tracts_fitted,
                     fitted
                         .borrowed

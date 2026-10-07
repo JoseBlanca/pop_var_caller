@@ -31,6 +31,17 @@
 # number that still carries `observations` came that way from another run's
 # file, and those counts are that run's.
 #
+# A number the fit measured also carries a `standard_error` where it could
+# compute one: how far the number would typically move if the same kind of data
+# were drawn again, on the number's own scale. It comes from how sharply the
+# fit's likelihood falls away from the number, or for a rate counted directly
+# from the spread of the count, and near either end of the number's range it is
+# not the spread of a bell curve. **No `standard_error` is not an error of
+# zero**: it means nothing determined the number — no reads, a stated default —
+# or no error is computed for it. A `supplied` number's `standard_error`, like
+# its `observations`, is that of the fit that first produced it. If you edit a
+# number, delete its `standard_error` with its `observations`.
+#
 # **Two keys do not take every warrant.**
 # `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only
 # where this file holds a fitted stratum spectrum for it to be the median of,
@@ -65,7 +76,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 1
+format_version = 2
 ploidy = 2
 
 [fitted_from]
@@ -88,6 +99,18 @@ read_groups = [
     { read_group = 0, declared_id = "HWI.3", library = "lib3", sample = "TS-1" },
     { read_group = 1, declared_id = "HWI.4", library = "lib4", sample = "TS-1" },
     { read_group = 2, declared_id = "HWI.5", library = "lib5", sample = "Ailsa ‘Craig’ \"×2\"" },
+]
+#
+# How each start of the SNP/indel fit ended, in the order it ran them. The fit
+# starts from several points and keeps the best; `converged` means every number
+# came within a tenth of its standard error of the best value the data allow,
+# `at_the_pass_limit` means it ran out of passes first and is not convergence,
+# and `agreed_with_an_earlier_start` means it was heading where an earlier one
+# had converged and stopped there. `passes` counts passes over the data.
+snp_indel_fit_starts = [
+    { start = 1, ended = "converged", passes = 41 },
+    { start = 2, ended = "agreed_with_an_earlier_start", passes = 12, agreed_with_start = 1 },
+    { start = 3, ended = "at_the_pass_limit", passes = 200 },
 ]
 
 [fitted_from.census]
@@ -140,11 +163,11 @@ terms = [
 # wrong than the file it came in said. **The exception is a run that fitted
 # nothing at all**, which read nothing to take a mean over and writes 1.0.
 by_read_group = [
-    { read_group = 0, error_probability_multiplier = { value = 1.0324, warrant = "fitted_here", observations = { reads = 812344 } } },
+    { read_group = 0, error_probability_multiplier = { value = 1.0324, standard_error = 0.0071, warrant = "fitted_here", observations = { reads = 812344 } } },
     # not calibrated: no usable error rate could be fitted for this read group,
     # so it is charged the stated rate — see the note above this table
     { read_group = 1, error_probability_multiplier = { value = 1.0, warrant = "defaulted" } },
-    { read_group = 2, error_probability_multiplier = { value = 0.87, warrant = "supplied", observations = { reads = 640918 } } },
+    { read_group = 2, error_probability_multiplier = { value = 0.87, standard_error = 0.0093, warrant = "supplied", observations = { reads = 640918 } } },
 ]
 
 [contamination]
@@ -190,7 +213,7 @@ by_sample = [
 # How inbred each sample is, as a fraction in [0, 1) — one row a sample, counted
 # over the reference positions that sample's reads covered.
 by_sample = [
-    { sample = "TS-1", inbreeding_coefficient = { value = 0.42, warrant = "fitted_here", observations = { covered_positions = 180600412 } } },
+    { sample = "TS-1", inbreeding_coefficient = { value = 0.42, standard_error = 0.012, warrant = "fitted_here", observations = { covered_positions = 180600412 } } },
     { sample = "Ailsa ‘Craig’ \"×2\"", inbreeding_coefficient = { value = 0.17, warrant = "borrowed", observations = { covered_positions = 9411027 } } },
 ]
 
@@ -227,7 +250,25 @@ rung = "fitted_curve"
 # slip, the share showing a shorter tract; `fall_off` — how fast two-repeat
 # slips fall off against one-repeat slips. `expected_slipped_reads` is
 # fractional because it is how many reads the fitted share says slipped, not a
-# count anybody labelled.
+# count anybody labelled. They are reads among the samples the stratum was
+# fitted on: every sample, unless the row carries `samples_fitted_on` — then a
+# large cohort's stratum was fitted on that many of its samples, taken in a
+# fixed order that does not look at the data, and every count and error in the
+# row is that subset's. A `samples_fitted_on` equal to the cohort's sample count
+# means the subset grew to every sample.
+#
+# Where a number is this stratum's own fit — its smoothing is `this_stratum` —
+# its origin carries an own-fit standard error: `own_fit_standard_error` for the
+# first number, `shorter_share_own_fit_standard_error` and
+# `fall_off_own_fit_standard_error` for the other two. It is how far that number
+# would typically move if the stratum's tracts were drawn again. A number taken
+# from a curve, or blended with one, has none: the blend's own error is not
+# computed. **Where the row's `samples_fitted_on` is fewer than the cohort's
+# samples, the error describes the subset's own fit, not how far that fit sits
+# from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers
+# compared sat further from the fit on every sample than the two fits' errors
+# allow for — more than two standard deviations of their difference — where
+# about one would by chance.
 #
 # `share_of_reads_that_slip_origin` says where the first of the three came from
 # and `shorter_share_and_fall_off_origin` where the other two did: this
@@ -267,8 +308,8 @@ slippage_group_by_read_group = [
     { read_group = 2, slippage_group = 1 },
 ]
 slippage_by_stratum_and_group = [
-    { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 22.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 36, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum" } },
-    { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 15 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 3.0, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 3, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } } } },
+    { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25, own_fit_standard_error = 0.0021 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 22.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 36, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum", fall_off_own_fit_standard_error = 0.018 }, samples_fitted_on = 1 },
+    { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 15 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 3.0, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 3, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } }, shorter_share_own_fit_standard_error = 0.011 } },
     { period = 2, reference_repeats = 11, slippage_group = 1, share_of_reads_that_slip = 0.0913, shorter_share = 0.79, fall_off = 0.28, share_of_reads_that_slip_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 12, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 8 }, reach = "below_the_fitted_range" } } } },
 ]
 # `shares_by_repeat_offset` runs from -span to +span in whole repeat units from
@@ -289,7 +330,7 @@ length_spectrum_by_period = [
 # compared, not reads: a read crossing a tract contributes as many bases as it
 # crosses.
 substitution_rate_by_stratum = [
-    { read_group = 0, period = 2, reference_repeats = 6, ploidy = 2, rate = { value = 0.0012, warrant = "borrowed", observations = { bases_compared = 40122 } } },
+    { read_group = 0, period = 2, reference_repeats = 6, ploidy = 2, rate = { value = 0.0012, standard_error = 0.000173, warrant = "borrowed", observations = { bases_compared = 40122 } } },
 ]
 
 [stated_constants]

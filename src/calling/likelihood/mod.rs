@@ -349,6 +349,12 @@ pub struct ReadGroupCalibration {
     /// detail**: a run calibrated against a measurement and a run trusting the instrument
     /// are otherwise indistinguishable in the output, and spec §3.2 requires them not to be.
     pub provenance: Provenance,
+    /// **How far the multiplier would typically move if the reads were drawn again** — the fitted
+    /// rate's standard error over the same divisor the multiplier has — or `None` where nothing
+    /// determined it: defaulted, or a rate the fit gave no error. Calling never reads it; it is
+    /// written into the parameters file for the person judging the fit
+    /// (`doc/devel/ng/spec/fit_precision.md` §5.2).
+    pub scale_standard_error: Option<f64>,
 }
 
 impl ReadGroupCalibration {
@@ -391,6 +397,9 @@ impl ReadGroupCalibration {
         let mean_minted_error = minted.mean_error_probability()?;
         (mean_minted_error > 0.0 && rate.value.get() > 0.0).then(|| Self {
             scale: rate.value.get() / mean_minted_error,
+            // **The multiplier's error is the rate's, over the same divisor**: the qualities'
+            // claimed mean is counted, not fitted, so all the uncertainty is the rate's.
+            scale_standard_error: rate.standard_error.map(|error| error / mean_minted_error),
             // **The rate's own provenance and not `FittedHere`.** A rate borrowed from a
             // sibling read group makes a *borrowed* calibration, and stamping this one
             // `FittedHere` would launder it — which is the failure `Provenance`'s own
@@ -417,6 +426,7 @@ impl ReadGroupCalibration {
         Self {
             scale: DEFAULT_ERROR_PROBABILITY_MULTIPLIER,
             provenance: Provenance::Defaulted,
+            scale_standard_error: None,
         }
     }
 
@@ -2598,6 +2608,7 @@ mod tests {
             value: ErrorRate::try_new(rate).expect("a fixture rate is a probability"),
             provenance: Provenance::FittedHere,
             observations: 84_113,
+            standard_error: None,
         }
     }
 
@@ -2608,6 +2619,7 @@ mod tests {
             value: ErrorRate::try_new(rate).expect("a fixture rate is a probability"),
             provenance: Provenance::Borrowed,
             observations: 311,
+            standard_error: None,
         }
     }
 
@@ -2638,6 +2650,33 @@ mod tests {
             })
             .sum();
         (q_sum, base_qualities.len() as u32)
+    }
+
+    /// **The multiplier's error is the rate's, over the same divisor**: the qualities' claimed mean
+    /// is counted, not fitted, so the multiplier is exactly as uncertain as its numerator, in
+    /// proportion. A rate with no error gives a multiplier with none.
+    #[test]
+    fn the_multipliers_error_is_the_rates_over_the_claimed_mean() {
+        let (q_sum, num_reads) = minted_reads_at_phred(&[40, 30, 13]);
+        let minted = MintedReadErrors::of_observation(q_sum, num_reads);
+        let mean = minted
+            .mean_error_probability()
+            .expect("three reads are a denominator");
+        let mut fitted = fitted_rate(0.004);
+        fitted.standard_error = Some(0.0003);
+        let calibration = ReadGroupCalibration::from_fitted_rate(&fitted, minted).expect("a scale");
+        assert_eq!(calibration.scale_standard_error, Some(0.0003 / mean));
+        let shares = (
+            calibration.scale_standard_error.expect("an error") / calibration.scale,
+            0.0003 / 0.004,
+        );
+        assert!(
+            (shares.0 - shares.1).abs() <= 1e-12 * shares.1,
+            "the same share of the multiplier as of the rate: {shares:?}"
+        );
+        fitted.standard_error = None;
+        let without = ReadGroupCalibration::from_fitted_rate(&fitted, minted).expect("a scale");
+        assert_eq!(without.scale_standard_error, None);
     }
 
     /// **The property the scale exists for** (spec §12 test 10): after scaling, the average
@@ -2906,10 +2945,12 @@ mod tests {
         let tiny = ReadGroupCalibration {
             scale: 1e-30,
             provenance: Provenance::Supplied,
+            scale_standard_error: None,
         };
         let huge = ReadGroupCalibration {
             scale: 1e30,
             provenance: Provenance::Supplied,
+            scale_standard_error: None,
         };
         let (q_sum, num_reads) = minted_reads_at_phred(&[30]);
 
@@ -4239,6 +4280,7 @@ mod tests {
         let calibration = ReadGroupCalibration {
             scale: 0.37,
             provenance: Provenance::FittedHere,
+            scale_standard_error: None,
         };
         let minted_at_phred_93 = -9.3 * std::f64::consts::LN_10;
 
@@ -4263,6 +4305,7 @@ mod tests {
         let scaled = ReadGroupCalibration {
             scale: 2.5,
             provenance: Provenance::FittedHere,
+            scale_standard_error: None,
         };
 
         let charged = scaled.charged_error(q_sum, reads);
@@ -4307,6 +4350,7 @@ mod tests {
         let broken = ReadGroupCalibration {
             scale: -1.0,
             provenance: Provenance::FittedHere,
+            scale_standard_error: None,
         };
 
         let _ = broken.charged_error(-7.0, 3);

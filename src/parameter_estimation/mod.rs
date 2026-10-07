@@ -117,9 +117,11 @@ impl Provenance {
 /// stay unmixable — the warrant travels without erasing which quantity it is a warrant
 /// for.
 ///
-/// **No uncertainty interval.** These are priors; a caller mixes them into a genotype
-/// prior rather than reporting them, and an interval on a prior is not a quantity any
-/// consumer in the design reads.
+/// **With a standard error where the fit computed one.** These numbers are priors, and calling
+/// mixes them into a genotype prior without reading the error. The error is there for the person
+/// judging a fit: without it, a number measured from a handful of reads cannot be told apart from
+/// one measured from millions (`doc/devel/ng/spec/fit_precision.md` §5.1, which reverses this
+/// type's earlier rule of carrying no uncertainty at all).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Estimate<T> {
     pub value: T,
@@ -127,6 +129,20 @@ pub struct Estimate<T> {
     /// Reads for a per-read rate, sites for a per-site one. The unit follows the
     /// quantity, which is why it is not named in the type.
     pub observations: u64,
+    /// **How far the value would typically move if the same kind of data were drawn again**, on
+    /// the value's own scale. It comes from the curvature of the fit's log-likelihood, or for a
+    /// rate counted directly, from the binomial spread of the count; near a bound of the value's
+    /// range it is not the spread of a normal distribution.
+    ///
+    /// `None` where nothing determined the value — no information, a defaulted value or one a
+    /// person typed (a number supplied from another run's file keeps that run's error), a value the
+    /// fit held at its start; where the data did not place it — not told apart from the fit's other
+    /// numbers, or an error wider than the value's whole range; and where the value is one this
+    /// design computes no error for: one made of several numbers (a frequency density, a library's
+    /// two error rates together) or one computed from other fitted numbers (a sample's genotype
+    /// rates). A value that is another under a second name — the inbreeding coefficient is the
+    /// homozygote excess — keeps that value's error.
+    pub standard_error: Option<f64>,
 }
 
 /// The per-base error rate used when none could be fitted and none was supplied.
@@ -171,6 +187,7 @@ mod tests {
             value: crate::types::ErrorRate::try_new(0.001).unwrap(),
             provenance: Provenance::FittedHere,
             observations: 80_000,
+            standard_error: None,
         };
 
         assert_eq!(error_rate.value.get(), 0.001);

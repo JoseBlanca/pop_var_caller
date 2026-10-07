@@ -1581,6 +1581,18 @@ impl SampleCensusEvidence {
         &self.minted
     }
 
+    /// **The same census with these claimed-error totals**, for a test whose drawn samples are built
+    /// without any and needs some.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_minted_read_errors(
+        mut self,
+        minted: BTreeMap<ReadGroupId, MintedReadErrors>,
+    ) -> Self {
+        self.minted = minted;
+        self
+    }
+
     /// The same sample under run-wide read-group identifiers.
     ///
     /// **The numbers a census carries are its own walk's**, and a walk sees one sample — so every

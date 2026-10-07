@@ -1,4 +1,4 @@
-format_version = 1
+format_version = 2
 ploidy = 2
 
 [fitted_from]
@@ -71,12 +71,29 @@ digest = "b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4"
 term = "per-position depth cap"
 digest = "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
 
+[[fitted_from.snp_indel_fit_starts]]
+start = 1
+ended = "converged"
+passes = 41
+
+[[fitted_from.snp_indel_fit_starts]]
+start = 2
+ended = "agreed_with_an_earlier_start"
+passes = 12
+agreed_with_start = 1
+
+[[fitted_from.snp_indel_fit_starts]]
+start = 3
+ended = "at_the_pass_limit"
+passes = 200
+
 [[base_quality_calibration.by_read_group]]
 read_group = 0
 
 [base_quality_calibration.by_read_group.error_probability_multiplier]
 value = 1.0324
 warrant = "fitted_here"
+standard_error = 0.0071
 
 [base_quality_calibration.by_read_group.error_probability_multiplier.observations]
 reads = 812344
@@ -94,6 +111,7 @@ read_group = 2
 [base_quality_calibration.by_read_group.error_probability_multiplier]
 value = 0.87
 warrant = "supplied"
+standard_error = 0.0093
 
 [base_quality_calibration.by_read_group.error_probability_multiplier.observations]
 reads = 640918
@@ -151,6 +169,7 @@ sample = "TS-1"
 [inbreeding.by_sample.inbreeding_coefficient]
 value = 0.42
 warrant = "fitted_here"
+standard_error = 0.012
 
 [inbreeding.by_sample.inbreeding_coefficient.observations]
 covered_positions = 180600412
@@ -193,14 +212,17 @@ slippage_group = 0
 share_of_reads_that_slip = 0.19
 shorter_share = 0.77
 fall_off = 0.24
+samples_fitted_on = 1
 
 [repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
 smoothing = "this_stratum"
 expected_slipped_reads = 12040.25
+own_fit_standard_error = 0.0021
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 12040.25
 fall_off_smoothing = "this_stratum"
+fall_off_own_fit_standard_error = 0.018
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.blend]
 curve_weight = 0.61
@@ -245,6 +267,7 @@ cells = 15
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 8000.5
 shorter_share_smoothing = "this_stratum"
+shorter_share_own_fit_standard_error = 0.011
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.this_periods_curve]
 reach = "above_the_fitted_range"
@@ -301,6 +324,7 @@ ploidy = 2
 [repeat_tracts.substitution_rate_by_stratum.rate]
 value = 0.0012
 warrant = "borrowed"
+standard_error = 0.000173
 
 [repeat_tracts.substitution_rate_by_stratum.rate.observations]
 bases_compared = 40122

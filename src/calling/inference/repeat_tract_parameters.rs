@@ -1239,6 +1239,7 @@ mod tests {
                             .expect("a valid rate"),
                         provenance: Provenance::FittedHere,
                         observations: 40_000,
+                        standard_error: None,
                     },
                 );
             }
@@ -2074,6 +2075,7 @@ mod tests {
                             .expect("a valid rate"),
                         provenance: Provenance::FittedHere,
                         observations: 40_000,
+                        standard_error: None,
                     },
                 );
             }
@@ -2176,6 +2178,9 @@ mod tests {
             slippage: slippage_at(0, CANDIDATE_REPEATS[0]),
             level: fitted_level(400.0),
             shares: Some(shares_from(ShareSource::Stratum, ShareSource::Stratum)),
+            own_fit_standard_errors:
+                crate::parameter_estimation::joint::stratum_fits::OwnFitStandardErrors::default(),
+            samples_fitted_on: None,
         };
         assert_eq!(warrant_of(&fitted_shares), Provenance::FittedHere);
         let no_shares = FittedSlippage {

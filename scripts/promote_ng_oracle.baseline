@@ -2,6 +2,28 @@
 # by table lookup (portable_float.md Milestone D), identical in the Linux container (arm64, glibc) and on macOS (arm64).
 # Replace it only when the output is meant to change, and say in the commit which lines moved and why.
 # Previous: fitted.parameters.toml 502c3d5e6c53acd7da2f66c29d430545, from_fit.comparable b7cbf43308722894dd47940e1611c0af (libm exp).
+# Fit lines re-recorded 2026-09-29 (fit_precision.md, checkpoint A'): be31e78a… / 18f4fc11… were the fit before SQUAREM (2026-09-25),
+# which moved them to c590689d… / 5cdeafd0… on main; plan step A7 (the allele-frequency shapes step along the likelihood's own
+# slope) moved them to these. Steps A6, A8 and the two checkpoint A' changes moved neither. The other five lines are unchanged.
+# Window lines re-recorded 2026-09-29 after merging main (c37e14e9): main's psp format 1.1 (59454108) counts the reads the depth
+# cap discarded into window depth and did not re-record them; they were 25d388c8… / 259baf04…. Step B1 moved no line.
+# Fit lines re-recorded 2026-10-02 (fit_precision.md, plan step C3): the repeat-tract climb stops on Newton distances in its
+# numbers' errors, with up to 40 rounds where it had 5; 50 of the file's 574 lines moved, all repeat-tract rows (37 slippage rows
+# and 13 of the 15 fitted strata's length spectra), and 352 of 6,706 calls changed printed numbers only (AF in 324 by at most
+# 0.043, 326 sample GQs by at most 2, QUAL in 193 by at most 0.5), no genotype, and no record appeared, vanished or changed its
+# alleles. They were 393e7cd3… / 1f16dec8….
+# Both parameters-file lines re-recorded 2026-10-06 (fit_precision.md, plan step E2): the file's format version 2 adds each
+# number's standard error, the SNP/indel fit's starts and their notes. No number and no call moved: with every key and note
+# version 2 added taken out, both files are the old ones line for line (each new key deleted from its row, each new note
+# line dropped, the version put back, then compared). The fitted file gains
+# 144 standard errors (4 multipliers, 4 inbreeding coefficients, 136 substitution rates; the other 52 rates are zero and carry
+# none), one own-fit error (the one stratum of 37 whose level is its own fit) and three starts, all at the pass limit.
+# They were 5e6d874d… / bf6b176a….
+# Three lines re-recorded 2026-10-06 (fit_precision.md, checkpoint E): a repeat-tract substitution rate is never zero — a
+# count with no mismatch takes half of one. 52 of the fitted file's 188 rates move (to 0.0010-0.014) and gain the
+# standard error they lacked, so every rate now carries one; nothing else moves but notes; 4 of 6,706 calls with the fit move, all repeat tracts — QUAL by at most 0.4, AF by at most 0.00046
+# — with no genotype changed and no record appearing or vanishing. The defaults run's file moves in 8 note lines.
+# They were 70a98909… / 351f244e… / 9f5edd0e….
 # Re-recorded 2026-10-03 (Linux container, arm64) with partial reads compared against the allele and the reference beyond it
 # (read_likelihoods.md §5.3). That moved the two default-parameter VCFs (b74f3edf → 28a750c9) and from_fit.comparable; the
 # window rows, histograms, fitted parameters and from_fit were already stale at 25bfe313 (bc6780ff, 6c5926ce, c590689d, 5cdeafd0).
@@ -28,6 +50,13 @@
 # 7,451 records); window rows follow the records (be16bc49 → a07ec5c5, 30,296 → 30,348 rows) and so do the coverage histograms
 # (9d3fa077 → ec08c16f); fitted error multipliers move at most 1 part in 3,000, each sample's F at most 0.0005, and the
 # slippage table's per-tract values move with them (68f564c5 → 3f618451); from_fit.comparable 2210e52e → 65105ad0 (6,631 → 6,642).
+# Merged 2026-10-06: branch fit-precision (the lines above under fit_precision.md) brought main in. Measured on the merged
+# code (Linux container, arm64): the default-parameter VCFs, window rows and histograms are main's exactly; the defaults
+# run's parameters file is fit-precision's (b7c0a262: main's numbers, in format version 2 with its notes); the fit and the
+# calls made with it are neither parent's — fit-precision's fit over main's walk. Against fit-precision's last run, 65 of
+# the fitted file's 344 non-note lines move (37 slippage rows, 15 length spectra, 4 multipliers, 4 inbreeding coefficients,
+# 3 concentrations, 2 starts' pass counts); the fit's calls go from 6,706 to 6,645 records, 17 genotypes changing among
+# those both hold. They were main's 5e6d874d… / 3f618451… / 65105ad0….
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -41,8 +70,8 @@ slice: 20 regions, 4 alignments
 # records: 7451
 ae07091c6dc555de7b7e520492540707  from_alignments.comparable
 ae07091c6dc555de7b7e520492540707  from_psps.comparable
-5e6d874da147f898eda134ce342424b8  from_alignments.parameters.toml
+b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
 a07ec5c5b95a22e83aaf3ee86e787fae  from_alignments.windows.sorted
 ec08c16f7e7e2956fdf8ab3a3e27da8d  from_alignments.windows.histograms
-3f618451d3b2ac4a7ba0f4be57944690  fitted.parameters.toml
-65105ad0cb69d99a086df2d9c1c8748f  from_fit.comparable
+3338658ce23b0ea15e77030840c1732a  fitted.parameters.toml
+07de643d526c2dd32123ca0cf162d5db  from_fit.comparable

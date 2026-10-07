@@ -1,6 +1,7 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27. **No code yet — this settles the design.** Build order:
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02).
+Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
 which says only "repeat until the fitted values stop moving"), the repeat-tract fit
@@ -80,8 +81,13 @@ thousands of samples to be known well.
 
 ### 1.3 Non-goals, and what this does not do
 
-- **It does not change the models.** The same likelihoods, the same parameters, the same starting
-  points. Only when the fits stop, which samples a stratum is read from, and what is reported.
+- **It does not change the models** — **amended at checkpoint A (owner, 2026-09-28; recorded
+  2026-09-29): two corrections do.** Each library's reads are now scored under that library's own
+  error rates, where a sample's libraries shared the first one's (plan step A6), and the
+  allele-frequency density's and the carrier Beta's shapes now step along the likelihood's own
+  slope, where they solved the digamma form and stopped beside the maximum (step A7). Both move
+  fitted numbers. Otherwise the same likelihoods, parameters and starting points; what changes is
+  when the fits stop, which samples a stratum is read from, and what is reported.
 - **It does not make calling read the standard errors.** Consumers "combine warrants; they do not
   branch on them" ([`parameters_file.md`](parameters_file.md) §2); whether calling should weight by
   a standard error is its own design (§7).
@@ -159,6 +165,42 @@ the most missing information — the poorly determined ones, whose standard erro
 The cap keeps one near-flat direction from holding the fit forever; with it, the projection is at
 most twenty times the last step.
 
+**Amended at plan step B1 (owner, 2026-09-29): for the SNP/indel fit the distance still to travel is
+Newton's, not the projection above.** Built as written, the projection stopped the fit far too early
+(the plan's B1 report, `fit_precision_b1_stopped_2026-09-29.md`): on the 4-accession oracle cohort
+every start stopped at 36 to 57 passes, 74 log-likelihood units below a fit run to 1,000 passes, the
+invariant share 28 of its errors away; and on 15 drawn cohorts nine stopped with a parameter more than a
+tenth of an error short, up to 1.9 errors at two samples. Two causes. The errors in force had been
+computed on a plateau the fit crosses slowly, where the invariant share's was 34 times wider than at the maximum. And
+the projection cannot see a slow approach: where a path turns, the moves change sign and λ is taken as
+zero; where it crawls, λ is 0.98 to 0.99, above the cap. A higher cap and a log-likelihood condition
+repaired the 20-sample cohorts and not the 2- and 4-sample ones.
+
+**The rule, as amended.** On a pass that sums the information (§3.3) the pass also sums each
+parameter's score — the slope of the whole log-likelihood, `g`. The information solved against it,
+`dⱼ = (I⁻¹ g)ⱼ`, is each parameter's distance to the likelihood's maximum as a Newton step estimates it,
+on its natural scale; it does not depend on how fast the fit happens to be moving.
+
+- The matrix is the one the errors come from (§3.2): the whole one for a small cohort, the blocks
+  above, solved as an arrow — each sample's own parameters given the cohort's, the cohort's from what
+  the samples leave of its slope.
+- **The step stays inside the parameters' bounds** — the maximum of the quadratic model
+  `g·d − ½ dᵀ I d` within the box the fit keeps the parameters in: a parameter whose step would carry
+  it past an end of its interval stops at that end, its distance the way there, and the others are
+  solved again with its move taken out of their scores; a stopped parameter whose slope at the
+  solution points back into its interval is freed (the active-set rule for a box). *Found in B1's
+  review:* holding only a parameter exactly on an end left a clean error rate the golden section rests
+  4.4 × 10⁻¹⁰ above its floor, and a density shape the fit walks towards its lower bound, unsettled for
+  1,000 passes; with the box both converge.
+- **A parameter is settled when |dⱼ| < `SETTLED_FRACTION` × SEⱼ**, both from the same pass; one with
+  no error, or no distance (not solved for), is settled by definition. **The fit has converged when
+  every parameter is settled**, and stops at the end of that cycle.
+
+Measured on the same 15 cohorts, before the box: every fit this rule calls converged is within 0.088 of
+an error of the 600-pass fit; the ones still crawling run to the pass limit and say so (all three two-sample
+cohorts and two of the three 4-sample ones with the duplicated class). On the oracle no start converges within 200 passes, and none
+claims to. Part B's climb (§4.3) keeps its projection of the log-likelihood gain.
+
 ---
 
 ## 3. Part A — the SNP/indel fit
@@ -216,13 +258,31 @@ cohort-level parameters explain); the cohort's from its own block.
 - **Where a sample carries several read groups** k is 1 + 2 × its read groups; the block grows
   with it.
 
+**Amended at checkpoints A and A′ (owner, 2026-09-28 and 2026-09-29) — what was built:**
+
+- **The blocks are inverted exactly, as an arrow**, not by the Schur-complement sketch above: the
+  cohort's errors come from `C − Σ_s B_sᵀ A_s⁻¹ B_s` inverted (the cohort's information less what
+  each sample's own parameters explain), and a sample's from `A_s⁻¹ + A_s⁻¹ B_s V B_sᵀ A_s⁻¹` with
+  `V` that inverse — the sample's own uncertainty plus the cohort's carried through the parameters
+  they share. The sketch was measured no closer on any kind and further on the cohort's (plan step
+  A3). A sample of k libraries carries 1 + 2k own parameters: its excess and each library's two
+  rates (step A6).
+- **Small cohorts use the whole matrix** (checkpoint A's decision 3, step A8): for a cohort of at most
+  `FULL_MATRIX_SAMPLES` = 20 samples, and at most 188 parameters (checkpoint A′), every pairing is
+  summed, two samples' included, and the matrix is inverted at once — the parameters taken in the
+  blocks' order, each sample's own then the cohort's, so the same one is dropped when others mimic
+  it. At 4 samples and 3 reads the blocks' errors were too small (the error rates and the mismapped
+  share scattered 1.23 to 1.67 times them) and the whole matrix's about right (0.89 to 1.02). The
+  parameter limit keeps the final pass's matrices to about 18 MB (20 samples of four libraries); a
+  cohort of samples with more libraries takes the blocks.
+
 **The scores to derive**, one per parameter kind, each new code:
 
 | parameter | the complete-data score is … |
 |---|---|
 | error rates | the read tallies' derivative in the rate — `maximise_error_rate` maximises the same function by golden section ([`fit.rs:3137-3163`](../../../../src/parameter_estimation/joint/fit.rs#L3137)) |
 | homozygote excess | the genotype prior's derivative in the excess, weighted by the posterior genotype counts `maximise_hom_excess` reads ([`fit.rs:3166-3182`](../../../../src/parameter_estimation/joint/fit.rs#L3166)) |
-| density and carrier Beta shapes | the digamma terms `fit_beta_shapes` already uses ([`fit.rs:3217-3242`](../../../../src/parameter_estimation/joint/fit.rs#L3217)) |
+| density and carrier Beta shapes | the slope of the likelihood the quadrature rule computes, as the rule's nodes and weights move with the shapes (`RuleSlopes`, step A1) — **amended 2026-09-29**: not the digamma terms, whose integral on the rule misses that slope. Since step A7 the fit's update of the shapes steps along this same slope (`step_beta_shapes`), and `fit_beta_shapes` is gone |
 | the three shares | the class posteriors over the share, as in their closed-form M-steps ([`fit.rs:3028-3048`](../../../../src/parameter_estimation/joint/fit.rs#L3028)) |
 
 **Trap: the per-position score must be the observed-data score at that position**, the posterior
@@ -242,6 +302,18 @@ never as zero and never as a large number (`Option::None`). **At one sample** th
 is carried but never moved ([`fit.rs:3117-3127`](../../../../src/parameter_estimation/joint/fit.rs#L3117))
 and has no error either; the error rates and the cohort's parameters still get theirs.
 
+**Amended 2026-09-29 — two more reasons an error is absent**, found on drawn cohorts (plan steps A3
+and A5), so a parameter without an error says which of four it is:
+
+- **no information** — the case above;
+- **held fixed** — the homozygote excess at one sample;
+- **not identified** — other parameters mimic its effect at every position, so once they are
+  accounted for less than 10⁻⁸ of its own curvature is left (at one sample the four density
+  parameters, at two samples the duplicated class's share and carrier shapes). Only that parameter is
+  dropped; the others are inverted without it;
+- **wider than its range** — its error came out wider than the whole interval the fit keeps it in,
+  so the data do not place it anywhere in that interval.
+
 ### 3.3 When the standard errors are computed
 
 **Decided: not every cycle.** The fit keeps its current log-likelihood rule — the gain over a cycle
@@ -257,6 +329,14 @@ that reaches it still returns what it has, as today.
 
 **The final pass** ([`fit.rs:1909-1921`](../../../../src/parameter_estimation/joint/fit.rs#L1909))
 also accumulates the information, so the errors reported are those at the returned parameters.
+
+**Amended at plan step B1 (owner, 2026-09-29): once the trigger has held, every cycle's first pass
+accumulates the information and the scores**, at the cycle's starting parameters, and the Newton
+distances of §2's amendment are judged there; `ERROR_REFRESH_CYCLES` is gone. The fit can stop only
+where fresh errors and distances say it is settled — errors ten cycles old were how the projection
+came to judge the oracle's plateau by the plateau's much wider errors. The cost is one information
+pass a cycle, at 1.48 to 1.80 times a plain pass (4 to 64 samples, one thread, measured in B1's
+review), in cycles of three or more passes: about 11 to 13% more time on a small cohort's fit.
 
 ### 3.4 Stopping a starting point that is heading where another arrived
 
@@ -275,7 +355,8 @@ starts agree, which is exactly when running them all to the end was wasted.
 
 - **Trap: the test compares a start's projected endpoint** (its current value plus the projected
   distance, §2) **with the earlier answer**, not its current value — early in a start, the current
-  value is far from anything.
+  value is far from anything. *Amended at plan step B1 (owner, 2026-09-29): the projected endpoint is
+  the current value plus the Newton step of §2's amendment, from the cycle's information pass.*
 - **Trap: the first start's errors are the yardstick**, so the first start must itself have
   converged under §2; if it hit `max_passes`, the others run to their own end.
 
@@ -323,7 +404,8 @@ allele classes, and a concentration. Production pools every read group into one 
 ([`ssr_fit.rs:2457`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L2457)); the climb is
 coordinate ascent by golden section, 18 evaluations a coordinate, up to 5 rounds from each of 3
 starts, stopping when a round gains less than 10⁻⁶ on that mean
-([`ssr_fit.rs:895`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L895)).
+([`ssr_fit.rs:895`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L895)). **That was the climb
+before plan step C3**; a walk now stops as §4.3's amendment says, within 40 rounds.
 
 **Trap: the mean is over every tract in the stratum, including those with no reads**, and a tract's
 log-likelihood sums over its samples. So the same 10⁻⁶ is a looser test in a stratum where most
@@ -336,8 +418,11 @@ differences over all its numbers on the scales the climb uses (logit for the sli
 shares, log for the concentration, log-ratios for the spectrum), inverted to give the errors, then
 carried to the natural scale.
 
-- **Cost:** about 2p² evaluations for p numbers — 578 at p = 17, against about 4,600 for the climb
-  from three starts: roughly an eighth more, once per stratum at its final answer (not per start).
+- **Cost:** `1 + 2p²` evaluations over the p numbers the errors are taken over — 513 at p = 16 (one
+  slippage group and thirteen classes; the shares sum to one, so one fewer than the 17 numbers fitted),
+  against about 4,600 for the climb from three starts under the rule before plan step C3: roughly a
+  ninth more, once per stratum at its final answer (not per start). Since C3 this curvature is usually
+  the winning walk's last judgement (§4.3), and is not paid again.
 - **Why all the numbers and not only the slippage three:** a read off the reference length is either
   a slip or a real allele, so the level and the spectrum trade against each other
   ([`ssr_fit.rs`](../../../../src/parameter_estimation/joint/ssr_fit.rs) `PeriodLengthSpectrum`
@@ -368,6 +453,47 @@ log-likelihood: Böhning et al. 1994) and stops when it is below that.
   rule a round that loses is **not** convergence: the round's worse moves are undone and the walk
   stops at the best point it held, recorded as such.
 - `max_rounds` stays as a backstop.
+
+**Amended at plan step C3 (owner, 2026-10-01): a walk stops when a Newton step says every number is
+within `SETTLED_FRACTION` of its error, not on the projected gain**, as §2 was amended for Part A. Built as
+written, the projection stopped climbs short of a longer climb of the same objective
+(`fit_precision_c3_stopped_2026-10-01.md`), for two reasons. The target bounds a sum: the 0.08 left when every
+number is a tenth of an error away can sit in one number, which is then 0.4 errors away — at three allele
+classes 21 of 195 class shares stopped 0.1 to 0.5 errors short. And the projection cannot see a climb crossing a
+plateau: at thirteen classes, gains of 13.7 and then 0.98 were projected to leave 0.076, and the walk went on to
+gain 5.5. Five rounds were also too few at thirteen classes: 9 of 15 walks ran out.
+
+**The rule, as amended.**
+
+- **The judgement.** At a point the walk has reached, the curvature and the slope of the stratum's total
+  log-likelihood (§4.2's central differences; the slope comes from the same evaluations) give each number's
+  distance to the maximum as a Newton step, `I⁻¹ g` over the numbers the curvature identifies, carried to each
+  number's own scale as its error is. **The walk has settled when every number with an error is within
+  `SETTLED_FRACTION` of it**; a number without one is settled by definition — not placed (its error on the climb's
+  scale is wider than three units of logit or log), not identified (§3.2), or a class with no share. A judgement
+  costs one curvature, `1 + 2p²` evaluations: 513 at thirteen classes, about 1.7 rounds, a round being 307
+  evaluations (17 golden sections of 18, and the score where it ends).
+- **When a walk is judged.** Once the projected remaining gain above is below ½ · p · `SETTLED_FRACTION`² — p is
+  the numbers the errors are taken over, 16 at one slippage group and thirteen classes, so 0.08 — the projection
+  being a trigger, not the test; and after a round that loses. A judgement that finds the walk unsettled puts
+  the next off by one round more each time (one, then two, then three rounds later).
+- **A round that loses** is undone back to the best point it stood at: the round's start, or a point part-way
+  through it. A point part-way through is judged unless a judgement is put off, and unless it has settled the
+  walk goes on from it. The round's start is always judged, put off or not, since a next round would repeat
+  this one exactly: settled, the walk ends settled; not, it stops there, recorded as having lost a round, not as
+  converged.
+- **`max_rounds` is 40**, from 5. Measured with the limit at 60 on drawn strata: walks that settled took 2 to 6
+  rounds at three classes and 6 to 36 at thirteen; at thirteen classes one walk of fifteen had not settled by
+  60, and none settled between 37 and 60.
+- **The winning walk's last judgement gives the stratum's errors** (§4.2) whenever its last round was judged at
+  the point it returns, settled or not, so they cost no second curvature.
+- §4.1's description of the climb — up to 5 rounds, stopping on a gain of the mean below 10⁻⁶ — is the rule
+  before this amendment.
+
+Measured with the limit at 60, against the best point the same walks reach in 60 rounds with no rule: at three
+classes every number of every fit is within 0.058 errors; at thirteen classes four of five drawn strata are within
+0.044 errors, and the fifth's winning walk stopped at a round that lost, 17.4 log-likelihood units short, and says
+it has not settled.
 
 ### 4.4 A stratum read from a subset of samples
 
@@ -410,14 +536,40 @@ Each larger subset starts its climb from the previous subset's answer.
 the loci are", lines 1627-1634) applied to the repeat-tract half, with its question 8 — how large the
 subsample must be — answered per stratum by the precision target rather than once for the cohort.
 
+**Amended at plan step D2 (owner, 2026-10-02)**, after the step's review measured the rule above as first
+built (`fit_precision_d2_2026-10-02.md`):
+
+- **Each larger subset holds the smaller one's samples.** Built literally, a slippage group's added readers
+  could leave the subset when it doubled.
+- **Every slippage group with reads in the stratum is topped up to `MIN_SAMPLES_A_GROUP` of its readers**,
+  not only one the first samples hold none of: one reader in 256 is barely better than none.
+- **The subset takes every sample once doubling would hold more than three quarters of them.** At 2,169
+  samples the subsets are 256, 512, 1,024, then every sample rather than 2,048.
+- **A subset holding fewer tracts with reads than the refusal floor is not fitted; it grows.** The floor is
+  still judged first on the whole stratum, so a stratum is never refused for its subset's thinness.
+- **The target is judged only on the slippage groups that still have readers outside the subset.** A group
+  whose every reader is in cannot be measured better by growing, and would otherwise hold every stratum to
+  the whole cohort.
+- **A larger subset is one walk from the last answer, which decides only whether to grow; the subset the
+  answer is taken from is fitted from every starting point and from the last answer, the best winning.** On
+  one drawn stratum of thirteen allele classes, one walk from the last answer ended 1.3 to 41
+  log-likelihood units below three fresh starts on the same samples, in all four comparisons, once with its
+  level 0.79 of an error away.
+- **What else moves.** A subset-fitted stratum's evidence counts are the subset's, so the curves across
+  strata weigh it by the subset's slipped reads, roughly 2,500 at thirteen classes once the target is met:
+  against a curve with HG002's homopolymer held-out error (7.7%), the curve's share of a well-read stratum's
+  blended level rises from under 1 in 100 to about 6 in 100. With several strata fitted at once, each stratum's
+  subsets run one after another on one thread.
+
 ### 4.5 How we know Part B works
 
 1. **The curvature errors mean what they say.** Draw strata at known slippage (the
    `bench_fixtures::draw_stratum` generator), fit each many times, and compare the spread of the
    fitted numbers with the reported errors, at 3 and at 30 reads.
 2. **The new stop loses nothing.** On drawn strata and on the 4-accession oracle cohort, the fitted
-   numbers under the new rule are within `SETTLED_FRACTION` of their errors of a climb run to 20
-   rounds.
+   numbers under the new rule are within `SETTLED_FRACTION` of their errors of a longer climb of the
+   same walks with no stopping rule (20 rounds as first written; 40 by the comparison test's default
+   since plan step C3, when the round limit itself became 40).
 3. **The subset loses little, and says how little.** On kimura's cohort (the owner's run), a handful
    of strata fitted on every sample and on the grown subset: the two levels differ by less than
    their errors, and the time saved is reported. Below 256 samples, byte-identical results to today.
@@ -493,7 +645,10 @@ a write and a read.
 - **Time.** On kimura: Part A should cut the SNP/indel fit from 9 h 25 min to roughly a third, if the
   first start converges near pass 100 and the others stop on agreement; Part B's subset should cut a
   2,169-sample stratum by roughly the ratio of samples read, 256/2,169 at the first size. Both are
-  estimates from the kimura log, not measurements.
+  estimates from the kimura log, not measurements. **Part B's stopping rule (§4.3) costs more than the
+  rule it replaced**, measured on the four-accession oracle cohort: 394 rounds against 217, and the
+  repeat-tract fit 5 min 13 s against 1 min 45 s, a ratio the host's load blurs (the unchanged SNP/indel
+  half took 8 min 24 s against 14 min 54 s in the same two runs).
 
 ---
 
@@ -532,6 +687,9 @@ a write and a read.
    `AGREEMENT_FRACTION` (0.5), `ERROR_REFRESH_CYCLES` (10), `FIRST_SUBSET` (256),
    `LEVEL_RELATIVE_ERROR_TARGET` (0.02), `MIN_SAMPLES_A_GROUP` (8). All starting values, none
    measured. **Settled by:** the plan's checkpoints A and D.
+   *Amended at plan step B1 (2026-09-29): `SETTLED_FRACTION` was kept at 0.1 at checkpoint A;
+   `MAX_CONTRACTION` and `ERROR_REFRESH_CYCLES` belonged to the projection §2's amendment replaced and
+   are no longer used.*
 3. **Is the outer-product estimator close enough to the observed information here?** — OPEN.
    *Leaning:* yes for the well-determined parameters, possibly not for the Beta shapes at three reads.
    **Settled by:** §3.6 items 2 and 3; if it is not, Louis's method replaces it for the cohort-level

@@ -63,7 +63,7 @@
 
 use super::{
     ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError,
-    ShareCurve, ShareSmoothing, SlippageCurve, Warrant, WarrantedValue,
+    ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome, Warrant, WarrantedValue,
 };
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
@@ -104,6 +104,7 @@ impl ParametersFile {
     pub fn validate(&self) -> Result<(), ParametersFileError> {
         self.the_version_is_one_this_build_reads()?;
         self.the_identity_names_a_cohort()?;
+        self.the_fits_starts_are_numbered_in_order()?;
         self.every_axis_covers_what_it_is_keyed_by()?;
         self.the_batching_puts_each_sample_in_one_batch()?;
         self.every_calibration_is_a_multiplier()?;
@@ -117,10 +118,9 @@ impl ParametersFile {
 
     fn the_version_is_one_this_build_reads(&self) -> Result<(), ParametersFileError> {
         // **Both a zero and a future version are refused**, which is the shape the project's other
-        // TOML artefact already uses (`SampleSummaryError::UnsupportedVersion`). Spec §11 defers
-        // what a reader *does* with an older file until there is one; refusing a version this
-        // build cannot know the meaning of is not that policy, it is the guard that makes the
-        // policy possible later.
+        // TOML artefact already uses (`SampleSummaryError::UnsupportedVersion`). A version this
+        // build knows is read: version 1 is version 2 with every key version 2 added absent, which
+        // is how the shape reads it (`FORMAT_VERSION`).
         if self.format_version == 0 || self.format_version > super::FORMAT_VERSION {
             return Err(refuse(
                 "format_version",
@@ -130,6 +130,71 @@ impl ParametersFile {
                     super::FORMAT_VERSION
                 ),
             ));
+        }
+        Ok(())
+    }
+
+    /// **The SNP/indel fit's starts are numbered from one in the order they ran, and a start that
+    /// agreed names an earlier one** — the only start it could have agreed with.
+    fn the_fits_starts_are_numbered_in_order(&self) -> Result<(), ParametersFileError> {
+        let Some(starts) = &self.fitted_from.snp_indel_fit_starts else {
+            return Ok(());
+        };
+        if starts.is_empty() {
+            return Err(refuse(
+                "fitted_from.snp_indel_fit_starts",
+                "is empty, and a fit runs from at least one start; delete the key where no fit stands \
+                 behind the file",
+            ));
+        }
+        for (index, start) in starts.iter().enumerate() {
+            let at = format!("fitted_from.snp_indel_fit_starts[{index}]");
+            let expected = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            if start.start != expected {
+                return Err(refuse(
+                    format!("{at}.start"),
+                    format!(
+                        "is {}, and the starts are numbered from one in the order the fit ran \
+                         them, so this one is {expected}",
+                        start.start
+                    ),
+                ));
+            }
+            match (start.ended, start.agreed_with_start) {
+                (StartOutcome::AgreedWithAnEarlierStart, Some(earlier)) => {
+                    // **Only a start that converged can be agreed with**: what a later start is
+                    // judged against is an earlier start's converged answer.
+                    let converged = earlier >= 1
+                        && earlier < start.start
+                        && starts[earlier as usize - 1].ended == StartOutcome::Converged;
+                    if !converged {
+                        return Err(refuse(
+                            format!("{at}.agreed_with_start"),
+                            format!(
+                                "is {earlier}, and a start can only agree with an earlier start \
+                                 that converged; name one numbered below {} whose `ended` is \
+                                 `converged`",
+                                start.start
+                            ),
+                        ));
+                    }
+                }
+                (StartOutcome::AgreedWithAnEarlierStart, None) => {
+                    return Err(refuse(
+                        format!("{at}.agreed_with_start"),
+                        "is missing, and a start that agreed says which earlier start it agreed \
+                         with; write that start's number",
+                    ));
+                }
+                (_, Some(_)) => {
+                    return Err(refuse(
+                        format!("{at}.agreed_with_start"),
+                        "is written beside a start that did not agree with an earlier one; delete \
+                         it, or set `ended` to `agreed_with_an_earlier_start`",
+                    ));
+                }
+                (_, None) => {}
+            }
         }
         Ok(())
     }
@@ -667,6 +732,7 @@ impl ParametersFile {
             &tracts.fallback_length_spectrum_concentration,
             EvidenceCount::Reads(0),
         )?;
+        no_error_is_computed_for(at, &tracts.fallback_length_spectrum_concentration)?;
         // **Two of the four warrants are claims this file's own rows can refute** — and the
         // other two are not, which is the whole of what changed on 2026-08-30 when the warrant
         // began travelling through `StratumFits` instead of being re-derived by the writer.
@@ -741,6 +807,33 @@ impl ParametersFile {
                     reads,
                 )?;
             }
+            an_own_fit_error(
+                &format!("{at}.share_of_reads_that_slip_origin.own_fit_standard_error"),
+                row.share_of_reads_that_slip_origin.own_fit_standard_error,
+                matches!(
+                    row.share_of_reads_that_slip_origin.smoothing,
+                    LevelSmoothing::ThisStratum
+                ),
+            )?;
+            if let Some(samples) = row.samples_fitted_on
+                && samples > self.fitted_from.samples.len() as u64
+            {
+                return Err(refuse(
+                    format!("{at}.samples_fitted_on"),
+                    format!(
+                        "is {samples}, and the file lists {} samples; a stratum is fitted on at \
+                         most every one",
+                        self.fitted_from.samples.len()
+                    ),
+                ));
+            }
+            if row.samples_fitted_on == Some(0) {
+                return Err(refuse(
+                    format!("{at}.samples_fitted_on"),
+                    "is 0, and a fit reads at least one sample; write how many samples the \
+                     stratum's fit read, or leave the key out where no subset was drawn",
+                ));
+            }
             if let Some(shares) = &row.shorter_share_and_fall_off_origin {
                 if let Some(reads) = shares.expected_slipped_reads {
                     finite(
@@ -755,6 +848,20 @@ impl ParametersFile {
                 a_share_smoothing(
                     &format!("{at}.shorter_share_and_fall_off_origin.fall_off_smoothing"),
                     &shares.fall_off_smoothing,
+                )?;
+                an_own_fit_error(
+                    &format!(
+                        "{at}.shorter_share_and_fall_off_origin.shorter_share_own_fit_standard_error"
+                    ),
+                    shares.shorter_share_own_fit_standard_error,
+                    matches!(shares.shorter_share_smoothing, ShareSmoothing::ThisStratum),
+                )?;
+                an_own_fit_error(
+                    &format!(
+                        "{at}.shorter_share_and_fall_off_origin.fall_off_own_fit_standard_error"
+                    ),
+                    shares.fall_off_own_fit_standard_error,
+                    matches!(shares.fall_off_smoothing, ShareSmoothing::ThisStratum),
                 )?;
             }
         }
@@ -800,6 +907,7 @@ impl ParametersFile {
         let at = "stated_constants.repeat_tract_outlier_weight";
         let weight = &self.stated_constants.repeat_tract_outlier_weight;
         a_warranted_value(at, weight, EvidenceCount::Reads(0))?;
+        no_error_is_computed_for(at, weight)?;
         // **Open at both ends, where every other share here is closed.** The scoring row asserts
         // `0 < weight < 1` (`likelihood::ssr`'s `genotype_log_likelihood_row`), so a zero or a
         // one accepted here becomes a panic several frames later naming a locus rather than the
@@ -1041,6 +1149,56 @@ fn finite(at: impl Into<String>, value: f64) -> Result<(), ParametersFileError> 
     ))
 }
 
+/// **A standard error is a spread**: finite and above zero. An error of zero would claim the number
+/// known exactly, which no fit can, and the writer leaves the key out rather than write one.
+fn a_standard_error(at: &str, error: f64) -> Result<(), ParametersFileError> {
+    finite(at, error)?;
+    if error <= 0.0 {
+        return Err(refuse(
+            at,
+            format!(
+                "is {error}, and a standard error is above zero; leave the key out where there is \
+                 none"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// **A number this design gives no standard error carries none** (`fit_precision.md` §5.2): the
+/// fallback concentration is a median over strata and the outlier weight a stated constant. A run
+/// reading one would drop it on the way back out, so the file would not survive its own round trip.
+fn no_error_is_computed_for(at: &str, value: &WarrantedValue) -> Result<(), ParametersFileError> {
+    if value.standard_error.is_some() {
+        return Err(refuse(
+            format!("{at}.standard_error"),
+            "is written on a number this caller computes no error for; delete it",
+        ));
+    }
+    Ok(())
+}
+
+/// **A stratum's own-fit error, written only beside a number that is the stratum's own fit**: one
+/// beside a number taken from a curve or blended with one would describe a number the stratum
+/// does not emit (`fit_precision.md` §5.2).
+fn an_own_fit_error(
+    at: &str,
+    error: Option<f64>,
+    the_number_is_the_stratums_own: bool,
+) -> Result<(), ParametersFileError> {
+    let Some(error) = error else {
+        return Ok(());
+    };
+    if !the_number_is_the_stratums_own {
+        return Err(refuse(
+            at,
+            "is written beside a number taken from its period's curve or blended with it, and \
+             only a number that is this stratum's own fit has an own-fit error; delete it",
+        ));
+    }
+    a_standard_error(at, error)
+}
+
 /// A number that is a share of something: finite, and within `[0, 1]`.
 fn a_share(at: &str, value: f64) -> Result<(), ParametersFileError> {
     finite(at, value)?;
@@ -1069,6 +1227,17 @@ fn a_warranted_value(
     counted_in: EvidenceCount,
 ) -> Result<(), ParametersFileError> {
     finite(at, value.value)?;
+    if let Some(error) = value.standard_error {
+        if value.warrant == Warrant::Defaulted {
+            return Err(refuse(
+                format!("{at}.standard_error"),
+                "is written beside a `defaulted` warrant, and nothing determined a stated \
+                 constant; delete it, or — if you changed the number — delete it and set the \
+                 warrant to `supplied`",
+            ));
+        }
+        a_standard_error(&format!("{at}.standard_error"), error)?;
+    }
     let Some(observations) = value.observations else {
         return Ok(());
     };
@@ -1274,7 +1443,12 @@ mod tests {
         edit(&mut file);
         match file.validate() {
             Ok(()) => panic!("this edit was accepted and should have been refused"),
-            Err(ParametersFileError::Meaningless { field, problem }) => (field, problem),
+            Err(ParametersFileError::Meaningless { field, problem }) => {
+                // **A message is one line of prose**: a string wrapped without its `\` keeps the
+                // next line's indentation, a hole in the middle of what the person reads.
+                assert!(!problem.contains("  "), "a run of spaces in: {problem}");
+                (field, problem)
+            }
             Err(other) => panic!("refused for the wrong reason: {other}"),
         }
     }
@@ -1325,6 +1499,7 @@ mod tests {
             value: 1.0,
             warrant: Warrant::Defaulted,
             observations: None,
+            standard_error: None,
         };
         small
             .validate()
@@ -1545,8 +1720,174 @@ mod tests {
         let (field, problem) = refused(|file| file.format_version = 0);
         assert_eq!(field, "format_version");
         assert!(problem.contains("written by a newer build"), "{problem}");
-        let (field, _) = refused(|file| file.format_version = 2);
+        let (field, _) = refused(|file| file.format_version = 3);
         assert_eq!(field, "format_version");
+    }
+
+    /// **What version 2 added is checked as the rest is.** A standard error is a spread — finite
+    /// and above zero — and a `defaulted` number carries none, as it carries no count; an own-fit
+    /// error sits only beside a number that is the stratum's own fit; a stratum is fitted on at
+    /// least one sample; the SNP/indel fit's starts are numbered from one, and only a start that
+    /// agreed names an earlier one. Each edit is made to the fixture, which is accepted as it
+    /// stands, and refused naming its key.
+    #[test]
+    fn every_key_version_two_added_is_refused_where_it_means_nothing() {
+        use super::super::StartOutcome;
+        let calibration = "base_quality_calibration.by_read_group[read_group = 0].error_probability_multiplier.standard_error";
+        for bad in [0.0, -0.01, f64::NAN, f64::INFINITY] {
+            let (field, _) = refused(|file| {
+                file.base_quality_calibration.by_read_group[0]
+                    .error_probability_multiplier
+                    .standard_error = Some(bad);
+            });
+            assert_eq!(field, calibration, "an error of {bad}");
+        }
+        let (field, problem) = refused(|file| {
+            let defaulted = &mut file.base_quality_calibration.by_read_group[1];
+            defaulted.error_probability_multiplier.standard_error = Some(0.01);
+        });
+        assert!(
+            field.ends_with("error_probability_multiplier.standard_error"),
+            "{field}"
+        );
+        assert!(problem.contains("`defaulted`"), "{problem}");
+
+        // The fixture's second row blends its level with its period's curve.
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[1]
+                .share_of_reads_that_slip_origin
+                .own_fit_standard_error = Some(0.002);
+        });
+        assert!(
+            field.ends_with("share_of_reads_that_slip_origin.own_fit_standard_error"),
+            "{field}"
+        );
+        assert!(problem.contains("curve"), "{problem}");
+        // Its fall-off is its period's curve's.
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[1]
+                .shorter_share_and_fall_off_origin
+                .as_mut()
+                .expect("the fixture's second row has a shares origin")
+                .fall_off_own_fit_standard_error = Some(0.02);
+        });
+        assert!(
+            field.ends_with("fall_off_own_fit_standard_error"),
+            "{field}"
+        );
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0]
+                .share_of_reads_that_slip_origin
+                .own_fit_standard_error = Some(0.0);
+        });
+        assert!(field.ends_with("own_fit_standard_error"), "{field}");
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0].samples_fitted_on = Some(0);
+        });
+        assert!(field.ends_with("samples_fitted_on"), "{field}");
+
+        let starts = |file: &mut ParametersFile| {
+            file.fitted_from
+                .snp_indel_fit_starts
+                .as_mut()
+                .expect("the fixture records its starts")
+                .clone()
+        };
+        let (field, _) = refused(|file| {
+            let mut renumbered = starts(file);
+            renumbered[1].start = 3;
+            file.fitted_from.snp_indel_fit_starts = Some(renumbered);
+        });
+        assert_eq!(field, "fitted_from.snp_indel_fit_starts[1].start");
+        let (field, problem) = refused(|file| {
+            let mut later = starts(file);
+            later[1].agreed_with_start = Some(2);
+            file.fitted_from.snp_indel_fit_starts = Some(later);
+        });
+        assert_eq!(
+            field,
+            "fitted_from.snp_indel_fit_starts[1].agreed_with_start"
+        );
+        assert!(problem.contains("an earlier start"), "{problem}");
+        let (field, _) = refused(|file| {
+            let mut unnamed = starts(file);
+            unnamed[1].agreed_with_start = None;
+            file.fitted_from.snp_indel_fit_starts = Some(unnamed);
+        });
+        assert_eq!(
+            field,
+            "fitted_from.snp_indel_fit_starts[1].agreed_with_start"
+        );
+        let (field, _) = refused(|file| {
+            let mut converged_and_agreed = starts(file);
+            converged_and_agreed[0].ended = StartOutcome::Converged;
+            converged_and_agreed[0].agreed_with_start = Some(1);
+            file.fitted_from.snp_indel_fit_starts = Some(converged_and_agreed);
+        });
+        assert_eq!(
+            field,
+            "fitted_from.snp_indel_fit_starts[0].agreed_with_start"
+        );
+        let (field, problem) = refused(|file| {
+            let mut with_a_start_that_never_converged = starts(file);
+            with_a_start_that_never_converged[0].ended = StartOutcome::AtThePassLimit;
+            file.fitted_from.snp_indel_fit_starts = Some(with_a_start_that_never_converged);
+        });
+        assert_eq!(
+            field,
+            "fitted_from.snp_indel_fit_starts[1].agreed_with_start"
+        );
+        assert!(problem.contains("converged"), "{problem}");
+        let (field, _) = refused(|file| {
+            let mut naming_no_start = starts(file);
+            naming_no_start[1].agreed_with_start = Some(0);
+            file.fitted_from.snp_indel_fit_starts = Some(naming_no_start);
+        });
+        assert_eq!(
+            field,
+            "fitted_from.snp_indel_fit_starts[1].agreed_with_start"
+        );
+        let (field, _) = refused(|file| file.fitted_from.snp_indel_fit_starts = Some(Vec::new()));
+        assert_eq!(field, "fitted_from.snp_indel_fit_starts");
+
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0].samples_fitted_on =
+                Some(file.fitted_from.samples.len() as u64 + 1);
+        });
+        assert!(field.ends_with("samples_fitted_on"), "{field}");
+        accepted(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0].samples_fitted_on =
+                Some(file.fitted_from.samples.len() as u64);
+        });
+        // The two numbers this design computes no error for.
+        let (field, _) = refused(|file| {
+            file.stated_constants
+                .repeat_tract_outlier_weight
+                .standard_error = Some(0.01);
+        });
+        assert_eq!(
+            field,
+            "stated_constants.repeat_tract_outlier_weight.standard_error"
+        );
+        let (field, _) = refused(|file| {
+            file.repeat_tracts
+                .fallback_length_spectrum_concentration
+                .standard_error = Some(0.1);
+        });
+        assert_eq!(
+            field,
+            "repeat_tracts.fallback_length_spectrum_concentration.standard_error"
+        );
+    }
+
+    /// **A version-1 file still reads**: every key version 2 added is optional, so a file written
+    /// before them is the same file with those keys absent (`fit_precision.md` §5.2).
+    #[test]
+    fn a_version_one_file_is_accepted() {
+        let mut file = a_file_using_every_shape();
+        file.format_version = 1;
+        file.fitted_from.snp_indel_fit_starts = None;
+        file.validate().expect("a version-1 file is accepted");
     }
 
     #[test]
@@ -2069,6 +2410,7 @@ mod tests {
                 value: 0.5,
                 warrant: Warrant::Supplied,
                 observations: None,
+                standard_error: None,
             };
         });
     }
@@ -2110,6 +2452,7 @@ mod tests {
                 value: DEFAULT_OUTLIER_WEIGHT,
                 warrant: Warrant::Defaulted,
                 observations: None,
+                standard_error: None,
             };
         });
         accepted(|file| {
@@ -2117,6 +2460,7 @@ mod tests {
                 value: 0.05,
                 warrant: Warrant::Supplied,
                 observations: None,
+                standard_error: None,
             };
         });
         assert!(
@@ -2288,6 +2632,7 @@ mod tests {
                     value: 1.4,
                     warrant: Warrant::Supplied,
                     observations: None,
+                    standard_error: None,
                 };
         });
     }

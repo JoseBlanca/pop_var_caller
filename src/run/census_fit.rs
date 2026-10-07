@@ -29,7 +29,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::calling::parameters_file::{CensusIdentity, ParametersFile, ReadsBehindEachCalibration};
+use crate::calling::parameters_file::{
+    CensusIdentity, ParametersFile, ReadsBehindEachCalibration, SnpIndelFitStart, StartOutcome,
+};
 use crate::calling::run_parameters::RunParameters;
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::joint::census::{
@@ -37,13 +39,14 @@ use crate::parameter_estimation::joint::census::{
 };
 use crate::parameter_estimation::joint::contamination::ContaminationEstimate;
 use crate::parameter_estimation::joint::fit::{
-    HomozygoteExcess, JointFit, JointFitConfig, JointFitError,
+    HomozygoteExcess, JointFit, JointFitConfig, JointFitError, StartEnding, StartRecord,
 };
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
+use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::{
-    self, SsrFitConfig, StratumOutcome, StratumSubstitutionCounts, gather_strata,
+    self, SsrFitConfig, StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata,
     strata_of_kept_loci,
 };
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
@@ -142,6 +145,67 @@ pub enum CohortFitError {
     },
 }
 
+/// **Refuse a cohort whose censuses were written against another selection than `loci`**: the
+/// digest every census records of the ordinary positions it kept, against the digest of `loci`'s.
+///
+/// # Errors
+///
+/// [`CohortFitError::AnotherSelection`] when they differ; [`CohortFitError::NoSamples`] for a cohort
+/// of none.
+pub fn refuse_another_selection(
+    cohort: &CohortCensusEvidence,
+    loci: &CensusLoci,
+) -> Result<(), CohortFitError> {
+    // The digest is over the kept ordinary positions, in the order the writer digested them —
+    // which is the order `CensusWriter` holds them in, straight from the selection.
+    let recorded = cohort
+        .terms()
+        .ok_or(CohortFitError::NoSamples)?
+        .kept_loci
+        .clone();
+    let mut digester = CensusLociDigester::new();
+    for (index, position) in loci.generic().iter().enumerate() {
+        digester.observe(index, *position);
+    }
+    if digester.finish() != recorded {
+        return Err(CohortFitError::AnotherSelection);
+    }
+    Ok(())
+}
+
+/// **A cohort's repeat-tract evidence**: every stratum with each sample's reads at its tracts, and
+/// how many tracts the selection kept.
+pub struct CohortTractStrata {
+    /// One entry a stratum, its samples indexed by the cohort's own sample order.
+    pub strata: Vec<StratumEvidence>,
+    /// The repeat tracts the selection kept, over every stratum.
+    pub tracts: usize,
+}
+
+/// **Every repeat-tract stratum of a cohort, with each sample's reads at its tracts** — what the
+/// tract half of [`fit_a_cohort`] fits.
+///
+/// # Errors
+///
+/// [`CohortFitError::Tracts`] when a census's tract sections cannot be read.
+pub fn the_tract_strata_of_a_cohort(
+    cohort: &mut CohortCensusEvidence,
+    loci: &CensusLoci,
+    contig_of: &dyn Fn(&str) -> Option<ContigId>,
+    slippage_group_of: &BTreeMap<ReadGroupId, u32>,
+) -> Result<CohortTractStrata, CohortFitError> {
+    let kept = strata_of_kept_loci(loci, contig_of);
+    let strata = gather_strata(cohort, &kept, slippage_group_of).map_err(|source| {
+        CohortFitError::Tracts {
+            source: Box::new(source),
+        }
+    })?;
+    Ok(CohortTractStrata {
+        strata,
+        tracts: kept.len(),
+    })
+}
+
 /// **Fit a cohort of censuses, both halves.**
 ///
 /// `loci` is the selection rebuilt from this run's reference and catalog; it is checked against
@@ -166,18 +230,7 @@ pub fn fit_a_cohort(
     //
     // The digest is over the kept ordinary positions, in the order the writer digested them —
     // which is the order `CensusWriter` holds them in, straight from the selection.
-    let recorded = cohort
-        .terms()
-        .ok_or(CohortFitError::NoSamples)?
-        .kept_loci
-        .clone();
-    let mut digester = CensusLociDigester::new();
-    for (index, position) in loci.generic().iter().enumerate() {
-        digester.observe(index, *position);
-    }
-    if digester.finish() != recorded {
-        return Err(CohortFitError::AnotherSelection);
-    }
+    refuse_another_selection(cohort, loci)?;
 
     let fit = crate::parameter_estimation::joint::fit::fit_jointly(cohort, generic).map_err(
         |source| CohortFitError::Generic {
@@ -196,13 +249,17 @@ pub fn fit_a_cohort(
         })
         .collect();
 
-    let strata = strata_of_kept_loci(loci, contig_of);
-    let evidence = gather_strata(cohort, &strata, slippage_group_of).map_err(|source| {
-        CohortFitError::Tracts {
-            source: Box::new(source),
-        }
-    })?;
-    let outcomes = ssr_fit::fit_strata(&evidence, &homozygote_excess, tracts);
+    let CohortTractStrata {
+        strata: evidence,
+        tracts: kept_tracts,
+    } = the_tract_strata_of_a_cohort(cohort, loci, contig_of, slippage_group_of)?;
+    // **A large cohort's strata are each read from a subset of its samples**, the first in a
+    // fixed order drawn from the samples' names (`fit_precision.md` §4.4); the order is indexed as
+    // the evidence's samples and `homozygote_excess` are, the cohort's own order.
+    let names: Vec<&str> = cohort.sample_names().collect();
+    let order = sample_order(&names, SAMPLE_ORDER_SEED);
+    let outcomes =
+        ssr_fit::fit_strata_on_sample_subsets(&evidence, &homozygote_excess, &order, tracts);
     // **The evidence is the largest thing the tract half holds and nothing after the fit needs
     // more of it than these two counts a stratum**, so it goes here rather than when the
     // parameters file has been written.
@@ -215,7 +272,7 @@ pub fn fit_a_cohort(
     Ok(CohortFit {
         generic: fit,
         strata: outcomes,
-        tracts: strata.len(),
+        tracts: kept_tracts,
         substitution_counts,
     })
 }
@@ -279,23 +336,7 @@ pub fn parameters_from_the_fit(
     // **The clean class's rate is the sequencing error rate.** The fit models two: how often a
     // read misreads a base at an ordinary position, and how often a read disagrees with the
     // reference at a mismapped one. Only the first is chemistry.
-    let error_rate_by_read_group: BTreeMap<ReadGroupId, Estimate<ErrorRate>> = fit
-        .generic
-        .noise
-        .iter()
-        .filter_map(|(group, estimate)| {
-            ErrorRate::try_new(estimate.value.clean).ok().map(|rate| {
-                (
-                    *group,
-                    Estimate {
-                        value: rate,
-                        provenance: estimate.provenance,
-                        observations: estimate.observations,
-                    },
-                )
-            })
-        })
-        .collect();
+    let error_rate_by_read_group = fit.generic.sequencing_error_rates();
 
     // Per sample, per read group — and a read group belongs to one sample, so flattening cannot
     // collide.
@@ -328,6 +369,11 @@ pub fn parameters_from_the_fit(
             continue;
         };
         let repeats = RepeatCount(repeats);
+        // **A counted rate's error is the binomial one**, √(p(1 − p)/n) over the bases compared:
+        // each base compared either matched or did not. The rate is never zero or one
+        // (`StratumSubstitutionCounts::substitution_rate`), so the error is never zero either.
+        let standard_error =
+            Some((rate.get() * (1.0 - rate.get()) / counts.bases_compared as f64).sqrt());
         for group in cohort.read_groups() {
             ssr_substitution_rate.insert(
                 StratumKey {
@@ -339,6 +385,7 @@ pub fn parameters_from_the_fit(
                     value: rate,
                     provenance: Provenance::FittedHere,
                     observations: counts.bases_compared,
+                    standard_error,
                 },
             );
         }
@@ -347,7 +394,16 @@ pub fn parameters_from_the_fit(
     // **What each library's own base qualities claimed**, which every census carries beside who
     // its read groups are. A calibration is fitted from this and the measured rate together;
     // `assemble` refuses one without the other, and says why.
-    let minted_by_read_group: BTreeMap<ReadGroupId, MintedReadErrors> = cohort
+    //
+    // **A read group nothing scored gets empty totals**, which is what they are: the census sums
+    // them at ordinary positions only (`calibration::minted_error_by_read_group`), so a sample whose
+    // walk wrote repeat-tract sections and no ordinary one has none, while the fit still lists its
+    // read group with a defaulted rate from no observation. Empty totals have no mean, and
+    // `ReadGroupCalibration::from_fitted_rate` gives such a library the defaulted multiplier of
+    // one. Until 2026-10-06 a cohort holding such a sample stopped here with a panic. **Only such a
+    // read group**: a fitted rate with no totals behind it is a lost read-group axis, and
+    // `RunParameters::assemble` still refuses it.
+    let census_totals: BTreeMap<ReadGroupId, MintedReadErrors> = cohort
         .samples()
         .iter()
         .flat_map(|sample| {
@@ -356,7 +412,16 @@ pub fn parameters_from_the_fit(
                 .iter()
                 .map(|(group, totals)| (*group, *totals))
         })
-        .filter(|(group, _)| error_rate_by_read_group.contains_key(group))
+        .collect();
+    let minted_by_read_group: BTreeMap<ReadGroupId, MintedReadErrors> = error_rate_by_read_group
+        .iter()
+        .filter_map(|(group, rate)| match census_totals.get(group) {
+            Some(totals) => Some((*group, *totals)),
+            None if rate.provenance == Provenance::Defaulted && rate.observations == 0 => {
+                Some((*group, MintedReadErrors::default()))
+            }
+            None => None,
+        })
         .collect();
 
     RunParameters::assemble(
@@ -420,6 +485,8 @@ pub fn fitted_inbreeding_of(
                             // apart.
                             provenance: excess.provenance,
                             observations: excess.observations,
+                            // The coefficient is the excess itself, so its error is the excess's.
+                            standard_error: excess.standard_error,
                         },
                     )
                 })
@@ -435,9 +502,14 @@ pub fn fitted_inbreeding_of(
 /// recording terms every one of them agreed on — so a calling run handed this file can tell
 /// whether its own evidence was recorded the same way.
 ///
-/// **The calibration counts say nothing was fitted, and that is true.** This route produces no
-/// per-read-group minted-error totals, so `ReadsBehindEachCalibration::nothing_was_fitted` is the
-/// honest entry and the file's warrants come out `defaulted` for those numbers.
+/// **The calibration rows carry no `observations`.** Their warrant and standard error are the
+/// calibration's own, but the count this fit keeps beside a library's rate is the census positions
+/// it read, and the file counts a multiplier's evidence in reads: writing it would put a position
+/// count under the name of a read count. `ReadsBehindEachCalibration::no_count_in_reads` is what
+/// states no count.
+///
+/// `snp_indel_fit_starts` is the fit's record of how each of its starts ended, written into the
+/// file's `[fitted_from]` (`doc/devel/ng/spec/fit_precision.md` §5.2).
 #[must_use]
 pub fn parameters_file_of(
     parameters: &RunParameters,
@@ -446,16 +518,42 @@ pub fn parameters_file_of(
     reference: &ReferenceDigest,
     terms: &RecordingTerms,
     repeat_routing: &StrRepeatCriteria,
+    snp_indel_fit_starts: &[StartRecord],
 ) -> ParametersFile {
     ParametersFile::of_run(
         parameters,
         read_groups,
-        &ReadsBehindEachCalibration::nothing_was_fitted(read_groups.len()),
+        &ReadsBehindEachCalibration::no_count_in_reads(read_groups.len()),
         inbreeding,
         reference,
         CensusIdentity::of(terms),
         repeat_routing,
     )
+    .with_snp_indel_fit_starts(Some(the_starts_as_written(snp_indel_fit_starts)))
+}
+
+/// **How each start of the SNP/indel fit ended, in the file's words**: its number, how it ended,
+/// its passes, and for one that agreed, which earlier start.
+fn the_starts_as_written(starts: &[StartRecord]) -> Vec<SnpIndelFitStart> {
+    starts
+        .iter()
+        .map(|record| {
+            let (ended, agreed_with_start) = match record.ended {
+                StartEnding::Converged => (StartOutcome::Converged, None),
+                StartEnding::AtTheLimit => (StartOutcome::AtThePassLimit, None),
+                StartEnding::Agreed { with_start } => (
+                    StartOutcome::AgreedWithAnEarlierStart,
+                    Some(u32::try_from(with_start).expect("a fit's starts are few")),
+                ),
+            };
+            SnpIndelFitStart {
+                start: u32::try_from(record.number).expect("a fit's starts are few"),
+                ended,
+                passes: record.passes,
+                agreed_with_start,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -469,6 +567,7 @@ mod fitted_inbreeding_tests {
             value: HomozygoteExcess::try_new(value).expect("a fraction in [0, 1]"),
             provenance,
             observations: 1_806,
+            standard_error: None,
         }
     }
 
@@ -488,6 +587,11 @@ mod fitted_inbreeding_tests {
         ]
         .into_iter()
         .collect();
+        let mut hom_excess = hom_excess;
+        hom_excess
+            .get_mut("identified")
+            .expect("inserted above")
+            .standard_error = Some(0.031);
 
         let coefficients = fitted_inbreeding_of(&hom_excess);
 
@@ -496,7 +600,11 @@ mod fitted_inbreeding_tests {
         assert!((identified.value.get() - 0.78).abs() < 1e-15);
         assert_eq!(identified.provenance, Provenance::FittedHere);
         assert_eq!(identified.observations, 1_806);
+        // The coefficient is the excess, so it keeps the excess's error, and an excess with none
+        // stays without one.
+        assert_eq!(identified.standard_error, Some(0.031));
         assert_eq!(coefficients["one_sample"].provenance, Provenance::Defaulted);
+        assert_eq!(coefficients["one_sample"].standard_error, None);
     }
 
     /// **An excess of exactly one has no coefficient to become, so that sample is left out** and
@@ -894,11 +1002,14 @@ mod writing_the_parameters_file {
     /// own**, for every read group, counted over the bases it compared.
     ///
     /// The fixture's one stratum compares 460 bases and finds none disagreeing, so on its own it
-    /// reaches neither case: its rate is zero and no stratum lacks one. Two strata are added to
-    /// the fit's counts before the file is assembled — one with nothing compared, which must be
-    /// skipped rather than written as a fitted zero, and one with 3 disagreeing in 4,000.
+    /// reaches neither case: none of its bases disagree, and no stratum lacks a rate. Three strata
+    /// are added to the fit's counts before the file is assembled — one with nothing compared,
+    /// which must be skipped rather than written as a fitted zero, one with 3 disagreeing in 4,000,
+    /// and one whose 5 bases all disagree. A count that saw one outcome only takes half a count of
+    /// the other, so the fixture's own rate is half a mismatch over its bases and the third
+    /// stratum's half a match short of one; each rate carries its binomial error.
     #[test]
-    fn a_stratum_with_nothing_compared_gets_no_rate_and_one_with_mismatches_gets_its_own() {
+    fn every_stratum_with_bases_compared_gets_a_rate_and_its_binomial_error() {
         use crate::parameter_estimation::joint::census::Stratum as CensusStratum;
 
         let nothing = CensusStratum {
@@ -908,6 +1019,10 @@ mod writing_the_parameters_file {
         let some = CensusStratum {
             period: 4,
             reference_repeats: 6,
+        };
+        let all = CensusStratum {
+            period: 5,
+            reference_repeats: 5,
         };
         let (parameters, _) = a_fitted_cohorts_parameters_with(&[
             StratumSubstitutionCounts {
@@ -919,6 +1034,11 @@ mod writing_the_parameters_file {
                 stratum: some,
                 bases_compared: 4_000,
                 mismatching_bases: 3,
+            },
+            StratumSubstitutionCounts {
+                stratum: all,
+                bases_compared: 5,
+                mismatching_bases: 5,
             },
         ]);
         let rates: Vec<_> = parameters.ssr_substitution_rate().collect();
@@ -938,6 +1058,25 @@ mod writing_the_parameters_file {
             !fixtures_own.is_empty(),
             "the fixture's own stratum is written, which is what the count below is measured by"
         );
+        // **A count that found no mismatch takes half of one**, not a rate of zero — which would
+        // give a read with one mismatched base no likelihood at all — and the rate's binomial error.
+        let binomial = |rate: f64, compared: u64| (rate * (1.0 - rate) / compared as f64).sqrt();
+        for (_, estimate) in &fixtures_own {
+            let compared = estimate.observations;
+            assert!(compared > 0);
+            assert_eq!(estimate.value.get(), 0.5 / (compared as f64 + 1.0));
+            assert_eq!(
+                estimate.standard_error,
+                Some(binomial(estimate.value.get(), compared))
+            );
+        }
+        // **Nor one**, where every base compared mismatched: half a match short of it.
+        let every_base = of_period(5);
+        assert_eq!(every_base.len(), fixtures_own.len());
+        for (_, estimate) in every_base {
+            assert_eq!(estimate.value.get(), 5.5 / 6.0);
+            assert_eq!(estimate.standard_error, Some(binomial(5.5 / 6.0, 5)));
+        }
         let added = of_period(4);
         assert_eq!(
             added.len(),
@@ -949,6 +1088,15 @@ mod writing_the_parameters_file {
             assert_eq!(estimate.value.get(), 3.0 / 4_000.0);
             assert_eq!(estimate.observations, 4_000);
             assert_eq!(estimate.provenance, Provenance::FittedHere);
+            // **The binomial error of 3 mismatches in 4,000 bases**, √(p(1 − p)/n): 0.000433,
+            // about the rate over √3 — one over the square root of the mismatches, as a count's
+            // error is.
+            let rate: f64 = 3.0 / 4_000.0;
+            let error = estimate
+                .standard_error
+                .expect("a counted rate has an error");
+            assert_eq!(error, (rate * (1.0 - rate) / 4_000.0).sqrt());
+            assert!((error - 0.000_433).abs() < 1e-6, "{error}");
         }
     }
 
@@ -1011,6 +1159,7 @@ mod writing_the_parameters_file {
                 value: declared,
                 provenance: Provenance::Supplied,
                 observations: 0,
+                standard_error: None,
             })
             .collect();
 
@@ -1032,7 +1181,228 @@ mod writing_the_parameters_file {
             &plan.terms.reference,
             &terms,
             &plan.terms.ssr_criteria,
+            &fit.generic.starts,
         );
         (parameters, file)
+    }
+}
+
+#[cfg(test)]
+mod a_sample_with_repeat_tracts_only {
+    //! **A sample whose census holds repeat tracts and no ordinary position, through to the file**
+    //! (plan `fit_precision.md` step E2, the owner at checkpoint A′).
+
+    use super::*;
+    use crate::calling::likelihood::ReadGroupCalibration;
+    use crate::calling::parameters_file::{DeclaredInbreeding, Warrant};
+    use crate::parameter_estimation::joint::census::{
+        NamedReadGroup, SampleCensusEvidence, Section, SectionKey, SsrEvidence,
+        Stratum as CensusStratum,
+    };
+    use crate::parameter_estimation::joint::fit::bench_fixtures::{as_cohort, draw_cohort};
+    use crate::parameter_estimation::joint::fit::{FrequencyDensity, StartingPoint, fit_jointly};
+    use crate::repeat_catalog::StrRepeatCriteria;
+
+    /// **Its read group and its sample are written `defaulted`, from nothing, with no error — and
+    /// the run gets that far.** Four drawn samples and a fifth with one repeat-tract section. The
+    /// census sums what a library's qualities claimed at ordinary positions only, so the fifth
+    /// read group has no totals, while the drawn four are given some. Before 2026-10-06 the run
+    /// stopped assembling at that read group with a panic; now it takes the defaulted multiplier of
+    /// one, beside the four fitted ones. Its sample's inbreeding coefficient is the default,
+    /// `defaulted`, where it was a fitted number no read informed. The drawn samples keep fitted
+    /// coefficients with errors.
+    #[test]
+    fn its_read_group_and_its_coefficient_are_written_defaulted() {
+        let mut drawn = draw_cohort(
+            4,
+            2_000,
+            6.0,
+            (0.003, 0.06, 0.02),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            0x5EED_0E20_0000_0002,
+        );
+        // **Real claimed-error totals for the four drawn read groups** — a thousand reads at Q30
+        // each — so that their rates make fitted multipliers beside the fifth's defaulted one. Drawn
+        // samples are built without any.
+        drawn.samples = std::mem::take(&mut drawn.samples)
+            .into_iter()
+            .enumerate()
+            .map(|(s, sample)| {
+                let group = ReadGroupId(u32::try_from(s).expect("four samples"));
+                sample.with_minted_read_errors(BTreeMap::from([(
+                    group,
+                    MintedReadErrors::of_observation(-6.907_755 * 1_000.0, 1_000),
+                )]))
+            })
+            .collect();
+        let terms = as_cohort(&drawn.samples)
+            .terms()
+            .expect("a drawn cohort records terms")
+            .clone();
+        drawn.samples.push(SampleCensusEvidence::resident(
+            "tracts_only".to_string(),
+            terms.clone(),
+            NamedReadGroup::drawn_for("tracts_only", [ReadGroupId(4)]),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                SectionKey::Ssr(
+                    ReadGroupId(4),
+                    CensusStratum {
+                        period: 2,
+                        reference_repeats: 6,
+                    },
+                ),
+                Section::Ssr(SsrEvidence::never_walked(0)),
+            )]),
+        ));
+        let mut cohort = as_cohort(&drawn.samples);
+        let generic = fit_jointly(
+            &mut cohort,
+            &JointFitConfig {
+                quadrature_nodes: 8,
+                max_passes: 40,
+                duplicated_positions: false,
+                estimate_contamination: false,
+                starting_points: vec![StartingPoint::spanning_the_class_separation()[1]],
+                ..JointFitConfig::default()
+            },
+        )
+        .expect("four drawn samples identify the cohort's numbers");
+        let fit = CohortFit {
+            generic,
+            strata: Vec::new(),
+            tracts: 0,
+            substitution_counts: Vec::new(),
+        };
+        let read_groups = ReadGroups::of_lanes(&[
+            ("rg0", "s0", "lib0"),
+            ("rg1", "s1", "lib1"),
+            ("rg2", "s2", "lib2"),
+            ("rg3", "s3", "lib3"),
+            ("rg4", "tracts_only", "lib4"),
+        ]);
+        let inbreeding = DeclaredInbreeding::nothing_said()
+            .of_each_sample_over(&read_groups, &fitted_inbreeding_of(&fit.generic.hom_excess));
+        let pooled: BTreeMap<ReadGroupId, u32> =
+            (0..5).map(|group| (ReadGroupId(group), 0)).collect();
+        let parameters = parameters_from_the_fit(
+            &fit,
+            &cohort,
+            &pooled,
+            &inbreeding,
+            crate::types::Ploidy::try_new(2).expect("diploid"),
+        );
+        assert_eq!(
+            parameters.calibration_by_read_group()[4],
+            ReadGroupCalibration::defaulted()
+        );
+        for group in 0..4 {
+            let fitted = parameters.calibration_by_read_group()[group];
+            assert_eq!(
+                fitted.provenance,
+                Provenance::FittedHere,
+                "read group {group}"
+            );
+            assert!(fitted.scale_standard_error.is_some(), "read group {group}");
+        }
+
+        let file = parameters_file_of(
+            &parameters,
+            &read_groups,
+            &inbreeding,
+            &ReferenceDigest([7; 16]),
+            &terms,
+            &StrRepeatCriteria::default(),
+            &fit.generic.starts,
+        );
+        let multiplier =
+            &file.base_quality_calibration.by_read_group[4].error_probability_multiplier;
+        assert_eq!(
+            (
+                multiplier.value,
+                multiplier.warrant,
+                multiplier.observations,
+                multiplier.standard_error
+            ),
+            (1.0, Warrant::Defaulted, None, None)
+        );
+        let coefficient = |sample: &str| {
+            file.inbreeding
+                .by_sample
+                .iter()
+                .find(|row| row.sample == sample)
+                .expect("every sample has a row")
+                .inbreeding_coefficient
+        };
+        let silent = coefficient("tracts_only");
+        assert_eq!(
+            (
+                silent.value,
+                silent.warrant,
+                silent.observations,
+                silent.standard_error
+            ),
+            (0.0, Warrant::Defaulted, None, None)
+        );
+        for sample in ["s0", "s1", "s2", "s3"] {
+            let fitted = coefficient(sample);
+            assert_eq!(fitted.warrant, Warrant::FittedHere, "{sample}");
+            assert!(fitted.standard_error.is_some(), "{sample} has an error");
+        }
+        let read_back = ParametersFile::from_toml(&file.to_toml()).expect("the file reads back");
+        assert_eq!(read_back, file);
+        read_back.validate().expect("and passes its own checks");
+    }
+}
+
+#[cfg(test)]
+mod the_starts_in_the_file {
+    use super::*;
+
+    /// **Each way a start can end is written as the file spells it**, with the start it agreed
+    /// with, numbered as the fit numbers its starts.
+    #[test]
+    fn each_ending_is_written_with_its_number_and_passes() {
+        let record = |number: usize, ended: StartEnding, passes: u32| StartRecord {
+            number,
+            ended,
+            passes,
+            log_likelihood: -1.0,
+            furthest_from_settled: None,
+        };
+        let written = the_starts_as_written(&[
+            record(1, StartEnding::Converged, 41),
+            record(2, StartEnding::AtTheLimit, 200),
+            record(3, StartEnding::Agreed { with_start: 1 }, 12),
+        ]);
+        assert_eq!(
+            written,
+            vec![
+                SnpIndelFitStart {
+                    start: 1,
+                    ended: StartOutcome::Converged,
+                    passes: 41,
+                    agreed_with_start: None,
+                },
+                SnpIndelFitStart {
+                    start: 2,
+                    ended: StartOutcome::AtThePassLimit,
+                    passes: 200,
+                    agreed_with_start: None,
+                },
+                SnpIndelFitStart {
+                    start: 3,
+                    ended: StartOutcome::AgreedWithAnEarlierStart,
+                    passes: 12,
+                    agreed_with_start: Some(1),
+                },
+            ]
+        );
     }
 }

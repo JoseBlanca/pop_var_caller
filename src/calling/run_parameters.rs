@@ -767,6 +767,7 @@ mod tests {
             },
             provenance: Provenance::FittedHere,
             observations: 250_000,
+            standard_error: None,
         }
     }
 
@@ -860,6 +861,7 @@ mod tests {
                 },
                 provenance: Provenance::FittedHere,
                 observations: 250_000,
+                standard_error: None,
             };
             let segregating = 1.0 - p_invariant - p_fixed_alt;
             let frequency = p_fixed_alt + segregating * a / (a + b);
@@ -953,6 +955,7 @@ mod tests {
             value: ErrorRate::try_new(rate).expect("a legal error rate"),
             provenance,
             observations: 1_000,
+            standard_error: None,
         }
     }
 

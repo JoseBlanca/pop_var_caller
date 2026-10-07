@@ -67,7 +67,8 @@ use super::{
     EvidenceCount, GroupOfNumbers, InbreedingRow, LevelOrigin, LevelSmoothing, ParametersFile,
     PeriodLengthSpectrumRow, ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareCurve,
     ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
-    SlippageRow, StratumLengthSpectrumRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    SlippageRow, SnpIndelFitStart, StartOutcome, StratumLengthSpectrumRow, SubstitutionRateRow,
+    Warrant, WarrantedValue,
 };
 
 impl ParametersFile {
@@ -101,6 +102,8 @@ impl ParametersFile {
                 "Every number this run scored its reads under, and what each one rests on.",
                 "",
                 "A number that could be fitted carries a `warrant`: fitted_here, borrowed, supplied or defaulted. **If you edit one, change its warrant to \"supplied\" and delete its `observations`** — otherwise this file says a number you typed was measured, and the run that reads it will report it that way. A `supplied` number that still carries `observations` came that way from another run's file, and those counts are that run's.",
+                "",
+                "A number the fit measured also carries a `standard_error` where it could compute one: how far the number would typically move if the same kind of data were drawn again, on the number's own scale. It comes from how sharply the fit's likelihood falls away from the number, or for a rate counted directly from the spread of the count, and near either end of the number's range it is not the spread of a bell curve. **No `standard_error` is not an error of zero**: it means nothing determined the number — no reads, a stated default — or no error is computed for it. A `supplied` number's `standard_error`, like its `observations`, is that of the fit that first produced it. If you edit a number, delete its `standard_error` with its `observations`.",
                 "",
                 "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
@@ -143,6 +146,22 @@ impl ParametersFile {
             "read_groups",
             self.fitted_from.read_groups.iter().map(a_read_group_row),
         );
+        // **No key where no SNP/indel fit stands behind the file**, rather than an empty list,
+        // which would say a fit ran and had no start.
+        if let Some(starts) = &self.fitted_from.snp_indel_fit_starts {
+            note(
+                &mut out,
+                &[
+                    "",
+                    "How each start of the SNP/indel fit ended, in the order it ran them. The fit starts from several points and keeps the best; `converged` means every number came within a tenth of its standard error of the best value the data allow, `at_the_pass_limit` means it ran out of passes first and is not convergence, and `agreed_with_an_earlier_start` means it was heading where an earlier one had converged and stopped there. `passes` counts passes over the data.",
+                ],
+            );
+            one_a_line(
+                &mut out,
+                "snp_indel_fit_starts",
+                starts.iter().map(a_fit_start),
+            );
+        }
 
         section(&mut out, "fitted_from.census");
         if self.fitted_from.census.terms.is_empty() {
@@ -317,7 +336,9 @@ impl ParametersFile {
                 "",
                 "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `length_spectrum_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
                 "",
-                "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled.",
+                "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled. They are reads among the samples the stratum was fitted on: every sample, unless the row carries `samples_fitted_on` — then a large cohort's stratum was fitted on that many of its samples, taken in a fixed order that does not look at the data, and every count and error in the row is that subset's. A `samples_fitted_on` equal to the cohort's sample count means the subset grew to every sample.",
+                "",
+                "Where a number is this stratum's own fit — its smoothing is `this_stratum` — its origin carries an own-fit standard error: `own_fit_standard_error` for the first number, `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error` for the other two. It is how far that number would typically move if the stratum's tracts were drawn again. A number taken from a curve, or blended with one, has none: the blend's own error is not computed. **Where the row's `samples_fitted_on` is fewer than the cohort's samples, the error describes the subset's own fit, not how far that fit sits from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further from the fit on every sample than the two fits' errors allow for — more than two standard deviations of their difference — where about one would by chance.",
                 "",
                 "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own.",
                 "",
@@ -1076,6 +1097,21 @@ fn a_read_group_row(row: &ReadGroupRow) -> String {
     ])
 }
 
+fn a_fit_start(start: &SnpIndelFitStart) -> String {
+    let mut fields = vec![
+        ("start", start.start.to_string()),
+        (
+            "ended",
+            a_toml_string(the_word_for_start_outcome(start.ended)),
+        ),
+        ("passes", start.passes.to_string()),
+    ];
+    if let Some(earlier) = start.agreed_with_start {
+        fields.push(("agreed_with_start", earlier.to_string()));
+    }
+    an_inline_table(&fields)
+}
+
 fn a_census_term(term: &CensusTerm) -> String {
     an_inline_table(&[
         ("term", a_toml_string(&term.term)),
@@ -1186,6 +1222,10 @@ fn a_slippage_row(row: &SlippageRow) -> String {
     if let Some(shares) = &row.shorter_share_and_fall_off_origin {
         fields.push(("shorter_share_and_fall_off_origin", a_shares_origin(shares)));
     }
+    // **Beside the origin blocks whose counts it qualifies**, and only where a subset was drawn.
+    if let Some(samples) = row.samples_fitted_on {
+        fields.push(("samples_fitted_on", a_toml_integer(samples)));
+    }
     an_inline_table(&fields)
 }
 
@@ -1196,6 +1236,9 @@ fn a_level_origin(origin: &LevelOrigin) -> String {
             "expected_slipped_reads",
             a_toml_float(expected_slipped_reads),
         ));
+    }
+    if let Some(error) = origin.own_fit_standard_error {
+        fields.push(("own_fit_standard_error", a_toml_float(error)));
     }
     an_inline_table(&fields)
 }
@@ -1216,6 +1259,12 @@ fn a_shares_origin(origin: &SharesOrigin) -> String {
         "fall_off_smoothing",
         a_share_smoothing(&origin.fall_off_smoothing),
     ));
+    if let Some(error) = origin.shorter_share_own_fit_standard_error {
+        fields.push(("shorter_share_own_fit_standard_error", a_toml_float(error)));
+    }
+    if let Some(error) = origin.fall_off_own_fit_standard_error {
+        fields.push(("fall_off_own_fit_standard_error", a_toml_float(error)));
+    }
     an_inline_table(&fields)
 }
 
@@ -1361,13 +1410,15 @@ fn a_float_array(values: &[f64]) -> String {
 /// **The one shape every four-state-warranted number in the file is written in** — and its count
 /// is a key that is simply not there where no fit produced one.
 fn a_warranted_value(value: &WarrantedValue) -> String {
-    let mut fields = vec![
-        ("value", a_toml_float(value.value)),
-        (
-            "warrant",
-            a_toml_string(the_word_for_warrant(value.warrant)),
-        ),
-    ];
+    let mut fields = vec![("value", a_toml_float(value.value))];
+    // **Beside the value it is the error of**, and absent where none was computed.
+    if let Some(standard_error) = value.standard_error {
+        fields.push(("standard_error", a_toml_float(standard_error)));
+    }
+    fields.push((
+        "warrant",
+        a_toml_string(the_word_for_warrant(value.warrant)),
+    ));
     if let Some(observations) = value.observations {
         fields.push(("observations", an_evidence_count(observations)));
     }
@@ -1395,6 +1446,14 @@ fn an_evidence_count(count: EvidenceCount) -> String {
 // file a tautology: a renamed variant would move the writer, the golden file and the reader
 // together, which is the failure `every_enum_variant_spells_as_the_file_says` exists to prevent
 // one level up. `the_hand_written_words_are_serdes_words` compares the two lists.
+
+fn the_word_for_start_outcome(ended: StartOutcome) -> &'static str {
+    match ended {
+        StartOutcome::Converged => "converged",
+        StartOutcome::AtThePassLimit => "at_the_pass_limit",
+        StartOutcome::AgreedWithAnEarlierStart => "agreed_with_an_earlier_start",
+    }
+}
 
 fn the_word_for_warrant(warrant: Warrant) -> &'static str {
     match warrant {
@@ -1785,6 +1844,17 @@ mod tests {
                 "{source:?} is written as {written}"
             );
         }
+        for outcome in [
+            StartOutcome::Converged,
+            StartOutcome::AtThePassLimit,
+            StartOutcome::AgreedWithAnEarlierStart,
+        ] {
+            assert_eq!(
+                the_word_for_start_outcome(outcome),
+                serdes_word(outcome),
+                "{outcome:?}"
+            );
+        }
     }
 
     /// **A run that declared no batching writes `false`** — and that flag is the only thing in
@@ -1947,6 +2017,7 @@ mod tests {
             value: 1.0,
             warrant: Warrant::Defaulted,
             observations: None,
+            standard_error: None,
         };
         let flat = nothing_to_fit.to_toml();
         for (key, note, in_this_text) in [
@@ -2238,6 +2309,7 @@ mod tests {
             value: 1.0,
             warrant: Warrant::Defaulted,
             observations: None,
+            standard_error: None,
         };
         let text = nothing_fitted.to_toml();
         assert!(
