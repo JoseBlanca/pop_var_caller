@@ -215,7 +215,6 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         paralog_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        max_strand_bias: crate::run::records::DEFAULT_MAX_STRAND_BIAS,
         paralog_filter_tag: false,
         cohort_locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,

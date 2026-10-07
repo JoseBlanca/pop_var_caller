@@ -37,7 +37,6 @@ use crate::calling::evidence_shaping::{
     GenericEvidenceScratch, SsrEvidenceScratch, shape_generic_locus, shape_ssr_locus,
 };
 use crate::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
-use crate::calling::quality::artifact_correction::strand_bias;
 use crate::calling::run_parameters::RunParameters;
 use crate::calling::{CallingScratch, FrozenParameters, LocusInference, ReferenceBesideLocus};
 use crate::fasta::ContigList;
@@ -76,9 +75,8 @@ use super::explain::{
     ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows, too_wide_rows,
 };
 use super::records::{
-    DEFAULT_MAX_STRAND_BIAS, DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch,
-    a_written_genotype_carries_an_alternative, evidence_for_output, padding_base_beside,
-    reference_beside_locus, reread_spellings_cut_short,
+    DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
+    evidence_for_output, padding_base_beside, reference_beside_locus, reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -265,9 +263,6 @@ pub struct AlignedFilesVariantCaller {
     explain: Option<ExplainRegions>,
     /// The site quality below which a called locus is not written (`--min-site-quality`).
     min_site_quality: Phred,
-    /// The strand bias at or above which a called locus is not written (`--max-strand-bias`);
-    /// `None` writes every called locus whatever its strand bias.
-    max_strand_bias: Option<Phred>,
 }
 
 impl AlignedFilesVariantCaller {
@@ -367,10 +362,6 @@ impl AlignedFilesVariantCaller {
             explain: None,
             min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
                 .expect("the default threshold is a valid quality"),
-            max_strand_bias: Some(
-                Phred::try_new(DEFAULT_MAX_STRAND_BIAS)
-                    .expect("the default cutoff is a valid Phred"),
-            ),
         })
     }
 
@@ -387,14 +378,6 @@ impl AlignedFilesVariantCaller {
     #[must_use]
     pub fn with_min_site_quality(mut self, quality: Phred) -> Self {
         self.min_site_quality = quality;
-        self
-    }
-
-    /// The same run, writing no locus whose strand bias reaches `cutoff`
-    /// ([`DEFAULT_MAX_STRAND_BIAS`] unless set; `None` writes every called locus).
-    #[must_use]
-    pub fn with_max_strand_bias(mut self, cutoff: Option<Phred>) -> Self {
-        self.max_strand_bias = cutoff;
         self
     }
 
@@ -807,7 +790,6 @@ impl AlignedFilesVariantCaller {
         // Taken before `walkers` consumes the run; a handful of regions.
         let explain = self.explain.clone();
         let min_site_quality = self.min_site_quality;
-        let max_strand_bias = self.max_strand_bias;
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -829,7 +811,6 @@ impl AlignedFilesVariantCaller {
             contigs: &contigs,
             explain: explain.as_ref(),
             min_site_quality,
-            max_strand_bias,
         };
         let CohortCallingOutcome {
             calling,
@@ -880,9 +861,6 @@ pub(crate) struct CohortCallingInputs<'a> {
     pub explain: Option<&'a ExplainRegions>,
     /// The site quality below which a called locus is not written (`--min-site-quality`).
     pub min_site_quality: Phred,
-    /// The strand bias at or above which a called locus is not written (`--max-strand-bias`);
-    /// `None` turns the cutoff off.
-    pub max_strand_bias: Option<Phred>,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -988,7 +966,6 @@ where
         contigs,
         explain,
         min_site_quality,
-        max_strand_bias,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -1015,7 +992,6 @@ where
     let mut explanations: Vec<ExplainRow> = Vec::new();
     let mut loci_called_but_not_written = 0_u64;
     let mut loci_below_minimum_site_quality = 0_u64;
-    let mut loci_at_or_above_strand_bias_cutoff = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     // Counted rather than collected — see the other driver.
@@ -1122,17 +1098,6 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
-                    // **The strand-bias cutoff reads a number nothing subtracts**: the strand test
-                    // with the reference reads' share taken as an estimate (`calling_quality.md`
-                    // §6.5). A repeat tract has no artifact counts and is never cut here.
-                    if let (Some(cutoff), Some(counts)) =
-                        (max_strand_bias, inference.artifact_test_counts())
-                    {
-                        let bias = strand_bias(&counts);
-                        if bias >= cutoff {
-                            return Ok(CalledLocus::StrandBiasAtOrAboveCutoff(bias));
-                        }
-                    }
                     // **Taken before the evidence is consumed**, into a buffer refilled per
                     // record rather than allocated: the record itself carries no window, by
                     // design — a run with the filter off writes byte for byte what it wrote
@@ -1161,9 +1126,6 @@ where
                 }
                 LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
                     loci_below_minimum_site_quality += 1;
-                }
-                LocusOutcome::Called(Ok(CalledLocus::StrandBiasAtOrAboveCutoff(_))) => {
-                    loci_at_or_above_strand_bias_cutoff += 1;
                 }
                 LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
                     // **What this run read, at every record it writes** — off unless the run was
@@ -1220,7 +1182,6 @@ where
             records_written,
             loci_called_but_not_written,
             loci_below_minimum_site_quality,
-            loci_at_or_above_strand_bias_cutoff,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,
@@ -1424,8 +1385,6 @@ pub(crate) enum CalledLocus {
     NoAlternative,
     /// The site quality after the artifact correction, below `--min-site-quality`.
     BelowMinimumSiteQuality(Phred),
-    /// The strand bias, at or above `--max-strand-bias`.
-    StrandBiasAtOrAboveCutoff(Phred),
 }
 
 /// **The explanation's outcome for a locus the caller called**, read off what the driver built
@@ -1438,9 +1397,6 @@ fn end_of_a_called_locus(
         LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => Some(LocusEnd::NotWritten),
         LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(quality))) => {
             Some(LocusEnd::BelowMinimumSiteQuality(*quality))
-        }
-        LocusOutcome::Called(Ok(CalledLocus::StrandBiasAtOrAboveCutoff(bias))) => {
-            Some(LocusEnd::StrandBiasAtOrAboveCutoff(*bias))
         }
         LocusOutcome::Called(Err(_)) => Some(LocusEnd::Failed),
         LocusOutcome::NobodyToCall
@@ -1803,9 +1759,6 @@ pub struct CohortCallingTallies {
     /// the artifact correction, and so left out of the file. Counted in
     /// [`loci_called`](Self::loci_called).
     pub loci_below_minimum_site_quality: u64,
-    /// **Loci called with an alternative but a strand bias at or above `--max-strand-bias`**,
-    /// and so left out of the file. Counted in [`loci_called`](Self::loci_called).
-    pub loci_at_or_above_strand_bias_cutoff: u64,
     /// **The ground of the loci the merge declined to assemble for being wider than
     /// `max_cohort_locus_span`**, in genome order — [`CalledCohort::loci_too_wide_to_assemble`].
     pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
@@ -1827,7 +1780,6 @@ impl CohortCallingTallies {
         self.records_written
             .saturating_add(self.loci_called_but_not_written)
             .saturating_add(self.loci_below_minimum_site_quality)
-            .saturating_add(self.loci_at_or_above_strand_bias_cutoff)
     }
 }
 
@@ -5965,7 +5917,6 @@ mod records_handed_over_as_the_run_finishes_them {
             contigs: &contigs,
             explain: None,
             min_site_quality: Phred::ZERO,
-            max_strand_bias: None,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -7244,8 +7195,6 @@ enum RoundLocusOutcome<P> {
     CalledNotWritten(GenomeRegion),
     /// Called with an alternative, at a site quality below `--min-site-quality`.
     CalledBelowMinimumSiteQuality(GenomeRegion),
-    /// Called with an alternative, at a strand bias at or above `--max-strand-bias`.
-    CalledAtOrAboveStrandBiasCutoff(GenomeRegion),
     /// The padding fetch refused.
     CalledFailed(RunError),
     /// A record got ready for its output, its per-sample windows, and the locus it came from.
@@ -7288,7 +7237,6 @@ where
         contigs,
         explain,
         min_site_quality,
-        max_strand_bias,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -7302,7 +7250,6 @@ where
     let mut records_written = 0_u64;
     let mut loci_called_but_not_written = 0_u64;
     let mut loci_below_minimum_site_quality = 0_u64;
-    let mut loci_at_or_above_strand_bias_cutoff = 0_u64;
     let mut loci_too_wide_to_assemble = Vec::new();
     let mut loci_with_nobody_to_call = Vec::new();
     let tract_totals = std::sync::Mutex::new(TractOutcomes::default());
@@ -7417,17 +7364,6 @@ where
                             evidence.corrected_site_quality,
                         ));
                     }
-                    // **The strand-bias cutoff reads a number nothing subtracts**: the strand test
-                    // with the reference reads' share taken as an estimate (`calling_quality.md`
-                    // §6.5). A repeat tract has no artifact counts and is never cut here.
-                    if let (Some(cutoff), Some(counts)) =
-                        (max_strand_bias, inference.artifact_test_counts())
-                    {
-                        let bias = strand_bias(&counts);
-                        if bias >= cutoff {
-                            return Ok(CalledLocus::StrandBiasAtOrAboveCutoff(bias));
-                        }
-                    }
                     window_coverage.clear();
                     window_coverage
                         .extend(evidence.samples.iter().map(|sample| sample.window_coverage));
@@ -7453,9 +7389,6 @@ where
                 }
                 LocusOutcome::Called(Ok(CalledLocus::BelowMinimumSiteQuality(_))) => {
                     RoundLocusOutcome::CalledBelowMinimumSiteQuality(region)
-                }
-                LocusOutcome::Called(Ok(CalledLocus::StrandBiasAtOrAboveCutoff(_))) => {
-                    RoundLocusOutcome::CalledAtOrAboveStrandBiasCutoff(region)
                 }
                 LocusOutcome::Called(Ok(CalledLocus::Written(record))) => {
                     match prepare(record, window_coverage) {
@@ -7495,10 +7428,6 @@ where
                 }
                 RoundLocusOutcome::CalledBelowMinimumSiteQuality(region) => {
                     loci_below_minimum_site_quality += 1;
-                    progress.locus_passed(region, records_written);
-                }
-                RoundLocusOutcome::CalledAtOrAboveStrandBiasCutoff(region) => {
-                    loci_at_or_above_strand_bias_cutoff += 1;
                     progress.locus_passed(region, records_written);
                 }
                 RoundLocusOutcome::CalledFailed(error) => {
@@ -7565,7 +7494,6 @@ where
             records_written,
             loci_called_but_not_written,
             loci_below_minimum_site_quality,
-            loci_at_or_above_strand_bias_cutoff,
             loci_too_wide_to_assemble,
             loci_with_nobody_to_call,
             tracts,

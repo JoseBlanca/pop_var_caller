@@ -65,20 +65,6 @@ fn the_tomato_cohorts_width_is_the_one_that_was_measured() {
     assert_eq!(round_width_for(63).get(), 7_936);
 }
 
-/// **`--max-strand-bias` takes zero and any finite positive Phred, and refuses the rest** —
-/// zero is how a user turns the cutoff off, so it must parse.
-#[test]
-fn the_max_strand_bias_parser_takes_zero_and_refuses_a_negative_or_non_number() {
-    assert_eq!(parse_max_strand_bias("0"), Ok(0.0));
-    assert_eq!(parse_max_strand_bias("100"), Ok(100.0));
-    for refused in ["-1", "inf", "NaN", "high"] {
-        assert!(
-            parse_max_strand_bias(refused).is_err(),
-            "`{refused}` must be refused"
-        );
-    }
-}
-
 /// **`--min-site-quality` takes zero and any finite positive quality, and refuses the rest** —
 /// zero is how a user turns the threshold off, so it must parse.
 #[test]

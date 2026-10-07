@@ -216,25 +216,6 @@ where
 /// it does. **Zero turns the threshold off** — no quality is below zero.
 pub const DEFAULT_MIN_SITE_QUALITY: f32 = 1.0;
 
-/// **The strand bias at or above which a called locus is not written**, by default —
-/// `--max-strand-bias`, in Phred, read off
-/// [`strand_bias`](crate::calling::quality::artifact_correction::strand_bias).
-///
-/// **A cutoff and not a larger penalty, because subtraction cannot keep up with depth.** The site
-/// quality grows with every variant read, and an artifact's variant reads grow with depth like a
-/// real variant's; the strand penalty grows too, but more slowly. At 300× on GIAB HG004
-/// chr3:107848623 all 61 variant reads are forward against 33 of 132 reference reads, the penalty
-/// is 367 Phred, the baseline about 440, and 8 is left to write the site.
-///
-/// **Why 100.** Measured on the three GIAB samples at 5×, 10×, 30× and 300×, against GIAB v4.2.1:
-/// at 300×, 100 removes 3 false calls and no true one; the largest value on a true call at any
-/// depth is 75, a homozygous site, so 60 (GATK's cutoff for its own strand test) would cost it.
-/// Below 300× no call reaches 40. In a cohort the reads pool, so it binds far more: on 63 tomato
-/// accessions at about 3× it leaves out 3,219 of 193,893 records, and at the 1,780 of those where
-/// GATK has a record of its own, GATK's own strand filters flag 1,217 (`calling_quality.md` §6.5).
-/// **Zero turns the cutoff off.**
-pub const DEFAULT_MAX_STRAND_BIAS: f32 = 100.0;
-
 /// **Re-read the reads the mapper laid straight across the reference where a longer allele began**
 /// — one ordinary locus, before candidate selection sees it (item 2 of the GIAB report on
 /// 5d2abae4; `doc/devel/ng/spec/read_likelihoods.md` §5.3).

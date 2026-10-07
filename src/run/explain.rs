@@ -513,24 +513,6 @@ pub(crate) fn outcome_rows(
             );
             return;
         }
-        LocusEnd::StrandBiasAtOrAboveCutoff(bias) => {
-            rows.push(
-                ExplainRow::of(
-                    region,
-                    ExplainStep::Outcome,
-                    "strand_bias_at_or_above_cutoff",
-                )
-                .with(
-                    "why",
-                    format!(
-                        "the variant reads' strand or position within the read, against the \
-                             reference reads', scores {:.1} Phred, at or above --max-strand-bias",
-                        bias.get()
-                    ),
-                ),
-            );
-            return;
-        }
         LocusEnd::NobodyToCall => (
             "nobody_to_call",
             "every sample was set aside because the allele cap cut an allele its reads earned",
@@ -554,7 +536,6 @@ pub(crate) enum LocusEnd<'a> {
     Written(&'a VcfRecord),
     NotWritten,
     BelowMinimumSiteQuality(Phred),
-    StrandBiasAtOrAboveCutoff(Phred),
     NobodyToCall,
     BundleSetAside,
     TractWithoutWholeRepeats,

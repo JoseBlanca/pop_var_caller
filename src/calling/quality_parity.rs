@@ -687,45 +687,64 @@ mod tests {
         }
     }
 
-    /// **A strand-piled artifact above the ramp and below it**, which is the one place the two
-    /// corrections could differ by a whole penalty rather than by a last bit. Forty alternative
-    /// reads all on one strand is the full charge; three is charged nothing, and a ramp
-    /// transcribed with its endpoints the other way round would give that locus the full charge
-    /// on one side and nothing on the other.
-    #[test]
-    fn a_strand_piled_artifact_is_corrected_the_same_above_and_below_the_ramp() {
-        let deep = vec![SampleReads {
-            reference: (60, 30, 30),
-            alternative: (40, 40, 20),
-            genotype: 1,
-        }];
-        assert_corrections_agree(&deep, 900.0, "forty alternative reads on one strand");
+    /// ng's corrected quality for `samples` at `baseline`, and production's recorded one.
+    fn both_corrections(samples: &[SampleReads], baseline: f64) -> (f64, f64) {
+        let production = production_corrected_quality(samples, baseline);
+        let (ng, _) = correct_site_quality(
+            Phred::try_new(baseline as f32).expect("a baseline quality"),
+            &ng_summary(samples),
+        );
+        (f64::from(ng.get()), production)
+    }
 
+    /// **Below the ramp the strand test charges nothing on either side**, so three alternative
+    /// reads on one strand are still parity: a ramp transcribed with its endpoints the other way
+    /// round would charge this locus in full.
+    #[test]
+    fn three_alternative_reads_on_one_strand_are_corrected_the_same_by_both() {
         let thin = vec![SampleReads {
             reference: (60, 30, 30),
             alternative: (3, 3, 2),
             genotype: 1,
         }];
         assert_corrections_agree(&thin, 900.0, "three alternative reads on one strand");
-
-        let midway = vec![SampleReads {
-            reference: (60, 30, 30),
-            alternative: (5, 5, 3),
-            genotype: 1,
-        }];
-        assert_corrections_agree(
-            &midway,
-            900.0,
-            "five alternative reads, halfway up the ramp",
-        );
     }
 
-    /// **A homozygous-variant cohort, which the allele-balance guard skips on both sides.** Its
-    /// few reference reads are sequencing error, and a correction that had transcribed the 0.9
-    /// guard as a strict inequality the other way would charge this locus where the other does
-    /// not.
+    /// **Above the ramp the strand test is ng's own since 2026-10-07, and this is a differential,
+    /// not parity** (`calling_quality.md` §6.2). ng weighs the alternative reads against a beta
+    /// of the reference reads and a prior, and charges [`STRAND_PENALTY_WEIGHT`] times the tail,
+    /// because at weight one an artifact's quality outruns its penalty at every depth. So a
+    /// one-strand pile-up is charged **more** by ng than by production, at full power and halfway
+    /// up the ramp alike.
+    ///
+    /// [`STRAND_PENALTY_WEIGHT`]: crate::calling::quality::artifact_correction::STRAND_PENALTY_WEIGHT
     #[test]
-    fn a_homozygous_variant_cohort_is_skipped_by_both() {
+    fn a_strand_piled_artifact_is_charged_more_by_ng_than_by_production() {
+        for (alternative, what) in [
+            ((40, 40, 20), "forty alternative reads on one strand"),
+            ((5, 5, 3), "five alternative reads, halfway up the ramp"),
+        ] {
+            let samples = vec![SampleReads {
+                reference: (60, 30, 30),
+                alternative,
+                genotype: 1,
+            }];
+            let (ng, production) = both_corrections(&samples, 900.0);
+            assert!(
+                ng < production - 1.0,
+                "{what}: ng corrects to {ng}, production to {production}"
+            );
+        }
+    }
+
+    /// **A homozygous-variant cohort: the allele-balance guard skips it on both sides, and ng no
+    /// longer overcharges its strand.** The few reference reads are sequencing error. Production
+    /// took their strand split as a known probability — ten reads, all forward, clamped to 99 in
+    /// 100 — and charged the alternative reads' even split for it; ng weighs those ten reads as
+    /// the estimate they are. So ng corrects this locus to a **higher** quality than production,
+    /// and charges it no allele-balance penalty, as production did not.
+    #[test]
+    fn a_homozygous_variant_cohort_is_skipped_by_both_and_charged_less_by_ng() {
         let samples: Vec<SampleReads> = (0..10)
             .map(|_| SampleReads {
                 reference: (1, 1, 0),
@@ -733,7 +752,16 @@ mod tests {
                 genotype: 2,
             })
             .collect();
-        assert_corrections_agree(&samples, 900.0, "ten homozygous-variant samples");
+        let (_, penalties) = correct_site_quality(
+            Phred::try_new(900.0).expect("a baseline quality"),
+            &ng_summary(&samples),
+        );
+        assert_eq!(penalties.allele_balance.get(), 0.0);
+        let (ng, production) = both_corrections(&samples, 900.0);
+        assert!(
+            ng > production + 1.0,
+            "ng corrects to {ng}, production to {production}"
+        );
     }
 
     /// **A weak baseline that both corrections floor at zero.** The penalties exceed what there

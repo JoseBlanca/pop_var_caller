@@ -86,7 +86,15 @@ mod tests {
     ///
     /// **Re-recorded 2026-09-25** with the fit above, whose different numbers this file is called
     /// with; it was `3432b4219342c6277ec1d0072945e423`.
-    const CALLS_MD5: &str = "dad5ff61fad91ca1d3d6a0e7587de946";
+    ///
+    /// **Re-recorded 2026-10-07** when the strand and read-position penalty became four times a
+    /// beta-binomial tail (`calling_quality.md` §6.2), measured on GIAB at four depths and on 63
+    /// tomato accessions first. The fit's checksum did not move. In the calls the same three
+    /// records and genotypes are written; the two SNPs' `SPPEN` is now about 42 and their `QUAL`
+    /// about 451, because this fixture's reads lean one way at both alleles and the prior pulls the
+    /// expected share a little toward even. It was `dad5ff61fad91ca1d3d6a0e7587de946`. Recorded in
+    /// the Linux container (arm64, glibc) only.
+    const CALLS_MD5: &str = "e665bf4ed6461494199ea5c2c5e996a4";
 
     /// Hex MD5 of some bytes.
     fn md5_hex(bytes: &[u8]) -> String {
@@ -163,7 +171,6 @@ mod tests {
             // Off: this test pins that platforms write the same bytes, over a fixture whose three
             // variant sites include low-quality ones; the threshold is pinned elsewhere.
             min_site_quality: 0.0,
-            max_strand_bias: 0.0,
             paralog_filter_tag: false,
             cohort_locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
