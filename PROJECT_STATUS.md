@@ -22,7 +22,16 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-06):** **fit precision: main merged into the branch** — the oracle and the cross-platform digests re-measured on the merged code and the oracle baseline re-recorded; full suite green but for the three known example failures. Next: the owner's kimura run on this build, then the merge into main.
+> - **Last completed task (2026-10-07):** **the strand penalty weighs an uncertain expectation, four
+> times over** (branch `strand-bias`, spec `calling_quality.md` §6.5). The reference reads' strand
+> and read-position shares are now an estimate (a beta-binomial with a prior worth 10 reads), which
+> stops homozygous sites being charged hundreds of Phred, and the tail is charged ×4, because at ×1
+> an artifact's site quality outran its penalty at every depth. A cutoff on the tail was tried and
+> dropped. GIAB missed / false: 5× 761/174 unchanged, 10× 217/94 → 217/91, 30× 50/23 → 50/19, 300×
+> 40/11 → 40/8, no true call lost. Tomato 63 accessions: 193,893 → 185,851 records; against GATK on
+> 50, 13,732 genotypes GATK does not call removed against 2,985 it does.
+>
+> - **Earlier (2026-10-06):** **fit precision: main merged into the branch** — the oracle and the cross-platform digests re-measured on the merged code and the oracle baseline re-recorded; full suite green but for the three known example failures. Next: the owner's kimura run on this build, then the merge into main.
 >
 > - **Earlier (2026-10-06):** **fit precision, step E2 — milestone E complete, at checkpoint E** ([report](doc/devel/reports/implementations/fit_precision_e2_2026-10-06.md), [review](doc/devel/reports/reviews/fit_precision_e2_2026-10-06.md), [fixes](doc/devel/reports/reviews/fixes_applied_fit_precision_e2_2026-10-06.md)): the parameters file, version 2, writes each number's standard error and how each SNP/indel start ended; numbers with no information are written `defaulted`; no number or call moved on the oracle cohort. Next: the owner's checkpoint E.
 >
