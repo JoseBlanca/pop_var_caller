@@ -447,6 +447,10 @@ fractions at the same site — the larger of the two. Using the reference reads 
 rather than a fixed one half is what makes it robust at a site whose coverage is one-sided for
 innocent reasons.
 
+**ng weighs that comparison differently from production since 2026-10-07**: the reference reads'
+share is treated as an estimate, and the tail is charged four times over. §6.5 says why and what it
+measured.
+
 **And this test is ramped in, because at two or three variant reads it has no power.** Three reads
 land on one strand by chance often enough that the test called genuine low-coverage heterozygotes
 biased and charged them a flat 10–17 Phred — harmless where the baseline is in the hundreds,
@@ -496,6 +500,83 @@ indels carry a persistent 15–20% reference-read fraction at every depth becaus
 reads collapse into the reference allele
 ([`gt_concordance_vs_giab_2026-07-04.md`](../../reports/gt_concordance_vs_giab_2026-07-04.md)).
 Nothing this document does will move them.
+
+### 6.5 The strand penalty's expectation and weight (2026-10-07)
+
+**ng's strand and read-position penalty is not production's** (§6.2 describes the question, which
+is unchanged). It differs in two ways, and both were measured on the three GIAB samples (HG002,
+HG003, HG004, each over its own 100 benchmark regions, against GIAB v4.2.1 with vcfeval) at 5×,
+10×, 30× and 300×, and on 63 tomato accessions at about 3× over tomato1's 80 regions, against GATK
+HaplotypeCaller's joint calls on 50 of them.
+
+**First, the reference reads' share is an estimate, not a known probability.** Production took the
+reference reads' forward share as the probability every variant read had of being forward. At a
+homozygous-variant site that share rests on no reference read or one. With none, production
+assumed an even split, which is wrong for the placed-left share, since nearly every read starts left
+of the site; with one, the share was clamped to 99 in 100. At 300× on GIAB that charged 848 of the
+2,320 true calls 100 Phred or more, up to 3,000. Their baselines are in the thousands, so no call
+was lost, but the number said nothing.
+
+So the variant reads' count is **beta-binomial**: each read's probability of being forward is drawn
+from a beta distribution whose parameters are the reference reads' forward and reverse counts plus a
+prior worth 10 reads. The prior is centred on an even split for strand. For read position it is
+centred on the site's own pooled share, reference and variant reads together, because how many
+reads start left of a site depends on read length and record width. With dozens of reference reads
+the answer is production's; with none or one it falls back to the prior. At 300× the largest tail
+on a true call falls from 3,000 Phred to 75. The tail is the two-sided Sterne tail, found by binary
+search for the mode and for the far flank's edge and summed outward from each edge only while a term
+still changes the sum, so a pooled count in the hundreds of thousands costs tens of terms.
+
+**Second, the tail is charged four times over.** The site quality grows by about 30 Phred for every
+variant read. The tail of a one-sided pile-up grows by a few Phred per read: about 3 against an even
+split, 6 against reference reads one in four forward. Both grow in step with the reads, so at a
+weight of one the quality outruns the penalty at every depth. At 300× on GIAB HG004 chr3:107848623
+all 61 variant reads are forward against 33 of 132 reference reads; GIAB has no variant there; the
+penalty was 367, the baseline about 440, and the site was written. With a weight `k` the sign of
+`quality − k × tail` depends on how lopsided the reads are per read and not on how many there are,
+so the penalty does not grow stricter as a cohort pools more reads.
+
+False calls on GIAB (the missed calls are the same at every weight up to 4: 761, 217, 50 and 40):
+
+| | 5× | 10× | 30× | 300× |
+|---|---|---|---|---|
+| production's penalty | 174 | 94 | 23 | 11 |
+| weight 1 | 175 | 96 | 28 | 17 |
+| weight 3 | 174 | 92 | 20 | 8 |
+| **weight 4** | **174** | **91** | **19** | **8** |
+| weight 5 | 174 | 91 | 18 | 8 |
+
+Weight 5 loses a true insertion at 30× (HG003 chr15:100155989), weight 10 eight true calls there,
+and weight 20 thirty. **Up to 4 no true call is lost at any depth.** At 300× weight 4 removes the
+false calls at chr3:107848623, chr1:179296064 and chr1:206201838.
+
+On tomato, against GATK's calls in the 50 accessions it called, sample by sample with vcfeval over
+every stretch whose calls changed: weight 4 removes 13,732 variant genotypes GATK does not call and
+2,985 it does, 18 in 100 of them agreeing with GATK, where about 47 in 100 of ng's calls agree with
+it overall. Weight 3 removes 3,168 and 1,796; weight 5, 20,942 and 4,142. Records written go from
+193,893 to 185,851.
+
+**Both halves of the test are kept, though the read-position half adds little.** With strand alone
+at weight 4, GIAB is identical at every depth, and tomato loses about 260 fewer genotypes GATK does
+not call and 53 fewer it does. Read position alone is worse than production: 30× false calls rise
+from 23 to 49, because the strand half is then gone.
+
+**A cutoff was tried first and dropped.** Leaving out any site whose tail reached 100 Phred, with the
+penalty left as production's, removed the same three false calls at 300× and nothing below it. On
+tomato it removed 39,047 genotypes GATK does not call and 14,897 it does. And a cutoff on a tail's
+size grows stricter as reads pool, so in a cohort of thousands a site with a mild, innocent
+imbalance would pass any fixed value. The weight judges the per-read imbalance and does not.
+
+**What it does not catch.** At HG003 chr7:63498962, 63498974 and 63499006 every read at 300×,
+reference and variant alike, is on the forward strand (23 to 33 reads, about a tenth of the
+sample's depth). The reference reads agree with the variant reads, so this test charges them only
+what the prior's pull toward an even split costs, 6 to 19 Phred before the weight. The signal there
+is the whole site, every read on one strand; left for now (owner, 2026-10-06), as three sites in one
+cluster in one sample are too few to set a rule from.
+
+**Open.** Four was chosen at two corners of the range: one sample from 5× to 300×, and 63 samples
+at about 3×. The per-read argument says the weight should hold as a cohort grows, but no cohort of
+thousands has been run.
 
 ---
 
@@ -663,6 +744,8 @@ bug in the other.
   never a value recomputed from the baseline. **Home:** step 11's spec, when it is written.
   > *Settled 2026-10-06 for the threshold:* [`site_quality_threshold.md`](site_quality_threshold.md)
   > — `--min-site-quality`, default 1, below it a locus is dropped; it reads the corrected quality.
+  > *Strand bias is not a separate filter:* a cutoff on it was tried and dropped on 2026-10-07 in
+  > favour of a heavier penalty (§6.5).
 - **Uncertainty beyond a point estimate** — a confidence interval on a repeat count, an expansion
   probability, the `REPCI`/`STDERR`/`QEXP` family GangSTR emits. Nothing here produces them and no
   consumer has asked. **Home:** the repeat-tract sibling of §8, where they would mean something.

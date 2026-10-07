@@ -486,54 +486,272 @@ fn as_penalty(phred: f64) -> Phred {
 ///
 /// A real variant's reads come off both strands and sit at varied places within the read; an
 /// artifact's often pile on one strand or at one end. This charges the improbability of the
-/// alternative reads' forward-strand share, and of their placed-left share — **the larger of the
-/// two**, since either alone is evidence the site is an artifact.
+/// alternative reads' forward-strand count, and of their placed-left count — **the larger of the
+/// two**, since either alone is evidence the site is an artifact — **times
+/// [`STRAND_PENALTY_WEIGHT`]**.
 ///
-/// **The expectation is the reference reads' own share at the same site, not one half.** A locus
-/// whose coverage is one-sided for innocent reasons — the edge of a capture target, a repeat that
-/// only one orientation maps into — has reference reads that are one-sided too, and comparing the
-/// alternative reads against them rather than against a fixed half is what keeps the test from
-/// charging the whole locus for its neighbourhood (§6.2).
+/// # The expectation is what the reference reads say, and how sure they can be
+///
+/// **The comparison is with the reference reads at the same site, not with one half.** A locus
+/// whose coverage is one-sided for innocent reasons — a repeat that only one orientation maps
+/// into, the edge of a deletion — has one-sided reference reads too, and comparing against them is
+/// what keeps the test from charging the locus for its neighbourhood (§6.2).
+///
+/// **But their share is an estimate, not a known probability**, and at a homozygous-variant site
+/// it rests on no reference read or one. Production's test, which this replaced on 2026-10-07,
+/// took the share as known: with no reference read it assumed an even split, which is wrong for
+/// the placed-left count (nearly every read starts left of the site), and with one it clamped to 99
+/// in 100. At 300× on GIAB that charged 848 of 2,320 true calls 100 Phred or more, up to 3,000.
+///
+/// So the alternative reads' count is **beta-binomial**: each read's probability of being forward
+/// is drawn from a beta distribution whose parameters are the reference reads' counts plus a prior
+/// worth [`EXPECTED_SHARE_PRIOR_READS`] reads. With dozens of reference reads that is their share;
+/// with none or one it falls back to the prior —
+///
+/// - **for strand, an even split**, which is what sequencing both strands of a fragment gives, and
+///   what lets a site whose few reference reads are all on one strand be weighed at all;
+/// - **for read position, the site's own pooled share**, reference and alternative reads together,
+///   because how many reads start left of a site depends on read length and record width, and no
+///   constant knows it.
 ///
 /// **And it is ramped in, because at two or three alternative reads it has no power.** See
-/// [`BIAS_RAMP_NO_POWER_BELOW`], which carries what removing the ramp cost and what restoring it
-/// bought.
-///
-/// Production's, inline in [`refine_qual`](../../../../src/vcf/qual_refine.rs).
+/// [`BIAS_RAMP_NO_POWER_BELOW`].
 pub fn strand_and_read_position_penalty(counts: &ArtifactTestCounts) -> Phred {
-    if counts.alternative_reads < 1.0 {
-        return NO_PENALTY;
-    }
-    let expected_forward_share =
-        reference_share(counts.reference_forward_reads, counts.reference_reads);
-    let expected_placed_left_share =
-        reference_share(counts.reference_placed_left_reads, counts.reference_reads);
-    let unramped = two_sided_binomial_tail_phred(
-        counts.alternative_forward_reads,
-        counts.alternative_reads,
-        expected_forward_share,
+    as_penalty(
+        STRAND_PENALTY_WEIGHT
+            * strand_and_read_position_tail_phred(counts)
+            * bias_test_power(counts.alternative_reads),
     )
-    .max(two_sided_binomial_tail_phred(
-        counts.alternative_placed_left_reads,
-        counts.alternative_reads,
-        expected_placed_left_share,
-    ));
-    as_penalty(unramped * bias_test_power(counts.alternative_reads))
 }
 
-/// **What share of the reference reads did the thing** — the expectation the alternative reads
-/// are weighed against.
+/// The larger of the two tails [`strand_and_read_position_penalty`] weighs, as a Phred, before the
+/// weight and the ramp.
+fn strand_and_read_position_tail_phred(counts: &ArtifactTestCounts) -> f64 {
+    if counts.alternative_reads < 1.0 {
+        return 0.0;
+    }
+    let reference_reverse = (counts.reference_reads - counts.reference_forward_reads).max(0.0);
+    let forward = beta_binomial_two_sided_tail_phred(
+        counts.alternative_forward_reads,
+        counts.alternative_reads,
+        counts.reference_forward_reads + EXPECTED_SHARE_PRIOR_READS * 0.5,
+        reference_reverse + EXPECTED_SHARE_PRIOR_READS * 0.5,
+    );
+    let all_reads = counts.reference_reads + counts.alternative_reads;
+    let pooled_placed_left =
+        ((counts.reference_placed_left_reads + counts.alternative_placed_left_reads) / all_reads)
+            .clamp(POOLED_SHARE_FLOOR, 1.0 - POOLED_SHARE_FLOOR);
+    let reference_not_placed_left =
+        (counts.reference_reads - counts.reference_placed_left_reads).max(0.0);
+    let placed_left = beta_binomial_two_sided_tail_phred(
+        counts.alternative_placed_left_reads,
+        counts.alternative_reads,
+        counts.reference_placed_left_reads + EXPECTED_SHARE_PRIOR_READS * pooled_placed_left,
+        reference_not_placed_left + EXPECTED_SHARE_PRIOR_READS * (1.0 - pooled_placed_left),
+    );
+    forward.max(placed_left)
+}
+
+/// **How many times its tail the strand and read-position test charges** (spec §6.2).
 ///
-/// `0.5` where there are no reference reads at all: with nothing to compare against, an even
-/// split is the assumption that charges least. Clamped away from both ends because the binomial
-/// tail takes a logarithm there, and because a site where *every* reference read is on one strand
-/// would otherwise make a single opposite-strand alternative read infinitely surprising.
-fn reference_share(reference_reads_that_did_it: f64, reference_reads: f64) -> f64 {
-    if reference_reads > 0.0 {
-        (reference_reads_that_did_it / reference_reads)
-            .clamp(REFERENCE_SHARE_FLOOR, REFERENCE_SHARE_CEILING)
+/// # Why a weight at all
+///
+/// The site quality grows by about 30 Phred for every alternative read; the tail of a one-sided
+/// pile-up grows by a few Phred per read (about 3 against an even split, 6 against reference reads
+/// one in four forward). **Both grow in step with the reads, so at a weight of one the quality
+/// outruns the penalty at every depth**: at 300× on GIAB HG004 chr3:107848623 all 61 alternative
+/// reads are forward against 33 of 132 reference reads, and the site was written. A weight `k`
+/// makes the sign of `quality − k × tail` depend on how lopsided the reads are per read, not on how
+/// many there are — so it does not grow stricter as a cohort pools more reads, which a cutoff on
+/// the tail's size does.
+///
+/// # Why 4
+///
+/// Measured 2026-10-07 on the three GIAB samples (HG002, HG003, HG004), each over its own 100
+/// benchmark regions, against GIAB v4.2.1 with vcfeval, and on 63 tomato accessions at about 3×
+/// against GATK's joint calls on 50 of them. False calls on GIAB at 5×, 10×, 30× and 300×:
+/// weight 3 gives 174, 92, 20, 8; **4 gives 174, 91, 19, 8**; 5 gives 174, 91, 18, 8 but loses a
+/// true insertion at 30×; 10 loses 8 true calls at 30×. Up to 4 no true call is lost at any depth.
+/// On tomato, 4 removes 13,732 sample genotypes GATK does not call and 2,985 it does; 5 removes
+/// 20,942 and 4,142.
+pub const STRAND_PENALTY_WEIGHT: f64 = 4.0;
+
+/// **How many reads the prior on the expected share is worth** in
+/// [`strand_and_read_position_penalty`].
+///
+/// Large enough that a homozygous-variant site's zero or one reference read does not set the
+/// expectation by itself (at 10, one forward reference read moves the expected forward share from
+/// 0.5 to 0.55), and small enough that a site with dozens of reference reads is judged by them. At
+/// 300× on GIAB it took the largest tail on a true call from 3,000 Phred, the most the tail can
+/// express, to 75.
+pub const EXPECTED_SHARE_PRIOR_READS: f64 = 10.0;
+
+/// The pooled placed-left share is held off zero and one, so neither beta parameter of the prior
+/// is zero, where the beta function is infinite.
+const POOLED_SHARE_FLOOR: f64 = 0.001;
+
+/// **The two-sided (Sterne) tail of a beta-binomial**, as a Phred: the probability of every count
+/// no more likely than `observed` of `total`, when each read's probability is drawn from
+/// `Beta(alpha, beta)`.
+///
+/// # Why it is cheap at cohort depth
+///
+/// `total` is the pooled alternative-read count, which at a common variant in a cohort of thousands
+/// is in the hundreds of thousands, so summing every outcome is out. The distribution here is
+/// unimodal — log-concave when both parameters are at least one, and monotone when one is below
+/// one, which is the only other case [`strand_and_read_position_penalty`] produces, since their sum is
+/// at least [`EXPECTED_SHARE_PRIOR_READS`] — so "no more likely than observed" is two flanks. The mode and
+/// the far flank's edge are each a binary search on the log-probability, and each flank is summed
+/// outward from its edge only until a term no longer moves the sum.
+fn beta_binomial_two_sided_tail_phred(observed: f64, total: f64, alpha: f64, beta: f64) -> f64 {
+    if total < 1.0 {
+        return 0.0;
+    }
+    let n = total.round() as u64;
+    let k_observed = observed.round().clamp(0.0, n as f64) as u64;
+    let distribution = BetaBinomial::new(n, alpha, beta);
+    let mode = distribution.mode();
+    if k_observed == mode {
+        return 0.0;
+    }
+    // The same slack the binomial tail compares with, for the same reason: two outcomes of equal
+    // probability can differ in their last bits.
+    let threshold = distribution.ln_probability(k_observed) + 1e-7;
+    let (near, far) = if k_observed < mode {
+        // Far flank: the first count right of the mode no more likely than the observed one.
+        let (mut low, mut high) = (mode, n + 1);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if distribution.ln_probability(middle) <= threshold {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        (
+            distribution.flank_sum(k_observed, Direction::Down),
+            if low > n {
+                0.0
+            } else {
+                distribution.flank_sum(low, Direction::Up)
+            },
+        )
     } else {
-        0.5
+        // Far flank: the last count left of the mode no more likely than the observed one.
+        let (mut low, mut high) = (0_u64, mode + 1);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if distribution.ln_probability(middle) > threshold {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        (
+            distribution.flank_sum(k_observed, Direction::Up),
+            if low == 0 {
+                0.0
+            } else {
+                distribution.flank_sum(low - 1, Direction::Down)
+            },
+        )
+    };
+    (-10.0 * float::log10((near + far).clamp(1e-300, 1.0))).max(0.0)
+}
+
+/// Which way a flank runs from its edge.
+#[derive(Clone, Copy)]
+enum Direction {
+    Up,
+    Down,
+}
+
+/// A beta-binomial on `n` reads, held as the constants its log-probability needs.
+struct BetaBinomial {
+    n: u64,
+    alpha: f64,
+    beta: f64,
+    /// `ln Γ(n + 1) − ln B(alpha, beta)`, the part of every log-probability that does not depend
+    /// on the count.
+    ln_constant: f64,
+}
+
+impl BetaBinomial {
+    fn new(n: u64, alpha: f64, beta: f64) -> Self {
+        let ln_beta_function = lgamma(alpha) + lgamma(beta) - lgamma(alpha + beta);
+        Self {
+            n,
+            alpha,
+            beta,
+            ln_constant: lgamma(n as f64 + 1.0) - ln_beta_function,
+        }
+    }
+
+    /// `ln P(X = k)`.
+    fn ln_probability(&self, k: u64) -> f64 {
+        let (k, n) = (k as f64, self.n as f64);
+        self.ln_constant - lgamma(k + 1.0) - lgamma(n - k + 1.0)
+            + lgamma(k + self.alpha)
+            + lgamma(n - k + self.beta)
+            - lgamma(n + self.alpha + self.beta)
+    }
+
+    /// The most likely count: the first `k` whose successor is less likely, found by a binary
+    /// search that is exact because the distribution is unimodal.
+    fn mode(&self) -> u64 {
+        let (mut low, mut high) = (0_u64, self.n);
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.ln_probability(middle + 1) > self.ln_probability(middle) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    /// `P(X = edge) + P(X = edge ± 1) + …` out to the end, stopping once a term is too small to
+    /// change the sum. Each step multiplies by the ratio of successive probabilities, so one
+    /// logarithm is taken per term, not six.
+    fn flank_sum(&self, edge: u64, direction: Direction) -> f64 {
+        let n = self.n as f64;
+        let first = self.ln_probability(edge);
+        // Terms are summed relative to the first, which is the flank's largest, and scaled back
+        // at the end.
+        let mut relative_sum = 1.0;
+        let mut ln_term = 0.0;
+        let mut k = edge;
+        loop {
+            let kf = k as f64;
+            let ln_ratio = match direction {
+                Direction::Up => {
+                    if k == self.n {
+                        break;
+                    }
+                    k += 1;
+                    float::ln(
+                        ((n - kf) * (kf + self.alpha)) / ((kf + 1.0) * (n - kf - 1.0 + self.beta)),
+                    )
+                }
+                Direction::Down => {
+                    if k == 0 {
+                        break;
+                    }
+                    k -= 1;
+                    float::ln(
+                        (kf * (n - kf + self.beta)) / ((n - kf + 1.0) * (kf - 1.0 + self.alpha)),
+                    )
+                }
+            };
+            ln_term += ln_ratio;
+            let term = float::exp(ln_term);
+            relative_sum += term;
+            if term < relative_sum * 1e-17 {
+                break;
+            }
+        }
+        float::exp(first) * relative_sum
     }
 }
 
@@ -560,16 +778,6 @@ fn bias_test_power(alternative_reads: f64) -> f64 {
             / (BIAS_RAMP_FULL_POWER_AT - BIAS_RAMP_NO_POWER_BELOW)
     }
 }
-
-/// **The reference reads' share is held inside `[0.01, 0.99]`**, which is a wider clamp than the
-/// allele-balance test's and, unlike that one, **binds on real data**: a locus every one of whose
-/// reference reads is on the forward strand is an ordinary thing to meet, and without the clamp a
-/// single reverse-strand alternative read there is charged the tail's whole 3,000-Phred floor.
-/// Production's, at the same value.
-const REFERENCE_SHARE_FLOOR: f64 = 0.01;
-
-/// The other end of [`REFERENCE_SHARE_FLOOR`]'s clamp.
-const REFERENCE_SHARE_CEILING: f64 = 0.99;
 
 // ---------------------------------------------------------------------------------------
 // The subtraction
@@ -949,137 +1157,98 @@ mod tests {
         assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
     }
 
-    /// **Forty alternative reads all on one strand are charged 111.6 Phred**, where the
-    /// reference reads at the same site split evenly. This is the artifact shape the test is
-    /// named for.
+    /// **Forty alternative reads all on one strand are charged the weight times their tail**,
+    /// where the reference reads at the same site split evenly — the artifact shape the test is
+    /// named for. The expectation is a beta of the 30 forward and 30 reverse reference reads plus
+    /// the prior's 5 and 5.
     #[test]
-    fn a_one_strand_pile_up_at_depth_is_charged() {
+    fn a_one_strand_pile_up_at_depth_is_charged_the_weight_times_its_tail() {
         let counts = strand_counts(60.0, 40.0, 40.0, 20.0);
         let penalty = f64::from(strand_and_read_position_penalty(&counts).get());
+        let tail = beta_binomial_two_sided_tail_phred(40.0, 40.0, 35.0, 35.0);
+        assert!(tail > 50.0, "forty of forty against an even split: {tail}");
         assert!(
-            (penalty - 117.40).abs() < 0.01,
-            "forty of forty on the forward strand: {penalty}"
+            (penalty - STRAND_PENALTY_WEIGHT * tail).abs() < 0.01,
+            "{penalty} against {} × {tail}",
+            STRAND_PENALTY_WEIGHT
         );
     }
 
-    /// **The larger of the two axes is what is charged.** The same forty reads, this time split
-    /// evenly by strand but every one placed left, cost the same 117.4 — so a site whose
-    /// artifact shows in only one of the two is caught by that one.
+    /// **Either axis alone is enough to charge a site.** The same forty reads, once all on one
+    /// strand and once split by strand but all placed left, are both charged heavily.
     #[test]
     fn either_axis_alone_is_enough_to_charge_a_site() {
         let by_strand = strand_and_read_position_penalty(&strand_counts(60.0, 40.0, 40.0, 20.0));
         let by_position = strand_and_read_position_penalty(&strand_counts(60.0, 40.0, 20.0, 40.0));
-        assert_eq!(by_strand, by_position);
-        assert!(by_strand.get() > 100.0);
+        assert!(by_strand.get() > 100.0, "{by_strand:?}");
+        assert!(by_position.get() > 100.0, "{by_position:?}");
     }
 
-    /// **Three alternative reads on one strand are charged exactly nothing, and five are
-    /// charged half.**
+    /// **Three alternative reads on one strand are charged exactly nothing, five are charged half,
+    /// and seven in full.**
     ///
-    /// This is the ramp, and it is the reason the test can be kept at all. Without it, three
-    /// reads landing on one strand by chance — which happens one time in four at an even split —
-    /// took genuine low-coverage heterozygotes for artifacts and charged them 10 to 17 Phred,
-    /// which is harmless where the baseline is in the hundreds and fatal at 5×.
-    ///
-    /// **Measured: the unramped penalty at five reads is 12.04 Phred and what is charged is
-    /// 6.02**, exactly half, because five sits halfway between the ramp's three and seven.
+    /// This is the ramp, and it is the reason the test can be kept at all. Without it, three reads
+    /// landing on one strand by chance — one time in four at an even split — took genuine
+    /// low-coverage heterozygotes for artifacts, which is harmless where the baseline is in the
+    /// hundreds and fatal at 5×.
     #[test]
     fn the_ramp_charges_nothing_at_three_reads_and_half_at_five() {
         let three = strand_and_read_position_penalty(&strand_counts(60.0, 3.0, 3.0, 1.5));
-        assert_eq!(
-            three.get(),
-            0.0,
-            "three alternative reads have no power, so the test says nothing about them"
+        assert_eq!(three.get(), 0.0);
+
+        let five_counts = strand_counts(60.0, 5.0, 5.0, 2.5);
+        let five = f64::from(strand_and_read_position_penalty(&five_counts).get());
+        let five_unramped =
+            STRAND_PENALTY_WEIGHT * strand_and_read_position_tail_phred(&five_counts);
+        assert!(five_unramped > 0.0);
+        assert!(
+            (five - five_unramped / 2.0).abs() < 0.01,
+            "five reads sit halfway along the ramp from three to seven: {five} against \
+             {five_unramped}"
         );
 
-        let five =
-            f64::from(strand_and_read_position_penalty(&strand_counts(60.0, 5.0, 5.0, 2.5)).get());
-        let unramped = two_sided_binomial_tail_phred(5.0, 5.0, 0.5);
+        let seven_counts = strand_counts(60.0, 7.0, 7.0, 3.5);
+        let seven = f64::from(strand_and_read_position_penalty(&seven_counts).get());
         assert!(
-            (unramped - 12.041).abs() < 0.01,
-            "five of five on one strand against an even expectation: {unramped}"
-        );
-        assert!(
-            (five - unramped / 2.0).abs() < 0.01,
-            "five reads sit halfway along the ramp from three to seven, so half the penalty is \
-             charged: {five} against {unramped}"
-        );
-
-        let seven =
-            f64::from(strand_and_read_position_penalty(&strand_counts(60.0, 7.0, 7.0, 3.5)).get());
-        assert!(
-            (seven - two_sided_binomial_tail_phred(7.0, 7.0, 0.5)).abs() < 0.01,
+            (seven - STRAND_PENALTY_WEIGHT * strand_and_read_position_tail_phred(&seven_counts))
+                .abs()
+                < 0.01,
             "seven reads are the top of the ramp and pay in full: {seven}"
         );
     }
 
-    /// **A site whose reference reads are one-sided does not charge its alternative reads for
-    /// it.** Every reference read on the forward strand and every alternative read too: the
-    /// expectation is read from the reference, so the alternative reads look exactly as expected
-    /// and cost nothing on that axis.
-    ///
-    /// Comparing against a fixed one half instead would charge this site 117.4 Phred — the
-    /// number a caller would take off every locus at the edge of a capture target.
+    /// **A site whose reference reads are one-sided charges its alternative reads little for
+    /// it.** Every one of 60 reference reads on the forward strand and every one of 40 alternative
+    /// reads too: the expectation comes from the reference reads, so the alternative reads look
+    /// nearly as expected. Not exactly — the prior's ten reads at an even split pull the expected
+    /// share a little below one — but a few dozen Phred, where comparing against a fixed one half
+    /// would charge hundreds.
     #[test]
-    fn a_one_sided_site_charges_nothing_when_both_alleles_lean_the_same_way() {
-        let counts = ArtifactTestCounts {
-            primary_alternative: AlleleId(1),
-            reference_reads: 60.0,
-            reference_forward_reads: 60.0,
-            reference_placed_left_reads: 30.0,
-            alternative_reads: 40.0,
-            alternative_forward_reads: 40.0,
-            alternative_placed_left_reads: 20.0,
-            total_reads: 100.0,
-            genotype_expected_alternative_reads: 40.0,
-        };
-        assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
-
-        let against_a_fixed_half = two_sided_binomial_tail_phred(40.0, 40.0, 0.5);
-        assert!(
-            (against_a_fixed_half - 117.40).abs() < 0.01,
-            "what a fixed expectation of one half would have charged: {against_a_fixed_half}"
-        );
+    fn a_one_sided_site_charges_little_when_both_alleles_lean_the_same_way() {
+        let counts = counts_with((60.0, 60.0, 30.0), (40.0, 40.0, 20.0));
+        let penalty = f64::from(strand_and_read_position_penalty(&counts).get());
+        let against_a_fixed_half =
+            STRAND_PENALTY_WEIGHT * two_sided_binomial_tail_phred(40.0, 40.0, 0.5);
+        assert!(penalty < 40.0, "{penalty}");
+        assert!(against_a_fixed_half > 400.0, "{against_a_fixed_half}");
     }
 
-    /// **A locus with no reference reads falls back to an even expectation.** Nothing to compare
-    /// against, so the assumption that charges least is the one taken — and the clamp keeps the
-    /// fall-back from ever being zero or one.
+    /// **A locus with no reference reads falls back to the prior**: an even split for strand, the
+    /// site's own share for read position. Alternative reads drawn evenly cost nothing.
     #[test]
-    fn no_reference_reads_falls_back_to_an_even_expectation() {
-        assert_eq!(reference_share(0.0, 0.0), 0.5);
+    fn no_reference_reads_falls_back_to_the_prior() {
         let counts = strand_counts(0.0, 40.0, 20.0, 20.0);
         assert_eq!(strand_and_read_position_penalty(&counts).get(), 0.0);
     }
 
-    /// **The reference share is clamped, and unlike the other test's clamp this one binds on
-    /// ordinary data.** Every reference read on one strand is a real thing to meet; without the
-    /// clamp a single opposite-strand alternative read there is weighed against a probability of
-    /// zero and charged the tail's floor.
+    /// **One alternative read on the other strand, at a site whose every reference read leans
+    /// one way, is a small charge** — the case production's clamp existed for; the prior covers it
+    /// now, and nothing reaches the tail's floor.
     #[test]
-    fn a_wholly_one_sided_reference_is_clamped_off_the_endpoint() {
-        assert_eq!(reference_share(60.0, 60.0), REFERENCE_SHARE_CEILING);
-        assert_eq!(reference_share(0.0, 60.0), REFERENCE_SHARE_FLOOR);
-
-        // What the clamp is worth: one alternative read of forty on the other strand, at a site
-        // whose every reference read leans one way.
-        let counts = ArtifactTestCounts {
-            primary_alternative: AlleleId(1),
-            reference_reads: 60.0,
-            reference_forward_reads: 60.0,
-            reference_placed_left_reads: 30.0,
-            alternative_reads: 40.0,
-            alternative_forward_reads: 39.0,
-            alternative_placed_left_reads: 20.0,
-            total_reads: 100.0,
-            genotype_expected_alternative_reads: 40.0,
-        };
+    fn one_read_against_a_wholly_one_sided_site_is_a_small_charge() {
+        let counts = counts_with((60.0, 60.0, 30.0), (40.0, 39.0, 20.0));
         let penalty = f64::from(strand_and_read_position_penalty(&counts).get());
-        assert!(
-            penalty.is_finite() && penalty < 10.0,
-            "one read of forty against the site's own lean is a small charge, not the tail's \
-             floor: {penalty}"
-        );
+        assert!(penalty.is_finite() && penalty < 40.0, "{penalty}");
     }
 
     /// **A locus with no alternative reads is charged nothing.** As with the other test, no such
@@ -1131,7 +1300,7 @@ mod tests {
             total_reads: 500.0,
             genotype_expected_alternative_reads: 250.0,
         };
-        let baseline = Phred::try_new(900.0).expect("a quality");
+        let baseline = Phred::try_new(5000.0).expect("a quality");
         let (corrected, penalties) = correct_site_quality(baseline, &counts);
         assert!(penalties.allele_balance.get() > 0.0);
         assert!(penalties.strand_and_read_position.get() > 0.0);
@@ -1140,7 +1309,7 @@ mod tests {
             + f64::from(penalties.allele_balance.get())
             + f64::from(penalties.strand_and_read_position.get());
         assert!(
-            (recovered - 900.0).abs() < 0.01,
+            (recovered - 5000.0).abs() < 0.01,
             "the baseline is the corrected quality plus the two penalties: {recovered}"
         );
     }
@@ -1202,5 +1371,113 @@ mod tests {
         };
         assert_eq!(penalties.allele_balance.get(), 12.5);
         assert_eq!(penalties.strand_and_read_position.get(), 0.0);
+    }
+
+    /// Counts with every field named, for the strand-bias tests: reference reads, of them
+    /// forward and placed left; alternative reads, of them forward and placed left.
+    fn counts_with(reference: (f64, f64, f64), alternative: (f64, f64, f64)) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            primary_alternative: AlleleId(1),
+            reference_reads: reference.0,
+            reference_forward_reads: reference.1,
+            reference_placed_left_reads: reference.2,
+            alternative_reads: alternative.0,
+            alternative_forward_reads: alternative.1,
+            alternative_placed_left_reads: alternative.2,
+            total_reads: reference.0 + alternative.0,
+            genotype_expected_alternative_reads: alternative.0,
+        }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The expectation as an estimate: the beta-binomial tail, and the cases it was built for
+    // -------------------------------------------------------------------------------------
+
+    /// **The naive beta-binomial tail**, every outcome summed — the oracle for the two binary
+    /// searches and the truncated flank sums.
+    fn exact_beta_binomial_tail_phred(observed: u64, total: u64, alpha: f64, beta: f64) -> f64 {
+        let distribution = BetaBinomial::new(total, alpha, beta);
+        let threshold = distribution.ln_probability(observed) + 1e-7;
+        let tail: f64 = (0..=total)
+            .map(|k| distribution.ln_probability(k))
+            .filter(|&l| l <= threshold)
+            .map(float::exp)
+            .sum();
+        (-10.0 * float::log10(tail.clamp(1e-300, 1.0))).max(0.0)
+    }
+
+    /// **The searched and truncated tail agrees with the full sum**, across read totals, every
+    /// outcome, and beta parameters from the J-shaped (one below one) to the concentrated — the
+    /// shapes [`strand_and_read_position_penalty`] produces.
+    #[test]
+    fn the_beta_binomial_tail_agrees_with_the_full_sum() {
+        for total in [1_u64, 2, 5, 17, 60, 233] {
+            for (alpha, beta) in [
+                (5.0, 5.0),
+                (38.0, 104.0),
+                (0.05, 9.95),
+                (9.95, 0.05),
+                (140.0, 2.0),
+            ] {
+                for observed in 0..=total {
+                    let fast = beta_binomial_two_sided_tail_phred(
+                        observed as f64,
+                        total as f64,
+                        alpha,
+                        beta,
+                    );
+                    let exact = exact_beta_binomial_tail_phred(observed, total, alpha, beta);
+                    assert!(
+                        (fast - exact).abs() < 1e-6 * exact.max(1.0),
+                        "{observed} of {total} at Beta({alpha}, {beta}): {fast} against {exact}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A homozygous-variant site with no reference reads is charged little.** 247 variant
+    /// reads, 125 forward and 245 starting left of the site, the shape of GIAB HG002 chr1:4909882
+    /// at 300×. Production's penalty charged that shape hundreds of Phred, because with no
+    /// reference read it assumed half the reads start left of the site; its baseline was in the
+    /// thousands, so the call survived, but only by its size.
+    #[test]
+    fn a_homozygous_site_with_no_reference_reads_is_charged_little() {
+        let counts = counts_with((0.0, 0.0, 0.0), (247.0, 125.0, 245.0));
+        let penalty = strand_and_read_position_penalty(&counts).get();
+        assert!(penalty < 40.0, "{penalty}");
+    }
+
+    /// **One reference read does not set the expectation.** It is forward, and half of 200
+    /// variant reads are: production clamped the expected share to 99 in 100 and charged
+    /// hundreds; here the one read moves an even prior a little.
+    #[test]
+    fn one_reference_read_does_not_set_the_expectation() {
+        let counts = counts_with((1.0, 1.0, 1.0), (200.0, 100.0, 199.0));
+        let penalty = strand_and_read_position_penalty(&counts).get();
+        assert!(penalty < 40.0, "{penalty}");
+    }
+
+    /// **Variant reads all on one strand, against reference reads on both, are charged more than
+    /// their site quality** — GIAB HG004 chr3:107848623 at 300×: 61 of 61 variant reads forward,
+    /// 33 of 132 reference reads, a baseline of about 440 Phred. The penalty at weight one was 367
+    /// and the site was written; at [`STRAND_PENALTY_WEIGHT`] it is not.
+    #[test]
+    fn variant_reads_on_one_strand_against_reference_reads_on_both_outweigh_their_quality() {
+        let counts = counts_with((132.0, 33.0, 131.0), (61.0, 61.0, 61.0));
+        let penalty = strand_and_read_position_penalty(&counts).get();
+        assert!(penalty > 440.0, "{penalty}");
+    }
+
+    /// **A site whose few reference reads share the variant reads' strand is still weighed**,
+    /// against the even prior — GIAB HG003 chr7:63498962 at 300×: every one of 7 reference and 26
+    /// variant reads is forward. Production's penalty charged nothing there; this charges
+    /// something, and far less than the one-strand pile-up above, because the reference reads
+    /// agree with the variant reads.
+    #[test]
+    fn a_site_whose_few_reference_reads_share_the_strand_is_still_weighed() {
+        let counts = counts_with((7.0, 7.0, 7.0), (26.0, 26.0, 26.0));
+        let tail = strand_and_read_position_tail_phred(&counts);
+        assert!(tail > 10.0 && tail < 40.0, "{tail}");
     }
 }
