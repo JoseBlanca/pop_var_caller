@@ -1672,16 +1672,21 @@ where
         Ok(())
     }
 
-    /// The stretch of `contig` this cover's records lie on: every record any sample still holds
-    /// there, widened to the region when `contig` is the region's own.
+    /// The stretch of `contig` this cover must read the reference over: every record a sample
+    /// holds there **that no accumulator has seen yet**, widened to the region and its chain when
+    /// `contig` is the region's own.
     ///
-    /// **The ground is what the cache holds, not what the region asked for**, and the two are
-    /// different at both ends. Past the region: an observation chaining beyond it widens the
-    /// reach, and every sample is drawn one observation *past* that reach — the only way to
-    /// know a record is beyond the reach is to draw it, and once drawn it is held rather than
-    /// thrown away. Before the region: a record drawn by an earlier cover and still held is
-    /// handed to the builders again, and this buffer is refilled rather than appended to, so
-    /// the bases the cover that drew it fetched are gone.
+    /// **Past the region**: an observation chaining beyond it widens the reach, and every sample
+    /// is drawn one observation *past* that reach — the only way to know a record is beyond the
+    /// reach is to draw it — and that record is observed by this cover, so its bases are read.
+    ///
+    /// **Only the records not yet seen**, because they are the only ones the measurement reads
+    /// bases for. A record already observed is still held — the one drawn past the reach stays
+    /// held until the merge reaches it — and counting it here stretched every later cover's
+    /// fetch out to it. Where a sample has no read for a long stretch that record is far ahead,
+    /// so every region inside the stretch fetched the rest of it again: on 63 tomato accessions
+    /// over chromosome 1, whose files hold reads only around 80 regions, a run recognising no
+    /// repeat tract fetched 110 billion bases, 1,200 times the chromosome, in 51 s of its 65.
     fn ground_this_cover_holds_on(
         &self,
         contig: ContigId,
@@ -1701,8 +1706,13 @@ where
             // **The first base is an end, not a scan.** A sample's held summaries ascend in
             // `(contig, position)` (`draw_next`'s ordering check), so the ones on `contig` are a
             // contiguous run and the earliest of them is the first. Scanning instead would cost
-            // this `samples × held` per contig on every cover.
-            let held = summaries_on(&sample.held_summaries, contig);
+            // this `samples × held` per contig on every cover. **The records not yet seen are a
+            // suffix of the held ones** ([`WindowCoverageInProgress::first_not_yet_observed`]),
+            // so the same holds of them.
+            let unobserved = sample
+                .window_coverage
+                .summaries_not_yet_observed(&sample.held_summaries);
+            let held = summaries_on(unobserved, contig);
             if let Some(first) = held.first() {
                 let start = first.start_position().position;
                 first_base = Some(first_base.map_or(start, |first: Position| first.min(start)));
@@ -2655,15 +2665,16 @@ mod tests {
         );
     }
 
-    /// **Every record the cache holds has a base**, which is the property the whole step
-    /// exists to provide and the one the next step reads. Two shapes make it non-trivial, and
-    /// both occur on ordinary input: each sample is drawn **one record past** the reach — the
-    /// only way to know a record is beyond it is to draw it — and a record drawn by an earlier
-    /// cover is still held and handed out again, with its head before this region's start.
+    /// **Every record a cover measures has a base**, which is the property the whole step
+    /// exists to provide and the one the measurement reads: the record each sample is drawn
+    /// **one past** the reach — the only way to know a record is beyond it is to draw it — is
+    /// measured by the cover that drew it, so its bases are read with the region's. **A record an
+    /// earlier cover measured is not read again**: it is still held and handed to the builders,
+    /// but nothing reads bases for it.
     #[test]
-    fn every_position_of_every_held_record_has_a_reference_base() {
-        // 30..44 is drawn by an earlier cover and still reaches into this one; 60..60 is the
-        // record this cover draws past its own reach.
+    fn every_position_of_every_record_a_cover_measures_has_a_reference_base() {
+        // 30..44 is measured by the first cover and still reaches into the second; 60..60 is
+        // the record the first cover draws past its own reach.
         let source = a_source(vec![
             Ok(observation_over(region(30, 44))),
             Ok(observation_over(region(45, 45))),
@@ -2673,15 +2684,59 @@ mod tests {
         cache
             .cover(region(20, 35))
             .expect("the fixture source and reference hold");
-        cache
-            .cover(region(40, 50))
-            .expect("the fixture source and reference hold");
-
-        for position in [30, 40, 44, 45, 50, 60] {
+        for position in [30, 44, 45, 60] {
             assert_eq!(
                 cache.reference_base_at(position_on(0, position)),
                 Some(fixture_base_at(position)),
-                "the cache holds a record covering {position} and no base for it",
+                "the first cover measures a record covering {position} and read no base for it",
+            );
+        }
+
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture source and reference hold");
+        for position in [40, 44, 45, 50, 60] {
+            assert_eq!(
+                cache.reference_base_at(position_on(0, position)),
+                Some(fixture_base_at(position)),
+                "the region and its chain are read: no base at {position}",
+            );
+        }
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 30)),
+            None,
+            "a record the first cover measured stretched the second cover's fetch back to it",
+        );
+    }
+
+    /// **A record far ahead, measured once, does not stretch every later cover's fetch out to
+    /// it.** Where a sample has no read for a long stretch, the record it is drawn past the reach
+    /// to lies at the stretch's far end and stays held until the merge reaches it; every region
+    /// inside the stretch fetched the ground out to it again, until only the records not yet
+    /// measured set the fetch.
+    #[test]
+    fn a_record_far_ahead_is_read_by_the_cover_that_draws_it_and_by_no_later_one() {
+        let source = a_source(vec![
+            Ok(observation_over(region(10, 10))),
+            Ok(observation_over(region(1_900, 1_900))),
+        ]);
+        let mut cache = ObservationCache::over_fixture(vec![source]);
+        cache
+            .cover(region(1, 100))
+            .expect("the fixture source and reference hold");
+        assert_eq!(
+            cache.reference_base_at(position_on(0, 1_900)),
+            Some(fixture_base_at(1_900)),
+            "the cover that draws the far record measures it, so reads its base",
+        );
+        for later in [region(101, 200), region(201, 300), region(301, 400)] {
+            cache
+                .cover(later)
+                .expect("the fixture source and reference hold");
+            assert_eq!(
+                cache.reference_base_at(position_on(0, 1_900)),
+                None,
+                "the cover of {later} read out to a record an earlier cover had measured",
             );
         }
     }
