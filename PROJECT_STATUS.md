@@ -22,7 +22,18 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-07):** **the strand penalty weighs an uncertain expectation, four
+> - **Last completed task (2026-10-08):** **two coverage-window fixes, found at the tract_dual_path
+> checkpoint B** (branch `window-fetch`, then `window-zero-depth`, fast-forwarded onto main).
+> (1) The merge fetched the reference for the coverage windows out to the furthest record any
+> sample held, so a read-less stretch was fetched again for every region inside it; it now fetches
+> only for the records not yet measured. No output moves; on 63 tomato accessions over chromosome 1
+> walked with no STR segment, calling went 135 s → 34 s (it had fetched 110 billion bases). (2) A base
+> no read covers is no covered base in the windows (owner, 2026-10-08): an STR segment's record with
+> no read had counted its bases at depth 0. GIAB missed/false unchanged at all four depths; tomato
+> 63 accessions, the filter removes 23,015 records instead of 23,068; oracle re-recorded (filter
+> scores only). Also a new [glossary](doc/devel/ng/spec/glossary.md), with *callable genome*.
+>
+> - **Earlier (2026-10-07):** **the strand penalty weighs an uncertain expectation, four
 > times over** (branch `strand-bias`, spec `calling_quality.md` §6.5). The reference reads' strand
 > and read-position shares are now an estimate (a beta-binomial with a prior worth 10 reads), which
 > stops homozygous sites being charged hundreds of Phred, and the tail is charged ×4, because at ×1
