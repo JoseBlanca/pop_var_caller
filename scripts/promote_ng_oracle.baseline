@@ -62,6 +62,12 @@
 # insertion added, QUAL moved at 4,492 of the 7,450 shared records (−72 to +554, the rises homozygous sites the old test
 # overcharged), no genotype moved; window rows follow the records (a07ec5c5 → 470161a3); fitted parameters and coverage
 # histograms unchanged; from_fit.comparable 07de643d → 42d02245.
+# Re-recorded 2026-10-08 (Linux container, arm64) with a base at depth 0 no covered base in the coverage windows
+# (window_coverage.md §3.1): an STR segment's record with no read there no longer counts its bases as covered at depth 0.
+# Window rows that are a measurement 29,561 → 29,483 of 30,348 (470161a3 → 9b503d9d); histograms ec08c16f → 4cda6ce3; the
+# filter's duplication rate 0.031605 → 0.031542, so PARALOG_LR and PARALOG_POST move on 3,541 default-parameter records
+# and 1,860 called with the fit, and nothing else in either file moves: no record, genotype, QUAL or filter
+# (6b86f72c → 6257aa6c, 42d02245 → b1b46ece). Fitted parameters unchanged.
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -73,10 +79,10 @@
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
 # records: 7451
-6b86f72cfde268c8b673509c965f56e3  from_alignments.comparable
-6b86f72cfde268c8b673509c965f56e3  from_psps.comparable
+6257aa6c7c55eb2d6c1313d872a2ab6f  from_alignments.comparable
+6257aa6c7c55eb2d6c1313d872a2ab6f  from_psps.comparable
 b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
-470161a35712f391682f2a27e5087308  from_alignments.windows.sorted
-ec08c16f7e7e2956fdf8ab3a3e27da8d  from_alignments.windows.histograms
+9b503d9dbb13aaca231afe5b476f429a  from_alignments.windows.sorted
+4cda6ce3dd2389e386acb69c1cc745d7  from_alignments.windows.histograms
 3338658ce23b0ea15e77030840c1732a  fitted.parameters.toml
-42d022451614ae26f70c3106b5bb4c69  from_fit.comparable
+b1b46ecef9a12f24412bd3e0ee425a28  from_fit.comparable
