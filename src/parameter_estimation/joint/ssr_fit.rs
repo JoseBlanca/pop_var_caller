@@ -441,7 +441,8 @@ pub struct StratumFit {
     ///
     /// **The errors of the stratum's own fit, and only of it.** Once [`fit_strata`] has drawn the
     /// curves, [`StratumFit::slippage`] may hold a blend of the own fit and its period's curve, and
-    /// these are not that blend's errors — a blended number has none (spec §5.2). The own fit's level
+    /// these are not that blend's errors, which are not computed; the parameters file writes the own
+    /// fit's error beside a blend all the same (spec §5.2, amended 2026-10-08). The own fit's level
     /// is the one [`LevelProvenance::slipped_reads`] is counted from.
     ///
     /// `None` where no error was computed: on the fixtures tests build by hand.
@@ -2958,8 +2959,47 @@ fn fit_strata_with(
         // furnished from its period's curves rather than refused.
         derive_thin_strata(&mut outcomes, strata, &levels, &shares);
     }
+    let summary = strata_outcomes_summary(&outcomes, config.refusal_floor);
+    stage.always(|into| format!("repeat-tract fit: {summary}; {into}"));
     stage.always(|into| format!("repeat-tract fit: done; {into}"));
     outcomes
+}
+
+/// **What the run's log says about where every stratum's answer came from**, once each has one:
+/// fitted on its own tracts, furnished from its period's curves, or refused — and of the refused,
+/// how many had no read spanning a tract and how many held tracts with reads but fewer than
+/// `refusal_floor`. The counts add up to the strata in the evidence; without this line a refused
+/// stratum appears nowhere in the log or the file (80 of 141 on a 2,169-sample cohort).
+fn strata_outcomes_summary(outcomes: &[StratumOutcome], refusal_floor: usize) -> String {
+    let (mut fitted, mut derived, mut no_reads) = (0, 0, 0);
+    let mut below_the_floor: Vec<usize> = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            StratumOutcome::Fitted(_) => fitted += 1,
+            StratumOutcome::Derived(_) => derived += 1,
+            StratumOutcome::Refused {
+                reason: StratumRefusal::NoSpanningReads,
+                ..
+            } => no_reads += 1,
+            StratumOutcome::Refused {
+                reason: StratumRefusal::BelowTheFloor { tracts, .. },
+                ..
+            } => below_the_floor.push(*tracts),
+        }
+    }
+    let below_the_floor_range = match (below_the_floor.iter().min(), below_the_floor.iter().max()) {
+        (Some(fewest), Some(most)) if fewest == most => format!(", holding {fewest}"),
+        (Some(fewest), Some(most)) => format!(", holding {fewest} to {most}"),
+        _ => String::new(),
+    };
+    format!(
+        "strata: {total} in all; {fitted} fitted on their own tracts, {derived} furnished from their \
+         period's curves, {refused} refused — {no_reads} with no read spanning a tract, {below} \
+         with fewer tracts with reads than the {refusal_floor} a fit needs{below_the_floor_range}",
+        total = outcomes.len(),
+        refused = no_reads + below_the_floor.len(),
+        below = below_the_floor.len(),
+    )
 }
 
 /// **What the run's log says about the subsets the strata were read from** (spec §4.4): over the
@@ -8739,6 +8779,64 @@ mod tests {
             assert!(summary.contains(part), "{part:?} in {summary}");
         }
         assert_eq!(subsets_summary(&[with(None)], 2_169), None);
+    }
+
+    /// **The log's line about where each stratum's answer came from**: the fitted, the furnished
+    /// and the refused add up to every stratum, and the refused are split by why.
+    #[test]
+    fn the_strata_outcomes_summary_accounts_for_every_stratum() {
+        let refused = |repeats: u64, reason: StratumRefusal| StratumOutcome::Refused {
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: repeats,
+            },
+            tracts: match reason {
+                StratumRefusal::BelowTheFloor { tracts, .. } => tracts,
+                StratumRefusal::NoSpanningReads => 0,
+            },
+            reason,
+        };
+        let below = |repeats: u64, tracts: usize| {
+            refused(repeats, StratumRefusal::BelowTheFloor { tracts, floor: 40 })
+        };
+        let furnished = StratumOutcome::Derived(Box::new(DerivedStratum {
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 20,
+            },
+            slippage: Vec::new(),
+            level_provenance: Vec::new(),
+            shares_provenance: Vec::new(),
+            tracts_of_its_own: 3,
+            reads_crossing: 30,
+        }));
+        let outcomes = [
+            fitted_at(2, 10, 0.1, 1_000),
+            fitted_at(2, 11, 0.1, 1_000),
+            furnished,
+            refused(30, StratumRefusal::NoSpanningReads),
+            below(31, 3),
+            below(32, 17),
+            below(33, 9),
+        ];
+        let summary = strata_outcomes_summary(&outcomes, 40);
+        assert_eq!(
+            summary,
+            "strata: 7 in all; 2 fitted on their own tracts, 1 furnished from their period's \
+             curves, 4 refused — 1 with no read spanning a tract, 3 with fewer tracts with reads \
+             than the 40 a fit needs, holding 3 to 17"
+        );
+        assert!(
+            strata_outcomes_summary(&outcomes[..5], 40)
+                .ends_with("1 with fewer tracts with reads than the 40 a fit needs, holding 3"),
+            "one stratum below the floor names its one count"
+        );
+        assert_eq!(
+            strata_outcomes_summary(&outcomes[..2], 40),
+            "strata: 2 in all; 2 fitted on their own tracts, 0 furnished from their period's \
+             curves, 0 refused — 0 with no read spanning a tract, 0 with fewer tracts with reads \
+             than the 40 a fit needs"
+        );
     }
 
     /// **The subset against every sample** (plan step D2, spec §4.5 item 3 on drawn cohorts): strata

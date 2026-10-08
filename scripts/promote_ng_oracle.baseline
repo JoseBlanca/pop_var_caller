@@ -62,6 +62,12 @@
 # insertion added, QUAL moved at 4,492 of the 7,450 shared records (−72 to +554, the rises homozygous sites the old test
 # overcharged), no genotype moved; window rows follow the records (a07ec5c5 → 470161a3); fitted parameters and coverage
 # histograms unchanged; from_fit.comparable 07de643d → 42d02245.
+# Both parameters-file lines re-recorded 2026-10-08 (fit_precision.md, plan step F1; spec §5.2 amended by the owner): a
+# slippage number blended with its period's curve keeps its stratum's own-fit standard error, and the file's note on those
+# errors says so. The fitted file gains 36 own-fit errors (14 levels, 12 shorter shares, 10 fall-offs, all beside blends whose
+# curve weight runs 0.05 to 0.9999); 8 blended numbers whose own fit gave no error stay without one. No number and no call
+# moved: with the old note put back and those 36 keys deleted, the fitted file is the old one byte for byte, and the defaults
+# run's file needs only the note put back. They were 3338658c… / b7c0a262….
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -75,8 +81,8 @@ slice: 20 regions, 4 alignments
 # records: 7451
 6b86f72cfde268c8b673509c965f56e3  from_alignments.comparable
 6b86f72cfde268c8b673509c965f56e3  from_psps.comparable
-b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
+105f0150d39344e16a3333c44962e18a  from_alignments.parameters.toml
 470161a35712f391682f2a27e5087308  from_alignments.windows.sorted
 ec08c16f7e7e2956fdf8ab3a3e27da8d  from_alignments.windows.histograms
-3338658ce23b0ea15e77030840c1732a  fitted.parameters.toml
+5a105ee1d99e9d4e6e667bde46d08bf8  fitted.parameters.toml
 42d022451614ae26f70c3106b5bb4c69  from_fit.comparable

@@ -596,6 +596,16 @@ impl ShareSource {
             Self::Blend { curve_weight } => curve_weight,
         }
     }
+
+    /// **Whether the stratum's own fit went into the share** — the whole of it, or a blend — and
+    /// so whether the own fit's standard error is written beside it (`fit_precision.md` §5.2,
+    /// amended 2026-10-08). Matched exhaustively, so a new source has to say.
+    pub fn holds_the_own_fit(self) -> bool {
+        match self {
+            Self::Stratum | Self::Blend { .. } => true,
+            Self::Curve => false,
+        }
+    }
 }
 
 /// One stratum's emitted share and where it came from.

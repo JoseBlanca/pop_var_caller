@@ -322,6 +322,51 @@ every sample — checkpoint D's run found 7 of 12 compared numbers beyond ±2 of
 2. **The cross-platform check pins the new errors**: a fixture whose file carries standard errors, recorded on
    macOS and in the Linux container. After item 1, since item 1 moves that fixture's file.
 
+### After the kimura run — decided (owner, 2026-10-08)
+
+The owner's run of `estimate-parameters` on kimura with the merged build (main `82e248e7`, 2,169 samples,
+2,651 read groups; report `tmp/fit_precision_kimura_2026-10-08.md` in the main checkout) found:
+
+- **Time.** The whole run took 20 h 55 min against 25 h 13 min before this plan; the repeat-tract half 10 h
+  41 min against 15 h 36 min. 10 of the 34 strata fitted on their own tracts grew to all 2,169 samples. Peak
+  memory did not move; the file is valid (format version 2, 86 MB).
+- **The SNP/indel fit does not converge.** All three starts stopped at the 200-pass limit with 6,545 to 7,164
+  of the 7,479 parameters more than a tenth of a standard error from the likelihood's peak; the furthest
+  were the allele-frequency shape b (464.9 errors away), the allele-frequency shape a (44.3) and the
+  carrier-frequency shape b (407.8). The starts ended up to 1.18
+  million log-likelihood units apart. The ordinary-site prior's reference concentration, computed from those
+  shapes, moved from 18.9 to 6.9. The fit did not converge before this plan either; the file now says so.
+- **31 of the 34 strata fitted on their own tracts were written with no own-fit error**, because their level
+  is a blend with the period's curve — though in the 22 one-base strata among them the curve's weight in the
+  blend was 2 × 10⁻⁵ to 1 × 10⁻⁴.
+- **80 of the 141 strata appear nowhere in the log or the file**: no line counts the strata refused.
+
+**Decided:**
+
+1. **Investigate why the SNP/indel fit does not converge at kimura's size — measurement first.** A kimura run
+   of `estimate-parameters` with the per-pass trace on (`PVC_JOINT_FIT_TRACE=<path>`), to see whether each
+   start is still gaining at pass 200 or has stalled, and which parameters move. The owner runs it; the
+   assistant writes the prompt for the agent on kimura. Then a short written plan to the owner — more passes,
+   a better acceleration step, or a stopping rule fit for millions of observations — **before any code**.
+2. **Write the own-fit standard error wherever a stratum has its own fit, blends with its period's curve
+   included** — amending spec §5.2 (recorded there, with the owner's approval and date). The error is the
+   stratum's own fit's, not the blend's; the origin block beside it already records the curve's weight, so a
+   reader can see how much of the written number is the curve's. Plus a log line counting the strata
+   refused, so the strata in the log add up to those in the evidence.
+
+The steps:
+
+1. ✅ **F1 — own-fit errors on blends, and the refused strata counted.** `OwnFitStandardErrors` keeps the own
+   fit's error for every number that is the stratum's own fit or a blend of it with a curve, and drops it only
+   for a number taken from the curve whole. The file's text for `own_fit_standard_error` says the error is the
+   own fit's, before any blend. The repeat-tract fit's log gains one line, once every stratum has its answer,
+   splitting the strata into fitted on their own tracts, furnished from their period's curves, and refused —
+   with no read spanning a tract, or below the floor. **The checksums move only if the oracle's or the
+   fixtures' files gain keys**; that is measured and explained before they are re-recorded. *Depends:* E2.
+   *Source:* spec §5.2 as amended.
+2. ☐ **F2 — the SNP/indel non-convergence, measured.** The prompt for the kimura run with the trace on; then
+   the written plan to the owner. No code before the owner has chosen. *Depends:* —. *Source:* spec §2, §3.3.
+
 ## 5. Verification summary
 
 | milestone | proven by |

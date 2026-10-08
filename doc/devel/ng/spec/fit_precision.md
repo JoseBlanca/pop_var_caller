@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02).
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02); and after the kimura run (§5.2; 2026-10-08).
 Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
@@ -604,7 +604,18 @@ error to**, and nowhere else:
 | inbreeding coefficient, per sample (§3.5) | Part A — the homozygote excess |
 | base-quality calibration multiplier, per read group (§3.3) | Part A's error on the ordinary-position error rate, carried through the multiplier (the rate over the minted rate) |
 | substitution rate, per read group and stratum (§3.7) | the binomial error of a count, √(p(1 − p)/n) over the bases compared |
-| slippage numbers, per stratum and slippage group (§3.7) | Part B — **only where the number is the stratum's own fit**, in its `*_origin` block as `own_fit_standard_error`; a number drawn from or blended with a curve gets none, because the blend's own error is not computed here |
+| slippage numbers, per stratum and slippage group (§3.7) | Part B — **wherever the number is the stratum's own fit or a blend of it with a curve** (amended 2026-10-08, below), in its `*_origin` block as `own_fit_standard_error`; a number taken from a curve whole gets none |
+
+**Amended after the kimura run (owner, 2026-10-08): a slippage number blended with its period's curve
+carries its stratum's own-fit error too.** Only a number taken from the curve whole has none. As first
+written, the row above read *"only where the number is the stratum's own fit … a number drawn from or blended
+with a curve gets none, because the blend's own error is not computed here"*. On kimura (2,169 samples) 31 of
+the 34 strata fitted on their own tracts emit a blended level, so they were written with no error; in the 22
+one-base strata among them the curve's weight in the blend was 2 × 10⁻⁵ to 1 × 10⁻⁴, so those numbers are, in
+effect, the stratum's own fit. The error written is still the own fit's, computed before the blend, not the
+blend's — which stays uncomputed (§7). The origin block's `curve_weight` beside it says how much of the written
+number is the curve's: near 0 the error describes the number written, near 1 mostly the own fit the curve
+outweighed, which is the thin-cohort case (the curve carries about 0.81 of a level at 40 slipped reads).
 
 - **The file's format version goes from 1 to 2** ([`parameters_file/mod.rs:188`](../../../../src/calling/parameters_file/mod.rs#L188)).
   Every table refuses unknown keys (`deny_unknown_fields`, [`mod.rs:406`](../../../../src/calling/parameters_file/mod.rs#L406)),

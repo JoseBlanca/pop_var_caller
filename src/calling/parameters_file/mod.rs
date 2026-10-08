@@ -1129,9 +1129,11 @@ pub struct LevelOrigin {
     /// How many of this stratum's own reads **its own fitted level** said slipped, and absent
     /// where the stratum has no level of its own because it borrowed. **Absent is not zero.**
     pub expected_slipped_reads: Option<f64>,
-    /// **The level's standard error, only where the level written is the stratum's own fit**
-    /// (`smoothing = "this_stratum"`). A level from its period's curve, or blended with it, has
-    /// none: the blend's own error is not computed (`fit_precision.md` §5.2).
+    /// **The standard error of the stratum's own fit of the level, where the level written is that
+    /// fit or a blend of it with its period's curve** (`smoothing = "this_stratum"` or `blend`;
+    /// `fit_precision.md` §5.2, amended 2026-10-08). Beside a blend it is still the own fit's error:
+    /// the blend's own is not computed. A level taken whole from the curve has none, and so does one
+    /// whose own fit gave no error.
     pub own_fit_standard_error: Option<f64>,
 }
 
@@ -1154,9 +1156,10 @@ pub struct SharesOrigin {
     pub shorter_share_smoothing: ShareSmoothing,
     /// Where the fall-off came from.
     pub fall_off_smoothing: ShareSmoothing,
-    /// **The shorter share's standard error, only where that share is the stratum's own fit** —
-    /// one key a share rather than one for the block, because the two are smoothed separately and
-    /// either can come from a curve while the other is the stratum's own.
+    /// **The standard error of the stratum's own fit of the shorter share, where the share written
+    /// is that fit or a blend of it with a curve** (on the level's terms, [`LevelOrigin`]) — one key
+    /// a share rather than one for the block, because the two are smoothed separately and either
+    /// can come from a curve whole while the other is the stratum's own.
     pub shorter_share_own_fit_standard_error: Option<f64>,
     /// The fall-off's, on the same terms.
     pub fall_off_own_fit_standard_error: Option<f64>,
@@ -1777,7 +1780,8 @@ mod tests {
                                 reach: CurveReach::InsideTheFittedRange,
                             },
                             fall_off_smoothing: ShareSmoothing::ThisStratum,
-                            shorter_share_own_fit_standard_error: None,
+                            // A blended share keeps its stratum's own-fit error too.
+                            shorter_share_own_fit_standard_error: Some(0.013),
                             fall_off_own_fit_standard_error: Some(0.018),
                         }),
                         // One of the fixture's two samples: a subset, as a large cohort's is.
@@ -1797,7 +1801,9 @@ mod tests {
                                 reach: CurveReach::InsideTheFittedRange,
                             },
                             expected_slipped_reads: Some(8_000.5),
-                            own_fit_standard_error: None,
+                            // A blend keeps its stratum's own-fit error (`fit_precision.md` §5.2,
+                            // amended 2026-10-08).
+                            own_fit_standard_error: Some(0.0024),
                         },
                         shorter_share_and_fall_off_origin: Some(SharesOrigin {
                             expected_slipped_reads: Some(8_000.5),

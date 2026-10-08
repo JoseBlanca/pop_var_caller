@@ -48,8 +48,6 @@ use crate::parameter_estimation::Provenance;
 use crate::types::ReadGroupId;
 
 use super::census::Stratum;
-use super::share_curve::ShareSource;
-use super::slippage_curve::LevelSource;
 use super::ssr_fit::{LevelProvenance, SharesProvenance, Slippage, StratumOutcome};
 
 /// What one `(read group, stratum)` cell answers with.
@@ -72,9 +70,10 @@ pub struct FittedSlippage {
     /// the three numbers are smoothed on their own curves and a stratum can take its level from
     /// a curve while keeping its own shares.
     pub shares: Option<SharesProvenance>,
-    /// **The standard error of each of the three numbers, where that number is the stratum's own
-    /// fit** (`doc/devel/ng/spec/fit_precision.md` §5.2). Calling never reads them; the parameters
-    /// file writes them for the person judging the fit.
+    /// **The standard error of the stratum's own fit of each of the three numbers, where the number
+    /// emitted is that fit or a blend of it with a curve** (`doc/devel/ng/spec/fit_precision.md`
+    /// §5.2, amended 2026-10-08). Calling never reads them; the parameters file writes them for the
+    /// person judging the fit.
     pub own_fit_standard_errors: OwnFitStandardErrors,
     /// **How many samples the stratum's own fit read**, where a large cohort's stratum was fitted
     /// on a subset of its samples (`fit_precision.md` §4.4) — `None` where every sample was read
@@ -83,13 +82,21 @@ pub struct FittedSlippage {
     pub samples_fitted_on: Option<u64>,
 }
 
-/// **The standard errors of one slippage group's three numbers in one stratum, each only where the
-/// number emitted is the stratum's own fit.**
+/// **The standard errors of one slippage group's three numbers in one stratum, as the stratum's own
+/// fit gives them — kept wherever the number emitted is that fit, or a blend of it with its period's
+/// curve.**
 ///
-/// A number taken from its period's curve, or blended with it, has none: the blend's own error is
-/// not computed (spec `fit_precision.md` §5.2), and the own fit's would describe a number the
-/// stratum does not emit. Also `None` where the own fit gives the number none — not told apart from
-/// the stratum's other numbers, or not placed by its tracts.
+/// **A blend keeps the own fit's error** (spec `fit_precision.md` §5.2, amended 2026-10-08). It is
+/// the own fit's error, from before the blend; the blend's own is not computed. On a large cohort
+/// the curve's share of a blend can be tiny — 2 × 10⁻⁵ to 1 × 10⁻⁴ at the one-base strata of 2,169
+/// tomato samples — and the number emitted is, in effect, the own fit. On a small one it is not: on
+/// four tomato samples at about three reads a position, the curve's share of the 44 blended numbers
+/// runs from 0.05 to 0.9999, median 0.6. Either way the provenance beside the error carries the
+/// curve's share, so a reader can tell which case a row is. A number taken from the curve whole has
+/// none:
+/// the own fit's error would describe a number the stratum does not emit. Also `None` where the own
+/// fit gives the number none — not told apart from the stratum's other numbers, or not placed by its
+/// tracts.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct OwnFitStandardErrors {
     /// The slippage level's — how often a read reports a tract length other than its allele's.
@@ -101,9 +108,10 @@ pub struct OwnFitStandardErrors {
 }
 
 impl OwnFitStandardErrors {
-    /// **The own fit's errors, kept only for the numbers the stratum emits as its own** — the
-    /// level where it came from the cell, each share where it came from the stratum. `errors` is
-    /// the own fit's for this group, `None` where none was computed.
+    /// **The own fit's errors, kept for every number the own fit went into** — the level where it
+    /// came from the cell or a blend, each share where it came from the stratum or a blend; dropped
+    /// where the number is the curve's whole. `errors` is the own fit's for this group, `None` where
+    /// none was computed.
     fn of_the_numbers_emitted(
         errors: Option<&super::ssr_fit::SlippageErrors>,
         level: Option<&LevelProvenance>,
@@ -114,13 +122,13 @@ impl OwnFitStandardErrors {
         };
         Self {
             level: level
-                .filter(|level| matches!(level.source, LevelSource::Cell))
+                .filter(|level| level.source.holds_the_own_fit())
                 .and_then(|_| errors.level.value()),
             shorter_share: shares
-                .filter(|shares| matches!(shares.shorter_share.source, ShareSource::Stratum))
+                .filter(|shares| shares.shorter_share.source.holds_the_own_fit())
                 .and_then(|_| errors.shorter_share.value()),
             fall_off: shares
-                .filter(|shares| matches!(shares.fall_off.source, ShareSource::Stratum))
+                .filter(|shares| shares.fall_off.source.holds_the_own_fit())
                 .and_then(|_| errors.fall_off.value()),
         }
     }
@@ -1197,14 +1205,18 @@ mod tests {
         }))
     }
 
-    /// **A stratum's own-fit errors are kept only for the numbers it emits as its own, and the
-    /// samples it was fitted on travel with every group's numbers.** Group 0's level is the
-    /// cell's and its fall-off the stratum's own, its shorter share a curve's: it keeps the
-    /// level's and the fall-off's errors and not the shorter share's, though the own fit computed
-    /// all three. Group 1's level is a blend and its shares a curve's: no error at all. A stratum
-    /// derived from its period's curves, fitted on nothing, has neither errors nor a sample count.
+    /// **A stratum's own-fit errors are kept for every number its own fit went into, blends
+    /// included, and the samples it was fitted on travel with every group's numbers.** Group 0's
+    /// level is the cell's and its fall-off the stratum's own, its shorter share a curve's whole: it
+    /// keeps the level's and the fall-off's errors and not the shorter share's, though the own fit
+    /// computed all three. Group 1's level and shorter share are blends with a curve and its
+    /// fall-off is the curve's whole: it keeps the two blends' errors (spec `fit_precision.md` §5.2,
+    /// amended 2026-10-08). Group 2's level is the curve's whole, its shorter share the stratum's
+    /// own and its fall-off a blend: it keeps the two shares' errors. So each of the three numbers
+    /// is seen from each of the three sources. A stratum derived from its period's curves, fitted
+    /// on nothing, has neither errors nor a sample count.
     #[test]
-    fn own_fit_errors_are_kept_only_for_the_numbers_the_stratum_emits_as_its_own() {
+    fn own_fit_errors_are_kept_for_every_number_the_own_fit_went_into() {
         use crate::parameter_estimation::joint::slippage_curve::CurveReach;
         use crate::parameter_estimation::joint::ssr_fit::{
             SlippageErrors, StratumError, StratumErrors,
@@ -1228,14 +1240,33 @@ mod tests {
             reach: Some(CurveReach::Inside),
             slipped_reads: Some(90.0),
         };
+        let mut shares_partly_blended = shares_from_a_curve(90.0);
+        shares_partly_blended.shorter_share.source = ShareSource::Blend { curve_weight: 0.3 };
+        let from_the_curve_whole = LevelProvenance {
+            source: LevelSource::Curve,
+            curve: Some(a_curve()),
+            reach: Some(CurveReach::Inside),
+            slipped_reads: Some(30.0),
+        };
+        let mut shares_own_and_blended = shares_from_a_curve(30.0);
+        shares_own_and_blended.shorter_share.source = ShareSource::Stratum;
+        shares_own_and_blended.fall_off.source = ShareSource::Blend { curve_weight: 0.7 };
         let fitted_on_a_subset = StratumOutcome::Fitted(Box::new(StratumFit {
             standard_errors: Some(StratumErrors {
-                slippage: vec![errors(0.001, 0.02, 0.03), errors(0.004, 0.05, 0.06)],
+                slippage: vec![
+                    errors(0.001, 0.02, 0.03),
+                    errors(0.004, 0.05, 0.06),
+                    errors(0.007, 0.08, 0.09),
+                ],
                 length_spectrum: vec![StratumError::NoShare; 3],
                 concentration: StratumError::Estimated(0.5),
             }),
             stratum: stratum(2, 10),
-            slippage: vec![Some(slippage(0.1)), Some(slippage(0.2))],
+            slippage: vec![
+                Some(slippage(0.1)),
+                Some(slippage(0.2)),
+                Some(slippage(0.25)),
+            ],
             length_spectrum: leaning_short(),
             concentration: 2.0,
             log_likelihood_a_tract: -1.5,
@@ -1246,8 +1277,16 @@ mod tests {
             samples_fitted_on: Some(300),
             tracts_of_its_own: 40,
             reads_crossing: 400,
-            level_provenance: vec![Some(from_the_cell(400.0)), Some(blended)],
-            shares_provenance: vec![Some(shares_partly_own), Some(shares_from_a_curve(90.0))],
+            level_provenance: vec![
+                Some(from_the_cell(400.0)),
+                Some(blended),
+                Some(from_the_curve_whole),
+            ],
+            shares_provenance: vec![
+                Some(shares_partly_own),
+                Some(shares_partly_blended),
+                Some(shares_own_and_blended),
+            ],
         }));
         let fits = StratumFits::over(
             &[
@@ -1258,10 +1297,14 @@ mod tests {
                     vec![Some(from_the_cell(5.0))],
                 ),
             ],
-            BTreeMap::from([(ReadGroupId(0), 0), (ReadGroupId(1), 1)]),
+            BTreeMap::from([
+                (ReadGroupId(0), 0),
+                (ReadGroupId(1), 1),
+                (ReadGroupId(2), 2),
+            ]),
         );
         let cells: Vec<_> = fits.each_stratum_and_group_with_numbers().collect();
-        assert_eq!(cells.len(), 3);
+        assert_eq!(cells.len(), 4);
         assert_eq!(
             cells[0].2.own_fit_standard_errors,
             OwnFitStandardErrors {
@@ -1272,17 +1315,29 @@ mod tests {
         );
         assert_eq!(
             cells[1].2.own_fit_standard_errors,
-            OwnFitStandardErrors::default()
+            OwnFitStandardErrors {
+                level: Some(0.004),
+                shorter_share: Some(0.05),
+                fall_off: None,
+            }
         );
         assert_eq!(
-            (cells[0].2.samples_fitted_on, cells[1].2.samples_fitted_on),
+            cells[2].2.own_fit_standard_errors,
+            OwnFitStandardErrors {
+                level: None,
+                shorter_share: Some(0.08),
+                fall_off: Some(0.09),
+            }
+        );
+        assert_eq!(
+            (cells[0].2.samples_fitted_on, cells[2].2.samples_fitted_on),
             (Some(300), Some(300))
         );
-        assert_eq!(cells[2].0, stratum(2, 12));
+        assert_eq!(cells[3].0, stratum(2, 12));
         assert_eq!(
             (
-                cells[2].2.own_fit_standard_errors,
-                cells[2].2.samples_fitted_on
+                cells[3].2.own_fit_standard_errors,
+                cells[3].2.samples_fitted_on
             ),
             (OwnFitStandardErrors::default(), None)
         );

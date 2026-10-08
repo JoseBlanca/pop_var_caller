@@ -810,10 +810,7 @@ impl ParametersFile {
             an_own_fit_error(
                 &format!("{at}.share_of_reads_that_slip_origin.own_fit_standard_error"),
                 row.share_of_reads_that_slip_origin.own_fit_standard_error,
-                matches!(
-                    row.share_of_reads_that_slip_origin.smoothing,
-                    LevelSmoothing::ThisStratum
-                ),
+                a_level_the_own_fit_went_into(&row.share_of_reads_that_slip_origin.smoothing),
             )?;
             if let Some(samples) = row.samples_fitted_on
                 && samples > self.fitted_from.samples.len() as u64
@@ -854,14 +851,14 @@ impl ParametersFile {
                         "{at}.shorter_share_and_fall_off_origin.shorter_share_own_fit_standard_error"
                     ),
                     shares.shorter_share_own_fit_standard_error,
-                    matches!(shares.shorter_share_smoothing, ShareSmoothing::ThisStratum),
+                    a_share_the_own_fit_went_into(&shares.shorter_share_smoothing),
                 )?;
                 an_own_fit_error(
                     &format!(
                         "{at}.shorter_share_and_fall_off_origin.fall_off_own_fit_standard_error"
                     ),
                     shares.fall_off_own_fit_standard_error,
-                    matches!(shares.fall_off_smoothing, ShareSmoothing::ThisStratum),
+                    a_share_the_own_fit_went_into(&shares.fall_off_smoothing),
                 )?;
             }
         }
@@ -1178,25 +1175,43 @@ fn no_error_is_computed_for(at: &str, value: &WarrantedValue) -> Result<(), Para
     Ok(())
 }
 
-/// **A stratum's own-fit error, written only beside a number that is the stratum's own fit**: one
-/// beside a number taken from a curve or blended with one would describe a number the stratum
-/// does not emit (`fit_precision.md` §5.2).
+/// **A stratum's own-fit error, written only beside a number the stratum's own fit went into** —
+/// its own fit, or a blend of it with a curve: one beside a number taken from the curve whole would
+/// describe a number the stratum does not emit (`fit_precision.md` §5.2, amended 2026-10-08).
 fn an_own_fit_error(
     at: &str,
     error: Option<f64>,
-    the_number_is_the_stratums_own: bool,
+    the_own_fit_went_into_the_number: bool,
 ) -> Result<(), ParametersFileError> {
     let Some(error) = error else {
         return Ok(());
     };
-    if !the_number_is_the_stratums_own {
+    if !the_own_fit_went_into_the_number {
         return Err(refuse(
             at,
-            "is written beside a number taken from its period's curve or blended with it, and \
-             only a number that is this stratum's own fit has an own-fit error; delete it",
+            "is written beside a number taken whole from its period's curve, and only a number \
+             this stratum's own fit went into — its own fit, or a blend of it with the curve — \
+             has an own-fit error; delete it",
         ));
     }
     a_standard_error(at, error)
+}
+
+/// Whether the stratum's own fit went into a level written with this smoothing — the whole of it,
+/// or a blend. Matched exhaustively, so a new smoothing has to say.
+fn a_level_the_own_fit_went_into(smoothing: &LevelSmoothing) -> bool {
+    match smoothing {
+        LevelSmoothing::ThisStratum | LevelSmoothing::Blend { .. } => true,
+        LevelSmoothing::ThisPeriodsCurve { .. } => false,
+    }
+}
+
+/// [`a_level_the_own_fit_went_into`], for a share.
+fn a_share_the_own_fit_went_into(smoothing: &ShareSmoothing) -> bool {
+    match smoothing {
+        ShareSmoothing::ThisStratum | ShareSmoothing::Blend { .. } => true,
+        ShareSmoothing::ThisPeriodsCurve { .. } => false,
+    }
 }
 
 /// A number that is a share of something: finite, and within `[0, 1]`.
@@ -1427,7 +1442,8 @@ fn a_share_curve(at: &str, curve: &ShareCurve) -> Result<(), ParametersFileError
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        THE_ROW_WHOSE_SHARES_BLEND, THE_ROW_WHOSE_SLIP_SHARE_BLENDS, a_file_using_every_shape,
+        THE_ROW_THAT_BORROWED_EVERYTHING, THE_ROW_WHOSE_SHARES_BLEND,
+        THE_ROW_WHOSE_SLIP_SHARE_BLENDS, a_file_using_every_shape,
     };
     use super::super::{
         ContaminationFittedFrom, ContaminationMeasurement, EvidenceCount, LevelSmoothing, SeedRung,
@@ -1726,7 +1742,8 @@ mod tests {
 
     /// **What version 2 added is checked as the rest is.** A standard error is a spread — finite
     /// and above zero — and a `defaulted` number carries none, as it carries no count; an own-fit
-    /// error sits only beside a number that is the stratum's own fit; a stratum is fitted on at
+    /// error sits only beside a number the stratum's own fit went into — its own fit, or a blend of
+    /// it with a curve, never the curve taken whole; a stratum is fitted on at
     /// least one sample; the SNP/indel fit's starts are numbered from one, and only a start that
     /// agreed names an earlier one. Each edit is made to the fixture, which is accepted as it
     /// stands, and refused naming its key.
@@ -1752,9 +1769,10 @@ mod tests {
         );
         assert!(problem.contains("`defaulted`"), "{problem}");
 
-        // The fixture's second row blends its level with its period's curve.
+        // One row takes its level whole from its period's curve. (The fixture's blended level, and
+        // its blended shorter share, carry own-fit errors the file accepts as it stands.)
         let (field, problem) = refused(|file| {
-            file.repeat_tracts.slippage_by_stratum_and_group[1]
+            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_THAT_BORROWED_EVERYTHING]
                 .share_of_reads_that_slip_origin
                 .own_fit_standard_error = Some(0.002);
         });
@@ -1763,18 +1781,44 @@ mod tests {
             "{field}"
         );
         assert!(problem.contains("curve"), "{problem}");
-        // Its fall-off is its period's curve's.
+        // The row whose level blends takes its fall-off whole from its period's curve.
         let (field, _) = refused(|file| {
-            file.repeat_tracts.slippage_by_stratum_and_group[1]
+            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
                 .shorter_share_and_fall_off_origin
                 .as_mut()
-                .expect("the fixture's second row has a shares origin")
+                .expect("the row whose level blends has a shares origin")
                 .fall_off_own_fit_standard_error = Some(0.02);
         });
         assert!(
             field.ends_with("fall_off_own_fit_standard_error"),
             "{field}"
         );
+        // **Each share on its own**, since the two are smoothed separately: the shorter share
+        // taken whole from the curve refuses its error, and a blended fall-off keeps one.
+        let shares_of = |file: &mut ParametersFile, row: usize| {
+            file.repeat_tracts.slippage_by_stratum_and_group[row]
+                .shorter_share_and_fall_off_origin
+                .as_mut()
+                .expect("the row has a shares origin")
+                .clone()
+        };
+        let (field, _) = refused(|file| {
+            let mut shares = shares_of(file, THE_ROW_WHOSE_SLIP_SHARE_BLENDS);
+            shares.shorter_share_smoothing = shares.fall_off_smoothing.clone();
+            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_WHOSE_SLIP_SHARE_BLENDS]
+                .shorter_share_and_fall_off_origin = Some(shares);
+        });
+        assert!(
+            field.ends_with("shorter_share_own_fit_standard_error"),
+            "{field}"
+        );
+        accepted(|file| {
+            let mut shares = shares_of(file, THE_ROW_WHOSE_SHARES_BLEND);
+            shares.fall_off_smoothing = shares.shorter_share_smoothing.clone();
+            assert!(shares.fall_off_own_fit_standard_error.is_some());
+            file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_WHOSE_SHARES_BLEND]
+                .shorter_share_and_fall_off_origin = Some(shares);
+        });
         let (field, _) = refused(|file| {
             file.repeat_tracts.slippage_by_stratum_and_group[0]
                 .share_of_reads_that_slip_origin

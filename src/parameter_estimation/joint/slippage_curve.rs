@@ -543,6 +543,16 @@ impl LevelSource {
             Self::Blend { curve_weight } => curve_weight,
         }
     }
+
+    /// **Whether the cell's own fit went into the level** — the whole of it, or a blend — and so
+    /// whether the own fit's standard error is written beside it (`fit_precision.md` §5.2, amended
+    /// 2026-10-08). Matched exhaustively, so a new source has to say.
+    pub fn holds_the_own_fit(self) -> bool {
+        match self {
+            Self::Cell | Self::Blend { .. } => true,
+            Self::Curve => false,
+        }
+    }
 }
 
 /// What one cell's emitted slippage level is, once its own fit and its period's curve have both

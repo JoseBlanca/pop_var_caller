@@ -126,7 +126,15 @@ mod tests {
     /// moves but 8 lines of notes. Measured first on four tomato accessions: 52 of 188 rates move
     /// and nothing else in the file. Recorded in the Linux container (arm64, glibc), and the same on
     /// macOS (arm64); it was `a5e87936e968f9b855f91f88db828083`.
-    const FITTED_PARAMETERS_MD5: &str = "860c3c65f27a1700e401d102833215e1";
+    ///
+    /// **Re-recorded 2026-10-08** when the file's note on own-fit standard errors changed
+    /// (`fit_precision.md` §5.2 amended: a blended slippage number keeps its stratum's own-fit
+    /// error). Only that note moves: this fixture writes no slippage rows, so no key is gained, and
+    /// putting the old note back reproduces `860c3c65f27a1700e401d102833215e1` exactly. Measured first on
+    /// four tomato accessions (`scripts/promote_ng_oracle.sh`): the fitted file gains 36 own-fit
+    /// errors beside blends and otherwise moves only in that note; no call moves. Recorded in the
+    /// Linux container (arm64, glibc) and the same on macOS (arm64); it was `860c3c65f27a1700e401d102833215e1`.
+    const FITTED_PARAMETERS_MD5: &str = "91f1016d0cf23090e73a7c50cf23fccd";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -187,7 +195,15 @@ mod tests {
     /// mismapped positions can be computed differently, even doubled, without moving a byte here, so
     /// a change confined to the cohort's own scores is not pinned by this pair. Recorded in the Linux container
     /// (arm64, glibc) and the same on macOS (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "8c71a5a95f1196e3dd8c05abdccf7355";
+    ///
+    /// **Re-recorded 2026-10-08** when the file's note on own-fit standard errors changed
+    /// (`fit_precision.md` §5.2 amended: a blended slippage number keeps its stratum's own-fit
+    /// error). Only that note moves: this fixture writes no slippage rows, so no key is gained, and
+    /// putting the old note back reproduces `8c71a5a95f1196e3dd8c05abdccf7355` exactly. Measured first on
+    /// four tomato accessions (`scripts/promote_ng_oracle.sh`): the fitted file gains 36 own-fit
+    /// errors beside blends and otherwise moves only in that note; no call moves. Recorded in the
+    /// Linux container (arm64, glibc) and the same on macOS (arm64); it was `8c71a5a95f1196e3dd8c05abdccf7355`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "8f4a5f5e4cc72f8d7bdfe44613d15c18";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -204,7 +220,15 @@ mod tests {
     /// libraries' multipliers run 0.35 to 7.97 with errors of 1.66 to 3.01; its inbreeding
     /// coefficients carry none; its calls are the 22 records designed into it, one site a sample and
     /// the tract. Recorded in the Linux container (arm64, glibc) and the same on macOS (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "5e3dacbf558adc6787276897935dbbf8";
+    ///
+    /// **Re-recorded 2026-10-08** when the file's note on own-fit standard errors changed
+    /// (`fit_precision.md` §5.2 amended: a blended slippage number keeps its stratum's own-fit
+    /// error). Only that note moves: this fixture writes no slippage rows, so no key is gained, and
+    /// putting the old note back reproduces `5e3dacbf558adc6787276897935dbbf8` exactly. Measured first on
+    /// four tomato accessions (`scripts/promote_ng_oracle.sh`): the fitted file gains 36 own-fit
+    /// errors beside blends and otherwise moves only in that note; no call moves. Recorded in the
+    /// Linux container (arm64, glibc) and the same on macOS (arm64); it was `5e3dacbf558adc6787276897935dbbf8`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "818b628a0e72bb39fc9cb5e757cfabd1";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.

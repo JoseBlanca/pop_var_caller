@@ -222,6 +222,7 @@ own_fit_standard_error = 0.0021
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
 expected_slipped_reads = 12040.25
 fall_off_smoothing = "this_stratum"
+shorter_share_own_fit_standard_error = 0.013
 fall_off_own_fit_standard_error = 0.018
 
 [repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.blend]
@@ -250,6 +251,7 @@ fall_off = 0.31
 
 [repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
 expected_slipped_reads = 8000.5
+own_fit_standard_error = 0.0024
 
 [repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.blend]
 curve_weight = 0.37
