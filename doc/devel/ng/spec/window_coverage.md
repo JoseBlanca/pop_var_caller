@@ -144,6 +144,19 @@ twice. A **repeat-tract** record is the only record over its ground (region typi
 reference, and a tract is one segment), so it contributes at **every position of its span**. The
 kind is read off the body where one is built, and a single-base record is generic by construction.
 
+**A position no read covers is not a covered position, whatever record reports it** (owner,
+2026-10-08). The generic walk writes no record where no read is, so ordinary ground no read covers
+is left out of the window. An STR segment's record is written whether or not a read reached it, and
+until 2026-10-08 its positions counted as covered at depth 0 — one fact, *no read here*, counted two
+ways. Now the accumulator treats a position at depth 0 as it treats an `N` (§3.3): it becomes no
+window's centre and enters no window's mean, but it still moves the frontier that closes the windows
+behind it, so when a window closes does not depend on which records have reads — without that, a
+window's closing moved with where the merge cut its regions, and calling from alignment files and
+from psps gave different windows. On 63 tomato accessions over
+chromosome 1, whose files hold reads only around 80 regions, the zeros had put 4.2 million of 59.4
+million windows below 0.05 reads and every sample's coverage model at its bottom depth bin, so the
+hidden-duplication filter could fit none.
+
 **What is not in the depth, on both sides alike:** reads that covered a locus and produced no
 observation, and reads a depth cap discarded. Neither counter is ever set on the generic path (no
 assignment outside the STR generator; the per-position cap is 8,000 reads,

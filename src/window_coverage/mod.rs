@@ -391,7 +391,9 @@ pub enum SampleHistogram {
     /// refused and none could train a yardstick.
     EveryWindowUnderTheFloor,
     /// The windows the depth axis would have been fitted from had no positive median depth, so
-    /// there is no width to cut bins at.
+    /// there is no width to cut bins at. **No sample's reads produce it since 2026-10-08**: a
+    /// position at depth 0 is no covered position, so every window's mean is positive. Kept so
+    /// the fit still refuses a zero width rather than cutting bins at one.
     MedianDepthNotPositive,
 }
 

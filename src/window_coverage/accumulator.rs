@@ -215,8 +215,9 @@ impl WindowCoverageAccumulator {
     /// One comparison per covered position, which is what the cache's own two release asserts
     /// cost. An `N`
     /// reference base is **not** a covered position: it becomes no centre and contributes to
-    /// no window's sums, but it still advances the finalisation frontier. Windows finalised by
-    /// this position are queued for [`pop_ready`](Self::pop_ready).
+    /// no window's sums, but it still advances the finalisation frontier. **Nor is a position at
+    /// depth 0**, by the same rule. Windows finalised by this position are queued for
+    /// [`pop_ready`](Self::pop_ready).
     pub fn observe(
         &mut self,
         contig: ContigId,
@@ -241,8 +242,13 @@ impl WindowCoverageAccumulator {
         }
 
         // A non-`N` covered position joins the buffer as a centre and a sum contributor; an
-        // `N` position only advances the frontier below.
-        if !reference_base.eq_ignore_ascii_case(&b'N') {
+        // `N` position only advances the frontier below. **So does a position no read covers**
+        // (owner, 2026-10-08): ordinary ground with no read has no record and never reaches here,
+        // and an STR segment's record, written whether or not a read reached it, reports its
+        // bases at depth 0 — the same fact, which must not count as a covered base on one side
+        // and be left out on the other. It still advances the frontier, so when a window closes
+        // does not depend on which records happen to have reads.
+        if depth > 0 && !reference_base.eq_ignore_ascii_case(&b'N') {
             self.positions.push_back(CoveredPosition {
                 position: position.get(),
                 depth,
@@ -597,9 +603,12 @@ mod tests {
         let (_, all_refused) = run_sliding_with_the_reason(floored_config(2), 0, &silenced);
         assert_eq!(all_refused, SampleHistogram::EveryWindowUnderTheFloor);
 
+        // **The third, no positive median, no stream can now produce**: since 2026-10-08 a
+        // position at depth 0 is no covered position, so every window's mean is positive. A
+        // stream of zeros is a sample no read covers, and says so.
         let zero_depth: Vec<(u64, u8, u32)> = (1..=5u64).map(|p| (p, b'G', 0u32)).collect();
-        let (_, no_median) = run_sliding_with_the_reason(sliding_config(), 0, &zero_depth);
-        assert_eq!(no_median, SampleHistogram::MedianDepthNotPositive);
+        let (_, no_read) = run_sliding_with_the_reason(sliding_config(), 0, &zero_depth);
+        assert_eq!(no_read, SampleHistogram::NoWindowFinalised);
     }
 
     /// The histogram says how many windows the floor silenced, so that a yardstick fitted from a
@@ -718,6 +727,52 @@ mod tests {
             );
         }
         assert_eq!(histogram.windows_folded, 4);
+    }
+
+    /// **A position no read covers is not a covered position**, as an `N` is not: positions
+    /// 1..=5, position 3 at depth 0 (an STR segment's record with no read there). The windows are
+    /// over {1,2,4,5} at depth 10; position 3 emits nothing and pulls no mean down.
+    #[test]
+    fn a_position_at_depth_zero_is_excluded_from_every_window() {
+        let stream = [
+            (1u64, b'G', 10u32),
+            (2, b'G', 10),
+            (3, b'G', 0),
+            (4, b'G', 10),
+            (5, b'G', 10),
+        ];
+        let (windows, histogram) = run_sliding(sliding_config(), 0, &stream);
+        let positions: Vec<u64> = windows.iter().map(|(at, _)| at.position.get()).collect();
+        assert_eq!(
+            positions,
+            vec![1, 2, 4, 5],
+            "position 3 (depth 0) emits no window"
+        );
+        for (_, window) in &windows {
+            assert!(
+                (window.mean_depth - 10.0).abs() < 1e-6,
+                "the uncovered position must not pull any mean down (got {})",
+                window.mean_depth,
+            );
+        }
+        assert_eq!(histogram.windows_folded, 4);
+    }
+
+    /// **A position at depth 0 still moves the frontier**, so a window closes when the stream
+    /// passes it whether or not the bases there have reads: the centre at 1 closes at position
+    /// `1 + half`, here a base no read covers.
+    #[test]
+    fn a_position_at_depth_zero_still_closes_the_windows_behind_it() {
+        let config = sliding_config();
+        let half = u64::from(config.window_bp / 2);
+        let mut accumulator = WindowCoverageAccumulator::new(config);
+        accumulator.observe(ContigId(0), Position(1), b'G', 10);
+        assert!(accumulator.pop_ready().is_none());
+        accumulator.observe(ContigId(0), Position(1 + half), b'G', 0);
+        let (centre, _) = accumulator
+            .pop_ready()
+            .expect("the frontier reached the centre's right edge");
+        assert_eq!(centre.position, Position(1));
     }
 
     /// Windows never span contigs: a contig change finalises the previous contig's tail
@@ -1652,38 +1707,6 @@ mod tests {
         assert_eq!(median_depth(&mut means(&[(9.0, 1.0), (1.0, 9.0)])), 9.0);
     }
 
-    /// **A sample whose held-back windows have no positive median is carried absent, and stays
-    /// absent.** Three of the first four windows read depth zero, so the median is zero and no
-    /// width can be fitted — but the fourth reads 80 and the two after it read 30. Refitting
-    /// from the remainder would hand the filter a yardstick built from the last two windows of
-    /// six, with `windows_folded` reporting two and nothing to say the other four existed.
-    #[test]
-    fn a_failed_fit_does_not_start_a_second_scale_sample() {
-        let config = WindowCoverageConfig {
-            depth_scale_windows: 4,
-            ..one_position_per_window_config()
-        };
-        let stream = [
-            (1u64, b'G', 0u32),
-            (100, b'G', 0),
-            (200, b'G', 0),
-            (300, b'G', 80),
-            (400, b'G', 30),
-            (500, b'G', 30),
-        ];
-        let (windows, histogram) = run_sliding_allowing_no_histogram(config, 0, &stream);
-        assert_eq!(windows.len(), 6);
-        assert!(
-            windows.iter().all(|(_, w)| !w.is_absent()),
-            "every window clears a floor of one, so every one of them speaks",
-        );
-        assert!(
-            histogram.is_none(),
-            "the fit failed on a median of zero, so this sample has no yardstick — a histogram \
-             here would have been fitted from the tail of the sample and would count only it",
-        );
-    }
-
     /// The width is fitted from exactly `depth_scale_windows` windows, not one more.
     ///
     /// Two windows at depths 10 and 2 — median 10, the upper of the two — then a third at 4. A
@@ -1770,21 +1793,15 @@ mod tests {
         assert_eq!(histogram.windows_folded, 4);
     }
 
-    /// **A sample whose windows all report zero depth gets no histogram.** The median is zero,
-    /// so the width would be zero — every window in the overflow column and a yardstick with no
-    /// scale on it. The same answer as for a sample that finalised no window at all, and for the
-    /// same reason: nothing was measured that a yardstick could be built from.
+    /// **A sample no read covers anywhere finalises no window**: every position it reports is at
+    /// depth 0, which is no covered position, so no window is centred anywhere and there is no
+    /// yardstick — the answer for a sample the pass never reached.
     #[test]
-    fn a_sample_whose_windows_all_report_zero_depth_gets_no_histogram() {
+    fn a_sample_no_read_covers_anywhere_finalises_no_window() {
         let stream: Vec<(u64, u8, u32)> = (1..=5u64).map(|p| (p, b'G', 0u32)).collect();
-        let (windows, histogram) = run_sliding_allowing_no_histogram(sliding_config(), 0, &stream);
-        assert_eq!(
-            windows.len(),
-            5,
-            "the windows are still emitted, and they are not absent"
-        );
-        assert!(windows.iter().all(|(_, w)| !w.is_absent()));
-        assert!(histogram.is_none());
+        let (windows, reason) = run_sliding_with_the_reason(sliding_config(), 0, &stream);
+        assert!(windows.is_empty());
+        assert_eq!(reason, SampleHistogram::NoWindowFinalised);
     }
 
     #[cfg(debug_assertions)]

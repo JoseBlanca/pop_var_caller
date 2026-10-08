@@ -113,56 +113,7 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
     let mut windows_compared = 0u64;
 
     for seed in 0..200u64 {
-        let mut stream = DeterministicStream::from_seed(seed);
-        // 1 to 600 bases wide: 1 is the degenerate window that holds only its own centre, and
-        // the range spans the 500 the run configures (`super::WINDOW_BP`), which the
-        // transcribed unit tests never reach.
-        let window_bp = 1 + stream.next_below(600) as u32;
-        let config = WindowCoverageConfig {
-            window_bp,
-            gc_bins: 5,
-            depth_bins: 17,
-            // The floor at 1 is the floor switched off — every window holds at least its own
-            // centre — which is what keeps this comparable with production, whose window has
-            // no floor at all. The floor is ng's own and is unit-tested.
-            min_window_positions: 1,
-            depth_scale_windows: 10_000,
-            depth_range_in_medians: 10.0,
-        };
-        let mut transcription = WindowCoverageAccumulator::new(config);
-        let mut transcribed_windows = Vec::new();
-
-        for contig in 0..3u32 {
-            let mut position = 1u64;
-            // Up to 2,000 covered positions at gaps of 0 to 8 bases, so a contig spans some
-            // thousands of bases and a 500-base window slides along it instead of covering it
-            // whole.
-            let covered_positions = 1 + stream.next_below(2_000);
-            for _ in 0..covered_positions {
-                // A gap of 0 repeats the previous position — the walk emits at most one
-                // record a position, but the accumulator's order rule is non-decreasing, and
-                // a repeat is the boundary of it.
-                position += stream.next_below(9);
-                let alphabet = *b"ACGTNgcn";
-                let reference_base = alphabet[stream.next_below(alphabet.len() as u64) as usize];
-                let depth = stream.next_below(40) as u32;
-                transcription.observe(ContigId(contig), Position(position), reference_base, depth);
-                while let Some(window) = transcription.pop_ready() {
-                    transcribed_windows.push(window);
-                }
-            }
-        }
-
-        // Production's histogram cells are not comparable — it cut its depth axis at a fixed width
-        // and ng cuts at one fitted to the sample — but two things about ng's still are, and
-        // neither has anything to do with the depth axis: that a stream of real windows produces a
-        // histogram at all, and that every window emitted was folded into it.
-        let (transcribed_tail, transcribed_histogram) = transcription.finish();
-        let transcribed_histogram = transcribed_histogram.fitted().expect(
-            "every window here clears a floor of 1 and the depths are positive, so a width is \
-             fitted and a histogram comes back",
-        );
-        transcribed_windows.extend(transcribed_tail);
+        let (window_bp, transcribed_windows, transcribed_histogram) = windows_on_stream(seed);
 
         let production = production_stream(seed);
         assert_eq!(
@@ -175,28 +126,9 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
             production.windows,
             "seed {seed}, window_bp {window_bp}: different number of windows emitted",
         );
-        // Reduced exactly as production's were: contig and centre as `u32`, then the mean depth
-        // and GC fraction as the bit patterns of their `f32`s, all little-endian, in emission
-        // order. Converting the centre rather than casting it, so that a wider stream fails here
-        // instead of silently digesting a wrapped one.
-        let mut bytes = Vec::with_capacity(transcribed_windows.len() * 16);
-        for (at, window) in &transcribed_windows {
-            bytes.extend(at.contig.get().to_le_bytes());
-            bytes.extend(
-                u32::try_from(at.position.get())
-                    .expect("fixture positions stay inside u32")
-                    .to_le_bytes(),
-            );
-            bytes.extend(window.mean_depth.to_bits().to_le_bytes());
-            bytes.extend(window.gc_fraction.to_bits().to_le_bytes());
-        }
-        let digest = bytes
-            .iter()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |digest, &byte| {
-                (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            });
         assert_eq!(
-            digest, production.digest,
+            digest_of(&transcribed_windows),
+            production.digest,
             "seed {seed}, window_bp {window_bp}: some window's contig, centre, mean depth or GC \
              fraction differs from production's — print ng's windows for this seed to find which",
         );
@@ -221,4 +153,109 @@ fn the_transcription_matches_production_on_streams_neither_test_was_written_for(
         "the 200 streams compare a fixed number of windows; a change here means the fixture \
          moved, not that the accumulator is wrong",
     );
+}
+
+/// **Writes the recorded file's rows** for the 200 streams, from whatever accumulator this tree
+/// holds — how `testdata/production_windows_by_seed.tsv` was re-recorded on 2026-10-08 (see its
+/// header). Run it only on an accumulator already shown equal to production's:
+/// `cargo test --release --lib -- --ignored --nocapture record_the_stream_digests`.
+#[test]
+#[ignore = "writes the recorded digests; run by hand, see the doc"]
+fn record_the_stream_digests() {
+    for seed in 0..200u64 {
+        let (window_bp, windows, _) = windows_on_stream(seed);
+        println!(
+            "{seed}\t{window_bp}\t{}\t{:016x}",
+            windows.len(),
+            digest_of(&windows)
+        );
+    }
+}
+
+/// The windows, in emission order, ng's accumulator gives on the stream `seed` generates, beside
+/// the stream's window width and the histogram.
+fn windows_on_stream(
+    seed: u64,
+) -> (
+    u32,
+    Vec<(crate::types::GenomePosition, super::WindowCoverage)>,
+    super::CoverageByGcHistogram,
+) {
+    let mut stream = DeterministicStream::from_seed(seed);
+    // 1 to 600 bases wide: 1 is the degenerate window that holds only its own centre, and
+    // the range spans the 500 the run configures (`super::WINDOW_BP`), which the
+    // transcribed unit tests never reach.
+    let window_bp = 1 + stream.next_below(600) as u32;
+    let config = WindowCoverageConfig {
+        window_bp,
+        gc_bins: 5,
+        depth_bins: 17,
+        // The floor at 1 is the floor switched off — every window holds at least its own
+        // centre — which is what keeps this comparable with production, whose window has
+        // no floor at all. The floor is ng's own and is unit-tested.
+        min_window_positions: 1,
+        depth_scale_windows: 10_000,
+        depth_range_in_medians: 10.0,
+    };
+    let mut transcription = WindowCoverageAccumulator::new(config);
+    let mut transcribed_windows = Vec::new();
+
+    for contig in 0..3u32 {
+        let mut position = 1u64;
+        // Up to 2,000 covered positions at gaps of 0 to 8 bases, so a contig spans some
+        // thousands of bases and a 500-base window slides along it instead of covering it
+        // whole.
+        let covered_positions = 1 + stream.next_below(2_000);
+        for _ in 0..covered_positions {
+            // A gap of 0 repeats the previous position — the walk emits at most one
+            // record a position, but the accumulator's order rule is non-decreasing, and
+            // a repeat is the boundary of it.
+            position += stream.next_below(9);
+            let alphabet = *b"ACGTNgcn";
+            let reference_base = alphabet[stream.next_below(alphabet.len() as u64) as usize];
+            // **Depth 1 and up**: from 2026-10-08 ng leaves a position at depth 0 out of every
+            // window, as it leaves an `N` out, where production counted it; the two agree on
+            // every position a read covers, which is what this compares.
+            let depth = 1 + stream.next_below(39) as u32;
+            transcription.observe(ContigId(contig), Position(position), reference_base, depth);
+            while let Some(window) = transcription.pop_ready() {
+                transcribed_windows.push(window);
+            }
+        }
+    }
+
+    // Production's histogram cells are not comparable — it cut its depth axis at a fixed width
+    // and ng cuts at one fitted to the sample — but two things about ng's still are, and
+    // neither has anything to do with the depth axis: that a stream of real windows produces a
+    // histogram at all, and that every window emitted was folded into it.
+    let (transcribed_tail, transcribed_histogram) = transcription.finish();
+    let transcribed_histogram = transcribed_histogram.fitted().expect(
+        "every window here clears a floor of 1 and the depths are positive, so a width is \
+             fitted and a histogram comes back",
+    );
+    transcribed_windows.extend(transcribed_tail);
+    (window_bp, transcribed_windows, transcribed_histogram)
+}
+
+/// **A stream's windows reduced exactly as production's were**: contig and centre as `u32`, then
+/// the mean depth and GC fraction as the bit patterns of their `f32`s, all little-endian, in
+/// emission order, folded by FNV-1a. Converting the centre rather than casting it, so that a wider
+/// stream fails here instead of silently digesting a wrapped one.
+fn digest_of(windows: &[(crate::types::GenomePosition, super::WindowCoverage)]) -> u64 {
+    let mut bytes = Vec::with_capacity(windows.len() * 16);
+    for (at, window) in windows {
+        bytes.extend(at.contig.get().to_le_bytes());
+        bytes.extend(
+            u32::try_from(at.position.get())
+                .expect("fixture positions stay inside u32")
+                .to_le_bytes(),
+        );
+        bytes.extend(window.mean_depth.to_bits().to_le_bytes());
+        bytes.extend(window.gc_fraction.to_bits().to_le_bytes());
+    }
+    bytes
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |digest, &byte| {
+            (digest ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
