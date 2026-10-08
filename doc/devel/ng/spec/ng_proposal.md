@@ -62,6 +62,9 @@ and the `.ssr.psp` / `.ssr.catalog` artifacts — because `str` is a built-in Ru
 type, so a `str` module or `Str` type would shadow it. In short: **STR is what you
 read, `ssr` is what you type in Rust.**
 
+The terms the design documents share — *STR segment*, *callable genome*, *generic path*,
+*STR path* and the rest — are defined in [`glossary.md`](glossary.md).
+
 ---
 
 ## 1. The algorithm is not an algorithm
