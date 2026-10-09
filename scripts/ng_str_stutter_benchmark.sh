@@ -36,6 +36,8 @@
 #   GATK_HEAP   Java heap per GATK process (default 4g)
 #   KEEP_FASTQ  1 keeps each sample's FASTQ after mapping (default: deleted, ~230 MB a sample at 60×)
 #   FIT_FROM    a run directory of the same cohort at another depth whose fit is reused (see ng_fit)
+#   REDO        stage names to run again although done, space-separated (e.g. REDO=score)
+#   MAIN_BIN    a build of main: adds main's defaults, fitted and true-stutter runs (ng_main_*)
 #   BIN_DIR     a directory holding pop_var_caller, ng_str_stutter_benchmark and
 #               ng_typed_region_dump, used instead of the newest build — so a grid can run on a
 #               frozen copy while the tree is rebuilt
@@ -85,7 +87,7 @@ catalog=$out/reference.fa.repeats.parquet
 stage() {
     local name=$1
     shift
-    if [[ -f "$out/$name.done" ]]; then
+    if [[ -f "$out/$name.done" && " ${REDO:-} " != *" $name "* ]]; then
         echo "[skip] $name"
         return 0
     fi
@@ -200,6 +202,36 @@ ng_true_stutter() {
         --output "$out/ng_true_stutter.vcf" > "$out/ng_true_stutter.log" 2>&1
 }
 
+# **The same calls made by main** (owner, 2026-10-09), when MAIN_BIN names a build of main: the
+# comparison that says what calling each STR segment both ways changed. Main fits with the same
+# code and reads this branch's parameters files unchanged, so its fitted and true-stutter runs use
+# this run's two files. It cannot read this branch's catalog (a catalog records the build that
+# wrote it) or its psps (format 2.0), so it writes its own. Main lacks the compound-motif fix
+# (db7388ec): it types the AAAAAC, AAAAAG and AAAAAT hexanucleotides as ordinary sequence, which
+# the scorer's `motif` column lets the report leave out.
+main_psps() {
+    mapfile -t args < <(alignments)
+    "$MAIN_BIN" repeat-catalog --reference "$reference" --output "$out/main_catalog.parquet" --force \
+        > "$out/main_catalog.log" 2>&1
+    "$MAIN_BIN" generate-psps --reference "$reference" --catalog "$out/main_catalog.parquet" \
+        "${args[@]}" --regions "$out/confident.bed" --output-dir "$out/psps_main" --force \
+        > "$out/main_generate_psps.log" 2>&1
+}
+
+ng_main_defaults() {
+    mapfile -t args < <(alignments)
+    "$MAIN_BIN" call-from-alignments --reference "$reference" --catalog "$out/main_catalog.parquet" \
+        "${args[@]}" --regions "$out/confident.bed" --defaults --threads "$threads" \
+        --output "$out/ng_main_defaults.vcf" > "$out/ng_main_defaults.log" 2>&1
+}
+
+# ng_main_called_with <name> <parameters file>
+ng_main_called_with() {
+    "$MAIN_BIN" call-from-psps --reference "$reference" --catalog "$out/main_catalog.parquet" \
+        --psp "$out/psps_main" --parameters "$2" --threads "$threads" \
+        --output "$out/$1.vcf" > "$out/$1.log" 2>&1
+}
+
 gatk_one() {
     local sample=$1
     "$gatk" --java-options "-Xmx$gatk_heap" HaplotypeCaller -R "$reference" \
@@ -256,8 +288,16 @@ stage map_reads map_reads
 stage ng_defaults ng_defaults
 stage ng_psps ng_psps
 stage ng_true_stutter ng_true_stutter
+if [[ -n "${MAIN_BIN:-}" ]]; then
+    stage main_psps main_psps
+    stage ng_main_defaults ng_main_defaults
+    stage ng_main_true_stutter ng_main_called_with ng_main_true_stutter "$out/true_stutter.parameters.toml"
+fi
 stage ng_fit ng_fit
 stage ng_fitted ng_fitted
+if [[ -n "${MAIN_BIN:-}" ]]; then
+    stage ng_main_fitted ng_main_called_with ng_main_fitted "$out/ng_fit.parameters.toml"
+fi
 stage gatk run_gatk
 stage hipstr run_hipstr hipstr
 stage hipstr_fixed_stutter run_hipstr hipstr_fixed_stutter --def-stutter-model --min-reads 1

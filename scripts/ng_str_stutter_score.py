@@ -62,6 +62,9 @@ CALLERS = [
     ("ng_defaults", "ng_defaults.vcf"),
     ("ng_fitted", "ng_fitted.vcf"),
     ("ng_true_stutter", "ng_true_stutter.vcf"),
+    ("ng_main_defaults", "ng_main_defaults.vcf"),
+    ("ng_main_fitted", "ng_main_fitted.vcf"),
+    ("ng_main_true_stutter", "ng_main_true_stutter.vcf"),
     ("gatk", "gatk.vcf.gz"),
     ("hipstr", "hipstr.vcf.gz"),
     ("hipstr_fixed_stutter", "hipstr_fixed_stutter.vcf.gz"),
@@ -337,7 +340,7 @@ def main():
     summary = collections.Counter()
     with open(os.path.join(run, "score_cells.tsv"), "w") as cells:
         cells.write("caller\tsegment\tsample\tperiod\treference_repeats\trepeat_band\ttruth\t"
-                    "truth_changes\toutcome\tgenotype_quality\n")
+                    "truth_changes\toutcome\tgenotype_quality\tmotif\n")
         for caller, name in callers:
             path = os.path.join(run, name)
             if not os.path.exists(path):
@@ -353,7 +356,7 @@ def main():
                     truth = "variant" if changes != "." else "reference"
                     cells.write(f"{caller}\t{segment.name}\t{sample}\t{segment.period}\t"
                                 f"{segment.reference_repeats}\t{band}\t{truth}\t{changes}\t{outcome}\t"
-                                f"{'.' if quality is None else quality}\n")
+                                f"{'.' if quality is None else quality}\t{segment.motif}\n")
                     summary[(caller, segment.period, band, truth, outcome)] += 1
     with open(os.path.join(run, "score_summary.tsv"), "w") as out:
         out.write("caller\tperiod\trepeat_band\ttruth\toutcome\tcells\n")
