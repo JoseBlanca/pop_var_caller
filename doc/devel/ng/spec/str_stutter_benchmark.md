@@ -13,7 +13,8 @@ calls with), and the existing simulator
 
 A program that makes a cohort whose STR genotypes we chose, sequences it through libraries that
 stutter at rates taken from the literature and from this project's own fits, and hands the reads to
-two callers — ng and GATK HaplotypeCaller — so that every call can be scored against the truth.
+three callers — ng, GATK HaplotypeCaller and HipSTR — so that every call can be scored against the
+truth.
 
 **Stutter** is the copying error at a repeat: while a library is amplified, the polymerase
 sometimes adds or drops one whole copy of the motif, so a read reports an STR one unit longer or
@@ -175,9 +176,8 @@ Per run, on about 4 Mb of simulated genome:
 
 Paired-end, 2 × 150 bases, fragment lengths drawn around 350 (standard deviation 50), positions
 uniform over the genome, one read group a sample. Sequencing errors: substitutions at the rate the
-base quality states, qualities drawn around Q32 with a falling tail along the read. **What is
-written** depends on the decision in §8: either FASTQ that an aligner maps, or BAM with each read's
-alignment written as an aligner would write it.
+base quality states, qualities drawn around Q32 with a falling tail along the read. The simulator
+writes FASTQ, and **minimap2** maps it (§8).
 
 ## 5. The callers, and how each is run
 
@@ -189,9 +189,11 @@ alignment written as an aligner would write it.
   `HaplotypeCaller -ERC GVCF`, then `CombineGVCFs` and `GenotypeGVCFs` over the cohort, with default
   settings and no filtering.
 
-**HipSTR is not in the first pass** (not asked for). It would be the natural third caller — the
-STR-specialist reference, whose read model ng's STR path follows — and adding it later costs one
-more runner.
+- **HipSTR v0.6.2**, the STR specialist whose read model ng's STR path follows, already built in
+  this project (`HipSTR/HipSTR` in the main checkout) and run on tomato by
+  `benchmarks/lib/run_hipstr.sh`: all samples jointly, over the simulator's STR segments given as
+  its region BED, default settings. It calls STR segments only, so it is scored on them alone
+  (§6); its calls carry SNPs inside a segment as part of the STR allele, which the scoring reads.
 
 ## 6. Scoring
 
@@ -210,7 +212,8 @@ record and two generic records saying the same thing score alike.
   VCF, as on GIAB, restricted to the segments and to everything else separately.
 
 Every count is broken down by design, motif length, repeat count (in bands), depth and cohort size,
-and given as counts, not only shares. ng's `--explain-loci` output is kept, so every stretch where
+and given as counts, not only shares. HipSTR is scored on the STR segments only; ng and GATK on
+everything. ng's `--explain-loci` output is kept, so every stretch where
 ng's two answers disagree can be checked against the truth: whether the weight favoured the right
 model.
 
@@ -227,33 +230,26 @@ model.
 A caller that does well here has done well on the problem as these numbers state it; one that does
 badly has a problem that real data will not hide.
 
-## 8. Decision for the owner: how reads are aligned
+## 8. Alignment: minimap2 (owner, 2026-10-09)
 
-**Option A — a real aligner (recommended).** The simulator writes FASTQ, and `bwa mem` maps it, as
-in GATK's best practice. Every aligner habit at repeats is then in the data: indels shifted to one
-end of a repeat, reads clipped rather than gapped, reads ending inside a segment placed with no
-anchor. Both callers meet those habits on real data, and ng's generic path takes alignments as
-given while its STR path re-aligns, so leaving them out favours the generic answer. Cost: `bwa` added
-to the dev container (one `apt` package, and the image rebuild of about ten minutes), and the
-mapping time — small, at a few Mb a sample.
-
-**Option B — alignments written by the simulator.** Each read's true placement, with its indels slid
-to the left end of the repeat as an aligner would put them. No container change, every run faster,
-and a run that goes wrong cannot be blamed on the aligner. But it is the easiest version of the
-problem.
-
-**I recommend A**, because the benchmark exists to say what happens on real data, and the cost is
-one package and minutes of mapping.
+The simulator writes FASTQ and **minimap2** maps it (`-ax sr`), because minimap2 is the aligner this
+caller's production data are mapped with (owner). Every aligner habit at repeats is then in the
+data — indels shifted to one end of a repeat, reads clipped rather than gapped, reads ending inside
+a segment placed with no anchor — which matters because ng's generic path takes alignments as given
+while its STR path re-aligns. Cost: `minimap2` added to the dev container (one package, and the
+image rebuild of about ten minutes), and minutes of mapping a run. Writing each read's true
+alignment instead was considered and set aside: it is the easiest version of the problem.
 
 ## 9. How it is built
 
 1. **The simulator**: a new program, `ng_str_stutter_benchmark`, beside `ng_tract_simulator`,
    taking its deterministic draw and its BAM writing; settings as `key=value` (design, samples,
-   depth, seed). It writes the reference, the reads (FASTQ or BAM, §8), the truth VCF, each
+   depth, seed). It writes the reference, the reads as FASTQ, the truth VCF, each
    sample's truth sequences at every segment, the segments' BED and the stutter each library was
    given.
-2. **One driver script** that runs a configuration end to end: simulate, (map), run ng both ways and
-   GATK, score — and one that runs the grid.
+2. **One driver script** that runs a configuration end to end: simulate, map with minimap2, sort and
+   index, run ng both ways, GATK and HipSTR, score — and one that runs the grid. `minimap2` goes
+   into the Containerfile first.
 3. **The scorer** (§6), as a program in this repository.
 4. **The report**: per configuration, the tables of §6 for both callers, then a short account of
    what the grid shows.
