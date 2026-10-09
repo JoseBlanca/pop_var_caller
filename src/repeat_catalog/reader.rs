@@ -33,6 +33,11 @@ use crate::types::ContigId;
 /// Holding one is the evidence that the file describes the reference in hand — which is why
 /// [`open_checking_against_reference`](Self::open_checking_against_reference) is the only
 /// way to get one, and why no row-reading method re-checks.
+///
+/// **The file must not be replaced while a run holds it open** (owner, 2026-10-09). The file's
+/// index is read once, at open, and every later read of rows trusts it; a file swapped
+/// underneath would be read through the old file's index. Nothing in the pipeline replaces a
+/// catalog mid-run, so this is a rule for the user, not a check.
 #[derive(Debug)]
 pub struct RepeatCatalog {
     path: PathBuf,
@@ -309,7 +314,14 @@ impl RepeatCatalog {
     /// **The floors only.** The scoring weights are a separate question with a separate
     /// answer, because a reader that only reads has no weights to offer — it is not scanning
     /// anything. A caller that scans as well as reads asks [`check_scored_with`] itself.
+    ///
+    /// **And a bundle radius of at least one base**, the same floor the scan path's `classify`
+    /// asserts (owner, 2026-10-09): at 0 every locus fails its own flank test. Refused here, at
+    /// the call, as an error the user can act on — `type-regions --flank-bp 0` reaches it.
     fn check_serves(&self, criteria: &StrRepeatCriteria) -> Result<(), RepeatCatalogError> {
+        if criteria.classification.bundle_threshold == 0 {
+            return Err(RepeatCatalogError::NoBundleRadius);
+        }
         self.header.built_under.serves(criteria)?;
         Ok(())
     }
@@ -726,6 +738,34 @@ mod tests {
 
         let rows: Vec<FoundRepeat> = catalog.repeats(ReadScope::WholeReference).expect("rows");
         assert_eq!(rows, vec![row(0, 100, 3), row(0, 400, 3), row(1, 50, 3)]);
+    }
+
+    /// **A bundle radius of 0 is refused before any row is read**, as the scan path refuses it:
+    /// at 0 every locus fails its own flank test and the typing would quietly hold no STR
+    /// segment. Every read that classifies goes through the same check.
+    #[test]
+    fn a_bundle_radius_of_zero_is_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+        let reference = reference();
+        write_catalog(&path, &reference);
+        let catalog =
+            RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
+        let mut criteria = StrRepeatCriteria::default();
+        criteria.classification.bundle_threshold = 0;
+
+        assert!(matches!(
+            catalog.genome_segments(&criteria, ReadScope::WholeReference),
+            Err(RepeatCatalogError::NoBundleRadius)
+        ));
+        assert!(matches!(
+            catalog.str_loci(&criteria, ReadScope::WholeReference),
+            Err(RepeatCatalogError::NoBundleRadius)
+        ));
+        assert!(matches!(
+            catalog.count_loci_per_stratum(&criteria, ReadScope::WholeReference),
+            Err(RepeatCatalogError::NoBundleRadius)
+        ));
     }
 
     /// **A catalog written by another build of the detector is refused.** The header records

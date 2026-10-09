@@ -525,6 +525,15 @@ pub enum RepeatCatalogError {
     #[error("catalog is not permissive enough: {0}")]
     CriteriaTooPermissive(#[from] CriteriaRefusal),
 
+    /// The reader asked for a bundle radius of 0 (`--flank-bp 0`). Every locus would then fail
+    /// its own flank test and the typing would hold no STR segment, silently; the scan path
+    /// refuses the same value.
+    #[error(
+        "the flank around an STR segment (--flank-bp) must be at least 1 base: at 0 no repeat \
+         has a flank, and no STR segment would be typed"
+    )]
+    NoBundleRadius,
+
     /// The reader wants tracts scored with different weights. Not a filter over the file:
     /// the weights decide where each segment starts and stops, so a tract can grow, shrink
     /// or vanish (spec §4.2).

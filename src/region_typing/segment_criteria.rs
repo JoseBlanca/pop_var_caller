@@ -1617,7 +1617,14 @@ mod tests {
     /// rotation or strand the motif was read in.
     #[test]
     fn is_compound_spares_a_unit_dominated_by_one_base_in_every_rotation() {
-        for motif in [&b"AAAAAC"[..], b"AAAAAT", b"AAAAAG", b"ATTTTT", b"CAAAAA", b"AAAAC"] {
+        for motif in [
+            &b"AAAAAC"[..],
+            b"AAAAAT",
+            b"AAAAAG",
+            b"ATTTTT",
+            b"CAAAAA",
+            b"AAAAC",
+        ] {
             for shift in 0..motif.len() {
                 let rotated = [&motif[shift..], &motif[..shift]].concat();
                 assert!(
@@ -1627,7 +1634,14 @@ mod tests {
                 );
             }
         }
-        for motif in [&b"AA"[..], b"AAAA", b"ACAC", b"AACAAC", b"ATATAT", b"TATATA"] {
+        for motif in [
+            &b"AA"[..],
+            b"AAAA",
+            b"ACAC",
+            b"AACAAC",
+            b"ATATAT",
+            b"TATATA",
+        ] {
             assert!(is_compound(motif), "{}", String::from_utf8_lossy(motif));
         }
     }
