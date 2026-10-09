@@ -519,6 +519,24 @@ pub(crate) fn rows_overlapping(
     // Columns 1 and 2 are `detected_start` and `detected_end` (`catalog_schema`).
     let coordinate_columns = ProjectionMask::roots(schema, [0, 1, 2]);
     let windows = windows.to_vec();
+    // **With both edges ascending, one binary search answers "does any window overlap this
+    // row?"**: the windows that do not end before the row starts are a suffix, and the first
+    // of them starts earliest, so it is the only one whose start needs checking. Spans widened
+    // by one reach — what `rows_for` passes — keep both edges ascending; any other list is
+    // walked whole, as before. A walk per row over 50,000 GIAB spans was the predicate's cost.
+    let ascending = windows
+        .windows(2)
+        .all(|w| w[0].0 <= w[1].0 && w[0].1 <= w[1].1);
+    let overlaps_a_window = move |start: u64, end: u64| {
+        if ascending {
+            let first = windows.partition_point(|(_, to)| *to < start);
+            windows.get(first).is_some_and(|(from, _)| *from <= end)
+        } else {
+            windows
+                .iter()
+                .any(|(from, to)| start <= *to && end >= *from)
+        }
+    };
     let predicate = ArrowPredicateFn::new(coordinate_columns, move |batch| {
         let contig_column = batch
             .column(0)
@@ -538,12 +556,7 @@ pub(crate) fn rows_overlapping(
         Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|i| {
             let start = starts.value(i);
             let end = ends.value(i);
-            Some(
-                contig_column.value(i) == contig.get()
-                    && windows
-                        .iter()
-                        .any(|(from, to)| start <= *to && end >= *from),
-            )
+            Some(contig_column.value(i) == contig.get() && overlaps_a_window(start, end))
         })))
     });
 
@@ -555,8 +568,15 @@ pub(crate) fn rows_overlapping(
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch?;
+        let columns =
+            CatalogColumns::of(&batch).ok_or("a column does not match the catalog schema")?;
+        rows.reserve(batch.num_rows());
         for i in 0..batch.num_rows() {
-            rows.push(row_from_batch(&batch, i).ok_or("a row does not match the catalog schema")?);
+            rows.push(
+                columns
+                    .row(i)
+                    .ok_or("a row does not match the catalog schema")?,
+            );
         }
     }
     Ok(rows)
@@ -573,42 +593,71 @@ fn statistics_min_u32(stats: &parquet::file::statistics::Statistics) -> Option<u
 }
 
 /// Rebuild one row from the column batch's `i`-th entry. Shared with the reader (B2).
+#[cfg(test)]
 fn row_from_batch(batch: &RecordBatch, i: usize) -> Option<FoundRepeat> {
-    use arrow_array::{
-        Float32Array, Int32Array, StringArray, UInt8Array, UInt32Array, UInt64Array,
-    };
+    CatalogColumns::of(batch)?.row(i)
+}
 
-    let contig = batch.column(0).as_any().downcast_ref::<UInt32Array>()?;
-    let detected_start = batch.column(1).as_any().downcast_ref::<UInt64Array>()?;
-    let detected_end = batch.column(2).as_any().downcast_ref::<UInt64Array>()?;
-    let trimmed_start = batch.column(3).as_any().downcast_ref::<UInt64Array>()?;
-    let trimmed_end = batch.column(4).as_any().downcast_ref::<UInt64Array>()?;
-    let period = batch.column(5).as_any().downcast_ref::<UInt8Array>()?;
-    let score = batch.column(6).as_any().downcast_ref::<Int32Array>()?;
-    let motif = batch.column(7).as_any().downcast_ref::<StringArray>()?;
-    let purity = batch.column(8).as_any().downcast_ref::<Float32Array>()?;
+/// A batch's nine columns, each downcast to its Arrow type **once per batch**.
+///
+/// Rebuilding a row needs all nine, and a downcast is a dynamic type check; doing them per
+/// row repeated nine checks for each of the 23.6 million rows of a GRCh38 catalog, when the
+/// answer can only change between batches.
+struct CatalogColumns<'a> {
+    contig: &'a arrow_array::UInt32Array,
+    detected_start: &'a arrow_array::UInt64Array,
+    detected_end: &'a arrow_array::UInt64Array,
+    trimmed_start: &'a arrow_array::UInt64Array,
+    trimmed_end: &'a arrow_array::UInt64Array,
+    period: &'a arrow_array::UInt8Array,
+    score: &'a arrow_array::Int32Array,
+    motif: &'a arrow_array::StringArray,
+    purity: &'a arrow_array::Float32Array,
+}
 
-    let trimmed = if trimmed_start.is_null(i) || trimmed_end.is_null(i) {
-        None
-    } else {
-        Some(TractSpan {
-            start: Position(trimmed_start.value(i)),
-            end: Position(trimmed_end.value(i)),
+impl<'a> CatalogColumns<'a> {
+    /// `None` when a column is not the catalog's type.
+    fn of(batch: &'a RecordBatch) -> Option<Self> {
+        fn column<T: 'static>(batch: &RecordBatch, i: usize) -> Option<&T> {
+            batch.column(i).as_any().downcast_ref::<T>()
+        }
+        Some(Self {
+            contig: column(batch, 0)?,
+            detected_start: column(batch, 1)?,
+            detected_end: column(batch, 2)?,
+            trimmed_start: column(batch, 3)?,
+            trimmed_end: column(batch, 4)?,
+            period: column(batch, 5)?,
+            score: column(batch, 6)?,
+            motif: column(batch, 7)?,
+            purity: column(batch, 8)?,
         })
-    };
+    }
 
-    Some(FoundRepeat {
-        contig: ContigId(contig.value(i)),
-        detected: TractSpan {
-            start: Position(detected_start.value(i)),
-            end: Position(detected_end.value(i)),
-        },
-        trimmed,
-        period: period.value(i),
-        score: score.value(i),
-        motif: Motif::new(motif.value(i).as_bytes()).ok()?,
-        purity: (!purity.is_null(i)).then(|| purity.value(i)),
-    })
+    /// The `i`-th row, or `None` when its motif is not a valid motif.
+    fn row(&self, i: usize) -> Option<FoundRepeat> {
+        let trimmed = if self.trimmed_start.is_null(i) || self.trimmed_end.is_null(i) {
+            None
+        } else {
+            Some(TractSpan {
+                start: Position(self.trimmed_start.value(i)),
+                end: Position(self.trimmed_end.value(i)),
+            })
+        };
+
+        Some(FoundRepeat {
+            contig: ContigId(self.contig.value(i)),
+            detected: TractSpan {
+                start: Position(self.detected_start.value(i)),
+                end: Position(self.detected_end.value(i)),
+            },
+            trimmed,
+            period: self.period.value(i),
+            score: self.score.value(i),
+            motif: Motif::new(self.motif.value(i).as_bytes()).ok()?,
+            purity: (!self.purity.is_null(i)).then(|| self.purity.value(i)),
+        })
+    }
 }
 
 #[cfg(test)]

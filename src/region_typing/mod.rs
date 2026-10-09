@@ -800,22 +800,11 @@ pub(crate) fn resolve_features(
     //    clustering: it is over-cap, so it lies inside its own satellite run.
     //    (`bundle_clusters`' `debug_assert` is what caught this, exactly as D2 built it
     //    to.)
-    loop {
-        let mut absorbed = false;
-        members.retain(|iv| {
-            let span = CoverageRun {
-                start: iv.start + 1,
-                end: iv.end,
-            };
-            !absorb_into(&mut satellites, span, bundle_threshold, &mut absorbed)
-        });
-        loci.retain(|(span, _)| {
-            !absorb_into(&mut satellites, *span, bundle_threshold, &mut absorbed)
-        });
-        if !absorbed {
-            break;
-        }
-    }
+    //
+    // **Computed as one sweep, not as the iteration it is defined by**
+    // ([`absorb_by_sweep`] says why the two agree); the iteration survives as the tests'
+    // oracle ([`absorb_into`]).
+    absorb_by_sweep(&mut satellites, &mut members, &mut loci, bundle_threshold);
 
     // Bundles (D2). `classify` set these aside — repeats too close to each other for
     // any of them to have a clean flank (spec §2.4) — and handed them back rather
@@ -877,6 +866,192 @@ pub(crate) fn resolve_features(
     features
 }
 
+/// The absorption fixed point of [`resolve_features`], reached in one start-sorted sweep:
+/// every bundle member and locus a satellite absorbs is removed from its list, and
+/// `satellites` becomes the grown satellites, ascending.
+///
+/// # Why one sweep gives the iteration's answer
+///
+/// The iteration ([`absorb_into`], repeated until a pass absorbs nothing) depends only on
+/// which features end up joined to which satellites, never on the order it met them in.
+/// Join two spans when they are **close**: a feature and anything else with a gap of fewer
+/// than `bundle_threshold` bases (overlap counts as no gap), or two satellites that overlap
+/// or abut. Then:
+///
+/// - **A feature is absorbed exactly when its group of close spans holds a satellite.**
+///   Satellites only grow, so a feature absorbed once stays absorbed; and the iteration stops
+///   only when no feature left is close to a grown satellite. A grown satellite is the hull
+///   of what it absorbed, and a feature close to a hull is close to one of the spans that
+///   built it: every gap inside the hull is a gap between two close spans, so it is shorter
+///   than `bundle_threshold`, and one of those two spans is a feature.
+/// - **Each grown satellite is the hull of one such group.** Two spans of one group end up in
+///   one satellite whichever of them the iteration absorbed first: the later one is close to
+///   the container of the earlier.
+///
+/// For start-sorted spans, a feature is close to an earlier span of a group exactly when its
+/// start is within `bundle_threshold` of the group's furthest end; a satellite, when its
+/// start is within `bundle_threshold` of the group's furthest feature end or abuts its
+/// furthest satellite end. So one pass over the spans sorted by start finds the groups (the
+/// loop says why a few can be open at once), and a group that closes holding a satellite is
+/// one grown satellite. `O(n log n)` for the sort, where the iteration was
+/// `O(passes × features × satellites)` — 9.3 billion span comparisons on GRCh38.
+///
+/// `absorption_by_sweep_is_the_iterations_fixed_point` checks the two against each other.
+///
+/// The order the lists keep is the iteration's: `retain` keeps survivors in place.
+fn absorb_by_sweep<T>(
+    satellites: &mut Vec<CoverageRun>,
+    members: &mut Vec<RepeatInterval>,
+    loci: &mut Vec<(CoverageRun, T)>,
+    bundle_threshold: u64,
+) {
+    if satellites.is_empty() {
+        return;
+    }
+
+    // Which list a span came from, and its index there.
+    #[derive(Clone, Copy)]
+    enum From {
+        Satellite,
+        Member(usize),
+        Locus(usize),
+    }
+    let mut spans: Vec<(CoverageRun, From)> =
+        Vec::with_capacity(satellites.len() + members.len() + loci.len());
+    spans.extend(satellites.iter().map(|s| (*s, From::Satellite)));
+    spans.extend(members.iter().enumerate().map(|(i, iv)| {
+        (
+            CoverageRun {
+                start: iv.start + 1,
+                end: iv.end,
+            },
+            From::Member(i),
+        )
+    }));
+    spans.extend(
+        loci.iter()
+            .enumerate()
+            .map(|(i, (span, _))| (*span, From::Locus(i))),
+    );
+    spans.sort_unstable_by_key(|(span, _)| span.start);
+
+    /// A run of `spans[from..to]` already known to be one group.
+    #[derive(Clone, Copy)]
+    struct Group {
+        from: usize,
+        to: usize,
+        hull: CoverageRun,
+        /// The furthest end of a feature in it, and of a satellite.
+        feature_end: Option<u64>,
+        satellite_end: Option<u64>,
+    }
+    impl Group {
+        fn reach(&self) -> u64 {
+            self.hull.end
+        }
+    }
+
+    let mut member_absorbed = vec![false; members.len()];
+    let mut locus_absorbed = vec![false; loci.len()];
+    let mut grown: Vec<CoverageRun> = Vec::with_capacity(satellites.len());
+    let mut finish = |group: Group, member_absorbed: &mut [bool], locus_absorbed: &mut [bool]| {
+        if group.satellite_end.is_none() {
+            return;
+        }
+        for (_, origin) in &spans[group.from..group.to] {
+            match *origin {
+                From::Satellite => {}
+                From::Member(i) => member_absorbed[i] = true,
+                From::Locus(i) => locus_absorbed[i] = true,
+            }
+        }
+        grown.push(group.hull);
+    };
+
+    // **More than one group can be open at once**, because the two kinds of closeness have
+    // different radii. A satellite that starts 2 bases past another is not close to it (they
+    // neither overlap nor abut), so it opens a group of its own — yet a feature starting a
+    // base later can still be within `bundle_threshold` of the first, and then it joins both.
+    // A group stays open while a feature could still reach it (its furthest end plus
+    // `bundle_threshold` is not behind the current start). Open groups are in start order and
+    // their furthest ends ascend, so a feature that reaches one reaches every later one, and a
+    // satellite can only ever join the last.
+    let mut open: std::collections::VecDeque<Group> = std::collections::VecDeque::new();
+    for (k, &(span, origin)) in spans.iter().enumerate() {
+        // Groups no later span can reach are final.
+        while open
+            .front()
+            .is_some_and(|g| g.reach() + bundle_threshold < span.start)
+        {
+            let group = open.pop_front().expect("checked non-empty");
+            finish(group, &mut member_absorbed, &mut locus_absorbed);
+        }
+        let is_satellite = matches!(origin, From::Satellite);
+        // The earliest open group this span joins.
+        let joins_at = if is_satellite {
+            open.back()
+                .is_some_and(|g| {
+                    g.feature_end
+                        .is_some_and(|end| span.start <= end + bundle_threshold)
+                        || g.satellite_end.is_some_and(|end| span.start <= end + 1)
+                })
+                .then(|| open.len() - 1)
+        } else {
+            // Every open group survived the pop above, so this feature reaches all of them.
+            (!open.is_empty()).then_some(0)
+        };
+        let mut group = match joins_at {
+            Some(at) => {
+                let mut merged = open.pop_back().expect("joins an open group");
+                while open.len() > at {
+                    let earlier = open.pop_back().expect("still above `at`");
+                    merged = Group {
+                        from: earlier.from,
+                        to: merged.to,
+                        hull: CoverageRun {
+                            start: earlier.hull.start.min(merged.hull.start),
+                            end: earlier.hull.end.max(merged.hull.end),
+                        },
+                        feature_end: earlier.feature_end.max(merged.feature_end),
+                        satellite_end: earlier.satellite_end.max(merged.satellite_end),
+                    };
+                }
+                merged
+            }
+            None => Group {
+                from: k,
+                to: k,
+                hull: span,
+                feature_end: None,
+                satellite_end: None,
+            },
+        };
+        group.to = k + 1;
+        group.hull.start = group.hull.start.min(span.start);
+        group.hull.end = group.hull.end.max(span.end);
+        let end = if is_satellite {
+            &mut group.satellite_end
+        } else {
+            &mut group.feature_end
+        };
+        *end = Some(end.map_or(span.end, |e| e.max(span.end)));
+        open.push_back(group);
+    }
+    while let Some(group) = open.pop_front() {
+        finish(group, &mut member_absorbed, &mut locus_absorbed);
+    }
+
+    let mut flags = member_absorbed.iter();
+    members.retain(|_| !*flags.next().expect("one flag per member"));
+    let mut flags = locus_absorbed.iter();
+    loci.retain(|_| !*flags.next().expect("one flag per locus"));
+    debug_assert!(
+        grown.windows(2).all(|w| w[0].end + 1 < w[1].start),
+        "grown satellites are ascending, disjoint and not abutting"
+    );
+    *satellites = grown;
+}
+
 /// Absorb `span` into any satellite it overlaps or lies within `bundle_threshold` of: those
 /// satellites and `span` become **one** span covering all of them, gaps included.
 /// Returns whether it was absorbed (and sets `absorbed`, the fixed-point loop's flag).
@@ -896,6 +1071,7 @@ pub(crate) fn resolve_features(
 /// The gaps swept in are deliberate: fewer than `bundle_threshold` bases between two repeats is
 /// sequence nothing can be anchored in — the same reasoning that puts a cluster's
 /// internal gaps inside its hull (spec §2.4).
+#[cfg(test)]
 fn absorb_into(
     satellites: &mut Vec<CoverageRun>,
     span: CoverageRun,
@@ -1106,6 +1282,72 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
+
+    /// The absorption as it is defined: [`absorb_into`] over every member, then every
+    /// locus, repeated until a pass absorbs nothing — the oracle for [`absorb_by_sweep`].
+    fn absorb_by_iteration(
+        satellites: &mut Vec<CoverageRun>,
+        members: &mut Vec<RepeatInterval>,
+        loci: &mut Vec<(CoverageRun, usize)>,
+        bundle_threshold: u64,
+    ) {
+        loop {
+            let mut absorbed = false;
+            members.retain(|iv| {
+                let span = CoverageRun {
+                    start: iv.start + 1,
+                    end: iv.end,
+                };
+                !absorb_into(satellites, span, bundle_threshold, &mut absorbed)
+            });
+            loci.retain(|(span, _)| {
+                !absorb_into(satellites, *span, bundle_threshold, &mut absorbed)
+            });
+            if !absorbed {
+                break;
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
+        /// The sweep reaches the iteration's fixed point exactly: the same grown satellites,
+        /// and the same members and loci left over, in the same order — on dense random
+        /// layouts where chains of features bridge satellites, features nest in satellites,
+        /// and satellites abut.
+        #[test]
+        fn absorption_by_sweep_is_the_iterations_fixed_point(
+            raw_satellites in proptest::collection::vec((1u64..600, 1u64..120), 0..6),
+            raw_members in proptest::collection::vec((0u64..700, 1u64..40), 0..14),
+            raw_loci in proptest::collection::vec((1u64..700, 1u64..40), 0..14),
+            bundle_threshold in 1u64..30,
+        ) {
+            // Satellites as `resolve_features` receives them: merged coverage runs.
+            let mut satellites: Vec<CoverageRun> = raw_satellites
+                .iter()
+                .map(|&(start, len)| CoverageRun { start, end: start + len - 1 })
+                .collect();
+            merge_runs(&mut satellites);
+            let members: Vec<RepeatInterval> = raw_members
+                .iter()
+                .map(|&(start, len)| RepeatInterval { start, end: start + len, period: 2, score: 10 })
+                .collect();
+            let loci: Vec<(CoverageRun, usize)> = raw_loci
+                .iter()
+                .enumerate()
+                .map(|(i, &(start, len))| (CoverageRun { start, end: start + len - 1 }, i))
+                .collect();
+
+            let (mut sat_a, mut mem_a, mut loc_a) = (satellites.clone(), members.clone(), loci.clone());
+            absorb_by_iteration(&mut sat_a, &mut mem_a, &mut loc_a, bundle_threshold);
+            let (mut sat_b, mut mem_b, mut loc_b) = (satellites, members, loci);
+            absorb_by_sweep(&mut sat_b, &mut mem_b, &mut loc_b, bundle_threshold);
+
+            prop_assert_eq!(sat_a, sat_b);
+            prop_assert_eq!(mem_a, mem_b);
+            prop_assert_eq!(loc_a, loc_b);
+        }
+    }
 
     fn two_contigs() -> Vec<ContigBounds<'static>> {
         vec![

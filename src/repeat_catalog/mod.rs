@@ -80,58 +80,116 @@ pub enum ReadScope<'a> {
 }
 
 impl<'a> ReadScope<'a> {
-    /// The regions this scope names on `contig`, or `None` when it covers the contig whole.
-    fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
-        match self {
-            ReadScope::WholeReference => None,
-            ReadScope::Regions(spans) => Some(
-                spans
-                    .iter()
-                    .filter(|s| s.contig == contig)
-                    .copied()
-                    .collect(),
-            ),
-        }
-    }
-
-    /// Whether this scope reaches `contig` at all.
-    fn touches(&self, contig: ContigId) -> bool {
-        match self {
-            ReadScope::WholeReference => true,
-            ReadScope::Regions(spans) => spans.iter().any(|s| s.contig == contig),
-        }
-    }
-
     /// The same scope, owning its regions — what a streaming read holds, since the iterator
     /// outlives the call that made it.
     fn owned(&self) -> OwnedScope {
         match self {
             ReadScope::WholeReference => OwnedScope::WholeReference,
-            ReadScope::Regions(spans) => OwnedScope::Regions(spans.to_vec()),
+            ReadScope::Regions(spans) => {
+                let mut by_contig: std::collections::BTreeMap<ContigId, ContigSpans> =
+                    std::collections::BTreeMap::new();
+                for span in spans.iter() {
+                    by_contig
+                        .entry(span.contig)
+                        .or_insert_with(|| ContigSpans {
+                            spans: Vec::new(),
+                            ordered: true,
+                        })
+                        .spans
+                        .push(*span);
+                }
+                for (contig, c) in &mut by_contig {
+                    c.ordered = SpanIndex::new(&c.spans, *contig).ordered;
+                }
+                OwnedScope::Regions(by_contig)
+            }
         }
     }
 }
 
-/// [`ReadScope`] with its regions owned, for an iterator to carry.
+/// [`ReadScope`] with its regions owned, for an iterator to carry — **grouped by contig once**,
+/// so asking for one contig's spans is a lookup rather than a scan of every span.
+///
+/// A run's regions can be hundreds of thousands of spans (the GIAB confident regions are
+/// 481,622), and the reader asks for a contig's spans once per contig and once per locus it
+/// hands out; a scan per question made typing grow with the product of the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OwnedScope {
     WholeReference,
-    Regions(Vec<GenomeRegion>),
+    /// Each named contig's spans, in the order the caller gave them.
+    Regions(std::collections::BTreeMap<ContigId, ContigSpans>),
+}
+
+/// One contig's requested spans, and whether they are in the shape that lets a lookup
+/// binary-search them ([`SpanIndex`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContigSpans {
+    spans: Vec<GenomeRegion>,
+    ordered: bool,
 }
 
 impl OwnedScope {
     /// The regions on `contig`, or `None` when the contig is covered whole.
-    pub(crate) fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
+    pub(crate) fn spans_on(&self, contig: ContigId) -> Option<&[GenomeRegion]> {
+        self.index_on(contig).map(|index| index.spans)
+    }
+
+    /// [`Self::spans_on`] with its search index.
+    pub(crate) fn index_on(&self, contig: ContigId) -> Option<SpanIndex<'_>> {
         match self {
             OwnedScope::WholeReference => None,
-            OwnedScope::Regions(spans) => Some(
-                spans
-                    .iter()
-                    .filter(|s| s.contig == contig)
-                    .copied()
-                    .collect(),
-            ),
+            OwnedScope::Regions(by_contig) => Some(match by_contig.get(&contig) {
+                Some(c) => SpanIndex {
+                    spans: &c.spans,
+                    ordered: c.ordered,
+                },
+                None => SpanIndex {
+                    spans: &[],
+                    ordered: true,
+                },
+            }),
         }
+    }
+}
+
+/// A list of requested spans that can answer *which of you might overlap `from..=to`?*
+/// without walking all of them.
+///
+/// **An answer, never a filter**: [`Self::candidates`] returns a sub-slice that holds every
+/// span overlapping the query, and the caller still applies its own test to each. So the
+/// result is the same as walking the whole list — spans outside the sub-slice are ones the
+/// caller's test would have rejected — and when the list is not in the shape a binary search
+/// needs, the sub-slice is simply the whole list.
+///
+/// The shape is the one every [`GenomeRegions`](crate::region_typing::GenomeRegions) hands
+/// out: one contig, start-ordered, each span ending before the next begins.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpanIndex<'a> {
+    spans: &'a [GenomeRegion],
+    /// All on one contig, and each span ends before the next starts — so starts and ends
+    /// both ascend.
+    ordered: bool,
+}
+
+impl<'a> SpanIndex<'a> {
+    /// Index `spans` for questions about `contig`, checking the shape once.
+    pub(crate) fn new(spans: &'a [GenomeRegion], contig: ContigId) -> Self {
+        let ordered = spans.iter().all(|s| s.contig == contig)
+            && spans.windows(2).all(|w| w[0].end.get() < w[1].start.get());
+        Self { spans, ordered }
+    }
+
+    /// A contiguous run of the spans holding every one that overlaps `from..=to` (1-based
+    /// inclusive) — possibly with others, never without one.
+    pub(crate) fn candidates(&self, from: u64, to: u64) -> &'a [GenomeRegion] {
+        if !self.ordered {
+            return self.spans;
+        }
+        // Ends ascend: the first span that does not end before `from`…
+        let first = self.spans.partition_point(|s| s.end.get() < from);
+        // …and starts ascend: through the last span that starts by `to`.
+        let last = self.spans.partition_point(|s| s.start.get() <= to);
+        &self.spans[first..last.max(first)]
     }
 }
 

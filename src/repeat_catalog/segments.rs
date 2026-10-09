@@ -15,9 +15,9 @@ use crate::region_typing::segment_criteria::{
 use crate::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps, resolve_features,
 };
-use crate::repeat_catalog::FoundRepeat;
 use crate::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::repeat_catalog::tally::{CatalogRejectionCounts, ContigTally};
+use crate::repeat_catalog::{FoundRepeat, SpanIndex};
 use crate::tandem_repeat::{RepeatInterval, ScanParams};
 use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position};
 
@@ -82,9 +82,16 @@ pub fn segments_of_contig_in(
         return (Vec::new(), tally);
     }
 
+    // Only the spans a region can overlap are visited (`SpanIndex`): a region against every
+    // span on its contig made this loop the product of the two.
+    let index = SpanIndex::new(wanted, contig);
     let mut out = Vec::new();
     for region in all {
-        for span in wanted.iter().filter(|s| s.contig == contig) {
+        for span in index
+            .candidates(region.region.start.get(), region.region.end.get())
+            .iter()
+            .filter(|s| s.contig == contig)
+        {
             let start = region.region.start.get().max(span.start.get());
             let end = region.region.end.get().min(span.end.get());
             if start > end {
@@ -153,12 +160,18 @@ pub fn loci_of_contig_in(
     criteria: &StrRepeatCriteria,
     wanted: &[GenomeRegion],
 ) -> Vec<SsrSegment> {
+    let index = SpanIndex::new(wanted, contig);
     loci_of_contig(chrom, contig, contig_len, rows, criteria)
         .into_iter()
         .filter(|locus| {
-            wanted.iter().any(|s| {
-                s.contig == contig && locus.start() <= s.end.get() && locus.end() >= s.start.get()
-            })
+            index
+                .candidates(locus.start(), locus.end())
+                .iter()
+                .any(|s| {
+                    s.contig == contig
+                        && locus.start() <= s.end.get()
+                        && locus.end() >= s.start.get()
+                })
         })
         .collect()
 }
@@ -189,6 +202,9 @@ fn repeat_features_of_contig(
 
     // 3. Admission, gate for gate as `classify` runs it — but reading the stored cut,
     //    motif and purity instead of the bases (§5.1).
+    // The requested spans, indexed once so each per-row and per-run question below visits only
+    // the spans it can overlap.
+    let wanted = wanted.map(|spans| SpanIndex::new(spans, contig));
     let admitted = admit(chrom, rows, &cleaned, contig_len, class, contig, wanted);
 
     // 4-5. The satellite cap over the cleaned coverage, then the features.
@@ -203,7 +219,8 @@ fn repeat_features_of_contig(
             None => run.len(),
             // Only the part of the run the caller asked about. The walk clips the same runs
             // to the same spans, which is what keeps the two tallies one number.
-            Some(spans) => spans
+            Some(index) => index
+                .candidates(run.start(), run.end())
                 .iter()
                 .filter(|s| s.contig == contig)
                 .map(|s| {
@@ -255,7 +272,7 @@ fn admit(
     contig_len: Bp,
     class: &SsrSegmentCriteria,
     contig: ContigId,
-    wanted: Option<&[GenomeRegion]>,
+    wanted: Option<SpanIndex<'_>>,
 ) -> Admitted {
     // **A rejection is charged where the repeat starts, and only if the caller asked about
     // that base.** The walk attributes each rejection to exactly one window core the same
@@ -263,11 +280,14 @@ fn admit(
     // windows can see it.
     let charged = |row: &FoundRepeat| match wanted {
         None => true,
-        Some(spans) => spans.iter().any(|s| {
-            s.contig == contig
-                && row.detected.start.get() >= s.start.get()
-                && row.detected.start.get() <= s.end.get()
-        }),
+        Some(index) => index
+            .candidates(row.detected.start.get(), row.detected.start.get())
+            .iter()
+            .any(|s| {
+                s.contig == contig
+                    && row.detected.start.get() >= s.start.get()
+                    && row.detected.start.get() <= s.end.get()
+            }),
     };
     // The pre-screen and the bundler both hand back **intervals**, not rows, and what a
     // locus needs — the whole-motif cut, the motif, the purity — lives on the row. So each

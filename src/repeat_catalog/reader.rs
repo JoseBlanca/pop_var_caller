@@ -106,8 +106,9 @@ impl RepeatCatalog {
     pub fn repeats(&self, scope: ReadScope<'_>) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
         self.check_scope(scope)?;
         let mut out = Vec::new();
+        let owned = scope.owned();
         for (contig, _, _) in self.contig_walk(scope) {
-            match scope.spans_on(contig) {
+            match owned.spans_on(contig) {
                 None => out.extend(rows_of_contig(self, contig)?),
                 Some(spans) if spans.is_empty() => {}
                 Some(spans) => {
@@ -203,12 +204,18 @@ impl RepeatCatalog {
     /// The contigs a scope reaches, with the names and lengths the header carries. A contig
     /// no region names is never opened.
     fn contig_walk(&self, scope: ReadScope<'_>) -> Vec<(ContigId, String, Bp)> {
+        // Which contigs the regions name, found in one pass over them rather than one pass
+        // per contig — 2,580 contigs times 481,622 GIAB spans was 1.2 billion comparisons.
+        let named: Option<std::collections::BTreeSet<ContigId>> = match scope {
+            ReadScope::WholeReference => None,
+            ReadScope::Regions(spans) => Some(spans.iter().map(|s| s.contig).collect()),
+        };
         self.header
             .contigs
             .iter()
             .enumerate()
             .map(|(i, info)| (ContigId(i as u32), info.name.clone(), Bp(info.length)))
-            .filter(|(id, _, _)| scope.touches(*id))
+            .filter(|(id, _, _)| named.as_ref().is_none_or(|named| named.contains(id)))
             .collect()
     }
 
@@ -367,9 +374,10 @@ impl GenomeSegments<'_> {
                 // edge, and taking back its whole length would remove bases that were never
                 // counted. What is inside the request is a subset of the coverage charged
                 // for it, so this cannot underflow. Same rule as the walk's.
-                let inside = match self.scope.spans_on(region.region.contig) {
+                let inside = match self.scope.index_on(region.region.contig) {
                     None => bp,
-                    Some(spans) => spans
+                    Some(index) => index
+                        .candidates(region.region.start.get(), region.region.end.get())
                         .iter()
                         .map(|s| {
                             let from = region.region.start.get().max(s.start.get());
