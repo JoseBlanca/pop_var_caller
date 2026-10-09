@@ -27,6 +27,7 @@
 #   gatk.vcf.gz                HaplotypeCaller -ERC GVCF, CombineGVCFs, GenotypeGVCFs
 #   hipstr.vcf.gz              HipSTR over the STR segments, all samples jointly, its defaults
 #   hipstr_fixed_stutter.vcf.gz  the same with one fixed stutter model and no read floor
+#   score_*.tsv                the scorer's tables (scripts/ng_str_stutter_score.py)
 #
 # Settings (environment):
 #   THREADS     threads for minimap2, samtools and ng (default: all)
@@ -219,4 +220,5 @@ stage ng_fitted ng_fitted
 stage gatk run_gatk
 stage hipstr run_hipstr hipstr
 stage hipstr_fixed_stutter run_hipstr hipstr_fixed_stutter --def-stutter-model --min-reads 1
+stage score python3 "$root/scripts/ng_str_stutter_score.py" "$out"
 echo "done: $out"
