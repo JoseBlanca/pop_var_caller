@@ -61,6 +61,7 @@ PLATEAU_REPEATS = [16, 16, 10, 10, 10, 10]
 CALLERS = [
     ("ng_defaults", "ng_defaults.vcf"),
     ("ng_fitted", "ng_fitted.vcf"),
+    ("ng_true_stutter", "ng_true_stutter.vcf"),
     ("gatk", "gatk.vcf.gz"),
     ("hipstr", "hipstr.vcf.gz"),
     ("hipstr_fixed_stutter", "hipstr_fixed_stutter.vcf.gz"),

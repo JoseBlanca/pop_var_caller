@@ -22,6 +22,7 @@
 #   typing_check.tsv           the regions the calling typing makes of the reference
 #   ng_defaults.vcf            call-from-alignments --defaults
 #   ng_fitted.vcf              call-from-psps with that fit
+#   ng_true_stutter.vcf        call-from-psps with the defaults and the simulator's true stutter
 #   ng_fit.parameters.toml     the fit (estimate-parameters over the psps)
 #   ng_*.explain.tsv           --explain-loci over every STR segment
 #   gatk.vcf.gz                HaplotypeCaller -ERC GVCF, CombineGVCFs, GenotypeGVCFs
@@ -187,6 +188,18 @@ ng_fitted() {
         --output "$out/ng_fitted.vcf" > "$out/ng_call_from_psps.log" 2>&1
 }
 
+# **ng with the true stutter** (owner, 2026-10-09): the defaults run's parameters file with its
+# stutter tables replaced by the simulator's (scripts/ng_str_stutter_true_parameters.py) — no fit.
+# Against the fitted run it says whether the fit can be skipped; against --defaults, what a right
+# stutter model buys.
+ng_true_stutter() {
+    python3 "$root/scripts/ng_str_stutter_true_parameters.py" "$out" > "$out/ng_true_stutter_parameters.log"
+    "$ng" call-from-psps --reference "$reference" --catalog "$catalog" --psp "$out/psps" \
+        --parameters "$out/true_stutter.parameters.toml" --threads "$threads" \
+        --explain-loci "$out/segments.bed" "$out/ng_true_stutter.explain.tsv" \
+        --output "$out/ng_true_stutter.vcf" > "$out/ng_true_stutter.log" 2>&1
+}
+
 gatk_one() {
     local sample=$1
     "$gatk" --java-options "-Xmx$gatk_heap" HaplotypeCaller -R "$reference" \
@@ -242,6 +255,7 @@ stage check_typing check_typing
 stage map_reads map_reads
 stage ng_defaults ng_defaults
 stage ng_psps ng_psps
+stage ng_true_stutter ng_true_stutter
 stage ng_fit ng_fit
 stage ng_fitted ng_fitted
 stage gatk run_gatk
