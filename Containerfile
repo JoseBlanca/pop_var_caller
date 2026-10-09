@@ -175,8 +175,14 @@ RUN npm install -g @anthropic-ai/claude-code
 # from the manifest it does. Only the populated registry under
 # $CARGO_HOME survives into the final image; the stripped manifest, stub
 # src/, and /build itself are byproducts of this layer.
+#
+# **A path dependency's source has to be copied, for the same reason** (found 2026-10-09):
+# `vendor/noodles-cram` (aa598441, 2026-09-08) is a `[patch]` path the manifest names, and
+# `cargo fetch` refuses without it ("failed to load source for dependency `noodles-cram`").
+# The cached layer hid it for a month, until a `Cargo.toml` edit invalidated it.
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/noodles-cram ./vendor/noodles-cram
 RUN mkdir -p src \
     && echo 'fn main() {}' > src/main.rs \
     && awk 'BEGIN{skip=0} /^\[\[(bench|example)\]\]/{skip=1; next} /^\[/{skip=0} !skip' Cargo.toml > Cargo.toml.fetch \
@@ -192,6 +198,22 @@ RUN mkdir -p src \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# The stuttering benchmark (doc/devel/ng/spec/str_stutter_benchmark.md §5, §8): minimap2 maps
+# the simulated reads, as it maps this caller's production data (`-ax sr`), and HipSTR is the
+# third caller beside ng and GATK. HipSTR is built from the commit the macOS build in the main
+# checkout's `HipSTR/` was made from (v0.6.2); it builds its bundled htslib, which needs only
+# the compression libraries. Its own layer, last, so the slow layers above stay cached.
+ARG HIPSTR_COMMIT=aed5265
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        minimap2 zlib1g-dev libbz2-dev liblzma-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone https://github.com/HipSTR-Tool/HipSTR /tmp/hipstr \
+    && cd /tmp/hipstr && git checkout "$HIPSTR_COMMIT" \
+    && make -j"$(nproc)" HipSTR \
+    && install -m 0755 HipSTR /usr/local/bin/HipSTR \
+    && cd / && rm -rf /tmp/hipstr
 
 WORKDIR /work
 COPY scripts/container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
