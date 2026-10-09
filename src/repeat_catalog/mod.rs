@@ -174,7 +174,13 @@ pub(crate) struct SpanIndex<'a> {
 impl<'a> SpanIndex<'a> {
     /// Index `spans` for questions about `contig`, checking the shape once.
     pub(crate) fn new(spans: &'a [GenomeRegion], contig: ContigId) -> Self {
-        let ordered = spans.iter().all(|s| s.contig == contig)
+        // **Each span's own `start <= end` is checked too**: `GenomeRegion` has public fields
+        // and no constructor to enforce it, and one inverted span between two ordered ones
+        // passes the pairwise test while leaving the starts out of order — so the search
+        // over starts below would skip spans the full walk finds.
+        let ordered = spans
+            .iter()
+            .all(|s| s.contig == contig && s.start.get() <= s.end.get())
             && spans.windows(2).all(|w| w[0].end.get() < w[1].start.get());
         Self { spans, ordered }
     }
@@ -572,6 +578,51 @@ pub enum RepeatCatalogError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn requested(start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    /// **An inverted span makes the list unsearchable, so every span is a candidate.** Between
+    /// `[1,2]` and `[6,40]`, the inverted `[30,5]` passes the pairwise "each ends before the
+    /// next starts" test while putting the starts out of order (1, 30, 6); a binary search over
+    /// those starts for a query ending at 20 stops at 30 and never sees `[6,40]`, which overlaps
+    /// the query `10..=20` — a span the plain walk the index replaced does find.
+    #[test]
+    fn candidates_hold_every_overlapping_span_when_a_span_is_inverted() {
+        let spans = [requested(1, 2), requested(30, 5), requested(6, 40)];
+        let index = SpanIndex::new(&spans, ContigId(0));
+        let found = index.candidates(10, 20);
+        assert!(
+            found.contains(&requested(6, 40)),
+            "[6,40] overlaps 10..=20 but the candidates were {found:?}"
+        );
+    }
+
+    /// **On the shape it is built for, the index narrows to exactly the overlapping spans**,
+    /// edges included: a span ending at the query's first base and one starting at its last
+    /// both count (1-based inclusive), the ones a base further out do not.
+    #[test]
+    fn candidates_are_the_overlapping_spans_on_ordered_spans() {
+        let spans = [
+            requested(1, 9),
+            requested(11, 20),
+            requested(30, 40),
+            requested(42, 50),
+        ];
+        let index = SpanIndex::new(&spans, ContigId(0));
+        assert_eq!(
+            index.candidates(20, 30),
+            &[requested(11, 20), requested(30, 40)]
+        );
+        assert_eq!(index.candidates(10, 10), &[] as &[GenomeRegion]);
+        assert_eq!(index.candidates(21, 29), &[] as &[GenomeRegion]);
+        assert_eq!(index.candidates(1, 100), &spans);
+    }
 
     /// A header two catalogs of one reference would share, for the comparison tests below.
     fn a_header() -> RepeatCatalogHeader {

@@ -60,10 +60,25 @@ impl RepeatCatalog {
                 path: path.to_path_buf(),
             });
         }
-        let index = CatalogIndex::load(path).map_err(|source| RepeatCatalogError::Unreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let index = match CatalogIndex::load(path) {
+            Ok(index) => index,
+            Err(source) => {
+                // **The build is named before the layout is blamed.** `load` refuses a file
+                // whose columns, page index or statistics are not this build's — and a
+                // catalog written by another build is exactly such a file. Its header may
+                // still be readable, and *written by another version* is the refusal a
+                // person can act on (rebuild it), where *unreadable* sends them looking for
+                // corruption. This is the order the checks ran in before the footer was
+                // parsed once at open.
+                if let Some(text) = header_text_without_layout_checks(path) {
+                    check_written_by_this_build(&decode_header(&text, path)?)?;
+                }
+                return Err(RepeatCatalogError::Unreadable {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
         let header = read_header(path, &index)?;
         check_written_by_this_build(&header)?;
         check_against_reference(&header, reference)?;
@@ -116,7 +131,7 @@ impl RepeatCatalog {
         for (contig, _, _) in self.contig_walk(scope) {
             match owned.spans_on(contig) {
                 None => out.extend(rows_of_contig(self, contig)?),
-                Some(spans) if spans.is_empty() => {}
+                Some([]) => {}
                 Some(spans) => {
                     let windows: Vec<(u64, u64)> =
                         spans.iter().map(|s| (s.start.get(), s.end.get())).collect();
@@ -440,7 +455,7 @@ impl Iterator for GenomeSegments<'_> {
                 }
                 Some(spans) => {
                     self.counts.spans += spans.len() as u64;
-                    segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
+                    segments_of_contig_in(&name, contig, length, &rows, &self.criteria, spans)
                 }
             };
             self.counts.add_contig(&tally);
@@ -478,7 +493,7 @@ impl Iterator for StrLoci<'_> {
             self.buffered = match self.scope.spans_on(contig) {
                 None => loci_of_contig(&name, contig, length, &rows, &self.criteria),
                 Some(spans) => {
-                    loci_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
+                    loci_of_contig_in(&name, contig, length, &rows, &self.criteria, spans)
                 }
             }
             .into_iter();
@@ -498,6 +513,21 @@ fn rows_of_contig(
             source,
         }
     })
+}
+
+/// The footer's header block, read with no page index and no check of the columns — only
+/// for naming the build of a file [`CatalogIndex::load`] refused. `None` when even that
+/// much cannot be read.
+fn header_text_without_layout_checks(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+    builder
+        .metadata()
+        .file_metadata()
+        .key_value_metadata()
+        .and_then(|kv| kv.iter().find(|entry| entry.key == HEADER_KEY))
+        .and_then(|entry| entry.value.clone())
 }
 
 /// Decode the footer's header block from the already-parsed footer.
@@ -797,6 +827,58 @@ mod tests {
         assert_eq!(rows, vec![row(1, 50, 3)]);
     }
 
+    /// **Part of a contig reads back exactly the rows that overlap it, edges inclusive** —
+    /// the answer a scan of every row against every span gives. chr1 holds `100..=117` and
+    /// `400..=417`. The cases cover both ways the read can go: a window holding the contig's
+    /// whole extent `100..=417` reads with no row filter, and every other window reads through
+    /// the filter's binary search. `118..=1000` is the one that tells them apart — it holds
+    /// the extent's end but not its start, so taking the no-filter shortcut there would
+    /// return the row at 100. Spans out of order and overlapping each other are walked whole.
+    #[test]
+    fn part_of_a_contig_reads_back_the_rows_overlapping_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+        let reference = reference();
+        write_catalog(&path, &reference);
+        let catalog =
+            RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
+        let all = catalog.repeats(ReadScope::WholeReference).expect("rows");
+
+        let on_chr1 = |start: u64, end: u64| GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        };
+        let cases: Vec<Vec<GenomeRegion>> = vec![
+            vec![on_chr1(100, 417)],
+            vec![on_chr1(1, 1000)],
+            vec![on_chr1(118, 1000)],
+            vec![on_chr1(101, 417)],
+            vec![on_chr1(100, 416)],
+            vec![on_chr1(117, 117)],
+            vec![on_chr1(118, 399)],
+            vec![on_chr1(400, 400)],
+            vec![on_chr1(110, 120), on_chr1(500, 600)],
+            vec![on_chr1(400, 450), on_chr1(1, 100)],
+            vec![on_chr1(1, 300), on_chr1(200, 450)],
+        ];
+        for spans in cases {
+            let expected: Vec<FoundRepeat> = all
+                .iter()
+                .filter(|r| {
+                    spans.iter().any(|s| {
+                        r.contig == s.contig
+                            && r.detected.start.get() <= s.end.get()
+                            && r.detected.end.get() >= s.start.get()
+                    })
+                })
+                .cloned()
+                .collect();
+            let rows = catalog.repeats(ReadScope::Regions(&spans)).expect("rows");
+            assert_eq!(rows, expected, "spans {spans:?}");
+        }
+    }
+
     /// **The whole reference is one span per non-empty contig**, which is what
     /// `GenomeRegions::whole_contigs` produces — so a consumer that swaps a scan for the
     /// file reads the same number back. A zero-length contig has no 1-based position to
@@ -962,5 +1044,77 @@ mod tests {
         let err = RepeatCatalog::open_checking_against_reference(&path, &reference())
             .expect_err("not a catalog");
         assert!(matches!(err, RepeatCatalogError::Unreadable { .. }));
+    }
+
+    /// A parquet file carrying a catalog header stamped `tool_version`, with columns that
+    /// are not a catalog's — the shape a catalog written by a build with another layout has.
+    fn catalog_header_over_foreign_columns(path: &Path, tool_version: &str) {
+        use arrow_array::{RecordBatch, UInt64Array};
+        use arrow_schema::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+        use std::sync::Arc;
+
+        let header = RepeatCatalogHeader {
+            tool_version: tool_version.to_string(),
+            ..header_for(&reference())
+        };
+        let properties = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                HEADER_KEY.to_string(),
+                crate::repeat_catalog::parquet_file::encode_header(&header),
+            )]))
+            .build();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::UInt64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(UInt64Array::from(vec![1u64, 2, 3]))],
+        )
+        .expect("batch");
+        let mut writer = ArrowWriter::try_new(
+            File::create(path).expect("create"),
+            schema,
+            Some(properties),
+        )
+        .expect("w");
+        writer.write(&batch).expect("write");
+        writer.close().expect("close");
+    }
+
+    /// **A catalog from another build is named as one even when its layout is not this
+    /// build's.** The layout checks run at open, and they would refuse such a file as
+    /// unreadable; the version refusal is the one that says what to do (rebuild the catalog),
+    /// so it comes first, as it did when the layout was only checked at the first read.
+    #[test]
+    fn a_catalog_from_another_build_with_another_layout_is_refused_by_version() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("old_layout.parquet");
+        catalog_header_over_foreign_columns(&path, "ancient-0.0.1");
+
+        let err = RepeatCatalog::open_checking_against_reference(&path, &reference())
+            .expect_err("another build");
+        match &err {
+            RepeatCatalogError::ToolVersionDiffers { built, .. } => {
+                assert_eq!(built, "ancient-0.0.1");
+            }
+            other => panic!("expected a tool-version refusal, got {other}"),
+        }
+    }
+
+    /// The same file stamped by this build is refused for its layout: the header is no
+    /// excuse for columns the reader cannot address.
+    #[test]
+    fn a_catalog_of_this_build_with_another_layout_is_unreadable() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("wrong_layout.parquet");
+        catalog_header_over_foreign_columns(&path, running_tool_version());
+
+        let err = RepeatCatalog::open_checking_against_reference(&path, &reference())
+            .expect_err("wrong layout");
+        assert!(
+            matches!(err, RepeatCatalogError::Unreadable { .. }),
+            "got {err}"
+        );
     }
 }

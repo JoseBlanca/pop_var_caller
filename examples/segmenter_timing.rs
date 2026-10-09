@@ -53,7 +53,9 @@ fn run(
         })
         .collect();
     let ground: Vec<GenomeRegion> = match bed {
-        Some(path) => GenomeRegions::from_bed_path(Path::new(path), &bounds)?.iter().collect(),
+        Some(path) => GenomeRegions::from_bed_path(Path::new(path), &bounds)?
+            .iter()
+            .collect(),
         None => GenomeRegions::whole_contigs(&bounds).iter().collect(),
     };
     eprintln!("spans\t{}", ground.len());
@@ -144,8 +146,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let calling = args.get(2).map(|s| s == "calling").unwrap_or(false);
-    let phases = args.get(3).map(String::as_str).unwrap_or("segments,loci,rows");
-    match run(Path::new(&args[1]), calling, phases, args.get(4).map(String::as_str)) {
+    let phases = args
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or("segments,loci,rows");
+    match run(
+        Path::new(&args[1]),
+        calling,
+        phases,
+        args.get(4).map(String::as_str),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");

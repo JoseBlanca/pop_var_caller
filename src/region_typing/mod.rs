@@ -1045,6 +1045,13 @@ fn absorb_by_sweep<T>(
     members.retain(|_| !*flags.next().expect("one flag per member"));
     let mut flags = locus_absorbed.iter();
     loci.retain(|_| !*flags.next().expect("one flag per locus"));
+    // **Two grown satellites that abut are one**, as `absorb_into`'s `merge_runs` makes them.
+    // With `bundle_threshold >= 1` the sweep never leaves two abutting (a gap of 0 is within
+    // the radius, so their spans were one group), and this changes nothing. At 0 it does: a
+    // feature that overlaps one satellite and abuts another joins only the first, and the
+    // iteration's `merge_runs` then joins the two grown satellites. Merging abutting hulls
+    // adds no base, so no feature the sweep left out overlaps the result.
+    merge_runs(&mut grown);
     debug_assert!(
         grown.windows(2).all(|w| w[0].end + 1 < w[1].start),
         "grown satellites are ascending, disjoint and not abutting"
@@ -1314,13 +1321,15 @@ mod tests {
         /// The sweep reaches the iteration's fixed point exactly: the same grown satellites,
         /// and the same members and loci left over, in the same order — on dense random
         /// layouts where chains of features bridge satellites, features nest in satellites,
-        /// and satellites abut.
+        /// and grown satellites come to abut. The radius starts at 0, which `classify`
+        /// refuses but the catalog path does not check, and where abutting satellites are
+        /// joined by `merge_runs` rather than by any feature's radius.
         #[test]
         fn absorption_by_sweep_is_the_iterations_fixed_point(
             raw_satellites in proptest::collection::vec((1u64..600, 1u64..120), 0..6),
             raw_members in proptest::collection::vec((0u64..700, 1u64..40), 0..14),
             raw_loci in proptest::collection::vec((1u64..700, 1u64..40), 0..14),
-            bundle_threshold in 1u64..30,
+            bundle_threshold in 0u64..30,
         ) {
             // Satellites as `resolve_features` receives them: merged coverage runs.
             let mut satellites: Vec<CoverageRun> = raw_satellites
@@ -1347,6 +1356,42 @@ mod tests {
             prop_assert_eq!(mem_a, mem_b);
             prop_assert_eq!(loc_a, loc_b);
         }
+    }
+
+    /// **At a radius of 0, a member overlapping one satellite and abutting another joins the
+    /// two**, because the iteration's `merge_runs` unites abutting satellites. Satellites
+    /// `22..=86` and `88..=88`, member covering `87..=88`: the member overlaps only the second,
+    /// the grown `87..=88` abuts the first, and the iteration's answer is one satellite
+    /// `22..=88`. The sweep without its closing merge left two. Found by widening the
+    /// property test's radius to 0.
+    #[test]
+    fn absorption_by_sweep_joins_satellites_that_abut_after_growing_at_radius_zero() {
+        let satellites = vec![
+            CoverageRun { start: 22, end: 86 },
+            CoverageRun { start: 88, end: 88 },
+        ];
+        let members = vec![RepeatInterval {
+            start: 86,
+            end: 88,
+            period: 2,
+            score: 10,
+        }];
+        let (mut sat_a, mut mem_a, mut loc_a) = (
+            satellites.clone(),
+            members.clone(),
+            Vec::<(CoverageRun, usize)>::new(),
+        );
+        absorb_by_iteration(&mut sat_a, &mut mem_a, &mut loc_a, 0);
+        assert_eq!(
+            sat_a,
+            vec![CoverageRun { start: 22, end: 88 }],
+            "the oracle's answer"
+        );
+        let (mut sat_b, mut mem_b, mut loc_b) =
+            (satellites, members, Vec::<(CoverageRun, usize)>::new());
+        absorb_by_sweep(&mut sat_b, &mut mem_b, &mut loc_b, 0);
+        assert_eq!(sat_b, sat_a);
+        assert_eq!(mem_b, mem_a);
     }
 
     fn two_contigs() -> Vec<ContigBounds<'static>> {

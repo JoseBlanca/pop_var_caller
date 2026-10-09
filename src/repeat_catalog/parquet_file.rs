@@ -530,8 +530,14 @@ impl CatalogIndex {
 
             let row_group = metadata.metadata().row_group(group);
             let one_contig = statistics_max_u64(stats) == Some(u64::from(min));
-            let start_min = row_group.column(1).statistics().and_then(statistics_min_u64);
-            let end_max = row_group.column(2).statistics().and_then(statistics_max_u64);
+            let start_min = row_group
+                .column(1)
+                .statistics()
+                .and_then(statistics_min_u64);
+            let end_max = row_group
+                .column(2)
+                .statistics()
+                .and_then(statistics_max_u64);
             extent_of_group.push(match (one_contig, start_min, end_max) {
                 (true, Some(from), Some(to)) => Some((from, to)),
                 _ => None,

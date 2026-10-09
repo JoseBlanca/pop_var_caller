@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7ecb22bde430b999a762df59774dd1e16882cf60792c6ae6c461dae0c38d30f0 # shrinks to raw_satellites = [(531, 1), (414, 116)], raw_members = [(521, 9)], raw_loci = [], bundle_threshold = 0
+cc f7dfb5e27c74d0fbe22ffd4ccc2c3a84f9d38420ac6cdcfeff64119923976007 # shrinks to raw_satellites = [(595, 1)], raw_members = [], raw_loci = [(566, 14)], bundle_threshold = 16
