@@ -436,6 +436,125 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+/// The catalog's footer, parsed once per open: the file metadata **with the page index**,
+/// and which row groups hold each contig.
+///
+/// **Parsed once, not once per contig.** The footer of a catalog carries the statistics and
+/// page index of every row group in the file — one per contig — so re-parsing it for each
+/// contig read costs the whole file's metadata per contig: quadratic in the contig count,
+/// and on GRCh38's 2,580 contigs it was most of the typing time. Holding it here makes a
+/// contig read cost its own pages.
+///
+/// Building one is also where the file is checked to be a catalog this build can read by
+/// contig — its columns, its page index, its per-row-group statistics — so a wrong file is
+/// refused at open rather than part-way through a walk.
+#[derive(Clone)]
+pub(crate) struct CatalogIndex {
+    metadata: parquet::arrow::arrow_reader::ArrowReaderMetadata,
+    /// Row groups per contig id, in file order. A contig with no rows has no entry.
+    groups_by_contig: std::collections::HashMap<u32, Vec<usize>>,
+    /// Per row group, the smallest `detected_start` and largest `detected_end` it holds —
+    /// when its statistics say it holds one contig alone. A window that contains this
+    /// extent keeps every row of the group, so the read needs no row filter.
+    extent_of_group: Vec<Option<(u64, u64)>>,
+}
+
+impl std::fmt::Debug for CatalogIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The metadata itself is the whole file's page index; printing it is never useful.
+        f.debug_struct("CatalogIndex")
+            .field("row_groups", &self.metadata.metadata().num_row_groups())
+            .field("contigs_with_rows", &self.groups_by_contig.len())
+            .finish()
+    }
+}
+
+impl CatalogIndex {
+    /// Parse `path`'s footer and page index, and check it is a catalog readable by contig.
+    pub(crate) fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+        use parquet::file::metadata::PageIndexPolicy;
+
+        let file = File::open(path)?;
+        // `Required`, not `Optional`: our own writer always emits the page index, so a file
+        // without one is not a catalog this build wrote, and silently falling back to a full
+        // scan would turn a wrong file into a slow answer.
+        let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
+        let metadata = ArrowReaderMetadata::load(&file, options)?;
+        // **The schema is checked before any column is addressed by position.** Every read
+        // addresses columns 0, 1 and 2 and downcasts them to fixed Arrow types; a parquet file
+        // that carries the catalog's header key but somebody else's columns would panic
+        // inside `ProjectionMask::roots` instead of coming back as an unreadable file.
+        let stored = metadata.schema();
+        let ours = catalog_schema();
+        if stored.fields().len() != ours.fields().len()
+            || stored
+                .fields()
+                .iter()
+                .zip(ours.fields())
+                .any(|(a, b)| a.name() != b.name() || a.data_type() != b.data_type())
+        {
+            return Err(format!(
+                "not a repeat catalog: its columns are {:?}, a catalog's are {:?}",
+                stored.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+                ours.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            )
+            .into());
+        }
+
+        // Each contig's row groups, found from the row-group statistics rather than by
+        // reading rows.
+        //
+        // **A row group with no usable statistics is a broken file, not an empty contig.** Our
+        // writer always emits them; without the distinction, a catalog written with statistics
+        // disabled reads back as "every contig is empty" and succeeds.
+        let mut groups_by_contig: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut extent_of_group = Vec::with_capacity(metadata.metadata().num_row_groups());
+        for group in 0..metadata.metadata().num_row_groups() {
+            let column = metadata.metadata().row_group(group).column(0);
+            let Some(stats) = column.statistics() else {
+                return Err(format!(
+                    "row group {group} carries no statistics for the contig column, so this file \
+                     cannot be read by contig"
+                )
+                .into());
+            };
+            let Some(min) = statistics_min_u32(stats) else {
+                return Err(format!(
+                    "row group {group}'s contig-column statistics are not a u32 minimum"
+                )
+                .into());
+            };
+            groups_by_contig.entry(min).or_default().push(group);
+
+            let row_group = metadata.metadata().row_group(group);
+            let one_contig = statistics_max_u64(stats) == Some(u64::from(min));
+            let start_min = row_group.column(1).statistics().and_then(statistics_min_u64);
+            let end_max = row_group.column(2).statistics().and_then(statistics_max_u64);
+            extent_of_group.push(match (one_contig, start_min, end_max) {
+                (true, Some(from), Some(to)) => Some((from, to)),
+                _ => None,
+            });
+        }
+        Ok(Self {
+            metadata,
+            groups_by_contig,
+            extent_of_group,
+        })
+    }
+
+    /// The footer's key-value entry under `key`, if any.
+    pub(crate) fn footer_value(&self, key: &str) -> Option<String> {
+        self.metadata
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| kv.iter().find(|entry| entry.key == key))
+            .and_then(|entry| entry.value.clone())
+    }
+}
+
 /// Every row of `contig` whose tract overlaps one of `windows`, in file order.
 ///
 /// **The file's own index does the skipping.** The page index — which the writer emits by
@@ -445,75 +564,37 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
 /// decompressing them. Asking for a megabase of a 90 Mb chromosome reads the pages that
 /// megabase touches, not the chromosome.
 ///
+/// `index` is the footer [`CatalogIndex::load`] parsed from this same `path`; the file is
+/// reopened here only to read pages.
+///
 /// `windows` are 1-based inclusive and already widened by the caller (see
 /// `RepeatCatalog::rows_for`) — this function does no widening of its own, because
 /// how far a row can reach is a question about classification, not about the file.
 pub(crate) fn rows_overlapping(
     path: &Path,
+    index: &CatalogIndex,
     contig: ContigId,
     windows: &[(u64, u64)],
 ) -> Result<Vec<FoundRepeat>, Box<dyn std::error::Error + Send + Sync>> {
     use arrow_array::{BooleanArray, UInt32Array, UInt64Array};
     use parquet::arrow::ProjectionMask;
-    use parquet::arrow::arrow_reader::{ArrowPredicateFn, ArrowReaderOptions, RowFilter};
-    use parquet::file::metadata::PageIndexPolicy;
+    use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter};
+
+    let Some(groups) = index.groups_by_contig.get(&contig.get()) else {
+        return Ok(Vec::new());
+    };
+    let groups = groups.clone();
+
+    // **No filter when it would keep every row** — the common case, a whole contig asked for
+    // as one region. The filter decodes the three coordinate columns once to evaluate and the
+    // output decodes them again, so a filter that drops nothing is pure overhead.
+    let keeps_everything = groups.iter().all(|&g| {
+        index.extent_of_group[g]
+            .is_some_and(|(lo, hi)| windows.iter().any(|(from, to)| *from <= lo && *to >= hi))
+    });
 
     let file = File::open(path)?;
-    // `Required`, not `Optional`: our own writer always emits the page index, so a file
-    // without one is not a catalog this build wrote, and silently falling back to a full
-    // scan would turn a wrong file into a slow answer.
-    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
-    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?;
-    // **The schema is checked before any column is addressed by position.** Everything below
-    // reads columns 0, 1 and 2 and downcasts them to fixed Arrow types; a parquet file that
-    // carries the catalog's header key but somebody else's columns would panic inside
-    // `ProjectionMask::roots` instead of coming back as an unreadable file.
-    let stored = builder.schema();
-    let ours = catalog_schema();
-    if stored.fields().len() != ours.fields().len()
-        || stored
-            .fields()
-            .iter()
-            .zip(ours.fields())
-            .any(|(a, b)| a.name() != b.name() || a.data_type() != b.data_type())
-    {
-        return Err(format!(
-            "not a repeat catalog: its columns are {:?}, a catalog's are {:?}",
-            stored.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
-            ours.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
-        )
-        .into());
-    }
-
-    // The contig's own row group, found from the row-group statistics rather than by
-    // reading rows.
-    //
-    // **A row group with no usable statistics is a broken file, not an empty contig.** Our
-    // writer always emits them; without the distinction, a catalog written with statistics
-    // disabled reads back as "every contig is empty" and succeeds.
-    let mut groups = Vec::new();
-    for group in 0..builder.metadata().num_row_groups() {
-        let column = builder.metadata().row_group(group).column(0);
-        let Some(stats) = column.statistics() else {
-            return Err(format!(
-                "row group {group} carries no statistics for the contig column, so this file \
-                 cannot be read by contig"
-            )
-            .into());
-        };
-        let Some(min) = statistics_min_u32(stats) else {
-            return Err(format!(
-                "row group {group}'s contig-column statistics are not a u32 minimum"
-            )
-            .into());
-        };
-        if min == contig.get() {
-            groups.push(group);
-        }
-    }
-    if groups.is_empty() {
-        return Ok(Vec::new());
-    }
+    let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, index.metadata.clone());
 
     let schema = builder.parquet_schema();
     // Columns 1 and 2 are `detected_start` and `detected_end` (`catalog_schema`).
@@ -560,10 +641,14 @@ pub(crate) fn rows_overlapping(
         })))
     });
 
-    let reader = builder
-        .with_row_groups(groups)
-        .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
-        .build()?;
+    let builder = builder.with_row_groups(groups);
+    let reader = if keeps_everything {
+        builder.build()?
+    } else {
+        builder
+            .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
+            .build()?
+    };
 
     let mut rows = Vec::new();
     for batch in reader {
@@ -588,6 +673,26 @@ fn statistics_min_u32(stats: &parquet::file::statistics::Statistics) -> Option<u
     match stats {
         Statistics::Int32(s) => s.min_opt().map(|v| *v as u32),
         Statistics::Int64(s) => s.min_opt().map(|v| *v as u32),
+        _ => None,
+    }
+}
+
+/// The minimum of an integer column chunk's statistics, widened to `u64`.
+fn statistics_min_u64(stats: &parquet::file::statistics::Statistics) -> Option<u64> {
+    use parquet::file::statistics::Statistics;
+    match stats {
+        Statistics::Int32(s) => s.min_opt().map(|v| *v as u32 as u64),
+        Statistics::Int64(s) => s.min_opt().map(|v| *v as u64),
+        _ => None,
+    }
+}
+
+/// The maximum of an integer column chunk's statistics, widened to `u64`.
+fn statistics_max_u64(stats: &parquet::file::statistics::Statistics) -> Option<u64> {
+    use parquet::file::statistics::Statistics;
+    match stats {
+        Statistics::Int32(s) => s.max_opt().map(|v| *v as u32 as u64),
+        Statistics::Int64(s) => s.max_opt().map(|v| *v as u64),
         _ => None,
     }
 }

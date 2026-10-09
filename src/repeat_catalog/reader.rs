@@ -6,16 +6,15 @@
 //! checked here against MD5s this run computed from the FASTA. Nothing is trusted because
 //! it was written down.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
-
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::reference_info::{ContigInfo, ReferenceInfo};
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::region_typing::{RegionKind, TypedRegion};
 use crate::repeat_catalog::StrRepeatCriteria;
-use crate::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, rows_overlapping};
+use crate::repeat_catalog::parquet_file::{
+    CatalogIndex, HEADER_KEY, decode_header, rows_overlapping,
+};
 use crate::repeat_catalog::segments::{
     loci_of_contig, loci_of_contig_in, segments_of_contig, segments_of_contig_in,
 };
@@ -38,6 +37,8 @@ use crate::types::ContigId;
 pub struct RepeatCatalog {
     path: PathBuf,
     header: RepeatCatalogHeader,
+    /// The footer and page index, parsed once here and reused by every contig read.
+    index: CatalogIndex,
 }
 
 impl RepeatCatalog {
@@ -59,12 +60,17 @@ impl RepeatCatalog {
                 path: path.to_path_buf(),
             });
         }
-        let header = read_header(path)?;
+        let index = CatalogIndex::load(path).map_err(|source| RepeatCatalogError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let header = read_header(path, &index)?;
         check_written_by_this_build(&header)?;
         check_against_reference(&header, reference)?;
         Ok(Self {
             path: path.to_path_buf(),
             header,
+            index,
         })
     }
 
@@ -114,12 +120,14 @@ impl RepeatCatalog {
                 Some(spans) => {
                     let windows: Vec<(u64, u64)> =
                         spans.iter().map(|s| (s.start.get(), s.end.get())).collect();
-                    out.extend(rows_overlapping(&self.path, contig, &windows).map_err(
-                        |source| RepeatCatalogError::Unreadable {
-                            path: self.path.clone(),
-                            source,
-                        },
-                    )?);
+                    out.extend(
+                        rows_overlapping(&self.path, &self.index, contig, &windows).map_err(
+                            |source| RepeatCatalogError::Unreadable {
+                                path: self.path.clone(),
+                                source,
+                            },
+                        )?,
+                    );
                 }
             }
         }
@@ -193,7 +201,7 @@ impl RepeatCatalog {
             })
             .collect();
 
-        rows_overlapping(&self.path, contig, &windows).map_err(|source| {
+        rows_overlapping(&self.path, &self.index, contig, &windows).map_err(|source| {
             RepeatCatalogError::Unreadable {
                 path: self.path.clone(),
                 source,
@@ -484,7 +492,7 @@ fn rows_of_contig(
     contig: ContigId,
 ) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
     // One window covering the contig: the same windowed read, with nothing to skip.
-    rows_overlapping(&catalog.path, contig, &[(0, u64::MAX)]).map_err(|source| {
+    rows_overlapping(&catalog.path, &catalog.index, contig, &[(0, u64::MAX)]).map_err(|source| {
         RepeatCatalogError::Unreadable {
             path: catalog.path.clone(),
             source,
@@ -492,25 +500,17 @@ fn rows_of_contig(
     })
 }
 
-/// Read and decode the footer's header block.
-fn read_header(path: &Path) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
-    let unreadable =
-        |source: Box<dyn std::error::Error + Send + Sync>| RepeatCatalogError::Unreadable {
+/// Decode the footer's header block from the already-parsed footer.
+fn read_header(
+    path: &Path,
+    index: &CatalogIndex,
+) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
+    let text = index
+        .footer_value(HEADER_KEY)
+        .ok_or_else(|| RepeatCatalogError::Unreadable {
             path: path.to_path_buf(),
-            source,
-        };
-
-    let file = File::open(path).map_err(|e| unreadable(Box::new(e)))?;
-    let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| unreadable(Box::new(e)))?;
-    let text = builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .and_then(|kv| kv.iter().find(|entry| entry.key == HEADER_KEY))
-        .and_then(|entry| entry.value.clone())
-        .ok_or_else(|| unreadable("not a repeat catalog: no header in the footer".into()))?;
-
+            source: "not a repeat catalog: no header in the footer".into(),
+        })?;
     decode_header(&text, path)
 }
 
@@ -613,6 +613,8 @@ fn hex(digest: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+
     use crate::repeat_catalog::parquet_file::{RepeatCatalogWriter, temp_path_for};
     use crate::repeat_catalog::{StrRepeatCriteria, TractSpan};
     use crate::tandem_repeat::ScanParams;
