@@ -40,7 +40,12 @@
 //! for every update solved exactly, and a coordinate climb over a non-concave surface does not.
 //! The density's two shapes and the carrier Beta's take one step along the likelihood's own slope
 //! instead ([`step_beta_shapes`]); that the step does not lower it is measured
-//! (`plain_passes_never_lower_the_log_likelihood`), not guaranteed.
+//! (`plain_passes_never_lower_the_log_likelihood`), not guaranteed — and on 2,169 tomato samples
+//! it did, by 1.58 million units once every twelve passes. So no shape moves more than a factor of
+//! two in a pass, and a start that stops at the pass limit returns the best point it measured
+//! ([`maximise`]; plan `fit_precision.md` step F3). Some other update is not uphill either: on 30
+//! drawn samples at 3 reads, about half the cycles start lower than the one before, by up to 34
+//! units, with the frequency density's shapes held fixed — not yet traced.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -2007,9 +2012,10 @@ pub fn fit_jointly(
                     outcome.furthest_from_settled.as_ref(),
                     config.settled_fraction,
                 );
+                let losses = describe_the_best_returned(outcome.best_above_the_last);
                 format!(
                     "SNP/indel fit, start {} of {}: {how} after {} pass(es), log-likelihood \
-                         {score:.6e}{short_of_settled}; {last_pass}; {into}",
+                         {score:.6e}{short_of_settled}{losses}; {last_pass}; {into}",
                     which.number, which.of, outcome.passes,
                 )
             });
@@ -2050,6 +2056,7 @@ pub fn fit_jointly(
                 last_pass_took: _,
                 judging_passes: _,
                 judging_took: _,
+                best_above_the_last: _,
             },
         ) = best.expect("the first start always competes");
         // The winner's statistics come from a final pass, the only pass that keeps each position's
@@ -2302,7 +2309,8 @@ struct WhichStart<'a> {
 /// One run of the alternation, from one starting point, **accelerated by SQUAREM**.
 ///
 /// **Why an accelerator.** The plain alternation — a pass over the data, then every parameter
-/// set to what that pass's counts make most likely — never lowers the log-likelihood, but it can
+/// set to what that pass's counts make most likely — is meant never to lower the log-likelihood
+/// (see the paragraph on losses below for where it does), but it can
 /// approach the maximum in steps that shrink by a few parts in a thousand each pass. The two
 /// shapes of the frequency density do exactly that: on four tomato accessions they were still
 /// climbing half a percent a pass at pass 200, 11 log-likelihood units short of a maximum that
@@ -2317,8 +2325,19 @@ struct WhichStart<'a> {
 /// as their shrinking says the maximum lies. At `α = 1` that point is `θ₂` itself, so the plain
 /// alternation is the special case, and it is what the step falls back to. One more plain step
 /// from the jumped-to point steadies it, and that step's pass also says whether the jump lost
-/// log-likelihood; **a jump that did is shortened towards `α = 1` and retried**, so the fit keeps
-/// the plain alternation's guarantee of never going downhill.
+/// log-likelihood; **a jump that did is shortened towards `α = 1` and retried**.
+///
+/// **The plain alternation is not always uphill, so a start returns the best point it measured**
+/// (owner, 2026-10-09; plan `fit_precision.md` step F3). The shapes' update is one Newton step
+/// ([`step_beta_shapes`]), and on 2,169 tomato samples the step steadying a jump lost 1.58 million
+/// log-likelihood units once every twelve passes, which no check read, so the fit went round a loop
+/// and never converged; that step is now capped. Other losses remain: on 30 drawn samples at 3
+/// reads about half the cycles start lower than the one before, by up to 34 units. So a start that
+/// stops at the pass limit with its last point more than [`JUMP_SLACK`] below the best point it
+/// measured — a cycle's start, or a jump that held — returns that best point, with one more final
+/// pass there. **Going back mid-fit was tried and dropped** (owner, 2026-10-09): on that cohort it
+/// fired 19 times a start and gained at most 0.4 units, since a loss from the alternation's own step
+/// recurs when the step is taken again.
 ///
 /// **The jump is taken in coordinates without edges.** Every parameter lives in an interval its
 /// own maximisation keeps it in; each is mapped to the whole real line by the logit of its
@@ -2391,9 +2410,14 @@ fn maximise(
     // The statistics of the pass that found this start heading where an earlier one converged: at
     // the parameters it returns, with their information, so no final pass is needed.
     let mut agreed_at: Option<Statistics> = None;
+    // **The best point this start has measured** (owner, 2026-10-09; plan `fit_precision.md` step
+    // F3): a cycle's start, or a jump that held. A start that stops at the pass limit with its last
+    // point lower returns it.
+    let mut best_point: Option<MeasuredPoint> = None;
     while alternation.passes + 3 <= config.max_passes {
         let cycle_began = std::time::Instant::now();
         let (first, entering) = alternation.step(&parameters, judging);
+        MeasuredPoint::keep_the_higher(&mut best_point, &parameters, entering.log_likelihood);
         let judging_pass = alternation.passes;
         // How many parameters this cycle's information pass found further than their share of an
         // error from the maximum, the furthest, and — when some are — the earlier start this one is
@@ -2450,13 +2474,21 @@ fn maximise(
                     if alpha >= reach {
                         reach *= 4.0;
                     }
+                    // The jumped-to point's log-likelihood is known too, so it can be the best
+                    // point the start returns.
+                    MeasuredPoint::keep_the_higher(
+                        &mut best_point,
+                        &jumped,
+                        at_jump.log_likelihood,
+                    );
                     break (steadied, at_jump.log_likelihood);
                 }
                 reach = (reach / 4.0).max(1.0);
             }
             // Shortened towards the plain step, and taken as the plain step once close to it
-            // or once the passes are spent — `θ₂` never needs a check, the alternation's own
-            // guarantee covers it.
+            // or once the passes are spent. `θ₂` is not checked: the plain alternation is
+            // meant not to lower the log-likelihood, and where it does, the start still
+            // returns the best point it measured.
             alpha = (1.0 + alpha) / 2.0;
             if alpha < 1.01 || alternation.passes >= config.max_passes {
                 alpha = 1.0;
@@ -2513,7 +2545,7 @@ fn maximise(
     // probability of being mismapped, and the information their standard errors come from.
     // **A start that agreed has that pass already** — the one that judged it, at the parameters
     // it returns — and no use for the posteriors, since it does not compete to be the answer.
-    let last_pass_began = std::time::Instant::now();
+    let mut last_pass_began = std::time::Instant::now();
     let mut statistics = agreed_at.unwrap_or_else(|| {
         expectation_pass(
             samples,
@@ -2528,6 +2560,34 @@ fn maximise(
             },
         )
     });
+    // **A start returns the best point it reached**, not its last, when the last is more than
+    // `JUMP_SLACK` below it: the last cycle's steadying step is the one no later pass has checked.
+    let mut best_above_the_last = None;
+    // A start that converged returns where it converged, the point its settled test judged; one
+    // that agreed returns the point its agreement judged.
+    if match ended {
+        StartEnding::AtTheLimit => true,
+        StartEnding::Converged | StartEnding::Agreed { .. } => false,
+    } && let Some(best) = best_point
+        && statistics.log_likelihood < best.log_likelihood - JUMP_SLACK
+    {
+        best_above_the_last = Some(best.log_likelihood - statistics.log_likelihood);
+        parameters = best.parameters;
+        // The pass reported as the last is the one at the returned point.
+        last_pass_began = std::time::Instant::now();
+        statistics = expectation_pass(
+            samples,
+            depth_cap,
+            config,
+            group_index,
+            coverage,
+            &parameters,
+            PassKeeps {
+                per_position_posteriors: true,
+                information: true,
+            },
+        );
+    }
     let last_pass_took = last_pass_began.elapsed();
     // PANIC-FREE: the final pass was asked to keep the information, and a pass that is asked
     // starts every chunk's statistics, and its empty total, with the sums in place; an agreeing
@@ -2566,6 +2626,28 @@ fn maximise(
         last_pass_took,
         judging_passes,
         judging_took,
+        best_above_the_last,
+    }
+}
+
+/// **A point on a start's path whose log-likelihood a pass has measured** ([`maximise`]).
+struct MeasuredPoint {
+    parameters: Parameters,
+    log_likelihood: f64,
+}
+
+impl MeasuredPoint {
+    /// Keep `parameters` as the best in `best` where their log-likelihood is higher than its.
+    fn keep_the_higher(best: &mut Option<Self>, parameters: &Parameters, log_likelihood: f64) {
+        if best
+            .as_ref()
+            .is_none_or(|best| log_likelihood > best.log_likelihood)
+        {
+            *best = Some(Self {
+                parameters: parameters.clone(),
+                log_likelihood,
+            });
+        }
     }
 }
 
@@ -2619,6 +2701,20 @@ struct StartOutcome {
     /// took.
     judging_passes: u32,
     judging_took: std::time::Duration,
+    /// How many log-likelihood units the best point the start reached was above its last, where
+    /// it returned the best instead; `None` where it returned its last.
+    best_above_the_last: Option<f64>,
+}
+
+/// **What the log says when a start returned its best point rather than its last** ([`maximise`]):
+/// how far above the last it was. Empty for a start that returned its last.
+fn describe_the_best_returned(best_above_the_last: Option<f64>) -> String {
+    best_above_the_last.map_or_else(String::new, |above| {
+        format!(
+            "; returned its best point, {above:.1} log-likelihood units above where its last \
+             cycle left it"
+        )
+    })
 }
 
 /// **What a start's last pass took, against the average plain pass before it** — `whole`, the
@@ -2661,8 +2757,9 @@ fn finely(took: std::time::Duration) -> String {
 
 /// **The per-pass trace's last rows** ([`fit_trace`](super::fit_trace)): under the winning start
 /// and the pass after its last, the values the fit returns — not always the last pass's, since a
-/// start whose last accelerated step is refused at the pass limit returns the step before it — and
-/// each one's standard error. Nothing when the trace is off.
+/// start whose last accelerated step is refused at the pass limit returns the step before it, and a
+/// start whose last point is below its best returns the best — and each one's standard error.
+/// Nothing when the trace is off.
 fn trace_the_returned_fit(
     winning_start: usize,
     passes: u32,
@@ -2929,6 +3026,9 @@ impl Parameters {
 /// the alternation itself cannot hold, every jump fails, and each cycle spends twelve passes where
 /// it needed three — 600 passes to converge where the plain alternation took 228. A unit is
 /// far below what separates two parameter values statistically, about two.
+///
+/// **The same unit judges what a start returns** (plan `fit_precision.md` step F3): a start
+/// stopped at the pass limit whose last point is more than this below its best returns the best.
 const JUMP_SLACK: f64 = 1.0;
 
 /// The intervals each maximisation keeps its parameter in — shared with the SQUAREM jump,
@@ -4223,9 +4323,50 @@ fn golden_section(score: &dyn Fn(f64) -> f64, low: f64, high: f64) -> f64 {
 /// assumes both shapes move (plan step A7's review, where a density wanting its second shape above
 /// 50 stopped its first 4.1 units from the maximum and lost log-likelihood from pass to pass). A
 /// slope that is not a number moves nothing.
+///
+/// **No shape moves by more than a factor of [`MAX_SHAPE_FACTOR_A_PASS`] in one pass** (owner,
+/// 2026-10-09; plan `fit_precision.md` step F3). The curvature is the complete-data one, and in a
+/// shape that is large beside the other it shrinks about as `a / b²`: a modest slope then asks for
+/// a step larger than the shape itself. On 2,169 tomato samples that step took the second shape
+/// from 34.4 to its lower bound in one pass and lost 1.58 million log-likelihood units, once every
+/// twelve passes, so the fit never converged (`tmp/fit_trace_kimura_2026-10-08.md`). The cap is on
+/// the log scale, the same factor either way, and never binds where the step is at rest.
 fn step_beta_shapes(slope: [f64; 2], positions: f64, a: f64, b: f64) -> (f64, f64) {
+    // A shape that is not a positive number has no box to step within — and `clamp` on bounds made
+    // from it would panic — so it moves nothing, as a slope that is not a number does.
+    if !(a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0) {
+        return (a, b);
+    }
     let (low, high) = BETA_SHAPE_BOUNDS;
-    let within = |shape: f64| (low..=high).contains(&shape);
+    let within_a_pass = |from: f64| {
+        (
+            (from / MAX_SHAPE_FACTOR_A_PASS).max(low),
+            (from * MAX_SHAPE_FACTOR_A_PASS).min(high),
+        )
+    };
+    the_shapes_newton_step(slope, positions, a, b, [within_a_pass(a), within_a_pass(b)])
+}
+
+/// The most a Beta shape may grow or shrink in one pass ([`step_beta_shapes`]). Two: the second
+/// shape's climb on 2,169 tomato samples grew it 1.7 to 2.5 times a pass, so the cap slows a climb
+/// like that by a pass or two and stops a fall from 34.4 to 0.02 at 17.2.
+const MAX_SHAPE_FACTOR_A_PASS: f64 = 2.0;
+
+/// **The shapes' Newton step, kept inside a box**: `boxes[0]` for the first shape, `boxes[1]` for
+/// the second — the shapes' bounds, intersected with how far a pass may move them
+/// ([`step_beta_shapes`]). The joint step where it stays inside; otherwise one shape held at the
+/// edge its step crosses and the other's step with it held; and both clamped only where that too
+/// leaves the box.
+fn the_shapes_newton_step(
+    slope: [f64; 2],
+    positions: f64,
+    a: f64,
+    b: f64,
+    boxes: [(f64, f64); 2],
+) -> (f64, f64) {
+    let [(low_a, high_a), (low_b, high_b)] = boxes;
+    let within_a = |shape: f64| (low_a..=high_a).contains(&shape);
+    let within_b = |shape: f64| (low_b..=high_b).contains(&shape);
     if !(slope[0].is_finite() && slope[1].is_finite()) {
         return (a, b);
     }
@@ -4241,27 +4382,27 @@ fn step_beta_shapes(slope: [f64; 2], positions: f64, a: f64, b: f64) -> (f64, f6
         a + (slope[0] * h22 - slope[1] * h12) / determinant,
         b + (slope[1] * h11 - slope[0] * h12) / determinant,
     );
-    if within(joint.0) && within(joint.1) {
+    if within_a(joint.0) && within_b(joint.1) {
         return joint;
     }
-    // One shape held at the bound its step crosses; the other's step with it held.
+    // One shape held at the edge its step crosses; the other's step with it held.
     let a_given = |held_b: f64| a + (slope[0] - h12 * (held_b - b)) / h11;
     let b_given = |held_a: f64| b + (slope[1] - h12 * (held_a - a)) / h22;
-    if !within(joint.1) {
-        let held_b = joint.1.clamp(low, high);
+    if !within_b(joint.1) {
+        let held_b = joint.1.clamp(low_b, high_b);
         let free_a = a_given(held_b);
-        if within(free_a) {
+        if within_a(free_a) {
             return (free_a, held_b);
         }
     }
-    if !within(joint.0) {
-        let held_a = joint.0.clamp(low, high);
+    if !within_a(joint.0) {
+        let held_a = joint.0.clamp(low_a, high_a);
         let free_b = b_given(held_a);
-        if within(free_b) {
+        if within_b(free_b) {
             return (held_a, free_b);
         }
     }
-    (joint.0.clamp(low, high), joint.1.clamp(low, high))
+    (joint.0.clamp(low_a, high_a), joint.1.clamp(low_b, high_b))
 }
 
 // ---------------------------------------------------------------------
@@ -4521,6 +4662,16 @@ mod tests {
         );
     }
 
+    /// The shapes' Newton step kept inside their bounds alone, with no cap on a pass's move.
+    fn newton_step_within_the_bounds(
+        slope: [f64; 2],
+        positions: f64,
+        a: f64,
+        b: f64,
+    ) -> (f64, f64) {
+        the_shapes_newton_step(slope, positions, a, b, [BETA_SHAPE_BOUNDS; 2])
+    }
+
     /// **The shapes' step is a Newton step with the complete-data curvature, at rest where the
     /// slope is zero, and projected at a bound.** A slope built as the curvature times a known move
     /// lands on that move exactly; a zero slope moves nothing, to the bit; a slope far beyond both
@@ -4540,12 +4691,15 @@ mod tests {
             h11 * (to_a - a) + h12 * (to_b - b),
             h12 * (to_a - a) + h22 * (to_b - b),
         ];
-        let (stepped_a, stepped_b) = step_beta_shapes(slope, weight, a, b);
+        let (stepped_a, stepped_b) = newton_step_within_the_bounds(slope, weight, a, b);
         assert!(
             (stepped_a - to_a).abs() < 1e-12 && (stepped_b - to_b).abs() < 1e-12,
             "stepped to ({stepped_a}, {stepped_b})"
         );
-        assert_eq!(step_beta_shapes([0.0, 0.0], weight, a, b), (a, b));
+        assert_eq!(
+            newton_step_within_the_bounds([0.0, 0.0], weight, a, b),
+            (a, b)
+        );
         // A slope pointing at (100, 100), past the upper bound of both shapes, stops at it.
         let (far_a, far_b) = (100.0, 100.0);
         let towards_far = [
@@ -4553,17 +4707,23 @@ mod tests {
             h12 * (far_a - a) + h22 * (far_b - b),
         ];
         assert_eq!(
-            step_beta_shapes(towards_far, weight, a, b),
+            newton_step_within_the_bounds(towards_far, weight, a, b),
             (BETA_SHAPE_BOUNDS.1, BETA_SHAPE_BOUNDS.1)
         );
-        assert_eq!(step_beta_shapes([f64::NAN, 1.0], weight, a, b), (a, b));
+        assert_eq!(
+            newton_step_within_the_bounds([f64::NAN, 1.0], weight, a, b),
+            (a, b)
+        );
         // A count of positions so small that the curvature's determinant underflows to zero.
-        assert_eq!(step_beta_shapes([1.0, -1.0], 1e-170, a, b), (a, b));
+        assert_eq!(
+            newton_step_within_the_bounds([1.0, -1.0], 1e-170, a, b),
+            (a, b)
+        );
         // One step worked by hand rather than from the code's own trigamma: at (1, 1), one position's
         // curvature is [[1, −c], [−c, 1]] with c = ψ′(2) = π²/6 − 1, so a slope of (1, 0) moves the
         // shapes by (1, c) / (1 − c²).
         let c = std::f64::consts::PI * std::f64::consts::PI / 6.0 - 1.0;
-        let (by_hand_a, by_hand_b) = step_beta_shapes([1.0, 0.0], 1.0, 1.0, 1.0);
+        let (by_hand_a, by_hand_b) = newton_step_within_the_bounds([1.0, 0.0], 1.0, 1.0, 1.0);
         assert!(
             (by_hand_a - (1.0 + 1.0 / (1.0 - c * c))).abs() < 1e-6
                 && (by_hand_b - (1.0 + c / (1.0 - c * c))).abs() < 1e-6,
@@ -4574,7 +4734,8 @@ mod tests {
         let ab = a + b;
         let h11 = weight * (trigamma(a) - trigamma(ab));
         for slope_in_a in [0.0, 30.0, -12.0] {
-            let (stepped_a, stepped_b) = step_beta_shapes([slope_in_a, 500.0], weight, a, b);
+            let (stepped_a, stepped_b) =
+                newton_step_within_the_bounds([slope_in_a, 500.0], weight, a, b);
             assert_eq!(
                 stepped_b, BETA_SHAPE_BOUNDS.1,
                 "the second shape held at its bound"
@@ -4584,6 +4745,91 @@ mod tests {
                 "slope {slope_in_a} in the first shape: stepped to {stepped_a}"
             );
         }
+    }
+
+    /// **The start's log line says when it returned its best point**, and nothing otherwise.
+    #[test]
+    fn the_log_says_when_a_start_returned_its_best_point() {
+        assert_eq!(describe_the_best_returned(None), "");
+        assert_eq!(
+            describe_the_best_returned(Some(76_900.04)),
+            "; returned its best point, 76900.0 log-likelihood units above where its last cycle \
+             left it"
+        );
+    }
+
+    /// **No shape moves more than a factor of two in a pass, and the cap is projected as a bound
+    /// is** (plan step F3). At the kimura loop's top — the first shape 0.27, the second 34.4 — the
+    /// curvature in the second is so small that a slope pulling it down a little asks for a step
+    /// past its lower bound; uncapped the step lands on the bound, capped it halves the shape and
+    /// the first takes its step with the second held there. A step inside the factor is the Newton
+    /// step unchanged, one asking for more than twice the shape stops at twice, and a zero slope
+    /// moves nothing.
+    #[test]
+    fn no_shape_moves_more_than_a_factor_of_two_in_a_pass() {
+        let (a, b, weight) = (0.27, 34.4, 1.0e6);
+        let ab = a + b;
+        let h11 = weight * (trigamma(a) - trigamma(ab));
+        let h22 = weight * (trigamma(b) - trigamma(ab));
+        let h12 = -weight * trigamma(ab);
+        let slope_towards = |to_a: f64, to_b: f64| {
+            [
+                h11 * (to_a - a) + h12 * (to_b - b),
+                h12 * (to_a - a) + h22 * (to_b - b),
+            ]
+        };
+        // Asked for b = −10, past the lower bound of 0.02, with a unchanged.
+        let past_the_floor = slope_towards(a, -10.0);
+        let (_, uncapped_b) = newton_step_within_the_bounds(past_the_floor, weight, a, b);
+        assert_eq!(
+            uncapped_b, BETA_SHAPE_BOUNDS.0,
+            "uncapped, the step hits the floor"
+        );
+        let (capped_a, capped_b) = step_beta_shapes(past_the_floor, weight, a, b);
+        assert_eq!(capped_b, b / MAX_SHAPE_FACTOR_A_PASS);
+        // **Projected at the cap as at a bound**: the first shape takes the step the same
+        // curvature gives with the second held at its cap, not the joint step's value for it.
+        let held_b = b / MAX_SHAPE_FACTOR_A_PASS;
+        let expected_a = a + (past_the_floor[0] - h12 * (held_b - b)) / h11;
+        assert!(
+            (capped_a - expected_a).abs() < 1e-12,
+            "the first shape with the second held at its cap: {capped_a} against {expected_a}"
+        );
+
+        let (inside_a, inside_b) = step_beta_shapes(slope_towards(0.3, 40.0), weight, a, b);
+        assert!(
+            (inside_a - 0.3).abs() < 1e-9 && (inside_b - 40.0).abs() < 1e-9,
+            "a step inside the factor is the Newton step: ({inside_a}, {inside_b})"
+        );
+        // From b = 10, asked for b = 45 (inside the bounds): the step stops at 20.
+        let low_b = 10.0;
+        let ab = a + low_b;
+        let (h22, h12) = (
+            weight * (trigamma(low_b) - trigamma(ab)),
+            -weight * trigamma(ab),
+        );
+        let upwards = [h12 * (45.0 - low_b), h22 * (45.0 - low_b)];
+        assert!((newton_step_within_the_bounds(upwards, weight, a, low_b).1 - 45.0).abs() < 1e-9);
+        let (unmoved_a, doubled_b) = step_beta_shapes(upwards, weight, a, low_b);
+        assert_eq!(doubled_b, low_b * MAX_SHAPE_FACTOR_A_PASS);
+        assert!((unmoved_a - a).abs() < 1e-9, "the first shape: {unmoved_a}");
+
+        // **The factor is two, on the first shape too**, by value rather than through the constant:
+        // from (1, 1), asked for (4, 1), it stops at exactly (2, 1). (With the first held at 2 the
+        // second's own step would leave its box, so both are clamped.)
+        let (h11, h12) = (
+            weight * (trigamma(1.0) - trigamma(2.0)),
+            -weight * trigamma(2.0),
+        );
+        let towards_four = [h11 * 3.0, h12 * 3.0];
+        let (stepped_a, stepped_b) = step_beta_shapes(towards_four, weight, 1.0, 1.0);
+        assert_eq!(stepped_a, 2.0);
+        assert!(
+            (stepped_b - 1.0).abs() < 1e-12,
+            "the second shape: {stepped_b}"
+        );
+        assert_eq!(step_beta_shapes([1.0, 1.0], weight, f64::NAN, 1.0).1, 1.0);
+        assert_eq!(step_beta_shapes([0.0, 0.0], weight, a, b), (a, b));
     }
 
     #[test]
@@ -5792,6 +6038,64 @@ mod whole_fit_tests {
             cohort.noisy_share
         );
         assert!(fit.converged, "the alternation ran out of passes");
+    }
+
+    /// **Every start that stops at the pass limit returns the best point it reached** (plan step
+    /// F3), on the cohort of `a_stretch_some_samples_carry_twice_is_not_read_as_heterozygosity`: 30
+    /// samples at 3 reads, fitted without and with the duplicated class. Found in the step's
+    /// review: before it, all six starts returned 1.5 to 16.4 log-likelihood units below the best
+    /// point any of their cycles had started from; and a mutation returning a start's best
+    /// parameters with its last point's log-likelihood passed every test then, none of which looked
+    /// past the winning start.
+    #[test]
+    fn every_start_at_the_pass_limit_returns_the_best_point_it_reached() {
+        use crate::parameter_estimation::joint::fit_trace::captured;
+        let cohort = draw_cohort_with_duplications(
+            30,
+            4_000,
+            3.0,
+            (0.002, 0.05, 0.01),
+            FrequencyDensity {
+                p_invariant: 0.95,
+                p_fixed_alt: 0.002,
+                a: 0.5,
+                b: 2.0,
+            },
+            0.6,
+            0.004,
+            0x51ED_2709,
+        );
+        let mut checked = 0;
+        for class in [false, true] {
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                max_passes: 120,
+                duplicated_positions: class,
+                ..JointFitConfig::default()
+            };
+            let (fit, rows) = captured(|| {
+                fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools")
+            });
+            for start in fit
+                .starts
+                .iter()
+                .filter(|start| start.ended == StartEnding::AtTheLimit)
+            {
+                let best_entered = rows
+                    .iter()
+                    .filter(|row| row.0 == start.number && row.1 <= start.passes)
+                    .map(|row| row.2)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                assert!(
+                    start.log_likelihood >= best_entered - JUMP_SLACK,
+                    "class {class}, start {}: returned {} against a best of {best_entered}",
+                    start.number,
+                    start.log_likelihood
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "some start runs to the pass limit");
     }
 
     /// **A stretch some samples carry twice must not be read as heterozygosity.**

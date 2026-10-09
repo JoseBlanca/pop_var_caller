@@ -17,7 +17,8 @@
 //! **Once a fit has chosen its best start, it writes what it returns**, under that start and
 //! `pass` one after its last: one row a parameter with the value the fit returns — which is not
 //! always the last pass's, since a start whose last accelerated step is refused at the pass limit
-//! returns the step before it — and one row a parameter with its standard error, named
+//! returns the step before it, and a start whose last point is below the best it reached returns
+//! that best (plan `fit_precision.md` step F3) — and one row a parameter with its standard error, named
 //! `standard_error:` and the parameter's name, NaN where it has none. Their `log_likelihood` is
 //! the final pass's, at the returned values. So each pass's move can be read in units of the
 //! parameter's own error, against the values the fit returned.

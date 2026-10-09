@@ -228,11 +228,27 @@ mod tests {
     /// four tomato accessions (`scripts/promote_ng_oracle.sh`): the fitted file gains 36 own-fit
     /// errors beside blends and otherwise moves only in that note; no call moves. Recorded in the
     /// Linux container (arm64, glibc) and the same on macOS (arm64); it was `5e3dacbf558adc6787276897935dbbf8`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "818b628a0e72bb39fc9cb5e757cfabd1";
+    ///
+    /// **Re-recorded 2026-10-09** when a start stopped at the pass limit began returning the best
+    /// point it measured rather than its last (`fit_precision.md` step F3). All three of this
+    /// cohort's starts stop at the limit below their best — by 15.3, 1,004.3 and 535.8
+    /// log-likelihood units — and the winner, start 1, now returns its best: −5,099.1 against
+    /// −5,114.4. Every library's multiplier moves (read group 0 from 4.85 to 7.66); 24 of the
+    /// file's 549 lines move. Measured by switching the return off, which reproduces
+    /// `818b628a0e72bb39fc9cb5e757cfabd1` exactly; the step's other change, the cap on the Beta
+    /// shapes, moves nothing here. The four-accession tomato cohort does not move. Recorded in the
+    /// Linux container (arm64, glibc) and the same on macOS (arm64); it was
+    /// `818b628a0e72bb39fc9cb5e757cfabd1`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "194beab11f8d2a166999f2f68c28eced";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "ec9aaa04a0d365fdaa468eb8eeda7c40";
+    ///
+    /// **Re-recorded 2026-10-09** with the fit above, its start returning its best point: the same
+    /// 22 records and genotypes; every site's `QUAL` falls, by 0.7 to 78.4, as the returned
+    /// multipliers charge the reads more error; 9 sample GQs move, by −4 to +8. It was
+    /// `ec9aaa04a0d365fdaa468eb8eeda7c40`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "795a97078e9322689f88fde223700a69";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

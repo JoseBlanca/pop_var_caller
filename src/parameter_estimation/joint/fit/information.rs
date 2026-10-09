@@ -4495,6 +4495,65 @@ mod tests {
         );
     }
 
+    /// **A start returns the best point it reached, never one more than `JUMP_SLACK` below it**
+    /// (plan step F3): over drawn cohorts of 2 to 20 samples at 3 to 30 reads, the fit's
+    /// log-likelihood is at least the highest any pass of the winning start entered with, less one
+    /// unit. Before the step a start returned wherever its last cycle left it, and on 2,169 tomato
+    /// samples that was 128,600 units below its best.
+    ///
+    /// **A guard, not a reproduction.** Drawn cohorts this small do not lose what kimura lost:
+    /// measured in the step with the fallback and the best-point return switched off, 54 drawn
+    /// cohorts of 8 to 40 samples at 3 and 10 reads, densities from (0.6, 2.2) to (0.2, 30), all
+    /// returned within 0.03 units of their best. So this test fails only if the step's own
+    /// bookkeeping returns something worse than a point it reached; the loss it was built for is
+    /// measured on kimura.
+    #[test]
+    fn a_start_returns_the_best_point_it_reached() {
+        use crate::parameter_estimation::joint::fit_trace::captured;
+        let config = JointFitConfig {
+            quadrature_nodes: 12,
+            estimate_contamination: false,
+            ..JointFitConfig::default()
+        };
+        for (samples, depth, seed) in [
+            (2, 3.0, 0xF3_0002),
+            (4, 3.0, 0xF3_0004),
+            (20, 30.0, 0xF3_0020),
+        ] {
+            let cohort = draw_cohort_with_duplications(
+                samples,
+                3_000,
+                depth,
+                (0.003, 0.06, 0.03),
+                FrequencyDensity {
+                    p_invariant: 0.88,
+                    p_fixed_alt: 0.01,
+                    a: 0.6,
+                    b: 2.2,
+                },
+                0.3,
+                0.01,
+                seed,
+            );
+            let ((fit, _), rows) = captured(|| fitted(&cohort, &config));
+            let winner = rows
+                .iter()
+                .find(|row| row.3.starts_with("standard_error:"))
+                .expect("the trace files the returned fit")
+                .0;
+            let best_entered = rows
+                .iter()
+                .filter(|row| row.0 == winner && row.1 <= fit.passes)
+                .map(|row| row.2)
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                fit.log_likelihood >= best_entered - super::super::JUMP_SLACK,
+                "{samples} samples × {depth} reads: returned {} against a best of {best_entered}",
+                fit.log_likelihood
+            );
+        }
+    }
+
     /// **A fit without the duplicated class says its three have no information, and the log leaves
     /// them out** — two samples, the class off in the draw and the fit.
     #[test]

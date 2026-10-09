@@ -364,8 +364,46 @@ The steps:
    with no read spanning a tract, or below the floor. **The checksums move only if the oracle's or the
    fixtures' files gain keys**; that is measured and explained before they are re-recorded. *Depends:* E2.
    *Source:* spec §5.2 as amended.
-2. ☐ **F2 — the SNP/indel non-convergence, measured.** The prompt for the kimura run with the trace on; then
+2. ✅ **F2 — the SNP/indel non-convergence, measured.** The prompt for the kimura run with the trace on; then
    the written plan to the owner. No code before the owner has chosen. *Depends:* —. *Source:* spec §2, §3.3.
+
+**Measured (the owner's traced kimura run, `82e248e7`, report `tmp/fit_trace_kimura_2026-10-08.md` in the main
+checkout), and decided (owner, 2026-10-09).** The fit does not converge slowly: it goes round a loop. From about
+pass 50 every start repeats the same 12 passes. Over 11 the log-likelihood climbs 1.58 million units while the
+allele-frequency shape b grows about twofold a pass, from 0.02 to 34.4, and the last of those passes gains 285. Then
+the pass that updates the two shapes, steadying a SQUAREM jump, leaves b at 0.02, its lower bound, and the 1.58
+million is lost — and kept, since the jump's check reads the jumped point and not the update after it. The three
+starts are on the same loop at different phases; no pass limit finishes it, and the settled test (a cycle gaining
+under 200 units) never started. The fit returned start 2's last point, 128,600 units below the best point any start
+reached, with its errors computed halfway up the loop. The update is `step_beta_shapes`: one Newton step whose
+curvature in b, the complete-data one, shrinks about as a/b², so a modest slope gives a step larger than b. It came
+in at step A7; the baseline before this plan ended all three starts at the same log-likelihood to seven digits.
+
+**Decided: three changes, one step (F3).** (1) The shapes' step is taken on the log scale and capped at a factor of
+2 a pass for each shape. (2) A cycle that starts more than `JUMP_SLACK` below where the previous cycle started goes
+back to the best point so far and takes one plain cycle from it, unaccelerated — the standard SQUAREM fallback. (3) A
+start returns the best point it reached, not the last. **Deferred, to be decided from the next kimura run:** with the
+loop gone, b will likely settle against its upper bound, 50, as the data do not determine it (no standard error);
+whether that stands or the Beta takes another parameterisation is the owner's call then.
+
+3. ✅ **F3 — the shapes' step capped, and a start returns its best point.** Measured on drawn cohorts and the
+   oracle cohort (traced first, to see whether it loops too); fitted numbers move, so **own commit**, with the
+   checksums re-recorded after `scripts/promote_ng_oracle.sh` has measured and explained the change. Then the
+   owner's kimura run of the SNP/indel half. *Depends:* F2. *Source:* spec §2, §3.3; this decision.
+   **Decided during F3 (owner, 2026-10-09): change (2), going back mid-fit, is dropped.** The step's review found
+   that on an existing test cohort of 30 drawn samples at 3 reads the alternation loses log-likelihood in about
+   half its cycles, by up to 34 units, with the frequency density's shapes held fixed too — so some other update
+   is not uphill. Judged against the best point, the fallback replayed one cycle every three passes to the pass
+   limit; judged against the cycle before, it still fired 19 times a start and gained at most 0.4 units, since a
+   loss that comes from the alternation's own step recurs when the step is taken again. **Built:** (1) no Beta
+   shape — the frequency density's or the carrier one's — moves more than a factor of two in a pass, the cap
+   projected as a bound is (the other shape takes its step with the capped one held); (3) a start that stops at
+   the pass limit with its last point more than `JUMP_SLACK` below the best point it measured — a cycle's start,
+   or a jump that held — returns that point, with a final pass there; a start that converged or agreed returns
+   where it did. The four-accession oracle does not move; the 21-sample cross-platform fixture does (its winning
+   start returns its best, 15.3 units above its last; no genotype moves). **Next, besides the owner's kimura
+   run:** find which other update loses log-likelihood, on the 30-sample cohort and with the simulator a parallel
+   session built — a plan to the owner before code.
 
 ## 5. Verification summary
 
