@@ -322,6 +322,14 @@ test = true
 name = "ng_psp_skip_value"
 test = true
 
+# The stuttering benchmark's simulator carries the tests that say its reads stutter at the rates
+# its specification tables (doc/devel/ng/spec/str_stutter_benchmark.md §3.2) and that its truth
+# VCF spells the sequences the reads were cut from. A benchmark scored against a wrong truth is
+# a wrong measurement with every gate green, so they run with a plain `cargo test`.
+[[example]]
+name = "ng_str_stutter_benchmark"
+test = true
+
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
 # only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
 # `cargo test` — which builds every example — fails to compile the crate at all.
