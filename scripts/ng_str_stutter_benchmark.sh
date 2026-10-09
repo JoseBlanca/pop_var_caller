@@ -34,6 +34,10 @@
 #   GATK_JOBS   HaplotypeCaller processes at once (default: THREADS / 2, at least 1)
 #   GATK_HEAP   Java heap per GATK process (default 4g)
 #   KEEP_FASTQ  1 keeps each sample's FASTQ after mapping (default: deleted, ~230 MB a sample at 60×)
+#   FIT_FROM    a run directory of the same cohort at another depth whose fit is reused (see ng_fit)
+#   BIN_DIR     a directory holding pop_var_caller, ng_str_stutter_benchmark and
+#               ng_typed_region_dump, used instead of the newest build — so a grid can run on a
+#               frozen copy while the tree is rebuilt
 set -euo pipefail
 
 out=${1:?usage: $0 <out-dir> [simulator key=value ...]}
@@ -57,9 +61,15 @@ newest() {
     [[ -n "$best" ]] || { echo "no built $1; build it with cargo build --release" >&2; exit 1; }
     echo "$best"
 }
-ng=$(newest pop_var_caller)
-simulator=$(newest examples/ng_str_stutter_benchmark)
-typing_dump=$(newest examples/ng_typed_region_dump)
+if [[ -n "${BIN_DIR:-}" ]]; then
+    ng=$BIN_DIR/pop_var_caller
+    simulator=$BIN_DIR/ng_str_stutter_benchmark
+    typing_dump=$BIN_DIR/ng_typed_region_dump
+else
+    ng=$(newest pop_var_caller)
+    simulator=$(newest examples/ng_str_stutter_benchmark)
+    typing_dump=$(newest examples/ng_typed_region_dump)
+fi
 for tool in minimap2 samtools bcftools "$gatk" "$hipstr"; do
     command -v "$tool" > /dev/null || { echo "$tool not found; run this in the dev container" >&2; exit 1; }
 done
@@ -146,7 +156,24 @@ ng_psps() {
         > "$out/ng_generate_psps.log" 2>&1
 }
 
+# **One fit a cohort** (owner, 2026-10-09): the fit is the slow step, and a cohort — one design,
+# sample count and seed — is the same samples at every depth, because the simulator draws the
+# genotypes and libraries before the depth is used. With FIT_FROM=<run dir of the same cohort>,
+# that run's fit is copied after checking the two runs' settings differ in depth alone.
 ng_fit() {
+    if [[ -n "${FIT_FROM:-}" ]]; then
+        local mine theirs
+        mine=$(grep '^settings' "$out/simulate.log" | sed 's/depth: [0-9.]*, //; s/threads: [0-9]*, //')
+        theirs=$(grep '^settings' "$FIT_FROM/simulate.log" | sed 's/depth: [0-9.]*, //; s/threads: [0-9]*, //')
+        if [[ "$mine" != "$theirs" ]]; then
+            echo "!! FIT_FROM=$FIT_FROM is another cohort:" >&2
+            printf '   %s\n   %s\n' "$theirs" "$mine" >&2
+            exit 1
+        fi
+        cp "$FIT_FROM/ng_fit.parameters.toml" "$out/ng_fit.parameters.toml"
+        echo "fit copied from $FIT_FROM" > "$out/ng_estimate_parameters.log"
+        return
+    fi
     "$ng" estimate-parameters --reference "$reference" --catalog "$catalog" --psp "$out/psps" \
         --output "$out/ng_fit.parameters.toml" --force > "$out/ng_estimate_parameters.log" 2>&1
 }
