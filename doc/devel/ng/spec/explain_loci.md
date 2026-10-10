@@ -16,8 +16,8 @@ HG003 and HG004 at 300×, they could trace 8 to the psp; the rest were lost afte
 ## 2. Interface
 
 ```text
-pop_var_caller call-from-psps       ... --explain-loci <regions.bed> <out.tsv>
-pop_var_caller call-from-alignments ... --explain-loci <regions.bed> <out.tsv>
+pvc call-from-psps       ... --explain-loci <regions.bed> <out.tsv>
+pvc call-from-alignments ... --explain-loci <regions.bed> <out.tsv>
 ```
 
 **It selects what is explained, never what is called.** The run calls the whole of its ground

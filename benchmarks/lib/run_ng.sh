@@ -10,7 +10,7 @@
 #          walks them all at one frontier — so unlike run_ours.sh there is no
 #          .psp stage to skip on a re-run.
 #
-# ng is the caller (`pop_var_caller call-from-alignments`); "ng" is the name it was written under.
+# ng is the caller (`pvc call-from-alignments`); "ng" is the name it was written under.
 # Three things about it shape this script:
 #
 #   * It needs a tandem-repeat catalog built from the same reference, and

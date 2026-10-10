@@ -6,7 +6,7 @@ Skills and agents are instructed to leave it untouched.
 -->
 > **About this project.** A population variant caller: SNPs, indels and repeat tracts, from
 > aligned reads to one VCF, for one sample to thousands of samples and from a few reads a
-> position to several hundred. It is the `pop_var_caller` binary; its subcommands build a
+> position to several hundred. It is the `pvc` binary; its subcommands build a
 > reference's repeat catalog, call a cohort straight from alignment files, or store each sample's
 > evidence as a psp file, fit the run's parameters from those files and call from them. The design
 > is under [doc/devel/ng/](doc/devel/ng/) — start with

@@ -22,7 +22,7 @@
 #   scripts/ng_mode_equivalence_oracle.sh <reference.fa> <catalog.parquet> <regions.bed> \
 #       <output-dir> <alignment.cram>...
 #
-# It expects a release build of `pop_var_caller` in `target-container/release` or `target/
+# It expects a release build of `pvc` in `target-container/release` or `target/
 # release` and takes whichever is newer, because a machine with no container runtime builds to
 # the second (see CLAUDE.md).
 set -eu
@@ -40,14 +40,14 @@ shift 4
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=""
-for candidate in "$root/target-container/release/pop_var_caller" \
-                 "$root/target/release/pop_var_caller"; do
+for candidate in "$root/target-container/release/pvc" \
+                 "$root/target/release/pvc"; do
   if [ -x "$candidate" ] && { [ -z "$bin" ] || [ "$candidate" -nt "$bin" ]; }; then
     bin=$candidate
   fi
 done
 if [ -z "$bin" ]; then
-  echo "no release build of pop_var_caller; build one first" >&2
+  echo "no release build of pvc; build one first" >&2
   exit 1
 fi
 
