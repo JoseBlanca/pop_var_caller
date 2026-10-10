@@ -70,6 +70,9 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
+pub mod library_stutter;
+pub mod neighbour_start;
+
 use crate::float;
 use crate::parameter_estimation::joint::census::{
     CensusError, CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
