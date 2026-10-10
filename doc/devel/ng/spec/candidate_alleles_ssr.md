@@ -241,6 +241,18 @@ representative, and the representative is the only sequence per rung a single-sa
 Production's figure is flat across the whole coverage ladder — 33% at 10×, 38% at 30×, 35% at 300×
 — because the limit is structural rather than evidential.
 
+**One exception: a length the reads earned keeps one spelling** (owner, 2026-10-10). Where some
+sample's own reads nominated a length (§4, before the `±1` rescue) but sequencing errors split
+them across spellings so that no spelling reached the bar, the length's best-supported spelling
+is admitted — the most reads, then the one closest to a pure run of the motif, then the lexically
+smaller. Without it the length §4 said was real is lost: on the stuttering benchmark at one
+sample and 15×, a 5-base repeat whose sample had lost two copies showed it on three reads, two of
+them with one wrong base, so three spellings of one read each and no candidate. The reads that
+carry an error still count for the admitted spelling through §4.3's substitution term of
+[`read_likelihoods.md`](read_likelihoods.md). A rescued neighbour, which no sample's reads
+earned, gets nothing from this; nor does a length the reference tract or an admitted spelling
+already stands for.
+
 **The rule of §5 costs fewer candidates, not more:** 1.26 sequences per tract at 300× against
 production's 1.57.
 

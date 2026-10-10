@@ -335,6 +335,7 @@ pub(super) fn build_ladder(
         sample_reads_per_rung: _,
         promoted_rungs: _,
         rung_is_promoted: _,
+        rung_earned_by_reads: _,
         cap_cut_table_indices: _,
         discovery_nominated: _,
     } = scratch;
@@ -796,10 +797,13 @@ pub(super) fn promote_rungs_for_cohort(
         sample_reads_per_rung,
         promoted_rungs,
         rung_is_promoted,
+        rung_earned_by_reads,
         ..
     } = scratch;
     rung_is_promoted.clear();
     rung_is_promoted.resize(ladder.rung_count(), false);
+    rung_earned_by_reads.clear();
+    rung_earned_by_reads.resize(ladder.rung_count(), false);
 
     for sample in &observation.per_sample {
         fill_sample_reads_per_rung(sample, observation.region, ladder, sample_reads_per_rung);
@@ -810,6 +814,12 @@ pub(super) fn promote_rungs_for_cohort(
             ladder,
             promoted_rungs,
         );
+        // Before the rescue widens the list: these are the lengths this sample's own reads put
+        // forward, which admission may keep a spelling of even when no single spelling cleared
+        // the bar.
+        for &rung in promoted_rungs.iter() {
+            rung_earned_by_reads[rung as usize] = true;
+        }
         rescue_occupied_neighbours(ladder, config.ploidy, promoted_rungs);
         for &rung in promoted_rungs.iter() {
             rung_is_promoted[rung as usize] = true;
@@ -931,6 +941,25 @@ pub(super) fn nominate_discovered_sequences(
 /// 296 of HG002's 695 heterozygous tracts — production offers both at 35.1% of them and this rule
 /// at 86.1%, against a ceiling of 93.6% set by what some read actually carried.
 ///
+/// # A length the reads earned keeps one spelling (owner, 2026-10-10)
+///
+/// **Where some sample's own reads earned a repeat length but sequencing errors split them across
+/// spellings so that none cleared the bar, the length's best-supported spelling is admitted** —
+/// the most cohort reads; among equals, the one closest to a pure run of the motif
+/// ([`bases_off_the_motif`]), because when the reads are split one apiece the spellings that
+/// differ from the pure run are most likely the ones carrying an error, and the admitted spelling
+/// is what the record writes; then the lexically smaller, for determinism. Without it the length is lost
+/// although the nomination said it was real: on the stuttering benchmark at one sample and 15×, a
+/// 5-base repeat whose sample had lost two copies showed it on three reads, two of them with one
+/// wrong base each, so three spellings of one read apiece and no candidate. The reads carrying an
+/// error still count for the admitted spelling, through the substitution term that scores every
+/// read against every candidate of its length (`read_likelihoods.md` §4.3).
+///
+/// Two limits keep it to that case: a length the `±1` rescue added — which no sample's reads
+/// earned — gets no such spelling; and a length the reference tract or an admitted spelling
+/// already stands for gets nothing more. A spelling with no whole repeat is never chosen, since
+/// the tract model cannot score it.
+///
 /// # The reference tract is admitted first and asked nothing
 ///
 /// It is exempt from the bar *and* from the promotion test (spec §5, §7), so a tract whose reads
@@ -972,6 +1001,7 @@ pub(super) fn admit_promoted_sequences(
         ranked_table_indices,
         ladder,
         rung_is_promoted,
+        rung_earned_by_reads,
         cap_cut_table_indices,
         discovery_nominated,
         ..
@@ -1012,6 +1042,53 @@ pub(super) fn admit_promoted_sequences(
                 u32::try_from(index).expect("a merge table narrower than four billion alleles")
             }),
     );
+
+    // **A length some sample's reads earned, which no admitted spelling and not the reference
+    // stands for, keeps its best-supported spelling** — the doc's "a length the reads earned".
+    // Empty flags are a selection that never ran nomination (a test driving admission alone);
+    // anything else is one flag per rung.
+    assert!(
+        rung_earned_by_reads.is_empty() || rung_earned_by_reads.len() == ladder.rung_count(),
+        "the earned-length flags hold {} entries over a ladder of {} rungs at {}",
+        rung_earned_by_reads.len(),
+        ladder.rung_count(),
+        observation.region
+    );
+    let reference_rung = ladder.rung_of_table_index(0);
+    let mut kept_for_an_earned_length = false;
+    for rung in (0..rung_earned_by_reads.len()).filter(|&rung| rung_earned_by_reads[rung]) {
+        let stood_for = rung == reference_rung
+            || ranked_table_indices
+                .iter()
+                .any(|&index| ladder.rung_of_table_index(index as usize) == rung);
+        if stood_for {
+            continue;
+        }
+        let best = (1..observation.alleles.len())
+            .filter(|&index| ladder.rung_of_table_index(index) == rung)
+            .filter(|&index| repeat_count_of_bases(&observation.alleles[index], &detail.motif) > 0)
+            .max_by(|&left, &right| {
+                per_allele[left]
+                    .cohort_reads
+                    .cmp(&per_allele[right].cohort_reads)
+                    .then_with(|| {
+                        bases_off_the_motif(&observation.alleles[right], &detail.motif).cmp(
+                            &bases_off_the_motif(&observation.alleles[left], &detail.motif),
+                        )
+                    })
+                    .then_with(|| observation.alleles[right].cmp(&observation.alleles[left]))
+            });
+        if let Some(index) = best {
+            ranked_table_indices.push(
+                u32::try_from(index).expect("a merge table narrower than four billion alleles"),
+            );
+            kept_for_an_earned_length = true;
+        }
+    }
+    if kept_for_an_earned_length {
+        // Back to the merge table's order, which is the order admission and the cap expect.
+        ranked_table_indices.sort_unstable();
+    }
 
     let allowed_alternatives = usize::from(config.shared.max_candidate_alleles.alternatives());
     let verdict = if ranked_table_indices.len() <= allowed_alternatives {
@@ -1063,6 +1140,27 @@ pub(super) fn admit_promoted_sequences(
         })
         .collect();
     LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
+}
+
+/// **How many of a tract sequence's bases differ from a pure run of the motif**, at whichever
+/// rotation of the motif fits it best — the tie-break that picks, among spellings of one length
+/// with equal reads, the one least likely to carry a sequencing error
+/// ([`admit_promoted_sequences`]). Zero for a pure run; an interrupted reference tract scores its
+/// interruptions, which is fine, because it only ever ranks spellings of one length against each
+/// other.
+fn bases_off_the_motif(bases: &[u8], motif: &Motif) -> usize {
+    let unit = motif.as_bytes();
+    let period = unit.len();
+    (0..period)
+        .map(|rotation| {
+            bases
+                .iter()
+                .enumerate()
+                .filter(|&(at, &base)| base != unit[(at + rotation) % period])
+                .count()
+        })
+        .min()
+        .unwrap_or(0)
 }
 
 /// **How many whole motif copies a tract sequence carries** — `bases.len() / motif.period()`,
@@ -2919,6 +3017,76 @@ mod tests {
             &Motif::new(b"AT").expect("a two-base motif"),
             MaxOffGridShare::DEFAULT
         ));
+    }
+
+    /// **A length the reads earned, split across spellings by sequencing errors, keeps its purest
+    /// spelling** (owner, 2026-10-10). The stuttering benchmark's case: four reads at the
+    /// reference length and three a unit shorter, one pure and two with one wrong base each —
+    /// three spellings of one read apiece, none clearing the bar of two, while the length's three
+    /// reads do. The pure spelling is admitted; the two carrying an error are not.
+    #[test]
+    fn a_length_split_across_spellings_keeps_its_purest_spelling() {
+        let observation = tract_of(
+            &[b"ATATATATAT", b"ATACATAT", b"ATATATAT", b"ATATAGAT"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 4, -4.0),
+                    row(1, 1, -1.0),
+                    row(2, 1, -1.0),
+                    row(3, 1, -1.0),
+                ],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"ATATATATAT".to_vec(), b"ATATATAT".to_vec()]
+        );
+    }
+
+    /// **The rule keeps one spelling for a length nothing else stands for, and no more.** Where a
+    /// spelling of the earned length cleared the bar on its own, the length is already stood for
+    /// and its one-read siblings stay out; and a length only the `±1` rescue reached — one read,
+    /// earned by nobody — gets no spelling from this rule.
+    #[test]
+    fn a_length_already_stood_for_or_only_rescued_gets_nothing_more() {
+        let stood_for = tract_of(
+            &[b"ATATATATAT", b"ATATATAT", b"ATACATAT"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 4, -4.0), row(1, 3, -3.0), row(2, 1, -1.0)],
+            )],
+        );
+        assert_eq!(
+            admitted_bases(&selected(&stood_for, 2)),
+            vec![b"ATATATATAT".to_vec(), b"ATATATAT".to_vec()]
+        );
+
+        // Twenty reads at the reference length and one a unit longer: the sample resolved one
+        // length, so the rescue promotes the occupied neighbour, but no sample's reads earned it.
+        let only_rescued = tract_of(
+            &[b"ATATATATAT", b"ATATATATATAT"],
+            b"AT",
+            vec![sample_showing(0, vec![row(0, 20, -20.0), row(1, 1, -1.0)])],
+        );
+        assert_eq!(
+            admitted_bases(&selected(&only_rescued, 2)),
+            vec![b"ATATATATAT".to_vec()]
+        );
+    }
+
+    /// The purity tie-break reads the motif at its best rotation: a pure run scores zero
+    /// whichever base of the unit it starts on, and each wrong base costs one.
+    #[test]
+    fn bases_off_the_motif_counts_wrong_bases_at_the_best_rotation() {
+        let motif = Motif::new(b"AAGAG").expect("a five-base motif");
+        assert_eq!(bases_off_the_motif(b"AAGAGAAGAG", &motif), 0);
+        assert_eq!(bases_off_the_motif(b"GAGAAGAGAA", &motif), 0);
+        assert_eq!(bases_off_the_motif(b"AAGAGAAAAG", &motif), 1);
+        assert_eq!(bases_off_the_motif(b"AATAGAAAAG", &motif), 2);
     }
 
     /// **One read off the grid never refuses a tract, whatever its share; two can** (owner,

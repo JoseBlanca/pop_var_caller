@@ -644,6 +644,12 @@ pub struct SelectionScratch {
     /// already claimed a length. It also comes out in ascending rung order for free, which is the
     /// order admission needs.
     rung_is_promoted: Vec<bool>,
+    /// **One flag per rung: whether some sample's own reads earned that repeat length** — the
+    /// promotions before the `±1` rescue adds the neighbours, which `rung_is_promoted` also holds.
+    /// Admission reads it to keep one spelling of a length whose reads sequencing errors split
+    /// across spellings ([`ssr::admit_promoted_sequences`]); a rescued neighbour, earned by no
+    /// sample's reads, gets no such spelling.
+    rung_earned_by_reads: Vec<bool>,
     /// **The merge-table indices the cap removed at this locus, ascending** — what
     /// [`leftover_of`] is asked, rather than inferring it from "this sample earned it and it is
     /// gone". Empty at every locus the cap did not bind at, which is almost all of them.
@@ -692,6 +698,7 @@ impl SelectionScratch {
             sample_reads_per_rung,
             promoted_rungs,
             rung_is_promoted,
+            rung_earned_by_reads,
             cap_cut_table_indices,
             discovery_nominated,
         } = self;
@@ -703,6 +710,7 @@ impl SelectionScratch {
         sample_reads_per_rung.clear();
         promoted_rungs.clear();
         rung_is_promoted.clear();
+        rung_earned_by_reads.clear();
         cap_cut_table_indices.clear();
         discovery_nominated.clear();
     }
