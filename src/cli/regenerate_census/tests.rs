@@ -148,12 +148,8 @@ fn the_subcommand_is_spelled_regenerate_census() {
     // **`SUBCOMMAND` is *defined as* that constant, so comparing them is `X == X`.** What
     // carries the claim is the parse above, whose argument list is built from the constant the
     // library's refusals print: if clap did not answer to that word, `args_of` would not return.
-    let refused = Cli::try_parse_from([
-        "pvc",
-        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
-        "--help",
-    ])
-    .expect_err("--help exits rather than running");
+    let refused = Cli::try_parse_from(["pvc", THE_COMMAND_THAT_REBUILDS_A_CENSUS, "--help"])
+        .expect_err("--help exits rather than running");
     assert_eq!(
         refused.kind(),
         clap::error::ErrorKind::DisplayHelp,

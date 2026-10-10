@@ -320,12 +320,7 @@ mod tests {
 
     #[test]
     fn the_output_defaults_to_a_sibling_of_the_reference() {
-        let args = args_of(&[
-            "pvc",
-            "repeat-catalog",
-            "--reference",
-            "/data/ref.fa",
-        ]);
+        let args = args_of(&["pvc", "repeat-catalog", "--reference", "/data/ref.fa"]);
         assert!(args.output.is_none());
         // The path the driver builds — kept in step with `run_repeat_catalog` by being the
         // same expression.

@@ -150,6 +150,23 @@ exactly at the tract were measured as complete observations of an **empty** trac
 segments in one 50-sample run at 15× — and an empty candidate stopped the locus. Unaligned bases facing
 the tract keep a read on the delimiter's path, because a long allele's extra units can hide there.
 
+**A read whose own alignment carries a deletion across the tract's edge is complete** (owner,
+2026-10-10). The delimiter reports a complete observation only where both flanks match intact, and
+a deletion that takes the first bases of a flank breaks that match: every read carrying it came back
+a partial, so the deleted allele was never a candidate, and only the generic path's piece of the
+deletion was written — a shorter deletion than the sample's. Where the CIGAR has a deletion taking
+bases from both sides of the tract's first or last base, and at least five aligned bases on each
+side beyond the tract (`MIN_ALIGNED_FLANK_BASES`), the read is complete without the delimiter, and
+spelled from its own alignment as every indel-carrying read already is. The tract piece of the
+deletion becomes a candidate, the generic path writes the flank piece, and the two records spell the
+sample's sequence. Measured on the stuttering benchmark: at 50 samples, PCR, 15×, the carrier
+genotypes right at segments with such a deletion went from 397 to 738 of 1,085; over all runs,
++1,122 right genotypes at 50 samples for 16 more false calls among 321,116 reference genotypes, and
++76 at one sample for none. On HG002's tandem-repeat benchmark, +138 right genotypes over 30× and
+50×, with one tract a depth going from right to wrong. The allele-exact comparison there counts about
+75 more false positives a depth, most of them the two records of a deletion that is now right but
+written in two pieces where the truth writes one.
+
 It reaches the delimiter at all because the fetch queries the tract **plus its margin** (§2), so a
 read clipping only the flank is delimited too; the aligner then reports `FromLeft`/`FromRight` with an
 empty span, the unanchored side having fallen back to the read's own edge. **It is not a corner:

@@ -950,6 +950,28 @@ mod classify {
             None
         };
 
+        // **A read whose own alignment carries a deletion across the tract's edge, and is
+        // aligned on both sides beyond the tract, crossed the tract** (owner, 2026-10-10;
+        // spec §3). The delimiter calls a read complete only where both flanks match intact,
+        // and a deletion that takes the first bases of a flank breaks that match, so every read
+        // carrying it came back a partial and the deleted allele was never a candidate: at 50
+        // samples and 15× on the stuttering benchmark, 55 of 84 segments carrying such a
+        // deletion, 563 carrier genotypes, none right. The read's own alignment already says it
+        // crossed, and is what spells it (above). Measured: +1,122 right genotypes at 50 samples
+        // over four runs for 16 more false calls in 321,116, +76 at one sample for none, and
+        // +138 on HG002's tandem-repeat benchmark at 30× and 50×, where one tract a depth went
+        // from right to wrong.
+        if let Some(span) = &input_span {
+            let (aligned_before, aligned_after) =
+                aligned_bases_beyond_the_tract(&read.cigar, fp.ref_start, tract_start, tract_end);
+            if deletion_crosses_a_tract_edge(&read.cigar, fp.ref_start, tract_start, tract_end)
+                && aligned_before >= MIN_ALIGNED_FLANK_BASES
+                && aligned_after >= MIN_ALIGNED_FLANK_BASES
+            {
+                return complete_or_low_quality(read, span.clone(), qual_buffer);
+            }
+        }
+
         let span = delimit(aligner, read, &region, reference, context, align_scratch);
         match span {
             RepeatSpan::Between(tract)
@@ -1012,6 +1034,68 @@ mod classify {
                 Classified::NoObservation(NoObservationReason::NoBorderAnchored)
             }
         }
+    }
+
+    /// **The fewest aligned bases a read must carry beyond the tract on each side** for its own
+    /// alignment, deletion and all, to count as having crossed the tract. Five keeps a read
+    /// whose alignment merely touches a flank on the delimiter's path. It was not swept: it is
+    /// the value the measurement in [`classify_read`]'s comment was taken at.
+    const MIN_ALIGNED_FLANK_BASES: u32 = 5;
+
+    /// **Does a deletion in the CIGAR take bases from both a flank and the tract?** — from both
+    /// sides of the tract's first base, or of its last. `tract_start`/`tract_end` are 0-based
+    /// reference positions, the end exclusive, as is `ref_start`.
+    fn deletion_crosses_a_tract_edge(
+        cigar: &[CigarOp],
+        ref_start: u32,
+        tract_start: u32,
+        tract_end: u32,
+    ) -> bool {
+        let mut at = ref_start;
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    let (from, to) = (at, at + n);
+                    if (from < tract_start && to > tract_start)
+                        || (from < tract_end && to > tract_end)
+                    {
+                        return true;
+                    }
+                    at = to;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// **How many aligned bases a read has before the tract and after it**, as `(before,
+    /// after)` — match operations only, so deleted, skipped, clipped and inserted bases do not
+    /// count. Coordinates as in [`deletion_crosses_a_tract_edge`].
+    fn aligned_bases_beyond_the_tract(
+        cigar: &[CigarOp],
+        ref_start: u32,
+        tract_start: u32,
+        tract_end: u32,
+    ) -> (u32, u32) {
+        let (mut before, mut after, mut at) = (0, 0, ref_start);
+        for op in cigar {
+            match op {
+                CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
+                    let end = at + n;
+                    before += end.min(tract_start).saturating_sub(at);
+                    after += end.saturating_sub(at.max(tract_end));
+                    at = end;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => at += n,
+                _ => {}
+            }
+        }
+        (before, after)
     }
 
     /// **How many read bases sit unaligned at each end of a read** — a soft clip, or an
@@ -1568,6 +1652,80 @@ mod classify {
             assert_eq!(
                 classified,
                 Classified::NoObservation(NoObservationReason::OutsideTract)
+            );
+        }
+
+        /// **A read carrying a deletion across the tract's edge crossed the tract** (owner,
+        /// 2026-10-10). The stuttering benchmark's shape: a 13-base deletion taking the last nine
+        /// bases of an `AAGAG` repeat and the first four of the right flank. The delimiter could
+        /// not match the damaged flank and returned a partial; the read's own alignment says it
+        /// crossed, and spells the tract as the 21 bases the deletion left.
+        #[test]
+        fn a_read_with_a_deletion_across_the_tract_edge_is_complete() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            let left_flank = b"GTCAGCATTGCAGGTCATCGGACTTAGCCA";
+            let tract = b"AAGAG".repeat(6);
+            let right_flank = b"CCACGATTGCAGTCAGCTTGACCATAGCAG";
+            let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+            let locus = SsrLocus {
+                segment: SsrSegment::new("chr1".into(), 31, 60, Motif::new(b"AAGAG").unwrap(), 1.0)
+                    .unwrap(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            let seq = [left_flank.as_slice(), &tract[..21], &right_flank[4..]].concat();
+            let mut carrier = read(&seq, 40);
+            carrier.cigar = vec![
+                CigarOp::Match(51),
+                CigarOp::Deletion(13),
+                CigarOp::Match(26),
+            ];
+            let classified = classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            );
+            match classified {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    ..
+                } => {
+                    assert_eq!(&*bases, &tract[..21]);
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// The two CIGAR measurements behind that rule: a deletion crosses an edge only when it
+        /// takes bases from both sides of it, and aligned bases are counted outside the tract
+        /// and outside deletions.
+        #[test]
+        fn a_deletion_crossing_an_edge_and_the_aligned_bases_beyond_are_read_off_the_cigar() {
+            use CigarOp::{Deletion, Match, SoftClip};
+            // Tract at [30, 60).
+            let across_the_end = [Match(51), Deletion(13), Match(26)];
+            assert!(deletion_crosses_a_tract_edge(&across_the_end, 0, 30, 60));
+            assert_eq!(
+                aligned_bases_beyond_the_tract(&across_the_end, 0, 30, 60),
+                (30, 26)
+            );
+            let across_the_start = [Match(27), Deletion(6), Match(40)];
+            assert!(deletion_crosses_a_tract_edge(&across_the_start, 0, 30, 60));
+            let inside = [Match(40), Deletion(5), Match(40)];
+            assert!(!deletion_crosses_a_tract_edge(&inside, 0, 30, 60));
+            let touching_the_start = [Match(30), Deletion(5), Match(40)];
+            assert!(
+                !deletion_crosses_a_tract_edge(&touching_the_start, 0, 30, 60),
+                "a deletion that starts at the tract's first base takes nothing from the flank"
+            );
+            assert_eq!(
+                aligned_bases_beyond_the_tract(&[SoftClip(10), Match(80)], 10, 30, 60),
+                (20, 30)
             );
         }
 

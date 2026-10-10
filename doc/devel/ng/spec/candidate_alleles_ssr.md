@@ -360,6 +360,14 @@ like it fell on the PCR-free library. A single off-grid read is what one sequenc
 error makes anywhere; a tract the model does not describe shows the pattern again and again. At 20
 spanning reads or more the share already needs three, so the floor changes nothing at depth.
 
+**A read spelling the reference tract with a block missing from one end is never off the grid**
+(owner, 2026-10-10). That is what a deletion across the tract's edge leaves inside the tract, and its
+length there need not be whole units — five bases of an `AAG` repeat, say — which says nothing
+about whether the tract stutters in whole units. At one sample, every read of a heterozygous edge
+deletion counted against the tract, the tract was refused, and the sample's other allele went with
+it. Such reads are spelled by their own alignment ([`locus_generation_ssr.md`](locus_generation_ssr.md)
+§3).
+
 **A `NotPeriodic` locus still yields a candidate table**: the reference tract alone, verdict
 `NotPeriodic`. What the run does with it is emission's.
 

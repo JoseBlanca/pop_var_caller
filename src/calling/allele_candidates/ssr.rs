@@ -1236,7 +1236,9 @@ pub struct SsrLocusSelection {
 /// A read is **off the grid** when the difference between its tract length and the reference
 /// tract's is not a whole number of motif units. A sample is non-periodic when more than
 /// `max_off_grid_share` of its spanning reads are off the grid **and** at least
-/// [`MIN_OFF_GRID_READS_TO_REFUSE`] of them are, and **the locus is judged
+/// [`MIN_OFF_GRID_READS_TO_REFUSE`] of them are — a read spelling the reference tract with a block
+/// missing from one end, which is a deletion across the tract's edge, never counting as off the
+/// grid ([`is_an_edge_deletion_of`]) — and **the locus is judged
 /// non-periodic only when no sample is periodic** — the same "one sample suffices" shape as
 /// everything else on this path.
 ///
@@ -1309,8 +1311,10 @@ pub(super) fn locus_is_periodic(
         any_sample_judged = true;
         let mut off_grid_reads = 0_u32;
         for rows in super::one_run_per_allele(sample, observation.region) {
-            let length = observation.alleles[rows[0].allele].len();
-            if !length.abs_diff(reference_len).is_multiple_of(period) {
+            let bases = &observation.alleles[rows[0].allele];
+            if !bases.len().abs_diff(reference_len).is_multiple_of(period)
+                && !is_an_edge_deletion_of(bases, &observation.alleles[0])
+            {
                 let pooled_reads = rows.iter().fold(0_u32, |total, row| {
                     total.saturating_add(row.support.num_reads)
                 });
@@ -1325,6 +1329,21 @@ pub(super) fn locus_is_periodic(
     }
     // Nobody had a spanning read to judge, so there is no evidence the tract is not a tract.
     !any_sample_judged
+}
+
+/// **Is `bases` the reference tract with a block missing from one end?** — what a deletion running
+/// from the tract into a flank leaves inside the tract, whatever its length (owner, 2026-10-10).
+///
+/// [`locus_is_periodic`] does not count such a spelling as off the grid. It is off the grid only
+/// because the deletion's part inside the tract need not be whole motif units — five bases of an
+/// `AAG` repeat, say — and that says nothing about whether the tract stutters in whole units. At
+/// one sample, every read of a heterozygous edge deletion was otherwise enough to refuse the
+/// tract, and with it the sample's other allele. Reads are spelled this way by their own alignment
+/// when a deletion crosses the tract's edge (`locus_generation_ssr.md` §3).
+fn is_an_edge_deletion_of(bases: &[u8], reference: &[u8]) -> bool {
+    !bases.is_empty()
+        && bases.len() < reference.len()
+        && (reference.ends_with(bases) || reference.starts_with(bases))
 }
 
 /// **Narrow one repeat tract's allele table to the tract sequences worth calling over**
@@ -3114,6 +3133,35 @@ mod tests {
             admitted_bases(&selection),
             vec![b"AACAATAACAATAACAAT".to_vec(), b"AACAATAACAAT".to_vec()]
         );
+    }
+
+    /// **Reads showing a deletion across the tract's edge never refuse it** (owner, 2026-10-10).
+    /// An `AAG` tract of 42 bases where eight reads show it five bases short from the left —
+    /// a 6-base deletion taking one flank base and five tract bases, the stuttering benchmark's
+    /// case — and eight show the reference: half the reads off the grid, and periodic. The same
+    /// count of reads five bases short from the *middle* of the tract is still refused.
+    #[test]
+    fn reads_showing_a_deletion_across_the_edge_do_not_refuse_a_tract() {
+        let reference = b"AAG".repeat(14);
+        let edge_deleted = reference[5..].to_vec();
+        let middle_deleted = [&reference[..20], &reference[25..]].concat();
+        let motif = Motif::new(b"AAG").expect("a three-base motif");
+        let edge = tract_of(
+            &[&reference, &edge_deleted],
+            b"AAG",
+            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 8, -8.0)])],
+        );
+        assert!(locus_is_periodic(&edge, &motif, MaxOffGridShare::DEFAULT));
+        let middle = tract_of(
+            &[&reference, &middle_deleted],
+            b"AAG",
+            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 8, -8.0)])],
+        );
+        assert!(!locus_is_periodic(
+            &middle,
+            &motif,
+            MaxOffGridShare::DEFAULT
+        ));
     }
 
     /// **One read off the grid never refuses a tract, whatever its share; two can** (owner,
