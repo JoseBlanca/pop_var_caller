@@ -38,7 +38,7 @@ off: GQ for ng and GATK; for HipSTR, its posterior probability of the genotype w
 scale, capped at 99 as the others are. Where a cell takes several records, the smallest GQ among the
 records whose call is not homozygous reference.
 
-**SNPs and indels**: RTG vcfeval per sample per caller against the truth VCF, once inside the
+**SNPs and indels**: RTG vcfeval (where `RTG_JAR` finds it) per sample per caller against the truth VCF, once inside the
 segments' windows and once outside them (the rest of the genome). HipSTR inside only.
 
 ## What it writes into <run-dir>
@@ -70,8 +70,12 @@ CALLERS = [
     ("hipstr_fixed_stutter", "hipstr_fixed_stutter.vcf.gz"),
 ]
 HIPSTR = {"hipstr", "hipstr_fixed_stutter"}
-RTG_JAR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "tools",
-                       "rtg-tools-3.13", "RTG.jar")
+# RTG tools are not in the dev image: unpack rtg-tools 3.13 (https://github.com/RealTimeGenomics/rtg-tools)
+# under the checkout's tmp/tools/, or point RTG_JAR at its RTG.jar. The jar is run with `java -jar`
+# because the `rtg` launcher refuses the container's arm64 CPU. Without it the STR cells are still
+# scored and vcfeval is skipped, with a message.
+RTG_JAR = os.environ.get("RTG_JAR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "tmp", "tools", "rtg-tools-3.13", "RTG.jar")
 
 
 def open_text(path):
@@ -364,6 +368,9 @@ def main():
             out.write("\t".join(map(str, key)) + f"\t{summary[key]}\n")
 
     if os.environ.get("SKIP_VCFEVAL") == "1":
+        return
+    if not os.path.exists(RTG_JAR):
+        print(f"[score] no RTG tools at {RTG_JAR}; vcfeval skipped (set RTG_JAR)", file=sys.stderr)
         return
     inside, outside = write_windows_beds(run, segments, contigs)
     rows = []
