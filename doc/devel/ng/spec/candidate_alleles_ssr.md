@@ -253,6 +253,12 @@ carry an error still count for the admitted spelling through §4.3's substitutio
 earned, gets nothing from this; nor does a length the reference tract or an admitted spelling
 already stands for.
 
+**A sequence with no whole repeat is never admitted**, by any rule (owner, 2026-10-10). The tract
+model cannot score it, and admitted it stopped the whole locus one step later, at the driver's
+conversion to non-zero repeat counts — taking every sample's real alleles with it. On the
+stuttering benchmark three soft-clipped reads spelled a 6-base repeat as empty, and the segment
+was lost.
+
 **The rule of §5 costs fewer candidates, not more:** 1.26 sequences per tract at 300× against
 production's 1.57.
 

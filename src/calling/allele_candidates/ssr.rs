@@ -1038,6 +1038,13 @@ pub(super) fn admit_promoted_sequences(
                     && per_allele[index].cleared_the_bar())
                     || (!discovery_nominated.is_empty() && discovery_nominated[index])
             })
+            // **A sequence with no whole repeat is left out here, not refused downstream**
+            // (owner, 2026-10-10): the tract model cannot score it, and admitted it reaches the
+            // driver's conversion to non-zero repeat counts and stops the whole locus —
+            // `repeat_counts_the_tract_model_can_take`, `src/run/callers.rs`. On the stuttering
+            // benchmark that dropped a segment three soft-clipped reads had spelled as empty,
+            // and with it the sample's real allele.
+            .filter(|&index| repeat_count_of_bases(&observation.alleles[index], &detail.motif) > 0)
             .map(|index| {
                 u32::try_from(index).expect("a merge table narrower than four billion alleles")
             }),
@@ -3087,6 +3094,26 @@ mod tests {
         assert_eq!(bases_off_the_motif(b"GAGAAGAGAA", &motif), 0);
         assert_eq!(bases_off_the_motif(b"AAGAGAAAAG", &motif), 1);
         assert_eq!(bases_off_the_motif(b"AATAGAAAAG", &motif), 2);
+    }
+
+    /// **A sequence with no whole repeat is never admitted, however many reads it has** (owner,
+    /// 2026-10-10): admitted, it would stop the whole locus downstream. Three reads spelled the
+    /// tract as empty at a 6-base repeat on the stuttering benchmark; the other lengths stay.
+    #[test]
+    fn a_sequence_with_no_whole_repeat_is_left_out_and_the_rest_stays() {
+        let observation = tract_of(
+            &[b"AACAATAACAATAACAAT", b"", b"AACAATAACAAT"],
+            b"AACAAT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 5, -5.0), row(1, 3, -3.0), row(2, 5, -5.0)],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"AACAATAACAATAACAAT".to_vec(), b"AACAATAACAAT".to_vec()]
+        );
     }
 
     /// **One read off the grid never refuses a tract, whatever its share; two can** (owner,
