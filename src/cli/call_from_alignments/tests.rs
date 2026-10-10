@@ -38,7 +38,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// the defaults.
 fn a_defaults_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -70,7 +70,7 @@ fn the_subcommand_is_spelled_call_from_alignments() {
 #[test]
 fn a_run_that_names_neither_a_parameters_file_nor_the_defaults_is_refused() {
     let refusal = refusal_of(&[
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -106,7 +106,7 @@ fn a_run_that_names_both_a_parameters_file_and_the_defaults_is_refused() {
 #[test]
 fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     let args = args_of(&[
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -126,7 +126,7 @@ fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     );
     assert!(
         refusal_of(&[
-            "pop_var_caller",
+            "pvc",
             "call-from-alignments",
             "--reference",
             "ref.fa",

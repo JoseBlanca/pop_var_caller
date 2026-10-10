@@ -3,12 +3,11 @@
 //! Two of these matter more than the rest. **The entry's position is the *written* one**, so
 //! pass three's ordering check runs against a position the file actually contains — an entry
 //! carrying the span start would order a left-padded deletion against a base one further on than
-//! the `POS` column says. And **the row shape follows the record's tract flag**, because that is
-//! what decides whether the scorer ever sees an allele split (spec §3.2).
+//! the `POS` column says. And **every record carries its allele split, repeat tracts included**
+//! (spec §3.2), with the tract flag kept for the writer's ordering rule.
 
 use super::{CalledRecordSink, entry_for};
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
-use crate::run::paralog_filter::SpilledSamples;
 use crate::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position};
 use crate::vcf::encode::record_line;
 use crate::vcf::{
@@ -188,39 +187,6 @@ fn a_records_line_is_parked_exactly_as_the_encoder_wrote_it() {
 }
 
 #[test]
-fn a_repeat_tract_is_parked_with_windows_and_no_read_counts() {
-    // Spec §3.2's rule, at the point it is applied: the tract flag chooses the row shape, and a
-    // tract's rows carry no allele split because slippage has made it unreadable.
-    let tract = record(
-        500,
-        503,
-        vec![allele(b"ATAT"), allele(b"AT")],
-        vec![called(&[1, 1], vec![3, 3]), called(&[0, 0], vec![6, 0])],
-        None,
-        Some(TractAnnotation::new(Motif::new(b"AT").expect("a motif"))),
-    );
-
-    let entry = entry_for(
-        &tract,
-        &[a_window(5.0), a_window(6.0)],
-        &contigs(),
-        diploid(),
-    );
-
-    assert!(entry.is_repeat_tract);
-    match entry.samples {
-        SpilledSamples::RepeatTract(rows) => {
-            assert_eq!(rows.len(), 2);
-            assert_eq!(rows[0].window.mean_depth, 5.0);
-            assert_eq!(rows[1].window.mean_depth, 6.0);
-        }
-        SpilledSamples::GenericLocus(_) => {
-            panic!("a repeat tract was parked with an allele split it cannot report")
-        }
-    }
-}
-
-#[test]
 fn a_multiallelic_site_is_parked_with_its_alternatives_summed() {
     // Pooling is what lets a multiallelic site carry the allele signal at all: the story asks
     // what share of the reads is non-reference, not which alternative each one carried.
@@ -235,16 +201,12 @@ fn a_multiallelic_site_is_parked_with_its_alternatives_summed() {
 
     let entry = entry_for(&multiallelic, &[a_window(5.0)], &contigs(), diploid());
 
-    match entry.samples {
-        SpilledSamples::GenericLocus(rows) => {
-            assert_eq!(rows[0].ref_reads, 2);
-            assert_eq!(
-                rows[0].alt_reads, 7,
-                "3 + 4, not just the first alternative"
-            );
-        }
-        SpilledSamples::RepeatTract(_) => panic!("a SNP was parked as a tract"),
-    }
+    let rows = entry.samples;
+    assert_eq!(rows[0].ref_reads, 2);
+    assert_eq!(
+        rows[0].alt_reads, 7,
+        "3 + 4, not just the first alternative"
+    );
 }
 
 #[test]
@@ -262,13 +224,9 @@ fn a_record_with_no_alternative_parks_a_zero_alternative_count() {
 
     let entry = entry_for(&refused, &[a_window(5.0)], &contigs(), diploid());
 
-    match entry.samples {
-        SpilledSamples::GenericLocus(rows) => {
-            assert_eq!(rows[0].ref_reads, 4);
-            assert_eq!(rows[0].alt_reads, 0);
-        }
-        SpilledSamples::RepeatTract(_) => panic!("a generic locus was parked as a tract"),
-    }
+    let rows = entry.samples;
+    assert_eq!(rows[0].ref_reads, 4);
+    assert_eq!(rows[0].alt_reads, 0);
 }
 
 #[test]
@@ -296,20 +254,16 @@ fn the_windows_reach_the_entry_in_the_runs_sample_order() {
         diploid(),
     );
 
-    match entry.samples {
-        SpilledSamples::GenericLocus(rows) => {
-            assert_eq!(
-                rows.iter().map(|r| r.window.mean_depth).collect::<Vec<_>>(),
-                vec![1.0, 2.0, 3.0]
-            );
-            assert_eq!(
-                rows.iter().map(|r| r.ref_reads).collect::<Vec<_>>(),
-                vec![5, 9, 0],
-                "a sample was given another's read counts"
-            );
-        }
-        SpilledSamples::RepeatTract(_) => panic!("a SNP was parked as a tract"),
-    }
+    let rows = entry.samples;
+    assert_eq!(
+        rows.iter().map(|r| r.window.mean_depth).collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.ref_reads).collect::<Vec<_>>(),
+        vec![5, 9, 0],
+        "a sample was given another's read counts"
+    );
 }
 
 #[test]
@@ -412,16 +366,12 @@ fn the_alternative_count_is_the_written_alleles_and_not_the_depth_minus_the_refe
 
     let entry = entry_for(&snp, &[a_window(5.0)], &contigs(), diploid());
 
-    match entry.samples {
-        SpilledSamples::GenericLocus(rows) => {
-            assert_eq!(rows[0].ref_reads, 4);
-            assert_eq!(
-                rows[0].alt_reads, 5,
-                "the six reads no allele explains are not evidence for the alternative"
-            );
-        }
-        SpilledSamples::RepeatTract(_) => panic!("a SNP was parked as a tract"),
-    }
+    let rows = entry.samples;
+    assert_eq!(rows[0].ref_reads, 4);
+    assert_eq!(
+        rows[0].alt_reads, 5,
+        "the six reads no allele explains are not evidence for the alternative"
+    );
 }
 
 #[test]
@@ -584,4 +534,35 @@ fn a_sink_that_cannot_write_says_which_half_of_pass_one_failed() {
         matches!(refused, super::PassOneError::Spill(_)),
         "a spill failure was reported as a VCF failure: {refused:?}"
     );
+}
+
+#[test]
+fn a_repeat_tract_is_parked_with_its_read_split() {
+    // **Spec §3.2, owner 2026-10-08/09.** Every run writes SNPs inside STR records, so every
+    // record is scored as a generic one is: `AD[0]` against the other alleles' `AD` summed. The
+    // flag stays, because the writer's ordering rule reads it.
+    let tract = record(
+        500,
+        503,
+        vec![allele(b"ATAT"), allele(b"AT"), allele(b"ATATAT")],
+        vec![
+            called(&[1, 1], vec![1, 3, 2]),
+            called(&[0, 0], vec![6, 0, 0]),
+        ],
+        None,
+        Some(TractAnnotation::new(Motif::new(b"AT").expect("a motif"))),
+    );
+
+    let entry = entry_for(
+        &tract,
+        &[a_window(5.0), a_window(6.0)],
+        &contigs(),
+        diploid(),
+    );
+
+    assert!(entry.is_repeat_tract);
+    let rows = entry.samples;
+    assert_eq!((rows[0].ref_reads, rows[0].alt_reads), (1, 5));
+    assert_eq!((rows[1].ref_reads, rows[1].alt_reads), (6, 0));
+    assert_eq!(rows[1].window.mean_depth, 6.0);
 }

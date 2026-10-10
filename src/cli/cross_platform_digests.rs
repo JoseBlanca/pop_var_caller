@@ -168,13 +168,20 @@ mod tests {
     /// expected share a little toward even. It was `a2d17168b04f33a8f62a0a6cd2511df4`. Recorded in
     /// the Linux container (arm64, glibc) only.
     ///
-    /// **Re-recorded 2026-10-10** when a repeat tract's site quality began to use the tract's own
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `a44fc3523149780329f43fd951abdab7`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-10, again,** when a repeat tract's site quality began to use the tract's own
     /// prior rather than the run's (`calling_quality.md` §8.1): the repeat tract at chrV:201 moves,
     /// QUAL 14.9 to 36.7; nothing else in the file does — the two SNPs keep the run's prior, the fit
     /// is unchanged, and no genotype moves. Measured by putting the old prior back at tracts, which
-    /// reproduces the old checksum exactly. It was `a44fc3523149780329f43fd951abdab7`. Recorded in
+    /// reproduces the old checksum exactly. It was `2200dfaaa1148093cccf828021c5a281`. Recorded in
     /// the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "859971fb45718e4030562f502c2e4f95";
+    const CALLS_MD5: &str = "bc75ec4d5a3c67dcaa776f56746b2bdd";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -202,10 +209,17 @@ mod tests {
     /// records and genotypes, the SNPs' `QUAL` about 29 lower. It was
     /// `943c7fa93e2a1f110e996c117e3b0808`. Recorded in the Linux container (arm64, glibc) only.
     ///
-    /// **Re-recorded 2026-10-10** with the tract prior of [`CALLS_MD5`]'s last note: only the
-    /// repeat tract's `QUAL` moves. It was `b82fed4ad01da17688bc4d695a9ed03d`. Recorded in the
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `b82fed4ad01da17688bc4d695a9ed03d`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
+    /// repeat tract's `QUAL` moves. It was `206e0f7bf9b5459b99b20477562642a1`. Recorded in the
     /// Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "42448436323349200e5cb70265786003";
+    const WITH_ERRORS_CALLS_MD5: &str = "f037a347e52634175a3eb5b4353fb8d0";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -220,10 +234,17 @@ mod tests {
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
     ///
-    /// **Re-recorded 2026-10-10** with the tract prior of [`CALLS_MD5`]'s last note: only the
-    /// repeat tract's `QUAL` moves. It was `ec9aaa04a0d365fdaa468eb8eeda7c40`. Recorded in the
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `ec9aaa04a0d365fdaa468eb8eeda7c40`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
+    /// repeat tract's `QUAL` moves. It was `102696ee67202548f35a28a698dbf244`. Recorded in the
     /// Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "aa62fffcaa3d6dcf1983e2351ea98670";
+    const OF_21_SAMPLES_CALLS_MD5: &str = "fcc1a04573dbbdb08ac80127c554dc94";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

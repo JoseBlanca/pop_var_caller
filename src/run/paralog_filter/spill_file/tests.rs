@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use super::{SpillFile, SpillFileError};
 use crate::run::RunError;
 use crate::run::paralog_filter::{
-    GenericLocusSample, SpillEntry, SpillError, SpillWriter, SpilledSamples, WindowCoverage,
+    SpillEntry, SpillError, SpillWriter, SpilledSample, WindowCoverage,
 };
 use crate::types::{ContigId, GenomeRegion, Position};
 
@@ -47,8 +47,8 @@ fn a_record_at(position: u64) -> SpillEntry {
         is_repeat_tract: false,
         line: format!("SL4.0ch03\t{position}\t.\tA\tG\t42.5\tPASS\tAF=0.5\tGT:AD\t0/1:5,5")
             .into_bytes(),
-        samples: SpilledSamples::GenericLocus(vec![
-            GenericLocusSample {
+        samples: vec![
+            SpilledSample {
                 window: WindowCoverage {
                     gc_fraction: 0.41,
                     mean_depth: 6.25,
@@ -56,7 +56,7 @@ fn a_record_at(position: u64) -> SpillEntry {
                 ref_reads: 5,
                 alt_reads: 5,
             },
-            GenericLocusSample {
+            SpilledSample {
                 window: WindowCoverage {
                     gc_fraction: f32::NAN,
                     mean_depth: f32::NAN,
@@ -64,7 +64,7 @@ fn a_record_at(position: u64) -> SpillEntry {
                 ref_reads: 0,
                 alt_reads: 0,
             },
-        ]),
+        ],
     }
 }
 
@@ -318,34 +318,6 @@ fn appending_after_pass_one_has_ended_is_refused() {
 }
 
 #[test]
-fn a_record_the_codec_refused_is_not_counted() {
-    // A repeat tract marked as a biallelic SNP: spec §3.2 excludes it, and the codec says so.
-    let output = an_output_path("a_record_the_codec_refused_is_not_counted");
-    let mut spill = SpillFile::beside(&output);
-    let impossible = SpillEntry {
-        is_repeat_tract: true,
-        ..a_record_at(100)
-    };
-
-    assert!(matches!(
-        spill.append(&impossible),
-        Err(SpillFileError::Write { .. })
-    ));
-    assert_eq!(spill.entries_written(), 0);
-
-    spill.finish_writing().expect("the flush");
-    assert_eq!(
-        spill.read().expect("a cursor").count(),
-        0,
-        "a spill that counted a record it never wrote reports the wrong number"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Reading it back
-// ---------------------------------------------------------------------------
-
-#[test]
 fn the_records_come_back_from_the_file_bit_for_bit() {
     let output = an_output_path("the_records_come_back_from_the_file_bit_for_bit");
     let mut spill = SpillFile::beside(&output);
@@ -370,8 +342,9 @@ fn the_records_come_back_from_the_file_bit_for_bit() {
         assert!(
             came_back
                 .samples
-                .window(1)
+                .get(1)
                 .expect("two samples went in")
+                .window
                 .gc_fraction
                 .is_nan(),
             "the absent sample came back as a number after a round trip through the filesystem"

@@ -103,7 +103,7 @@ pub struct CallFromAlignmentsArgs {
     pub reference: PathBuf,
 
     /// The tandem-repeat catalog, which says where the repeat tracts are. Build it first with
-    /// `pop_var_caller repeat-catalog --reference <reference>`; it is not optional.
+    /// `pvc repeat-catalog --reference <reference>`; it is not optional.
     ///
     /// Defaults to `<reference>.repeats.parquet`, which is where that command writes it. A
     /// catalog built on another reference is refused: its coordinates would put every tract in

@@ -25,7 +25,7 @@ fn args_of(argv: &[&str]) -> RegenerateCensusArgs {
 /// and the criteria come from the psps.
 fn a_shortest_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         SUBCOMMAND,
         "--reference",
         "ref.fa",
@@ -149,7 +149,7 @@ fn the_subcommand_is_spelled_regenerate_census() {
     // carries the claim is the parse above, whose argument list is built from the constant the
     // library's refusals print: if clap did not answer to that word, `args_of` would not return.
     let refused = Cli::try_parse_from([
-        "pop_var_caller",
+        "pvc",
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,
         "--help",
     ])
