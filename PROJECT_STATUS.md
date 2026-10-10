@@ -22,7 +22,21 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-08):** **two coverage-window fixes, found at the tract_dual_path
+> - **Last completed task (2026-10-10):** **from branch `tract-ceiling` to main's line: the
+> compound-motif fix, the segmenter speed fixes and the stuttering benchmark** (branch
+> `segmenter-and-stutter-bench`, from main 4b528afe). The owner decided not to merge `tract-ceiling`:
+> on the stuttering benchmark's STR segments with no variant beside or across their edge, calling each
+> segment both ways is behind main at 50 samples in all 8 runs (PCR 15×, fitted: 92.43% of variant
+> genotypes right against 93.64%) and ahead only at one sample and 5–15×
+> ([report](doc/devel/reports/implementations/str_stutter_benchmark_first_pass_2026-10-10.md)). Moved
+> here: the exact compound-motif test (AAAAAT-type hexanucleotides typed as STR segments again; GRCh38
+> +3,267 segments, 188 kb into clusters of repeats), the refusal of a bundle radius of 0, the segmenter
+> speed fixes with their two reviews (GRCh38 typing 39.7 s → 3.8 s a pass, output identical), the
+> benchmark's simulator, driver, scorer and grid tools, and minimap2 + HipSTR in the dev image. Identity
+> baseline re-recorded (3 of 7,451 records vanish into clusters). Next: the hidden-duplication filter
+> scoring STR records from their read split, ported alone and measured on tomato.
+>
+> - **Earlier (2026-10-08):** **two coverage-window fixes, found at the tract_dual_path
 > checkpoint B** (branch `window-fetch`, then `window-zero-depth`, fast-forwarded onto main).
 > (1) The merge fetched the reference for the coverage windows out to the furthest record any
 > sample held, so a read-less stretch was fetched again for every region inside it; it now fetches
