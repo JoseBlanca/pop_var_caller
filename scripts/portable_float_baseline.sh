@@ -97,21 +97,21 @@ record_build() {
   } > "$1"
 }
 
-# The newest release build of pop_var_caller that runs on this machine. The container builds to
+# The newest release build of pvc that runs on this machine. The container builds to
 # target-container and a native build to target (CLAUDE.md), and a Linux binary does not run on
 # macOS nor the reverse, so both are tried. Never run `cargo bench` into these directories between
 # a build and a measurement: see `benches` below.
 find_binary() {
   found=""
-  for candidate in "$root/target-container/release/pop_var_caller" \
-                   "$root/target/release/pop_var_caller"; do
+  for candidate in "$root/target-container/release/pvc" \
+                   "$root/target/release/pvc"; do
     if [ -x "$candidate" ] && "$candidate" --version > /dev/null 2>&1 &&
        { [ -z "$found" ] || [ "$candidate" -nt "$found" ]; }; then
       found=$candidate
     fi
   done
   if [ -z "$found" ]; then
-    echo "no release build of pop_var_caller that runs on this machine; build one first" >&2
+    echo "no release build of pvc that runs on this machine; build one first" >&2
     exit 1
   fi
   echo "$found"

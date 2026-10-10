@@ -1,10 +1,10 @@
 # Pop Var Caller
 
 A population variant caller: SNPs, indels and repeat tracts, from aligned reads to one VCF, for
-one sample to a cohort. The `pop_var_caller` binary ([src/main.rs](src/main.rs)) has the
+one sample to a cohort. The `pvc` binary ([src/main.rs](src/main.rs)) has the
 subcommands `type-regions`, `repeat-catalog`, `call-from-alignments`, `generate-psps`,
 `call-from-psps`, `regenerate-census`, `estimate-parameters` and `estimate-contamination`;
-`pop_var_caller <subcommand> --help` describes each.
+`pvc <subcommand> --help` describes each.
 
 > This caller was written as "ng", beside an older six-stage caller (per-sample pileup → `.psp`
 > → DUST → grouping → merger → posterior engine), and replaced it on 2026-09-13. Its design is

@@ -1,6 +1,6 @@
 # Estimating cross-sample contamination
 
-`pop_var_caller_exp estimate-contamination` estimates, for each sample in a
+`pvc estimate-contamination` estimates, for each sample in a
 panel of Illumina alignments, what share of that sample's sequencing reads
 came from a different individual. It is a side tool taken out of a variant
 caller under development: the caller fits contamination internally before
@@ -10,8 +10,8 @@ be compared against tools such as verifyBamID.
 Two commands, run in this order:
 
 ```
-pop_var_caller_exp repeat-catalog --reference ref.fa        # once per reference
-pop_var_caller_exp estimate-contamination ...               # per panel of samples
+pvc repeat-catalog --reference ref.fa        # once per reference
+pvc estimate-contamination ...               # per panel of samples
 ```
 
 ## How it works
@@ -95,7 +95,7 @@ value above a half would be a mirror image, not a stronger claim.
 ## Step 1 — build the repeat catalog
 
 ```
-pop_var_caller_exp repeat-catalog --reference GRCh38.fa
+pvc repeat-catalog --reference GRCh38.fa
 ```
 
 This scans the reference once and writes `GRCh38.fa.repeats.parquet` beside
@@ -116,7 +116,7 @@ at every thread count.
 ## Step 2 — run the estimate
 
 ```
-pop_var_caller_exp estimate-contamination \
+pvc estimate-contamination \
     --reference GRCh38.fa \
     --alignment sampleA.cram \
     --alignment sampleB.cram \
@@ -130,7 +130,7 @@ One `--alignment` flag per sample, twelve or more of them.
 
 Add `--regions my_regions.bed` to look at a stretch of your own choosing,
 and `--components 2` on a panel of fewer than about twelve samples.
-`pop_var_caller_exp estimate-contamination --help` lists the remaining
+`pvc estimate-contamination --help` lists the remaining
 flags.
 
 `--threads` bounds both halves of the run: how many alignments are walked at
@@ -270,7 +270,7 @@ far from the rest of the panel, not that anything went wrong with its file.
 
 ## Getting help and reporting trouble
 
-`pop_var_caller_exp estimate-contamination --help` describes every flag.
+`pvc estimate-contamination --help` describes every flag.
 Errors are written to name the file and the reason — a missing `.fai` names
 the FASTA and tells you to run `samtools faidx`, a file with two samples
 names the file and the count — so the message itself should say what to fix.

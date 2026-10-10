@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn the_flag_default_is_the_catalogs_own_floor_table() {
-        let args = args_of(&["pop_var_caller", "repeat-catalog", "--reference", "r.fa"]);
+        let args = args_of(&["pvc", "repeat-catalog", "--reference", "r.fa"]);
         let criteria = catalog_criteria(&args).expect("valid");
         for (index, expected) in CATALOG_MIN_COPIES.iter().enumerate() {
             let period = index as u8 + 1;
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn the_output_defaults_to_a_sibling_of_the_reference() {
         let args = args_of(&[
-            "pop_var_caller",
+            "pvc",
             "repeat-catalog",
             "--reference",
             "/data/ref.fa",
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn an_impossible_period_range_is_an_error_not_a_scan() {
         let args = args_of(&[
-            "pop_var_caller",
+            "pvc",
             "repeat-catalog",
             "--reference",
             "r.fa",
@@ -378,7 +378,7 @@ mod tests {
         drop(file);
 
         let args = args_of(&[
-            "pop_var_caller",
+            "pvc",
             "repeat-catalog",
             "--reference",
             fasta.to_str().expect("utf8"),
@@ -418,7 +418,7 @@ mod tests {
         assert!(format!("{err}").contains("--force"));
 
         let forced = args_of(&[
-            "pop_var_caller",
+            "pvc",
             "repeat-catalog",
             "--reference",
             fasta.to_str().expect("utf8"),
@@ -431,7 +431,7 @@ mod tests {
     fn a_misspelled_flag_does_not_parse() {
         assert!(
             Cli::try_parse_from([
-                "pop_var_caller",
+                "pvc",
                 "repeat-catalog",
                 "--reference",
                 "r.fa",
