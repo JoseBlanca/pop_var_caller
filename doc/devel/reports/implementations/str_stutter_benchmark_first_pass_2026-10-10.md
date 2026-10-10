@@ -10,6 +10,14 @@ its summary (`scripts/ng_str_stutter_grid_summary.py`). Outputs under
 
 ---
 
+*Outcome, owner, 2026-10-10: on segments with no variant beside or across their edge — where the
+boundary rule of §2.2 never applies — the branch is behind main in all 8 runs at 50 samples (PCR 15×,
+fitted: 92.43% against 93.64%) and ahead only at one sample and 5–15×. So calling both ways is not
+kept: branch `tract-ceiling` is not merged, and its spec `tract_dual_path.md` stays there. The
+compound-motif fix, the segmenter speed fixes and this benchmark's tools were moved to main.*
+
+---
+
 ## 1. What was measured
 
 A simulated cohort whose STR genotypes we drew, read through libraries that stutter at rates taken

@@ -1,11 +1,19 @@
 # ng — a simulated stuttering benchmark: STR segments of known genotype, read through libraries that stutter as real ones do
 
 *Design spec, 2026-10-09. For the owner's review before any code. It is milestone 2 of
-[`tract_dual_path.md`](tract_dual_path.md) §13, built here because the colleague's simulation is
-weeks away (owner, 2026-10-09). Reads on: [`tract_dual_path.md`](tract_dual_path.md) §2 (what the
+`tract_dual_path.md` (branch `tract-ceiling`) §13, built here because the colleague's simulation is
+weeks away (owner, 2026-10-09). Reads on: `tract_dual_path.md` (branch `tract-ceiling`) §2 (what the
 real benchmarks cannot show), [`read_likelihoods.md`](read_likelihoods.md) (the stutter model ng
 calls with), and the existing simulator
 [`examples/ng_tract_simulator.rs`](../../../../examples/ng_tract_simulator.rs), which this extends.*
+
+---
+
+*Note, 2026-10-10: `tract_dual_path.md`, the design this benchmark was built to test (calling each STR
+segment both ways), lives on branch `tract-ceiling`, which the owner decided not to merge after this
+benchmark's first pass
+([report](../../reports/implementations/str_stutter_benchmark_first_pass_2026-10-10.md)). The
+benchmark itself is kept on main; references to that spec below point to that branch.*
 
 ---
 

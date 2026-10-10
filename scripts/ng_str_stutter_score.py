@@ -12,7 +12,7 @@ segment's window (the segment and 30 bases either side, `segment_alleles.tsv` an
 record's called alleles are applied to the reference, and every way of assigning a heterozygous
 record's two alleles to the two copies is tried, because no caller here phases reliably. **Two answers
 are the same genotype when some assignment gives the truth's two sequences** — the same as
-`tract_dual_path.md` §6's test, edits slid left and counted per copy, since two sets of edits that
+`tract_dual_path.md` (branch `tract-ceiling`) §6's test, edits slid left and counted per copy, since two sets of edits that
 spell the same sequence are the same edits once slid left. So an STR record and two generic records
 saying the same thing score alike.
 

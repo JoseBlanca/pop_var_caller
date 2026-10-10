@@ -13,7 +13,7 @@ and the branch are compared on the same STR segments.
 **The branch also scored with its `strBoundary` placeholders treated as absent** (callers suffixed
 `_no_placeholders`). Where a generic edit crosses a segment's edge at a stutter weight of 0.95 or
 more, the branch writes the STR answer and marks the flank bases that edit touched as missing for
-every sample (`tract_dual_path.md` §8). The scorer counts such a cell as uncalled, which is what the
+every sample (`tract_dual_path.md` (branch `tract-ceiling`) §8). The scorer counts such a cell as uncalled, which is what the
 VCF says; this second count shows what the rest of the branch's answer is worth. It reuses the
 scorer's own functions, so the two counts differ only in the records read.
 
