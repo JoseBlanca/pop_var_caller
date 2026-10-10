@@ -12,9 +12,7 @@ use std::path::PathBuf;
 
 use super::{WhatTheOperatorAskedFor, fit_score_and_write_the_calls, what_to_tell_the_operator};
 use crate::paralog::CoverageFitConfig;
-use crate::run::paralog_filter::{
-    GenericLocusSample, SpillEntry, SpillFile, SpilledSamples, TargetFdr, WindowCoverage,
-};
+use crate::run::paralog_filter::{SpillEntry, SpillFile, SpilledSample, TargetFdr, WindowCoverage};
 use crate::types::{ContigId, InbreedingF, Ploidy, Position};
 use crate::vcf::{HeaderContig, VcfHeaderMetadata};
 use crate::window_coverage::{CoverageByGcHistogram, SampleHistogram};
@@ -47,18 +45,16 @@ fn a_record(position: u64, samples: usize, depth: f32) -> SpillEntry {
         is_repeat_tract: false,
         line: format!("chr0\t{position}\t.\tA\tG\t42.5\tPASS\tAN=2;DP=10\tGT:AD{columns}")
             .into_bytes(),
-        samples: SpilledSamples::GenericLocus(
-            (0..samples)
-                .map(|_| GenericLocusSample {
-                    window: WindowCoverage {
-                        gc_fraction: 0.4,
-                        mean_depth: depth,
-                    },
-                    ref_reads: 20,
-                    alt_reads: 10,
-                })
-                .collect(),
-        ),
+        samples: (0..samples)
+            .map(|_| SpilledSample {
+                window: WindowCoverage {
+                    gc_fraction: 0.4,
+                    mean_depth: depth,
+                },
+                ref_reads: 20,
+                alt_reads: 10,
+            })
+            .collect(),
     }
 }
 
@@ -66,18 +62,16 @@ fn a_record(position: u64, samples: usize, depth: f32) -> SpillEntry {
 /// not a number.
 fn a_record_no_sample_covered(position: u64, samples: usize) -> SpillEntry {
     let mut entry = a_record(position, samples, ONE_COPY_DEPTH);
-    entry.samples = SpilledSamples::GenericLocus(
-        (0..samples)
-            .map(|_| GenericLocusSample {
-                window: WindowCoverage {
-                    gc_fraction: f32::NAN,
-                    mean_depth: f32::NAN,
-                },
-                ref_reads: 20,
-                alt_reads: 10,
-            })
-            .collect(),
-    );
+    entry.samples = (0..samples)
+        .map(|_| SpilledSample {
+            window: WindowCoverage {
+                gc_fraction: f32::NAN,
+                mean_depth: f32::NAN,
+            },
+            ref_reads: 20,
+            alt_reads: 10,
+        })
+        .collect();
     entry
 }
 

@@ -22,7 +22,17 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-10):** **from branch `tract-ceiling` to main's line: the
+> - **Last completed task (2026-10-10):** **the hidden-duplication filter scores STR records from their
+> read split** (branch `str-filter-read-split`, from `segmenter-and-stutter-bench`; spec
+> `hidden_paralog_filter.md` §3.2). Ported alone from `tract-ceiling` (797bbbcc/0b098573): an STR
+> record is scored on coverage and `AD[0]` against the other alleles' reads, as SNP/indel records are.
+> Tomato, 63 accessions, `--defaults`, SNP genotypes inside STR segments against GATK on 50: agreeing
+> 3,928 → 4,121, GATK-only 960 → 767, ng-only 70 → 70; GATK-matched genotypes lost to STR records the
+> filter dropped 202 → 10 (the branch's same 10, chr1:15063839); STR records dropped over the segments
+> 88 → 53. That recovers the branch's improvement, so the depth-along-segments change is not ported
+> (owner). Identity baseline and the three cross-platform call digests re-recorded (scores only).
+>
+> - **Earlier (2026-10-10):** **from branch `tract-ceiling` to main's line: the
 > compound-motif fix, the segmenter speed fixes and the stuttering benchmark** (branch
 > `segmenter-and-stutter-bench`, from main 4b528afe). The owner decided not to merge `tract-ceiling`:
 > on the stuttering benchmark's STR segments with no variant beside or across their edge, calling each

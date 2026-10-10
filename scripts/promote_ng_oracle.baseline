@@ -24,6 +24,11 @@
 # standard error they lacked, so every rate now carries one; nothing else moves but notes; 4 of 6,706 calls with the fit move, all repeat tracts — QUAL by at most 0.4, AF by at most 0.00046
 # — with no genotype changed and no record appearing or vanishing. The defaults run's file moves in 8 note lines.
 # They were 70a98909… / 351f244e… / 9f5edd0e….
+# Re-recorded 2026-10-10 (Linux container, arm64) with the hidden-duplication filter scoring STR records from their read
+# split as well as coverage (hidden_paralog_filter.md §3.2, ported from branch tract-ceiling). Default-parameter VCFs
+# a81c458b → 770df4ce and from_fit 3bbd4d7e → 6a0890f9: 4,103 of 7,448 records change in PARALOG_LR / PARALOG_POST
+# alone — 381 STR records, whose score now reads the split, and 3,722 SNP/indel records, through the duplication rate the
+# run fits — and no record, genotype or filter verdict moves. Windows, histograms and fitted parameters unchanged.
 # Re-recorded 2026-10-10 (Linux container, arm64) with the compound-motif test made exact (segment_criteria.rs `is_compound`,
 # moved from branch tract-ceiling): AAAAAT-type hexanucleotides are STR segments again, and some homopolymers beside one join
 # it in a cluster of repeats, which nothing calls. Default-parameter VCFs 6257aa6c → a81c458b (7,451 → 7,448 records): three
@@ -85,10 +90,10 @@
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
 # records: 7448
-a81c458ba120d3a6f794adbe41712e73  from_alignments.comparable
-a81c458ba120d3a6f794adbe41712e73  from_psps.comparable
+770df4ce99cd6ce6ea398f40d74e1fcd  from_alignments.comparable
+770df4ce99cd6ce6ea398f40d74e1fcd  from_psps.comparable
 b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
 38ae39e27282a4aa9ede9a63ea9419b8  from_alignments.windows.sorted
 9d949511c6b0d17f4fd218dd8f7ec4af  from_alignments.windows.histograms
 d68e0540314d5a49d08a3d4c6e57ac63  fitted.parameters.toml
-3bbd4d7eb667c34cc241924e88948006  from_fit.comparable
+6a0890f947cbcfed054b74ee1b6a2fdb  from_fit.comparable

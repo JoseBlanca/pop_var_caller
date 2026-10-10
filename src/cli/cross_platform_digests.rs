@@ -167,7 +167,14 @@ mod tests {
     /// 520.7), because this fixture's reads lean one way at both alleles and the prior pulls the
     /// expected share a little toward even. It was `a2d17168b04f33a8f62a0a6cd2511df4`. Recorded in
     /// the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "a44fc3523149780329f43fd951abdab7";
+    ///
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `a44fc3523149780329f43fd951abdab7`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    const CALLS_MD5: &str = "2200dfaaa1148093cccf828021c5a281";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -194,7 +201,14 @@ mod tests {
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same
     /// records and genotypes, the SNPs' `QUAL` about 29 lower. It was
     /// `943c7fa93e2a1f110e996c117e3b0808`. Recorded in the Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "b82fed4ad01da17688bc4d695a9ed03d";
+    ///
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `b82fed4ad01da17688bc4d695a9ed03d`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    const WITH_ERRORS_CALLS_MD5: &str = "206e0f7bf9b5459b99b20477562642a1";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -208,7 +222,14 @@ mod tests {
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "ec9aaa04a0d365fdaa468eb8eeda7c40";
+    ///
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `ec9aaa04a0d365fdaa468eb8eeda7c40`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "102696ee67202548f35a28a698dbf244";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

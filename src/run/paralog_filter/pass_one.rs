@@ -24,10 +24,7 @@ use crate::vcf::encode::{record_line, written_position};
 use crate::vcf::{HeaderContig, VcfRecord, VcfWriteError, VcfWriter};
 use crate::window_coverage::WindowCoverage;
 
-use super::{
-    EncodedSpillEntry, GenericLocusSample, RepeatTractSample, SpillEntry, SpillError, SpillFile,
-    SpillFileError, SpilledSamples,
-};
+use super::{EncodedSpillEntry, SpillEntry, SpillError, SpillFile, SpillFileError, SpilledSample};
 
 /// **The spill entry for one finished record**, ready to append.
 ///
@@ -40,10 +37,9 @@ use super::{
 /// the same evidence under its own assertion — so a disagreement is a wiring error rather than an
 /// input, and the alternative is an entry that silently carries a prefix of the cohort.
 ///
-/// **Which shape the rows take is the record's tract flag and nothing else** (spec §3.2). A
-/// repeat tract's rows carry the window alone, because slippage makes its allele split unreadable
-/// and the filter declines to use it; every other record's rows carry the reference count and
-/// every alternative's reads summed.
+/// **Every record's rows carry the reference count and every alternative's reads summed**,
+/// repeat tracts included (spec §3.2): the STR path writes SNPs inside a segment as part of an STR
+/// record's alleles, whose allele evidence coverage alone would throw away.
 #[must_use]
 pub fn entry_for(
     record: &VcfRecord,
@@ -64,41 +60,26 @@ pub fn entry_for(
          entry would silently carry a prefix of the cohort"
     );
 
-    // Read once and used twice, so the flag the entry carries and the rows it carries cannot
-    // come from two different answers to the same question.
-    let is_repeat_tract = record.is_repeat_tract();
-
-    let samples = if is_repeat_tract {
-        SpilledSamples::RepeatTract(
-            windows
-                .iter()
-                .map(|window| RepeatTractSample { window: *window })
-                .collect(),
-        )
-    } else {
-        SpilledSamples::GenericLocus(
-            windows
-                .iter()
-                .zip(record.sample_columns())
-                .map(|(window, column)| {
-                    let reads = column.read_counts.allele_reads();
-                    GenericLocusSample {
-                        window: *window,
-                        ref_reads: reads.first().copied().unwrap_or(0),
-                        // **Summed, not `reads[1]`.** A multiallelic site takes this path too,
-                        // and the collapsed-duplication story asks what share of the reads is
-                        // non-reference — not which alternative each one carried (spec §3.2).
-                        alt_reads: reads.iter().skip(1).copied().sum(),
-                    }
-                })
-                .collect(),
-        )
-    };
+    let samples = windows
+        .iter()
+        .zip(record.sample_columns())
+        .map(|(window, column)| {
+            let reads = column.read_counts.allele_reads();
+            SpilledSample {
+                window: *window,
+                ref_reads: reads.first().copied().unwrap_or(0),
+                // **Summed, not `reads[1]`.** A multiallelic site takes this path too, and the
+                // collapsed-duplication story asks what share of the reads is non-reference — not
+                // which alternative each one carried (spec §3.2).
+                alt_reads: reads.iter().skip(1).copied().sum(),
+            }
+        })
+        .collect();
 
     SpillEntry {
         contig: record.region().contig,
         position: crate::types::Position(written_position(record)),
-        is_repeat_tract,
+        is_repeat_tract: record.is_repeat_tract(),
         line: record_line(record, contigs, ploidy).into_bytes(),
         samples,
     }

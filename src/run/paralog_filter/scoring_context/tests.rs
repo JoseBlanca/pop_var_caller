@@ -1,18 +1,10 @@
-//! **The one that carries the step: a tract's samples all score, and a SNP's zero-read sample
-//! does not.**
-//!
-//! Production drops a sample at zero total reads, which is right at a locus where reads report
-//! their allele and wrong at a repeat tract, where the filter hands the scorer no read counts at
-//! all because slippage has smeared the split. Copied without that distinction, the skip empties
-//! every tract's score and the run finishes looking correct (spec §6 trap 1). The type is what
-//! forecloses it — a tract's rows have no read counts to be zero — and
-//! `every_sample_of_a_tract_scores_even_where_no_read_supports_an_allele` is what says so.
+//! **What a spilled row hands the scorer.** Every record's rows carry coverage and the allele
+//! split, repeat tracts included (spec §3.2), and a sample whose rows show no read at all is absent
+//! from the score, as in production — at a tract as at any other record.
 
 use super::{ParalogScoringContext, WhyNoCoverageModel};
 use crate::paralog::{CoverageFitConfig, CoverageModelError, ParalogModelParams};
-use crate::run::paralog_filter::{
-    GenericLocusSample, RepeatTractSample, SpillEntry, SpilledSamples,
-};
+use crate::run::paralog_filter::{SpillEntry, SpilledSample};
 use crate::types::{ContigId, InbreedingF, Position};
 use crate::window_coverage::{CoverageByGcHistogram, SampleHistogram, WindowCoverage};
 
@@ -86,19 +78,13 @@ fn no_window() -> WindowCoverage {
     }
 }
 
-/// A repeat tract whose samples carry windows and, by construction, no read counts.
-fn a_tract(windows: Vec<WindowCoverage>) -> SpillEntry {
+/// A repeat tract whose samples carry windows and read counts — the generic locus's rows, with the
+/// tract flag.
+fn a_tract(samples: Vec<(WindowCoverage, u32, u32)>) -> SpillEntry {
     SpillEntry {
-        contig: ContigId(0),
         position: Position(500),
         is_repeat_tract: true,
-        line: b"line".to_vec(),
-        samples: SpilledSamples::RepeatTract(
-            windows
-                .into_iter()
-                .map(|window| RepeatTractSample { window })
-                .collect(),
-        ),
+        ..a_generic_locus(samples)
     }
 }
 
@@ -109,44 +95,35 @@ fn a_generic_locus(samples: Vec<(WindowCoverage, u32, u32)>) -> SpillEntry {
         position: Position(100),
         is_repeat_tract: false,
         line: b"line".to_vec(),
-        samples: SpilledSamples::GenericLocus(
-            samples
-                .into_iter()
-                .map(|(window, ref_reads, alt_reads)| GenericLocusSample {
-                    window,
-                    ref_reads,
-                    alt_reads,
-                })
-                .collect(),
-        ),
+        samples: samples
+            .into_iter()
+            .map(|(window, ref_reads, alt_reads)| SpilledSample {
+                window,
+                ref_reads,
+                alt_reads,
+            })
+            .collect(),
     }
 }
 
 #[test]
-fn every_sample_of_a_tract_scores_even_where_no_read_supports_an_allele() {
-    // **Spec §6 trap 1.** Production's rule drops a sample at zero total reads. A tract's rows
-    // carry no read counts at all, so every sample with a window must score — if this ever
-    // fails, every tract in the run scores on nothing and is silently never filtered.
-    let context = a_context_over(3);
+fn a_tract_hands_the_scorer_its_read_split_and_its_zero_read_sample_is_absent() {
+    // **Spec §3.2, owner 2026-10-08/09.** A tract is scored as every other record is, so its
+    // split reaches the scorer and a sample with no reads says nothing, as at a SNP.
+    let context = a_context_over(2);
     let entry = a_tract(vec![
-        a_window(ONE_COPY_DEPTH),
-        a_window(ONE_COPY_DEPTH * 2.0),
-        a_window(ONE_COPY_DEPTH),
+        (a_window(ONE_COPY_DEPTH), 2, 7),
+        (a_window(ONE_COPY_DEPTH), 0, 0),
     ]);
 
-    let scored: Vec<_> = (0..3)
-        .map(|sample| context.observation_of(&entry, sample))
-        .collect();
-
+    let observation = context
+        .observation_of(&entry, 0)
+        .expect("a covered sample with reads");
+    assert_eq!((observation.alt_reads, observation.total_reads), (7, 9));
     assert!(
-        scored.iter().all(Option::is_some),
-        "a sample of a repeat tract was skipped: {scored:?}"
+        context.observation_of(&entry, 1).is_none(),
+        "a tract's sample with no reads entered the score"
     );
-    for observation in scored.into_iter().flatten() {
-        assert_eq!(observation.alt_reads, 0);
-        assert_eq!(observation.total_reads, 0);
-        assert!(observation.relative_copy_number.is_finite());
-    }
 }
 
 #[test]
@@ -192,7 +169,7 @@ fn a_sample_with_no_usable_window_is_absent_whatever_its_reads_say() {
 
     assert!(context.observation_of(&entry, 0).is_none());
 
-    let tract = a_tract(vec![no_window()]);
+    let tract = a_tract(vec![(no_window(), 20, 20)]);
     assert!(context.observation_of(&tract, 0).is_none());
 }
 
@@ -579,5 +556,35 @@ fn a_fit_configuration_that_is_not_one_fails_construction_rather_than_every_samp
     assert!(
         !refused.reason.is_empty(),
         "the refusal must say what was wrong with it"
+    );
+}
+
+#[test]
+fn hom_alt_samples_at_a_tract_argue_against_a_duplication() {
+    // **The case that decided spec §3.2's rule** (owner, 2026-10-08): a SNP written inside an STR
+    // record, in samples whose coverage is raised. Under a collapsed duplication a sample showing
+    // no reference read is near-impossible, while a third of the reads non-reference is what one
+    // carrier copy in three gives — so the hom-alt tract must score lower. The flag changes
+    // nothing: the tract scores as a generic locus with the same rows.
+    let context = a_context_over(6);
+    let raised = a_window(ONE_COPY_DEPTH * 1.6);
+    let mut scratch = Vec::new();
+    let mut score = |entry: &SpillEntry| {
+        context
+            .score(entry, &mut scratch)
+            .expect("the cohort's width")
+    };
+
+    let hom_alt = score(&a_tract(vec![(raised, 0, 9); 6]));
+    let one_copy_in_three = score(&a_tract(vec![(raised, 6, 3); 6]));
+    assert!(
+        hom_alt < one_copy_in_three,
+        "hom-alt samples did not argue against a duplication: {hom_alt} against \
+         {one_copy_in_three}"
+    );
+    assert_eq!(
+        hom_alt.to_bits(),
+        score(&a_generic_locus(vec![(raised, 0, 9); 6])).to_bits(),
+        "the tract flag changed the score"
     );
 }

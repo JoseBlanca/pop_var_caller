@@ -39,8 +39,7 @@ use crate::paralog::{
     ParalogLrHistogram, ParalogModelParams,
 };
 use crate::run::paralog_filter::{
-    GenericLocusSample, ParalogScoringContext, RepeatTractSample, SpillEntry, SpillFile,
-    SpillFileError, SpilledSamples,
+    ParalogScoringContext, SpillEntry, SpillFile, SpillFileError, SpilledSample,
 };
 use crate::types::{ContigId, InbreedingF, Position};
 use crate::window_coverage::{CoverageByGcHistogram, SampleHistogram, WindowCoverage};
@@ -110,32 +109,33 @@ fn a_generic_locus(position: u64, samples: Vec<(WindowCoverage, u32, u32)>) -> S
         position: Position(position),
         is_repeat_tract: false,
         line: format!("chr1\t{position}\t.\tA\tG\t42\tPASS\t.\tGT\t0/1").into_bytes(),
-        samples: SpilledSamples::GenericLocus(
-            samples
-                .into_iter()
-                .map(|(window, ref_reads, alt_reads)| GenericLocusSample {
-                    window,
-                    ref_reads,
-                    alt_reads,
-                })
-                .collect(),
-        ),
+        samples: samples
+            .into_iter()
+            .map(|(window, ref_reads, alt_reads)| SpilledSample {
+                window,
+                ref_reads,
+                alt_reads,
+            })
+            .collect(),
     }
 }
 
-/// A repeat tract at `position`, whose rows carry windows and — by construction — no reads.
+/// A repeat tract at `position`, each sample's reads split evenly between the reference length and
+/// another — rows of the shape every record carries (spec §3.2).
 fn a_repeat_tract(position: u64, windows: Vec<WindowCoverage>) -> SpillEntry {
     SpillEntry {
         contig: ContigId(0),
         position: Position(position),
         is_repeat_tract: true,
         line: format!("chr1\t{position}\t.\tAT\tATAT\t42\tPASS\t.\tGT\t0/1").into_bytes(),
-        samples: SpilledSamples::RepeatTract(
-            windows
-                .into_iter()
-                .map(|window| RepeatTractSample { window })
-                .collect(),
-        ),
+        samples: windows
+            .into_iter()
+            .map(|window| SpilledSample {
+                window,
+                ref_reads: 4,
+                alt_reads: 4,
+            })
+            .collect(),
     }
 }
 
@@ -412,7 +412,7 @@ fn the_ratios_are_in_spill_order_and_each_belongs_to_its_own_record() {
     );
 }
 
-/// **A repeat tract is scored like any other record, on its coverage alone.**
+/// **A repeat tract is scored like any other record.**
 ///
 /// Every fixture but this one holds at least one generic locus, so a pass that quietly dropped
 /// tracts would still fold something and still look calibrated. Here there is nothing else to
