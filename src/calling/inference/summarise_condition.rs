@@ -38,7 +38,7 @@ use crate::calling::likelihood::ssr::genotype_log_likelihood_row;
 use crate::calling::likelihood::ssr_emission::SsrEmissionModel;
 use crate::calling::likelihood::{FrozenContamination, ReadGroupCalibrations};
 use crate::calling::quality::{
-    ArtifactTestCounts, score_best_genotype, score_uncorrected_site_quality,
+    ArtifactTestCounts, SiteQualityPrior, score_best_genotype, score_uncorrected_site_quality,
 };
 use crate::calling::{
     CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture, ErrorSpreadTable,
@@ -1334,19 +1334,20 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     // genotype likelihood table, which the loop built and this pass only reads
     // (`doc/devel/ng/spec/calling_quality.md` §3.2).
     //
-    // **⚠ At a repeat tract this is the one place an ordinary-site quantity is read**, and it
-    // is worth naming because everything else on the tract path was moved off one. The prior
-    // seed here is the run's *frequency* spectrum — how allele frequencies are spread across
-    // the population — and the tract's own *length* spectrum has no bearing on it. That is not
-    // a defect introduced by the tract branch: `calling_quality.md` §8 leaves a tract's site
-    // quality to a sibling document that is not written, so a tract shares the SNP/indel fold
-    // until that lands. It is stated here rather than left for a reader to discover, because
-    // `population_diversity.md` §1's fourth goal names exactly this shape of failure.
-    let site_quality = score_uncorrected_site_quality(
-        scratch.site_quality_buffers_mut(),
-        genotypes,
-        parameters.prior_seed(),
-    );
+    // **The prior is the one this locus's genotypes were called under** (`calling_quality.md`
+    // §8.1): the run's frequency spectrum at an ordinary locus, and at a repeat tract the seed
+    // concentration its own length spectrum gave — still in the scratch, which nothing after
+    // the per-locus fill writes. Until 2026-10-10 a tract read the run's spectrum here, about
+    // 1 variant position in 1,000, and at one sample a heterozygote called at genotype quality
+    // 20 came out of this fold at 0.6 and was not written.
+    let prior = match evidence {
+        LocusEvidence::Generic { .. } => SiteQualityPrior::from(parameters.prior_seed()),
+        LocusEvidence::Ssr { .. } => {
+            SiteQualityPrior::of_repeat_tract(scratch.seed_concentration())
+        }
+    };
+    let site_quality =
+        score_uncorrected_site_quality(scratch.site_quality_buffers_mut(), genotypes, prior);
 
     let cohort_expected_copies =
         ExpectedAlleleCopies::new(scratch.cohort_expected_copies().to_vec(), &candidates);
@@ -6053,7 +6054,9 @@ mod tests {
         );
 
         // **The site quality is the only number this arm has to get right**, so it is
-        // compared against an independently prepared fold rather than merely being present.
+        // compared against an independently prepared fold rather than merely being present —
+        // and the fold runs under the tract's own seed (1.0 for the reference tract against
+        // 0.5 for the other), not the run's (`calling_quality.md` §8.1).
         let mut fold_only = CallingScratch::<()>::default();
         fold_only.prepare_for_locus(1, &alleles, &view);
         for (slot, &value) in fold_only
@@ -6066,9 +6069,21 @@ mod tests {
         let expected = score_uncorrected_site_quality(
             fold_only.site_quality_buffers_mut(),
             &view,
+            SiteQualityPrior::of_repeat_tract(&[1.0, 0.5]),
+        );
+        let under_the_run_seed = score_uncorrected_site_quality(
+            fold_only.site_quality_buffers_mut(),
+            &view,
             human_like_seed(),
         );
         assert!(expected.get() > 0.0, "the fixture's fold is above zero");
+        assert!(
+            expected.get() > under_the_run_seed.get() + 10.0,
+            "a tract seed expecting variation must ask for less evidence than a seed of 1 \
+             variant in 1,000: {} against {}",
+            expected.get(),
+            under_the_run_seed.get()
+        );
         assert_eq!(inference.uncorrected_site_quality(), expected);
     }
 

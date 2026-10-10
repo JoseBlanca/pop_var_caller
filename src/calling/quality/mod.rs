@@ -255,6 +255,72 @@ pub struct CountPriorMemo {
     log_range: f64,
 }
 
+/// **The prior on how many non-reference copies the cohort carries**, as the two
+/// concentrations it is built from: the reference allele's, and the total over every other
+/// allele. Collapsing a Dirichlet over a locus's alleles to *reference against the rest* gives
+/// exactly a Beta with these two numbers, so nothing is approximated by the collapse.
+///
+/// **Two sources, one per path** (`doc/devel/ng/spec/calling_quality.md` §5.4, §8.1):
+///
+/// - an ordinary locus takes the run's [`SpectrumSeed`] — how allele frequencies are spread
+///   across the population, one pair for the whole genome;
+/// - a repeat tract takes the concentration its own genotype prior was seeded with
+///   ([`Self::of_repeat_tract`]). Repeat tracts mutate orders of magnitude faster than single
+///   bases, so the run's pair — about 1 variant position in 1,000 — would demand some 28 Phred
+///   of evidence from one sample before a tract's quality left zero, while the same tract's
+///   genotype prior expects several common lengths. A sample could then be called
+///   heterozygous at genotype quality 20 on a site of quality 0.6, two numbers that contradict
+///   each other; using the genotype's own prior makes them agree by construction.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SiteQualityPrior {
+    reference: f64,
+    alternative_total: f64,
+}
+
+impl SiteQualityPrior {
+    /// The prior at a repeat tract: the reference candidate's seed concentration against the sum
+    /// of every other candidate's — the same per-candidate concentration the tract's genotype
+    /// prior starts from (`fill_ssr_seed`), in the candidate set's order, where the reference
+    /// tract is always entry 0.
+    ///
+    /// # Panics
+    ///
+    /// On an empty slice, which is a candidate set without its reference, and on a reference
+    /// concentration that is not finite and positive — the seed builder floors every entry above
+    /// zero, so either is a buffer filled for something else.
+    #[must_use]
+    pub fn of_repeat_tract(seed_concentration: &[f64]) -> Self {
+        let (&reference, alternatives) = seed_concentration.split_first().expect(
+            "a repeat tract's candidate set always holds its reference tract, so its seed \
+             concentration has at least one entry",
+        );
+        assert!(
+            reference.is_finite() && reference > 0.0,
+            "the reference tract's seed concentration must be finite and positive, got \
+             {reference}: the buffer was not filled for this tract"
+        );
+        let alternative_total: f64 = alternatives.iter().sum();
+        assert!(
+            alternative_total.is_finite() && alternative_total >= 0.0,
+            "the alternative tracts' seed concentrations must sum to a finite, non-negative \
+             total, got {alternative_total}"
+        );
+        Self {
+            reference,
+            alternative_total,
+        }
+    }
+}
+
+impl From<SpectrumSeed> for SiteQualityPrior {
+    fn from(seed: SpectrumSeed) -> Self {
+        Self {
+            reference: seed.alpha_ref(),
+            alternative_total: seed.alpha_alt_total(),
+        }
+    }
+}
+
 /// **How unlikely is it that the cohort carries no copy of any non-reference allele here?**
 /// — the site quality, before the artifact correction that the output stream applies.
 ///
@@ -302,6 +368,9 @@ pub struct CountPriorMemo {
 /// constants. That is the property worth having — on a panel ten times as polymorphic a locus
 /// being variant is genuinely more likely before any read is looked at, and two fixed
 /// constants cannot know that.
+///
+/// **At a repeat tract the two numbers are the tract's own, not the run's**
+/// ([`SiteQualityPrior::of_repeat_tract`]; `doc/devel/ng/spec/calling_quality.md` §8.1).
 ///
 /// **The alternative concentration is floored at
 /// [`MIN_ALT_CONCENTRATION`].** [`SpectrumSeed`]
@@ -356,8 +425,9 @@ pub struct CountPriorMemo {
 pub fn score_uncorrected_site_quality(
     buffers: SiteQualityBuffers<'_>,
     genotypes: &GenotypeTableView<'_>,
-    seed: SpectrumSeed,
+    prior: impl Into<SiteQualityPrior>,
 ) -> Phred {
+    let prior = prior.into();
     let SiteQualityBuffers {
         sample_count,
         genotype_likelihoods,
@@ -452,13 +522,16 @@ pub fn score_uncorrected_site_quality(
     // The Beta-Binomial prior on the cohort's count, from the run's fitted spectrum — step 3,
     // built here because the fold reads how far apart its terms are.
     //
-    // **Built once a run rather than once a locus.** Every term below is a function of the
-    // fitted spectrum and the chromosome count and of nothing this locus carries, so the
-    // whole vector repeats — see [`CountPriorMemo`]. The expressions, their operands and
+    // **Built once a run at ordinary loci, and again at each repeat tract whose prior differs
+    // from the last one's.** Every term below is a function of the two concentrations and the
+    // chromosome count and of nothing else this locus carries, so at ordinary loci, which all
+    // share the run's seed, the whole vector repeats — see [`CountPriorMemo`]. A tract carries
+    // its own pair, so there the memo rebuilds: `2 × samples + 1` terms of three `lgamma`s, small
+    // beside the fold that follows. The expressions, their operands and
     // their order are what they were when this loop ran per locus, so the row it adds is the
     // row that loop added, bit for bit.
-    let alpha_reference = seed.alpha_ref();
-    let alpha_alternative = seed.alpha_alt_total().max(MIN_ALT_CONCENTRATION);
+    let alpha_reference = prior.reference;
+    let alpha_alternative = prior.alternative_total.max(MIN_ALT_CONCENTRATION);
     let built_for = (
         largest_count,
         alpha_reference.to_bits(),
@@ -726,6 +799,62 @@ mod tests {
     /// the middle column of `spec/calling_quality.md` §5.4's table.
     pub fn human_like_seed() -> SpectrumSeed {
         SpectrumSeed::new(1.0, 1e-3, SeedRegime::NeutralShape)
+    }
+
+    /// A tract's prior is its reference tract's concentration against the rest, summed; and
+    /// the run's seed passes through unchanged.
+    #[test]
+    fn a_tract_prior_is_its_reference_against_the_sum_of_the_rest() {
+        let tract = SiteQualityPrior::of_repeat_tract(&[0.4, 0.3, 0.2, 0.1]);
+        assert_eq!(tract.reference, 0.4);
+        assert!((tract.alternative_total - 0.6).abs() < 1e-12);
+
+        let alone = SiteQualityPrior::of_repeat_tract(&[1.0]);
+        assert_eq!(alone.alternative_total, 0.0);
+
+        let run = SiteQualityPrior::from(human_like_seed());
+        assert_eq!((run.reference, run.alternative_total), (1.0, 1e-3));
+    }
+
+    /// The per-locus buffer is filled with `NaN` until written, so a tract whose seed was never
+    /// filled is refused rather than scored.
+    #[test]
+    #[should_panic(expected = "was not filled for this tract")]
+    fn an_unfilled_tract_seed_is_refused() {
+        let _ = SiteQualityPrior::of_repeat_tract(&[f64::NAN, 0.5]);
+    }
+
+    /// The count-prior memo is keyed by the two concentrations, so alternating between a
+    /// tract's prior and the run's gives each its own answer, not the cached other one.
+    #[test]
+    fn alternating_priors_do_not_reuse_each_others_memo() {
+        let rows = [vec![-4.0, 0.0, -4.0]];
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let mut scratch = CallingScratch::<()>::default();
+        scratch.prepare_for_locus(1, &alleles, &view);
+        for (slot, &value) in scratch
+            .sample_genotype_likelihoods_mut(0)
+            .iter_mut()
+            .zip(&rows[0])
+        {
+            *slot = LogProb(value);
+        }
+        let tract = SiteQualityPrior::of_repeat_tract(&[1.0, 0.5]);
+        let first_tract =
+            score_uncorrected_site_quality(scratch.site_quality_buffers_mut(), &view, tract);
+        let run = score_uncorrected_site_quality(
+            scratch.site_quality_buffers_mut(),
+            &view,
+            human_like_seed(),
+        );
+        let second_tract =
+            score_uncorrected_site_quality(scratch.site_quality_buffers_mut(), &view, tract);
+        assert_eq!(first_tract, second_tract);
+        assert!(
+            first_tract.get() > run.get() + 10.0,
+            "{first_tract:?} against {run:?}"
+        );
     }
 
     /// Run the site quality over a cohort whose per-genotype log-likelihoods are `rows`.

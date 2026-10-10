@@ -167,7 +167,14 @@ mod tests {
     /// 520.7), because this fixture's reads lean one way at both alleles and the prior pulls the
     /// expected share a little toward even. It was `a2d17168b04f33a8f62a0a6cd2511df4`. Recorded in
     /// the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "a44fc3523149780329f43fd951abdab7";
+    ///
+    /// **Re-recorded 2026-10-10** when a repeat tract's site quality began to use the tract's own
+    /// prior rather than the run's (`calling_quality.md` §8.1): the repeat tract at chrV:201 moves,
+    /// QUAL 14.9 to 36.7; nothing else in the file does — the two SNPs keep the run's prior, the fit
+    /// is unchanged, and no genotype moves. Measured by putting the old prior back at tracts, which
+    /// reproduces the old checksum exactly. It was `a44fc3523149780329f43fd951abdab7`. Recorded in
+    /// the Linux container (arm64, glibc) only.
+    const CALLS_MD5: &str = "859971fb45718e4030562f502c2e4f95";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -194,7 +201,11 @@ mod tests {
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same
     /// records and genotypes, the SNPs' `QUAL` about 29 lower. It was
     /// `943c7fa93e2a1f110e996c117e3b0808`. Recorded in the Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "b82fed4ad01da17688bc4d695a9ed03d";
+    ///
+    /// **Re-recorded 2026-10-10** with the tract prior of [`CALLS_MD5`]'s last note: only the
+    /// repeat tract's `QUAL` moves. It was `b82fed4ad01da17688bc4d695a9ed03d`. Recorded in the
+    /// Linux container (arm64, glibc) only.
+    const WITH_ERRORS_CALLS_MD5: &str = "42448436323349200e5cb70265786003";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -208,7 +219,11 @@ mod tests {
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "ec9aaa04a0d365fdaa468eb8eeda7c40";
+    ///
+    /// **Re-recorded 2026-10-10** with the tract prior of [`CALLS_MD5`]'s last note: only the
+    /// repeat tract's `QUAL` moves. It was `ec9aaa04a0d365fdaa468eb8eeda7c40`. Recorded in the
+    /// Linux container (arm64, glibc) only.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "aa62fffcaa3d6dcf1983e2351ea98670";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
