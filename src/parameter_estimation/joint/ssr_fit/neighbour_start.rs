@@ -13,6 +13,9 @@ pub struct NeighbourWalk {
     pub log_likelihood_a_tract: f64,
     /// Its slippage numbers where it stopped, per slippage group.
     pub slippage: Vec<Slippage>,
+    /// Its allele-length frequencies and their spread where it stopped.
+    pub length_spectrum: Vec<f64>,
+    pub concentration: f64,
 }
 
 /// **Climbs `evidence` once, from `neighbour`'s answer**: its slippage numbers, its allele-length
@@ -62,5 +65,39 @@ pub fn walk_from_a_neighbour(
         record: climb.record(),
         log_likelihood_a_tract: climb.score,
         slippage: climb.parameters.slippage,
+        length_spectrum: climb.parameters.length_spectrum,
+        concentration: climb.parameters.concentration,
+    })
+}
+
+/// **The mean log-likelihood a tract of `evidence` at these numbers**, its average over each tract's
+/// allele frequencies taken over `points` points rather than the fit's 256 — for scoring two answers
+/// with an average precise enough to tell them apart (`fit_precision_quadrature_average_2026-10-01.md`).
+#[must_use]
+pub fn mean_log_likelihood_at(
+    evidence: &StratumEvidence,
+    slippage: &[Slippage],
+    length_spectrum: &[f64],
+    concentration: f64,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    points: usize,
+) -> f64 {
+    let genotypes = genotype_pairs(allele_classes_of(config));
+    let precise = SsrFitConfig {
+        quadrature_points: points,
+        ..config.clone()
+    };
+    let mut scorer = Scorer::new(
+        evidence,
+        homozygote_excess,
+        &genotypes,
+        &precise,
+        WhereTheThreadsGo::AcrossTheTractsOfOneStratum,
+    );
+    scorer.score(&Parameters {
+        slippage: slippage.to_vec(),
+        length_spectrum: length_spectrum.to_vec(),
+        concentration,
     })
 }

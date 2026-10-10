@@ -25,9 +25,11 @@ use pop_var_caller::calling::parameters_file::ParametersFile;
 use pop_var_caller::cli::estimate_parameters::{
     EstimateParametersArgs, OpenedCensuses, contig_id_of, open_the_censuses,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::neighbour_start::walk_from_a_neighbour;
+use pop_var_caller::parameter_estimation::joint::ssr_fit::neighbour_start::{
+    mean_log_likelihood_at, walk_from_a_neighbour,
+};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    SsrFitConfig, StratumError, StratumFit, StratumOutcome, fit_strata,
+    Slippage, SsrFitConfig, StratumError, StratumFit, StratumOutcome, fit_strata,
 };
 use pop_var_caller::run::{
     CohortTractStrata, every_read_group_pooled, the_tract_strata_of_a_cohort,
@@ -41,6 +43,9 @@ struct Cli {
     /// A parameters file whose homozygote excesses are used; every sample at zero without one.
     #[arg(long)]
     fitted: Option<PathBuf>,
+    /// Points of the precise average both answers are scored again with.
+    #[arg(long, default_value_t = 65_536)]
+    precise_points: usize,
 }
 
 fn main() {
@@ -115,18 +120,44 @@ fn main() {
     let neighbour_seconds = started.elapsed().as_secs_f64();
 
     println!(
-        "period\trepeats\tneighbour_repeats\ttracts\tusual_rounds\tneighbour_rounds\tneighbour_ending\tloss\tlevel_usual\tlevel_neighbour\tlevel_gap_in_errors"
+        "period\trepeats\tneighbour_repeats\ttracts\tusual_rounds\tneighbour_rounds\tneighbour_ending\tloss\tprecise_loss\tlevel_usual\tlevel_neighbour\tlevel_gap_in_errors"
     );
     let (mut usual_rounds, mut neighbour_rounds) = (0_u32, 0_u32);
     let mut losses: Vec<f64> = Vec::new();
+    let mut precise_losses: Vec<f64> = Vec::new();
+    let scoring = Instant::now();
     for ((index, own, neighbour), walk) in pairs.iter().zip(&walks) {
         let Some(walk) = walk else { continue };
-        let tracts = strata[*index].tracts.len() as f64;
+        let evidence = &strata[*index];
+        let tracts = evidence.tracts.len() as f64;
         let rounds: u32 = own.walks.iter().map(|record| record.rounds).sum();
         usual_rounds += rounds;
         neighbour_rounds += walk.record.rounds;
         let loss = (own.log_likelihood_a_tract - walk.log_likelihood_a_tract) * tracts;
         losses.push(loss);
+        // Both answers scored again with the precise average, every slippage group the usual fit
+        // left without numbers taking the neighbour walk's.
+        let own_slippage: Vec<Slippage> = own
+            .slippage
+            .iter()
+            .zip(&walk.slippage)
+            .map(|(own, walked)| own.unwrap_or(*walked))
+            .collect();
+        let precise = |slippage: &[Slippage], spectrum: &[f64], concentration: f64| {
+            mean_log_likelihood_at(
+                evidence,
+                slippage,
+                spectrum,
+                concentration,
+                &excess,
+                &config,
+                cli.precise_points,
+            )
+        };
+        let precise_loss = (precise(&own_slippage, &own.length_spectrum, own.concentration)
+            - precise(&walk.slippage, &walk.length_spectrum, walk.concentration))
+            * tracts;
+        precise_losses.push(precise_loss);
         let usual_level = own.slippage[0].map_or(f64::NAN, |s| s.level);
         let error = own
             .standard_errors
@@ -138,7 +169,7 @@ fn main() {
             })
             .unwrap_or(f64::NAN);
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:.3}\t{:.5}\t{:.5}\t{:.2}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{:?}\t{:.3}\t{:.3}\t{:.5}\t{:.5}\t{:.2}",
             own.stratum.period,
             own.stratum.reference_repeats,
             neighbour.stratum.reference_repeats,
@@ -147,22 +178,31 @@ fn main() {
             walk.record.rounds,
             walk.record.ending,
             loss,
+            precise_loss,
             usual_level,
             walk.slippage[0].level,
             (walk.slippage[0].level - usual_level) / error
         );
     }
-    let at_most = |limit: f64| losses.iter().filter(|loss| **loss <= limit).count();
+    let summarise = |name: &str, values: &[f64]| {
+        let at_most = |limit: f64| values.iter().filter(|value| **value <= limit).count();
+        let at_least = |limit: f64| values.iter().filter(|value| **value >= limit).count();
+        println!(
+            "{name}\tneighbour worse by more than 1: {}\twithin 1: {}\tneighbour better by more than 1: {}\tlargest worse {:.2}\tlargest better {:.2}",
+            values.len() - at_most(1.0),
+            at_most(1.0) - (values.len() - at_least(-1.0)),
+            values.len() - at_least(-1.0),
+            values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            -values.iter().copied().fold(f64::INFINITY, f64::min)
+        );
+    };
     println!();
     println!(
-        "summary\tclasses compared {}\tusual rounds {usual_rounds} ({usual_seconds:.1} s for every class)\tneighbour rounds {neighbour_rounds} ({neighbour_seconds:.1} s)",
-        losses.len()
+        "summary\tclasses compared {}\tusual rounds {usual_rounds} ({usual_seconds:.1} s for every class)\tneighbour rounds {neighbour_rounds} ({neighbour_seconds:.1} s)\tprecise scoring {:.1} s at {} points",
+        losses.len(),
+        scoring.elapsed().as_secs_f64(),
+        cli.precise_points
     );
-    println!(
-        "loss of total log-likelihood\tat most 0.1: {}\tat most 1: {}\tmore than 1: {}\tlargest {:.2}",
-        at_most(0.1),
-        at_most(1.0),
-        losses.len() - at_most(1.0),
-        losses.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-    );
+    summarise("loss at 256 points", &losses);
+    summarise("loss at the precise average", &precise_losses);
 }
