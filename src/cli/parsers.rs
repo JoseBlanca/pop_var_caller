@@ -1,4 +1,4 @@
-//! Value parsers several `pop_var_caller` subcommands share. The shape was first copied from the
+//! Value parsers several `pvc` subcommands share. The shape was first copied from the
 //! deleted production binary's `cli::parsers` (spec §2.1).
 
 use crate::region_typing::segment_criteria::{MAX_MOTIF_LEN, MinCopies};

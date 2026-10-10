@@ -229,7 +229,7 @@ lands where "0.09%" does not.
 - Reviews (correctness and performance): `doc/devel/reports/reviews/`.
 - Skills used by the assistant: `ai/skills/`.
 - Source tree: `src/` — the library, its modules at the crate root (`src/lib.rs` maps them) — and
-  `src/main.rs`, the `pop_var_caller` binary, whose subcommands live in `src/cli/`.
+  `src/main.rs`, the `pvc` binary, whose subcommands live in `src/cli/`.
 - Tests: per-module `#[cfg(test)] mod tests` blocks; integration
   tests in `tests/`.
 

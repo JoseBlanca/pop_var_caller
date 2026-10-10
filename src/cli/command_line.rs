@@ -1,4 +1,4 @@
-//! Top-level CLI for the `pop_var_caller` binary: the `Parser` and the
+//! Top-level CLI for the `pvc` binary: the `Parser` and the
 //! subcommand enum. Shape first copied from the deleted production binary's `cli` module.
 
 use clap::{Parser, Subcommand};
@@ -13,9 +13,9 @@ use super::regenerate_census::RegenerateCensusArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
-/// Top-level CLI for the `pop_var_caller` binary.
+/// Top-level CLI for the `pvc` binary.
 #[derive(Debug, Parser)]
-#[command(name = "pop_var_caller", version, about, long_about = None)]
+#[command(name = "pvc", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: PopVarCallerCommand,

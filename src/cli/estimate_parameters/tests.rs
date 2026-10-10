@@ -24,7 +24,7 @@ fn args_of(argv: &[&str]) -> EstimateParametersArgs {
 /// The shortest run a person can type.
 fn a_shortest_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         "estimate-parameters",
         "--reference",
         "ref.fa",
@@ -106,7 +106,7 @@ fn the_subcommand_is_spelled_estimate_parameters() {
     assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
     assert_eq!(args.output, PathBuf::from("cohort.parameters.toml"));
     assert!(
-        Cli::try_parse_from(["pop_var_caller", SUBCOMMAND, "--help"])
+        Cli::try_parse_from(["pvc", SUBCOMMAND, "--help"])
             .expect_err("--help exits")
             .to_string()
             .contains(SUBCOMMAND),
@@ -761,7 +761,7 @@ fn the_report_names_the_command_that_rebuilds_a_psps_census() {
     // `regenerate_census::SUBCOMMAND` *is* this constant, so comparing the two is `X == X`;
     // what carries the claim is the parse below.
     let parsed = Cli::try_parse_from([
-        "pop_var_caller",
+        "pvc",
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,
         "--reference",
         "ref.fa",

@@ -311,7 +311,7 @@ pub fn write_header<W: io::Write>(
         min_copies: scan_min_copies,
     } = scan;
 
-    writeln!(out, "## tool: pop_var_caller type-regions")?;
+    writeln!(out, "## tool: pvc type-regions")?;
     writeln!(out, "## version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(out, "## reference: {}", reference.display())?;
     writeln!(out, "## min_period: {}", periods.min())?;
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn parses_through_the_top_level_cli() {
         let cli = Cli::try_parse_from([
-            "pop_var_caller",
+            "pvc",
             "type-regions",
             "--reference",
             "r.fa",
@@ -1358,7 +1358,7 @@ mod tests {
         output: &Path,
     ) -> TypedRegionsArgs {
         let mut argv = vec![
-            "pop_var_caller".to_string(),
+            "pvc".to_string(),
             "type-regions".to_string(),
             "--reference".to_string(),
             reference.display().to_string(),
@@ -1870,7 +1870,7 @@ mod tests {
             "--min-purity=inf",  //
         ] {
             let err = Cli::try_parse_from([
-                "pop_var_caller",
+                "pvc",
                 "type-regions",
                 "--reference",
                 "r.fa",
@@ -2056,7 +2056,7 @@ mod tests {
     #[test]
     fn min_copies_accepts_exactly_six_values() {
         let cli = Cli::try_parse_from([
-            "pop_var_caller",
+            "pvc",
             "type-regions",
             "--reference",
             "r.fa",
@@ -2080,7 +2080,7 @@ mod tests {
     fn min_copies_with_a_wrong_count_is_a_cli_usage_error() {
         for bad in ["6,4,4,3,3", "6,4,4,3,3,3,3", "6"] {
             let err = Cli::try_parse_from([
-                "pop_var_caller",
+                "pvc",
                 "type-regions",
                 "--reference",
                 "r.fa",

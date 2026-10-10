@@ -6295,7 +6295,7 @@ mod records_handed_over_as_the_run_finishes_them {
                 md5: None,
             }],
             sample_names.clone(),
-            "pop_var_caller call-from-alignments".to_owned(),
+            "pvc call-from-alignments".to_owned(),
             "reference.fa".to_owned(),
             String::new(),
         )
@@ -6529,7 +6529,7 @@ mod records_handed_over_as_the_run_finishes_them {
                     md5: None,
                 }],
                 sample_names,
-                "pop_var_caller call-from-alignments".to_owned(),
+                "pvc call-from-alignments".to_owned(),
                 "reference.fa".to_owned(),
                 String::new(),
             )

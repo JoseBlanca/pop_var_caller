@@ -66,15 +66,15 @@ discover_bin() {
     if [[ -z "${NG_BIN:-}" ]]; then
         local candidate
         for candidate in \
-            "$PROJECT_ROOT/target-container/release/pop_var_caller" \
-            "$PROJECT_ROOT/target/release/pop_var_caller"; do
+            "$PROJECT_ROOT/target-container/release/pvc" \
+            "$PROJECT_ROOT/target/release/pvc"; do
             if [[ -x "$candidate" ]] && "$candidate" --version >/dev/null 2>&1; then
                 NG_BIN="$candidate"; break
             fi
         done
     fi
     [[ -n "${NG_BIN:-}" && -x "${NG_BIN}" ]] || {
-        echo "no pop_var_caller binary found; set NG_BIN=<path>" >&2; exit 1; }
+        echo "no pvc binary found; set NG_BIN=<path>" >&2; exit 1; }
 }
 
 align_file() {

@@ -5,7 +5,7 @@
 #
 #   scripts/ng_str_stutter_first_pass.sh <grid-dir> <bin-dir>
 #
-# Run it inside the dev container. <bin-dir> holds a frozen copy of pop_var_caller,
+# Run it inside the dev container. <bin-dir> holds a frozen copy of pvc,
 # ng_str_stutter_benchmark and ng_typed_region_dump, so the tree can be rebuilt while the grid runs.
 #
 # Each cohort — one design and sample count, at the simulator's default seed — runs at 30× first,

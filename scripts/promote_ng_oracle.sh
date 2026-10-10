@@ -75,8 +75,8 @@ kept=$(wc -l < "$out/regions.bed" | tr -d ' ')
 fit=${PROMOTE_NG_FIT:-1}
 if [ "$fit" != 0 ]; then
   bin=""
-  for candidate in "$root/target-container/release/pop_var_caller" \
-                   "$root/target/release/pop_var_caller"; do
+  for candidate in "$root/target-container/release/pvc" \
+                   "$root/target/release/pvc"; do
     if [ -x "$candidate" ] && { [ -z "$bin" ] || [ "$candidate" -nt "$bin" ]; }; then
       bin=$candidate
     fi

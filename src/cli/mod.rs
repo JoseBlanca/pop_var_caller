@@ -1,4 +1,4 @@
-//! The `pop_var_caller` binary's command line: [`command_line`] owns the top-level `Parser` and the
+//! The `pvc` binary's command line: [`command_line`] owns the top-level `Parser` and the
 //! subcommand enum, [`parsers`] the value parsers several subcommands share, and one module per
 //! subcommand owns its `Args`, its `run_*` and its `#[non_exhaustive]` error enum.
 //!
