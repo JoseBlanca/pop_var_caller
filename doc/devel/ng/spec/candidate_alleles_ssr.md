@@ -333,6 +333,15 @@ what changes is that the fraction is taken of each sample's own spanning reads a
 `NotPeriodic` only when **no** sample is periodic by it — the same "one sample suffices" shape as
 everything else here, for the same reason.
 
+**And at least two reads must be off the grid** (owner, 2026-10-10;
+`MIN_OFF_GRID_READS_TO_REFUSE`). With the share alone, one read refuses a tract at low depth — one
+in eight is 12.5% — and at one sample a refused tract is a lost genotype. On the stuttering
+benchmark at one sample and 15×, that refused a 4-base repeat whose sample carried a 14-copy allele
+on 7 of its 8 reads, the eighth spelled by the mapper with one flank base inside; two more tracts
+like it fell on the PCR-free library. A single off-grid read is what one sequencing or mapping
+error makes anywhere; a tract the model does not describe shows the pattern again and again. At 20
+spanning reads or more the share already needs three, so the floor changes nothing at depth.
+
 **A `NotPeriodic` locus still yields a candidate table**: the reference tract alone, verdict
 `NotPeriodic`. What the run does with it is emission's.
 

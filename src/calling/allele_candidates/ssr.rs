@@ -461,6 +461,22 @@ impl Default for MaxOffGridShare {
 /// the code depends on the value.
 pub const DEFAULT_MAX_OFF_GRID_SHARE: MaxOffGridShare = MaxOffGridShare(0.10);
 
+/// **The fewest off-grid reads that can make a sample non-periodic, whatever their share** —
+/// owner's decision of 2026-10-10 (spec §7).
+///
+/// [`DEFAULT_MAX_OFF_GRID_SHARE`] alone lets **one read** refuse a tract at low depth: one off-grid
+/// read in eight spanning reads is 12.5%, over the tenth, and at one sample a refused tract is a
+/// lost genotype. On the stuttering benchmark (one sample, 15×) that was a 4-base repeat whose
+/// sample carried a 14-copy allele on 7 reads, refused for an eighth read that the mapper had
+/// spelled with one flank base inside, and two more tracts like it on the PCR-free library. A
+/// single read off the grid is what a sequencing or mapping error produces at any tract; a tract
+/// the model does not describe shows the pattern again and again. So a sample is non-periodic only
+/// when **both** hold: more than the share, and at least this many reads.
+///
+/// **At high depth it changes nothing**: at 20 spanning reads or more the share already needs
+/// three.
+pub const MIN_OFF_GRID_READS_TO_REFUSE: u32 = 2;
+
 /// **32 tract sequences including the reference, where the ordinary path allows six**
 /// ([`DEFAULT_MAX_CANDIDATE_ALLELES`](super::DEFAULT_MAX_CANDIDATE_ALLELES)) — the owner's
 /// decision of 2026-08-24 on spec §12's Q2.
@@ -1114,7 +1130,8 @@ pub struct SsrLocusSelection {
 ///
 /// A read is **off the grid** when the difference between its tract length and the reference
 /// tract's is not a whole number of motif units. A sample is non-periodic when more than
-/// `max_off_grid_share` of its spanning reads are off the grid, and **the locus is judged
+/// `max_off_grid_share` of its spanning reads are off the grid **and** at least
+/// [`MIN_OFF_GRID_READS_TO_REFUSE`] of them are, and **the locus is judged
 /// non-periodic only when no sample is periodic** — the same "one sample suffices" shape as
 /// everything else on this path.
 ///
@@ -1195,7 +1212,9 @@ pub(super) fn locus_is_periodic(
                 off_grid_reads = off_grid_reads.saturating_add(pooled_reads);
             }
         }
-        if f64::from(off_grid_reads) <= max_off_grid_share.get() * f64::from(spanning_reads) {
+        if off_grid_reads < MIN_OFF_GRID_READS_TO_REFUSE
+            || f64::from(off_grid_reads) <= max_off_grid_share.get() * f64::from(spanning_reads)
+        {
             return true;
         }
     }
@@ -2898,6 +2917,42 @@ mod tests {
         assert!(!locus_is_periodic(
             &above_it,
             &Motif::new(b"AT").expect("a two-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+    }
+
+    /// **One read off the grid never refuses a tract, whatever its share; two can** (owner,
+    /// 2026-10-10). The case from the stuttering benchmark: eight spanning reads, seven of them a
+    /// whole number of units from the reference and one a base longer — an eighth of the reads,
+    /// over the tenth, and still periodic. A second off-grid read in nine is over the tenth and
+    /// refused, as before.
+    #[test]
+    fn one_off_grid_read_never_refuses_a_tract_at_low_depth() {
+        let alleles: [&[u8]; 3] = [b"ATATATATAT", b"ATATATAT", b"GATATATAT"];
+        let motif = Motif::new(b"AT").expect("a two-base motif");
+        let one_off = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(1, 7, -7.0), row(2, 1, -1.0)])],
+        );
+        assert!(locus_is_periodic(
+            &one_off,
+            &motif,
+            MaxOffGridShare::DEFAULT
+        ));
+        assert_ne!(
+            selected(&one_off, 2).verdict(),
+            SelectionVerdict::NotPeriodic
+        );
+
+        let two_off = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(1, 7, -7.0), row(2, 2, -2.0)])],
+        );
+        assert!(!locus_is_periodic(
+            &two_off,
+            &motif,
             MaxOffGridShare::DEFAULT
         ));
     }

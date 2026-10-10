@@ -660,12 +660,14 @@ mod tests {
         }
         // Pinned rather than bounded, because these three numbers are the measurement this
         // fixture exists to make and a range would let all three drift unnoticed. Measured
-        // 2026-09-02 on the 269-tract fixture at ploidy 2.
+        // 2026-09-02 on the 269-tract fixture at ploidy 2. **Re-pinned 2026-10-10** when one
+        // off-grid read stopped being able to refuse a tract (`MIN_OFF_GRID_READS_TO_REFUSE`):
+        // 602 to 605 sequences, the tracts that differ from production's still 184.
         assert_eq!(
             (moved, ours_total, theirs_total),
-            (184, 602, 668),
+            (184, 605, 668),
             "the shipped rules narrow 184 of the fixture's 269 tracts differently from \
-             production's, to 602 candidate sequences against production's 668 — spec §4.1 and \
+             production's, to 605 candidate sequences against production's 668 — spec §4.1 and \
              §5 measure the replacement as *cheaper* in candidates as well as better in recall, \
              and on this panel it stays so",
         );
