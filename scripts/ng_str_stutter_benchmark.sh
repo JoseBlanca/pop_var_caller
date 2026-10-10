@@ -38,7 +38,7 @@
 #   FIT_FROM    a run directory of the same cohort at another depth whose fit is reused (see ng_fit)
 #   REDO        stage names to run again although done, space-separated (e.g. REDO=score)
 #   MAIN_BIN    a build of main: adds main's defaults, fitted and true-stutter runs (ng_main_*)
-#   BIN_DIR     a directory holding pop_var_caller, ng_str_stutter_benchmark and
+#   BIN_DIR     a directory holding pvc, ng_str_stutter_benchmark and
 #               ng_typed_region_dump, used instead of the newest build — so a grid can run on a
 #               frozen copy while the tree is rebuilt
 set -euo pipefail
@@ -65,11 +65,11 @@ newest() {
     echo "$best"
 }
 if [[ -n "${BIN_DIR:-}" ]]; then
-    ng=$BIN_DIR/pop_var_caller
+    ng=$BIN_DIR/pvc
     simulator=$BIN_DIR/ng_str_stutter_benchmark
     typing_dump=$BIN_DIR/ng_typed_region_dump
 else
-    ng=$(newest pop_var_caller)
+    ng=$(newest pvc)
     simulator=$(newest examples/ng_str_stutter_benchmark)
     typing_dump=$(newest examples/ng_typed_region_dump)
 fi
