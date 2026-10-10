@@ -140,6 +140,16 @@ that anchors a flank and crosses **no** tract position is not a lower bound of z
 never entered the repeat, and its bases are the SNP/indel path's to analyse. The STR path discards it
 and counts it, as `NoObservationReason::OutsideTract`.
 
+**Where the read's own alignment shows it never reached the tract, that is decided before the
+delimiter runs** (owner, 2026-10-10). A read whose aligned span ends at or before the tract's first
+base, or starts at or after its last, with no soft clip or edge insertion on the side facing the tract,
+is `OutsideTract` without being aligned. The delimiter cannot always tell such a read from one that
+crossed: where a flank's last bases repeat the other flank's first, it matches the read's tail to the
+far flank. On the stuttering benchmark a 6-base repeat had `CCACCA` on both sides, and reads stopping
+exactly at the tract were measured as complete observations of an **empty** tract — 122 reads at 34
+segments in one 50-sample run at 15× — and an empty candidate stopped the locus. Unaligned bases facing
+the tract keep a read on the delimiter's path, because a long allele's extra units can hide there.
+
 It reaches the delimiter at all because the fetch queries the tract **plus its margin** (§2), so a
 read clipping only the flank is delimited too; the aligner then reports `FromLeft`/`FromRight` with an
 empty span, the unanchored side having fallen back to the read's own edge. **It is not a corner:

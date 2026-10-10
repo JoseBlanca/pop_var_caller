@@ -880,6 +880,27 @@ mod classify {
         let fp = read_footprint(&read.cigar, read.pos);
         let window_start = (locus.margin_start.get() - 1) as u32; // 0-based
         let window_len = reference.len() as u32;
+
+        // **A read whose own alignment never reaches the tract measures nothing about it**
+        // (owner, 2026-10-10). The fetch takes the tract plus its margin, so reads lying wholly
+        // in a flank arrive here, and the delimiter cannot always tell them from a read that
+        // crossed: where a flank's last bases repeat the other flank's first — `CCACCA` on both
+        // sides of a 6-base repeat on the stuttering benchmark — a read stopping exactly at the
+        // tract matched its last six bases to the far flank and was measured as a complete
+        // observation of an **empty** tract. At 50 samples and 15× that was 122 reads at 34
+        // segments, and an empty candidate stopped the locus. The read's CIGAR settles it before
+        // any alignment: ending at or before the tract's first base, or starting at or after its
+        // last, with no unaligned bases on the side facing it — a soft clip or an insertion
+        // there could be tract the mapper did not place, and goes to the delimiter as before.
+        let tract_start = window_start + left as u32;
+        let tract_end = tract_start + locus.segment.tract_len() as u32;
+        let (unaligned_before, unaligned_after) = unaligned_bases_at_the_ends(&read.cigar);
+        let ends_before_the_tract = fp.ref_end <= tract_start && unaligned_after == 0;
+        let starts_after_the_tract = fp.ref_start >= tract_end && unaligned_before == 0;
+        if ends_before_the_tract || starts_after_the_tract {
+            return Classified::NoObservation(NoObservationReason::OutsideTract);
+        }
+
         let region = extract_region(&read.cigar, fp, read_len, window_start, window_len);
 
         // **A read that copies the reference across the whole window has nothing to align.**
@@ -991,6 +1012,26 @@ mod classify {
                 Classified::NoObservation(NoObservationReason::NoBorderAnchored)
             }
         }
+    }
+
+    /// **How many read bases sit unaligned at each end of a read** — a soft clip, or an
+    /// insertion with no aligned base beyond it — as `(at the start, at the end)`. Hard clips are
+    /// not in the read and are stepped over. These are the bases a long allele's extra tract can
+    /// hide in, which is why a read with any of them facing a tract is never ruled out of it by
+    /// its footprint alone.
+    fn unaligned_bases_at_the_ends(cigar: &[CigarOp]) -> (u32, u32) {
+        fn run(ops: &mut dyn Iterator<Item = &CigarOp>) -> u32 {
+            let mut bases = 0;
+            for op in ops {
+                match op {
+                    CigarOp::HardClip(_) | CigarOp::Padding(_) => {}
+                    CigarOp::SoftClip(n) | CigarOp::Insertion(n) => bases += n,
+                    _ => break,
+                }
+            }
+            bases
+        }
+        (run(&mut cigar.iter()), run(&mut cigar.iter().rev()))
     }
 
     /// The tract's span inside `region`, for a read the aligner has nothing to decide about.
@@ -1485,6 +1526,65 @@ mod classify {
                 classify(&right_only),
                 Classified::NoObservation(NoObservationReason::OutsideTract),
                 "and the mirror case, which arrives through the other end of the span",
+            );
+        }
+
+        /// **A read that stops where the tract begins is outside it, even where the flanks echo
+        /// each other** (owner, 2026-10-10). The stuttering benchmark's segment: the left flank
+        /// ends `CCACCA` and the right flank begins `CCACCA`, so the production delimiter
+        /// matched a flank-only read's last six bases to the right flank and measured an empty
+        /// tract — a complete observation that stopped the locus. Without the check this
+        /// 30-base read fares no better: it comes back as a *partial* observation of the tract
+        /// spelled from 24 flank bases. The read's own CIGAR says it never reached the tract,
+        /// and that is now decided before any alignment.
+        #[test]
+        fn a_read_stopping_at_the_tract_is_outside_it_when_the_flanks_echo() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            let left_flank = b"TAAGCTGTACTCTTCCAGTCACCGCCACCA";
+            let tract = b"AACAAT".repeat(11);
+            let right_flank = b"CCACCAACGTGACCGTGACCGTACTAGCTC";
+            let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+            let echo_locus = SsrLocus {
+                segment: SsrSegment::new(
+                    "chr1".into(),
+                    31,
+                    30 + tract.len() as u64,
+                    Motif::new(b"AACAAT").unwrap(),
+                    1.0,
+                )
+                .unwrap(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            let flank_only = read(left_flank, 40);
+            let classified = classify_read(
+                &flank_only,
+                &echo_locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            );
+            assert_eq!(
+                classified,
+                Classified::NoObservation(NoObservationReason::OutsideTract)
+            );
+        }
+
+        /// Unaligned bases at a read's ends: soft clips and edge insertions count, hard clips are
+        /// stepped over, and an aligned base ends the run.
+        #[test]
+        fn unaligned_bases_at_the_ends_counts_clips_and_edge_insertions() {
+            use CigarOp::{HardClip, Insertion, Match, SoftClip};
+            assert_eq!(unaligned_bases_at_the_ends(&[Match(50)]), (0, 0));
+            assert_eq!(
+                unaligned_bases_at_the_ends(&[HardClip(3), SoftClip(4), Match(50), Insertion(6)]),
+                (4, 6)
+            );
+            assert_eq!(
+                unaligned_bases_at_the_ends(&[Match(10), Insertion(6), Match(10)]),
+                (0, 0),
+                "an insertion with aligned bases beyond it is not at an end"
             );
         }
 
