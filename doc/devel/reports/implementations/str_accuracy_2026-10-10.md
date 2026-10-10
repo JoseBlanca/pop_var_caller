@@ -82,8 +82,10 @@ Per run, one sample: 1,125 variant and 1,613 reference pairs; 50 samples: 56,621
   end inside the segment, which score genotypes but cannot propose an allele, and which can only
   prove a longer allele, not a shorter one.
 - **Deletions across a segment's edge.** At one sample main gets 16–17 of the 27 such pairs right
-  at 15× and above, GATK 26–27; at 50 samples (PCR, 15×) 344 of 1,085 are still wrong, 40 segments
-  where the deleted sequence is still never offered. One proposal, not built: let a segment's read
+  at 15× and above, GATK 26–27. At 50 samples (PCR, 15×) 347 of the 1,085 carrier pairs are still
+  not right, 289 of them at the 18 of 62 carried edge-deletion alleles whose sequence the records
+  still cannot spell (before the rule: 33 of 62, 563 pairs); `scripts/ng_str_accuracy/edge_deletions.py`
+  counts it. One proposal, not built: let a segment's read
   spelling take in a few flank bases each side, so such a deletion is one allele of one record.
 - **Representation.** An edge deletion is now written as two records; allele-exact comparisons
   count that as a miss and a false positive.

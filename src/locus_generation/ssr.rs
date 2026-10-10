@@ -955,8 +955,8 @@ mod classify {
         // spec §3). The delimiter calls a read complete only where both flanks match intact,
         // and a deletion that takes the first bases of a flank breaks that match, so every read
         // carrying it came back a partial and the deleted allele was never a candidate: at 50
-        // samples and 15× on the stuttering benchmark, 55 of 84 segments carrying such a
-        // deletion, 563 carrier genotypes, none right. The read's own alignment already says it
+        // samples and 15× on the stuttering benchmark, 33 of the 62 such alleles the cohort
+        // carries, 563 carrier genotypes, none right. The read's own alignment already says it
         // crossed, and is what spells it (above). Measured: +1,122 right genotypes at 50 samples
         // over four runs for 16 more false calls in 321,116, +76 at one sample for none, and
         // +138 on HG002's tandem-repeat benchmark at 30× and 50×, where one tract a depth went
