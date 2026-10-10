@@ -31,7 +31,7 @@ meant to merge into main on its own, independent of `fit-precision-followup`.
 
 ## 3. The steps
 
-1. ☐ **H1 — each library kept apart, every multiplier one.** The evidence's per-tract counts are keyed by
+1. ✅ **H1 — each library kept apart, every multiplier one.** The evidence's per-tract counts are keyed by
    library (read group) rather than summed into the slippage group; a map from library to slippage
    group says which class rates a library reads; a per-library multiplier vector, all ones, enters the
    level each read is scored at (`min(mₗ · Lₛ, LEVEL_CEILING)`). The subset's top-up stays on slippage

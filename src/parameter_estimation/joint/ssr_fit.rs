@@ -66,6 +66,7 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
@@ -158,7 +159,86 @@ pub use super::slippage_curve::{
     blend_level, choose_rise_shape,
 };
 
-/// One sample's spanning reads at one tract, split by the slippage group that produced them.
+/// **The highest slippage level a library's multiplier may lift a read to**
+/// (`str_library_stutter.md` §2.1). A level of one would say no read reports its allele.
+///
+/// **It caps the lift, never the class's own level**: a library is scored at
+/// `min(m · L, max(L, MULTIPLIED_LEVEL_CEILING))`, so a multiplier of one scores every read at
+/// exactly the class rate whatever that rate is, and the fit with every multiplier one is today's
+/// to the bit (spec §3.1). Named apart from the curves' `LEVEL_CEILING` (0.999), which bounds a
+/// level read off a curve and is a different number.
+pub const MULTIPLIED_LEVEL_CEILING: f64 = 0.95;
+
+/// **The slippage level a library's reads are scored at**: the class rate `class_level` times the
+/// library's `multiplier`, held below [`MULTIPLIED_LEVEL_CEILING`] unless the class rate itself is
+/// above it.
+///
+/// **A multiplier of one returns the class rate itself**, whatever it is — a rate that is not a
+/// number included, which the `min` and `max` below would otherwise turn into the ceiling.
+///
+/// # Panics
+///
+/// In a debug build, when `multiplier` is not a finite positive number.
+#[must_use]
+pub fn library_level(class_level: f64, multiplier: f64) -> f64 {
+    debug_assert!(
+        multiplier.is_finite() && multiplier > 0.0,
+        "a library's stutter multiplier is a finite positive number, not {multiplier}"
+    );
+    if multiplier == 1.0 {
+        return class_level;
+    }
+    (multiplier * class_level).min(MULTIPLIED_LEVEL_CEILING.max(class_level))
+}
+
+/// **Which library of [`StratumEvidence::libraries`] a sample's reads came through** — its position
+/// in that list. A type of its own so that it cannot be mistaken for the sample or the slippage
+/// group, which are numbered the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LibraryIndex(pub u32);
+
+impl LibraryIndex {
+    /// The position in [`StratumEvidence::libraries`].
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// **One library of the cohort** — a read group, the grain the census keeps apart — and how its
+/// reads are scored (`str_library_stutter.md` §1.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Library {
+    /// The read group the library is.
+    pub read_group: ReadGroupId,
+    /// The slippage group whose class rates the library's reads are scored at.
+    pub slippage_group: u32,
+    /// The library's stutter relative to its slippage group's class rates: a read slips with
+    /// probability [`library_level`]`(class rate, stutter_multiplier)`. **Held while a stratum's
+    /// numbers are climbed**; one until the fit sets it.
+    pub stutter_multiplier: f64,
+}
+
+impl Library {
+    /// A library of `slippage_group` with a multiplier of one.
+    #[must_use]
+    pub fn in_group(read_group: ReadGroupId, slippage_group: u32) -> Self {
+        Self {
+            read_group,
+            slippage_group,
+            stutter_multiplier: 1.0,
+        }
+    }
+
+    /// Whether `self` and `other` are the same library of the same run: the same read group in the
+    /// same slippage group. **The multiplier is not compared** — it is a fitted number, not part of
+    /// which library this is.
+    fn is_the_same_library_as(&self, other: &Library) -> bool {
+        self.read_group == other.read_group && self.slippage_group == other.slippage_group
+    }
+}
+
+/// One sample's spanning reads at one tract, split by the library that produced them.
 ///
 /// **Only the samples that put a read on the tract are here.** A sample with no read
 /// contributes a likelihood of exactly one whatever the parameters are, so leaving it out is
@@ -166,8 +246,9 @@ pub use super::slippage_curve::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleTractReads {
     pub sample: u32,
-    /// Per slippage group that put a read here, its reads in each bucket.
-    pub by_group: Vec<(u32, Vec<u32>)>,
+    /// Per library that put a read here, in increasing library order, which library it is and its
+    /// reads in each bucket.
+    pub by_library: Vec<(LibraryIndex, Vec<u32>)>,
 }
 
 /// Every sample's reads at one tract.
@@ -186,6 +267,14 @@ pub struct StratumEvidence {
     /// How many slippage groups the cohort declares. Every group is fitted whether or not it
     /// put a read in this stratum; one that did not is returned as not fitted.
     pub groups: usize,
+    /// **Every library of the cohort**, indexed as [`SampleTractReads::by_library`] names them:
+    /// which slippage group each reads and the multiplier its reads are scored at.
+    ///
+    /// **One list a run, shared by every stratum** rather than copied into each: the multipliers
+    /// are the run's, and a fit that updates them builds one new list and hands the same one to
+    /// every stratum, so no stratum can be left scoring at an old multiplier. Every library's
+    /// slippage group is below [`groups`](Self::groups) ([`check_libraries`](Self::check_libraries)).
+    pub libraries: Arc<[Library]>,
     /// Tracts left out because more than one read in ten of those differing from the reference
     /// length differed by a **non-whole** number of repeat units — the guard's threshold. Such
     /// a tract is not something this noise model describes, and the fit says so rather than
@@ -273,8 +362,9 @@ impl StratumEvidence {
     }
 
     /// **The bytes this stratum's evidence holds**, counted by what its vectors reserved:
-    /// the tract list, each tract's rows, each row's slippage groups and each group's counts.
-    /// The allocator rounds every block up, so the process holds somewhat more.
+    /// the tract list, each tract's rows, each row's libraries and each library's counts. The
+    /// allocator rounds every block up, so the process holds somewhat more. **The library list is
+    /// not counted**: one list is shared by every stratum of a run.
     pub fn heap_bytes(&self) -> usize {
         self.tracts.capacity() * std::mem::size_of::<TractReads>()
             + self
@@ -286,9 +376,10 @@ impl StratumEvidence {
                             .samples
                             .iter()
                             .map(|row| {
-                                row.by_group.capacity() * std::mem::size_of::<(u32, Vec<u32>)>()
+                                row.by_library.capacity()
+                                    * std::mem::size_of::<(LibraryIndex, Vec<u32>)>()
                                     + row
-                                        .by_group
+                                        .by_library
                                         .iter()
                                         .map(|(_, counts)| {
                                             counts.capacity() * std::mem::size_of::<u32>()
@@ -311,7 +402,7 @@ impl StratumEvidence {
         self.tracts
             .iter()
             .flat_map(|tract| tract.samples.iter())
-            .flat_map(|sample| sample.by_group.iter())
+            .flat_map(|sample| sample.by_library.iter())
             .flat_map(|(_, counts)| counts.iter())
             .map(|reads| u64::from(*reads))
             .sum()
@@ -330,7 +421,7 @@ impl StratumEvidence {
         self.tracts
             .iter()
             .flat_map(|tract| tract.samples.iter())
-            .flat_map(|sample| sample.by_group.iter())
+            .flat_map(|sample| sample.by_library.iter())
             .flat_map(|(_, counts)| {
                 counts
                     .iter()
@@ -364,14 +455,67 @@ impl StratumEvidence {
         let mut seen = vec![false; self.groups];
         for tract in &self.tracts {
             for sample in &tract.samples {
-                for (group, counts) in &sample.by_group {
+                for (library, counts) in &sample.by_library {
                     if counts.iter().any(|reads| *reads > 0) {
-                        seen[*group as usize] = true;
+                        seen[self.slippage_group_of(*library)] = true;
                     }
                 }
             }
         }
         seen
+    }
+
+    /// The slippage group whose class rates `library`'s reads are scored at.
+    fn slippage_group_of(&self, library: LibraryIndex) -> usize {
+        self.libraries[library.get()].slippage_group as usize
+    }
+
+    /// **Refuses evidence whose libraries do not fit together**: a library in a slippage group at or
+    /// past [`groups`](Self::groups), or a sample's reads naming a library the list does not hold or
+    /// naming libraries out of increasing order.
+    ///
+    /// Called where a fit first takes a stratum, so a builder that sets one of the two fields and not
+    /// the other is stopped there, by name, rather than as an index out of bounds deep in scoring.
+    ///
+    /// # Panics
+    ///
+    /// On any of the three.
+    pub fn check_libraries(&self) {
+        if let Some(library) = self
+            .libraries
+            .iter()
+            .find(|library| library.slippage_group as usize >= self.groups)
+        {
+            panic!(
+                "period {} at {} repeats: read group {:?} is in slippage group {} of the {} the \
+                 evidence declares",
+                self.stratum.period,
+                self.stratum.reference_repeats,
+                library.read_group,
+                library.slippage_group,
+                self.groups
+            );
+        }
+        for row in self.tracts.iter().flat_map(|tract| &tract.samples) {
+            let in_order = row.by_library.windows(2).all(|pair| pair[0].0 < pair[1].0);
+            let in_range = row
+                .by_library
+                .last()
+                .is_none_or(|(library, _)| library.get() < self.libraries.len());
+            assert!(
+                in_order && in_range,
+                "period {} at {} repeats: sample {}'s reads name libraries {:?}, out of order or \
+                 past the {} the evidence lists",
+                self.stratum.period,
+                self.stratum.reference_repeats,
+                row.sample,
+                row.by_library
+                    .iter()
+                    .map(|(library, _)| library.0)
+                    .collect::<Vec<_>>(),
+                self.libraries.len()
+            );
+        }
     }
 }
 
@@ -1076,6 +1220,7 @@ pub fn fit_stratum(
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
 ) -> Option<StratumFit> {
+    evidence.check_libraries();
     // **One stratum has no second grain to spread the pool over**, so this entry ignores
     // `config.strata_at_once` and always splits this stratum's tracts. `fit_strata` is the caller
     // that has a choice to make.
@@ -2226,6 +2371,7 @@ impl StratumEvidence {
                 .collect(),
             read_span: self.read_span,
             groups: self.groups,
+            libraries: Arc::clone(&self.libraries),
             tracts_over_guard_threshold: self.tracts_over_guard_threshold,
             reads_reaching_not_crossing: self.reads_reaching_not_crossing,
             guard_reads: self.guard_reads,
@@ -2240,9 +2386,9 @@ impl StratumEvidence {
         let mut readers = vec![vec![false; samples]; self.groups];
         for tract in &self.tracts {
             for reads in &tract.samples {
-                for (group, counts) in &reads.by_group {
+                for (library, counts) in &reads.by_library {
                     if counts.iter().any(|count| *count > 0) {
-                        readers[*group as usize][reads.sample as usize] = true;
+                        readers[self.slippage_group_of(*library)][reads.sample as usize] = true;
                     }
                 }
             }
@@ -2827,6 +2973,9 @@ fn fit_strata_with(
     sample_order: Option<&[usize]>,
     config: &SsrFitConfig,
 ) -> Vec<StratumOutcome> {
+    for evidence in strata {
+        evidence.check_libraries();
+    }
     // **Every stratum is fitted on its own tracts and no other's.** Pooling a thin stratum's
     // tracts with its neighbours' and refitting used to be how it got an answer at all; it now
     // gets its level from its period's curve and its two shares copied from a neighbour that
@@ -3197,6 +3346,9 @@ pub fn fit_period_length_spectra(
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
 ) -> BTreeMap<u8, PeriodLengthSpectrum> {
+    for evidence in strata {
+        evidence.check_libraries();
+    }
     let mut by_period: BTreeMap<u8, Vec<&StratumEvidence>> = BTreeMap::new();
     for evidence in strata {
         by_period
@@ -3291,6 +3443,18 @@ fn pool_a_period(period: u8, members: &[&StratumEvidence]) -> StratumEvidence {
             first.stratum.reference_repeats,
             first.groups
         );
+        assert!(
+            evidence.libraries.len() == first.libraries.len()
+                && evidence
+                    .libraries
+                    .iter()
+                    .zip(first.libraries.iter())
+                    .all(|(one, other)| one.is_the_same_library_as(other)),
+            "period {period}: the strata at {} and {} repeats name different libraries — the list \
+             is a property of the run, so two lists mean the evidence came from two runs",
+            evidence.stratum.reference_repeats,
+            first.stratum.reference_repeats,
+        );
     }
     let smallest = members
         .iter()
@@ -3308,6 +3472,7 @@ fn pool_a_period(period: u8, members: &[&StratumEvidence]) -> StratumEvidence {
             .collect(),
         read_span: first.read_span,
         groups: first.groups,
+        libraries: Arc::clone(&first.libraries),
         // **The five diagnostic counters below are summed rather than zeroed, and nothing in the
         // fit reads any of them.** The pooled evidence never leaves this function —
         // `fit_period_length_spectra` keeps only the length spectrum and the concentration — so
@@ -3760,10 +3925,139 @@ struct TractLikelihoods {
     ln_offset: f64,
 }
 
+/// **The read-length distributions a stratum's reads are scored under**: one for each slippage group
+/// and multiplier that some library is scored at, and which of them each library uses.
+///
+/// **One distribution for all the libraries of a slippage group that share a multiplier**, not one
+/// for each library: a sample whose libraries use the same distribution has their counts summed
+/// before the logarithm, as the evidence did when it summed them into the slippage group. With
+/// every multiplier one, the distributions are the slippage groups' and every sum is the one the fit
+/// made before libraries were kept apart, to the bit (`str_library_stutter.md` §3.1).
+struct ReadDistributionsByLevel {
+    /// Per distribution, per allele offset, the probability of each read bucket. **In
+    /// slippage-group order, then by multiplier**, so a sample's rows are summed in the order the
+    /// slippage groups were.
+    read_distribution_by_allele: Vec<Vec<Vec<f64>>>,
+    /// Per library, the position of its distribution in `read_distribution_by_allele`.
+    distribution_of_library: Vec<usize>,
+}
+
+impl ReadDistributionsByLevel {
+    fn of(slippage: &[Slippage], libraries: &[Library], allele_span: i32, read_span: i32) -> Self {
+        // Each distinct (slippage group, multiplier), the multiplier by its bits so that a
+        // multiplier sorts and compares the same way in both places.
+        let key = |library: &Library| {
+            (
+                library.slippage_group as usize,
+                library.stutter_multiplier.to_bits(),
+            )
+        };
+        let mut group_and_multiplier: Vec<(usize, u64)> = libraries.iter().map(key).collect();
+        group_and_multiplier.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(f64::from_bits(left.1).total_cmp(&f64::from_bits(right.1)))
+        });
+        group_and_multiplier.dedup();
+        let distribution_of_library = libraries
+            .iter()
+            .map(|library| {
+                let (group, multiplier) = key(library);
+                // PANIC-FREE: every library's key was put in the list just above.
+                group_and_multiplier
+                    .binary_search_by(|(held_group, held_multiplier)| {
+                        held_group.cmp(&group).then(
+                            f64::from_bits(*held_multiplier).total_cmp(&f64::from_bits(multiplier)),
+                        )
+                    })
+                    .expect("every library's slippage group and multiplier is listed")
+            })
+            .collect();
+        let read_distribution_by_allele = group_and_multiplier
+            .iter()
+            .map(|(group, multiplier)| {
+                let class = slippage[*group];
+                let scored = Slippage {
+                    level: library_level(class.level, f64::from_bits(*multiplier)),
+                    shorter_share: class.shorter_share,
+                    fall_off: class.fall_off,
+                };
+                (-allele_span..=allele_span)
+                    .map(|allele| scored.read_probabilities(allele, read_span))
+                    .collect()
+            })
+            .collect();
+        Self {
+            read_distribution_by_allele,
+            distribution_of_library,
+        }
+    }
+
+    /// The read-length distribution from each allele that `library`'s reads are scored under.
+    fn of_library(&self, library: LibraryIndex) -> &[Vec<f64>] {
+        &self.read_distribution_by_allele[self.distribution_of_library[library.get()]]
+    }
+
+    /// **One sample's reads, one row for each distribution its libraries use**, in distribution
+    /// order, for a sample with several libraries. Libraries using one distribution have their
+    /// counts summed into `summed_by_distribution`, a scratch buffer whose count vectors are reused
+    /// from one sample to the next; the rows returned are the part of it in use, so they last until
+    /// it is next used.
+    fn rows_by_distribution<'a>(
+        &self,
+        sample: &SampleTractReads,
+        summed_by_distribution: &'a mut Vec<(usize, Vec<u32>)>,
+    ) -> &'a [(usize, Vec<u32>)] {
+        let mut used = 0;
+        for (library, counts) in &sample.by_library {
+            let distribution = self.distribution_of_library[library.get()];
+            if let Some((_, sum)) = summed_by_distribution[..used]
+                .iter_mut()
+                .find(|(held, _)| *held == distribution)
+            {
+                for (into, reads) in sum.iter_mut().zip(counts) {
+                    *into += reads;
+                }
+            } else if let Some((held, sum)) = summed_by_distribution.get_mut(used) {
+                *held = distribution;
+                sum.clone_from(counts);
+                used += 1;
+            } else {
+                summed_by_distribution.push((distribution, counts.clone()));
+                used += 1;
+            }
+        }
+        let rows = &mut summed_by_distribution[..used];
+        rows.sort_unstable_by_key(|(distribution, _)| *distribution);
+        rows
+    }
+}
+
+/// **Adds to `total` the log-likelihood of one library's `counts` under the genotype of alleles
+/// `first` and `second`**, each read drawn from either allele with even odds; `per_allele` is the
+/// library's read-length distribution from each allele.
+#[inline(always)]
+fn add_ln_reads(
+    total: &mut f64,
+    per_allele: &[Vec<f64>],
+    counts: &[u32],
+    first: usize,
+    second: usize,
+) {
+    for (bucket, reads) in counts.iter().enumerate() {
+        if *reads == 0 {
+            continue;
+        }
+        let probability = 0.5 * (per_allele[first][bucket] + per_allele[second][bucket]);
+        *total += f64::from(*reads) * float::ln(probability.max(1e-300));
+    }
+}
+
 impl TractLikelihoods {
+    /// `distributions` holds the read-length distributions the tract's libraries are scored under.
     fn of(
         tract: &TractReads,
-        per_group_allele: &[Vec<Vec<f64>>],
+        distributions: &ReadDistributionsByLevel,
         genotypes: &[(usize, usize)],
         homozygote_excess: &[f64],
     ) -> Self {
@@ -3771,23 +4065,31 @@ impl TractLikelihoods {
         let mut scaled: Vec<f64> = Vec::with_capacity(tract.samples.len() * width);
         let mut excess = Vec::with_capacity(tract.samples.len());
         let mut ln_offset = 0.0;
+        let mut summed_by_distribution: Vec<(usize, Vec<u32>)> = Vec::new();
         for sample in &tract.samples {
             let start = scaled.len();
-            scaled.extend(genotypes.iter().map(|(first, second)| {
-                let mut total = 0.0;
-                for (group, counts) in &sample.by_group {
-                    let per_allele = &per_group_allele[*group as usize];
-                    for (bucket, reads) in counts.iter().enumerate() {
-                        if *reads == 0 {
-                            continue;
-                        }
-                        let probability =
-                            0.5 * (per_allele[*first][bucket] + per_allele[*second][bucket]);
-                        total += f64::from(*reads) * float::ln(probability.max(1e-300));
+            // **A sample with one library — every sample of a cohort of one read group a sample —
+            // runs the loop the fit ran before libraries were kept apart**, with its distribution
+            // fetched once: going through the general path below cost that case 1.75 times the
+            // time (review of step H1, 400 tracts of 200 samples at three reads).
+            if let [(library, counts)] = sample.by_library.as_slice() {
+                let per_allele = distributions.of_library(*library);
+                scaled.extend(genotypes.iter().map(|(first, second)| {
+                    let mut total = 0.0;
+                    add_ln_reads(&mut total, per_allele, counts, *first, *second);
+                    total
+                }));
+            } else {
+                let rows = distributions.rows_by_distribution(sample, &mut summed_by_distribution);
+                scaled.extend(genotypes.iter().map(|(first, second)| {
+                    let mut total = 0.0;
+                    for (distribution, counts) in rows {
+                        let per_allele = &distributions.read_distribution_by_allele[*distribution];
+                        add_ln_reads(&mut total, per_allele, counts, *first, *second);
                     }
-                }
-                total
-            }));
+                    total
+                }));
+            }
             let row = &mut scaled[start..];
             let largest = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             ln_offset += largest;
@@ -4105,18 +4407,16 @@ impl<'a> Scorer<'a> {
         // its peak: nothing reads them while the new ones are filled, so holding both would cost
         // a second table for nothing — and make the size the fit prints for one table untrue.
         self.prepared = None;
-        let per_group_allele: Vec<Vec<Vec<f64>>> = slippage
-            .iter()
-            .map(|group| {
-                (-self.allele_span..=self.allele_span)
-                    .map(|allele| group.read_probabilities(allele, self.evidence.read_span))
-                    .collect()
-            })
-            .collect();
+        let distributions = ReadDistributionsByLevel::of(
+            slippage,
+            &self.evidence.libraries,
+            self.allele_span,
+            self.evidence.read_span,
+        );
         let build = |tract: &TractReads| {
             TractLikelihoods::of(
                 tract,
-                &per_group_allele,
+                &distributions,
                 self.genotypes,
                 self.homozygote_excess,
             )
@@ -4459,6 +4759,11 @@ pub fn strata_of_kept_loci(
 /// read groups ran on one machine may pool them, and one that pools everything is saying it
 /// cannot tell them apart.
 ///
+/// **Every read group is kept apart as a library of its own** ([`StratumEvidence::libraries`],
+/// one list shared by every stratum), each at a stutter multiplier of one. A read group
+/// `slippage_group_of` does not name is put in slippage group 0, and the log counts such read
+/// groups unless the map is empty.
+///
 /// Every sample must hold evidence for the same STR loci in the same order, which the
 /// recording-terms check the cohort makes at its door has already refused to let fail silently.
 ///
@@ -4481,6 +4786,23 @@ pub fn gather_strata(
         .max()
         .unwrap_or(1);
     let buckets = (2 * RECORDED_OFFSET_RANGE + 1) as usize;
+    // **Every read group of the cohort is a library of its own**, in the cohort's read-group order;
+    // one `slippage_group_of` does not name is in group 0, as its reads always were.
+    let libraries: Arc<[Library]> = cohort
+        .read_groups()
+        .iter()
+        .map(|read_group| {
+            Library::in_group(
+                *read_group,
+                *slippage_group_of.get(read_group).unwrap_or(&0),
+            )
+        })
+        .collect();
+    let library_of: BTreeMap<ReadGroupId, LibraryIndex> = libraries
+        .iter()
+        .enumerate()
+        .map(|(index, library)| (library.read_group, LibraryIndex(index as u32)))
+        .collect();
 
     // How many tracts each stratum holds, which is the length its sections are built at.
     let mut tracts_in: BTreeMap<Stratum, usize> = BTreeMap::new();
@@ -4501,6 +4823,19 @@ pub fn gather_strata(
         tracts_in.len(),
         names.len()
     ));
+    let undeclared = libraries
+        .iter()
+        .filter(|library| !slippage_group_of.contains_key(&library.read_group))
+        .count();
+    if undeclared > 0 && !slippage_group_of.is_empty() {
+        stage.always(|into| {
+            format!(
+                "repeat-tract evidence: {undeclared} read group(s) of {} have no slippage group \
+                 declared and are scored in group 0; {into}",
+                libraries.len()
+            )
+        });
+    }
     cohort.with_strata(&band, |lent| {
         stage.always(|into| format!("repeat-tract evidence: every sample's sections read; {into}"));
         // Each sample's tract sections, gathered by stratum. **One row a sample and not one
@@ -4548,6 +4883,7 @@ pub fn gather_strata(
                     tracts: Vec::new(),
                     read_span: RECORDED_OFFSET_RANGE,
                     groups,
+                    libraries: Arc::clone(&libraries),
                     tracts_over_guard_threshold: 0,
                     reads_reaching_not_crossing: 0,
                     guard_reads: 0,
@@ -4575,7 +4911,7 @@ pub fn gather_strata(
                     let mut reads = TractReads::default();
                     let mut over_guard = false;
                     for (sample_index, sample) in by_sample.iter().enumerate() {
-                        let mut by_group: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+                        let mut by_library: BTreeMap<LibraryIndex, Vec<u32>> = BTreeMap::new();
                         for (read_group, records) in sample.get(stratum).into_iter().flatten() {
                             if records.guard_is_over_threshold(locus) {
                                 over_guard = true;
@@ -4589,18 +4925,22 @@ pub fn gather_strata(
                             if records.state(locus) != SsrLocusState::Crossed {
                                 continue;
                             }
-                            let group = *slippage_group_of.get(read_group).unwrap_or(&0);
-                            let counts = by_group.entry(group).or_insert_with(|| vec![0; buckets]);
+                            let library = *library_of
+                                .get(read_group)
+                                .expect("every section's read group is one of the cohort's");
+                            let counts = by_library
+                                .entry(library)
+                                .or_insert_with(|| vec![0; buckets]);
                             let offsets = records.offsets(locus);
                             for (bucket, count) in counts.iter_mut().enumerate() {
                                 *count +=
                                     u32::from(offsets.at(bucket as i32 - RECORDED_OFFSET_RANGE));
                             }
                         }
-                        if !by_group.is_empty() {
+                        if !by_library.is_empty() {
                             reads.samples.push(SampleTractReads {
                                 sample: sample_index as u32,
-                                by_group: by_group.into_iter().collect(),
+                                by_library: by_library.into_iter().collect(),
                             });
                         }
                     }
@@ -4736,6 +5076,9 @@ pub mod bench_fixtures {
     /// position puts a read at a tract in a minority of its samples. So a drawn stratum of `n`
     /// samples costs more a tract than a recorded one of `n` samples — which is the right way
     /// round for a benchmark, and the wrong way round for extrapolating a wall time to a cohort.
+    ///
+    /// **Each sample is a library of its own**, library `s` read group `s`, every one in slippage
+    /// group 0 at a multiplier of one ([`one_library_a_sample`]).
     #[allow(
         clippy::too_many_arguments,
         reason = "the drawn stratum's own parameters, and the two axes CLAUDE.md §0 commits to \
@@ -4777,7 +5120,7 @@ pub mod bench_fixtures {
                 }
                 reads.samples.push(SampleTractReads {
                     sample: sample as u32,
-                    by_group: vec![(0, counts)],
+                    by_library: vec![(LibraryIndex(sample as u32), counts)],
                 });
             }
             drawn.push(reads);
@@ -4790,6 +5133,7 @@ pub mod bench_fixtures {
             tracts: drawn,
             read_span: span,
             groups: 1,
+            libraries: one_library_a_sample(samples),
             tracts_over_guard_threshold: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
@@ -4799,6 +5143,14 @@ pub mod bench_fixtures {
             bases_compared: 0,
             mismatching_bases: 0,
         }
+    }
+
+    /// **`samples` libraries, one a sample**: library `s` is read group `s`, in slippage group 0 at a
+    /// multiplier of one.
+    pub fn one_library_a_sample(samples: usize) -> Arc<[Library]> {
+        (0..samples as u32)
+            .map(|sample| Library::in_group(ReadGroupId(sample), 0))
+            .collect()
     }
 
     /// The three-class spectrum every measurement on this path was made against: most
@@ -5024,6 +5376,356 @@ mod tests {
             .build()
             .expect("a pool of the requested width");
         pool.install(|| every_fitted_number(&fit_strata(strata, excess, config)))
+    }
+
+    /// **The same strata with every sample's reads split between two libraries** of the sample's
+    /// slippage group: library `2s` takes half of sample `s`'s reads in each bucket, rounded down,
+    /// and library `2s + 1` the rest. Samples at or past `second_group_from` are in slippage
+    /// group 1, both libraries.
+    fn split_into_two_libraries_a_sample(
+        strata: &[StratumEvidence],
+        second_group_from: u32,
+    ) -> Vec<StratumEvidence> {
+        let samples = strata[0].libraries.len() as u32;
+        let group_of = |sample: u32| u32::from(sample >= second_group_from);
+        let libraries: Arc<[Library]> = (0..2 * samples)
+            .map(|library| Library::in_group(ReadGroupId(library), group_of(library / 2)))
+            .collect();
+        strata
+            .iter()
+            .map(|evidence| {
+                let mut split = evidence.clone();
+                split.groups = if second_group_from < samples { 2 } else { 1 };
+                split.libraries = Arc::clone(&libraries);
+                for tract in &mut split.tracts {
+                    for reads in &mut tract.samples {
+                        let [(_, counts)] = reads.by_library.as_slice() else {
+                            panic!("a drawn sample is one library");
+                        };
+                        let first: Vec<u32> = counts.iter().map(|reads| reads / 2).collect();
+                        let second: Vec<u32> = counts
+                            .iter()
+                            .zip(&first)
+                            .map(|(all, half)| all - half)
+                            .collect();
+                        reads.by_library = vec![
+                            (LibraryIndex(2 * reads.sample), first),
+                            (LibraryIndex(2 * reads.sample + 1), second),
+                        ];
+                    }
+                }
+                split
+            })
+            .collect()
+    }
+
+    /// The same strata with each sample's one library moved to slippage group 1 from
+    /// `second_group_from` on — the summed shape of [`split_into_two_libraries_a_sample`].
+    fn one_library_a_sample_in_groups(
+        strata: &[StratumEvidence],
+        second_group_from: u32,
+    ) -> Vec<StratumEvidence> {
+        strata
+            .iter()
+            .map(|evidence| {
+                let mut summed = evidence.clone();
+                summed.groups = if (second_group_from as usize) < summed.libraries.len() {
+                    2
+                } else {
+                    1
+                };
+                let mut libraries = summed.libraries.to_vec();
+                for (sample, library) in libraries.iter_mut().enumerate() {
+                    library.slippage_group = u32::from(sample as u32 >= second_group_from);
+                }
+                summed.libraries = libraries.into();
+                summed
+            })
+            .collect()
+    }
+
+    /// **Keeping libraries apart moves no number while every multiplier is one**
+    /// (`str_library_stutter.md` §3.1): a cohort whose samples each read through two libraries is
+    /// fitted to the bit as the same reads summed into one library a sample — the shape the
+    /// evidence had when it summed read groups into their slippage group — in one slippage group
+    /// and in two.
+    #[test]
+    fn libraries_kept_apart_at_a_multiplier_of_one_fit_as_their_sum_to_the_bit() {
+        let config = a_two_round_config(1);
+        let excess = [0.4; 8];
+        let drawn = classes_of_unequal_size();
+        for second_group_from in [8, 5] {
+            let summed = one_library_a_sample_in_groups(&drawn, second_group_from);
+            let split = split_into_two_libraries_a_sample(&drawn, second_group_from);
+            assert!(
+                split[0].tracts[0]
+                    .samples
+                    .iter()
+                    .all(|reads| reads.by_library.len() == 2),
+                "every sample reads through two libraries"
+            );
+            the_same_bits(
+                &every_fitted_number(&fit_strata(&summed, &excess, &config)),
+                &every_fitted_number(&fit_strata(&split, &excess, &config)),
+                &format!("second slippage group from sample {second_group_from}"),
+            );
+        }
+    }
+
+    /// Two slippage groups' numbers, at different levels, shares and fall-offs.
+    fn two_groups_slippage() -> [Slippage; 2] {
+        [
+            Slippage {
+                level: 0.1,
+                shorter_share: 0.8,
+                fall_off: 0.25,
+            },
+            Slippage {
+                level: 0.23,
+                shorter_share: 0.6,
+                fall_off: 0.3,
+            },
+        ]
+    }
+
+    /// One tract read by one sample through two libraries, `first`'s reads through library 0 and
+    /// `second`'s through library 1.
+    fn one_sample_through_two_libraries(first: &[u32], second: &[u32]) -> TractReads {
+        TractReads {
+            samples: vec![SampleTractReads {
+                sample: 0,
+                by_library: vec![
+                    (LibraryIndex(0), first.to_vec()),
+                    (LibraryIndex(1), second.to_vec()),
+                ],
+            }],
+        }
+    }
+
+    /// A tract's likelihood table and its offset, as bits.
+    fn the_bits_of(likelihoods: &TractLikelihoods) -> Vec<u64> {
+        let mut bits: Vec<u64> = likelihoods.scaled.iter().map(|x| x.to_bits()).collect();
+        bits.push(likelihoods.ln_offset.to_bits());
+        bits
+    }
+
+    /// **Libraries at different levels are scored under different distributions, and libraries at
+    /// one level under one**: two libraries of one group at one multiplier share a distribution, a
+    /// library at another multiplier has its own, and libraries of two groups never share — and the
+    /// distributions run in slippage-group order, then by multiplier.
+    #[test]
+    fn a_read_distribution_is_one_slippage_group_at_one_multiplier() {
+        let slippage = two_groups_slippage();
+        let library = |group: u32, multiplier: f64| Library {
+            read_group: ReadGroupId(0),
+            slippage_group: group,
+            stutter_multiplier: multiplier,
+        };
+        let distributions = ReadDistributionsByLevel::of(
+            &slippage,
+            &[
+                library(1, 1.0),
+                library(0, 2.0),
+                library(0, 1.0),
+                library(0, 1.0),
+            ],
+            1,
+            1,
+        );
+        assert_eq!(distributions.distribution_of_library, vec![2, 1, 0, 0]);
+        let doubled = Slippage {
+            level: 0.2,
+            ..slippage[0]
+        };
+        assert_eq!(
+            distributions.read_distribution_by_allele[1][1],
+            doubled.read_probabilities(0, 1)
+        );
+        assert_eq!(
+            distributions.read_distribution_by_allele[2][1],
+            slippage[1].read_probabilities(0, 1)
+        );
+    }
+
+    /// **A sample's rows are summed in distribution order, not in the order its libraries are
+    /// listed**: a sample whose library 0 is in slippage group 1 and library 1 in group 0 scores
+    /// to the bit as the same reads listed the other way round.
+    #[test]
+    fn tract_likelihoods_do_not_depend_on_the_order_a_samples_libraries_are_listed_in() {
+        let slippage = two_groups_slippage();
+        let genotypes = genotype_pairs(3);
+        let (one, other) = ([3, 7, 2], [5, 1, 9]);
+        let inverted = [
+            Library::in_group(ReadGroupId(0), 1),
+            Library::in_group(ReadGroupId(1), 0),
+        ];
+        let in_order = [
+            Library::in_group(ReadGroupId(0), 0),
+            Library::in_group(ReadGroupId(1), 1),
+        ];
+        let listed_against_the_groups = TractLikelihoods::of(
+            &one_sample_through_two_libraries(&one, &other),
+            &ReadDistributionsByLevel::of(&slippage, &inverted, 1, 1),
+            &genotypes,
+            &[0.4],
+        );
+        let listed_with_the_groups = TractLikelihoods::of(
+            &one_sample_through_two_libraries(&other, &one),
+            &ReadDistributionsByLevel::of(&slippage, &in_order, 1, 1),
+            &genotypes,
+            &[0.4],
+        );
+        assert_eq!(
+            the_bits_of(&listed_against_the_groups),
+            the_bits_of(&listed_with_the_groups)
+        );
+    }
+
+    /// **Two libraries of one sample and one slippage group at different multipliers are scored
+    /// apart**: the sample scores to the bit as if the second library were in a group of its own
+    /// at the doubled level, and not as the two libraries' reads summed at the class rate.
+    #[test]
+    fn a_samples_libraries_at_two_multipliers_are_two_rows() {
+        let class = two_groups_slippage()[0];
+        let genotypes = genotype_pairs(3);
+        let (one, other) = ([3, 7, 2], [5, 1, 9]);
+        let at_two_multipliers = [
+            Library::in_group(ReadGroupId(0), 0),
+            Library {
+                stutter_multiplier: 2.0,
+                ..Library::in_group(ReadGroupId(1), 0)
+            },
+        ];
+        let scored = TractLikelihoods::of(
+            &one_sample_through_two_libraries(&one, &other),
+            &ReadDistributionsByLevel::of(&[class], &at_two_multipliers, 1, 1),
+            &genotypes,
+            &[0.4],
+        );
+        let doubled = Slippage {
+            level: class.level * 2.0,
+            ..class
+        };
+        let in_two_groups = TractLikelihoods::of(
+            &one_sample_through_two_libraries(&one, &other),
+            &ReadDistributionsByLevel::of(
+                &[class, doubled],
+                &[
+                    Library::in_group(ReadGroupId(0), 0),
+                    Library::in_group(ReadGroupId(1), 1),
+                ],
+                1,
+                1,
+            ),
+            &genotypes,
+            &[0.4],
+        );
+        assert_eq!(the_bits_of(&scored), the_bits_of(&in_two_groups));
+        let summed: Vec<u32> = one.iter().zip(&other).map(|(a, b)| a + b).collect();
+        let at_the_class_rate = TractLikelihoods::of(
+            &TractReads {
+                samples: vec![SampleTractReads {
+                    sample: 0,
+                    by_library: vec![(LibraryIndex(0), summed)],
+                }],
+            },
+            &ReadDistributionsByLevel::of(&[class], &[Library::in_group(ReadGroupId(0), 0)], 1, 1),
+            &genotypes,
+            &[0.4],
+        );
+        assert_ne!(the_bits_of(&scored), the_bits_of(&at_the_class_rate));
+    }
+
+    /// **A library in a slippage group the evidence does not declare is refused by name**, where the
+    /// fit takes the stratum.
+    #[test]
+    #[should_panic(expected = "is in slippage group 1 of the 1 the evidence declares")]
+    fn a_library_past_the_declared_groups_is_refused() {
+        let mut evidence = draw_stratum(
+            two_groups_slippage()[0],
+            &spectrum_of(3),
+            0.5,
+            0.4,
+            8,
+            2,
+            3,
+            1,
+            5,
+        );
+        let mut libraries = evidence.libraries.to_vec();
+        libraries[1].slippage_group = 1;
+        evidence.libraries = libraries.into();
+        let _ = fit_stratum(&evidence, &[0.4; 2], &SsrFitConfig::default());
+    }
+
+    /// **A sample's reads naming a library the evidence does not list are refused by name.**
+    #[test]
+    #[should_panic(expected = "out of order or past the 2 the evidence lists")]
+    fn reads_naming_a_library_past_the_list_are_refused() {
+        let mut evidence = draw_stratum(
+            two_groups_slippage()[0],
+            &spectrum_of(3),
+            0.5,
+            0.4,
+            8,
+            2,
+            3,
+            1,
+            5,
+        );
+        evidence.tracts[0].samples[0].by_library[0].0 = LibraryIndex(2);
+        let _ = fit_stratum(&evidence, &[0.4; 2], &SsrFitConfig::default());
+    }
+
+    /// **Pooling a period refuses strata that list different libraries**: their reads' library
+    /// numbers would name different read groups. Different multipliers alone are not refused.
+    #[test]
+    fn pooling_a_period_refuses_strata_naming_different_libraries() {
+        let first = draw_stratum(
+            two_groups_slippage()[0],
+            &spectrum_of(3),
+            0.5,
+            0.4,
+            8,
+            2,
+            3,
+            1,
+            5,
+        );
+        let mut multiplied = first.clone();
+        multiplied.stratum.reference_repeats += 1;
+        let mut libraries = multiplied.libraries.to_vec();
+        libraries[0].stutter_multiplier = 2.0;
+        multiplied.libraries = libraries.into();
+        let _ = pool_a_period(2, &[&first, &multiplied]);
+
+        let mut regrouped = multiplied.clone();
+        let mut libraries = regrouped.libraries.to_vec();
+        libraries[0].slippage_group = 1;
+        regrouped.libraries = libraries.into();
+        let refused = std::panic::catch_unwind(|| pool_a_period(2, &[&first, &regrouped]));
+        let message = refused.expect_err("different libraries are refused");
+        let message = message
+            .downcast_ref::<String>()
+            .expect("the refusal is a formatted message");
+        assert!(
+            message.contains("name different libraries"),
+            "the refusal says why: {message}"
+        );
+    }
+
+    /// **A multiplier lifts a level no higher than the ceiling, and never lowers a class's own**:
+    /// one leaves any level as it is, including one above the ceiling and one that is not a number.
+    #[test]
+    fn a_library_level_is_the_class_rate_times_the_multiplier_below_the_ceiling() {
+        assert_eq!(library_level(0.1, 1.0), 0.1);
+        assert_eq!(library_level(0.1, 0.5), 0.05);
+        assert_eq!(library_level(0.1, 3.0), 0.1 * 3.0);
+        assert_eq!(library_level(0.5, 3.0), MULTIPLIED_LEVEL_CEILING);
+        assert_eq!(library_level(0.97, 1.0), 0.97);
+        assert_eq!(library_level(0.97, 2.0), 0.97);
+        assert_eq!(library_level(0.97, 0.5), 0.485);
+        assert!(library_level(f64::NAN, 1.0).is_nan());
     }
 
     /// **Spreading the pool over the classes rather than over one class's tracts moves no
@@ -6366,17 +7068,12 @@ mod tests {
             fall_off: 0.25,
         };
         let mut evidence = draw_stratum(truth, &spectrum_of(3), 0.5, 0.4, 300, 40, 6, 1, 47);
-        for tract in &mut evidence.tracts {
-            for sample in tract
-                .samples
-                .iter_mut()
-                .filter(|sample| sample.sample >= 20)
-            {
-                for (group, _) in &mut sample.by_group {
-                    *group = 1;
-                }
-            }
+        // Sample `s` is library `s`, so the last twenty samples' libraries go to group 1.
+        let mut libraries = evidence.libraries.to_vec();
+        for library in &mut libraries[20..] {
+            library.slippage_group = 1;
         }
+        evidence.libraries = libraries.into();
         evidence.groups = 2;
         let config = SsrFitConfig {
             allele_span: 1,
@@ -7392,15 +8089,12 @@ mod tests {
                 0xA7E0_0000 + cell as u64,
             );
             let genotypes = genotype_pairs(classes);
-            let per_allele: Vec<Vec<Vec<f64>>> = vec![
-                (-span..=span)
-                    .map(|allele| truth.read_probabilities(allele, span))
-                    .collect(),
-            ];
+            let distributions =
+                ReadDistributionsByLevel::of(&[truth], &evidence.libraries, span, span);
             let likelihoods: Vec<TractLikelihoods> = evidence
                 .tracts
                 .iter()
-                .map(|tract| TractLikelihoods::of(tract, &per_allele, &genotypes, &excess))
+                .map(|tract| TractLikelihoods::of(tract, &distributions, &genotypes, &excess))
                 .collect();
             let alpha: Vec<f64> = spectrum.iter().map(|share| concentration * share).collect();
             let mut stream = Stream(0x5EED + cell as u64);
@@ -7944,6 +8638,7 @@ mod tests {
             tracts: vec![TractReads::default(); 20],
             read_span: 4,
             groups: 1,
+            libraries: Arc::from([Library::in_group(ReadGroupId(0), 0)]),
             tracts_over_guard_threshold: 0,
             reads_reaching_not_crossing: 40,
             guard_reads: 0,
@@ -8543,17 +9238,14 @@ mod tests {
         }
         let mut evidence =
             draw_stratum(subset_truth(), &spectrum_of(3), 0.5, 0.4, 100, 40, 6, 1, 59);
-        for tract in &mut evidence.tracts {
-            for reads in tract
-                .samples
-                .iter_mut()
-                .filter(|reads| rank[reads.sample as usize] >= 20)
-            {
-                for (group, _) in &mut reads.by_group {
-                    *group = 1;
-                }
+        // Sample `s` is library `s`.
+        let mut libraries = evidence.libraries.to_vec();
+        for (sample, library) in libraries.iter_mut().enumerate() {
+            if rank[sample] >= 20 {
+                library.slippage_group = 1;
             }
         }
+        evidence.libraries = libraries.into();
         evidence.groups = 2;
         let members_by_name = |evidence: &StratumEvidence, names: &[String]| {
             let order = sample_order(names, SAMPLE_ORDER_SEED);
@@ -8694,16 +9386,17 @@ mod tests {
                 samples: vec![
                     SampleTractReads {
                         sample: 0,
-                        by_group: vec![(0, vec![0, 1, 0])],
+                        by_library: vec![(LibraryIndex(0), vec![0, 1, 0])],
                     },
                     SampleTractReads {
                         sample: 2,
-                        by_group: vec![(0, vec![0, 0, 0])],
+                        by_library: vec![(LibraryIndex(0), vec![0, 0, 0])],
                     },
                 ],
             }],
             read_span: 1,
             groups: 1,
+            libraries: Arc::from([Library::in_group(ReadGroupId(0), 0)]),
             tracts_over_guard_threshold: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
@@ -8848,13 +9541,14 @@ mod the_largest_table {
                     samples: (0..count as u32)
                         .map(|sample| SampleTractReads {
                             sample,
-                            by_group: vec![(0, vec![1])],
+                            by_library: vec![(LibraryIndex(0), vec![1])],
                         })
                         .collect(),
                 })
                 .collect(),
             read_span: RECORDED_OFFSET_RANGE,
             groups: 1,
+            libraries: Arc::from([Library::in_group(ReadGroupId(0), 0)]),
             tracts_over_guard_threshold: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
@@ -8869,7 +9563,7 @@ mod the_largest_table {
         let stratum = stratum_with(&[3, 0, 2]);
         assert_eq!(stratum.rows_with_reads(), 5);
         let row = std::mem::size_of::<SampleTractReads>()
-            + std::mem::size_of::<(u32, Vec<u32>)>()
+            + std::mem::size_of::<(LibraryIndex, Vec<u32>)>()
             + std::mem::size_of::<u32>();
         assert_eq!(
             stratum.heap_bytes(),

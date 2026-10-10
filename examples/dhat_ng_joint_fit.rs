@@ -712,7 +712,7 @@ fn draw_stratum(
             }
             reads.samples.push(SampleTractReads {
                 sample: sample as u32,
-                by_group: vec![(0, counts)],
+                by_library: vec![(ssr_fit::LibraryIndex(sample as u32), counts)],
             });
         }
         drawn.push(reads);
@@ -722,6 +722,10 @@ fn draw_stratum(
         tracts: drawn,
         read_span: span,
         groups: 1,
+        // One library a sample, as the library's own drawn strata have it.
+        libraries: (0..samples as u32)
+            .map(|sample| ssr_fit::Library::in_group(ReadGroupId(sample), 0))
+            .collect(),
         tracts_over_guard_threshold: 0,
         reads_reaching_not_crossing: 0,
         guard_reads: 0,

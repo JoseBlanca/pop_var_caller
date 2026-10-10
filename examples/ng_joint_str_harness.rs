@@ -1405,7 +1405,7 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
                 .filter(|(_, counts)| counts.iter().any(|reads| *reads > 0))
                 .map(|(sample, counts)| ssr_fit::SampleTractReads {
                     sample: sample as u32,
-                    by_group: vec![(0, counts.clone())],
+                    by_library: vec![(ssr_fit::LibraryIndex(sample as u32), counts.clone())],
                 })
                 .collect(),
         })
@@ -1418,6 +1418,10 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
         tracts,
         read_span: span,
         groups: 1,
+        // One library a sample, as the library's own drawn strata have it.
+        libraries: (0..truth.samples as u32)
+            .map(|sample| ssr_fit::Library::in_group(pop_var_caller::types::ReadGroupId(sample), 0))
+            .collect(),
         tracts_over_guard_threshold: 0,
         reads_reaching_not_crossing: 0,
         guard_reads: 0,

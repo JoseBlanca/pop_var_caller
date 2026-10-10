@@ -826,6 +826,68 @@ mod tests {
         assert_eq!(twice.substitution_counts, fit.substitution_counts);
     }
 
+    /// **Gathering keeps each read group a library of its own, in the slippage group the run
+    /// declared for it** (`str_library_stutter.md` §1.2): the fixture's three read groups over two
+    /// samples come back as three libraries in the cohort's read-group order, each in its own
+    /// declared group at a multiplier of one, and a sample reading through two of them has its
+    /// reads kept apart rather than summed.
+    #[test]
+    fn gathering_keeps_each_read_group_a_library_in_its_declared_group() {
+        let (cohort, psps) = a_fitted_cohorts_inputs();
+        let (_segmentation, plan) = a_census_plan_over_selecting(
+            &cohort.reference,
+            &cohort.catalog,
+            crate::run::CensusSelection::SHIPPED.generic_target,
+        );
+        let mut open = the_censuses_in(&psps);
+        let contigs = std::sync::Arc::clone(&plan.contigs);
+        let contig_of = move |name: &str| {
+            contigs
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+                .map(|index| crate::types::ContigId(index as u32))
+        };
+        let read_groups: Vec<ReadGroupId> = open.read_groups().to_vec();
+        assert_eq!(
+            (read_groups.len(), open.len()),
+            (3, 2),
+            "the fixture has a sample reading through two read groups"
+        );
+        let one_group_each: BTreeMap<ReadGroupId, u32> = read_groups
+            .iter()
+            .enumerate()
+            .map(|(index, read_group)| (*read_group, index as u32))
+            .collect();
+        let strata =
+            the_tract_strata_of_a_cohort(&mut open, &plan.loci, &contig_of, &one_group_each)
+                .expect("the tract sections read")
+                .strata;
+        assert!(!strata.is_empty(), "the fixture's tract is gathered");
+
+        let mut a_sample_read_through_two_libraries = false;
+        for stratum in &strata {
+            assert_eq!(stratum.groups, 3);
+            assert_eq!(stratum.libraries.len(), read_groups.len());
+            for (index, library) in stratum.libraries.iter().enumerate() {
+                assert_eq!(library.read_group, read_groups[index]);
+                assert_eq!(library.slippage_group, index as u32);
+                assert_eq!(library.stutter_multiplier, 1.0);
+            }
+            for row in stratum.tracts.iter().flat_map(|tract| &tract.samples) {
+                assert!(
+                    row.by_library.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                    "a sample's libraries are listed in increasing order"
+                );
+                a_sample_read_through_two_libraries |= row.by_library.len() == 2;
+            }
+        }
+        assert!(
+            a_sample_read_through_two_libraries,
+            "some sample's reads at some tract came through both its read groups, kept apart"
+        );
+    }
+
     /// **A cohort fitted against another selection is refused before a tract is read.**
     ///
     /// A census stores a tract by its index within its stratum, so a selection rebuilt from
