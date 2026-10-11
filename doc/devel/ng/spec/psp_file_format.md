@@ -457,6 +457,12 @@ it is refused as damage. Its layout is recognised from the manifest
 (`RecordLayout::from_manifest`). The writer writes 2.0 only, and does not append to a 1.x file.
 *(Corrected in review, 2026-10-11: this said a 2.0 reader "still reads 1.x".)*
 
+*Changed during implementation (2026-10-11, `str_bundle_loci.md` step 4): **a 1.x psp is now
+refused by its version.** `OLDEST_READABLE_MAJOR` is 2, so the reader stops at the version check
+with `UnsupportedVersion` — the true reason, a psp written by an older pvc — rather than one step
+later naming a typing key the user never set. Nothing readable is lost: every 1.x psp was refused
+anyway. The 1.x record layouts stay recognised by `RecordLayout`, for the record-level tests.*
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

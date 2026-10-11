@@ -29,13 +29,14 @@
 //!
 //! # Where this run is short, and it says so rather than being wrong
 //!
-//! **Repeat tracts are called, and repeat *clusters* are not.** A tract goes down its own path
+//! **Repeat tracts and STR bundles are called.** A tract goes down its own path
 //! — `select_ssr`, the stutter emission, and the same frequency loop — and its record carries
 //! `STR`, `RU`, `PERIOD` and each called allele's `REPCN`
 //! (`doc/devel/ng/impl_plan/calling_loop_ssr.md` Milestone C). An STR bundle — repeats too close
-//! together for any to have clean flanks — is measured as one locus over its hull since
-//! 2026-10-11 (`str_bundle_loci.md` §6), but has no calling model yet: each bundle locus is set
-//! aside and counted, and the summary says how many.
+//! together for any to have clean flanks — is one locus over its hull, called with stutter in
+//! each of its runs (`str_bundle_loci.md` §7); its record carries per-run `RU` and `PERIOD` and
+//! each called allele's run counts in `REPCNB`, and the summary says how many bundles were
+//! called.
 //!
 //! **The decode is parallel; the rest is one thread (Milestone E1, 2026-09-01).** Decoding
 //! reads is 88% of a calling run at 63 samples, and the run sweeps every sample's reader

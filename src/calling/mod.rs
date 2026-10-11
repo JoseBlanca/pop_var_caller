@@ -89,7 +89,7 @@ pub use likelihood::{
 use crate::calling::genotype_prior::SpectrumSeed;
 use crate::calling::likelihood::ssr::RepeatTractOutlierWeight;
 use crate::calling::quality::{ArtifactTestCounts, CountPriorMemo, SiteQualityBuffers};
-use crate::locus_generation::{LocusKind, SsrDetail};
+use crate::locus_generation::{LocusKind, SsrBundleDetail, SsrDetail};
 use crate::parameter_estimation::Estimate;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
@@ -97,6 +97,7 @@ use crate::parameter_estimation::joint::stratum_fits::{
     LengthSpectrum, LengthSpectrumRung, StratumFits,
 };
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
+use crate::region_typing::run_parse::RunParse;
 use crate::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
     InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
@@ -450,8 +451,8 @@ pub enum LocusEvidence<'a> {
         /// more bases than the shortest allele has.
         reference_beside: ReferenceBesideLocus<'a>,
     },
-    /// A repeat tract, or a repeat bundle: what each sample showed, and the tract's motif
-    /// and flanks.
+    /// An STR segment, or an STR bundle: what each sample showed, and the repeat ground it is
+    /// scored against.
     ///
     /// **No sample is set aside here**, and the absence is structural rather than an
     /// oversight. A tract's discovery round can put back a length the cap cut, so a sample
@@ -462,6 +463,19 @@ pub enum LocusEvidence<'a> {
         region: GenomeRegion,
         /// One entry per run sample, in run order.
         per_sample: &'a [SsrSampleEvidence<'a>],
+        /// The repeat ground — a segment's motif and flanks with each candidate's repeat count,
+        /// or a bundle's runs and flanks with each candidate's run parse.
+        shape: SsrLocusShape<'a>,
+    },
+}
+
+/// **The repeat ground an STR locus's reads are scored against, and what each candidate carries
+/// on it** — one repeat count per candidate at an STR segment, one run parse per candidate at an
+/// STR bundle (`str_bundle_loci.md` §7).
+#[derive(Copy, Clone, Debug)]
+pub enum SsrLocusShape<'a> {
+    /// An STR segment: one motif, two flanks.
+    Segment {
         /// The tract's repeat unit and its two flanks — what the repeat read model scores
         /// against.
         detail: &'a SsrDetail,
@@ -473,14 +487,33 @@ pub enum LocusEvidence<'a> {
         /// repeats than its length suggests, and the slippage fit is keyed by the count rather
         /// than by the length (`doc/devel/ng/spec/read_likelihoods.md` §4.4). Two candidates of
         /// equal length can therefore be drawn from different strata.
-        ///
-        /// **Its producer is repeat-tract candidate selection, which is unwritten**
-        /// ([`candidate_alleles_ssr.md`](../../../doc/devel/ng/impl_plan/candidate_alleles_ssr.md)),
-        /// so until that lands every caller supplies it — and a test that supplies one must say
-        /// so, because a supplied candidate set read as a selected one is a claim about a step
-        /// that does not exist.
         candidate_repeat_counts: &'a [NonZeroU32],
     },
+    /// An STR bundle: its reference runs and the hull's flanks.
+    Bundle {
+        /// The hull's flanks and its reference runs.
+        detail: &'a SsrBundleDetail,
+        /// **Each candidate read against the reference runs**, parallel to the locus's
+        /// [`CandidateAlleles`]: its count in every run, which keys that run's stutter and prior,
+        /// and each run's place in it, where a slip in that run is placed.
+        candidate_parses: &'a [RunParse],
+    },
+}
+
+impl SsrLocusShape<'_> {
+    /// How many candidates the shape describes — one count, or one parse, per candidate.
+    #[must_use]
+    pub fn candidate_count(&self) -> usize {
+        match self {
+            Self::Segment {
+                candidate_repeat_counts,
+                ..
+            } => candidate_repeat_counts.len(),
+            Self::Bundle {
+                candidate_parses, ..
+            } => candidate_parses.len(),
+        }
+    }
 }
 
 impl<'a> LocusEvidence<'a> {
@@ -560,8 +593,44 @@ impl<'a> LocusEvidence<'a> {
         Self::Ssr {
             region,
             per_sample,
-            detail,
-            candidate_repeat_counts,
+            shape: SsrLocusShape::Segment {
+                detail,
+                candidate_repeat_counts,
+            },
+        }
+    }
+
+    /// An STR bundle's evidence (`str_bundle_loci.md` §7): each candidate's run parse rides
+    /// beside the samples, as a segment's repeat counts do.
+    ///
+    /// # Panics
+    ///
+    /// If `per_sample` names no sample, for the reason [`Self::generic`] gives, or no candidate
+    /// was parsed.
+    #[must_use]
+    pub fn ssr_bundle(
+        region: GenomeRegion,
+        per_sample: &'a [SsrSampleEvidence<'a>],
+        detail: &'a SsrBundleDetail,
+        candidate_parses: &'a [RunParse],
+    ) -> Self {
+        assert!(
+            !per_sample.is_empty(),
+            "the STR bundle evidence at {region} names no sample: a locus carries one entry per \
+             sample of the run"
+        );
+        assert!(
+            !candidate_parses.is_empty(),
+            "the STR bundle at {region} supplied no candidate parse: a bundle is called over at \
+             least its reference allele"
+        );
+        Self::Ssr {
+            region,
+            per_sample,
+            shape: SsrLocusShape::Bundle {
+                detail,
+                candidate_parses,
+            },
         }
     }
 
@@ -637,10 +706,9 @@ impl<'a> LocusEvidence<'a> {
     ///   at every sample with nothing failing
     ///   (`doc/devel/ng/arch/calling_em_loop.md` §2). A repeat **bundle** goes to the
     ///   repeat path with a tract, which is how every other consumer of
-    ///   [`LocusKind`] groups the two. *(What happens to a bundle after that is a
-    ///   different question and the calling loop has no answer yet: the tract's candidate
-    ///   table refuses one by name, because nothing scores a bundle. No producer emits one
-    ///   into calling.)*
+    ///   [`LocusKind`] groups the two, and is scored over its runs
+    ///   (`str_bundle_loci.md` §7; `bundle_candidates`). The one-tract candidate table,
+    ///   `tract_candidates`, still refuses one by name.
     /// - **the cohort.** One run-wide sample order indexes this evidence, every per-sample
     ///   slice of `parameters`, and the calls that come back. Two lists of different lengths
     ///   are two different orders, and a positional join between them silently pairs one
@@ -667,8 +735,18 @@ impl<'a> LocusEvidence<'a> {
             (self, alleles.kind()),
             (Self::Generic { .. }, LocusKind::Generic)
                 | (
-                    Self::Ssr { .. },
-                    LocusKind::Ssr(_) | LocusKind::SsrBundle(_)
+                    Self::Ssr {
+                        shape: SsrLocusShape::Segment { .. },
+                        ..
+                    },
+                    LocusKind::Ssr(_)
+                )
+                | (
+                    Self::Ssr {
+                        shape: SsrLocusShape::Bundle { .. },
+                        ..
+                    },
+                    LocusKind::SsrBundle(_)
                 )
         );
         assert!(
@@ -685,19 +763,15 @@ impl<'a> LocusEvidence<'a> {
         // parallel to the candidate table, and a table with more candidates than counts would
         // pair one candidate's bases with another's stratum — a wrong slippage model per
         // candidate, with a well-formed genotype coming back.
-        if let Self::Ssr {
-            candidate_repeat_counts,
-            ..
-        } = self
-        {
+        if let Self::Ssr { shape, .. } = self {
             assert_eq!(
-                candidate_repeat_counts.len(),
+                shape.candidate_count(),
                 alleles.len(),
                 "the repeat tract at {} is called over {} candidates and {} repeat counts \
                  arrived, so one of the two belongs to a different locus",
                 self.region(),
                 alleles.len(),
-                candidate_repeat_counts.len()
+                shape.candidate_count()
             );
         }
         assert_eq!(
@@ -5126,15 +5200,13 @@ mod tests {
         assert!(!inference.per_sample[2].is_missing());
     }
 
-    /// A repeat **bundle**'s allele table takes repeat-tract evidence, exactly as a tract's
-    /// does — which is how every other consumer of `LocusKind` groups the two
-    /// (`src/run/cohort_merge/close.rs`).
+    /// An STR **bundle**'s allele table takes the repeat path's evidence in its bundle shape —
+    /// the runs and each candidate's run parse (`str_bundle_loci.md` §7).
     ///
-    /// **No fixture reached this cell before, and two mutations lived there.** Deleting
-    /// `| LocusKind::SsrBundle` from the accepting arm left the whole suite green, and so
-    /// did widening the SNP/indel arm to accept a bundle — the second of which routes a
-    /// repeat bundle to the SNP/indel row: a plausible genotype at every sample, nothing
-    /// failing.
+    /// **No fixture reached this cell before, and two mutations lived there.** Deleting the
+    /// bundle arm from the accepting match left the whole suite green, and so did widening the
+    /// SNP/indel arm to accept a bundle — the second of which routes a repeat bundle to the
+    /// SNP/indel row: a plausible genotype at every sample, nothing failing.
     #[test]
     fn ssr_evidence_against_a_bundle_allele_table_is_accepted() {
         let calibration = one_read_group();
@@ -5154,10 +5226,38 @@ mod tests {
             Box::from(b"CAGCAG".as_slice()),
             LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
         );
+        let detail = crate::locus_generation::SsrBundleDetail::default();
+        let per_sample = [SsrSampleEvidence::of_bundle(&[])];
+        // One parse, because a bundle built from a reference alone is called over one allele.
+        let parses = [RunParse::default()];
+        let evidence = LocusEvidence::ssr_bundle(region(), &per_sample, &detail, &parses);
+        evidence.assert_matches_locus_and_run(&bundle, &parameters);
+    }
+
+    /// **A segment's evidence is refused against a bundle's table**, and a bundle's against a
+    /// segment's: each shape carries what its own read model scores, a repeat count per candidate
+    /// or a run parse, and the other model cannot read it.
+    #[test]
+    #[should_panic(expected = "belong to different loci")]
+    fn segment_evidence_against_a_bundle_allele_table_is_refused() {
+        let calibration = one_read_group();
+        let inbreeding = outbred_samples(1);
+        let strata = no_strata();
+        let no_declared_batching = one_batch(1, 1);
+        let parameters = frozen_parameters(
+            &calibration,
+            &[],
+            &no_declared_batching,
+            &inbreeding,
+            &strata,
+            &NO_SUBSTITUTION_RATES,
+        );
+        let bundle = CandidateAlleles::new(
+            Box::from(b"CAGCAG".as_slice()),
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
+        );
         let detail = ssr_detail();
         let per_sample = [SsrSampleEvidence::new(&[], &detail)];
-        // One repeat count, because a bundle built from a reference alone is called over one
-        // allele — the counts run parallel to the candidate table, which the same method checks.
         let counts = [NonZeroU32::new(6).expect("six repeats")];
         let evidence = LocusEvidence::ssr(region(), &per_sample, &detail, &counts);
         evidence.assert_matches_locus_and_run(&bundle, &parameters);

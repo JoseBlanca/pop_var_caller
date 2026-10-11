@@ -1558,9 +1558,10 @@ pub struct SsrSampleEvidence<'a> {
     /// that scoring a partial as complete has to be written rather than fallen into, and
     /// that the split has one spelling instead of one per caller.
     pub observations: &'a [SequenceObservation],
-    /// The tract's motif and flanks — what the emission needs to know which repeat it is
-    /// scoring against.
-    pub detail: &'a SsrDetail,
+    /// The tract's motif and flanks — which repeat it is scored against. `None` at an STR
+    /// bundle, whose runs and flanks travel on the locus's evidence instead
+    /// ([`SsrLocusShape`](crate::calling::SsrLocusShape)). The row reads neither.
+    pub detail: Option<&'a SsrDetail>,
 }
 
 impl<'a> SsrSampleEvidence<'a> {
@@ -1569,7 +1570,16 @@ impl<'a> SsrSampleEvidence<'a> {
     pub fn new(observations: &'a [SequenceObservation], detail: &'a SsrDetail) -> Self {
         Self {
             observations,
-            detail,
+            detail: Some(detail),
+        }
+    }
+
+    /// A sample's observations at one STR bundle.
+    #[must_use]
+    pub fn of_bundle(observations: &'a [SequenceObservation]) -> Self {
+        Self {
+            observations,
+            detail: None,
         }
     }
 
@@ -2502,7 +2512,7 @@ mod tests {
         assert_eq!(partial, vec![(1, 5)]);
         // The tract's own detail is the whole of what the emission is told about which
         // repeat it is scoring against, and nothing else here reads it back.
-        assert_eq!(evidence.detail, &detail);
+        assert_eq!(evidence.detail, Some(&detail));
         assert_eq!(evidence.observations, &observations[..]);
     }
 

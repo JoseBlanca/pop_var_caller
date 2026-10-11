@@ -517,10 +517,6 @@ pub(crate) fn outcome_rows(
             "nobody_to_call",
             "every sample was set aside because the allele cap cut an allele its reads earned",
         ),
-        LocusEnd::BundleSetAside => (
-            "bundle_set_aside",
-            "a cluster of repeats without clean flanks is not called",
-        ),
         LocusEnd::TractWithoutWholeRepeats => (
             "tract_without_whole_repeats",
             "a candidate tract length holds no whole repeat, which the tract model cannot score",
@@ -537,7 +533,6 @@ pub(crate) enum LocusEnd<'a> {
     NotWritten,
     BelowMinimumSiteQuality(Phred),
     NobodyToCall,
-    BundleSetAside,
     TractWithoutWholeRepeats,
     Failed,
 }

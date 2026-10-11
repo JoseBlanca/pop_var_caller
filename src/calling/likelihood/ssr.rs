@@ -66,7 +66,9 @@
 //! frozen.
 
 use super::ContaminationView;
-use super::ssr_emission::{SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over};
+use super::ssr_emission::{
+    BundleCandidate, SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over,
+};
 use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::calling::GenotypeTableView;
 use crate::float;
@@ -818,6 +820,13 @@ fn fill_emissions<Model: SsrEmissionModel>(
                             &read_over,
                             &SsrCandidate {
                                 bases: &allele_over,
+                                // A bundle allele respelled over the wider extent carries the
+                                // flank bases it was given in front, and its runs move with it.
+                                bundle: allele.bundle.map(|bundle| BundleCandidate {
+                                    leading_flank_bases: bundle.leading_flank_bases
+                                        + u32::from(wider.left - allele.flank_deletion.left),
+                                    ..bundle
+                                }),
                                 ..*allele
                             },
                             context,
@@ -1024,6 +1033,7 @@ mod tests {
                 .iter()
                 .zip(&self.repeat_counts)
                 .map(|(bases, count)| SsrCandidate {
+                    bundle: None,
                     reference_flanks: (&[], &[]),
                     flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                     bases,

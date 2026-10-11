@@ -76,7 +76,11 @@ meaning does.
 | `genotype` | sample | the called GT | `GQ`, `missing`, `reads_were_uninformative` |
 | `site` | locus | QUAL as written | `uncorrected_qual`, `ABPEN`, `SPPEN`, `converged`, `passes`, `filter` |
 | `paralog` | locus scored by the hidden-paralog filter | `kept`, `tagged` or `dropped` | `LR`, `posterior` |
-| `outcome` | locus | `written`, `not_written`, `dropped_by_paralog_filter`, `nobody_to_call`, `tract_without_whole_repeats`, `bundle_set_aside`, `too_quiet`, `too_wide`, `over_depth_ceiling` | the reason in words |
+| `outcome` | locus | `written`, `not_written`, `dropped_by_paralog_filter`, `nobody_to_call`, `tract_without_whole_repeats`, `too_quiet`, `too_wide`, `over_depth_ceiling` | the reason in words |
+
+*Changed during implementation (2026-10-11, `str_bundle_loci.md` step 4): `bundle_set_aside` is
+gone — STR bundles are called, and a bundle's rows are a segment's, under the locus type
+`repeat_bundle`.*
 
 **How partial reads were weighted** is the `partial` rows: a partial read compatible with a
 genotype's alleles contributes the shares of the copies carrying them, one compatible with none of

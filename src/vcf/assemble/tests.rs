@@ -501,7 +501,12 @@ fn a_tract_record_is_widened_over_its_alleles_reach_into_the_flanks() {
         FlankDeletion::NONE,
         FlankDeletion { left: 0, right: 1 },
     ];
-    let widened = WidenedTract::over(&alleles, &deletions, &detail).expect("a reach");
+    let widened = WidenedTract::over(
+        &alleles,
+        &deletions,
+        (&detail.left_flank, &detail.right_flank),
+    )
+    .expect("a reach");
     assert_eq!((widened.left, widened.right), (1, 1));
     assert_eq!(
         widened.alleles,
@@ -536,5 +541,12 @@ fn a_tract_record_is_widened_over_its_alleles_reach_into_the_flanks() {
         Box::from(&b"AGAGAGAG"[..]),
         Box::from(&b"AGAGAGAGAG"[..]),
     ];
-    assert!(WidenedTract::over(&expansion, &plain, &detail).is_none());
+    assert!(
+        WidenedTract::over(
+            &expansion,
+            &plain,
+            (&detail.left_flank, &detail.right_flank)
+        )
+        .is_none()
+    );
 }

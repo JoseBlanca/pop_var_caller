@@ -343,11 +343,11 @@ impl<'a> RunReport<'a> {
                     tracts.without_whole_repeats,
                 ));
             }
-            if tracts.bundles_set_aside > 0 {
+            if tracts.bundles > 0 {
                 lines.push(format!(
-                    "  not called — clusters of repeats with no clean flanks, which nothing \
-                     builds a caller for yet: {}",
-                    tracts.bundles_set_aside,
+                    "  of the loci above, STR bundles (repeats too close for clean flanks, called \
+                     as one locus each): {}",
+                    tracts.bundles,
                 ));
             }
         }

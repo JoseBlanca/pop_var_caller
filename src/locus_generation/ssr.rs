@@ -55,8 +55,19 @@ pub struct MeasuredRepeat {
     delimiter_motif: Motif,
     /// The period of the reference run reaching each edge, `None` where fixed sequence does.
     edge_run_periods: EdgeRunPeriods,
-    /// What becomes of a read that anchors one edge and ends inside the repeat.
-    reads_ending_inside: ReadsEndingInside,
+    /// Whether this is an STR segment or an STR bundle's hull — which decides whether a flank
+    /// deletion the delimiter's own spelling implies is recorded
+    /// ([`classify::flank_deletion_the_delimiter_implies`]).
+    ground: MeasuredGround,
+}
+
+/// Which kind of repeat ground a [`MeasuredRepeat`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasuredGround {
+    /// An STR segment, measured with its own delimiter.
+    Segment,
+    /// An STR bundle's hull, measured with the flat-gap delimiter.
+    BundleHull,
 }
 
 /// The period of the reference run that reaches each edge of a measured repeat — what decides
@@ -69,22 +80,11 @@ pub struct EdgeRunPeriods {
     pub right: Option<usize>,
 }
 
-/// What a read that anchors one edge of the repeat and then ends inside it becomes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadsEndingInside {
-    /// A partial observation — a lower bound on the repeat's length, as an STR segment keeps
-    /// it (`locus_generation_ssr.md` §3).
-    KeptAsPartial,
-    /// Dropped and counted: in an STR bundle such a read bounds one run's count and says
-    /// nothing of the runs it did not reach, and using it needs a censored emission over run
-    /// counts that is left out (`str_bundle_loci.md` §6.1, §11.5).
-    Dropped,
-}
-
 impl MeasuredRepeat {
     /// An STR bundle's hull, `start..=end` (1-based), measured with `delimiter_motif` in the
-    /// geometry and `runs` deciding its edges; reads ending inside it are dropped
-    /// (`str_bundle_loci.md` §6.1).
+    /// geometry and `runs` deciding its edges. A read ending inside it is kept as a partial
+    /// observation, as at a segment, so that it counts toward the hull's depth; calling leaves it
+    /// out (`str_bundle_loci.md` §6.1, changed during implementation 2026-10-11).
     pub fn bundle_hull(
         start: u64,
         end: u64,
@@ -96,7 +96,7 @@ impl MeasuredRepeat {
             end,
             delimiter_motif,
             edge_run_periods,
-            reads_ending_inside: ReadsEndingInside::Dropped,
+            ground: MeasuredGround::BundleHull,
         }
     }
 
@@ -135,7 +135,7 @@ impl From<&SsrSegment> for MeasuredRepeat {
                 left: period,
                 right: period,
             },
-            reads_ending_inside: ReadsEndingInside::KeptAsPartial,
+            ground: MeasuredGround::Segment,
         }
     }
 }
@@ -307,10 +307,6 @@ pub struct SsrGeneratorCounts {
     /// fetch window is wider than the locus: **6,704 reads against 7,085 real partials** on
     /// tomato chr01 of `SRR7279503` when this counter was added.
     pub outside_tract: u64,
-    /// Reads that anchored one edge of an STR bundle's hull and ended inside it — a partial
-    /// observation at a segment, dropped at a bundle (`str_bundle_loci.md` §6.1). Always zero
-    /// for a segment generator.
-    pub ended_inside_a_bundle: u64,
 }
 
 impl SsrGeneratorCounts {
@@ -342,9 +338,8 @@ impl SsrGeneratorCounts {
             low_quality,
             window_truncated,
             outside_tract,
-            ended_inside_a_bundle,
         } = self;
-        no_border_anchored + low_quality + window_truncated + outside_tract + ended_inside_a_bundle
+        no_border_anchored + low_quality + window_truncated + outside_tract
     }
 }
 
@@ -891,10 +886,10 @@ mod read_region {
 // ---------------------------------------------------------------------
 mod classify {
     use super::read_region::{
-        MIN_REGION_Q1, extract_region, flank_truncated, passes_quality_gate, read_footprint,
-        tract_span_from_input, widen_region,
+        Footprint, MIN_REGION_Q1, extract_region, flank_truncated, passes_quality_gate,
+        read_footprint, tract_span_from_input, widen_region,
     };
-    use super::{RepeatDelimiter, SsrLocus};
+    use super::{MeasuredGround, RepeatDelimiter, SsrLocus};
     use crate::alignment::{ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel};
     use crate::bam::alignment_input::CigarOp;
     use crate::locus_generation::{FlankDeletion, LocusLen, ReadWitness};
@@ -930,11 +925,6 @@ mod classify {
         /// positions — 3,180 rows of the STR dump — contributing to `num_obs` while adding
         /// nothing to depth anywhere along the locus.
         OutsideTract,
-        /// The read anchored one edge of an STR bundle's hull and ended inside it. At a segment
-        /// that is a partial observation; at a bundle it is dropped, because a read reaching
-        /// into one run says nothing about the runs it did not reach (`str_bundle_loci.md`
-        /// §6.1, §11.5).
-        EndedInsideABundle,
     }
 
     /// What one read contributes to a locus: an observed tract (complete or partial), or a
@@ -1129,6 +1119,20 @@ mod classify {
         }
 
         let span = delimit(aligner, read, &region, reference, context, align_scratch);
+        if locus.repeat.ground == MeasuredGround::BundleHull
+            && let Some((spelled, deleted)) = flank_deletion_the_delimiter_implies(
+                read,
+                &span,
+                &region,
+                fp,
+                window_start..window_start + window_len,
+                tract_start..tract_end,
+                reference,
+                (left, right),
+            )
+        {
+            return complete_or_low_quality(read, spelled, deleted, qual_buffer);
+        }
         match span {
             RepeatSpan::Between(tract)
                 if flank_truncated(&region, &to_usize(&tract), read_len, left, right) =>
@@ -1199,6 +1203,158 @@ mod classify {
                 Classified::NoObservation(NoObservationReason::NoBorderAnchored)
             }
         }
+    }
+
+    /// **The flank deletion an STR bundle read's delimiter spelling implies**, as a complete
+    /// observation in its smallest form — or `None`, and the read is measured as at a segment
+    /// (found in review, 2026-10-11; `str_bundle_loci.md` §6.1).
+    ///
+    /// A deletion across a hull's outer edge is a sequence the mapper can write without any
+    /// deletion crossing the edge: as substitutions (`CTCCGA|AAAC…` read as `CTCAAC|AAAC…`), or
+    /// as a deletion inside the flank and an insertion at the hull's first base. Then the
+    /// own-alignment rule above does not fire, and the flat-gap delimiter — which prices nothing
+    /// inside the hull and a stiff gap in the flanks — either deletes the flank bases and spells
+    /// the read's extra bases into the hull, or fails to anchor that flank at all. The first
+    /// wrote the event twice, once as hull bases in the bundle record and once as the flank
+    /// deletion the generic path calls beside it; the second made every carrier read a partial,
+    /// which calling leaves out at a bundle. On the stuttering benchmark (50 samples, PCR, 30×)
+    /// that was 24 of the 51 wrong bundle cells. (A segment's own delimiter prices an
+    /// insertion inside the repeat that is not whole units, so it keeps such a flank in place
+    /// and leaves the change to the generic path, once.)
+    ///
+    /// So at a bundle, **where the delimiter itself says a flank lost bases** — it anchored a
+    /// complete read with fewer read bases on that side than the flank holds, or it could not
+    /// anchor that side of a read whose own alignment deletes bases in that flank — the read's
+    /// bases over the window are read as the flank's longest matching stretch from its far end,
+    /// the deleted bases between it and the hull, and the spelling. Both flanks must keep at
+    /// least [`MIN_ALIGNED_FLANK_BASES`] matching bases, the read's own alignment must cover the
+    /// whole window and reach that far beyond the hull on each side, and the side the delimiter
+    /// anchored in full keeps its junction. A flank the delimiter left intact never yields a
+    /// deletion here, so a substituted flank base still reads as it does at a segment
+    /// (`str_edge_deletion_alleles.md` §4, the rule tried and not adopted).
+    #[allow(clippy::too_many_arguments)]
+    fn flank_deletion_the_delimiter_implies(
+        read: &AlignedRead,
+        span: &RepeatSpan,
+        region: &Range<usize>,
+        fp: Footprint,
+        window: Range<u32>,
+        tract: Range<u32>,
+        reference: &[u8],
+        (left, right): (usize, usize),
+    ) -> Option<(Range<usize>, FlankDeletion)> {
+        let region_len = region.end - region.start;
+        let cigar: &[CigarOp] = &read.cigar;
+        let (deleted_before, deleted_after) =
+            reference_bases_deleted_in_the_flanks(cigar, fp.ref_start, &window, &tract);
+        // Each side: (whether the delimiter left it short, the junction it kept, region-relative).
+        let (left_short, left_junction, right_short, right_junction) = match span {
+            RepeatSpan::Between(tract_span) => {
+                let tract_span = to_usize(tract_span);
+                (
+                    tract_span.start < left,
+                    tract_span.start,
+                    region_len.saturating_sub(tract_span.end) < right,
+                    tract_span.end,
+                )
+            }
+            RepeatSpan::FromRight(tract_span) => {
+                (deleted_before > 0, 0, false, to_usize(tract_span).end)
+            }
+            RepeatSpan::FromLeft(tract_span) => (
+                false,
+                to_usize(tract_span).start,
+                deleted_after > 0,
+                region_len,
+            ),
+            RepeatSpan::Unanchored => return None,
+        };
+        if !(left_short || right_short) {
+            return None;
+        }
+        if fp.ref_start > window.start || fp.ref_end < window.end {
+            return None;
+        }
+        let (aligned_before, aligned_after) =
+            aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract.start, tract.end);
+        if aligned_before < MIN_ALIGNED_FLANK_BASES || aligned_after < MIN_ALIGNED_FLANK_BASES {
+            return None;
+        }
+        let bases = &read.seq[region.clone()];
+        let left_flank = &reference[..left];
+        let right_flank = &reference[reference.len() - right..];
+        let kept_left = bases
+            .iter()
+            .zip(left_flank)
+            .take_while(|(read_base, flank_base)| read_base == flank_base)
+            .count();
+        let kept_right = bases
+            .iter()
+            .rev()
+            .zip(right_flank.iter().rev())
+            .take_while(|(read_base, flank_base)| read_base == flank_base)
+            .count();
+        let floor = MIN_ALIGNED_FLANK_BASES as usize;
+        if (left_short && kept_left < floor) || (right_short && kept_right < floor) {
+            return None;
+        }
+        let (start, deleted_left) = if left_short {
+            (kept_left, left - kept_left)
+        } else {
+            (left_junction, 0)
+        };
+        let (end, deleted_right) = if right_short {
+            (region_len - kept_right, right - kept_right)
+        } else {
+            (right_junction, 0)
+        };
+        if start > end {
+            return None;
+        }
+        let deleted = FlankDeletion {
+            left: u8::try_from(deleted_left).ok()?,
+            right: u8::try_from(deleted_right).ok()?,
+        };
+        if deleted.is_none() {
+            return None;
+        }
+        let tract_len = reference.len() - left - right;
+        Some(in_smallest_form(
+            &read.seq,
+            region.start + start..region.start + end,
+            deleted,
+            &left_flank[left - deleted_left..],
+            &reference[left + tract_len..left + tract_len + deleted_right],
+        ))
+    }
+
+    /// **How many reference bases the read's deletions take inside each flank of the window**,
+    /// as `(left flank, right flank)` — the flanks being `window` less `tract`. Coordinates as in
+    /// [`deletion_crosses_a_tract_edge`].
+    fn reference_bases_deleted_in_the_flanks(
+        cigar: &[CigarOp],
+        ref_start: u32,
+        window: &Range<u32>,
+        tract: &Range<u32>,
+    ) -> (u32, u32) {
+        let overlap =
+            |from: u32, to: u32, lo: u32, hi: u32| to.min(hi).saturating_sub(from.max(lo));
+        let (mut before, mut after, mut at) = (0, 0, ref_start);
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    before += overlap(at, at + n, window.start, tract.start);
+                    after += overlap(at, at + n, tract.end, window.end);
+                    at += n;
+                }
+                _ => {}
+            }
+        }
+        (before, after)
     }
 
     /// **The fewest aligned bases a read must carry beyond the tract on each side** for its own
@@ -1598,12 +1754,10 @@ mod classify {
         }) else {
             return Classified::NoObservation(NoObservationReason::OutsideTract);
         };
-        // **Only reads that cross the whole hull are used at a bundle** (`str_bundle_loci.md`
-        // §6.1). Asked after the outside-tract test, so a read that never entered the hull is
-        // still counted as that.
-        if locus.repeat.reads_ending_inside == super::ReadsEndingInside::Dropped {
-            return Classified::NoObservation(NoObservationReason::EndedInsideABundle);
-        }
+        // **At a bundle, a read ending inside the hull is kept as a partial too**, though only
+        // reads that cross the whole hull are used to call it (`str_bundle_loci.md` §6.1): the
+        // partial is what counts the read toward the hull's depth, which the hidden-duplication
+        // filter's coverage windows read, and calling leaves it out.
         Classified::Observed {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: region_seq[tract.clone()].into(),
@@ -1619,6 +1773,7 @@ mod classify {
         use crate::alignment::PerQualityEmission;
         use crate::alignment::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
         use crate::bam::alignment_input::CigarOp;
+        use crate::locus_generation::ssr::{EdgeRunPeriods, MeasuredRepeat};
         use crate::region_typing::segment_criteria::{Motif, SsrSegment};
         use crate::types::{Position, ReadGroupId};
 
@@ -1649,6 +1804,125 @@ mod classify {
                 mate_pos: None,
                 adaptor_boundary: None,
                 read_group: ReadGroupId(0),
+            }
+        }
+
+        /// Classify `read` against an STR bundle's hull `hull` between `left` and `right`
+        /// flanks, as the bundle generator measures it: the flat-gap delimiter with the
+        /// segments' firm-anchor test.
+        fn classify_at_a_bundle(
+            read: &AlignedRead,
+            (left, hull, right): (&[u8], &[u8], &[u8]),
+            edges: EdgeRunPeriods,
+        ) -> Classified {
+            use crate::alignment::ssr_unit_robust::AnchorRule;
+            let frame = [left, hull, right].concat();
+            let start = left.len() as u64 + 1;
+            let bundle = SsrLocus {
+                repeat: MeasuredRepeat::bundle_hull(
+                    start,
+                    start + hull.len() as u64 - 1,
+                    Motif::new(b"A").unwrap(),
+                    edges,
+                ),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            classify_read(
+                read,
+                &bundle,
+                &SsrFlatGapAligner::with_anchor_rule(
+                    PerQualityEmission::new(),
+                    AnchorRule::default(),
+                ),
+                &StutterModel::hipstr_shipped(),
+                &mut ViterbiScratch::new(),
+                &mut Vec::new(),
+            )
+        }
+
+        /// **A deletion across a bundle's edge that the mapper wrote as substitutions is one
+        /// allele with a flank deletion** (found in review, 2026-10-11). The stuttering
+        /// benchmark's `bun00119`: the left flank's last three bases `CGA` are gone and the
+        /// `(AAAC)6` run carries one copy more, so the read is the reference's length and the
+        /// mapper writes it with no indel. The flat-gap delimiter deleted two flank bases and
+        /// spelled `AC` into the hull, while the generic path called the flank change beside
+        /// it — the event written twice. Now the read is the hull's spelling `AAC (AAAC)6 …` with
+        /// three flank bases deleted, the allele the truth holds.
+        #[test]
+        fn a_bundle_read_whose_delimiter_deletes_flank_bases_records_them_as_a_flank_deletion() {
+            let left = b"CGGACGCCGCTCCGA";
+            let hull = b"AAACAAACAAACAAACAAACAAACGTCAATTAATGGTCTCTCTCTCTC";
+            let right = b"AACGGTGCTATCCGC";
+            let spelled = [&b"AAC"[..], hull].concat();
+            let carrier = read(&[&left[..12], &spelled, right].concat(), 40);
+            let edges = EdgeRunPeriods {
+                left: Some(4),
+                right: Some(2),
+            };
+            match classify_at_a_bundle(&carrier, (left, hull, right), edges) {
+                Classified::Observed {
+                    bases,
+                    read_witness: ReadWitness::Complete,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, spelled.as_slice());
+                    assert_eq!(flank_deletion, FlankDeletion { left: 3, right: 0 });
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+            // The reference read is measured as before: no flank deletion.
+            let reference = read(&[&left[..], hull, right].concat(), 40);
+            match classify_at_a_bundle(&reference, (left, hull, right), edges) {
+                Classified::Observed {
+                    bases,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, hull.as_slice());
+                    assert!(flank_deletion.is_none());
+                }
+                other => panic!("expected an observation, got {other:?}"),
+            }
+        }
+
+        /// **A deletion across a bundle's edge that the mapper wrote inside the flank, with an
+        /// insertion at the hull's first base, is one allele with a flank deletion** (found in
+        /// review, 2026-10-11). The benchmark's `bun00018`: `TCCGA` is gone from the left flank
+        /// and the `(AAAT)6` run gained a copy, written `10M 4D 2M 6I 61M`. No deletion crosses
+        /// the hull's edge, so the own-alignment rule does not fire, and the delimiter cannot
+        /// anchor a flank whose last five bases are missing; the read was a partial, which
+        /// calling leaves out at a bundle.
+        #[test]
+        fn a_bundle_read_with_a_deletion_inside_the_flank_records_it_as_a_flank_deletion() {
+            let left = b"GGACATTGTGTCCGA";
+            let hull = b"AAATAAATAAATAAATAAATAAATTCCGGCGAGCCTATATATATATA";
+            let right = b"ACGGTAGTCCAGCGG";
+            let spelled = [&b"AAT"[..], &b"AAAT".repeat(7), &hull[24..]].concat();
+            let mut carrier = read(&[&left[..10], &spelled, right].concat(), 40);
+            carrier.cigar = vec![
+                CigarOp::Match(10),
+                CigarOp::Deletion(4),
+                CigarOp::Match(2),
+                CigarOp::Insertion(6),
+                CigarOp::Match(61),
+            ];
+            let edges = EdgeRunPeriods {
+                left: Some(4),
+                right: Some(2),
+            };
+            match classify_at_a_bundle(&carrier, (left, hull, right), edges) {
+                Classified::Observed {
+                    bases,
+                    read_witness: ReadWitness::Complete,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, spelled.as_slice());
+                    assert_eq!(flank_deletion, FlankDeletion { left: 5, right: 0 });
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
             }
         }
 
@@ -2275,39 +2549,18 @@ mod classify {
             }
         }
 
-        /// **A read that ends inside the hull is dropped, not kept as a partial** — at a
-        /// segment it would be a lower bound; at a bundle it bounds one run and says nothing
-        /// of the others (`str_bundle_loci.md` §6.1). The same read against the hull measured
-        /// as a segment would measure it is a partial, which is what makes this the bundle's
-        /// rule and not the delimiter's.
+        /// **A read that ends inside the hull is kept as a partial, as at a segment** — so it
+        /// counts toward the hull's depth — and calling leaves it out (`str_bundle_loci.md`
+        /// §6.1; changed during implementation, 2026-10-11, where it was first dropped).
         #[test]
-        fn a_read_ending_inside_the_hull_is_dropped_where_a_segment_keeps_a_partial() {
+        fn a_read_ending_inside_the_hull_is_kept_as_a_partial() {
             let seq = [BUNDLE_LEFT, b"CACACACATTGA"].concat();
-            assert_eq!(
-                classify_in_the_bundle(&read(&seq, 40)),
-                Classified::NoObservation(NoObservationReason::EndedInsideABundle)
-            );
-
-            let mut as_a_segment = bundle_locus(runs_at_both_edges());
-            as_a_segment.repeat =
-                SsrSegment::new("chr1".into(), 9, 27, Motif::new(b"CA").unwrap(), 1.0)
-                    .unwrap()
-                    .into();
-            let aligner = SsrFlatGapAligner::new(PerQualityEmission::new());
-            let stutter = StutterModel::hipstr_shipped();
-            match classify_read(
-                &read(&seq, 40),
-                &as_a_segment,
-                &aligner,
-                &stutter,
-                &mut ViterbiScratch::new(),
-                &mut Vec::new(),
-            ) {
+            match classify_in_the_bundle(&read(&seq, 40)) {
                 Classified::Observed {
                     read_witness: ReadWitness::Partial { .. },
                     ..
                 } => {}
-                other => panic!("a segment keeps the read as a partial, got {other:?}"),
+                other => panic!("a bundle keeps the read as a partial, got {other:?}"),
             }
         }
 
@@ -2482,9 +2735,6 @@ mod tally {
                         NoObservationReason::LowQuality => counts.low_quality += 1,
                         NoObservationReason::WindowTruncated => counts.window_truncated += 1,
                         NoObservationReason::OutsideTract => counts.outside_tract += 1,
-                        NoObservationReason::EndedInsideABundle => {
-                            counts.ended_inside_a_bundle += 1
-                        }
                     }
                 }
             }

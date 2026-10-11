@@ -480,8 +480,8 @@ pub const HEADER_FRAMING_BYTES: usize = HEAD_MAGIC.len() + 8 + HEAD_SENTINEL.len
 pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES as u64;
 
 /// The format this writer produces and the newest this reader understands. A file whose
-/// **major** is later, or earlier than [`OLDEST_READABLE_MAJOR`], is refused as
-/// [`PspReadError::UnsupportedVersion`], not read as damaged.
+/// **major** is later is refused as [`PspReadError::UnsupportedVersion`], and one earlier than
+/// [`OLDEST_READABLE_MAJOR`] as [`PspReadError::OlderVersion`] — neither read as damaged.
 ///
 /// **2.0 since 2026-10-11, when STR bundle records gained a payload** (their flanks and
 /// reference runs, `str_bundle_loci.md` §6.2). The payload is the body's last field, so a 1.x
@@ -491,14 +491,18 @@ pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES
 /// these files, by name.
 pub const FORMAT_VERSION: (u16, u16) = (2, 0);
 
-/// The oldest major this reader reads. **A 1.x header passes this check, and in practice almost
-/// no 1.x psp is read**: the typing section then refuses a psp that does not record
-/// `max-str-bundle-len-bp` (`segmentation_section.rs`), and no released build wrote that key —
-/// only builds of the `str-bundles` branch from 270da29f to format 2.0 did. **So every psp
-/// written by main must be written again.** A 1.x file that does pass holds no bundle record
-/// (no 1.x writer had a bundle generator; one found is refused as damage), and its record layout
-/// is recognised from its manifest ([`RecordLayout`](crate::psp::record::RecordLayout)).
-pub const OLDEST_READABLE_MAJOR: u16 = 1;
+/// The oldest major this reader reads: **2, so a 1.x psp is refused up front, by its version**
+/// (session lead, 2026-10-11, in building `str_bundle_loci.md` §7).
+///
+/// Before this, a 1.x header passed this check and was refused one step later all the same: the
+/// typing section refuses a psp that does not record `max-str-bundle-len-bp`
+/// (`segmentation_section.rs`), and no released build wrote that key — only builds of the
+/// `str-bundles` branch from 270da29f to format 2.0 did. Refusing by version says the true reason
+/// in the error a user reads ("written by an older pvc; write it again") rather than naming a key
+/// they never set. **Every psp written by main must be written again.** The record layouts of 1.x
+/// stay recognised from a manifest ([`RecordLayout`](crate::psp::record::RecordLayout)), for the
+/// record-level tests that read them.
+pub const OLDEST_READABLE_MAJOR: u16 = 2;
 
 /// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
 ///
@@ -707,7 +711,14 @@ impl Header {
             .map_err(|e| malformed_by("the header body is not valid TOML", Box::new(e)))?;
 
         let format_version = version_in(&table, path)?;
-        if !(OLDEST_READABLE_MAJOR..=FORMAT_VERSION.0).contains(&format_version.0) {
+        if format_version.0 < OLDEST_READABLE_MAJOR {
+            return Err(PspReadError::OlderVersion {
+                path: path.to_path_buf(),
+                found: format_version,
+                oldest_major: OLDEST_READABLE_MAJOR,
+            });
+        }
+        if format_version.0 > FORMAT_VERSION.0 {
             return Err(PspReadError::UnsupportedVersion {
                 path: path.to_path_buf(),
                 found: format_version,
@@ -2155,22 +2166,29 @@ mod tests {
         }
     }
 
-    /// **A 1.x header still reads, and a major before 1 is refused as a version.** Format 2.0
-    /// gave STR bundle records a payload; a 1.x file holds no bundle record, so it reads as it
-    /// always did (its record layout is chosen from its manifest, `RecordLayout`).
+    /// **A 1.x header is refused as a version, and so is a major before it** — the oldest major
+    /// this reader reads is 2 ([`OLDEST_READABLE_MAJOR`]): a 1.x psp's typing has no bundle cap
+    /// and must be written again, and the error says that rather than naming a missing key.
     #[test]
-    fn a_format_1_header_reads_and_a_major_before_it_is_refused() {
-        let mut written = a_written_header();
+    fn a_format_1_header_and_a_major_before_it_are_refused_as_versions() {
+        let written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
-        let body = body_of(&bytes).replace("format-version = \"2.0\"", "format-version = \"1.2\"");
-        written.format_version = (1, 2);
-        let (read_back, _) = decoded(&framed(&body)).expect("a 1.2 header reads");
-        assert_eq!(read_back, written);
-
-        let body = body_of(&bytes).replace("format-version = \"2.0\"", "format-version = \"0.9\"");
-        match decoded(&framed(&body)) {
-            Err(PspReadError::UnsupportedVersion { found, .. }) => assert_eq!(found, (0, 9)),
-            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        for (spelled, major, minor) in [("1.2", 1, 2), ("1.0", 1, 0), ("0.9", 0, 9)] {
+            let body = body_of(&bytes).replace(
+                "format-version = \"2.0\"",
+                &format!("format-version = \"{spelled}\""),
+            );
+            match decoded(&framed(&body)) {
+                Err(PspReadError::OlderVersion {
+                    found,
+                    oldest_major,
+                    ..
+                }) => {
+                    assert_eq!(found, (major, minor));
+                    assert_eq!(oldest_major, OLDEST_READABLE_MAJOR);
+                }
+                other => panic!("expected OlderVersion for {spelled}, got {other:?}"),
+            }
         }
     }
 

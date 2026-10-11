@@ -39,7 +39,8 @@ use super::{
 };
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::calling::{LocusInference, SampleGenotypeCall};
-use crate::locus_generation::{FlankDeletion, LocusKind, SsrDetail};
+use crate::locus_generation::{FlankDeletion, LocusKind};
+use crate::region_typing::run_parse::parse_into_runs;
 use crate::types::{AlleleId, Genotype, Phred};
 use crate::types::{GenomeRegion, Position};
 use crate::window_coverage::WindowCoverage;
@@ -186,8 +187,27 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
     let mut region = locus.region;
     let mut repeat_tract = evidence.repeat_tract;
     let mut padding_base = evidence.padding_base;
-    if let LocusKind::Ssr(detail) = locus.alleles().kind()
-        && let Some(widened) = WidenedTract::over(&alleles, &flank_deletions, detail)
+    // **An STR bundle's run counts are read off the alleles the record keeps**, before any
+    // widening adds flank bases to them: each is parsed against the bundle's reference runs, the
+    // reference allele being the reference hull (`str_bundle_loci.md` §7.1, §7.5).
+    if let LocusKind::SsrBundle(detail) = locus.alleles().kind() {
+        let counts = alleles
+            .iter()
+            .map(|allele| {
+                parse_into_runs(allele, &alleles[0], &detail.runs)
+                    .copies()
+                    .collect()
+            })
+            .collect();
+        repeat_tract = repeat_tract.map(|tract| tract.with_run_counts_of_alleles(counts));
+    }
+    let flanks = match locus.alleles().kind() {
+        LocusKind::Ssr(detail) => Some((&*detail.left_flank, &*detail.right_flank)),
+        LocusKind::SsrBundle(detail) => Some((&*detail.left_flank, &*detail.right_flank)),
+        LocusKind::Generic => None,
+    };
+    if let Some(flanks) = flanks
+        && let Some(widened) = WidenedTract::over(&alleles, &flank_deletions, flanks)
     {
         region = GenomeRegion {
             contig: region.contig,
@@ -258,10 +278,8 @@ impl WidenedTract {
     fn over(
         alleles: &[Box<[u8]>],
         flank_deletions: &[FlankDeletion],
-        detail: &SsrDetail,
+        (left_flank, right_flank): (&[u8], &[u8]),
     ) -> Option<Self> {
-        let left_flank = &*detail.left_flank;
-        let right_flank = &*detail.right_flank;
         let flank = left_flank.len();
         let reference = &alleles[0];
         let reach_left = |bases: &[u8], deleted: FlankDeletion| -> usize {

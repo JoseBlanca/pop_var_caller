@@ -72,7 +72,8 @@ use super::{
     GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence,
     ReferenceBesideLocus,
 };
-use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
+use crate::locus_generation::{ReadWitness, SequenceObservation, SsrBundleDetail, SsrDetail};
+use crate::region_typing::run_parse::RunParse;
 use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::{AlleleId, GenomeRegion, SummedLogError};
 
@@ -466,6 +467,25 @@ pub fn shape_ssr_locus<'a>(
             .map(|observations| SsrSampleEvidence::new(observations, detail)),
     );
     LocusEvidence::ssr(region, views, detail, candidate_repeat_counts)
+}
+
+/// [`shape_ssr_locus`] for an STR bundle (`str_bundle_loci.md` §7): the samples' observations,
+/// unchanged, beside the bundle's runs and each candidate's run parse.
+#[must_use]
+pub fn shape_ssr_bundle_locus<'a>(
+    region: GenomeRegion,
+    observations_of_each_run_sample: &'a [&'a [SequenceObservation]],
+    detail: &'a SsrBundleDetail,
+    candidate_parses: &'a [RunParse],
+    views: &'a mut Vec<SsrSampleEvidence<'a>>,
+) -> LocusEvidence<'a> {
+    views.clear();
+    views.extend(
+        observations_of_each_run_sample
+            .iter()
+            .map(|observations| SsrSampleEvidence::of_bundle(observations)),
+    );
+    LocusEvidence::ssr_bundle(region, views, detail, candidate_parses)
 }
 
 /// **A repeat tract's observations, rebuilt from the merge's rows** — reusable buffers, one

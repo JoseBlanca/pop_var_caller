@@ -35,6 +35,7 @@
 //! — see [`segment_criteria`]'s differential against production (spec §8.0).
 
 pub mod reference_runs;
+pub mod run_parse;
 pub mod segment_criteria;
 
 use std::path::Path;

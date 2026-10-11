@@ -256,12 +256,25 @@ pub fn info_column(record: &VcfRecord) -> String {
         ));
     }
 
-    if let Some(tract) = record.repeat_tract() {
-        let motif = std::str::from_utf8(tract.motif())
-            .expect("motif bases are A/C/G/T/N-validated at the catalog boundary");
+    // **One `RU` and one `PERIOD` per repeat unit, in order** — one at a segment, one per run at an
+    // STR bundle (`RU=CT,AT,T;PERIOD=2,2,1`). A bundle with no run writes none of the three.
+    if let Some(tract) = record.repeat_tract()
+        && !tract.units().is_empty()
+    {
+        let units = tract
+            .units()
+            .iter()
+            .map(|motif| {
+                std::str::from_utf8(motif.as_bytes())
+                    .expect("motif bases are A/C/G/T/N-validated at the catalog boundary")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let periods =
+            join_with_commas(tract.units().iter().map(|motif| motif.period().to_string()));
         fields.push("STR".to_string());
-        fields.push(format!("RU={motif}"));
-        fields.push(format!("PERIOD={}", tract.period()));
+        fields.push(format!("RU={units}"));
+        fields.push(format!("PERIOD={periods}"));
     }
 
     fields.join(";")
@@ -344,12 +357,16 @@ fn join_with_commas(values: impl Iterator<Item = String>) -> String {
 ///
 /// A repeat-tract record carries one more than a SNP or indel — `REPCN`, each called allele's
 /// length in whole repeat units — and that is the only difference between the two.
+///
+/// **An STR bundle record carries `REPCNB` instead** — each called allele's run counts — and one
+/// with no run carries neither (`str_bundle_loci.md` §7.5).
 #[must_use]
 pub fn format_keys(record: &VcfRecord) -> &'static str {
-    if record.is_repeat_tract() {
-        "GT:GQ:DP:AD:REPCN"
-    } else {
-        "GT:GQ:DP:AD"
+    match record.repeat_tract() {
+        None => "GT:GQ:DP:AD",
+        Some(tract) if !tract.is_bundle() => "GT:GQ:DP:AD:REPCN",
+        Some(tract) if tract.units().is_empty() => "GT:GQ:DP:AD",
+        Some(_) => "GT:GQ:DP:AD:REPCNB",
     }
 }
 
@@ -384,7 +401,24 @@ fn one_sample_column(record: &VcfRecord, column: &SampleColumn, ploidy: Ploidy) 
         join_with_commas(column.read_counts.allele_reads().iter().map(u32::to_string));
 
     let mut fields = format!("{genotype}:{quality}:{depth}:{allele_depths}");
-    if let Some(tract) = record.repeat_tract() {
+    if let Some(tract) = record.repeat_tract()
+        && tract.is_bundle()
+    {
+        if !tract.units().is_empty() {
+            let run_counts = column.call.genotype().map_or_else(
+                || MISSING_FIELD.to_string(),
+                |genotype| {
+                    join_with_commas(genotype.alleles().iter().map(|allele| {
+                        tract
+                            .run_counts_of_allele(usize::from(allele.get()))
+                            .unwrap_or_else(|| MISSING_FIELD.to_string())
+                    }))
+                },
+            );
+            fields.push(':');
+            fields.push_str(&run_counts);
+        }
+    } else if let Some(tract) = record.repeat_tract() {
         let repeat_counts = column.call.genotype().map_or_else(
             || MISSING_FIELD.to_string(),
             |genotype| {

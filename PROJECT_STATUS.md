@@ -2086,6 +2086,13 @@ comparisons one by one.
 
 ---
 
+#### STR bundles called as one STR locus (`str_bundle_loci.md`)
+- **Status:** fixes-applied (step 4, branch `str-bundles`, uncommitted)
+- **Spec:** [str_bundle_loci.md](doc/devel/ng/spec/str_bundle_loci.md); **Impl report:** [step 4](doc/devel/reports/implementations/str_bundles_calling_2026-10-11.md)
+- **Latest review:** [str_bundles_calling_2026-10-11.md](doc/devel/reports/reviews/str_bundles_calling_2026-10-11.md)
+- **Latest fixes-applied:** [fixes_applied_str_bundles_calling_2026-10-11.md](doc/devel/reports/reviews/fixes_applied_str_bundles_calling_2026-10-11.md)
+- **Open:** M3 (owner decision: part-repeat regime at bundles whose periods share no divisor above 1); M4, M8–M12 (tests and a refactor, see the fixes report); the periodicity gate at bundles (owner decision).
+
 ## Standing project-wide items
 
 Not bound to a specific component; pick up whenever the active feature

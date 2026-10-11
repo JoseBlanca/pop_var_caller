@@ -83,22 +83,25 @@
 //! loop's driver (`inference::summarise_condition`).
 
 use crate::alignment::StutterModel;
-use crate::calling::genotype_prior::fill_seed_share_per_candidate;
+use crate::calling::genotype_prior::{
+    BundlePrior, fill_bundle_seed_share_per_candidate, fill_seed_share_per_candidate,
+};
 use crate::calling::likelihood::ssr::{
     RepeatTractOutlierWeight, SsrContaminationMixture, SsrLocusParameters, SsrScoringContextTable,
 };
 use crate::calling::likelihood::ssr_emission::{
-    SsrCandidate, SsrScoringContext, fill_reachable_lengths,
+    BundleCandidate, SsrCandidate, SsrScoringContext, fill_reachable_lengths,
 };
 use crate::calling::likelihood::stutter_rates::stutter_model_for;
 use crate::calling::{CandidateAlleles, ContaminationView, FrozenParameters};
-use crate::locus_generation::LocusKind;
+use crate::locus_generation::{LocusKind, SsrBundleDetail};
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::joint::stratum_fits::{
     FittedSlippage, LengthSpectrum, NoSlippage,
 };
 use crate::parameter_estimation::repeat_strata::RepeatCount;
+use crate::region_typing::run_parse::RunParse;
 use crate::types::{ErrorRate, Motif, ReadGroupId};
 
 use std::num::NonZeroU32;
@@ -256,6 +259,17 @@ pub struct TractScoringFits {
     /// parameters file so that a person can change it, and a row reading the compiled-in
     /// constant made an edited file round-trip and change nothing.
     outlier_weight: Option<RepeatTractOutlierWeight>,
+    /// **At an STR bundle, one stutter model per reference run of each cell** —
+    /// `read groups × candidates × runs`, read-group-major, then candidate, then run
+    /// (`str_bundle_loci.md` §7.3). Empty after a segment's gather, whose one model per cell is
+    /// [`Self::stutter`]; at a bundle, [`Self::stutter`] holds each cell's first run's model, or
+    /// the shipped constants where the bundle has no run.
+    run_stutter: Vec<StutterModel>,
+    /// How many reference runs each cell of [`Self::run_stutter`] covers — zero after a
+    /// segment's gather and at a bundle with no run.
+    runs_per_cell: usize,
+    /// Whether the last gather was an STR bundle's.
+    gathered_a_bundle: bool,
 }
 
 impl TractScoringFits {
@@ -325,6 +339,9 @@ impl TractScoringFits {
         self.effective_slippage.clear();
         self.substitution_rate.clear();
         self.warrant.clear();
+        self.run_stutter.clear();
+        self.runs_per_cell = 0;
+        self.gathered_a_bundle = false;
         self.motif = Some(*motif);
         self.run_fitted_contamination = !parameters.contamination_is_absent();
         self.outlier_weight = Some(parameters.repeat_tract_outlier_weight());
@@ -392,6 +409,177 @@ impl TractScoringFits {
 
         fill_reachable_lengths(candidates, motif, &mut self.reachable_lengths);
         self.fill_contaminant_length_frequencies(candidates, tract_prior, parameters);
+    }
+
+    /// **Read the run's fitted parameters for one STR bundle's candidates** — the bundle's
+    /// [`Self::gather_for_locus`] (`str_bundle_loci.md` §7.3).
+    ///
+    /// **Stutter is looked up per run**, by read group, the run's period and the run's count in
+    /// the candidate — the key an STR segment uses, so no new stratum and no new parameter — and
+    /// the table grows from `read groups × candidates` to `read groups × candidates × runs`. A run
+    /// the candidate holds no copy of cannot slip, and takes the shipped constants unread.
+    ///
+    /// **One substitution rate per cell**, as at a segment, because the letters are compared over
+    /// the whole allele at once: the mean of the runs' fitted rates, each looked up as the run's
+    /// stutter is. A bundle with no run takes [`DEFAULT_SSR_SUBSTITUTION_RATE`], and its cells'
+    /// warrant says so.
+    ///
+    /// **The per-locus slippage re-fit does not run at a bundle**: its cells' frozen slippage is
+    /// left empty, so a round would have nothing to re-fit. It is off by default for segments too.
+    ///
+    /// # Panics
+    ///
+    /// If `candidates` is empty, or a candidate carries no bundle.
+    pub fn gather_for_bundle(
+        &mut self,
+        detail: &SsrBundleDetail,
+        candidates: &[SsrCandidate<'_>],
+        prior: &BundlePrior<'_>,
+        parameters: &FrozenParameters<'_>,
+    ) {
+        assert!(
+            !candidates.is_empty(),
+            "an STR bundle is called over at least its reference allele"
+        );
+        let read_groups = parameters.read_group_count();
+        let runs = detail.runs.len();
+        self.stutter.clear();
+        self.frozen_slippage.clear();
+        self.effective_slippage.clear();
+        self.substitution_rate.clear();
+        self.warrant.clear();
+        self.run_stutter.clear();
+        self.runs_per_cell = runs;
+        self.gathered_a_bundle = true;
+        // The bundle emission reads no motif; the field is shared with segments, so it carries
+        // the first run's, or one base where there is no run.
+        self.motif = Some(detail.runs.first().map_or_else(
+            || Motif::new(b"A").expect("one base is a motif"),
+            |run| run.motif(),
+        ));
+        self.run_fitted_contamination = !parameters.contamination_is_absent();
+        self.outlier_weight = Some(parameters.repeat_tract_outlier_weight());
+        self.candidates = candidates.len();
+        self.read_groups = read_groups;
+        self.slippage_defaulted = 0;
+        self.slippage_defaulted_by_an_unknown_read_group = 0;
+        self.substitution_defaulted = 0;
+
+        for group in 0..read_groups {
+            let read_group = ReadGroupId(
+                u32::try_from(group).expect("a run has fewer read groups than a u32 can name"),
+            );
+            for candidate in candidates {
+                let parse = candidate
+                    .bundle
+                    .expect("an STR bundle's candidates carry their run parse")
+                    .parse;
+                let mut warrant = Provenance::FittedHere;
+                let mut rates = 0.0;
+                let mut rates_read = 0usize;
+                // **Counted per cell, as a segment's are**: a cell fell back where any run of it
+                // did, so the counts stay within the cell count the record reports them against.
+                let mut slippage_fell_back = false;
+                let mut read_group_unknown = false;
+                let mut rate_fell_back = false;
+                for (reference_run, in_allele) in detail.runs.iter().zip(parse.runs()) {
+                    let period = reference_run.motif().ssr_period();
+                    let copies = in_allele.copies;
+                    if copies == 0 {
+                        // A run this candidate holds no copy of cannot slip and has no bases to
+                        // read: nothing of it is looked up.
+                        self.run_stutter.push(StutterModel::hipstr_shipped());
+                        continue;
+                    }
+                    let slippage = parameters.ssr_slippage_fits().at(
+                        read_group,
+                        period.get(),
+                        u64::from(copies),
+                    );
+                    let model = match &slippage {
+                        Ok(fitted) => {
+                            warrant = warrant.weaker_of(warrant_of(fitted));
+                            stutter_model_for(&fitted.slippage)
+                        }
+                        Err(absence) => {
+                            slippage_fell_back = true;
+                            read_group_unknown |= matches!(
+                                absence,
+                                NoSlippage::UnknownReadGroup | NoSlippage::GroupNotInTheFit { .. }
+                            );
+                            warrant = warrant.weaker_of(Provenance::Defaulted);
+                            StutterModel::hipstr_shipped()
+                        }
+                    };
+                    self.run_stutter.push(model);
+                    let rate = match parameters.ssr_substitution_rate_at(
+                        read_group,
+                        period,
+                        RepeatCount(copies),
+                    ) {
+                        Some(fitted) => {
+                            warrant = warrant.weaker_of(fitted.provenance);
+                            fitted.value
+                        }
+                        None => {
+                            rate_fell_back = true;
+                            warrant = warrant.weaker_of(Provenance::Defaulted);
+                            default_substitution_rate()
+                        }
+                    };
+                    rates += rate.get();
+                    rates_read += 1;
+                }
+                let substitution_rate = if rates_read == 0 {
+                    rate_fell_back = true;
+                    warrant = warrant.weaker_of(Provenance::Defaulted);
+                    default_substitution_rate()
+                } else {
+                    ErrorRate::try_new(rates / rates_read as f64)
+                        .expect("a mean of error rates is an error rate")
+                };
+                self.slippage_defaulted += usize::from(slippage_fell_back);
+                self.slippage_defaulted_by_an_unknown_read_group += usize::from(read_group_unknown);
+                self.substitution_defaulted += usize::from(rate_fell_back);
+                let cell_runs = self.run_stutter.len() - runs..self.run_stutter.len();
+                self.stutter.push(
+                    self.run_stutter[cell_runs]
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(StutterModel::hipstr_shipped),
+                );
+                self.frozen_slippage.push(None);
+                self.effective_slippage.push(None);
+                self.substitution_rate.push(substitution_rate);
+                self.warrant.push(warrant);
+            }
+        }
+
+        let motif = self.gathered_motif().to_owned();
+        fill_reachable_lengths(candidates, &motif, &mut self.reachable_lengths);
+
+        self.contaminant_length_frequencies.clear();
+        self.candidate_repeat_counts.clear();
+        self.share_of_each_candidate.clear();
+        if parameters.contamination_is_absent() {
+            return;
+        }
+        self.candidate_repeat_counts
+            .extend(candidates.iter().flat_map(|candidate| {
+                candidate
+                    .bundle
+                    .expect("an STR bundle's candidates carry their run parse")
+                    .parse
+                    .copies()
+            }));
+        self.share_of_each_candidate
+            .resize(candidates.len(), f64::NAN);
+        fill_bundle_seed_share_per_candidate(
+            &self.candidate_repeat_counts,
+            prior,
+            &mut self.share_of_each_candidate,
+        );
+        self.scatter_contaminant_shares(candidates);
     }
 
     /// **Turn the prior's belief about this tract's lengths into the third term of the row's
@@ -498,6 +686,12 @@ impl TractScoringFits {
             &mut self.share_of_each_candidate,
         );
 
+        self.scatter_contaminant_shares(candidates);
+    }
+
+    /// Add each candidate's share of the prior onto the reachable length its bases spell — the
+    /// last step of [`Self::fill_contaminant_length_frequencies`], shared with a bundle's gather.
+    fn scatter_contaminant_shares(&mut self, candidates: &[SsrCandidate<'_>]) {
         self.contaminant_length_frequencies
             .resize(self.reachable_lengths.len(), 0.0);
         for (candidate, share) in candidates.iter().zip(&self.share_of_each_candidate) {
@@ -557,13 +751,26 @@ impl TractScoringFits {
         for group in 0..self.read_groups {
             for (candidate, allele) in candidates.iter().enumerate() {
                 let cell = group * self.candidates + candidate;
-                contexts.push(SsrScoringContext::new(
-                    motif,
-                    &self.stutter[cell],
-                    allele,
-                    self.substitution_rate[cell],
-                    [self.warrant[cell]],
-                ));
+                contexts.push(if self.gathered_a_bundle {
+                    let runs = &self.run_stutter
+                        [cell * self.runs_per_cell..(cell + 1) * self.runs_per_cell];
+                    SsrScoringContext::for_bundle(
+                        motif,
+                        &self.stutter[cell],
+                        runs,
+                        allele,
+                        self.substitution_rate[cell],
+                        [self.warrant[cell]],
+                    )
+                } else {
+                    SsrScoringContext::new(
+                        motif,
+                        &self.stutter[cell],
+                        allele,
+                        self.substitution_rate[cell],
+                        [self.warrant[cell]],
+                    )
+                });
             }
         }
         contexts
@@ -932,8 +1139,8 @@ fn default_substitution_rate() -> ErrorRate {
 /// table reaching here is a locus routed to the wrong read model, which would otherwise surface
 /// as a stutter score over bases that are not a tract. A repeat **bundle** is not misrouted —
 /// the calling seam sends a bundle down the repeat path deliberately, which is how every other
-/// consumer of [`LocusKind`] groups the two — but nothing here scores one, and no producer
-/// emits a bundle into calling today.
+/// consumer of [`LocusKind`] groups the two — but a bundle's candidates are built by
+/// [`bundle_candidates`], over its runs, and never here.
 #[must_use]
 pub fn tract_candidates<'a>(
     alleles: &'a CandidateAlleles,
@@ -941,10 +1148,10 @@ pub fn tract_candidates<'a>(
 ) -> Vec<SsrCandidate<'a>> {
     assert!(
         !matches!(alleles.kind(), LocusKind::SsrBundle(_)),
-        "the locus at this table is a bundle of repeat tracts, and nothing scores a bundle \
-         yet: this path is written for one tract, whose candidates are its own lengths. The \
-         calling seam sends a bundle down the repeat path on purpose, so this is a gap in \
-         what the repeat path covers rather than a locus routed to the wrong read model"
+        "the locus at this table is a bundle of repeat tracts, and this one-tract table does \
+         not score a bundle: its candidates are built over its runs by `bundle_candidates`. \
+         The calling seam sends a bundle down the repeat path on purpose, so this is a bundle \
+         handed to the segment's table rather than a locus routed to the wrong read model"
     );
     assert!(
         matches!(alleles.kind(), LocusKind::Ssr(_)),
@@ -965,6 +1172,7 @@ pub fn tract_candidates<'a>(
         .zip(repeat_counts)
         .enumerate()
         .map(|(index, (bases, repeat_count))| SsrCandidate {
+            bundle: None,
             bases,
             repeat_count: *repeat_count,
             flank_deletion: alleles.flank_deletion(index),
@@ -972,6 +1180,49 @@ pub fn tract_candidates<'a>(
                 LocusKind::Ssr(detail) => (&detail.left_flank, &detail.right_flank),
                 _ => (&[], &[]),
             },
+        })
+        .collect()
+}
+
+/// **An STR bundle's candidate table as the emission sees it** — each candidate's bases with its
+/// run parse and the bundle's reference runs (`str_bundle_loci.md` §7.3); the bundle's
+/// [`tract_candidates`]. A bundle candidate's `repeat_count` is not read, and is one.
+///
+/// # Panics
+///
+/// If `alleles` is not an STR bundle's table, or `parses` is not one per candidate.
+#[must_use]
+pub fn bundle_candidates<'a>(
+    alleles: &'a CandidateAlleles,
+    detail: &'a SsrBundleDetail,
+    parses: &'a [RunParse],
+) -> Vec<SsrCandidate<'a>> {
+    assert!(
+        matches!(alleles.kind(), LocusKind::SsrBundle(_)),
+        "these candidates were generated at a {:?} locus and are being scored as an STR bundle",
+        alleles.kind()
+    );
+    assert_eq!(
+        alleles.len(),
+        parses.len(),
+        "this STR bundle is called over {} candidates and {} run parses were supplied",
+        alleles.len(),
+        parses.len()
+    );
+    alleles
+        .iter()
+        .zip(parses)
+        .enumerate()
+        .map(|(index, (bases, parse))| SsrCandidate {
+            bases,
+            repeat_count: NonZeroU32::MIN,
+            flank_deletion: alleles.flank_deletion(index),
+            reference_flanks: (&detail.left_flank, &detail.right_flank),
+            bundle: Some(BundleCandidate {
+                runs: &detail.runs,
+                parse,
+                leading_flank_bases: 0,
+            }),
         })
         .collect()
 }
@@ -1079,6 +1330,7 @@ mod tests {
             .iter()
             .zip(CANDIDATE_REPEATS)
             .map(|(bases, count)| SsrCandidate {
+                bundle: None,
                 reference_flanks: (&[], &[]),
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases,
@@ -1721,6 +1973,7 @@ mod tests {
         // is defaulted on both lookups.
         let lone_bases = tract(20);
         let lone = [SsrCandidate {
+            bundle: None,
             reference_flanks: (&[], &[]),
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: &lone_bases,
@@ -2043,6 +2296,7 @@ mod tests {
             .iter()
             .zip(CANDIDATE_REPEATS)
             .map(|(bases, count)| SsrCandidate {
+                bundle: None,
                 reference_flanks: (&[], &[]),
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases,
@@ -2701,10 +2955,10 @@ mod tests {
     /// what this path covers, not a locus handed to the wrong read model. The message says
     /// which, because the two ask a reader to do different things.
     ///
-    /// Nothing constructs a bundle into calling today; this is what keeps the two messages from
-    /// merging back into one when something does.
+    /// A bundle's candidates are built by `bundle_candidates`; this is what keeps the two
+    /// messages apart if a bundle is ever handed to the segment's table.
     #[test]
-    #[should_panic(expected = "nothing scores a bundle")]
+    #[should_panic(expected = "this one-tract table does not score a bundle")]
     fn a_bundle_of_repeat_tracts_is_refused_as_one_tract() {
         let alleles = CandidateAlleles::new(
             Box::from(tract(6).as_slice()),

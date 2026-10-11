@@ -27,8 +27,8 @@
 use crate::calling::GenotypeTableView;
 use crate::calling::genotype_prior::seed_generic::{VariantClass, fill_locus_concentration};
 use crate::calling::genotype_prior::{
-    CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
-    fill_sample_concentration, fill_ssr_seed,
+    BundlePrior, CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow,
+    SampleAlleleCopies, fill_sample_concentration, fill_ssr_bundle_seed, fill_ssr_seed,
 };
 use crate::calling::likelihood::copy_shares;
 use crate::calling::likelihood::generic::{
@@ -44,19 +44,20 @@ use crate::calling::{
     CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture, ErrorSpreadTable,
     ExpectedAlleleCopies, FrozenParameters, GenericLocusSample, GenericSampleEvidence,
     GenotypeTable, LocusEvidence, LocusInference, ReadGroupParameters, RepeatTractProvenance,
-    SampleGenotypeCall, SampleScoringBuffers, SsrSampleEvidence, fill_batch_allele_copies,
-    fill_contaminant_allele_frequencies, fill_error_spreads,
+    SampleGenotypeCall, SampleScoringBuffers, SsrLocusShape, SsrSampleEvidence,
+    fill_batch_allele_copies, fill_contaminant_allele_frequencies, fill_error_spreads,
 };
 use crate::float;
-use crate::locus_generation::SsrDetail;
+use crate::locus_generation::SsrBundleDetail;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::repeat_strata::RepeatCount;
 use crate::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
-use std::num::NonZeroU32;
 
-use super::repeat_tract_parameters::{TractPrior, TractScoringFits, tract_candidates};
+use super::repeat_tract_parameters::{
+    TractPrior, TractScoringFits, bundle_candidates, tract_candidates,
+};
 use super::slippage_refit::{PooledSlipCounts, RefitEmissionCache, largest_movement, refit_cells};
 use super::{LocusGenotyper, RunnableCallingLoopConfig};
 
@@ -1574,10 +1575,8 @@ struct TractEvidence<'a> {
     /// One entry per sample of the run, in run order. **A tract rules no sample out**
     /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), so every sample has one.
     per_sample: &'a [SsrSampleEvidence<'a>],
-    /// The tract's repeat unit and its two flanks.
-    detail: &'a SsrDetail,
-    /// How many whole repeats each candidate carries, parallel to the locus's candidate table.
-    candidate_repeat_counts: &'a [NonZeroU32],
+    /// The repeat ground: a segment's motif and repeat counts, or a bundle's runs and parses.
+    shape: SsrLocusShape<'a>,
 }
 
 impl<'a> TractEvidence<'a> {
@@ -1592,13 +1591,48 @@ impl<'a> TractEvidence<'a> {
     /// of every candidate table and these counts run parallel to it. It is what the spectrum's
     /// offsets are measured from, and passing a candidate's instead would re-centre the shape on
     /// that candidate.
+    ///
+    /// # Panics
+    ///
+    /// At an STR bundle, whose prior is [`bundle_prior_of`]'s.
     fn prior(&self, parameters: &'a FrozenParameters<'a>) -> TractPrior<'a> {
-        let reference_repeats = RepeatCount(self.candidate_repeat_counts[0].get());
+        let SsrLocusShape::Segment {
+            detail,
+            candidate_repeat_counts,
+        } = self.shape
+        else {
+            unreachable!("an STR bundle's prior is read per run, by `bundle_prior_of`")
+        };
+        let reference_repeats = RepeatCount(candidate_repeat_counts[0].get());
         TractPrior {
             reference_repeats,
             length_spectrum: parameters
-                .ssr_length_spectrum_at(self.detail.motif.ssr_period(), reference_repeats),
+                .ssr_length_spectrum_at(detail.motif.ssr_period(), reference_repeats),
         }
+    }
+}
+
+/// **What an STR bundle's prior is read from, looked up once per locus**: each reference run's
+/// own reference count and its stratum's length spectrum (`str_bundle_loci.md` §7.4). The
+/// reference counts are the reference allele's run parse, entry 0 of the candidates.
+fn bundle_prior_of<'a>(
+    detail: &SsrBundleDetail,
+    candidate_parses: &[crate::region_typing::run_parse::RunParse],
+    parameters: &'a FrozenParameters<'a>,
+) -> BundlePrior<'a> {
+    let reference_run_counts: Vec<u32> = candidate_parses[0].copies().collect();
+    let run_spectra = detail
+        .runs
+        .iter()
+        .zip(&reference_run_counts)
+        .map(|(run, &copies)| {
+            parameters.ssr_length_spectrum_at(run.motif().ssr_period(), RepeatCount(copies))
+        })
+        .collect();
+    BundlePrior {
+        reference_run_counts,
+        run_spectra,
+        stated_concentration: parameters.ssr_slippage_fits().stated_concentration(),
     }
 }
 
@@ -1609,12 +1643,10 @@ fn tract_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> TractEvidence<'a> {
         LocusEvidence::Ssr {
             region: _,
             per_sample,
-            detail,
-            candidate_repeat_counts,
+            shape,
         } => TractEvidence {
             per_sample,
-            detail,
-            candidate_repeat_counts,
+            shape: *shape,
         },
         LocusEvidence::Generic { region, .. } => unreachable!(
             "the SNP/indel locus at {region} reached the repeat-tract path's evidence: its \
@@ -1819,13 +1851,34 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     mut refit: SlippageRoundBuild<'_>,
 ) {
     let tract = tract_evidence_of(evidence);
-    let scored_candidates = tract_candidates(candidates, tract.candidate_repeat_counts);
-    scratch.tract_fits_mut().gather_for_locus(
-        &tract.detail.motif,
-        &scored_candidates,
-        tract.prior(parameters),
-        parameters,
-    );
+    let scored_candidates = match tract.shape {
+        SsrLocusShape::Segment {
+            detail,
+            candidate_repeat_counts,
+        } => {
+            let scored = tract_candidates(candidates, candidate_repeat_counts);
+            scratch.tract_fits_mut().gather_for_locus(
+                &detail.motif,
+                &scored,
+                tract.prior(parameters),
+                parameters,
+            );
+            scored
+        }
+        SsrLocusShape::Bundle {
+            detail,
+            candidate_parses,
+        } => {
+            let scored = bundle_candidates(candidates, detail, candidate_parses);
+            scratch.tract_fits_mut().gather_for_bundle(
+                detail,
+                &scored,
+                &bundle_prior_of(detail, candidate_parses, parameters),
+                parameters,
+            );
+            scored
+        }
+    };
     // **The slippage round's numbers go over the frozen gather, not instead of it.** The
     // gather is re-run each round because everything *else* a cell carries is frozen and this
     // is its one builder; what a round adopted then replaces the stutter models it re-fitted,
@@ -1940,7 +1993,10 @@ fn attribute_reads_under_the_posteriors<SsrEmissionScratch>(
     candidates: &CandidateAlleles,
     emissions: &RefitEmissionCache,
 ) -> PooledSlipCounts {
-    let period = i64::from(tract.detail.motif.ssr_period().get());
+    let SsrLocusShape::Segment { detail, .. } = tract.shape else {
+        unreachable!("the slippage round runs at STR segments only")
+    };
+    let period = i64::from(detail.motif.ssr_period().get());
     let candidate_count = candidates.len();
     let candidate_byte_lengths: Vec<i64> = candidates.iter().map(|b| b.len() as i64).collect();
     // Copied out because the walk below borrows the whole scratch mutably to score each row,
@@ -2405,8 +2461,30 @@ where
                 None
             }
             LocusEvidence::Ssr {
-                detail,
-                candidate_repeat_counts,
+                shape:
+                    SsrLocusShape::Bundle {
+                        detail,
+                        candidate_parses,
+                    },
+                ..
+            } => {
+                // **The product of the runs' seeds** (`str_bundle_loci.md` §7.4): each run's
+                // shape read off its own stratum at its own offset, held with the most variable
+                // run's conviction — `fill_ssr_bundle_seed` says why.
+                let prior = bundle_prior_of(detail, candidate_parses, parameters);
+                let run_counts: Vec<u32> = candidate_parses
+                    .iter()
+                    .flat_map(|parse| parse.copies())
+                    .collect();
+                let _ = fill_ssr_bundle_seed(&run_counts, &prior, scratch.seed_concentration_mut());
+                Some(prior.rung())
+            }
+            LocusEvidence::Ssr {
+                shape:
+                    SsrLocusShape::Segment {
+                        detail,
+                        candidate_repeat_counts,
+                    },
                 ..
             } => {
                 // **The reference tract's own repeat count is entry 0**, and that is a
@@ -2455,8 +2533,16 @@ where
         // attributed. An ordinary site ignores the setting structurally, whatever a run asked
         // for: it has no slippage numbers to re-fit (§5.1's closing paragraph).
         let refit_config = &config.slippage_refit;
-        let refit_may_run =
-            !refit_config.is_frozen() && matches!(evidence, LocusEvidence::Ssr { .. });
+        // **An STR bundle runs no round**: its cells carry no frozen slippage to re-fit
+        // (`TractScoringFits::gather_for_bundle`).
+        let refit_may_run = !refit_config.is_frozen()
+            && matches!(
+                evidence,
+                LocusEvidence::Ssr {
+                    shape: SsrLocusShape::Segment { .. },
+                    ..
+                }
+            );
         // The round's working memory, allocated only where a round may run: the emissions the
         // build caches for the attribution, the numbers the last round adopted, and a buffer
         // for the next re-fit. The frozen path allocates none of it — the three empty
@@ -8190,6 +8276,89 @@ mod tests {
         );
     }
 
+    /// **An STR bundle of one run spanning its hull is called exactly as the segment over the
+    /// same bases** — the same genotypes, genotype qualities, site quality, expected copies and
+    /// warrant — through the whole loop: candidates parsed against the run, stutter looked up
+    /// per run, the seed read per run, the row scored per slip set (`str_bundle_loci.md` §7).
+    #[test]
+    fn a_one_run_bundle_is_called_as_the_segment_over_its_bases() {
+        use crate::locus_generation::SsrBundleDetail;
+        use crate::region_typing::reference_runs::ReferenceRun;
+        use crate::region_typing::run_parse::parse_into_runs;
+
+        let carrier = [tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)];
+        let heterozygote = [
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 10),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 10),
+        ];
+        let reference_sample = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)];
+        let observations: [&[SequenceObservation]; 3] =
+            [&carrier, &heterozygote, &reference_sample];
+
+        let as_segment = call_tract(
+            &observations,
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut worker_scratch(),
+        );
+
+        let hull = tract_bases(TRACT_CANDIDATE_REPEATS[0]);
+        let detail = SsrBundleDetail {
+            left_flank: tract_detail().left_flank,
+            right_flank: tract_detail().right_flank,
+            runs: vec![
+                ReferenceRun::new(
+                    0,
+                    hull.len() as u64,
+                    Motif::new(TRACT_MOTIF).expect("a dinucleotide motif"),
+                )
+                .expect("a run of whole copies"),
+            ]
+            .into_boxed_slice(),
+        };
+        let mut alleles = CandidateAlleles::new(
+            hull.clone().into_boxed_slice(),
+            LocusKind::SsrBundle(detail.clone()),
+        );
+        alleles.admit(tract_bases(TRACT_CANDIDATE_REPEATS[1]).into_boxed_slice());
+        let parses: Vec<_> = alleles
+            .iter()
+            .map(|allele| parse_into_runs(allele, &hull, &detail.runs))
+            .collect();
+        let per_sample: Vec<SsrSampleEvidence<'_>> = observations
+            .iter()
+            .map(|observations| SsrSampleEvidence::of_bundle(observations))
+            .collect();
+        let evidence = LocusEvidence::ssr_bundle(locus_region(), &per_sample, &detail, &parses);
+        let strata = tract_strata();
+        let substitution = tract_substitution_rates();
+        let calibration = tract_libraries();
+        let inbreeding = vec![outbred(); per_sample.len()];
+        let parameters =
+            uncontaminated_run(&calibration, &inbreeding, &strata, &substitution, diploid());
+        let as_bundle = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut worker_scratch(),
+        );
+
+        assert_eq!(as_bundle.per_sample, as_segment.per_sample);
+        assert_eq!(
+            as_bundle.uncorrected_site_quality(),
+            as_segment.uncorrected_site_quality()
+        );
+        assert_eq!(
+            as_bundle.cohort_expected_copies().copies(),
+            as_segment.cohort_expected_copies().copies()
+        );
+        assert_eq!(as_bundle.weakest_provenance, as_segment.weakest_provenance);
+        assert_eq!(as_bundle.repeat_tract, as_segment.repeat_tract);
+        assert_eq!(called_alleles(&as_bundle, 1), vec![0, 1]);
+    }
+
     /// **The tract's prior seed is its stratum's fitted length spectrum, restricted to the
     /// lengths this locus is called over and scaled by the strength the fit holds them with** —
     /// asserted as numbers, because nothing else in this file can fail if it is wrong.
@@ -9192,18 +9361,21 @@ mod tests {
         let interrupted = b"ATATATATCTAT".to_vec();
         let scored = [
             SsrCandidate {
+                bundle: None,
                 reference_flanks: (&[], &[]),
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &clean,
                 repeat_count: NonZeroU32::new(6).expect("six repeats"),
             },
             SsrCandidate {
+                bundle: None,
                 reference_flanks: (&[], &[]),
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &interrupted,
                 repeat_count: NonZeroU32::new(4).expect("four whole repeats"),
             },
             SsrCandidate {
+                bundle: None,
                 reference_flanks: (&[], &[]),
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &seven,

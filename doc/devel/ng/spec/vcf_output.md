@@ -276,6 +276,14 @@ Declarations, with what the value is and which records carry it:
   every catalogue entry already. `PERIOD = len(RU)` is redundant by construction and kept anyway:
   it is the field dumpSTR-style tools key on, and one integer per tract record is the whole cost.
 
+*Changed during implementation (2026-10-11, [`str_bundle_loci.md`](str_bundle_loci.md) §7.5).* An
+**STR bundle** record is a tract record too, with one `RU` and one `PERIOD` per reference run, in
+hull order — `RU=CT,AT,T;PERIOD=2,2,1` — so both are declared `Number=.` (the header of every VCF
+moved; segment records still write one value). `STR`'s description names bundles. **A bundle with no
+run writes none of `STR`, `RU` and `PERIOD`**, which keeps this section's rule that the three travel
+together; it is still the repeat path's record for the gathering of edge deletions (§6 of
+`str_edge_deletion_alleles.md`) and for the writer's ordering.
+
 **Not carried over, by name:** `CA` (production's chain-anchor flag — the chain machinery has no
 ng counterpart); `PARALOG_POST` (the hidden-paralog score — ng has no paralog filter yet; the id
 is reserved for step 11a's document, §13); `MQDiffT` (above).
@@ -293,6 +301,13 @@ is reserved for step 11a's document, §13); `MQDiffT` (above).
 ```
 
 The FORMAT string is `GT:GQ:DP:AD` on a generic record and `GT:GQ:DP:AD:REPCN` on a tract record.
+
+*Changed during implementation (2026-10-11, [`str_bundle_loci.md`](str_bundle_loci.md) §7.5):* an
+STR bundle record writes `GT:GQ:DP:AD:REPCNB` instead —
+`##FORMAT=<ID=REPCNB,Number=.,Type=String,...>`, each called allele's copies in every run joined by
+`_`, GT order (`20_8_8,21_8_8`) — and a bundle with no run writes `GT:GQ:DP:AD`. `REPCN` is never
+written on a bundle record and keeps its integer type. The counts are each allele's run parse
+(§7.1 there), read off the alleles the record keeps, before any widening over the flanks.
 
 - **`GT`** — allele indices in canonical non-decreasing order, `/`-joined, ploidy from the run's
   parameters. Decoding through the shared genotype-order table

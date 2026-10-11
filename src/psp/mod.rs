@@ -281,6 +281,21 @@ pub enum PspReadError {
         supported: (u16, u16),
     },
 
+    /// Written by a format older than the oldest this reader reads. The file must be written
+    /// again with this `pvc` (found in review, 2026-10-11: such a file was reported as
+    /// [`UnsupportedVersion`](Self::UnsupportedVersion), "understands up to 2.0", which reads
+    /// as though a 1.2 file should load).
+    #[error(
+        "{} is format {}.{}, written by an older pvc; this reader reads format {}.0 and later, \
+         so write the psp again with this pvc",
+        path.display(), found.0, found.1, oldest_major
+    )]
+    OlderVersion {
+        path: PathBuf,
+        found: (u16, u16),
+        oldest_major: u16,
+    },
+
     /// The file declares a compressor look-back window larger than this reader budgeted
     /// for, so its decoder would have to hold more than it is allowed to.
     ///
@@ -829,6 +844,17 @@ mod tests {
         assert_eq!(
             version.to_string(),
             "SRR7279481.psp is format 2.0; this reader understands up to 1.0"
+        );
+
+        let older = PspReadError::OlderVersion {
+            path: PathBuf::from("SRR7279481.psp"),
+            found: (1, 2),
+            oldest_major: 2,
+        };
+        assert_eq!(
+            older.to_string(),
+            "SRR7279481.psp is format 1.2, written by an older pvc; this reader reads format 2.0 \
+             and later, so write the psp again with this pvc"
         );
 
         let window = PspReadError::WindowTooLarge {

@@ -192,7 +192,13 @@ mod tests {
     /// is unchanged, and no genotype moves. Measured by putting the old prior back at tracts, which
     /// reproduces the old checksum exactly. It was `2200dfaaa1148093cccf828021c5a281`. Recorded in
     /// the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "bc75ec4d5a3c67dcaa776f56746b2bdd";
+    ///
+    /// **Re-recorded 2026-10-11** when STR bundles began to be called (`str_bundle_loci.md` §7.5):
+    /// the header's `RU` and `PERIOD` became `Number=.`, `STR`'s description names bundles, and
+    /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
+    /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
+    /// was `bc75ec4d5a3c67dcaa776f56746b2bdd`. Recorded in the Linux container (arm64, glibc) only.
+    const CALLS_MD5: &str = "b1a1a907e4e7adf22fb62c56f3305258";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -233,7 +239,13 @@ mod tests {
     /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
     /// repeat tract's `QUAL` moves. It was `206e0f7bf9b5459b99b20477562642a1`. Recorded in the
     /// Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "f037a347e52634175a3eb5b4353fb8d0";
+    ///
+    /// **Re-recorded 2026-10-11** when STR bundles began to be called (`str_bundle_loci.md` §7.5):
+    /// the header's `RU` and `PERIOD` became `Number=.`, `STR`'s description names bundles, and
+    /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
+    /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
+    /// was `f037a347e52634175a3eb5b4353fb8d0`. Recorded in the Linux container (arm64, glibc) only.
+    const WITH_ERRORS_CALLS_MD5: &str = "977f08d389bdba037ee350ab38164e1b";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -261,7 +273,13 @@ mod tests {
     /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
     /// repeat tract's `QUAL` moves. It was `102696ee67202548f35a28a698dbf244`. Recorded in the
     /// Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "fcc1a04573dbbdb08ac80127c554dc94";
+    ///
+    /// **Re-recorded 2026-10-11** when STR bundles began to be called (`str_bundle_loci.md` §7.5):
+    /// the header's `RU` and `PERIOD` became `Number=.`, `STR`'s description names bundles, and
+    /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
+    /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
+    /// was `fcc1a04573dbbdb08ac80127c554dc94`. Recorded in the Linux container (arm64, glibc) only.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "08a675fd6ba4bc8a627fa2bd2118b415";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

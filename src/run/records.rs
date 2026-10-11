@@ -604,9 +604,17 @@ pub fn evidence_for_output(
         // stamped the kind: a repeat tract's table is `LocusKind::Ssr` and carries the motif,
         // and everything the record says about the repeat — the `STR` flag, `RU`, `PERIOD`
         // and each called allele's `REPCN` — is written from that one motif.
+        //
+        // **An STR bundle's record is a repeat-tract record too** (`str_bundle_loci.md` §7.5): its
+        // annotation carries the runs' motifs here, and the record's assembly adds each allele's
+        // run counts, read off the alleles it keeps.
         repeat_tract: match locus.alleles().kind() {
             LocusKind::Ssr(detail) => Some(TractAnnotation::new(detail.motif)),
-            LocusKind::Generic | LocusKind::SsrBundle(_) => None,
+            LocusKind::SsrBundle(detail) => Some(TractAnnotation::bundle(
+                detail.runs.iter().map(|run| run.motif()).collect(),
+                Vec::new(),
+            )),
+            LocusKind::Generic => None,
         },
         filter: filter_for(locus, selection),
     }
@@ -641,8 +649,10 @@ fn filter_for(locus: &LocusInference, selection: SelectionVerdict) -> FilterVerd
         return FilterVerdict::EmDidNotConverge;
     }
     match locus.alleles().kind() {
-        LocusKind::Generic | LocusKind::SsrBundle(_) => FilterVerdict::Pass,
-        LocusKind::Ssr(_) => match selection {
+        LocusKind::Generic => FilterVerdict::Pass,
+        // An STR bundle's selection gives the segment's two verdicts (`str_bundle_loci.md` §7.2),
+        // and they reach the column the same way.
+        LocusKind::Ssr(_) | LocusKind::SsrBundle(_) => match selection {
             SelectionVerdict::NotPeriodic => FilterVerdict::NotPeriodic,
             SelectionVerdict::Truncated { .. } => FilterVerdict::TooManyAlleles,
             _ => FilterVerdict::Pass,

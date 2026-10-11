@@ -53,7 +53,7 @@
 //! is ever called just "the spectrum" (`population_diversity.md` §2).
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
-use crate::parameter_estimation::joint::stratum_fits::LengthSpectrum;
+use crate::parameter_estimation::joint::stratum_fits::{LengthSpectrum, LengthSpectrumRung};
 
 use super::Concentration;
 
@@ -307,6 +307,164 @@ fn fill_candidate_weights(
                 *slot = weight.max(SHAPE_FLOOR);
             }
         }
+    }
+    out.iter().sum()
+}
+
+/// **What an STR bundle's genotype prior is read from**: for each of its reference runs, the
+/// run's own reference count and the length spectrum of its stratum — period and reference count
+/// — looked up once per locus (`str_bundle_loci.md` §7.4).
+#[derive(Debug, Clone)]
+pub struct BundlePrior<'a> {
+    /// Each reference run's whole copies in the reference hull, in hull order — what that run's
+    /// offsets are measured from.
+    pub reference_run_counts: Vec<u32>,
+    /// Each reference run's stratum's length spectrum, parallel to `reference_run_counts`.
+    pub run_spectra: Vec<LengthSpectrum<'a>>,
+    /// The concentration the tract ladder's bottom rung states — what a bundle with no run is
+    /// held with, flat over its candidates.
+    pub stated_concentration: f64,
+}
+
+impl BundlePrior<'_> {
+    /// **The weakest rung any run's spectrum came from** — what the bundle's record says its prior
+    /// rested on; the stated flat rung for a bundle with no run.
+    #[must_use]
+    pub fn rung(&self) -> LengthSpectrumRung {
+        self.run_spectra
+            .iter()
+            .map(LengthSpectrum::rung)
+            .max()
+            .unwrap_or(LengthSpectrumRung::StatedFlat)
+    }
+
+    /// **The conviction a bundle's seed is held with: its most variable run's** — the smallest of
+    /// the runs' concentrations, or the stated one where there is no run.
+    fn concentration(&self) -> f64 {
+        self.run_spectra
+            .iter()
+            .map(LengthSpectrum::concentration)
+            .reduce(f64::min)
+            .unwrap_or(self.stated_concentration)
+    }
+}
+
+/// Fill `out` with an STR bundle's seed (`str_bundle_loci.md` §7.4): **each candidate's shape is
+/// the product of its runs' shapes**, each run's read off its own stratum's length spectrum at the
+/// candidate's offset from that run's reference count, exactly as [`fill_ssr_seed`] reads a
+/// segment's; the seed is that shape times the bundle's concentration.
+///
+/// `candidate_run_counts` holds the candidates' run counts one candidate after another,
+/// `prior.reference_run_counts.len()` entries each, the reference allele first.
+///
+/// ```text
+/// shape:  w_j = max(Π_r spectrum_r(c_jr − ref_r), SHAPE_FLOOR)   over the runs with a fit
+///         w_j = 1/K                                                where no run has one
+/// seed:   α_j = concentration · w_j,  floored at MIN_ALT_CONCENTRATION
+/// ```
+///
+/// **Two choices the specification leaves open, made here.**
+///
+/// - **The concentration is the runs' smallest**, not their product: multiplying the runs' seeds
+///   outright would hold a two-run bundle with the square of a run's conviction, a belief no
+///   measurement stands behind. The smallest is the conviction of the most variable run, and a
+///   bundle varies at least as much as any of its runs.
+/// - **A run on the stated flat rung contributes no factor**: a flat shape asserts nothing about
+///   which count is likelier, so it leaves the other runs' shapes as they are. Where no run has a
+///   fit, or there is no run, the shape is flat over the candidates, `1/K`, as on a segment's
+///   flat rung.
+///
+/// **For a bundle of one run this is [`fill_ssr_seed`] exactly.** Treating the runs as independent
+/// is the plain assumption with nothing measured against it: a bundle is one haplotype, and its
+/// runs' lengths may well be correlated.
+///
+/// # Panics
+///
+/// If `out` is not one entry per candidate, or `candidate_run_counts` is not one count per run per
+/// candidate.
+#[must_use]
+pub fn fill_ssr_bundle_seed<'a>(
+    candidate_run_counts: &[u32],
+    prior: &BundlePrior<'_>,
+    out: &'a mut [f64],
+) -> Concentration<'a> {
+    let _ = fill_bundle_candidate_weights(candidate_run_counts, prior, out);
+    let concentration = prior.concentration();
+    for slot in out.iter_mut() {
+        *slot = (concentration * *slot).max(MIN_ALT_CONCENTRATION);
+    }
+    Concentration::new(out)
+}
+
+/// [`fill_seed_share_per_candidate`] for an STR bundle: the shape [`fill_ssr_bundle_seed`] scales,
+/// normalised to sum to one — what the read likelihood's contamination term reads.
+pub fn fill_bundle_seed_share_per_candidate(
+    candidate_run_counts: &[u32],
+    prior: &BundlePrior<'_>,
+    out: &mut [f64],
+) {
+    let total = fill_bundle_candidate_weights(candidate_run_counts, prior, out);
+    for slot in out.iter_mut() {
+        *slot /= total;
+    }
+}
+
+/// Each bundle candidate's unnormalised weight, and their total — [`fill_candidate_weights`] with
+/// one factor per run.
+fn fill_bundle_candidate_weights(
+    candidate_run_counts: &[u32],
+    prior: &BundlePrior<'_>,
+    out: &mut [f64],
+) -> f64 {
+    let runs = prior.reference_run_counts.len();
+    assert_eq!(
+        prior.run_spectra.len(),
+        runs,
+        "a bundle's prior holds one length spectrum per reference run"
+    );
+    assert!(
+        !out.is_empty(),
+        "every STR bundle has a reference allele, so its candidate set holds at least one"
+    );
+    assert_eq!(
+        candidate_run_counts.len(),
+        out.len() * runs,
+        "the run counts must be one per run for each of the locus's candidates"
+    );
+    let any_fitted = prior
+        .run_spectra
+        .iter()
+        .any(|spectrum| spectrum.fitted_weights().is_some());
+    if !any_fitted {
+        out.fill(1.0 / out.len() as f64);
+        return out.iter().sum();
+    }
+    for (candidate, slot) in out.iter_mut().enumerate() {
+        let counts = &candidate_run_counts[candidate * runs..(candidate + 1) * runs];
+        let mut weight = 1.0;
+        for ((spectrum, &reference), &count) in prior
+            .run_spectra
+            .iter()
+            .zip(&prior.reference_run_counts)
+            .zip(counts)
+        {
+            let Some(weights) = spectrum.fitted_weights() else {
+                continue;
+            };
+            let span = i64::from(
+                spectrum
+                    .allele_span()
+                    .expect("a fitted spectrum has a span"),
+            );
+            let offset = i64::from(count) - i64::from(reference);
+            let run_weight = if offset.abs() <= span {
+                weights[(offset + span) as usize]
+            } else {
+                0.0
+            };
+            weight *= run_weight.max(SHAPE_FLOOR);
+        }
+        *slot = weight.max(SHAPE_FLOOR);
     }
     out.iter().sum()
 }
@@ -877,5 +1035,91 @@ mod tests {
     #[test]
     fn the_stated_flat_concentration_is_one_chromosomes_worth() {
         assert_eq!(STATED_FLAT_CONCENTRATION, 1.0);
+    }
+
+    // ── STR bundles (`str_bundle_loci.md` §7.4) ──
+
+    /// A three-class spectrum, different from [`leaning_long`] in every class.
+    fn narrow() -> Vec<f64> {
+        vec![0.2, 0.7, 0.1]
+    }
+
+    fn bundle_seed(counts: &[u32], prior: &BundlePrior<'_>) -> Vec<f64> {
+        let mut out = vec![f64::NAN; counts.len() / prior.reference_run_counts.len().max(1)];
+        fill_ssr_bundle_seed(counts, prior, &mut out).get().to_vec()
+    }
+
+    /// **A bundle of one run is seeded exactly as the segment of that run** — the same shape at
+    /// the same offsets, held with the same concentration, bit for bit.
+    #[test]
+    fn a_one_run_bundles_seed_is_its_runs_segment_seed() {
+        let weights = leaning_long();
+        let prior = BundlePrior {
+            reference_run_counts: vec![REFERENCE_REPEATS],
+            run_spectra: vec![own_fit(&weights, 7.5)],
+            stated_concentration: STATED_FLAT_CONCENTRATION,
+        };
+        let mut out = vec![f64::NAN; candidates().len()];
+        let as_segment = seed(
+            &candidates(),
+            REFERENCE_REPEATS,
+            own_fit(&weights, 7.5),
+            &mut out,
+        );
+        assert_eq!(bundle_seed(&candidates(), &prior), as_segment);
+        assert_eq!(prior.rung(), LengthSpectrumRung::StratumsOwnFit);
+    }
+
+    /// **Two runs: each candidate's shape is the product of its runs' shapes**, each read at its
+    /// own offset from its own run's reference count, and the seed is held with the smaller of
+    /// the two runs' concentrations.
+    #[test]
+    fn a_two_run_bundles_shape_is_the_product_of_its_runs_and_its_conviction_the_smaller() {
+        let (long, narrow) = (leaning_long(), narrow());
+        let prior = BundlePrior {
+            reference_run_counts: vec![11, 5],
+            run_spectra: vec![own_fit(&long, 7.5), own_fit(&narrow, 3.0)],
+            stated_concentration: STATED_FLAT_CONCENTRATION,
+        };
+        // (11, 5) the reference; (12, 5) one copy more in the first run; (11, 4) one fewer in the
+        // second; (13, 6) both moved.
+        let counts = [11, 5, 12, 5, 11, 4, 13, 6];
+        let seeded = bundle_seed(&counts, &prior);
+        let expected = [0.50 * 0.7, 0.25 * 0.7, 0.50 * 0.2, 0.05 * 0.1].map(|shape| 3.0 * shape);
+        for (got, want) in seeded.iter().zip(expected) {
+            assert!(close(*got, want), "{got} against {want}");
+        }
+    }
+
+    /// **A run on the stated flat rung adds no factor; with no fitted run, or no run, the shape is
+    /// flat** at the stated concentration, as a segment's flat rung is.
+    #[test]
+    fn a_flat_run_adds_no_factor_and_a_bundle_without_a_fitted_run_is_flat() {
+        let long = leaning_long();
+        let mixed = BundlePrior {
+            reference_run_counts: vec![11, 5],
+            run_spectra: vec![own_fit(&long, 7.5), LengthSpectrum::stated_flat(4.0)],
+            stated_concentration: STATED_FLAT_CONCENTRATION,
+        };
+        let seeded = bundle_seed(&[11, 5, 12, 9], &mixed);
+        assert!(
+            close(seeded[0], 4.0 * 0.50) && close(seeded[1], 4.0 * 0.25),
+            "{seeded:?}"
+        );
+        assert_eq!(mixed.rung(), LengthSpectrumRung::StatedFlat);
+
+        let no_run = BundlePrior {
+            reference_run_counts: Vec::new(),
+            run_spectra: Vec::new(),
+            stated_concentration: 2.0,
+        };
+        let mut out = vec![f64::NAN; 4];
+        let flat = fill_ssr_bundle_seed(&[], &no_run, &mut out).get().to_vec();
+        assert!(flat.iter().all(|share| close(*share, 0.5)), "{flat:?}");
+        assert_eq!(no_run.rung(), LengthSpectrumRung::StatedFlat);
+
+        let mut shares = vec![f64::NAN; 4];
+        fill_bundle_seed_share_per_candidate(&[], &no_run, &mut shares);
+        assert!(shares.iter().all(|share| close(*share, 0.25)));
     }
 }

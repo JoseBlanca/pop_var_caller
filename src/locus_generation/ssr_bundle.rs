@@ -15,8 +15,10 @@
 //!   reported complete over part of it (found in review, 2026-10-11);
 //! - **the edge-escape check** asks, at each edge, about the reference run reaching it, and
 //!   about nothing where fixed sequence reaches it;
-//! - **only reads that cross the whole hull are used**: a read that anchors one edge and ends
-//!   inside is dropped and counted (`SsrGeneratorCounts::ended_inside_a_bundle`).
+//! - **only reads that cross the whole hull are used to call it**: a read that anchors one edge
+//!   and ends inside is kept as a partial observation, as at a segment, so that it counts toward
+//!   the hull's depth, and calling leaves it out (changed during implementation, 2026-10-11:
+//!   such a read was first dropped).
 //!
 //! What it adds is the hull's **reference runs**, found once per bundle from the hull's bases
 //! alone, every motif of period 1 to 6 looked for ([`find_reference_runs`]), and carried on the
@@ -326,13 +328,14 @@ mod tests {
         read
     }
 
-    /// **Reads that end inside a bundle's hull are dropped and counted by that reason; reads
-    /// that cross it are complete observations of the whole hull; none is a partial.** Five reads
+    /// **Reads that end inside a bundle's hull are partial observations, as at a segment, so they
+    /// count toward its depth; reads that cross it are complete observations of the whole hull.**
+    /// Five reads
     /// over the designed bundle: two cross it (one copying the whole fetched window, one the
     /// delimiter's to measure), one ends inside it, one starts inside it, one lies in the left
     /// flank alone.
     #[test]
-    fn a_bundle_drops_and_counts_the_reads_ending_inside_and_keeps_the_crossing_ones() {
+    fn a_bundle_keeps_the_reads_ending_inside_as_partials_beside_the_crossing_ones() {
         assert_eq!(
             designed_chr1().len(),
             100,
@@ -369,12 +372,24 @@ mod tests {
 
         let counts = bundles.counts();
         assert_eq!(counts.reads_fetched, 5);
-        assert_eq!(counts.ended_inside_a_bundle, 2, "{counts:?}");
         assert_eq!(counts.outside_tract, 1, "{counts:?}");
-        assert_eq!(counts.observations_partial, 0);
-        assert_eq!(locus.reads_without_observation, 3);
-        assert_eq!(locus.observations.len(), 1, "{:?}", locus.observations);
-        let crossing = &locus.observations[0];
+        assert_eq!(counts.observations_partial, 2, "{counts:?}");
+        assert_eq!(locus.reads_without_observation, 1);
+        assert_eq!(locus.observations.len(), 3, "{:?}", locus.observations);
+        assert_eq!(
+            locus
+                .observations
+                .iter()
+                .filter(|observation| observation.read_witness != ReadWitness::Complete)
+                .count(),
+            2,
+            "the two reads ending inside, one from each side"
+        );
+        let crossing = locus
+            .observations
+            .iter()
+            .find(|observation| observation.read_witness == ReadWitness::Complete)
+            .expect("the crossing reads");
         assert_eq!(crossing.read_witness, ReadWitness::Complete);
         assert_eq!(&*crossing.bases, DESIGNED_HULL);
         assert_eq!(crossing.num_obs, 2);

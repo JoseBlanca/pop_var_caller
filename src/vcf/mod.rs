@@ -716,7 +716,8 @@ impl FilterVerdict {
 }
 
 /// **What makes a record a repeat-tract record**: the tract's motif, from which the `STR` flag,
-/// `RU` and `PERIOD` are all written.
+/// `RU` and `PERIOD` are all written — or, at an STR bundle, its runs' motifs and each allele's
+/// run counts (`str_bundle_loci.md` §7.5).
 ///
 /// **`PERIOD` is not stored, it is the motif's length.** The two cannot disagree, which is the
 /// whole reason to hold one field rather than two — production writes the period and never the
@@ -728,10 +729,23 @@ impl FilterVerdict {
 /// unrepresentable rather than merely rejected.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TractAnnotation {
-    motif: Motif,
+    repeat: RepeatGround,
     /// How the record was widened over the tract's flanks, if it was
     /// (`str_edge_deletion_alleles.md` §5.8). Boxed: nearly every tract record is not.
     widening: Option<Box<TractWidening>>,
+}
+
+/// The repeat ground a tract record annotates: one motif, or an STR bundle's runs.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum RepeatGround {
+    /// An STR segment's motif.
+    Segment(Motif),
+    /// An STR bundle: its reference runs' motifs in hull order, and each allele's run counts at
+    /// the allele's index in the record — `REPCNB`.
+    Bundle {
+        run_motifs: Box<[Motif]>,
+        run_counts_per_allele: Vec<Box<[u32]>>,
+    },
 }
 
 /// **How an STR record was widened over its flanks** (`str_edge_deletion_alleles.md` §5.8):
@@ -755,8 +769,85 @@ impl TractAnnotation {
     #[inline]
     pub fn new(motif: Motif) -> Self {
         Self {
-            motif,
+            repeat: RepeatGround::Segment(motif),
             widening: None,
+        }
+    }
+
+    /// Build an STR bundle record's annotation (`str_bundle_loci.md` §7.5): its runs' motifs, in
+    /// hull order, and each of the record's alleles' run counts, at the allele's index — one count
+    /// per run each.
+    ///
+    /// # Panics
+    ///
+    /// If an allele's counts are not one per run.
+    #[must_use]
+    pub fn bundle(run_motifs: Box<[Motif]>, run_counts_per_allele: Vec<Box<[u32]>>) -> Self {
+        assert!(
+            run_counts_per_allele
+                .iter()
+                .all(|counts| counts.len() == run_motifs.len()),
+            "an STR bundle allele carries one count per run of the bundle"
+        );
+        Self {
+            repeat: RepeatGround::Bundle {
+                run_motifs,
+                run_counts_per_allele,
+            },
+            widening: None,
+        }
+    }
+
+    /// **The same bundle annotation with each of the record's alleles' run counts** — at the
+    /// allele's index, one count per run each. A segment's annotation comes back unchanged.
+    ///
+    /// # Panics
+    ///
+    /// If an allele's counts are not one per run.
+    #[must_use]
+    pub fn with_run_counts_of_alleles(self, counts: Vec<Box<[u32]>>) -> Self {
+        match self.repeat {
+            RepeatGround::Bundle { run_motifs, .. } => Self {
+                widening: self.widening,
+                ..Self::bundle(run_motifs, counts)
+            },
+            RepeatGround::Segment(_) => self,
+        }
+    }
+
+    /// Whether this annotates an STR bundle rather than a segment.
+    #[inline]
+    #[must_use]
+    pub fn is_bundle(&self) -> bool {
+        matches!(self.repeat, RepeatGround::Bundle { .. })
+    }
+
+    /// **The repeat units the record writes as `RU`, in order** — a segment's one motif, or a
+    /// bundle's runs' motifs in hull order; none for a bundle with no run, which writes no `STR`,
+    /// `RU` or `PERIOD` (`vcf_output.md` §3: the three travel together).
+    pub fn units(&self) -> &[Motif] {
+        match &self.repeat {
+            RepeatGround::Segment(motif) => std::slice::from_ref(motif),
+            RepeatGround::Bundle { run_motifs, .. } => run_motifs,
+        }
+    }
+
+    /// **`REPCNB` for allele `index`**: its run counts joined by `_` — `20_8_8` — or `None` at a
+    /// segment, whose count is `REPCN`, and at a bundle with no run.
+    #[must_use]
+    pub fn run_counts_of_allele(&self, index: usize) -> Option<String> {
+        match &self.repeat {
+            RepeatGround::Bundle {
+                run_motifs,
+                run_counts_per_allele,
+            } if !run_motifs.is_empty() => run_counts_per_allele.get(index).map(|counts| {
+                counts
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            }),
+            _ => None,
         }
     }
 
@@ -789,18 +880,20 @@ impl TractAnnotation {
         self.repeat_copies_of(&allele[..allele.len().saturating_sub(flank_bases)])
     }
 
-    /// The `RU` field: the motif's bases.
+    /// The `RU` field of a segment record: the motif's bases. At a bundle, its first run's
+    /// ([`Self::units`] has them all).
     #[inline]
     #[must_use]
     pub fn motif(&self) -> &[u8] {
-        self.motif.as_bytes()
+        self.units().first().map_or(&[], |motif| motif.as_bytes())
     }
 
-    /// The `PERIOD` field: the motif's length in bases.
+    /// The `PERIOD` field of a segment record: the motif's length in bases. At a bundle, its
+    /// first run's.
     #[inline]
     #[must_use]
     pub fn period(&self) -> usize {
-        self.motif.period()
+        self.units().first().map_or(0, Motif::period)
     }
 
     /// **How many whole repeat units an allele's sequence holds** — one entry of `REPCN`.
@@ -815,9 +908,11 @@ impl TractAnnotation {
     #[inline]
     #[must_use]
     pub fn repeat_copies_of(&self, allele: &[u8]) -> usize {
-        // PANIC-FREE: a `Motif` is at least one base by construction, so the period is never
-        // zero and this division cannot trap.
-        allele.len() / self.motif.ssr_period().get() as usize
+        // A bundle has no one period; its counts are `REPCNB`, and this is never asked of one.
+        match self.period() {
+            0 => 0,
+            period => allele.len() / period,
+        }
     }
 }
 

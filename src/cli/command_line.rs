@@ -45,10 +45,12 @@ pub enum PopVarCallerCommand {
     /// on one thread, and says nothing while it works.
     ///
     /// Repeat tracts ARE called, through their own stutter model, and their
-    /// records carry STR, RU, PERIOD and each called allele's REPCN. What is
-    /// still set aside is an STR bundle (repeats too close together for any
-    /// to have clean flanks): it is measured, but not yet called, and the
-    /// bundles set aside are counted and reported at the end.
+    /// records carry STR, RU, PERIOD and each called allele's REPCN. An STR
+    /// bundle (repeats too close together for any to have clean flanks) is
+    /// called as one locus over its span, with stutter in each of its runs:
+    /// its record carries one RU and PERIOD value per run and, per sample,
+    /// each called allele's run counts in REPCNB (none of the four when the
+    /// bundle holds no run).
     CallFromAlignments(CallFromAlignmentsArgs),
 
     /// Walk each sample's alignment files once and store what they showed as a psp,
