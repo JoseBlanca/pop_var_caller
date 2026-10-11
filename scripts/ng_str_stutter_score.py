@@ -32,6 +32,10 @@ A record that reaches outside the window widens the stretch compared, and the tr
 is the reference: the simulator puts no variant within 150 bases of a segment beyond its window.
 Overlapping records that would apply two edits to one base of one copy (GATK writes `*` for "deleted
 by an upstream record", which is skipped) leave the cell `wrong`, or `false_call` on reference truth.
+**An allele's edit is what it changes, not the whole record it sits in** (owner, 2026-10-10): the
+bases an allele shares with its record's reference at either end are trimmed off before edits are
+checked for touching one base. A record widened over a few flank bases for one allele's sake spells
+the reference there in its other alleles, and that is no edit.
 
 Every variant call carries its genotype quality, so the confidence of each caller's errors can be read
 off: GQ for ng and GATK; for HipSTR, its posterior probability of the genotype written on the Phred
@@ -219,6 +223,25 @@ def spell(reference, start, end, edits):
     return "".join(pieces)
 
 
+def trimmed_edit(start, reference_allele, allele):
+    """The edit an allele makes, as (start, end, bases), without the bases it shares with the
+    record's reference at either end — a record's alleles all span its reference, so an allele
+    that changes one base of a long record still claims only that base. Suffix first, then
+    prefix, as VCF normalisation trims."""
+    end = start + len(reference_allele)
+    shared = 0
+    while shared < min(len(reference_allele), len(allele)) and \
+            reference_allele[-1 - shared] == allele[-1 - shared]:
+        shared += 1
+    reference_allele, allele, end = reference_allele[:len(reference_allele) - shared], \
+        allele[:len(allele) - shared], end - shared
+    shared = 0
+    while shared < min(len(reference_allele), len(allele)) and \
+            reference_allele[shared] == allele[shared]:
+        shared += 1
+    return (start + shared, end, allele[shared:])
+
+
 def called_pairs(records, sample, reference, start, end):
     """Every unordered pair of sequences the sample's calls over [start, end) can spell, trying both
     assignments of each heterozygous record; None in a pair where edits collide."""
@@ -239,7 +262,9 @@ def called_pairs(records, sample, reference, start, end):
         for first, second in options:
             def edit(index):
                 allele = record.alleles[index]
-                return [] if index == 0 or allele == "*" else [(record.start, record.end, allele)]
+                if index == 0 or allele == "*":
+                    return []
+                return [trimmed_edit(record.start, record.alleles[0], allele)]
             walk(position + 1, edits_one + edit(first), edits_two + edit(second))
     walk(0, [], [])
     return pairs
