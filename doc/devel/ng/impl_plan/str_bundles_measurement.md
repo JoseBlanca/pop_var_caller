@@ -92,7 +92,51 @@ no bundles (its simulator picks repeats with clean flanks), so PCR stutter in bu
 sizes are unmeasured; adding bundles to the simulator is a separate piece of work, worth proposing
 only if option 2 looks good on HG002 (`CLAUDE.md`: one sample to thousands, 3× to hundreds).
 
-## 4. Practical notes for the session
+## 4. Outcome (2026-10-11): the generic path fails under PCR stutter; bundles get an STR bundle path
+
+**Decision (owner, 2026-10-11): build an STR bundle path — one STR locus per bundle, a motif per
+member — with the same 100-base cap as STR segments; longer bundles are typed as satellites.** The
+generic-path change was not merged. It is kept as a patch, not committed.
+
+**On HG002 the generic path looked good** (bundles typed as generic, coalesced with the generic
+regions either side, in `resolve_features`). Per region, at 30×, against main's typing:
+
+| HG002, 30× | truth variant: right | wrong genotype | missed | no truth variant: false call | left as reference |
+|---|---|---|---|---|---|
+| bundles, main (nothing calls them) | 55 | 94 | 976 | 1 | 1,341 |
+| bundles, generic path | 901 | 178 | 46 | 16 | 1,326 |
+| STR segments, period 2+, STR path | 2,566 | 299 | 115 | 24 | 4,793 |
+| STR segments, homopolymer, STR path | 3,503 | 361 | 131 | 73 | 8,217 |
+
+At 50×: bundles on the generic path 934 / 164 / 27 / 18. The STR segments' counts were identical with
+and without the change at both depths. In 139 of the 178 wrong bundles the right allele was never
+offered.
+
+**HG002 is PCR-free, so the owner asked whether that was why.** It was. The same build was run on the
+stuttering benchmark's reads (2026-10-10 first pass, true stutter, no fit) twice: as is, and with
+every STR segment typed as generic (an experiment-only switch, `NG_EXPERIMENT_SEGMENTS_AS_GENERIC`).
+A cell is one sample at one segment; false calls are among the cells where the sample carries no
+variant (about 87,800 at 50 samples):
+
+| 50 samples | variant cells right, STR path | generic path | false calls, STR path | generic path |
+|---|---|---|---|---|
+| PCR 30× | 61,370 of 62,127 | 58,477 of 62,290 | 79 | 9,097 |
+| PCR 5× | 43,569 of 62,620 | 40,097 of 64,122 | 1,557 | 8,563 |
+| PCR-free 30× | 61,803 of 62,127 | 61,055 of 62,154 | 11 | 560 |
+
+GATK on the same PCR 30× reads: 9,448 false calls. 8,279 of the generic path's 9,097 sit on mono-
+and dinucleotides of 16 copies or more (17,831 cells). At one sample, PCR 30×: 10 false calls
+against 3 of 1,771. On HG002, 293 of the 2,473 bundles hold a mono- or dinucleotide run of 16 copies
+or more, and 795 one of 12 or more — the ground where the generic path takes stutter for alleles.
+
+**Why not each member as its own STR locus** (owner's question, after the size worry): the STR path
+aligns a read against the repeat and 15 repeat-free bases either side, and inside a bundle that flank
+is partly the neighbouring repeat (`SsrGeneratorConfig::check_flank_within`). A length change in the
+neighbour moves the anchor; a slip in `(CA)8 GT (CA)10` can be counted by both loci; a deletion
+across the gap is the edge-deletion problem between two STR loci. **The size worry is met by the
+cap:** 2,410 of the 2,473 bundles are 100 bases or shorter; 10 are longer than 150.
+
+## 5. Practical notes for the session
 
 - **Rules that still hold** (owner): don't run the parameter fit; where STR calling is measured on
   the stuttering benchmark, call with the true stutter (`true_stutter.parameters.toml`). Don't

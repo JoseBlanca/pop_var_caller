@@ -9,7 +9,7 @@ defines it where it is used; a term two specs use belongs here. Started 2026-10-
 regions a BED file names (`--regions`). A psp file records the analysed ground it was walked over.
 
 **Typing.** The split of the analysed ground into regions by what the reference sequence is, made
-before any read is seen: generic regions, STR segments, clusters of repeats and satellites
+before any read is seen: generic regions, STR segments, STR bundles and satellites
 (`typed_regions.md`). It depends on the reference, the repeat catalog and the repeat criteria
 (`--min-copies` and its siblings), never on a sample.
 
@@ -17,17 +17,19 @@ before any read is seen: generic regions, STR segments, clusters of repeats and 
 to six bases repeated enough times, at enough purity, to meet the repeat criteria. In the code it is
 `RegionKind::SsrSegment`; some design documents call it a *repeat tract* or a *tract*.
 
-**Generic region.** Any analysed region that is not an STR segment, a cluster of repeats or a
+**Generic region.** Any analysed region that is not an STR segment, an STR bundle or a
 satellite — ordinary sequence.
 
-**Cluster of repeats.** Several repeats too close together for any of them to have clean flanks
-(`RegionKind::SsrBundle`). Nothing calls them today.
+**STR bundle.** Two or more repeats within 15 bases of each other, too close for any of them to have
+clean flanks (`RegionKind::SsrBundle`). Its region is the hull of its repeats, first start to last
+end. Nothing calls them yet; `str_bundle_loci.md` designs an STR locus per bundle. Earlier documents
+call it a *cluster of repeats*.
 
 **Satellite.** A tandem array longer than the longest STR the run types as callable (`--max-str-len`,
 100 bases by default). Never called.
 
 **Callable genome.** The part of the analysed ground the caller writes calls for: the generic
-regions and the STR segments — everything except clusters of repeats and satellites. The generic
+regions and the STR segments — everything except STR bundles and satellites. The generic
 path can walk all of it; the STR path walks the STR segments.
 
 ## The two calling paths
