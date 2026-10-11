@@ -16,7 +16,9 @@ use clap::Parser;
 use pop_var_caller::cli::estimate_parameters::{
     EstimateParametersArgs, OpenedCensuses, contig_id_of, open_the_censuses,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::fit_class_by_counting;
+use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
+    fit_class_by_counting, fit_class_by_counting_with_pairs,
+};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     DEFAULT_REFUSAL_FLOOR, Slippage, SsrFitConfig,
 };
@@ -32,9 +34,15 @@ struct Cli {
     /// One homozygote excess for every sample.
     #[arg(long, default_value_t = 0.0)]
     homozygote_excess: f64,
+    /// A parameters file whose per-sample homozygote excesses are used instead.
+    #[arg(long)]
+    fitted: Option<std::path::PathBuf>,
     /// Rounds of counting at most.
     #[arg(long, default_value_t = 2000)]
     rounds: usize,
+    /// Read the spread off pairs of samples at a tract (an inbred cohort needs this).
+    #[arg(long)]
+    pairs: bool,
 }
 
 fn main() {
@@ -50,7 +58,35 @@ fn main() {
         the_tract_strata_of_a_cohort(&mut evidence, &plan.loci, &contig_of, &pooled)
             .unwrap_or_else(|error| panic!("{error:?}"));
     let config = SsrFitConfig::default();
-    let excess = vec![cli.homozygote_excess; samples];
+    let names: Vec<String> = evidence.sample_names().map(str::to_owned).collect();
+    let excess: Vec<f64> = match &cli.fitted {
+        Some(path) => {
+            let file = pop_var_caller::calling::parameters_file::ParametersFile::from_toml(
+                &std::fs::read_to_string(path).expect("the parameters file reads"),
+            )
+            .expect("the parameters file parses");
+            let by_name: std::collections::BTreeMap<&str, f64> = file
+                .inbreeding
+                .by_sample
+                .iter()
+                .map(|row| (row.sample.as_str(), row.inbreeding_coefficient.value))
+                .collect();
+            let missing = names
+                .iter()
+                .filter(|name| !by_name.contains_key(name.as_str()))
+                .count();
+            eprintln!(
+                "homozygote excess from the file for {} of {} samples",
+                names.len() - missing,
+                names.len()
+            );
+            names
+                .iter()
+                .map(|name| *by_name.get(name.as_str()).unwrap_or(&cli.homozygote_excess))
+                .collect()
+        }
+        None => vec![cli.homozygote_excess; samples],
+    };
     let start = Slippage {
         level: 0.05,
         shorter_share: 0.5,
@@ -79,7 +115,13 @@ fn main() {
             continue;
         }
         let fitting = Instant::now();
-        let fit = fit_class_by_counting(evidence, start, &excess, &config, cli.rounds, 1e-7);
+        let fit = if cli.pairs {
+            fit_class_by_counting_with_pairs(
+                evidence, start, &excess, &config, cli.rounds, 1e-7, 10,
+            )
+        } else {
+            fit_class_by_counting(evidence, start, &excess, &config, cli.rounds, 1e-7)
+        };
         let mut row = vec![
             evidence.stratum.period.to_string(),
             evidence.stratum.reference_repeats.to_string(),

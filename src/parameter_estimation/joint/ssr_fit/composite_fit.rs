@@ -92,6 +92,31 @@ pub fn fit_class_by_counting(
     max_rounds: usize,
     tolerance: f64,
 ) -> CountedClass {
+    count_class(
+        evidence,
+        start,
+        None,
+        None,
+        homozygote_excess,
+        config,
+        max_rounds,
+        tolerance,
+    )
+}
+
+/// The rounds of counting, from `start` and `start_shares` (flat when `None`). With `held_spread`
+/// the spread is held there rather than counted from each sample's two copies.
+#[allow(clippy::too_many_arguments, reason = "a prototype's internal entry")]
+fn count_class(
+    evidence: &StratumEvidence,
+    start: Slippage,
+    start_shares: Option<&[f64]>,
+    held_spread: Option<f64>,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    max_rounds: usize,
+    tolerance: f64,
+) -> CountedClass {
     let classes = allele_classes_of(config);
     let genotypes = genotype_pairs(classes);
     let span = config.allele_span;
@@ -100,8 +125,9 @@ pub fn fit_class_by_counting(
     let slot =
         |class: usize| ((class as i32 - span).clamp(-read_span, read_span) + read_span) as usize;
     let mut slippage = start;
-    let mut shares = vec![1.0 / classes as f64; classes];
-    let mut concentration = 1.0_f64;
+    let mut shares =
+        start_shares.map_or_else(|| vec![1.0 / classes as f64; classes], <[f64]>::to_vec);
+    let mut concentration = held_spread.unwrap_or(1.0);
     let mut rounds = 0;
     let mut last_change = f64::INFINITY;
     let mut log_likelihood = f64::NEG_INFINITY;
@@ -252,7 +278,9 @@ pub fn fit_class_by_counting(
         log_likelihood = counts.log_likelihood;
         let draws: f64 = counts.draws.iter().sum();
         let new_shares: Vec<f64> = counts.draws.iter().map(|d| d / draws).collect();
-        let new_concentration = if counts.shared_in_tract > 0.0 {
+        let new_concentration = if let Some(held) = held_spread {
+            held
+        } else if counts.shared_in_tract > 0.0 {
             (counts.pairs_not_by_descent / counts.shared_in_tract - 1.0).clamp(1e-3, 1e4)
         } else {
             1e4
@@ -299,10 +327,379 @@ pub fn fit_class_by_counting(
     }
 }
 
+/// **The class fitted by counting, its spread read off pairs of samples at a tract** — what an
+/// inbred cohort needs, where a sample's two copies are nearly always one draw and so say almost
+/// nothing about how much tracts differ.
+///
+/// Alternates: the stutter and shares counted with the spread held, then the spread that maximises
+/// the pairwise likelihood ([`fit_spread_by_pairs`]) with the rest held, `alternations` times or
+/// until the spread moves by less than 1% — starting from the within-sample counting fit.
+#[must_use]
+pub fn fit_class_by_counting_with_pairs(
+    evidence: &StratumEvidence,
+    start: Slippage,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    max_rounds: usize,
+    tolerance: f64,
+    alternations: usize,
+) -> CountedClass {
+    let mut fitted = fit_class_by_counting(
+        evidence,
+        start,
+        homozygote_excess,
+        config,
+        max_rounds,
+        tolerance,
+    );
+    let mut spread = 1.0;
+    for _ in 0..alternations {
+        let next = fit_spread_by_pairs(
+            evidence,
+            fitted.slippage,
+            &fitted.length_spectrum,
+            homozygote_excess,
+            config,
+        );
+        fitted = count_class(
+            evidence,
+            fitted.slippage,
+            Some(&fitted.length_spectrum),
+            Some(next),
+            homozygote_excess,
+            config,
+            max_rounds,
+            tolerance,
+        );
+        let settled = (float::ln(next) - float::ln(spread)).abs() < 0.01;
+        spread = next;
+        if settled {
+            break;
+        }
+    }
+    fitted
+}
+
+/// **The spread that maximises the pairwise likelihood of the class**, stutter and shares held.
+///
+/// At a tract, every sample with reads is paired with the next (and the last with the first). A
+/// pair's likelihood sums both samples' reads over their alleles, each sample's copies one draw with
+/// chance its homozygote excess and two otherwise, the draws from the tract's frequencies weighted
+/// as a Pólya urn: a draw takes length `a` with chance `(spread · share_a + earlier draws of a) /
+/// (spread + earlier draws)`. Searched on the log scale between 10⁻³ and 10⁴.
+#[must_use]
+pub fn fit_spread_by_pairs(
+    evidence: &StratumEvidence,
+    slippage: Slippage,
+    shares: &[f64],
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> f64 {
+    let classes = allele_classes_of(config);
+    let genotypes = genotype_pairs(classes);
+    let libraries: Vec<Library> = evidence
+        .libraries
+        .iter()
+        .map(|library| Library {
+            slippage_group: 0,
+            stutter_multiplier: 1.0,
+            ..*library
+        })
+        .collect();
+    let distributions = ReadDistributionsByLevel::of(
+        &[slippage],
+        &libraries,
+        config.allele_span,
+        evidence.read_span,
+    );
+    // Per tract, per sample with reads, its likelihood of every ordered allele pair, and its excess.
+    let per_tract: Vec<Vec<(Vec<f64>, f64)>> = evidence
+        .tracts
+        .par_iter()
+        .filter(|tract| tract.samples.len() >= 2)
+        .map(|tract| {
+            let likelihoods =
+                TractLikelihoods::of(tract, &distributions, &genotypes, homozygote_excess);
+            likelihoods
+                .scaled
+                .chunks_exact(likelihoods.width)
+                .zip(&likelihoods.homozygote_excess)
+                .map(|(row, excess)| {
+                    let mut ordered = vec![0.0; classes * classes];
+                    for ((first, second), value) in genotypes.iter().zip(row) {
+                        ordered[first * classes + second] = *value;
+                        ordered[second * classes + first] = *value;
+                    }
+                    (ordered, *excess)
+                })
+                .collect()
+        })
+        .collect();
+    let objective = |ln_spread: f64| -> f64 {
+        let spread = float::exp(ln_spread);
+        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+        per_tract
+            .par_iter()
+            .map(|samples| {
+                let mut total = 0.0;
+                let count = samples.len();
+                let pairs = if count == 2 { 1 } else { count };
+                for index in 0..pairs {
+                    let (one, one_excess) = &samples[index];
+                    let (other, other_excess) = &samples[(index + 1) % count];
+                    let pair = pair_likelihood(
+                        one,
+                        *one_excess,
+                        other,
+                        *other_excess,
+                        &weights,
+                        spread,
+                        classes,
+                    );
+                    total += float::ln(pair.max(1e-300));
+                }
+                total
+            })
+            .sum()
+    };
+    // A coarse grid, then golden-section search around its best point.
+    let grid: Vec<f64> = (0..=28)
+        .map(|step| float::ln(1e-3) + f64::from(step) * (float::ln(1e4) - float::ln(1e-3)) / 28.0)
+        .collect();
+    let scores: Vec<f64> = grid.iter().map(|x| objective(*x)).collect();
+    let best = scores
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map_or(0, |(index, _)| index);
+    let (mut low, mut high) = (
+        grid[best.saturating_sub(1)],
+        grid[(best + 1).min(grid.len() - 1)],
+    );
+    let ratio = 0.5 * (5.0_f64.sqrt() - 1.0);
+    let (mut left, mut right) = (high - ratio * (high - low), low + ratio * (high - low));
+    let (mut left_score, mut right_score) = (objective(left), objective(right));
+    for _ in 0..30 {
+        if left_score > right_score {
+            high = right;
+            right = left;
+            right_score = left_score;
+            left = high - ratio * (high - low);
+            left_score = objective(left);
+        } else {
+            low = left;
+            left = right;
+            left_score = right_score;
+            right = low + ratio * (high - low);
+            right_score = objective(right);
+        }
+    }
+    float::exp(0.5 * (low + high))
+}
+
+/// One pair of samples' likelihood at a tract: both samples' reads summed over their alleles, each
+/// sample one draw (chance its excess) or two, the draws weighted as a Pólya urn.
+///
+/// **Summed in closed form, a pair in `classes²` steps rather than `classes⁴`.** With `w = spread ·
+/// share`, the urn's weight for a later draw is `w_x` plus how many earlier draws were `x`, so every
+/// sum over the later sample's alleles reduces to a few totals of its row: `Q = Σ L(c,d) w_c w_d`,
+/// `R = Σ L(c,c) w_c`, `u_x = Σ_c L(c,x) w_c` and the diagonal `D_x = L(x,x)`. Checked against the
+/// four nested sums in `the_closed_form_pair_likelihood_is_the_four_nested_sums`.
+fn pair_likelihood(
+    one: &[f64],
+    one_excess: f64,
+    other: &[f64],
+    other_excess: f64,
+    weights: &[f64],
+    spread: f64,
+    classes: usize,
+) -> f64 {
+    let totals = |row: &[f64]| {
+        let diagonal: Vec<f64> = (0..classes).map(|x| row[x * classes + x]).collect();
+        let u: Vec<f64> = (0..classes)
+            .map(|x| {
+                (0..classes)
+                    .map(|c| row[c * classes + x] * weights[c])
+                    .sum()
+            })
+            .collect();
+        let q: f64 = (0..classes).map(|d| u[d] * weights[d]).sum();
+        let r: f64 = (0..classes).map(|c| diagonal[c] * weights[c]).sum();
+        (diagonal, u, q, r)
+    };
+    let (d1, u1, q1, r1) = totals(one);
+    let (d2, u2, q2, r2) = totals(other);
+    let alpha = spread;
+    let two = alpha * (alpha + 1.0);
+    let three = two * (alpha + 2.0);
+    let four = three * (alpha + 3.0);
+
+    // Each sample one draw: Σ_a Σ_c h1_a h2_c w_a (w_c + [c = a]).
+    let one_one = ((0..classes).map(|a| d1[a] * weights[a]).sum::<f64>()
+        * (0..classes).map(|c| d2[c] * weights[c]).sum::<f64>()
+        + (0..classes)
+            .map(|a| d1[a] * d2[a] * weights[a])
+            .sum::<f64>())
+        / two;
+    // The first sample one draw `a`, then the other's two: Σ_a h1_a w_a (Q2 + R2 + 2 u2_a + 2 D2_a).
+    let one_two = (0..classes)
+        .map(|a| d1[a] * weights[a] * (q2 + r2 + 2.0 * u2[a] + 2.0 * d2[a]))
+        .sum::<f64>()
+        / three;
+    // The first sample two draws, then the other's one `a`: Σ_a h2_a w_a (Q1 + R1 + 2 u1_a + 2 D1_a).
+    let two_one = (0..classes)
+        .map(|a| d2[a] * weights[a] * (q1 + r1 + 2.0 * u1[a] + 2.0 * d1[a]))
+        .sum::<f64>()
+        / three;
+    // Each sample two draws: Σ_ab L1(a,b) w_a (w_b + [b = a]) ·
+    //   (Q2 + R2 + 2 (u2_a + u2_b) + 2 (D2_a + D2_b) + 2 L2(a,b)).
+    let mut two_two = 0.0;
+    for a in 0..classes {
+        for b in 0..classes {
+            let first = one[a * classes + b];
+            if first == 0.0 {
+                continue;
+            }
+            let urn = weights[a] * (weights[b] + f64::from(u8::from(a == b)));
+            let rest = q2
+                + r2
+                + 2.0 * (u2[a] + u2[b])
+                + 2.0 * (d2[a] + d2[b])
+                + 2.0 * other[a * classes + b];
+            two_two += first * urn * rest;
+        }
+    }
+    two_two /= four;
+    one_excess * other_excess * one_one
+        + one_excess * (1.0 - other_excess) * one_two
+        + (1.0 - one_excess) * other_excess * two_one
+        + (1.0 - one_excess) * (1.0 - other_excess) * two_two
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
+
+    /// One pair of samples' likelihood at a tract: both samples' reads summed over their alleles, each
+    /// sample one draw (chance its excess) or two, the draws weighted as a Pólya urn.
+    fn pair_likelihood_by_nested_sums(
+        one: &[f64],
+        one_excess: f64,
+        other: &[f64],
+        other_excess: f64,
+        weights: &[f64],
+        spread: f64,
+        classes: usize,
+    ) -> f64 {
+        // The chance of each ordered sequence of draws, built draw by draw.
+        let urn = |drawn: &[usize]| -> f64 {
+            let mut chance = 1.0;
+            for (position, allele) in drawn.iter().enumerate() {
+                let earlier = drawn[..position]
+                    .iter()
+                    .filter(|previous| *previous == allele)
+                    .count() as f64;
+                chance *= (weights[*allele] + earlier) / (spread + position as f64);
+            }
+            chance
+        };
+        let homozygous = |row: &[f64], allele: usize| row[allele * classes + allele];
+        let (mut one_one, mut one_two, mut two_one, mut two_two) = (0.0, 0.0, 0.0, 0.0);
+        for a in 0..classes {
+            let one_a = homozygous(one, a);
+            for c in 0..classes {
+                // Each sample one draw.
+                one_one += one_a * homozygous(other, c) * urn(&[a, c]);
+                for d in 0..classes {
+                    // The first one draw, the second two; and the other way round.
+                    one_two += one_a * other[c * classes + d] * urn(&[a, c, d]);
+                    two_one += one[c * classes + d] * homozygous(other, a) * urn(&[c, d, a]);
+                }
+            }
+        }
+        if one_excess < 1.0 && other_excess < 1.0 {
+            for a in 0..classes {
+                for b in 0..classes {
+                    let one_ab = one[a * classes + b];
+                    if one_ab < 1e-12 {
+                        continue;
+                    }
+                    for c in 0..classes {
+                        for d in 0..classes {
+                            let other_cd = other[c * classes + d];
+                            if other_cd < 1e-12 {
+                                continue;
+                            }
+                            two_two += one_ab * other_cd * urn(&[a, b, c, d]);
+                        }
+                    }
+                }
+            }
+        }
+        one_excess * other_excess * one_one
+            + one_excess * (1.0 - other_excess) * one_two
+            + (1.0 - one_excess) * other_excess * two_one
+            + (1.0 - one_excess) * (1.0 - other_excess) * two_two
+    }
+
+    /// **The closed-form pair likelihood is the four nested sums over both samples' alleles**, to
+    /// within rounding, on random rows at thirteen classes, every excess and several spreads.
+    #[test]
+    fn the_closed_form_pair_likelihood_is_the_four_nested_sums() {
+        let classes = 13;
+        let mut state = 0x1234_5678_u64;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut row = || {
+            let mut values = vec![0.0; classes * classes];
+            for a in 0..classes {
+                for b in a..classes {
+                    let value = uniform();
+                    values[a * classes + b] = value;
+                    values[b * classes + a] = value;
+                }
+            }
+            values
+        };
+        let (one, other) = (row(), row());
+        let shares: Vec<f64> = {
+            let raw: Vec<f64> = (0..classes).map(|_| uniform() + 0.05).collect();
+            let total: f64 = raw.iter().sum();
+            raw.iter().map(|value| value / total).collect()
+        };
+        for spread in [0.01, 0.5, 3.0, 200.0] {
+            let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+            for (one_excess, other_excess) in [(0.0, 0.0), (0.3, 0.9), (0.98, 0.5), (1.0, 1.0)] {
+                let fast = pair_likelihood(
+                    &one,
+                    one_excess,
+                    &other,
+                    other_excess,
+                    &weights,
+                    spread,
+                    classes,
+                );
+                let slow = pair_likelihood_by_nested_sums(
+                    &one,
+                    one_excess,
+                    &other,
+                    other_excess,
+                    &weights,
+                    spread,
+                    classes,
+                );
+                assert!(
+                    (fast - slow).abs() <= 1e-10 * slow.abs(),
+                    "spread {spread}, excesses {one_excess} {other_excess}: {fast} against {slow}"
+                );
+            }
+        }
+    }
 
     /// **On a drawn class the counting fit returns the stutter and the shares it was drawn at**,
     /// within sampling error, from a start far from them. At a concentration of 0.5 each tract is nearly fixed
@@ -339,5 +736,36 @@ mod tests {
             "concentration {} against 0.5",
             fitted.concentration
         );
+    }
+
+    /// **In an inbred cohort the spread comes from pairs of samples, not from each sample's two
+    /// copies**: at a homozygote excess of 0.95 and three reads a sample, the pairs return the spread a
+    /// class was drawn at, where a sample's own two copies carry too little to.
+    #[test]
+    fn an_inbred_classs_spread_comes_from_pairs_of_samples() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let spectrum = spectrum_of(3);
+        let evidence = draw_stratum(truth, &spectrum, 0.5, 0.95, 2000, 20, 3, 1, 17);
+        let start = Slippage {
+            level: 0.2,
+            shorter_share: 0.5,
+            fall_off: 0.5,
+        };
+        let fitted =
+            fit_class_by_counting_with_pairs(&evidence, start, &[0.95; 20], &config, 500, 1e-9, 10);
+        assert!(
+            (0.35..0.7).contains(&fitted.concentration),
+            "spread {} against 0.5: {fitted:?}",
+            fitted.concentration
+        );
+        assert!((fitted.slippage.level - 0.08).abs() < 0.012, "{fitted:?}");
     }
 }
