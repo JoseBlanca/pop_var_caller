@@ -230,7 +230,7 @@ model.
 - **Alignment beyond what §8 decides**: with an aligner, its own misplacements are in; without one,
   every read is placed where it came from.
 - **Stutter that depends on anything but motif length, repeat count and library** (§3.3), interrupted
-  repeats, clusters of repeats and satellites.
+  repeats and satellites. STR bundles — repeats a few bases apart — were added on 2026-10-11 (§11).
 - **Real genomes' sequence context**: GC content, mappability, paralogs. The duplication filter will
   see a genome with no duplications, so its effect here is only its false drops.
 - **Cohorts of thousands** (§4.1).
@@ -282,3 +282,108 @@ slowest part, roughly minutes a sample on a few Mb. The first pass of 16 runs is
 - This project's fitted parameters: GIAB HG002–HG004 at 30× (`tract_dual_path` milestone C fits)
   and four tomato accessions (the portable-float measurements of 2026-09-14), the
   `slippage_by_stratum_and_group` rows.
+
+## 11. STR bundles (added 2026-10-11)
+
+*Built for [`str_bundle_loci.md`](str_bundle_loci.md) §9–§10 step 1, so that calling a bundle can be
+measured under PCR stutter and in a cohort.*
+
+**An STR bundle is two or more repeats within 15 bases of each other**, so that none of them has the
+15 repeat-free bases either side an STR segment needs; the typing calls the stretch from the first
+repeat's start to the last one's end — the **hull** — one bundle, and each repeat in it a
+**member**. The simulator now lays bundles beside the segments.
+
+### 11.1 What is laid
+
+- **How many**: the setting `bundles` (default **500**, one for every six segments at the default
+  3,000; `0` lays none). With `bundles=0` every file the simulator wrote before is written byte for
+  byte as before, for the same seed and settings: everything about the bundles — their shapes,
+  alleles and genotypes — is drawn from a second random stream, seeded from the run's seed, so the
+  first stream makes exactly the draws it made before. Checked on 2026-10-11 by running the build
+  before bundles and this one on one configuration (2 samples, 600 segments, 0.6 Mb) and comparing
+  the checksums of all twelve files, reads decompressed; the unit test
+  `no_bundles_draws_the_cohort_drawn_before_bundles` pins the truth VCF and the reference.
+- **Members**: two, or three in 15 bundles in 100 (HG002's tandem-repeat regions have about one in
+  eleven; set higher so three-member bundles are numerous enough to count). Each member's motif
+  length is uniform over one to six, its motif drawn from the segments' list, its reference repeat
+  count uniform from the calling floor (8, 6, 6, 6, 5, 4) to the segments' highest (30 for motif
+  lengths one and two, 15 for the rest) — at or above the floor, so the typing counts each member
+  as a repeat.
+- **Gaps**: 1 to 14 bases between consecutive members, uniform. Each gap base is drawn so it
+  continues neither neighbour's motif, as the spacer beside a segment does: the first bases differ
+  from the next bases a copy of the left motif would have, the last from the bases a copy of the
+  right motif would have before it; and no three copies of any unit of one to six bases end on a
+  gap base.
+- **Hull**: at most 100 bases — the default `--max-str-bundle-len` of `str_bundle_loci.md` §5.2 —
+  with 150 bases of clean flank either side, spacer included, as a segment has.
+- **The typing must see exactly the members.** A shape is kept only if the simulator's own copy of
+  the scanner's arithmetic (each base scored +2 when it equals the base one motif length before it,
+  −7 otherwise; maximal scoring stretches; the copy floors) finds the members and nothing else. This
+  is what refuses two members of one motif length — whatever their motifs, since the scanner
+  compares bases a motif length apart — whose gap is too short to keep them apart: the scanner would
+  read them as one repeat. The copy lives in the simulator so the fixture does not change when the
+  caller's code does.
+
+The rules are applied by redrawing the members and gaps (never their number), so they shape the
+distribution: with the default seed (the shapes do not depend on the genome's size), of 500 bundles 81 have three members; members by motif length
+one to six are 248, 185, 235, 167, 143 and 103 (the hull cap thins long motifs); 93 of 581 pairs of
+neighbouring members share a motif length; the hull's median is 77 bases, its 90th percentile 96.
+**That is more than twice HG002's median of 35 bases**, because each member's repeat count is drawn
+uniform from the calling floor to the segments' highest — 30 copies for motif lengths one and two,
+15 for the rest, so a hexanucleotide member can be 90 bases — and a member averages 31 bases (1,081
+members at the default seed). A long hull leaves fewer reads that cross it whole, so at low depth
+these bundles are harder than HG002's; whether to draw counts nearer the floor is open.
+
+**Alleles**, as for a segment (§4.2): two to six, the non-reference ones sharing a Beta-drawn
+frequency. A length change moves one member by whole units of its own motif (one most often), and in
+one allele in four a second member too; no member falls below one copy. Derived alleles, at the
+segments' shares: one bundle in ten gains a substitution inside a member of at least three copies,
+one in ten a SNP within 30 bases of the hull's edge, one in thirty a deletion of two to ten bases
+across the hull's left or right edge, cutting into the first or the last member.
+
+**Stutter**: one stutter site per member in each copy of the genome, each at its member's own rate
+— its motif length and its repeat count in that allele (§3.1). A molecule crossing a bundle
+stutters in each member independently.
+
+### 11.2 The files
+
+The bundles have **files of their own**, beside the segments' three, so that the segments' files are
+unchanged (a kind column on them would change them at `bundles=0`) and every reader of them — the
+driver, `--explain-loci`, HipSTR's region file, the report scripts — still reads segments only.
+Per-member values are listed in member order, comma-separated; coordinates are zero-based half-open.
+
+- `bundles.bed` — a `#` header line, then `chrom start end name periods motifs reference_repeats
+  member_starts member_ends`: the hull, the bundle's name (`bun00000`), then each member's motif
+  length, motif, reference repeat count and span.
+- `bundle_alleles.tsv` — one row per allele, as `segment_alleles.tsv`: `bundle chrom window_start
+  window_end hull_start hull_end members periods motifs reference_repeats allele repeats change
+  frequency sequence`. The window is the hull and 30 bases either side; `repeats` is the allele's
+  count in each member; `change` takes the segments' values.
+- `bundle_genotypes.tsv` — `bundle sample first_copy second_copy`, indices into the allele table.
+- `truth.vcf` — one record per bundle window any sample varies at, spelled as a segment's (trimmed to
+  the stretch its alleles differ over), with ID the bundle's name and INFO `BUNDLE`, `MOTIFS`
+  (`Number=.`), `CHANGE` and `MEMBER_REPEATS` (`Number=R`, each allele's member counts joined by
+  `_`, e.g. `8_10,9_10`). The three new keys are declared in the header only when the file has a
+  bundle.
+
+### 11.3 The checks and the scoring
+
+- **Typing** (`scripts/ng_str_stutter_check_bundles.py`, run by the driver's typing check): every
+  simulated bundle must be typed as exactly one `ssr_bundle` overlapping its hull, with as many
+  members, in order, each of the drawn motif length and with a start and an end within a tolerance
+  of the drawn member's — **0 bases by default**. The typed members are the repeat detector's
+  intervals, which differ from a drawn run only when a gap base continues a motif, and the gap rule
+  stops that; on one run (the default seed, 600 segments and 500 bundles on 1.5 Mb) all 500 matched with no offset, and the
+  typing made no bundle the simulator did not lay. The segments are checked as before. The typing
+  dump (`examples/ng_typed_region_dump.rs`) gained a `members` column for this, a bundle's members
+  as a JSON array of `{"start","end","period"}` as `pvc type-regions` writes them.
+- **HipSTR is not given the bundles.** A HipSTR region carries one period and HipSTR fits one stutter
+  model to it, so a bundle given as its hull would have every member's stutter priced at one
+  member's period; its calls would measure that, not HipSTR. GATK and ng are scored on the bundles.
+- **Scoring**: a cell is one sample at one bundle, scored exactly as a segment's cell (§6) — the
+  scorer compares sequences over the window and needs no member structure. Bundle cells go to
+  `score_bundle_cells.tsv` and `score_bundle_summary.tsv`, so `score_cells.tsv` and
+  `score_summary.tsv` hold segments only, as before. One motif length cannot describe a bundle, so it
+  is summarised by its **number of members** and its **longest member** — the one with the most
+  reference bases — with that member's motif length and repeat band (§6). vcfeval gains a third
+  stretch, `bundles`, and `outside` now leaves out the bundles' windows as well as the segments'.

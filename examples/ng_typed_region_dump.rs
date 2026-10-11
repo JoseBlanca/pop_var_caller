@@ -32,8 +32,10 @@
 //! run's "bases spoken for" can exceed the bases asked for.
 //!
 //! Output: a `#` comment header, a bare TSV column line, then one row per typed region —
-//! `chrom  start  end  kind  motif  period  copies  purity`, coordinates 1-based inclusive,
-//! with `.` wherever a kind carries no such detail.
+//! `chrom  start  end  kind  motif  period  copies  purity  members`, coordinates 1-based
+//! inclusive, with `.` wherever a kind carries no such detail. `members` is a bundle's repeats as
+//! `pvc type-regions` writes them: a JSON array of `{"start","end","period"}`, each the detector's
+//! interval, **zero-based half-open** — not the row's own coordinates.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -104,7 +106,7 @@ fn run(
         Some(path) => println!("## regions: {}", path.display()),
         None => println!("## regions: whole genome"),
     }
-    println!("#chrom\tstart\tend\tkind\tmotif\tperiod\tcopies\tpurity");
+    println!("#chrom\tstart\tend\tkind\tmotif\tperiod\tcopies\tpurity\tmembers");
 
     let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&ground))?;
     for region in walk.by_ref() {
@@ -144,8 +146,27 @@ fn run(
                 format!("{:.2}", segment.purity_fraction()),
             ),
         };
+        // A bundle's members, written through as the walk hands them: zero-based half-open
+        // contig coordinates, the form `pvc type-regions` writes (`cli/typed_regions.rs`).
+        let members = match &region.kind {
+            RegionKind::SsrBundle { tracts } => {
+                let cells: Vec<String> = tracts
+                    .iter()
+                    .map(|tract| {
+                        format!(
+                            r#"{{"start":{},"end":{},"period":{}}}"#,
+                            tract.start, tract.end, tract.period
+                        )
+                    })
+                    .collect();
+                format!("[{}]", cells.join(","))
+            }
+            RegionKind::Generic | RegionKind::Satellite | RegionKind::SsrSegment(_) => {
+                ".".to_string()
+            }
+        };
         println!(
-            "{name}\t{}\t{}\t{kind}\t{motif}\t{period}\t{copies}\t{purity}",
+            "{name}\t{}\t{}\t{kind}\t{motif}\t{period}\t{copies}\t{purity}\t{members}",
             region.region.start.get(),
             region.region.end.get(),
         );

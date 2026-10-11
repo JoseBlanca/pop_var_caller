@@ -25,7 +25,10 @@
 //!   the bar). An STR segment is **one record over its window** (the segment and 30 bases either
 //!   side, trimmed to the stretch its alleles differ over), so a length change, a substitution
 //!   inside the repeat, a SNP beside it and a deletion across its edge on one haplotype are one
-//!   allele. Variants away from the segments are one record each.
+//!   allele. An STR bundle is likewise one record over its window (the hull and 30 bases either
+//!   side), with `BUNDLE`, `MOTIFS` and `MEMBER_REPEATS` in place of `SEGMENT`, `MOTIF` and
+//!   `REPEATS`; those three keys are declared in the header only when the file has a bundle.
+//!   Variants away from the segments are one record each.
 //! - `segments.bed` — `chrom start end period`, zero-based half-open, one row per STR segment:
 //!   the ground the typing must call STR segments, and nothing else.
 //! - `segment_alleles.tsv` — every allele drawn at every segment, carried or not, as its whole
@@ -34,6 +37,12 @@
 //! - `segment_genotypes.tsv` — every sample's two alleles at every segment, as indices into
 //!   `segment_alleles.tsv`, including the homozygous-reference ones. With the allele table this
 //!   is each sample's two truth sequences at every segment.
+//! - `bundles.bed`, `bundle_alleles.tsv`, `bundle_genotypes.tsv` — the same three for the STR
+//!   bundles (below), with every member's motif, span and repeat count. Kept apart from the
+//!   segments' files so that those keep their columns and every reader of them keeps reading
+//!   segments only. Written with their header alone when `bundles=0`, and then every other file
+//!   is byte for byte what the simulator wrote before bundles existed; with bundles laid, the
+//!   segments sit elsewhere along the genome, so a default run is a different cohort.
 //! - `libraries.tsv` — each sample's library: its stutter level and its own multiplier.
 //! - `stutter_rates.tsv` — the share of molecules that stutter, by level, motif length and
 //!   repeat count, before a library's multiplier (§3.2's table, laid out per repeat count).
@@ -44,13 +53,20 @@
 //! 1. **The reference**: `segments_per_period` STR segments of each motif length from one to
 //!    six, their reference repeat counts spread evenly from the calling floor (8, 6, 6, 6, 5, 4)
 //!    to 30 copies for motif lengths one and two and 15 for the rest, shuffled along the genome
-//!    and separated by ordinary sequence.
+//!    and separated by ordinary sequence. Beside them, `bundles` **STR bundles**: two or three
+//!    repeats (*members*) separated by gaps of 1 to 14 bases, so close that none of them has
+//!    clean flanks of its own, the whole stretch from the first member's start to the last one's
+//!    end (the *hull*) at most 100 bases and wrapped in 150 bases of clean flank as a segment is
+//!    (`doc/devel/ng/spec/str_bundle_loci.md` §9).
 //! 2. **The population**: at each segment two to six alleles differing by whole units, the
 //!    non-reference ones sharing a frequency drawn from a Beta(0.5, 1.5); one segment in ten
 //!    gains an allele with a substitution inside the repeat, one in ten an allele with a SNP
 //!    within 30 bases of an edge, one in thirty an allele with a deletion crossing an edge.
 //!    Away from the segments, SNPs at one per thousand bases and indels of one to ten bases at
-//!    one per ten thousand, each with its own Beta frequency.
+//!    one per ten thousand, each with its own Beta frequency. A bundle's alleles are drawn the
+//!    same way, the length changes per member (one member at a time, a second one too in one
+//!    allele in four), and the derived alleles carry a substitution inside a member, a SNP
+//!    beside the hull or a deletion across the hull's outer edge.
 //! 3. **The genotypes**: each sample's two copies drawn from those frequencies, both copies one
 //!    draw with probability `inbreeding`.
 //! 4. **The libraries**: each sample's stutter level comes from the `design`, and its multiplier
@@ -60,7 +76,9 @@
 //!    or loses whole units: it stutters with probability `rate(level, motif length, repeats) ×
 //!    multiplier`, shorter with the level's shorter share, by one unit with probability 0.85,
 //!    two with 0.85 × 0.15 and so on, at most four. **Stutter acts on the molecule, so both mates
-//!    of a pair report the same length**, as both read one PCR product.
+//!    of a pair report the same length**, as both read one PCR product. A bundle stutters in
+//!    every member independently, each at the rate for its own motif length and its own repeat
+//!    count in the allele the molecule copies.
 //! 6. **The reads**: the first 150 bases of the molecule and the reverse complement of its last
 //!    150, from either strand at random; base qualities drawn around Q32 with a tail falling to
 //!    about Q22 at the read's end, and each base misread with the probability its quality
@@ -85,6 +103,7 @@
 //! | `samples` | 1 | how many samples are sequenced |
 //! | `depth` | 30 | reads a position, both mates counted, averaged over the genome |
 //! | `segments_per_period` | 500 | STR segments of each motif length |
+//! | `bundles` | 500 | STR bundles, all motif lengths together; `0` lays none and leaves every other output as it was without them |
 //! | `genome_bp` | 4000000 | the reference's length, all contigs together |
 //! | `contigs` | 4 | how many contigs the reference is cut into |
 //! | `inbreeding` | 0 | the chance a sample's two copies at a site are one draw |
@@ -183,6 +202,42 @@ const EDGE_DELETION_SHARE: f64 = 1.0 / 30.0;
 /// homopolymer here goes. The driver checks it — the typed STR segments must be the ones in
 /// `segments.bed`.
 const GROUND_MAX_COPIES: [usize; 6] = [4, 2, 2, 2, 2, 2];
+
+/// The bundles laid by default: one for every six segments, a few hundred, so that a cohort's
+/// bundle cells are counted in thousands while the segments stay the bulk of the genome.
+const DEFAULT_BUNDLES: usize = 500;
+
+/// The share of bundles with three members; the rest have two. HG002's tandem-repeat regions
+/// hold 229 three-member bundles in 2,473 (`str_bundle_loci.md` §1), about one in eleven; this
+/// is set higher so that three-member bundles are numerous enough to count.
+const THREE_MEMBER_SHARE: f64 = 0.15;
+
+/// The longest gap between two members, in bases: one less than the typing's bundle radius
+/// (`DEFAULT_BUNDLE_THRESHOLD`, 15), the widest gap at which two repeats are still one bundle.
+const LONGEST_BUNDLE_GAP: usize = 14;
+
+/// The longest hull laid, in bases: the default `--max-str-bundle-len` of
+/// `str_bundle_loci.md` §5.2, above which a bundle is typed as a satellite.
+const LONGEST_BUNDLE_HULL: usize = 100;
+
+/// The scores [`scanner_repeats`] gives a base that equals the one a motif length before it, and
+/// takes from one that does not: copies of `tandem_repeat.rs`'s `DEFAULT_MATCH_REWARD` and
+/// `DEFAULT_MISMATCH_PENALTY`, held here so the bundles drawn do not change when the library's do.
+/// The test `the_scanner_copy_uses_the_library_scores` fails when the two part.
+const SCANNER_MATCH_REWARD: i64 = 2;
+const SCANNER_MISMATCH_PENALTY: i64 = 7;
+
+/// The redraws [`draw_bundle_shape`] makes before it gives up, far more than today's rules need; the
+/// bound turns a rule that can no longer be met into a message rather than a hang.
+const BUNDLE_SHAPE_ATTEMPTS: usize = 100_000;
+
+/// The share of a bundle's length-change alleles that change a second member as well as the
+/// first.
+const SECOND_MEMBER_CHANGE_SHARE: f64 = 0.25;
+
+/// Mixed into the seed for the bundles' own draw, so that laying bundles takes nothing from the
+/// draw everything else comes from, and `bundles=0` leaves that draw untouched.
+const BUNDLE_SEED_SALT: u64 = 0x5851_F42D_4C95_7F2D;
 
 /// The extra bases a molecule is cut with before its stutter is applied, so a removal still
 /// leaves it its full length.
@@ -420,6 +475,7 @@ struct Settings {
     samples: usize,
     depth: f64,
     segments_per_period: usize,
+    bundles: usize,
     genome_bp: usize,
     contigs: usize,
     inbreeding: f64,
@@ -434,6 +490,7 @@ impl Default for Settings {
             samples: 1,
             depth: 30.0,
             segments_per_period: 500,
+            bundles: DEFAULT_BUNDLES,
             genome_bp: 4_000_000,
             contigs: 4,
             inbreeding: 0.0,
@@ -462,6 +519,7 @@ impl Settings {
                 "samples" => settings.samples = number()? as usize,
                 "depth" => settings.depth = number()?,
                 "segments_per_period" => settings.segments_per_period = number()? as usize,
+                "bundles" => settings.bundles = number()? as usize,
                 "genome_bp" => settings.genome_bp = number()? as usize,
                 "contigs" => settings.contigs = number()? as usize,
                 "inbreeding" => settings.inbreeding = number()?,
@@ -538,12 +596,385 @@ fn segment_name(index: usize) -> String {
     format!("seg{index:05}")
 }
 
-/// The contigs, and every segment's place on them; the segments carry no alleles yet.
+/// **An STR bundle's reference sequence, before it is placed**: its members in order along the
+/// contig, each a motif and how many whole copies of it the reference holds, and the bases
+/// between consecutive members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BundleShape {
+    /// Each member's motif and reference repeat count, first member first.
+    members: Vec<(Vec<u8>, u32)>,
+    /// The gap after each member but the last: one to [`LONGEST_BUNDLE_GAP`] bases, none of
+    /// them continuing either neighbour's motif.
+    gaps: Vec<Vec<u8>>,
+}
+
+impl BundleShape {
+    fn reference_repeats(&self) -> Vec<u32> {
+        self.members.iter().map(|(_, repeats)| *repeats).collect()
+    }
+
+    fn periods(&self) -> Vec<usize> {
+        self.members.iter().map(|(motif, _)| motif.len()).collect()
+    }
+
+    /// The hull spelled with `repeats[m]` whole copies of member `m`'s motif and the reference
+    /// gaps between them.
+    fn spell(&self, repeats: &[u32]) -> Vec<u8> {
+        let mut hull = Vec::new();
+        for (index, ((motif, _), copies)) in self.members.iter().zip(repeats).enumerate() {
+            hull.extend(motif.repeat(*copies as usize));
+            if let Some(gap) = self.gaps.get(index) {
+                hull.extend_from_slice(gap);
+            }
+        }
+        hull
+    }
+
+    /// Where each member's run lies in [`Self::spell`]'s hull for these repeat counts:
+    /// zero-based half-open offsets from the hull's first base.
+    fn member_runs(&self, repeats: &[u32]) -> Vec<(usize, usize)> {
+        let mut runs = Vec::with_capacity(self.members.len());
+        let mut cursor = 0;
+        for (index, ((motif, _), copies)) in self.members.iter().zip(repeats).enumerate() {
+            let end = cursor + motif.len() * *copies as usize;
+            runs.push((cursor, end));
+            cursor = end + self.gaps.get(index).map_or(0, Vec::len);
+        }
+        runs
+    }
+
+    fn hull_len(&self) -> usize {
+        let members: usize = self
+            .members
+            .iter()
+            .map(|(motif, repeats)| motif.len() * *repeats as usize)
+            .sum();
+        members + self.gaps.iter().map(Vec::len).sum::<usize>()
+    }
+
+    fn first_motif(&self) -> &[u8] {
+        &self.members[0].0
+    }
+
+    fn last_motif(&self) -> &[u8] {
+        &self.members[self.members.len() - 1].0
+    }
+}
+
+/// One STR bundle as laid down, and the alleles the population carries at it.
+struct Bundle {
+    contig: usize,
+    shape: BundleShape,
+    /// Zero-based, the first base of the first member — the hull's start.
+    start: usize,
+    /// Allele 0 is the reference.
+    alleles: Vec<BundleAllele>,
+}
+
+impl Bundle {
+    /// Zero-based, one past the last member's last base.
+    fn end(&self) -> usize {
+        self.start + self.shape.hull_len()
+    }
+
+    fn window_start(&self) -> usize {
+        self.start - WINDOW_FLANK_BP
+    }
+
+    fn window_end(&self) -> usize {
+        self.end() + WINDOW_FLANK_BP
+    }
+
+    /// Each member's reference span on the contig, zero-based half-open.
+    fn member_spans(&self) -> Vec<(usize, usize)> {
+        self.shape
+            .member_runs(&self.shape.reference_repeats())
+            .into_iter()
+            .map(|(start, end)| (self.start + start, self.start + end))
+            .collect()
+    }
+
+    /// The members' motifs, comma-separated, first member first.
+    fn motifs(&self) -> String {
+        self.shape
+            .members
+            .iter()
+            .map(|(motif, _)| String::from_utf8_lossy(motif).into_owned())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn bundle_name(index: usize) -> String {
+    format!("bun{index:05}")
+}
+
+/// Join numbers with `separator` — a bundle's per-member values in its tables and record.
+fn joined<T: std::fmt::Display>(values: impl IntoIterator<Item = T>, separator: &str) -> String {
+    values
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+/// One STR bundle's shape: members, motifs, repeat counts and gap bases, drawn until every rule
+/// below holds — a redraw, so a rule shapes the distribution rather than bending one draw.
+///
+/// - **Two members, or three** with probability [`THREE_MEMBER_SHARE`], drawn once; the rules
+///   below redraw the members and gaps, never their number. Each member's motif
+///   length is uniform over one to six, its motif drawn from [`MOTIFS`] as a segment's is, its
+///   reference repeat count uniform from the calling floor to [`HIGHEST_REFERENCE_REPEATS`] —
+///   at or above the floor, so the typing counts each member as a repeat.
+/// - **Gaps of 1 to [`LONGEST_BUNDLE_GAP`] bases**, each drawn by [`draw_gap`] so it continues
+///   neither neighbour's motif.
+/// - **A hull of at most [`LONGEST_BUNDLE_HULL`] bases.** Long members are therefore rarer in
+///   bundles than in segments, most of all for motif lengths four to six.
+/// - **The typing's scanner reports exactly the members** ([`scanner_repeats`]): nothing joins
+///   two members into one repeat, nothing stretches a member past its drawn span, and nothing
+///   in a gap clears a copy floor. Two members of one motif length — whatever their motifs,
+///   since the scanner compares each base with the one a motif length before it — are read as
+///   one repeat when the gap is too short to break the run; this is the rule that catches it.
+///
+/// # Panics
+///
+/// If no shape keeps every rule in [`BUNDLE_SHAPE_ATTEMPTS`] redraws.
+fn draw_bundle_shape(draw: &mut Draw) -> BundleShape {
+    // Drawn once, outside the redraw, so the share holds although three members are refused
+    // more often than two.
+    let member_count = if draw.unit() < THREE_MEMBER_SHARE {
+        3
+    } else {
+        2
+    };
+    for _ in 0..BUNDLE_SHAPE_ATTEMPTS {
+        let members: Vec<(Vec<u8>, u32)> = (0..member_count)
+            .map(|_| {
+                let period = 1 + draw.below(6) as usize;
+                let motifs = MOTIFS[period - 1];
+                let motif = motifs[draw.below(motifs.len() as u64) as usize];
+                let floor = CALLING_FLOOR[period - 1];
+                let span = HIGHEST_REFERENCE_REPEATS[period - 1] - floor + 1;
+                let repeats = floor + draw.below(u64::from(span)) as u32;
+                (motif.as_bytes().to_vec(), repeats)
+            })
+            .collect();
+        let gap_lengths: Vec<usize> = (1..member_count)
+            .map(|_| 1 + draw.below(LONGEST_BUNDLE_GAP as u64) as usize)
+            .collect();
+        let members_bp: usize = members
+            .iter()
+            .map(|(motif, repeats)| motif.len() * *repeats as usize)
+            .sum();
+        if members_bp + gap_lengths.iter().sum::<usize>() > LONGEST_BUNDLE_HULL {
+            continue;
+        }
+
+        let mut hull = members[0].0.repeat(members[0].1 as usize);
+        let mut gaps = Vec::with_capacity(gap_lengths.len());
+        for (index, len) in gap_lengths.iter().enumerate() {
+            let (left, right) = (&members[index].0, &members[index + 1].0);
+            let Some(gap) = draw_gap(&hull, left, right, *len, draw) else {
+                break;
+            };
+            hull.extend_from_slice(&gap);
+            hull.extend(right.repeat(members[index + 1].1 as usize));
+            gaps.push(gap);
+        }
+        if gaps.len() < gap_lengths.len() {
+            continue;
+        }
+        let shape = BundleShape { members, gaps };
+        if scanner_reports_exactly_the_members(&shape) {
+            return shape;
+        }
+    }
+    panic!(
+        "no {member_count}-member bundle shape kept every rule in {BUNDLE_SHAPE_ATTEMPTS} draws: \
+         the hull cap, the gap rules or the scanner copy can no longer be met together"
+    );
+}
+
+/// `len` gap bases to follow `hull` (which ends with a whole copy of `left`) and precede a run
+/// of `right`, or `None` if some position has no base that keeps every rule:
+///
+/// - **the first bases continue no copy of `left`**: base `i` differs from `left[i]` for each
+///   `i` below `left`'s length — the spacer's rule ([`append_spacer`]) applied after the run;
+/// - **the last bases continue no copy of `right` backwards**: the base `j` places before the
+///   right member differs from the base a copy of `right` would have there;
+/// - **no three copies of any unit** of one to six bases end on it, as in a clean flank.
+///
+/// The base is drawn and the four tried in turn from it, as [`append_capped`] does.
+fn draw_gap(
+    hull: &[u8],
+    left: &[u8],
+    right: &[u8],
+    len: usize,
+    draw: &mut Draw,
+) -> Option<Vec<u8>> {
+    let mut so_far = hull.to_vec();
+    let mut gap = Vec::with_capacity(len);
+    for index in 0..len {
+        let from_end = len - index;
+        let continues_left = |base: u8| index < left.len() && base == left[index];
+        let continues_right =
+            |base: u8| from_end <= right.len() && base == right[right.len() - from_end];
+        let drawn = draw.below(4) as usize;
+        let chosen = (0..FOUR_BASES.len())
+            .map(|step| FOUR_BASES[(drawn + step) % FOUR_BASES.len()])
+            .find(|base| {
+                !continues_left(*base)
+                    && !continues_right(*base)
+                    && !completes_copies(&so_far, *base, &[2; 6])
+            })?;
+        so_far.push(chosen);
+        gap.push(chosen);
+    }
+    Some(gap)
+}
+
+/// Whether the repeats the typing's scanner finds in this bundle, with a spacer either side as
+/// it will be laid, are exactly its members, each over its drawn span.
+fn scanner_reports_exactly_the_members(shape: &BundleShape) -> bool {
+    let mut probe = Vec::new();
+    append_spacer(&mut probe, shape.first_motif());
+    let offset = probe.len();
+    probe.extend(shape.spell(&shape.reference_repeats()));
+    append_spacer(&mut probe, shape.last_motif());
+    let expected: Vec<(usize, usize, usize)> = shape
+        .member_runs(&shape.reference_repeats())
+        .into_iter()
+        .zip(shape.periods())
+        .map(|((start, end), period)| (offset + start, offset + end, period))
+        .collect();
+    scanner_repeats(&probe) == expected
+}
+
+/// **The repeats the region typing would see in `bases`**, as `(start, end, period)`,
+/// zero-based half-open, in start order — this file's own copy of the typing's arithmetic, so
+/// the fixture does not change when the caller's code does:
+///
+/// 1. For each motif length `p` from one to six, every base scores
+///    [`SCANNER_MATCH_REWARD`] if it equals the base `p` before it and loses
+///    [`SCANNER_MISMATCH_PENALTY`] otherwise; each maximal scoring stretch is one repeat
+///    (`tandem_repeat.rs`, `find_tandem_repeats`), kept when it holds two copies and its
+///    first `p` bases are not themselves a repeat of a shorter unit.
+/// 2. A repeat at least half covered by one of a shorter motif length that divides its own is
+///    the same repeat seen at a multiple of its period, and is dropped.
+/// 3. What is left must clear the calling copy floor ([`CALLING_FLOOR`]) to count
+///    (`segment_criteria.rs`, `prefilter`).
+fn scanner_repeats(bases: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut found: Vec<(usize, usize, usize)> = Vec::new();
+    for period in 1..=6_usize {
+        if period >= bases.len() {
+            continue;
+        }
+        let scores: Vec<i64> = (period..bases.len())
+            .map(|index| {
+                if bases[index] == bases[index - period] {
+                    SCANNER_MATCH_REWARD
+                } else {
+                    -SCANNER_MISMATCH_PENALTY
+                }
+            })
+            .collect();
+        let mut stretches = Vec::new();
+        maximal_scoring_stretches(&scores, 0, &mut stretches);
+        for (first, last) in stretches {
+            let (start, end) = (first, last + period + 1);
+            if (end - start) / period >= 2 && is_primitive(&bases[start..start + period]) {
+                found.push((start, end, period));
+            }
+        }
+    }
+    found.sort_by_key(|(start, _, period)| (*period, *start));
+    let mut kept: Vec<(usize, usize, usize)> = Vec::with_capacity(found.len());
+    for (start, end, period) in found {
+        let len = end - start;
+        let seen_shorter = kept.iter().any(|(other_start, other_end, other_period)| {
+            *other_period < period
+                && period.is_multiple_of(*other_period)
+                && 2 * (*other_end)
+                    .min(end)
+                    .saturating_sub((*other_start).max(start))
+                    >= len
+        });
+        if !seen_shorter {
+            kept.push((start, end, period));
+        }
+    }
+    kept.retain(|(start, end, period)| {
+        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+    });
+    kept.sort_unstable();
+    kept
+}
+
+/// The maximal scoring stretches of `scores`, as inclusive index pairs offset by `offset`:
+/// the highest-scoring stretch, then the same on what lies left and right of it — the
+/// recursive definition the Ruzzo–Tompa algorithm the scanner runs computes in one pass.
+fn maximal_scoring_stretches(scores: &[i64], offset: usize, out: &mut Vec<(usize, usize)>) {
+    let mut best: Option<(usize, usize, i64)> = None;
+    let mut run_start = 0;
+    let mut run_score = 0_i64;
+    for (index, score) in scores.iter().enumerate() {
+        if run_score <= 0 {
+            run_start = index;
+            run_score = 0;
+        }
+        run_score += score;
+        if run_score > 0 && best.is_none_or(|(_, _, highest)| run_score > highest) {
+            best = Some((run_start, index, run_score));
+        }
+    }
+    let Some((first, last, _)) = best else {
+        return;
+    };
+    maximal_scoring_stretches(&scores[..first], offset, out);
+    out.push((offset + first, offset + last));
+    maximal_scoring_stretches(&scores[last + 1..], offset + last + 1, out);
+}
+
+/// Whether `unit` is not itself a whole number of copies of a shorter unit.
+fn is_primitive(unit: &[u8]) -> bool {
+    (1..unit.len())
+        .filter(|shorter| unit.len().is_multiple_of(*shorter))
+        .all(|shorter| unit[shorter..] != unit[..unit.len() - shorter])
+}
+
+/// What [`build_reference`] lays at one place along a contig.
+enum PlannedFeature {
+    /// An STR segment: its motif and reference repeat count.
+    Segment(Vec<u8>, u32),
+    Bundle(BundleShape),
+}
+
+impl PlannedFeature {
+    /// The feature's bases with its two flanks.
+    fn footprint(&self) -> usize {
+        let core = match self {
+            Self::Segment(motif, repeats) => motif.len() * *repeats as usize,
+            Self::Bundle(shape) => shape.hull_len(),
+        };
+        2 * FLANK_BP + core
+    }
+}
+
+/// The reference as [`build_reference`] lays it: the contigs, and every segment and bundle on
+/// them, none carrying alleles yet.
+struct LaidReference {
+    contigs: Vec<Contig>,
+    segments: Vec<Segment>,
+    bundles: Vec<Bundle>,
+}
+
+/// The contigs, and every segment's and bundle's place on them; neither carries alleles yet.
 fn build_reference(
     settings: &Settings,
+    bundle_shapes: Vec<BundleShape>,
     draw: &mut Draw,
-) -> Result<(Vec<Contig>, Vec<Segment>), String> {
-    let mut shapes: Vec<(Vec<u8>, u32)> = Vec::new();
+) -> Result<LaidReference, String> {
+    let mut shapes: Vec<PlannedFeature> = Vec::new();
     for period in 1..=6_usize {
         let floor = CALLING_FLOOR[period - 1];
         let span = HIGHEST_REFERENCE_REPEATS[period - 1] - floor + 1;
@@ -551,25 +982,23 @@ fn build_reference(
         for index in 0..settings.segments_per_period {
             let repeats = floor + (index as u32 % span);
             let motif = motifs[draw.below(motifs.len() as u64) as usize];
-            shapes.push((motif.as_bytes().to_vec(), repeats));
+            shapes.push(PlannedFeature::Segment(motif.as_bytes().to_vec(), repeats));
         }
     }
+    shapes.extend(bundle_shapes.into_iter().map(PlannedFeature::Bundle));
     // Fisher–Yates, so motif lengths and repeat counts are interleaved along the genome.
     for index in (1..shapes.len()).rev() {
         let other = draw.below(index as u64 + 1) as usize;
         shapes.swap(index, other);
     }
 
-    let segment_bp: usize = shapes
-        .iter()
-        .map(|(motif, repeats)| 2 * FLANK_BP + motif.len() * *repeats as usize)
-        .sum();
+    let segment_bp: usize = shapes.iter().map(PlannedFeature::footprint).sum();
     let gaps = shapes.len() + settings.contigs;
     let mean_gap = settings.genome_bp.saturating_sub(segment_bp) / gaps;
     if mean_gap < 2 * READ_LEN {
         return Err(format!(
-            "{} segments leave {mean_gap} bases of ordinary sequence between them in {} bases; \
-             raise genome_bp or lower segments_per_period",
+            "{} segments and bundles leave {mean_gap} bases of ordinary sequence between them in \
+             {} bases; raise genome_bp or lower segments_per_period or bundles",
             shapes.len(),
             settings.genome_bp
         ));
@@ -577,6 +1006,7 @@ fn build_reference(
 
     let mut contigs = Vec::with_capacity(settings.contigs);
     let mut segments = Vec::with_capacity(shapes.len());
+    let mut bundles = Vec::new();
     for contig_index in 0..settings.contigs {
         let first = contig_index * shapes.len() / settings.contigs;
         let last = (contig_index + 1) * shapes.len() / settings.contigs;
@@ -588,21 +1018,40 @@ fn build_reference(
             append_ordinary(bases, len, draw);
             ordinary.push((start, bases.len()));
         };
-        for (motif, repeats) in &shapes[first..last] {
+        for shape in &shapes[first..last] {
             gap(&mut bases, draw);
-            append_aperiodic(&mut bases, FLANK_BP - motif.len(), draw);
-            append_spacer(&mut bases, motif);
-            let start = bases.len();
-            bases.extend(motif.repeat(*repeats as usize));
-            append_spacer(&mut bases, motif);
-            append_aperiodic(&mut bases, FLANK_BP - motif.len(), draw);
-            segments.push(Segment {
-                contig: contig_index,
-                motif: motif.clone(),
-                reference_repeats: *repeats,
-                start,
-                alleles: Vec::new(),
-            });
+            match shape {
+                PlannedFeature::Segment(motif, repeats) => {
+                    append_aperiodic(&mut bases, FLANK_BP - motif.len(), draw);
+                    append_spacer(&mut bases, motif);
+                    let start = bases.len();
+                    bases.extend(motif.repeat(*repeats as usize));
+                    append_spacer(&mut bases, motif);
+                    append_aperiodic(&mut bases, FLANK_BP - motif.len(), draw);
+                    segments.push(Segment {
+                        contig: contig_index,
+                        motif: motif.clone(),
+                        reference_repeats: *repeats,
+                        start,
+                        alleles: Vec::new(),
+                    });
+                }
+                PlannedFeature::Bundle(shape) => {
+                    let (first_motif, last_motif) = (shape.first_motif(), shape.last_motif());
+                    append_aperiodic(&mut bases, FLANK_BP - first_motif.len(), draw);
+                    append_spacer(&mut bases, first_motif);
+                    let start = bases.len();
+                    bases.extend(shape.spell(&shape.reference_repeats()));
+                    append_spacer(&mut bases, last_motif);
+                    append_aperiodic(&mut bases, FLANK_BP - last_motif.len(), draw);
+                    bundles.push(Bundle {
+                        contig: contig_index,
+                        shape: shape.clone(),
+                        start,
+                        alleles: Vec::new(),
+                    });
+                }
+            }
         }
         gap(&mut bases, draw);
         contigs.push(Contig {
@@ -611,7 +1060,11 @@ fn build_reference(
             ordinary,
         });
     }
-    Ok((contigs, segments))
+    Ok(LaidReference {
+        contigs,
+        segments,
+        bundles,
+    })
 }
 
 /// **`period` bases that cannot be read as another copy of the motif** — the segment's
@@ -901,7 +1354,17 @@ fn add_derived(
 fn pure_span(sequence: &[u8], period: usize) -> Option<(usize, usize)> {
     let from = WINDOW_FLANK_BP.saturating_sub(period);
     let to = (sequence.len() + period).saturating_sub(WINDOW_FLANK_BP);
-    let to = to.min(sequence.len());
+    longest_periodic_stretch(sequence, from, to.min(sequence.len()), period)
+}
+
+/// The longest stretch of `sequence[from..to]` that repeats with this period, or `None` if it
+/// is shorter than two units.
+fn longest_periodic_stretch(
+    sequence: &[u8],
+    from: usize,
+    to: usize,
+    period: usize,
+) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize)> = None;
     let mut index = from;
     while index + period < to {
@@ -919,6 +1382,228 @@ fn pure_span(sequence: &[u8], period: usize) -> Option<(usize, usize)> {
         }
     }
     best.filter(|(start, end)| end - start >= 2 * period)
+}
+
+/// One allele at one STR bundle, written over the bundle's whole window.
+#[derive(Debug, Clone)]
+struct BundleAllele {
+    sequence: Vec<u8>,
+    /// Whole units of each member's motif the allele holds, first member first; each member's
+    /// stutter rate is looked up by its own.
+    repeats: Vec<u32>,
+    change: AlleleChange,
+    frequency: f64,
+    /// Zero-based half-open, within `sequence`: where each member's run lies.
+    member_runs: Vec<(usize, usize)>,
+    /// Within `sequence`, per member: the longest stretch of the member's run that is pure
+    /// repeat, where stutter adds or removes units of that member. `None` when it is shorter
+    /// than two units.
+    pure_spans: Vec<Option<(usize, usize)>>,
+}
+
+/// Every allele the population carries at one bundle, with its frequency — the bundle's
+/// counterpart of [`draw_segment_alleles`], with the same counts and shares:
+///
+/// - **two to six alleles**, the reference and length changes. A length change moves one
+///   member by a whole number of its units (one most often, as for a segment), and with
+///   probability [`SECOND_MEMBER_CHANGE_SHARE`] a second member as well; no member falls
+///   below one copy.
+/// - **derived alleles**, each from a donor among the pure length alleles: a substitution
+///   inside a member of at least three copies, a SNP within 30 bases of the hull's edge, a
+///   deletion of two to ten bases across the hull's left or right edge, cutting into the
+///   first or the last member.
+fn draw_bundle_alleles(bundle: &Bundle, window: &[u8], draw: &mut Draw) -> Vec<BundleAllele> {
+    let shape = &bundle.shape;
+    let left = &window[..WINDOW_FLANK_BP];
+    let right = &window[window.len() - WINDOW_FLANK_BP..];
+    let periods = shape.periods();
+    let pure_allele = |repeats: Vec<u32>, change: AlleleChange, frequency: f64| {
+        let mut sequence = left.to_vec();
+        sequence.extend(shape.spell(&repeats));
+        sequence.extend_from_slice(right);
+        let member_runs = shape
+            .member_runs(&repeats)
+            .into_iter()
+            .map(|(start, end)| (WINDOW_FLANK_BP + start, WINDOW_FLANK_BP + end))
+            .collect();
+        BundleAllele {
+            sequence,
+            repeats,
+            change,
+            frequency,
+            member_runs,
+            pure_spans: Vec::new(),
+        }
+    };
+    let step = |draw: &mut Draw| {
+        let mut step = 1;
+        while step < LONGEST_LENGTH_STEP && draw.unit() < LENGTH_STEP_CONTINUE {
+            step += 1;
+        }
+        step
+    };
+    let moved = |repeats: u32, draw: &mut Draw| -> Option<u32> {
+        let units = step(draw);
+        if draw.unit() < 0.5 {
+            repeats.checked_sub(units).filter(|one| *one >= 1)
+        } else {
+            Some(repeats + units)
+        }
+    };
+
+    let wanted = 2 + draw.below(5) as usize;
+    let mut lengths: Vec<Vec<u32>> = vec![shape.reference_repeats()];
+    for _ in 0..50 {
+        if lengths.len() == wanted {
+            break;
+        }
+        let mut repeats = shape.reference_repeats();
+        let first = draw.below(repeats.len() as u64) as usize;
+        let Some(count) = moved(repeats[first], draw) else {
+            continue;
+        };
+        repeats[first] = count;
+        if draw.unit() < SECOND_MEMBER_CHANGE_SHARE {
+            let second =
+                (first + 1 + draw.below(repeats.len() as u64 - 1) as usize) % repeats.len();
+            if let Some(count) = moved(repeats[second], draw) {
+                repeats[second] = count;
+            }
+        }
+        if !lengths.contains(&repeats) {
+            lengths.push(repeats);
+        }
+    }
+
+    let nonreference = draw.beta(NONREF_FREQUENCY_BETA.0, NONREF_FREQUENCY_BETA.1);
+    let weights: Vec<f64> = (1..lengths.len()).map(|_| draw.exponential()).collect();
+    let total: f64 = weights.iter().sum();
+    let mut alleles: Vec<BundleAllele> = lengths
+        .into_iter()
+        .enumerate()
+        .map(|(index, repeats)| {
+            if index == 0 {
+                pure_allele(repeats, AlleleChange::Reference, 1.0 - nonreference)
+            } else {
+                let frequency = nonreference * weights[index - 1] / total;
+                pure_allele(repeats, AlleleChange::Length, frequency)
+            }
+        })
+        .collect();
+
+    let pure_donors = |alleles: &[BundleAllele]| -> Vec<usize> {
+        (0..alleles.len())
+            .filter(|index| alleles[*index].change.is_pure_length())
+            .collect()
+    };
+
+    if draw.unit() < INTERIOR_SUBSTITUTION_SHARE {
+        let candidates: Vec<(usize, usize)> = pure_donors(&alleles)
+            .into_iter()
+            .flat_map(|donor| (0..periods.len()).map(move |member| (donor, member)))
+            .filter(|(donor, member)| alleles[*donor].repeats[*member] >= 3)
+            .collect();
+        if !candidates.is_empty() {
+            let (donor, member) = candidates[draw.below(candidates.len() as u64) as usize];
+            let period = periods[member];
+            let repeats = alleles[donor].repeats[member] as usize;
+            let unit = (repeats / 3 + draw.below((repeats / 3).max(1) as u64) as usize)
+                .clamp(1, repeats - 2);
+            let at = alleles[donor].member_runs[member].0
+                + unit * period
+                + draw.below(period as u64) as usize;
+            let mut derived = alleles[donor].clone();
+            derived.sequence[at] = draw.other_base(derived.sequence[at]);
+            derived.change = AlleleChange::InteriorSubstitution;
+            add_derived_bundle_allele(&mut alleles, donor, derived, draw);
+        }
+    }
+    if draw.unit() < FLANK_SNP_SHARE {
+        let donors = pure_donors(&alleles);
+        let donor = donors[draw.below(donors.len() as u64) as usize];
+        let distance = 1 + draw.below(WINDOW_FLANK_BP as u64) as usize;
+        let mut derived = alleles[donor].clone();
+        let at = if draw.unit() < 0.5 {
+            WINDOW_FLANK_BP - distance
+        } else {
+            derived.sequence.len() - WINDOW_FLANK_BP + distance - 1
+        };
+        derived.sequence[at] = draw.other_base(derived.sequence[at]);
+        derived.change = AlleleChange::FlankSnp;
+        add_derived_bundle_allele(&mut alleles, donor, derived, draw);
+    }
+    if draw.unit() < EDGE_DELETION_SHARE {
+        let from_left = draw.unit() < 0.5;
+        let member = if from_left { 0 } else { periods.len() - 1 };
+        let donors: Vec<usize> = pure_donors(&alleles)
+            .into_iter()
+            .filter(|donor| alleles[*donor].repeats[member] >= 2)
+            .collect();
+        if !donors.is_empty() {
+            let donor = donors[draw.below(donors.len() as u64) as usize];
+            let period = periods[member];
+            let (run_start, run_end) = alleles[donor].member_runs[member];
+            let run_len = run_end - run_start;
+            let deleted = 2 + draw.below(9) as usize; // two to ten bases
+            let in_repeat = 1 + draw.below((deleted - 1).min(run_len - period) as u64) as usize;
+            let in_flank = deleted - in_repeat;
+            let mut derived = alleles[donor].clone();
+            if from_left {
+                derived
+                    .sequence
+                    .drain(run_start - in_flank..run_start + in_repeat);
+                // The first run now starts where the deletion did; every later one moves left
+                // by all the deleted bases.
+                for (index, run) in derived.member_runs.iter_mut().enumerate() {
+                    let start = if index == 0 {
+                        run_start - in_flank
+                    } else {
+                        run.0 - deleted
+                    };
+                    *run = (start, run.1 - deleted);
+                }
+            } else {
+                derived
+                    .sequence
+                    .drain(run_end - in_repeat..run_end + in_flank);
+                derived.member_runs[member].1 -= in_repeat;
+            }
+            derived.repeats[member] = ((run_len - in_repeat) / period) as u32;
+            derived.change = AlleleChange::EdgeDeletion;
+            add_derived_bundle_allele(&mut alleles, donor, derived, draw);
+        }
+    }
+
+    for allele in &mut alleles {
+        allele.pure_spans = allele
+            .member_runs
+            .iter()
+            .zip(&periods)
+            .map(|((start, end), period)| {
+                longest_periodic_stretch(&allele.sequence, *start, *end, *period)
+            })
+            .collect();
+    }
+    alleles
+}
+
+/// [`add_derived`] for a bundle: add `derived`, which came from `donor`, with a share of the
+/// donor's frequency — unless an allele with its sequence is already there.
+fn add_derived_bundle_allele(
+    alleles: &mut Vec<BundleAllele>,
+    donor: usize,
+    mut derived: BundleAllele,
+    draw: &mut Draw,
+) {
+    if alleles
+        .iter()
+        .any(|allele| allele.sequence == derived.sequence)
+    {
+        return;
+    }
+    derived.frequency = alleles[donor].frequency * (0.2 + 0.6 * draw.unit());
+    alleles[donor].frequency -= derived.frequency;
+    alleles.push(derived);
 }
 
 /// One variant away from the segments: a SNP or an indel, in VCF's spelling (an indel's first
@@ -1014,9 +1699,12 @@ struct Cohort {
     segment_genotypes: Vec<Vec<[u8; 2]>>,
     /// `[variant][sample]`, 1 where the copy carries the alternative.
     generic_genotypes: Vec<Vec<[u8; 2]>>,
+    bundles: Vec<Bundle>,
+    /// `[bundle][sample]`, indices into the bundle's alleles, first copy first.
+    bundle_genotypes: Vec<Vec<[u8; 2]>>,
     samples: Vec<String>,
     libraries: Vec<Library>,
-    /// Per contig, every segment and variant on it in order along the contig.
+    /// Per contig, every segment, bundle and variant on it in order along the contig.
     events: Vec<Vec<Event>>,
 }
 
@@ -1024,13 +1712,30 @@ struct Cohort {
 enum Event {
     Segment(usize),
     Generic(usize),
+    Bundle(usize),
 }
 
+/// The whole truth. **Everything about the bundles is drawn from a second draw**, seeded from
+/// the first's seed and [`BUNDLE_SEED_SALT`]: their shapes, alleles and genotypes. The first
+/// draw lays them along the contigs with the segments, and gives them their flanks, but with
+/// `bundles=0` it makes exactly the draws it made before bundles existed.
 fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
-    let (contigs, mut segments) = build_reference(settings, draw)?;
+    let mut bundle_draw = Draw::new(settings.seed ^ BUNDLE_SEED_SALT);
+    let bundle_shapes: Vec<BundleShape> = (0..settings.bundles)
+        .map(|_| draw_bundle_shape(&mut bundle_draw))
+        .collect();
+    let LaidReference {
+        contigs,
+        mut segments,
+        mut bundles,
+    } = build_reference(settings, bundle_shapes, draw)?;
     for segment in &mut segments {
         let window = &contigs[segment.contig].bases[segment.window_start()..segment.window_end()];
         segment.alleles = draw_segment_alleles(segment, window, draw);
+    }
+    for bundle in &mut bundles {
+        let window = &contigs[bundle.contig].bases[bundle.window_start()..bundle.window_end()];
+        bundle.alleles = draw_bundle_alleles(bundle, window, &mut bundle_draw);
     }
     let generic = draw_generic_variants(&contigs, draw);
     let samples: Vec<String> = (0..settings.samples)
@@ -1060,6 +1765,15 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
                 .collect()
         })
         .collect();
+    let bundle_genotypes = bundles
+        .iter()
+        .map(|bundle| {
+            let frequencies: Vec<f64> = bundle.alleles.iter().map(|one| one.frequency).collect();
+            (0..settings.samples)
+                .map(|_| draw_pair(&frequencies, settings.inbreeding, &mut bundle_draw))
+                .collect()
+        })
+        .collect();
 
     let mut events: Vec<Vec<(usize, Event)>> = vec![Vec::new(); contigs.len()];
     for (index, segment) in segments.iter().enumerate() {
@@ -1067,6 +1781,9 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
     }
     for (index, variant) in generic.iter().enumerate() {
         events[variant.contig].push((variant.position, Event::Generic(index)));
+    }
+    for (index, bundle) in bundles.iter().enumerate() {
+        events[bundle.contig].push((bundle.window_start(), Event::Bundle(index)));
     }
     let events = events
         .into_iter()
@@ -1082,6 +1799,8 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
         generic,
         segment_genotypes,
         generic_genotypes,
+        bundles,
+        bundle_genotypes,
         samples,
         libraries,
         events,
@@ -1092,8 +1811,8 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
 // The molecules and the reads
 // ---------------------------------------------------------------------------
 
-/// Where one copy of the genome can stutter: one segment's pure repeat, in the copy's own
-/// coordinates.
+/// Where one copy of the genome can stutter: one segment's or one bundle member's pure repeat,
+/// in the copy's own coordinates.
 #[derive(Debug, Clone, Copy)]
 struct StutterSite {
     pure_start: usize,
@@ -1132,6 +1851,30 @@ fn build_haplotype(cohort: &Cohort, contig: usize, sample: usize, copy: usize) -
                     });
                 }
                 cursor = segment.window_end();
+            }
+            Event::Bundle(index) => {
+                let bundle = &cohort.bundles[index];
+                let allele = &bundle.alleles[cohort.bundle_genotypes[index][sample][copy] as usize];
+                bases.extend_from_slice(&reference[cursor..bundle.window_start()]);
+                let offset = bases.len();
+                bases.extend_from_slice(&allele.sequence);
+                // One site per member, each stuttering at its own motif length and count.
+                for ((pure_span, period), repeats) in allele
+                    .pure_spans
+                    .iter()
+                    .zip(bundle.shape.periods())
+                    .zip(&allele.repeats)
+                {
+                    if let Some((start, end)) = pure_span {
+                        sites.push(StutterSite {
+                            pure_start: offset + start,
+                            pure_end: offset + end,
+                            period,
+                            repeats: *repeats,
+                        });
+                    }
+                }
+                cursor = bundle.window_end();
             }
             Event::Generic(index) => {
                 if cohort.generic_genotypes[index][sample][copy] == 1 {
@@ -1395,6 +2138,78 @@ fn trim_shared_bases(position: usize, alleles: &mut [Vec<u8>]) -> usize {
     position
 }
 
+/// One STR segment's or bundle's truth record before it is written: the window and every allele
+/// drawn there, with each sample's two copies.
+struct WindowRecord<'a> {
+    contig: &'a str,
+    /// Zero-based, the window's first base.
+    window_start: usize,
+    id: &'a str,
+    /// Every allele's window sequence, the reference first.
+    sequences: &'a [&'a [u8]],
+    /// `[sample]`, indices into `sequences`, first copy first.
+    genotypes: &'a [[u8; 2]],
+}
+
+impl WindowRecord<'_> {
+    /// Write the record into `line` — the reference and the alleles some sample carries,
+    /// trimmed to the stretch they differ over, `info(carried)` as its INFO, then each sample's
+    /// phased genotype — or write nothing and return `false` when no sample carries a
+    /// non-reference allele. `carried` is the carried alleles' indices, ascending, as they are
+    /// listed in ALT.
+    fn write(&self, line: &mut String, info: impl FnOnce(&[u8]) -> String) -> bool {
+        let mut carried: Vec<u8> = self.genotypes.iter().flatten().copied().collect();
+        carried.sort_unstable();
+        carried.dedup();
+        carried.retain(|allele| *allele != 0);
+        if carried.is_empty() {
+            return false;
+        }
+        let mut alleles = vec![self.sequences[0].to_vec()];
+        alleles.extend(
+            carried
+                .iter()
+                .map(|one| self.sequences[*one as usize].to_vec()),
+        );
+        let position = trim_shared_bases(self.window_start, &mut alleles);
+        write!(
+            line,
+            "{}\t{}\t{}\t{}\t{}\t.\tPASS\t{}\tGT",
+            self.contig,
+            position + 1,
+            self.id,
+            String::from_utf8_lossy(&alleles[0]),
+            alleles[1..]
+                .iter()
+                .map(|one| String::from_utf8_lossy(one).into_owned())
+                .collect::<Vec<_>>()
+                .join(","),
+            info(&carried),
+        )
+        .expect("writing to a String");
+        let index_in_record = |allele: u8| -> usize {
+            if allele == 0 {
+                0
+            } else {
+                1 + carried
+                    .iter()
+                    .position(|one| *one == allele)
+                    .expect("every carried allele is listed")
+            }
+        };
+        for pair in self.genotypes {
+            write!(
+                line,
+                "\t{}|{}",
+                index_in_record(pair[0]),
+                index_in_record(pair[1])
+            )
+            .expect("writing to a String");
+        }
+        true
+    }
+}
+
 /// The truth VCF: every site any sample carries a non-reference allele at, genotypes phased.
 fn write_truth_vcf(out: &mut impl std::io::Write, cohort: &Cohort) -> std::io::Result<()> {
     writeln!(out, "##fileformat=VCFv4.2")?;
@@ -1427,6 +2242,23 @@ fn write_truth_vcf(out: &mut impl std::io::Write, cohort: &Cohort) -> std::io::R
         "##INFO=<ID=REPEATS,Number=R,Type=Integer,Description=\"Whole motif units in each \
          allele's repeat\">"
     )?;
+    if !cohort.bundles.is_empty() {
+        writeln!(
+            out,
+            "##INFO=<ID=BUNDLE,Number=1,Type=String,Description=\"The STR bundle whose window \
+             this record spells\">"
+        )?;
+        writeln!(
+            out,
+            "##INFO=<ID=MOTIFS,Number=.,Type=String,Description=\"The bundle's members' motifs, \
+             first member first\">"
+        )?;
+        writeln!(
+            out,
+            "##INFO=<ID=MEMBER_REPEATS,Number=R,Type=String,Description=\"Whole motif units in \
+             each member of each allele, joined by _ in member order\">"
+        )?;
+    }
     writeln!(
         out,
         "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">"
@@ -1445,65 +2277,72 @@ fn write_truth_vcf(out: &mut impl std::io::Write, cohort: &Cohort) -> std::io::R
             match *event {
                 Event::Segment(index) => {
                     let segment = &cohort.segments[index];
-                    let genotypes = &cohort.segment_genotypes[index];
-                    let mut carried: Vec<u8> = genotypes.iter().flatten().copied().collect();
-                    carried.sort_unstable();
-                    carried.dedup();
-                    carried.retain(|allele| *allele != 0);
-                    if carried.is_empty() {
+                    let sequences: Vec<&[u8]> = segment
+                        .alleles
+                        .iter()
+                        .map(|one| one.sequence.as_slice())
+                        .collect();
+                    let info = |carried: &[u8]| {
+                        let changes: Vec<&str> = carried
+                            .iter()
+                            .map(|one| segment.alleles[*one as usize].change.name())
+                            .collect();
+                        let repeats: Vec<String> = std::iter::once(0)
+                            .chain(carried.iter().copied())
+                            .map(|one| segment.alleles[one as usize].repeats.to_string())
+                            .collect();
+                        format!(
+                            "SEGMENT={};MOTIF={};CHANGE={};REPEATS={}",
+                            segment_name(index),
+                            String::from_utf8_lossy(&segment.motif),
+                            changes.join(","),
+                            repeats.join(","),
+                        )
+                    };
+                    let record = WindowRecord {
+                        contig: &contig.name,
+                        window_start: segment.window_start(),
+                        id: &segment_name(index),
+                        sequences: &sequences,
+                        genotypes: &cohort.segment_genotypes[index],
+                    };
+                    if !record.write(&mut line, info) {
                         continue;
                     }
-                    let mut alleles = vec![segment.alleles[0].sequence.clone()];
-                    alleles.extend(
-                        carried
-                            .iter()
-                            .map(|one| segment.alleles[*one as usize].sequence.clone()),
-                    );
-                    let position = trim_shared_bases(segment.window_start(), &mut alleles);
-                    let changes: Vec<&str> = carried
+                }
+                Event::Bundle(index) => {
+                    let bundle = &cohort.bundles[index];
+                    let sequences: Vec<&[u8]> = bundle
+                        .alleles
                         .iter()
-                        .map(|one| segment.alleles[*one as usize].change.name())
+                        .map(|one| one.sequence.as_slice())
                         .collect();
-                    let repeats: Vec<String> = std::iter::once(0)
-                        .chain(carried.iter().copied())
-                        .map(|one| segment.alleles[one as usize].repeats.to_string())
-                        .collect();
-                    write!(
-                        line,
-                        "{}\t{}\t{}\t{}\t{}\t.\tPASS\tSEGMENT={};MOTIF={};CHANGE={};REPEATS={}\tGT",
-                        contig.name,
-                        position + 1,
-                        segment_name(index),
-                        String::from_utf8_lossy(&alleles[0]),
-                        alleles[1..]
+                    let info = |carried: &[u8]| {
+                        let changes: Vec<&str> = carried
                             .iter()
-                            .map(|one| String::from_utf8_lossy(one).into_owned())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                        segment_name(index),
-                        String::from_utf8_lossy(&segment.motif),
-                        changes.join(","),
-                        repeats.join(","),
-                    )
-                    .expect("writing to a String");
-                    let index_in_record = |allele: u8| -> usize {
-                        if allele == 0 {
-                            0
-                        } else {
-                            1 + carried
-                                .iter()
-                                .position(|one| *one == allele)
-                                .expect("every carried allele is listed")
-                        }
-                    };
-                    for pair in genotypes {
-                        write!(
-                            line,
-                            "\t{}|{}",
-                            index_in_record(pair[0]),
-                            index_in_record(pair[1])
+                            .map(|one| bundle.alleles[*one as usize].change.name())
+                            .collect();
+                        let repeats: Vec<String> = std::iter::once(0)
+                            .chain(carried.iter().copied())
+                            .map(|one| joined(&bundle.alleles[one as usize].repeats, "_"))
+                            .collect();
+                        format!(
+                            "BUNDLE={};MOTIFS={};CHANGE={};MEMBER_REPEATS={}",
+                            bundle_name(index),
+                            bundle.motifs(),
+                            changes.join(","),
+                            repeats.join(","),
                         )
-                        .expect("writing to a String");
+                    };
+                    let record = WindowRecord {
+                        contig: &contig.name,
+                        window_start: bundle.window_start(),
+                        id: &bundle_name(index),
+                        sequences: &sequences,
+                        genotypes: &cohort.bundle_genotypes[index],
+                    };
+                    if !record.write(&mut line, info) {
+                        continue;
                     }
                 }
                 Event::Generic(index) => {
@@ -1530,6 +2369,70 @@ fn write_truth_vcf(out: &mut impl std::io::Write, cohort: &Cohort) -> std::io::R
         }
     }
     out.flush()
+}
+
+/// The bundles' three tables, the segments' counterparts. Per-member values are listed in member
+/// order, comma-separated; coordinates are zero-based half-open.
+///
+/// - `bundles.bed` — `chrom start end name periods motifs reference_repeats member_starts
+///   member_ends`: the hull, then each member's motif length, motif, reference repeat count and
+///   span.
+/// - `bundle_alleles.tsv` — one row per allele, as `segment_alleles.tsv`, with the hull for the
+///   segment's span, the per-member lists for its period, motif and repeat counts, and `repeats`
+///   the allele's own count in each member.
+/// - `bundle_genotypes.tsv` — each sample's two alleles, as indices into `bundle_alleles.tsv`.
+fn write_bundle_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
+    let mut bed = create(&out_dir.join("bundles.bed"))?;
+    let mut alleles = create(&out_dir.join("bundle_alleles.tsv"))?;
+    let mut genotypes = create(&out_dir.join("bundle_genotypes.tsv"))?;
+    writeln!(
+        bed,
+        "#chrom\tstart\tend\tname\tperiods\tmotifs\treference_repeats\tmember_starts\tmember_ends"
+    )?;
+    writeln!(
+        alleles,
+        "bundle\tchrom\twindow_start\twindow_end\thull_start\thull_end\tmembers\tperiods\tmotifs\t\
+         reference_repeats\tallele\trepeats\tchange\tfrequency\tsequence"
+    )?;
+    writeln!(genotypes, "bundle\tsample\tfirst_copy\tsecond_copy")?;
+    for (index, bundle) in cohort.bundles.iter().enumerate() {
+        let contig = &cohort.contigs[bundle.contig].name;
+        let name = bundle_name(index);
+        let periods = joined(bundle.shape.periods(), ",");
+        let motifs = bundle.motifs();
+        let reference_repeats = joined(bundle.shape.reference_repeats(), ",");
+        let spans = bundle.member_spans();
+        writeln!(
+            bed,
+            "{contig}\t{}\t{}\t{name}\t{periods}\t{motifs}\t{reference_repeats}\t{}\t{}",
+            bundle.start,
+            bundle.end(),
+            joined(spans.iter().map(|(start, _)| start), ","),
+            joined(spans.iter().map(|(_, end)| end), ","),
+        )?;
+        for (allele_index, allele) in bundle.alleles.iter().enumerate() {
+            writeln!(
+                alleles,
+                "{name}\t{contig}\t{}\t{}\t{}\t{}\t{}\t{periods}\t{motifs}\t{reference_repeats}\t\
+                 {allele_index}\t{}\t{}\t{:.6}\t{}",
+                bundle.window_start(),
+                bundle.window_end(),
+                bundle.start,
+                bundle.end(),
+                spans.len(),
+                joined(&allele.repeats, ","),
+                allele.change.name(),
+                allele.frequency,
+                String::from_utf8_lossy(&allele.sequence),
+            )?;
+        }
+        for (sample, pair) in cohort.samples.iter().zip(&cohort.bundle_genotypes[index]) {
+            writeln!(genotypes, "{name}\t{sample}\t{}\t{}", pair[0], pair[1])?;
+        }
+    }
+    bed.flush()?;
+    alleles.flush()?;
+    genotypes.flush()
 }
 
 fn write_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
@@ -1582,6 +2485,7 @@ fn write_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
     bed.flush()?;
     alleles.flush()?;
     genotypes.flush()?;
+    write_bundle_tables(out_dir, cohort)?;
 
     let mut confident = create(&out_dir.join("confident.bed"))?;
     for contig in &cohort.contigs {
@@ -1706,6 +2610,21 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
     println!(
         "(sample, segment) cells carrying a non-reference allele : {variant_cells} of {}",
         cohort.segments.len() * cohort.samples.len()
+    );
+    let three_member_bundles = cohort
+        .bundles
+        .iter()
+        .filter(|bundle| bundle.shape.members.len() == 3)
+        .count();
+    let varying_bundles = cohort
+        .bundle_genotypes
+        .iter()
+        .filter(|genotypes| genotypes.iter().flatten().any(|one| *one != 0))
+        .count();
+    println!(
+        "STR bundles         : {} ({three_member_bundles} with three members), \
+         {varying_bundles} varying in some sample",
+        cohort.bundles.len()
     );
     println!(
         "variants away from segments : {} drawn ({} SNPs)",
@@ -1910,10 +2829,11 @@ mod tests {
         );
     }
 
-    fn small_cohort(samples: usize) -> Cohort {
+    fn small_cohort(samples: usize, bundles: usize) -> Cohort {
         let settings = Settings {
             samples,
             segments_per_period: 40,
+            bundles,
             genome_bp: 300_000,
             contigs: 2,
             inbreeding: 0.3,
@@ -1922,12 +2842,198 @@ mod tests {
         draw_cohort(&settings, &mut Draw::new(settings.seed)).expect("the settings fit")
     }
 
+    /// FNV-1a, 64 bits, continuing from `hash`.
+    fn fnv(bytes: &[u8], hash: u64) -> u64 {
+        bytes.iter().fold(hash, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// **With no bundles, the cohort is the one drawn before bundles existed**: the truth VCF and
+    /// the reference's names and bases hash to what the build before bundles wrote for these
+    /// settings (`samples=6 segments_per_period=40 genome_bp=300000 contigs=2 inbreeding=0.3`,
+    /// the default seed; 33,623 bytes of VCF). The bundles' draws come from their own stream, so
+    /// nothing about the segments may move when there are none.
+    #[test]
+    fn no_bundles_draws_the_cohort_drawn_before_bundles() {
+        let cohort = small_cohort(6, 0);
+        let mut vcf = Vec::new();
+        write_truth_vcf(&mut vcf, &cohort).expect("writing to memory");
+        assert_eq!(vcf.len(), 33_623);
+        let hash = cohort
+            .contigs
+            .iter()
+            .fold(fnv(&vcf, 0xcbf2_9ce4_8422_2325), |hash, contig| {
+                fnv(&contig.bases, fnv(contig.name.as_bytes(), hash))
+            });
+        assert_eq!(hash, 0x899e_4139_8adc_6a9f);
+    }
+
+    /// Every bundle shape keeps its rules: two or three members, each at or above its calling
+    /// floor; gaps of 1 to 14 bases, none continuing either neighbour's motif; a hull of at most
+    /// 100 bases; and the scanner's arithmetic sees exactly the members.
+    #[test]
+    fn bundle_shapes_keep_their_rules() {
+        let mut draw = Draw::new(17);
+        let mut three_members = 0;
+        let mut one_motif_length_pairs = 0;
+        for _ in 0..2_000 {
+            let shape = draw_bundle_shape(&mut draw);
+            assert!((2..=3).contains(&shape.members.len()));
+            three_members += usize::from(shape.members.len() == 3);
+            assert_eq!(shape.gaps.len(), shape.members.len() - 1);
+            assert!(shape.hull_len() <= LONGEST_BUNDLE_HULL, "{shape:?}");
+            for (motif, repeats) in &shape.members {
+                assert!(*repeats >= CALLING_FLOOR[motif.len() - 1], "{shape:?}");
+            }
+            for (index, gap) in shape.gaps.iter().enumerate() {
+                assert!((1..=LONGEST_BUNDLE_GAP).contains(&gap.len()), "{shape:?}");
+                let (left, right) = (&shape.members[index].0, &shape.members[index + 1].0);
+                one_motif_length_pairs += usize::from(left.len() == right.len());
+                for (offset, base) in gap.iter().enumerate().take(left.len()) {
+                    assert_ne!(
+                        *base, left[offset],
+                        "gap continues the left motif: {shape:?}"
+                    );
+                }
+                for (from_end, base) in gap.iter().rev().enumerate().take(right.len()) {
+                    assert_ne!(
+                        *base,
+                        right[right.len() - 1 - from_end],
+                        "gap continues the right motif backwards: {shape:?}"
+                    );
+                }
+            }
+            assert!(scanner_reports_exactly_the_members(&shape));
+        }
+        assert!(
+            within_sampling_error(three_members, 2_000, THREE_MEMBER_SHARE),
+            "{three_members} of 2000 with three members"
+        );
+        assert!(one_motif_length_pairs > 100, "{one_motif_length_pairs}");
+    }
+
+    /// The scanner copy reads two runs of one motif length a base apart as one repeat — the case
+    /// the shape rule exists to refuse — two runs of different lengths as two, and stretches a run
+    /// over a gap base that continues its motif.
+    #[test]
+    fn the_scanner_copy_joins_close_runs_of_one_motif_length() {
+        let mut joined = b"AC".repeat(10);
+        joined.push(b'G');
+        joined.extend(b"AC".repeat(10));
+        assert_eq!(scanner_repeats(&joined), vec![(0, 41, 2)]);
+
+        let mut apart = b"AC".repeat(10);
+        apart.extend_from_slice(b"GC");
+        apart.extend(b"AAT".repeat(6));
+        assert_eq!(scanner_repeats(&apart), vec![(0, 20, 2), (22, 40, 3)]);
+        // A gap base that continues a motif stretches its run: `T` before `AAT` is one more
+        // base of it.
+        let mut stretched = b"AC".repeat(10);
+        stretched.extend_from_slice(b"GT");
+        stretched.extend(b"AAT".repeat(6));
+        assert_eq!(scanner_repeats(&stretched), vec![(0, 20, 2), (21, 40, 3)]);
+
+        assert!(is_primitive(b"AAAAAC"));
+        assert!(!is_primitive(b"ATAT"));
+    }
+
+    /// A bundle's alleles: distinct, frequencies summing to one, the reference the window itself,
+    /// each pure allele's member runs exactly its counts of its motifs, and every kind of derived
+    /// allele turning up somewhere.
+    #[test]
+    fn bundle_alleles_spell_their_member_counts() {
+        let cohort = small_cohort(1, 120);
+        let mut kinds = std::collections::HashSet::new();
+        for bundle in &cohort.bundles {
+            let total: f64 = bundle.alleles.iter().map(|one| one.frequency).sum();
+            assert!((total - 1.0).abs() < 1e-9);
+            let window =
+                &cohort.contigs[bundle.contig].bases[bundle.window_start()..bundle.window_end()];
+            assert_eq!(bundle.alleles[0].sequence, window);
+            assert_eq!(bundle.alleles[0].repeats, bundle.shape.reference_repeats());
+            for (index, allele) in bundle.alleles.iter().enumerate() {
+                kinds.insert(allele.change);
+                assert!(
+                    bundle.alleles[..index]
+                        .iter()
+                        .all(|earlier| earlier.sequence != allele.sequence)
+                );
+                assert!(allele.repeats.iter().all(|count| *count >= 1));
+                if allele.change.is_pure_length() {
+                    for ((run, (motif, _)), count) in allele
+                        .member_runs
+                        .iter()
+                        .zip(&bundle.shape.members)
+                        .zip(&allele.repeats)
+                    {
+                        assert_eq!(
+                            allele.sequence[run.0..run.1],
+                            motif.repeat(*count as usize)[..]
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(kinds.len(), 5, "{kinds:?}");
+    }
+
+    /// **A bundle stutters in every member**: each copy of each bundle carries one stutter site
+    /// per member with a pure run, at that member's motif length and its count in the allele the
+    /// copy carries.
+    #[test]
+    fn a_bundle_has_one_stutter_site_per_member() {
+        let cohort = small_cohort(3, 60);
+        for sample in 0..3 {
+            for copy in 0..2 {
+                for contig in 0..cohort.contigs.len() {
+                    let haplotype = build_haplotype(&cohort, contig, sample, copy);
+                    let mut sites = haplotype.sites.iter();
+                    for event in &cohort.events[contig] {
+                        let expected: Vec<(usize, u32)> = match *event {
+                            Event::Segment(index) => {
+                                let segment = &cohort.segments[index];
+                                let allele = &segment.alleles
+                                    [cohort.segment_genotypes[index][sample][copy] as usize];
+                                allele
+                                    .pure_span
+                                    .map(|_| (segment.period(), allele.repeats))
+                                    .into_iter()
+                                    .collect()
+                            }
+                            Event::Bundle(index) => {
+                                let bundle = &cohort.bundles[index];
+                                let allele = &bundle.alleles
+                                    [cohort.bundle_genotypes[index][sample][copy] as usize];
+                                assert_eq!(allele.pure_spans.len(), bundle.shape.members.len());
+                                allele
+                                    .pure_spans
+                                    .iter()
+                                    .zip(bundle.shape.periods())
+                                    .zip(&allele.repeats)
+                                    .filter(|((span, _), _)| span.is_some())
+                                    .map(|((_, period), repeats)| (period, *repeats))
+                                    .collect()
+                            }
+                            Event::Generic(_) => Vec::new(),
+                        };
+                        for (period, repeats) in expected {
+                            let site = sites.next().expect("a site for every member");
+                            assert_eq!((site.period, site.repeats), (period, repeats));
+                        }
+                    }
+                    assert!(sites.next().is_none());
+                }
+            }
+        }
+    }
+
     /// **The truth VCF reproduces the truth sequences**: applying its phased records to the
     /// reference gives each sample's two copies of every contig exactly, the copies the reads
-    /// were cut from — and so every segment's window as the allele table spells it.
+    /// were cut from — and so every segment's and every bundle's window as the allele tables spell it.
     #[test]
     fn truth_vcf_reproduces_the_truth_sequences() {
-        let cohort = small_cohort(6);
+        let cohort = small_cohort(6, 40);
         let mut vcf = Vec::new();
         write_truth_vcf(&mut vcf, &cohort).expect("writing to memory");
         let text = String::from_utf8(vcf).expect("ASCII");
@@ -1948,6 +3054,7 @@ mod tests {
         records
             .sort_by_key(|fields| (contig_index(fields[0]), fields[1].parse::<usize>().unwrap()));
         let mut segment_records = 0;
+        let mut bundle_records = 0;
         for sample in 0..cohort.samples.len() {
             for copy in 0..2 {
                 for (contig, reference) in cohort.contigs.iter().enumerate() {
@@ -1970,7 +3077,8 @@ mod tests {
                             rebuilt.extend_from_slice(alleles[called].as_bytes());
                             cursor = position + fields[3].len();
                         }
-                        segment_records += usize::from(fields[2] != ".");
+                        segment_records += usize::from(fields[2].starts_with("seg"));
+                        bundle_records += usize::from(fields[2].starts_with("bun"));
                     }
                     rebuilt.extend_from_slice(&reference.bases[cursor..]);
                     let built = build_haplotype(&cohort, contig, sample, copy);
@@ -1983,13 +3091,14 @@ mod tests {
             }
         }
         assert!(segment_records > 0);
+        assert!(bundle_records > 0);
     }
 
     /// Every allele drawn is distinct, the frequencies sum to one, each kind of derived allele
     /// turns up, and an allele's pure stretch is its repeat.
     #[test]
     fn alleles_are_distinct_and_their_frequencies_sum_to_one() {
-        let cohort = small_cohort(1);
+        let cohort = small_cohort(1, 0);
         let mut kinds = std::collections::HashSet::new();
         for segment in &cohort.segments {
             let total: f64 = segment.alleles.iter().map(|one| one.frequency).sum();
@@ -2064,5 +3173,135 @@ mod tests {
             Settings::parse(&["design=one_outlier".to_string(), "samples=3".to_string()]).unwrap();
         assert_eq!(settings.design.level_of(0), StutterLevel::HeavyPcr);
         assert_eq!(settings.design.level_of(1), StutterLevel::PcrFree);
+        assert_eq!(Settings::default().bundles, DEFAULT_BUNDLES);
+        assert_eq!(
+            Settings::parse(&["bundles=0".to_string()]).unwrap().bundles,
+            0
+        );
+    }
+
+    /// **Every bundle allele's member runs lie on its members' bases, derived alleles included**:
+    /// between consecutive runs sit exactly the reference gap bases, so a length change in an
+    /// earlier member moves the later runs with it; an untouched member's run is its motif `count`
+    /// times; the member a deletion across the edge cut is the tail (left edge) or the head (right
+    /// edge) of a run of its motif holding `count` whole copies; a substitution changes one base of
+    /// one run. And every member's stretch where stutter acts lies inside its run and repeats with
+    /// the member's motif length.
+    #[test]
+    fn every_bundle_allele_keeps_its_member_runs_on_its_members() {
+        let cohort = small_cohort(1, 150);
+        let mut edge_deletions = [0_usize; 2];
+        for bundle in &cohort.bundles {
+            let shape = &bundle.shape;
+            let last = shape.members.len() - 1;
+            for allele in &bundle.alleles {
+                let runs = &allele.member_runs;
+                for (index, gap) in shape.gaps.iter().enumerate() {
+                    assert_eq!(&allele.sequence[runs[index].1..runs[index + 1].0], &gap[..]);
+                }
+                let mut changed_bases = 0;
+                for (member, ((motif, _), count)) in
+                    shape.members.iter().zip(&allele.repeats).enumerate()
+                {
+                    let period = motif.len();
+                    let run = &allele.sequence[runs[member].0..runs[member].1];
+                    let whole = motif.repeat(*count as usize);
+                    let cut_left = allele.change == AlleleChange::EdgeDeletion
+                        && member == 0
+                        && runs[0].0 < WINDOW_FLANK_BP;
+                    let cut_right = allele.change == AlleleChange::EdgeDeletion
+                        && member == last
+                        && allele.sequence.len() - runs[last].1 < WINDOW_FLANK_BP;
+                    if cut_left || cut_right {
+                        edge_deletions[usize::from(cut_right)] += 1;
+                        assert_eq!(run.len() / period, *count as usize);
+                        assert!((period..run.len()).all(|at| run[at] == run[at - period]));
+                        if cut_left {
+                            assert_eq!(&run[run.len() - period..], &motif[..]);
+                        } else {
+                            assert_eq!(&run[..period], &motif[..]);
+                        }
+                    } else {
+                        assert_eq!(run.len(), whole.len(), "{:?}", allele.change);
+                        changed_bases += run.iter().zip(&whole).filter(|(a, b)| a != b).count();
+                    }
+                    if let Some((start, end)) = allele.pure_spans[member] {
+                        assert!(runs[member].0 <= start && end <= runs[member].1);
+                        assert!(end - start >= 2 * period);
+                        let stretch = &allele.sequence[start..end];
+                        assert!(
+                            (period..stretch.len()).all(|at| stretch[at] == stretch[at - period])
+                        );
+                    }
+                }
+                let expected = usize::from(allele.change == AlleleChange::InteriorSubstitution);
+                assert_eq!(changed_bases, expected, "{:?}", allele.change);
+            }
+        }
+        assert!(
+            edge_deletions[0] > 0 && edge_deletions[1] > 0,
+            "{edge_deletions:?}"
+        );
+    }
+
+    /// **The scanner copy finds what the library's scanner finds**, after the calling copy floor,
+    /// on bundle-like sequences whose gaps follow no rule — so the copy cannot drift from
+    /// `tandem_repeat::find_tandem_repeats` without this test saying so. The copy stays the
+    /// fixture's own; this only reports when the two part.
+    #[test]
+    fn the_scanner_copy_agrees_with_the_library_scanner() {
+        use pop_var_caller::tandem_repeat::{PeriodRange, ScanParams, find_tandem_repeats};
+        let periods = PeriodRange::new(1, 6).expect("1..=6 is a valid range");
+        let mut draw = Draw::new(29);
+        let mut differing = 0;
+        for _ in 0..3_000 {
+            let mut bases = Vec::new();
+            append_aperiodic(&mut bases, 20, &mut draw);
+            for _ in 0..2 + draw.below(2) {
+                let period = 1 + draw.below(6) as usize;
+                let motifs = MOTIFS[period - 1];
+                let motif = motifs[draw.below(motifs.len() as u64) as usize].as_bytes();
+                bases.extend(motif.repeat(2 + draw.below(14) as usize));
+                for _ in 0..draw.below(8) {
+                    bases.push(FOUR_BASES[draw.below(4) as usize]);
+                }
+            }
+            append_aperiodic(&mut bases, 20, &mut draw);
+            let library: Vec<(usize, usize, usize)> =
+                find_tandem_repeats(&bases, periods, &ScanParams::default())
+                    .into_iter()
+                    .map(|one| {
+                        (
+                            one.start as usize,
+                            one.end as usize,
+                            usize::from(one.period),
+                        )
+                    })
+                    .filter(|(start, end, period)| {
+                        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+                    })
+                    .collect();
+            let mut library = library;
+            library.sort_unstable();
+            differing += usize::from(scanner_repeats(&bases) != library);
+        }
+        assert_eq!(
+            differing, 0,
+            "{differing} of 3000 sequences scanned differently"
+        );
+    }
+
+    /// The scanner copy's scores and the widest gap laid are the library's, so a retuned scanner or
+    /// bundle radius in `src/` shows up here rather than as different bundles.
+    #[test]
+    fn the_scanner_copy_uses_the_library_scores() {
+        use pop_var_caller::region_typing::segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
+        use pop_var_caller::tandem_repeat::{DEFAULT_MATCH_REWARD, DEFAULT_MISMATCH_PENALTY};
+        assert_eq!(SCANNER_MATCH_REWARD, i64::from(DEFAULT_MATCH_REWARD));
+        assert_eq!(
+            SCANNER_MISMATCH_PENALTY,
+            i64::from(DEFAULT_MISMATCH_PENALTY)
+        );
+        assert_eq!(LONGEST_BUNDLE_GAP as u64, DEFAULT_BUNDLE_THRESHOLD - 1);
     }
 }

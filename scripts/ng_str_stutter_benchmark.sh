@@ -19,7 +19,8 @@
 #
 # What it writes into <out-dir>, beside the simulator's own files:
 #   bams/<sample>.bam          minimap2 -ax sr, sorted and indexed; one read group a sample
-#   typing_check.tsv           the regions the calling typing makes of the reference
+#   typing_check.tsv           the regions the calling typing makes of the reference (checked
+#                              against segments.bed and bundles.bed before anything is mapped)
 #   ng_defaults.vcf            call-from-alignments --defaults
 #   ng_fitted.vcf              call-from-psps with that fit
 #   ng_true_stutter.vcf        call-from-psps with the defaults and the simulator's true stutter
@@ -105,7 +106,9 @@ simulate() {
 }
 
 # **The typed STR segments must be the planted ones**, exactly: a segment the typing misses is
-# scored for ng on the generic path alone, and one it invents has no truth. Stops the run if not.
+# scored for ng on the generic path alone, and one it invents has no truth. **And every planted STR
+# bundle must be typed as one bundle with the drawn members** (scripts/ng_str_stutter_check_bundles.py
+# says exactly what matches). Stops the run if not.
 check_typing() {
     NG_REFERENCE_CHECK=skip "$typing_dump" "$reference" "$out/confident.bed" calling \
         > "$out/typing_check.tsv"
@@ -119,6 +122,9 @@ check_typing() {
         exit 1
     fi
     echo "       typing: $(echo "$planted" | wc -l) STR segments, all as planted"
+    if [[ -f "$out/bundles.bed" ]]; then
+        python3 "$root/scripts/ng_str_stutter_check_bundles.py" "$out"
+    fi
 }
 
 samples() {
@@ -258,6 +264,11 @@ run_gatk() {
 }
 
 # HipSTR's region file: chrom, 1-based start, end, period, copies, name — the STR segments.
+#
+# **Not the STR bundles** (bundles.bed): a HipSTR region carries one period and HipSTR fits one
+# stutter model to it, so a bundle given as its hull would be called with every member's stutter
+# priced at one member's period, and its calls would measure that mismatch rather than HipSTR. It is
+# scored on segments only, as before; GATK and ng are scored on the bundles.
 #
 # **Twice, because its defaults call nothing at low total depth**: HipSTR learns each locus's
 # stutter from the cohort's reads and skips a locus with fewer than 100 reads over all samples

@@ -265,8 +265,10 @@ nothing here can be measured under PCR stutter or in a cohort. Built first (§10
   SNP beside the hull, a deletion across an outer edge) as for segments.
 - **Stutter.** One stutter site per member in each molecule, each at its member's own rate. The
   molecule cutter already applies several sites a molecule overlaps.
-- **Truth.** One record per bundle window. `segments.bed` and the allele tables gain a kind column
-  and per-member motifs and counts.
+- **Truth.** One record per bundle window. The bundles' table and allele tables carry per-member
+  motifs and counts — in files of their own (`bundles.bed`, `bundle_alleles.tsv`,
+  `bundle_genotypes.tsv`) rather than a kind column on the segments', so that the segments' files
+  stay byte-identical when no bundle is laid (`str_stutter_benchmark.md` §11.2).
 - **Scoring.** A cell is one sample at one bundle, scored exactly as a segment's cell — the
   scorer compares sequences over the window and needs no member structure — and reported
   separately from segments.

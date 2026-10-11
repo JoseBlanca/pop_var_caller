@@ -20,7 +20,8 @@ dst=${STR_RUNS_DIR:-$root/tmp/str_accuracy/runs}/$1
 [[ -d $src ]] || { echo "no run at $src" >&2; exit 1; }
 mkdir -p "$dst"
 for f in reference.fa reference.fa.fai reference.dict reference.fa.repeats.parquet segments.bed confident.bed \
-         segment_alleles.tsv segment_genotypes.tsv truth.vcf libraries.tsv stutter_rates.tsv simulate.log \
+         segment_alleles.tsv segment_genotypes.tsv bundles.bed bundle_alleles.tsv bundle_genotypes.tsv \
+         truth.vcf libraries.tsv stutter_rates.tsv simulate.log \
          ng_defaults.parameters.toml true_stutter.parameters.toml gatk.vcf.gz gatk.vcf.gz.tbi \
          hipstr.vcf.gz hipstr.vcf.gz.tbi hipstr_fixed_stutter.vcf.gz hipstr_fixed_stutter.vcf.gz.tbi \
          ng_main_true_stutter.vcf; do

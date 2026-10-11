@@ -42,18 +42,41 @@ off: GQ for ng and GATK; for HipSTR, its posterior probability of the genotype w
 scale, capped at 99 as the others are. Where a cell takes several records, the smallest GQ among the
 records whose call is not homozygous reference.
 
+**STR bundles** (two or three repeats a few bases apart, `doc/devel/ng/spec/str_bundle_loci.md`) are
+scored the same way: one cell is one sample at one bundle, its truth the sample's two sequences over
+the bundle's window (the hull, first member's start to last member's end, and 30 bases either side;
+`bundle_alleles.tsv` and `bundle_genotypes.tsv`). Their cells go to files of their own, so the
+segments' files are what they were and every reader of them still reads segments only. A bundle has
+one motif length per member, so it is summarised by its number of members and by its **longest
+member** — the one with the most reference bases — with that member's motif length and repeat band.
+HipSTR is not given the bundles (the driver's region file holds segments only) and is not scored on
+them. A run made before the simulator laid bundles has no bundle files, and only segments are
+scored.
+
 **SNPs and indels**: RTG vcfeval (where `RTG_JAR` finds it) per sample per caller against the truth VCF, once inside the
-segments' windows and once outside them (the rest of the genome). HipSTR inside only.
+segments' windows, once inside the bundles' windows (when there are bundles), and once outside both
+(the rest of the genome). HipSTR inside the segments' windows only. **`outside` therefore differs
+between runs**: in a run made before the simulator laid bundles it is everything outside the
+segments' windows, in a run with bundles it leaves out the bundles' windows too. A stretch's vcfeval
+result is reused on a rerun only while its window file, the truth and the call file are unchanged.
 
 ## What it writes into <run-dir>
 
 - `score_cells.tsv` — one row per caller, sample and segment.
 - `score_summary.tsv` — counts by caller, motif length, repeat band and outcome.
-- `score_vcfeval.tsv` — vcfeval's counts per caller, sample and stretch.
+- `score_bundle_cells.tsv` — one row per caller, sample and bundle: the members' motif lengths,
+  motifs and reference repeat counts, the longest member's motif length and repeat band
+  (`longest_member_period`, `longest_member_repeat_band`), the truth,
+  the outcome and the genotype quality.
+- `score_bundle_summary.tsv` — counts by caller, number of members, longest member's motif length and
+  repeat band, truth and outcome.
+- `score_vcfeval.tsv` — vcfeval's counts per caller, sample and stretch (`segments`, `bundles`,
+  `outside`).
 """
 
 import collections
 import gzip
+import hashlib
 import math
 import os
 import subprocess
@@ -140,6 +163,47 @@ def read_truth(run):
             name, sample, first, second = line.rstrip("\n").split("\t")
             genotypes[name][sample] = (int(first), int(second))
     return segments, genotypes
+
+
+class Bundle:
+    """One STR bundle's truth: the attributes `score_cell` reads (a window and its alleles), as a
+    Segment has them, and the members' motif lengths, motifs and reference repeat counts."""
+
+    def __init__(self, name, chrom, window_start, window_end, periods, motifs, reference_repeats):
+        self.name, self.chrom = name, chrom
+        self.window_start, self.window_end = window_start, window_end
+        self.periods, self.motifs, self.reference_repeats = periods, motifs, reference_repeats
+        self.alleles = {}  # index -> (sequence, change)
+
+    def longest_member(self):
+        """The member with the most reference bases (the first, on a tie), as (period, repeats)."""
+        return max(zip(self.periods, self.reference_repeats), key=lambda one: one[0] * one[1])
+
+
+def read_bundles(run):
+    """The STR bundles' truth, as read_truth gives the segments'; empty for a run made before the
+    simulator laid bundles."""
+    bundles, genotypes = {}, collections.defaultdict(dict)
+    path = os.path.join(run, "bundle_alleles.tsv")
+    if not os.path.exists(path):
+        return bundles, genotypes
+    with open(path) as handle:
+        header = handle.readline().rstrip("\n").split("\t")
+        for line in handle:
+            row = dict(zip(header, line.rstrip("\n").split("\t")))
+            bundle = bundles.get(row["bundle"])
+            if bundle is None:
+                bundle = bundles[row["bundle"]] = Bundle(
+                    row["bundle"], row["chrom"], int(row["window_start"]), int(row["window_end"]),
+                    [int(one) for one in row["periods"].split(",")], row["motifs"].split(","),
+                    [int(one) for one in row["reference_repeats"].split(",")])
+            bundle.alleles[int(row["allele"])] = (row["sequence"], row["change"])
+    with open(os.path.join(run, "bundle_genotypes.tsv")) as handle:
+        handle.readline()
+        for line in handle:
+            name, sample, first, second = line.rstrip("\n").split("\t")
+            genotypes[name][sample] = (int(first), int(second))
+    return bundles, genotypes
 
 
 class Record:
@@ -299,23 +363,55 @@ def score_cell(caller, segment, sample, truth_pair, calls, contigs):
     return "wrong", quality
 
 
-def write_windows_beds(run, segments, contigs):
+def write_windows_beds(run, segments, bundles, contigs):
+    """The three stretches vcfeval is run over: the segments' windows, the bundles' windows, and
+    everything outside both."""
     inside = os.path.join(run, "score_windows.bed")
+    in_bundles = os.path.join(run, "score_bundle_windows.bed")
     outside = os.path.join(run, "score_outside_windows.bed")
     by_chrom = collections.defaultdict(list)
-    for segment in segments.values():
-        by_chrom[segment.chrom].append((segment.window_start, segment.window_end))
-    with open(inside, "w") as one, open(outside, "w") as other:
+    for kind, features in (("segment", segments), ("bundle", bundles)):
+        for feature in features.values():
+            by_chrom[feature.chrom].append((feature.window_start, feature.window_end, kind))
+    with open(inside, "w") as one, open(in_bundles, "w") as bundle_out, open(outside, "w") as other:
         for chrom in contigs:
             cursor = 0
-            for start, end in sorted(by_chrom.get(chrom, [])):
-                one.write(f"{chrom}\t{start}\t{end}\n")
+            for start, end, kind in sorted(by_chrom.get(chrom, [])):
+                (one if kind == "segment" else bundle_out).write(f"{chrom}\t{start}\t{end}\n")
                 if start > cursor:
                     other.write(f"{chrom}\t{cursor}\t{start}\n")
-                cursor = end
+                cursor = max(cursor, end)
             if cursor < len(contigs[chrom]):
                 other.write(f"{chrom}\t{cursor}\t{len(contigs[chrom])}\n")
-    return inside, outside
+    return inside, in_bundles, outside
+
+
+def bundle_band(bundle):
+    """A bundle's place on the stutter curve: its longest member's, as repeat_band gives it."""
+    period, repeats = bundle.longest_member()
+    return period, repeat_band(period, repeats)
+
+
+def file_digest(path):
+    """SHA-256 of a file's bytes, read in blocks."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def read_stamp(path):
+    """The input digest saved beside a cached result, or None when there is none."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as handle:
+        return handle.read().strip()
+
+
+def write_stamp(path, digest):
+    with open(path, "w") as handle:
+        handle.write(digest + "\n")
 
 
 def run_vcfeval(run, caller, path, samples, stretches):
@@ -327,25 +423,37 @@ def run_vcfeval(run, caller, path, samples, stretches):
     if not os.path.isdir(sdf):
         subprocess.run(rtg + ["format", "-o", sdf, os.path.join(run, "reference.fa")],
                        check=True, stdout=subprocess.DEVNULL)
+    truth_source = os.path.join(run, "truth.vcf")
+    truth_digest = file_digest(truth_source)
     truth = os.path.join(work, "truth.vcf.gz")
-    if not os.path.exists(truth + ".tbi"):
-        subprocess.run(["bcftools", "view", "-Oz", "-o", truth, os.path.join(run, "truth.vcf")], check=True)
-        subprocess.run(["bcftools", "index", "-t", truth], check=True)
+    truth_stamp = truth + ".inputs"
+    if not os.path.exists(truth + ".tbi") or read_stamp(truth_stamp) != truth_digest:
+        subprocess.run(["bcftools", "view", "-Oz", "-o", truth, truth_source], check=True)
+        subprocess.run(["bcftools", "index", "-t", "-f", truth], check=True)
+        write_stamp(truth_stamp, truth_digest)
+    calls_digest = file_digest(path)
     if not path.endswith(".gz"):
         packed = os.path.join(work, caller + ".vcf.gz")
         subprocess.run(["bcftools", "view", "-Oz", "-o", packed, path], check=True)
+        subprocess.run(["bcftools", "index", "-t", "-f", packed], check=True)
         path = packed
-    if not os.path.exists(path + ".tbi"):
+    elif not os.path.exists(path + ".tbi"):
         subprocess.run(["bcftools", "index", "-t", "-f", path], check=True)
     rows = []
     for sample in samples:
         for stretch, bed in stretches:
             out = os.path.join(work, f"{caller}.{sample}.{stretch}")
-            if not os.path.exists(os.path.join(out, "summary.txt")):
+            # A cached result stands only for the inputs it was computed from: the stretch's window
+            # file changes meaning between scorer versions (`outside` lost the bundles' windows on
+            # 2026-10-11), and a rerun can replace the truth or the calls.
+            stamp = os.path.join(out, "inputs.sha256")
+            digest = f"{truth_digest} {calls_digest} {file_digest(bed)}"
+            if not os.path.exists(os.path.join(out, "summary.txt")) or read_stamp(stamp) != digest:
                 subprocess.run(["rm", "-rf", out])
                 subprocess.run(rtg + ["vcfeval", "-b", truth, "-c", path, "-t", sdf, "-o", out,
                                       "--sample", sample, "--bed-regions", bed, "--all-records"],
                                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                write_stamp(stamp, digest)
             with open(os.path.join(out, "summary.txt")) as handle:
                 lines = [line.split() for line in handle if line.strip() and not line.startswith("-")]
             header, values = lines[0], lines[-1]
@@ -353,6 +461,40 @@ def run_vcfeval(run, caller, path, samples, stretches):
             rows.append((caller, sample, stretch, row.get("True-pos-baseline", "0"),
                          row.get("False-pos", "0"), row.get("False-neg", "0")))
     return rows
+
+
+def score_bundles(run, callers, samples, bundles, genotypes, contigs):
+    """The bundles' cells, scored exactly as the segments' (score_cell compares sequences over the
+    window and needs no member structure), into score_bundle_cells.tsv and
+    score_bundle_summary.tsv. HipSTR is not given the bundles, so it is not scored on them."""
+    summary = collections.Counter()
+    with open(os.path.join(run, "score_bundle_cells.tsv"), "w") as cells:
+        cells.write("caller\tbundle\tsample\tmembers\tperiods\tmotifs\treference_repeats\t"
+                    "longest_member_period\tlongest_member_repeat_band\ttruth\ttruth_changes\toutcome\t"
+                    "genotype_quality\n")
+        for caller, name in callers:
+            path = os.path.join(run, name)
+            if caller in HIPSTR or not os.path.exists(path):
+                continue
+            calls = CallIndex(read_calls(path, caller, samples))
+            for bundle in bundles.values():
+                longest_period, band = bundle_band(bundle)
+                members = len(bundle.periods)
+                for sample in samples:
+                    truth_pair = genotypes[bundle.name][sample]
+                    changes = ",".join(sorted({bundle.alleles[i][1] for i in truth_pair if i != 0})) or "."
+                    outcome, quality = score_cell(caller, bundle, sample, truth_pair, calls, contigs)
+                    truth = "variant" if changes != "." else "reference"
+                    cells.write(f"{caller}\t{bundle.name}\t{sample}\t{members}\t"
+                                f"{','.join(map(str, bundle.periods))}\t{','.join(bundle.motifs)}\t"
+                                f"{','.join(map(str, bundle.reference_repeats))}\t{longest_period}\t"
+                                f"{band}\t{truth}\t{changes}\t{outcome}\t"
+                                f"{'.' if quality is None else quality}\n")
+                    summary[(caller, members, longest_period, band, truth, outcome)] += 1
+    with open(os.path.join(run, "score_bundle_summary.tsv"), "w") as out:
+        out.write("caller\tmembers\tlongest_member_period\tlongest_member_repeat_band\ttruth\toutcome\tcells\n")
+        for key in sorted(summary):
+            out.write("\t".join(map(str, key)) + f"\t{summary[key]}\n")
 
 
 def main():
@@ -392,18 +534,24 @@ def main():
         for key in sorted(summary):
             out.write("\t".join(map(str, key)) + f"\t{summary[key]}\n")
 
+    bundles, bundle_genotypes = read_bundles(run)
+    if bundles:
+        score_bundles(run, callers, samples, bundles, bundle_genotypes, contigs)
+
     if os.environ.get("SKIP_VCFEVAL") == "1":
         return
     if not os.path.exists(RTG_JAR):
         print(f"[score] no RTG tools at {RTG_JAR}; vcfeval skipped (set RTG_JAR)", file=sys.stderr)
         return
-    inside, outside = write_windows_beds(run, segments, contigs)
+    inside, in_bundles, outside = write_windows_beds(run, segments, bundles, contigs)
     rows = []
     for caller, name in CALLERS:
         path = os.path.join(run, name)
         if not os.path.exists(path):
             continue
-        stretches = [("segments", inside)] + ([] if caller in HIPSTR else [("outside", outside)])
+        stretches = [("segments", inside)]
+        if caller not in HIPSTR:
+            stretches += ([("bundles", in_bundles)] if bundles else []) + [("outside", outside)]
         rows += run_vcfeval(run, caller, path, samples, stretches)
     with open(os.path.join(run, "score_vcfeval.tsv"), "w") as out:
         out.write("caller\tsample\tstretch\ttrue_positives\tfalse_positives\tfalse_negatives\n")

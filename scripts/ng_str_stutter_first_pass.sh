@@ -12,6 +12,12 @@
 # and its fit is reused at 5×, 15× and 60× (`FIT_FROM`; the samples are the same at every depth).
 # A run that fails is logged and the grid moves on; rerunning the script resumes every run where
 # it stopped. Runs are `<grid-dir>/<design>_<samples>s_<depth>x`; progress in `<grid-dir>/grid.log`.
+#
+# **A simulator built since 2026-10-11 lays 500 STR bundles by default**, and the segments then sit
+# elsewhere along the genome: the cohorts are not the 2026-10-10 first pass's
+# (doc/devel/reports/implementations/str_stutter_benchmark_first_pass_2026-10-10.md). Those come
+# back only with `bundles=0`, which this script does not pass. A fit from a run made before bundles
+# is refused by `FIT_FROM`, because the settings line it compares now names `bundles`.
 set -uo pipefail
 
 grid=${1:?usage: $0 <grid-dir> <bin-dir>}
