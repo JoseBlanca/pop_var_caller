@@ -22,7 +22,7 @@ import sys
 import numpy as np
 from scipy.optimize import minimize
 
-SPAN = 6
+SPAN = 6  # replaced by the span genotypes.tsv records, in main()
 OFFSETS = np.arange(-SPAN, SPAN + 1)
 K = len(OFFSETS)
 MAX_TRACTS = 1500
@@ -39,7 +39,13 @@ def load(path):
 
 
 def genotype_order(directory):
+    """The genotype pairs' allele classes, and setting the span from them."""
+    global SPAN, OFFSETS, K, DISTANCE
     pairs = np.loadtxt(os.path.join(directory, "genotypes.tsv"), skiprows=1, dtype=int)
+    SPAN = int(pairs.max())
+    OFFSETS = np.arange(-SPAN, SPAN + 1)
+    K = len(OFFSETS)
+    DISTANCE = np.arange(1, SPAN + 1, dtype=float)
     return pairs[:, 0] + SPAN, pairs[:, 1] + SPAN
 
 
@@ -84,6 +90,10 @@ def em(excess, values, weights=None, start=None, iterations=2000, tolerance=1e-1
     return p
 
 
+def safe_exp(x):
+    return math.exp(max(min(x, 50.0), -50.0))
+
+
 def expit(x):
     x = max(min(x, 700.0), -700.0)
     return 1.0 / (1.0 + math.exp(-x))
@@ -124,8 +134,8 @@ SHAPES = {
     # the stepwise mutation model: one fall-off, symmetric
     "smm": (1, lambda x: (lambda r: (lambda w: w / w.sum())(r ** np.abs(OFFSETS).astype(float)))(expit(x[0]))),
     "ref_geo4": (4, lambda x: with_reference(expit(x[0]), side_tails(expit(x[1]), flip(geometric(expit(x[2]))), geometric(expit(x[3]))))),
-    "ref_power3": (3, lambda x: with_reference(expit(x[0]), side_tails(expit(x[1]), flip(power(math.exp(x[2]))), power(math.exp(x[2]))))),
-    "ref_power4": (4, lambda x: with_reference(expit(x[0]), side_tails(expit(x[1]), flip(power(math.exp(x[2]))), power(math.exp(x[3]))))),
+    "ref_power3": (3, lambda x: with_reference(expit(x[0]), side_tails(expit(x[1]), flip(power(safe_exp(x[2]))), power(safe_exp(x[2]))))),
+    "ref_power4": (4, lambda x: with_reference(expit(x[0]), side_tails(expit(x[1]), flip(power(safe_exp(x[2]))), power(safe_exp(x[3]))))),
     # a power tail whose first step is free: the one-repeat share set apart on each side
     "ref_step_power6": (
         6,
@@ -133,8 +143,8 @@ SHAPES = {
             expit(x[0]),
             side_tails(
                 expit(x[1]),
-                flip(np.concatenate(([1.0], expit(x[2]) * power(math.exp(x[3]))[1:] / power(math.exp(x[3]))[1]))),
-                np.concatenate(([1.0], expit(x[4]) * power(math.exp(x[5]))[1:] / power(math.exp(x[5]))[1])),
+                flip(np.concatenate(([1.0], expit(x[2]) * power(safe_exp(x[3]))[1:] / power(safe_exp(x[3]))[1]))),
+                np.concatenate(([1.0], expit(x[4]) * power(safe_exp(x[5]))[1:] / power(safe_exp(x[5]))[1])),
             ),
         ),
     ),

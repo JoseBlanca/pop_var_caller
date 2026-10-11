@@ -34,6 +34,10 @@ struct Cli {
     /// One homozygote excess for every sample.
     #[arg(long, default_value_t = 0.0)]
     homozygote_excess: f64,
+    /// How far either side of the reference length alleles may sit (the fit's `ALLELE_SPAN` by
+    /// default).
+    #[arg(long)]
+    allele_span: Option<i32>,
     /// A parameters file whose per-sample homozygote excesses are used instead.
     #[arg(long)]
     fitted: Option<std::path::PathBuf>,
@@ -57,7 +61,10 @@ fn main() {
     let CohortTractStrata { strata, .. } =
         the_tract_strata_of_a_cohort(&mut evidence, &plan.loci, &contig_of, &pooled)
             .unwrap_or_else(|error| panic!("{error:?}"));
-    let config = SsrFitConfig::default();
+    let mut config = SsrFitConfig::default();
+    if let Some(span) = cli.allele_span {
+        config.allele_span = span;
+    }
     let names: Vec<String> = evidence.sample_names().map(str::to_owned).collect();
     let excess: Vec<f64> = match &cli.fitted {
         Some(path) => {
