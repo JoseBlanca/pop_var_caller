@@ -39,6 +39,9 @@ struct Cli {
     /// One homozygote excess for every sample.
     #[arg(long, default_value_t = 0.0)]
     homozygote_excess: f64,
+    /// A parameters file whose per-sample homozygote excesses are used instead.
+    #[arg(long)]
+    fitted: Option<PathBuf>,
     /// Where the class files go.
     #[arg(long)]
     out_dir: PathBuf,
@@ -49,7 +52,8 @@ fn main() {
     let OpenedCensuses {
         mut evidence, plan, ..
     } = open_the_censuses(&cli.args).unwrap_or_else(|error| panic!("{error:?}"));
-    let samples = evidence.sample_names().count();
+    let names: Vec<String> = evidence.sample_names().map(str::to_owned).collect();
+    let samples = names.len();
     let contig_of = contig_id_of(&plan);
     let pooled = every_read_group_pooled(&evidence);
     let CohortTractStrata { strata, .. } =
@@ -91,7 +95,25 @@ fn main() {
 
     std::fs::create_dir_all(&cli.out_dir).expect("the output directory");
     let config = SsrFitConfig::default();
-    let excess = vec![cli.homozygote_excess; samples];
+    let excess: Vec<f64> = match &cli.fitted {
+        Some(path) => {
+            let file = pop_var_caller::calling::parameters_file::ParametersFile::from_toml(
+                &std::fs::read_to_string(path).expect("the parameters file reads"),
+            )
+            .expect("the parameters file parses");
+            let by_name: BTreeMap<&str, f64> = file
+                .inbreeding
+                .by_sample
+                .iter()
+                .map(|row| (row.sample.as_str(), row.inbreeding_coefficient.value))
+                .collect();
+            names
+                .iter()
+                .map(|name| *by_name.get(name.as_str()).unwrap_or(&cli.homozygote_excess))
+                .collect()
+        }
+        None => vec![cli.homozygote_excess; samples],
+    };
     let mut wrote_genotypes = false;
     for evidence in &strata {
         let key = (evidence.stratum.period, evidence.stratum.reference_repeats);
