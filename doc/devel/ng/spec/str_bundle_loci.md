@@ -258,9 +258,14 @@ same way (§6 there). The repeat annotation becomes per member:
 nothing here can be measured under PCR stutter or in a cohort. Built first (§10, step 1):
 
 - **The reference.** A share of the shapes the simulator lays are bundles: two members (most) or
-  three, motifs drawn as for segments (same or different), gaps of 1 to 14 bases — never 0 between
-  two members of one motif, which the typing would read as one repeat — and hulls of at most 100
-  bases. Gap bases are drawn so they extend neither neighbour's motif, as the spacer does today.
+  three, gaps of 1 to 14 bases — never 0 between two members of one motif, which the typing would
+  read as one repeat — and hulls of at most 100 bases. Gap bases are drawn so they extend neither
+  neighbour's motif, as the spacer does today. Members are drawn to resemble HG002's bundles
+  (`str_stutter_benchmark.md` §11.1): motif lengths in HG002's shares (half mononucleotides, three
+  in ten dinucleotides), most members at or just above the calling floor, and 7 in 100 mono- and
+  dinucleotide members long (16 to 30 copies). The median hull is 36 bases against HG002's 34, and
+  about one bundle in eight holds a mono- or dinucleotide run of 16 copies or more, as in HG002
+  (284 of 2,410).
 - **Alleles.** Length changes drawn per member; derived alleles (a substitution inside a member, a
   SNP beside the hull, a deletion across an outer edge) as for segments.
 - **Stutter.** One stutter site per member in each molecule, each at its member's own rate. The

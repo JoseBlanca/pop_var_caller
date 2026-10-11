@@ -212,6 +212,34 @@ const DEFAULT_BUNDLES: usize = 500;
 /// is set higher so that three-member bundles are numerous enough to count.
 const THREE_MEMBER_SHARE: f64 = 0.15;
 
+/// How often a bundle member has each motif length, one to six, in hundredths: HG002's shares.
+/// Of the 5,067 members of the 2,410 bundles of at most 100 bases that the typing finds in HG002's
+/// tandem-repeat regions, 2,540, 1,519, 249, 390, 167 and 202 have motif lengths one to six
+/// (measured 2026-10-11, `str_stutter_benchmark.md` §11.1). Bundles are mostly short repeats side by
+/// side; drawn uniform over one to six, two members at their floors and a gap of the mean length
+/// would already make a hull of 44 bases, against HG002's median of 34.
+const BUNDLE_MOTIF_LENGTH_WEIGHTS: [u64; 6] = [50, 30, 5, 8, 3, 4];
+
+/// The share of mono- and dinucleotide members drawn **long**: a repeat count uniform from
+/// [`LONG_MEMBER_LEAST_REPEATS`] to the segments' highest, 30. The rest of the members sit near
+/// their floor ([`BUNDLE_MEAN_EXTRA_COPIES`]). Chosen so that about one bundle in eight holds a
+/// mono- or dinucleotide run of 16 copies or more, as in HG002 (284 of 2,410 bundles of at most 100
+/// bases, counting pure runs) — the members where stutter does its damage. Of 10,000 bundles drawn
+/// with the default seed, 1,164 hold one.
+const LONG_MEMBER_SHARE: f64 = 0.07;
+
+/// The fewest copies of a long member ([`LONG_MEMBER_SHARE`]).
+const LONG_MEMBER_LEAST_REPEATS: u32 = 16;
+
+/// The mean number of copies a member that is not long has above its calling floor: a geometric
+/// count, so about three in four of these members sit at the floor and one in six a copy above it.
+/// Far lower than HG002's (about 2.6 extra pure copies for mono- and dinucleotides) because the
+/// simulator cannot lay what shortens HG002's hulls — members that overlap or abut, in 898 of its
+/// 2,410 bundles — and its gaps, uniform over 1 to 14 bases, average 7.5 against HG002's 6.2. Chosen
+/// so that the median hull comes near HG002's 34 bases: 36 over 10,000 bundles drawn with the
+/// default seed, against 37 with a mean of 0.5 (and 8 long members in 100).
+const BUNDLE_MEAN_EXTRA_COPIES: f64 = 0.3;
+
 /// The longest gap between two members, in bases: one less than the typing's bundle radius
 /// (`DEFAULT_BUNDLE_THRESHOLD`, 15), the widest gap at which two repeats are still one bundle.
 const LONGEST_BUNDLE_GAP: usize = 14;
@@ -722,10 +750,9 @@ fn joined<T: std::fmt::Display>(values: impl IntoIterator<Item = T>, separator: 
 /// below holds — a redraw, so a rule shapes the distribution rather than bending one draw.
 ///
 /// - **Two members, or three** with probability [`THREE_MEMBER_SHARE`], drawn once; the rules
-///   below redraw the members and gaps, never their number. Each member's motif
-///   length is uniform over one to six, its motif drawn from [`MOTIFS`] as a segment's is, its
-///   reference repeat count uniform from the calling floor to [`HIGHEST_REFERENCE_REPEATS`] —
-///   at or above the floor, so the typing counts each member as a repeat.
+///   below redraw the members and gaps, never their number. Each member is drawn by
+///   [`draw_bundle_member`]: motif lengths in HG002's proportions, most members near their
+///   calling floor and some mono- and dinucleotides long.
 /// - **Gaps of 1 to [`LONGEST_BUNDLE_GAP`] bases**, each drawn by [`draw_gap`] so it continues
 ///   neither neighbour's motif.
 /// - **A hull of at most [`LONGEST_BUNDLE_HULL`] bases.** Long members are therefore rarer in
@@ -749,15 +776,7 @@ fn draw_bundle_shape(draw: &mut Draw) -> BundleShape {
     };
     for _ in 0..BUNDLE_SHAPE_ATTEMPTS {
         let members: Vec<(Vec<u8>, u32)> = (0..member_count)
-            .map(|_| {
-                let period = 1 + draw.below(6) as usize;
-                let motifs = MOTIFS[period - 1];
-                let motif = motifs[draw.below(motifs.len() as u64) as usize];
-                let floor = CALLING_FLOOR[period - 1];
-                let span = HIGHEST_REFERENCE_REPEATS[period - 1] - floor + 1;
-                let repeats = floor + draw.below(u64::from(span)) as u32;
-                (motif.as_bytes().to_vec(), repeats)
-            })
+            .map(|_| draw_bundle_member(draw))
             .collect();
         let gap_lengths: Vec<usize> = (1..member_count)
             .map(|_| 1 + draw.below(LONGEST_BUNDLE_GAP as u64) as usize)
@@ -793,6 +812,46 @@ fn draw_bundle_shape(draw: &mut Draw) -> BundleShape {
         "no {member_count}-member bundle shape kept every rule in {BUNDLE_SHAPE_ATTEMPTS} draws: \
          the hull cap, the gap rules or the scanner copy can no longer be met together"
     );
+}
+
+/// One bundle member before the shape's rules are applied: its motif and reference repeat count.
+///
+/// - **Motif length** from [`BUNDLE_MOTIF_LENGTH_WEIGHTS`], HG002's shares; the motif from
+///   [`MOTIFS`], as a segment's is.
+/// - **Repeat count**: for a mono- or dinucleotide, with probability [`LONG_MEMBER_SHARE`],
+///   uniform from [`LONG_MEMBER_LEAST_REPEATS`] to [`HIGHEST_REFERENCE_REPEATS`]; otherwise the
+///   calling floor plus a geometric number of extra copies with mean [`BUNDLE_MEAN_EXTRA_COPIES`],
+///   held at the highest. Never below the floor, so the typing counts each member as a repeat.
+fn draw_bundle_member(draw: &mut Draw) -> (Vec<u8>, u32) {
+    let total_weight: u64 = BUNDLE_MOTIF_LENGTH_WEIGHTS.iter().sum();
+    let mut ticket = draw.below(total_weight);
+    let period = 1 + BUNDLE_MOTIF_LENGTH_WEIGHTS
+        .iter()
+        .position(|weight| {
+            if ticket < *weight {
+                return true;
+            }
+            ticket -= weight;
+            false
+        })
+        .expect("the ticket is below the weights' sum");
+    let motifs = MOTIFS[period - 1];
+    let motif = motifs[draw.below(motifs.len() as u64) as usize];
+    let floor = CALLING_FLOOR[period - 1];
+    let highest = HIGHEST_REFERENCE_REPEATS[period - 1];
+    let repeats = if period <= 2 && draw.unit() < LONG_MEMBER_SHARE {
+        let span = highest - LONG_MEMBER_LEAST_REPEATS + 1;
+        LONG_MEMBER_LEAST_REPEATS + draw.below(u64::from(span)) as u32
+    } else {
+        // Each further copy with probability mean / (1 + mean): a geometric count of that mean.
+        let another_copy = BUNDLE_MEAN_EXTRA_COPIES / (1.0 + BUNDLE_MEAN_EXTRA_COPIES);
+        let mut extra = 0;
+        while floor + extra < highest && draw.unit() < another_copy {
+            extra += 1;
+        }
+        floor + extra
+    };
+    (motif.as_bytes().to_vec(), repeats)
 }
 
 /// `len` gap bases to follow `hull` (which ends with a whole copy of `left`) and precede a run
@@ -2911,6 +2970,52 @@ mod tests {
             "{three_members} of 2000 with three members"
         );
         assert!(one_motif_length_pairs > 100, "{one_motif_length_pairs}");
+    }
+
+    /// A bundle member's draw is the one stated: motif lengths in HG002's shares, the long share of
+    /// mono- and dinucleotides between 16 and 30 copies, and every other member at or above its
+    /// floor with [`BUNDLE_MEAN_EXTRA_COPIES`] extra copies on average.
+    #[test]
+    fn bundle_members_follow_the_stated_draw() {
+        let mut draw = Draw::new(23);
+        let trials = 20_000;
+        let mut by_motif_length = [0_usize; 6];
+        let (mut short_motif_members, mut long_members) = (0, 0);
+        let (mut near_floor_members, mut extra_copies) = (0, 0);
+        for _ in 0..trials {
+            let (motif, repeats) = draw_bundle_member(&mut draw);
+            let period = motif.len();
+            by_motif_length[period - 1] += 1;
+            let floor = CALLING_FLOOR[period - 1];
+            assert!((floor..=HIGHEST_REFERENCE_REPEATS[period - 1]).contains(&repeats));
+            if period <= 2 {
+                short_motif_members += 1;
+            }
+            // Below 16 copies a mono- or dinucleotide can only be a near-floor draw: the floors
+            // are 8 and 6 and a geometric count of mean 0.3 reaches 16 too rarely to matter.
+            if period <= 2 && repeats >= LONG_MEMBER_LEAST_REPEATS {
+                long_members += 1;
+            } else {
+                near_floor_members += 1;
+                extra_copies += (repeats - floor) as usize;
+            }
+        }
+        let total_weight: u64 = BUNDLE_MOTIF_LENGTH_WEIGHTS.iter().sum();
+        for (count, weight) in by_motif_length.iter().zip(BUNDLE_MOTIF_LENGTH_WEIGHTS) {
+            assert!(
+                within_sampling_error(*count, trials, weight as f64 / total_weight as f64),
+                "{by_motif_length:?}"
+            );
+        }
+        assert!(
+            within_sampling_error(long_members, short_motif_members, LONG_MEMBER_SHARE),
+            "{long_members} long of {short_motif_members}"
+        );
+        let mean_extra = extra_copies as f64 / near_floor_members as f64;
+        assert!(
+            (mean_extra - BUNDLE_MEAN_EXTRA_COPIES).abs() < 0.03,
+            "mean extra copies {mean_extra}"
+        );
     }
 
     /// The scanner copy reads two runs of one motif length a base apart as one repeat — the case

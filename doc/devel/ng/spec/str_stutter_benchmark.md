@@ -304,11 +304,14 @@ repeat's start to the last one's end — the **hull** — one bundle, and each r
   the checksums of all twelve files, reads decompressed; the unit test
   `no_bundles_draws_the_cohort_drawn_before_bundles` pins the truth VCF and the reference.
 - **Members**: two, or three in 15 bundles in 100 (HG002's tandem-repeat regions have about one in
-  eleven; set higher so three-member bundles are numerous enough to count). Each member's motif
-  length is uniform over one to six, its motif drawn from the segments' list, its reference repeat
-  count uniform from the calling floor (8, 6, 6, 6, 5, 4) to the segments' highest (30 for motif
-  lengths one and two, 15 for the rest) — at or above the floor, so the typing counts each member
-  as a repeat.
+  eleven; set higher so three-member bundles are numerous enough to count). Each member is drawn to
+  resemble HG002's bundles (measured below):
+  - its **motif length** one to six in 50, 30, 5, 8, 3 and 4 members in 100 — HG002's shares — and
+    its motif from the segments' list;
+  - its **reference repeat count**: a mono- or dinucleotide member is **long** in 7 in 100, its count
+    uniform from 16 copies to 30; every other member has its calling floor (8, 6, 6, 6, 5, 4) plus
+    a geometric number of extra copies with mean 0.3, so about three in four sit at the floor. No
+    member is below its floor, so the typing counts each one as a repeat.
 - **Gaps**: 1 to 14 bases between consecutive members, uniform. Each gap base is drawn so it
   continues neither neighbour's motif, as the spacer beside a segment does: the first bases differ
   from the next bases a copy of the left motif would have, the last from the bases a copy of the
@@ -325,14 +328,33 @@ repeat's start to the last one's end — the **hull** — one bundle, and each r
   caller's code does.
 
 The rules are applied by redrawing the members and gaps (never their number), so they shape the
-distribution: with the default seed (the shapes do not depend on the genome's size), of 500 bundles 81 have three members; members by motif length
-one to six are 248, 185, 235, 167, 143 and 103 (the hull cap thins long motifs); 93 of 581 pairs of
-neighbouring members share a motif length; the hull's median is 77 bases, its 90th percentile 96.
-**That is more than twice HG002's median of 35 bases**, because each member's repeat count is drawn
-uniform from the calling floor to the segments' highest — 30 copies for motif lengths one and two,
-15 for the rest, so a hexanucleotide member can be 90 bases — and a member averages 31 bases (1,081
-members at the default seed). A long hull leaves fewer reads that cross it whole, so at low depth
-these bundles are harder than HG002's; whether to draw counts nearer the floor is open.
+distribution: with the default seed (the shapes do not depend on the genome's size), of 500 bundles 72
+have three members; members by motif length one to six are 537, 308, 50, 88, 44 and 45; 208 of 572
+pairs of neighbouring members share a motif length; the hull's median is 36 bases, its 90th
+percentile 60; and 61 bundles hold a mono- or dinucleotide member of 16 copies or more.
+
+**What the draw is matched to.** HG002's tandem-repeat regions, typed with the calling floors, hold
+2,410 bundles of at most 100 bases (2,181 with two members, 211 with three, 18 with four; measured
+2026-10-11). Their hull's median is 34 bases, its 90th percentile 67. Of their 5,067 members, 2,540,
+1,519, 249, 390, 167 and 202 have motif lengths one to six. **284 of the 2,410 bundles, about one in
+eight, hold a mono- or dinucleotide run of 16 copies or more** — counting pure runs, as the
+simulator lays them; counting each detected repeat's length over its motif length, impurities
+included, it is 480. Those members are where stutter does its damage, so the simulator keeps their
+share while holding the rest near the floor.
+
+The near-floor mean of 0.3 extra copies is far below HG002's — its mono- and dinucleotide members
+carry about 2.6 pure copies above the floor — because two things that shorten HG002's hulls cannot be
+laid: in 898 of its 2,410 bundles two members overlap or abut (a homopolymer inside a pentanucleotide
+repeat, say), and its gaps between separated members average 6.2 bases against the simulator's 7.5.
+Over 10,000 bundles at the default seed the median hull is 36 bases, and 1,164 bundles hold a long
+mono- or dinucleotide member; a mean of 0.5 (with 8 long members in 100) gave 37. On two more seeds (7
+and 2026, 500 bundles each) the hull's median is 36 and 35, its 90th percentile 60 and 59, and 58
+and 43 bundles hold a long member — 500 bundles is few enough that this share moves by a third from
+seed to seed. The simulated hulls' upper tail is shorter than HG002's (90th percentile 60 against
+67): long members of three to six bases are rarer here than there.
+
+Before this draw (2026-10-11, the first bundle build), counts were uniform from the floor to the
+segments' highest and motif lengths uniform over one to six; the median hull was 77 bases.
 
 **Alleles**, as for a segment (§4.2): two to six, the non-reference ones sharing a Beta-drawn
 frequency. A length change moves one member by whole units of its own motif (one most often), and in
@@ -373,8 +395,9 @@ Per-member values are listed in member order, comma-separated; coordinates are z
   members, in order, each of the drawn motif length and with a start and an end within a tolerance
   of the drawn member's — **0 bases by default**. The typed members are the repeat detector's
   intervals, which differ from a drawn run only when a gap base continues a motif, and the gap rule
-  stops that; on one run (the default seed, 600 segments and 500 bundles on 1.5 Mb) all 500 matched with no offset, and the
-  typing made no bundle the simulator did not lay. The segments are checked as before. The typing
+  stops that; on three runs (the default seed, 7 and 2026; 300 segments and 500 bundles on 1.5 Mb)
+  all 500 matched with no offset in each, and the typing made no bundle the simulator did not lay.
+  The segments are checked as before. The typing
   dump (`examples/ng_typed_region_dump.rs`) gained a `members` column for this, a bundle's members
   as a JSON array of `{"start","end","period"}` as `pvc type-regions` writes them.
 - **HipSTR is not given the bundles.** A HipSTR region carries one period and HipSTR fits one stutter
