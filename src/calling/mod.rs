@@ -666,7 +666,10 @@ impl<'a> LocusEvidence<'a> {
         let paths_agree = matches!(
             (self, alleles.kind()),
             (Self::Generic { .. }, LocusKind::Generic)
-                | (Self::Ssr { .. }, LocusKind::Ssr(_) | LocusKind::SsrBundle)
+                | (
+                    Self::Ssr { .. },
+                    LocusKind::Ssr(_) | LocusKind::SsrBundle(_)
+                )
         );
         assert!(
             paths_agree,
@@ -717,7 +720,7 @@ fn locus_kind_word(kind: &LocusKind) -> &'static str {
     match kind {
         LocusKind::Generic => "SNP/indel",
         LocusKind::Ssr(_) => "repeat-tract",
-        LocusKind::SsrBundle => "repeat-bundle",
+        LocusKind::SsrBundle(_) => "repeat-bundle",
     }
 }
 
@@ -3608,8 +3611,14 @@ mod tests {
     fn the_locus_kind_travels_with_the_allele_table() {
         assert_eq!(generic_reference().kind(), &LocusKind::Generic);
 
-        let bundle = CandidateAlleles::new(Box::from(b"CAG".as_slice()), LocusKind::SsrBundle);
-        assert_eq!(bundle.kind(), &LocusKind::SsrBundle);
+        let bundle = CandidateAlleles::new(
+            Box::from(b"CAG".as_slice()),
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
+        );
+        assert_eq!(
+            bundle.kind(),
+            &LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default())
+        );
         assert_eq!(bundle.reference(), b"CAG");
 
         let motif = Motif::new(b"AT").expect("a dinucleotide motif");
@@ -5141,7 +5150,10 @@ mod tests {
             &NO_SUBSTITUTION_RATES,
         );
 
-        let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
+        let bundle = CandidateAlleles::new(
+            Box::from(b"CAGCAG".as_slice()),
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
+        );
         let detail = ssr_detail();
         let per_sample = [SsrSampleEvidence::new(&[], &detail)];
         // One repeat count, because a bundle built from a reference alone is called over one
@@ -5171,7 +5183,10 @@ mod tests {
             &NO_SUBSTITUTION_RATES,
         );
 
-        let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
+        let bundle = CandidateAlleles::new(
+            Box::from(b"CAGCAG".as_slice()),
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
+        );
         let per_sample = [GenericLocusSample {
             evidence: GenericSampleEvidence::empty(),
             genotype_must_be_missing: false,

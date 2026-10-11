@@ -1007,11 +1007,11 @@ mod tests {
 
     /// **A newer format is `UnsupportedVersion`, not a parse failure** — spec §6.7's
     /// distinction, and the reason the header is plain text. The body here carries a key no
-    /// 1.0 reader knows, which is what a real 2.0 file would do.
+    /// 2.0 reader knows, which is what a real 3.0 file would do.
     #[test]
     fn a_file_from_a_newer_format_says_so_rather_than_failing_to_parse() {
-        let body = "format-version = \"2.0\"\n\
-                    whatever-version-two-added = { shape = \"nothing here knows\" }\n";
+        let body = "format-version = \"3.0\"\n\
+                    whatever-version-three-added = { shape = \"nothing here knows\" }\n";
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&HEAD_MAGIC);
         bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
@@ -1023,7 +1023,7 @@ mod tests {
             Err(PspReadError::UnsupportedVersion {
                 found, supported, ..
             }) => {
-                assert_eq!(found, (2, 0));
+                assert_eq!(found, (3, 0));
                 assert_eq!(supported, FORMAT_VERSION);
             }
             other => panic!("expected UnsupportedVersion, got {other:?}"),

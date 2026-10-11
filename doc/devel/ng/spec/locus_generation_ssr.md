@@ -103,6 +103,18 @@ this sample showed nothing"* and *"we never looked here"* are different facts, a
 destroys the difference. Zero coverage is a real observation; at low depth it is most of what a
 sample has to say.
 
+*Changed during implementation (2026-10-11): the same four steps measure an STR bundle's hull*
+([`str_bundle_loci.md`](str_bundle_loci.md) §6.1). `SsrLocus` no longer holds an `SsrSegment`; it
+holds a `MeasuredRepeat` — the repeat's span, the motif handed to the delimiter's geometry, the
+period of the reference run reaching each edge (`None` where fixed sequence reaches it), and
+whether a read that ends inside is kept as a partial or dropped. A segment converts into one with
+its own motif at both edges and partials kept, so every segment is measured exactly as before:
+the psps' non-bundle records were byte-identical on the stuttering benchmark (4,120,085 dump rows,
+one sample, 30×). The bundle generator (`locus_generation/ssr_bundle.rs`) is this generator with
+the flat-gap delimiter, run over the hull through the steps it exposes (`fetch_locus`,
+`measure_reads`); it drops reads that end inside the hull and counts them as
+`ended_inside_a_bundle`, a fifth no-observation reason that is always zero for a segment.
+
 ---
 
 ## 3. The output — what the reads showed about the tract

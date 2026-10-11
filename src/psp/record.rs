@@ -52,8 +52,8 @@
 //! handed the region rather than reading one.
 
 use crate::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrDetail,
-    WitnessedLocusPositions,
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrBundleDetail,
+    SsrDetail, WitnessedLocusPositions,
 };
 use crate::psp::chain_ids::{
     LiveSet, LiveSetReader, LiveSetWriter, as_a_read_set, decode_read_list, encode_read_list,
@@ -63,6 +63,7 @@ use crate::psp::header::{FieldEncoding, FieldName, FieldSpec, Manifest};
 use crate::psp::varint::{
     VarintError, decode_i64_svarint, decode_u64_leb128, encode_i64_svarint, encode_u64_leb128,
 };
+use crate::region_typing::reference_runs::ReferenceRun;
 use crate::types::ChainId;
 use crate::types::{ContigId, GenomeRegion, Motif, Position, ReadGroupId, SummedLogError};
 
@@ -222,10 +223,13 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 
 /// Every field a record's **body** carries, in encoding order.
 ///
-/// **A field list, not a count of values per record.** Twelve of these twenty-one are written
+/// **A field list, not a count of values per record.** Twelve of these twenty-four are written
 /// more than once: ten once per *observation* — one of those ten for every observation but the
-/// residual — and two more once per *witness run* inside an observation. The last three are
-/// written only when the locus kind is a repeat tract. The manifest says
+/// residual — and two more once per *witness run* inside an observation. The repeat's motif and
+/// its two flanks are written only when the locus kind is a repeat tract. Two fields close every
+/// body whatever its kind, each a length-prefixed byte string empty on most records: the
+/// observations' flank deletions (format 1.2) and an STR bundle's payload — its flanks and its
+/// reference runs — (format 2.0). The manifest says
 /// what one appearance of a field looks like — a single value, or a counted run of them
 /// ([`FieldShape`]); it does not say how often a field appears. So what this list gives a
 /// reader is the order, the encodings and each field's own shape; how many of each a body
@@ -252,7 +256,7 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 /// **The chain ids are not here either, and that is Milestone E.** A record's chain ids are
 /// dropped by [`encode_record_body`] and come back empty from [`decode_record_body`], which is
 /// stated on both and pinned by a test rather than left for a reader to discover.
-const BODY_FIELDS: [(&str, FieldEncoding); 23] = [
+const BODY_FIELDS: [(&str, FieldEncoding); 24] = [
     ("reference-bases", FieldEncoding::LengthPrefixedBytes),
     ("observation-count", FieldEncoding::Varint),
     // Which observation's reads are derived rather than stored, or the observation count for
@@ -303,10 +307,20 @@ const BODY_FIELDS: [(&str, FieldEncoding); 23] = [
         "observation-flank-deletions",
         FieldEncoding::LengthPrefixedBytes,
     ),
+    // **Format 2.0: an STR bundle's payload** (`str_bundle_loci.md` §6.2) — its two flanks and
+    // its reference runs — as one byte string on every record whatever its kind, empty but for
+    // a bundle's, for the reason the flank deletions above are: a field every record carries
+    // is one a reader can walk past. Inside it: the left flank and the right flank, each
+    // length-prefixed; the run count; then each run's offset into the hull, its length and its
+    // motif, the motif length-prefixed.
+    ("str-bundle-payload", FieldEncoding::LengthPrefixedBytes),
 ];
 
 /// The body fields of formats 1.0 and 1.1, which end at the repeat's right flank.
 const BODY_FIELDS_BEFORE_1_2: usize = 22;
+
+/// The body fields of format 1.2, which end at the flank deletions.
+const BODY_FIELDS_BEFORE_2_0: usize = 23;
 
 /// The declared name of one field, by its position in [`BODY_FIELDS`].
 ///
@@ -342,6 +356,7 @@ const REPEAT_MOTIF: &str = body_field(19);
 const REPEAT_LEFT_FLANK: &str = body_field(20);
 const REPEAT_RIGHT_FLANK: &str = body_field(21);
 const OBSERVATION_FLANK_DELETIONS: &str = body_field(22);
+const STR_BUNDLE_PAYLOAD: &str = body_field(23);
 
 /// The witness as a whole, for the two faults that are about the set rather than about one of
 /// its numbers. Not a declared field: the three `witness-run-*` entries are.
@@ -393,6 +408,10 @@ const LEAST_BYTES_PER_OBSERVATION: usize = 9;
 
 /// The fewest bytes one witnessed run can occupy: its start and its length, one byte each.
 const LEAST_BYTES_PER_WITNESS_RUN: usize = 2;
+
+/// The fewest bytes one STR bundle's reference run can occupy: its offset, its length, its
+/// motif's length prefix and one motif base, one byte each.
+const LEAST_BYTES_PER_BUNDLE_RUN: usize = 4;
 
 const _: () = assert!(
     LEAST_BYTES_PER_OBSERVATION > 0 && LEAST_BYTES_PER_WITNESS_RUN > 0,
@@ -496,6 +515,10 @@ pub struct RecordLayout {
     /// `false` for 1.0 and 1.1 files, whose observations all read as having none, which is
     /// what those formats measured.
     body_carries_flank_deletions: bool,
+    /// Whether the body ends with an STR bundle's payload — format 2.0 and later. `false`
+    /// for every 1.x file, none of which holds a bundle record: no 1.x writer had a bundle
+    /// generator, so a bundle record in such a file is refused as damage.
+    body_carries_bundle_payload: bool,
 }
 
 impl RecordLayout {
@@ -511,6 +534,7 @@ impl RecordLayout {
             unknown_final_encodings: Vec::new(),
             head_carries_discarded_reads: true,
             body_carries_flank_deletions: true,
+            body_carries_bundle_payload: true,
         }
     }
 
@@ -525,29 +549,40 @@ impl RecordLayout {
         // **This build's fields first, then format 1.0's**, whose head lacks the discarded-read
         // copy. A file that is neither is refused with what it failed against this build's
         // list, which names the field it is missing or has wrong.
-        // Then format 1.1's, whose body ends before the flank deletions.
+        // Then format 1.1's, whose body ends before the flank deletions. Format 1.2's comes
+        // first of the three: this build's without the bundle payload format 2.0 added.
         let before_1_2 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_1_2];
-        let (known, head_carries_discarded_reads, body_carries_flank_deletions) =
-            match matches_fields(manifest, fields_this_build_knows()) {
-                Ok(known) => (known, true, true),
-                Err(against_this_build) => {
-                    if let Ok(known) =
-                        matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_1_2))
-                    {
-                        (known, true, false)
-                    } else {
-                        match matches_fields(
-                            manifest,
-                            fields_of_body(&RECORD_HEAD_FIELDS_1_0, before_1_2),
-                        ) {
-                            Ok(known) => (known, false, false),
-                            Err(_) => return Err(against_this_build),
-                        }
+        let before_2_0 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_0];
+        let (
+            known,
+            head_carries_discarded_reads,
+            body_carries_flank_deletions,
+            body_carries_bundle_payload,
+        ) = match matches_fields(manifest, fields_this_build_knows()) {
+            Ok(known) => (known, true, true, true),
+            Err(against_this_build) => {
+                if let Ok(known) =
+                    matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_2_0))
+                {
+                    (known, true, true, false)
+                } else if let Ok(known) =
+                    matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_1_2))
+                {
+                    (known, true, false, false)
+                } else {
+                    match matches_fields(
+                        manifest,
+                        fields_of_body(&RECORD_HEAD_FIELDS_1_0, before_1_2),
+                    ) {
+                        Ok(known) => (known, false, false, false),
+                        Err(_) => return Err(against_this_build),
                     }
                 }
-            };
+            }
+        };
         Ok(Self {
             body_carries_flank_deletions,
+            body_carries_bundle_payload,
             unknown_final_encodings: manifest
                 .fields
                 .iter()
@@ -1064,6 +1099,95 @@ pub fn encode_record_body_reusing(
     put_varint(out, u64::from(*reads_discarded_by_cap));
     put_kind(out, kind);
     put_flank_deletions(out, observations);
+    put_bundle_payload(out, kind);
+}
+
+/// An STR bundle's flanks and reference runs as one length-prefixed field, empty for every
+/// other kind (format 2.0; `str_bundle_loci.md` §6.2).
+fn put_bundle_payload(out: &mut Vec<u8>, kind: &LocusKind) {
+    let LocusKind::SsrBundle(detail) = kind else {
+        put_bytes(out, &[]);
+        return;
+    };
+    let mut payload: Vec<u8> = Vec::new();
+    put_bytes(&mut payload, &detail.left_flank);
+    put_bytes(&mut payload, &detail.right_flank);
+    put_varint(&mut payload, detail.runs.len() as u64);
+    for run in &detail.runs {
+        put_varint(&mut payload, run.offset());
+        put_varint(&mut payload, run.length());
+        put_bytes(&mut payload, run.motif().as_bytes());
+    }
+    put_bytes(out, &payload);
+}
+
+/// An STR bundle's payload back from its bytes — every byte of them, so a payload with bytes
+/// left over is refused as one that does not say what it seems to. `bytes_in` is where the
+/// payload ended in the body, for the errors; `hull_len` is the record's reference bases' length,
+/// which is the hull's.
+///
+/// A bundle's runs ascend, never overlap, each holds a whole copy of its motif
+/// ([`ReferenceRun::new`]), and each ends inside the hull; a payload breaking any of the four is
+/// refused naming the field. The last is what lets a reader index the hull by a run's offset
+/// without checking again (found in review, 2026-10-11).
+fn read_bundle_payload(
+    payload: &[u8],
+    bytes_in: usize,
+    hull_len: u64,
+) -> Result<SsrBundleDetail, RecordDecodeError> {
+    let malformed = |reason: String| RecordDecodeError::Malformed {
+        field: STR_BUNDLE_PAYLOAD,
+        bytes_in,
+        reason,
+    };
+    let mut reader = FieldReader::new(payload);
+    let left_flank: Box<[u8]> = reader.read_length_prefixed(STR_BUNDLE_PAYLOAD)?.into();
+    let right_flank: Box<[u8]> = reader.read_length_prefixed(STR_BUNDLE_PAYLOAD)?.into();
+    let declared_runs = reader.read_count(STR_BUNDLE_PAYLOAD, LEAST_BYTES_PER_BUNDLE_RUN)?;
+    let mut runs = Vec::with_capacity(entries_to_reserve(
+        declared_runs,
+        LEAST_BYTES_PER_BUNDLE_RUN,
+        reader.bytes_left(),
+    ));
+    let mut previous_end = 0u64;
+    for _ in 0..declared_runs {
+        let offset = reader.read_varint(STR_BUNDLE_PAYLOAD)?;
+        let length = reader.read_varint(STR_BUNDLE_PAYLOAD)?;
+        let motif = Motif::new(reader.read_length_prefixed(STR_BUNDLE_PAYLOAD)?)
+            .map_err(|source| malformed(format!("a run's motif: {source}")))?;
+        let run = ReferenceRun::new(offset, length, motif).ok_or_else(|| {
+            malformed(format!(
+                "a run of {length} bases holds no whole copy of its {}-base motif",
+                motif.period()
+            ))
+        })?;
+        if offset < previous_end {
+            return Err(malformed(format!(
+                "a run at {offset} before the previous run's end at {previous_end}; a bundle's \
+                 runs ascend and never overlap"
+            )));
+        }
+        previous_end = offset
+            .checked_add(length)
+            .filter(|end| *end <= hull_len)
+            .ok_or_else(|| {
+                malformed(format!(
+                    "a run at {offset} of {length} bases ends past the {hull_len}-base hull"
+                ))
+            })?;
+        runs.push(run);
+    }
+    if reader.bytes_left() > 0 {
+        return Err(malformed(format!(
+            "{} bytes after the last of its {declared_runs} runs",
+            reader.bytes_left()
+        )));
+    }
+    Ok(SsrBundleDetail {
+        left_flank,
+        right_flank,
+        runs: runs.into_boxed_slice(),
+    })
 }
 
 /// The observations' flank deletions as one length-prefixed field: a varint triple
@@ -1202,7 +1326,7 @@ pub fn decode_record_body(
 
     let reads_without_observation = body.read_u32(READS_WITHOUT_OBSERVATION)?;
     let reads_discarded_by_cap = body.read_u32(READS_DISCARDED_BY_THE_DEPTH_CAP)?;
-    let kind = body.read_locus_kind()?;
+    let mut kind = body.read_locus_kind()?;
     if layout.body_carries_flank_deletions {
         let triples = body.read_length_prefixed(OBSERVATION_FLANK_DELETIONS)?;
         let mut list = FieldReader::new(triples);
@@ -1226,6 +1350,31 @@ pub fn decode_record_body(
             };
             observation.flank_deletion = crate::locus_generation::FlankDeletion { left, right };
         }
+    }
+
+    if layout.body_carries_bundle_payload {
+        let payload = body.read_length_prefixed(STR_BUNDLE_PAYLOAD)?;
+        match &mut kind {
+            LocusKind::SsrBundle(detail) => {
+                *detail =
+                    read_bundle_payload(payload, body.bytes_read(), reference_bases.len() as u64)?;
+            }
+            LocusKind::Generic | LocusKind::Ssr(_) if !payload.is_empty() => {
+                return Err(body.malformed(
+                    STR_BUNDLE_PAYLOAD,
+                    format!(
+                        "{} bytes of bundle payload on a record that is no bundle",
+                        payload.len()
+                    ),
+                ));
+            }
+            LocusKind::Generic | LocusKind::Ssr(_) => {}
+        }
+    } else if matches!(kind, LocusKind::SsrBundle(_)) {
+        return Err(body.malformed(
+            LOCUS_KIND,
+            "an STR bundle record in a file whose format predates bundle records (2.0)".to_string(),
+        ));
     }
 
     for encoding in &layout.unknown_final_encodings {
@@ -1301,7 +1450,8 @@ fn put_kind(out: &mut Vec<u8>, kind: &LocusKind) {
             put_bytes(out, &detail.left_flank);
             put_bytes(out, &detail.right_flank);
         }
-        LocusKind::SsrBundle => put_varint(out, KIND_SSR_BUNDLE),
+        // The payload is the body's last field, `put_bundle_payload`'s.
+        LocusKind::SsrBundle(_) => put_varint(out, KIND_SSR_BUNDLE),
     }
 }
 
@@ -1550,6 +1700,8 @@ impl<'a> FieldReader<'a> {
         Ok(ReadWitness::Partial { positions })
     }
 
+    /// The locus kind and what a repeat tract carries with it. A bundle comes back with an
+    /// empty payload, which the body's last field fills (format 2.0).
     fn read_locus_kind(&mut self) -> Result<LocusKind, RecordDecodeError> {
         let at = self.bytes_read;
         let tag = self.read_varint(LOCUS_KIND)?;
@@ -1567,7 +1719,7 @@ impl<'a> FieldReader<'a> {
                     right_flank,
                 }))
             }
-            KIND_SSR_BUNDLE => Ok(LocusKind::SsrBundle),
+            KIND_SSR_BUNDLE => Ok(LocusKind::SsrBundle(SsrBundleDetail::default())),
             tag => Err(RecordDecodeError::Unsupported {
                 field: LOCUS_KIND,
                 bytes_in: at,
@@ -2597,6 +2749,9 @@ mod tests {
     /// ⚠ **And at format 1.2** (2026-10-10), with the version raised: every body ends with the
     /// observations' flank deletions, one empty byte string here (`str_edge_deletion_alleles.md`
     /// §5.2).
+    ///
+    /// ⚠ **And at format 2.0** (2026-10-11), with the major version raised: every body ends with
+    /// an STR bundle's payload, one empty byte string here (`str_bundle_loci.md` §6.2).
     #[test]
     fn the_fixture_encodes_to_these_exact_bytes() {
         let mut bytes = Vec::new();
@@ -2651,6 +2806,7 @@ mod tests {
                 177, 2, // reads-discarded-by-the-depth-cap
                 0, // locus-kind: Generic
                 0, // observation-flank-deletions: none (format 1.2)
+                0, // str-bundle-payload: empty, the record is no bundle (format 2.0)
             ]
         );
     }
@@ -2698,19 +2854,38 @@ mod tests {
                 left_flank: b"GG".to_vec().into_boxed_slice(),
                 right_flank: b"CCCCCCCCCC".to_vec().into_boxed_slice(),
             }),
-            LocusKind::SsrBundle,
+            // A bundle with flanks of different lengths and three runs, one of them with a
+            // part copy at its end, and a bundle with no run at all.
+            LocusKind::SsrBundle(SsrBundleDetail {
+                left_flank: b"TTT".to_vec().into_boxed_slice(),
+                right_flank: b"GGGGGGGG".to_vec().into_boxed_slice(),
+                runs: vec![
+                    ReferenceRun::new(0, 40, Motif::new(b"CT").unwrap()).unwrap(),
+                    ReferenceRun::new(40, 17, Motif::new(b"AT").unwrap()).unwrap(),
+                    ReferenceRun::new(300, 8, Motif::new(b"AAAAAT").unwrap()).unwrap(),
+                ]
+                .into_boxed_slice(),
+            }),
+            LocusKind::SsrBundle(SsrBundleDetail {
+                left_flank: b"A".to_vec().into_boxed_slice(),
+                right_flank: b"C".to_vec().into_boxed_slice(),
+                runs: Box::default(),
+            }),
         ];
         for kind in &kinds {
             match kind {
                 // Exhaustive on purpose: a kind added to `LocusKind` is a compile error until
                 // it is in the list above.
-                LocusKind::Generic | LocusKind::Ssr(_) | LocusKind::SsrBundle => {}
+                LocusKind::Generic | LocusKind::Ssr(_) | LocusKind::SsrBundle(_) => {}
             }
         }
         for kind in kinds {
             let mut live_reads = a_live_set_reader();
             let mut written = a_rich_record();
             written.kind = kind;
+            // A hull long enough for the bundle's runs, which must end inside it.
+            written.region = a_region(1_000, 1_319);
+            written.reference_bases = vec![b'C'; 320].into_boxed_slice();
             let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&written));
             let decoded = decode_a_record(
                 &mut live_reads,
@@ -2722,6 +2897,201 @@ mod tests {
             .expect("what this encoder wrote, this decoder reads");
             assert_eq!(decoded.record, written);
         }
+    }
+
+    /// **Format 2.0: a bundle record is these bytes** — the tag where every record's kind is,
+    /// then, after the flank deletions, the payload as one byte string: the two flanks, the
+    /// run count, and each run's offset, length and motif (`str_bundle_loci.md` §6.2). Pinned
+    /// byte for byte, as the body fixture is, because the round trips are symmetric and would
+    /// pass under any consistent reordering.
+    #[test]
+    fn a_bundle_records_payload_is_these_exact_bytes() {
+        let mut record = a_rich_record();
+        record.observations.clear();
+        record.reads_discarded_by_cap = 0;
+        // A 146-base hull: the second run ends on its last base.
+        record.region = a_region(1_000, 1_145);
+        record.reference_bases = vec![b'A'; 146].into_boxed_slice();
+        record.kind = LocusKind::SsrBundle(SsrBundleDetail {
+            left_flank: b"GA".to_vec().into_boxed_slice(),
+            right_flank: b"C".to_vec().into_boxed_slice(),
+            runs: vec![
+                ReferenceRun::new(0, 9, Motif::new(b"A").unwrap()).unwrap(),
+                ReferenceRun::new(130, 16, Motif::new(b"AT").unwrap()).unwrap(),
+            ]
+            .into_boxed_slice(),
+        });
+        let mut bytes = Vec::new();
+        encode_record_body(&record, &mut bytes);
+        let tail = &bytes[bytes.len() - 21..];
+        assert_eq!(
+            tail,
+            [
+                12, // reads-without-observation
+                0,  // reads-discarded-by-the-depth-cap
+                2,  // locus-kind: an STR bundle
+                0,  // observation-flank-deletions: none
+                16, // str-bundle-payload: sixteen bytes
+                2, b'G', b'A', // the left flank
+                1, b'C', // the right flank
+                2,    // two runs
+                0, 9, 1, b'A', // the first: offset, length, motif
+                130, 1, 16, 2, b'A', b'T', // the second, its offset two bytes long
+            ]
+            .as_slice()
+        );
+        let (decoded, _) = round_trip(&record);
+        assert_eq!(decoded.record, record);
+    }
+
+    /// Every other kind carries an empty payload — one byte — and a payload on a record that is
+    /// no bundle is refused rather than dropped.
+    #[test]
+    fn a_record_that_is_no_bundle_carries_an_empty_payload_and_refuses_one() {
+        for kind in [
+            LocusKind::Generic,
+            LocusKind::Ssr(SsrDetail {
+                motif: Motif::new(b"AT").unwrap(),
+                left_flank: b"GG".to_vec().into_boxed_slice(),
+                right_flank: b"CC".to_vec().into_boxed_slice(),
+            }),
+        ] {
+            a_record_of_this_kind_refuses_a_bundle_payload(kind);
+        }
+    }
+
+    fn a_record_of_this_kind_refuses_a_bundle_payload(kind: LocusKind) {
+        let mut record = a_rich_record();
+        record.kind = kind;
+        let mut bytes = Vec::new();
+        encode_record_body(&record, &mut bytes);
+        assert_eq!(
+            bytes[bytes.len() - 2..],
+            [0, 0],
+            "no flank deletion, and an empty payload"
+        );
+
+        let last = bytes.len() - 1;
+        bytes[last] = 1;
+        bytes.push(b'A');
+        let refused = decode_record_body(
+            &bytes,
+            record.region,
+            &the_live_reads_of(&record),
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect_err("a payload on a record that is no bundle");
+        assert!(
+            matches!(refused, RecordDecodeError::Malformed { field, .. } if field == STR_BUNDLE_PAYLOAD),
+            "{refused:?}"
+        );
+    }
+
+    /// **A 1.2 file is read, and a bundle record in it is damage**: no 1.x writer had a bundle
+    /// generator, so this reader refuses one rather than read it with no payload. And this
+    /// build does not extend a 1.2 file, whose header declares a layout its records would not
+    /// follow.
+    #[test]
+    fn a_format_1_2_manifest_is_read_and_a_bundle_record_in_it_is_refused() {
+        let fields: Vec<FieldSpec> =
+            fields_of_body(&RECORD_HEAD_FIELDS, &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_0]).collect();
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields.clone()))
+            .expect("a 1.2 manifest is read");
+        assert!(layout.body_carries_flank_deletions);
+        assert!(!layout.body_carries_bundle_payload);
+        assert_eq!(layout.unknown_field_count(), 0);
+        assert!(RecordLayout::check_this_build_writes(&a_manifest_declaring(fields)).is_err());
+
+        let mut record = a_rich_record();
+        record.kind = LocusKind::SsrBundle(SsrBundleDetail::default());
+        let mut bytes = Vec::new();
+        encode_record_body(&record, &mut bytes);
+        bytes.pop(); // a 1.2 body ends at the flank deletions: drop the (empty) payload
+        let refused =
+            decode_record_body(&bytes, record.region, &the_live_reads_of(&record), &layout)
+                .expect_err("a bundle record in a 1.2 file");
+        assert!(
+            matches!(refused, RecordDecodeError::Malformed { field, .. } if field == LOCUS_KIND),
+            "{refused:?}"
+        );
+    }
+
+    /// **A bundle record whose run ends past its own hull is refused** — the hull being the
+    /// record's reference bases, seven here — so a reader can index the hull by a run's offset
+    /// (found in review, 2026-10-11).
+    #[test]
+    fn decode_record_body_refuses_a_bundle_run_past_the_hull() {
+        let mut record = a_rich_record();
+        assert_eq!(record.reference_bases.len(), 7);
+        record.kind = LocusKind::SsrBundle(SsrBundleDetail {
+            left_flank: b"G".to_vec().into_boxed_slice(),
+            right_flank: b"G".to_vec().into_boxed_slice(),
+            runs: vec![ReferenceRun::new(5, 4, Motif::new(b"CA").unwrap()).unwrap()]
+                .into_boxed_slice(),
+        });
+        let mut bytes = Vec::new();
+        encode_record_body(&record, &mut bytes);
+        let refused = decode_record_body(
+            &bytes,
+            record.region,
+            &the_live_reads_of(&record),
+            &RecordLayout::as_this_build_writes_it(),
+        )
+        .expect_err("a run at 5 of 4 bases on a 7-base hull");
+        assert!(
+            matches!(&refused, RecordDecodeError::Malformed { field, reason, .. }
+                if *field == STR_BUNDLE_PAYLOAD && reason.contains("past the 7-base hull")),
+            "{refused:?}"
+        );
+    }
+
+    /// A bundle's runs must each hold a whole copy, ascend and never overlap, and the payload
+    /// must end where its runs do; a payload breaking any of these is refused.
+    #[test]
+    fn a_bundle_payload_whose_runs_overlap_descend_hold_no_copy_or_trail_bytes_is_refused() {
+        // Empty flanks, then the runs, on a 40-base hull.
+        let with_runs = |runs: &[u8]| [&[0u8, 0][..], runs].concat();
+        for (case, runs, expected) in [
+            (
+                "overlapping",
+                &[2u8, 0, 10, 1, b'A', 9, 5, 1, b'C'][..],
+                "ascend and never overlap",
+            ),
+            (
+                "descending",
+                &[2u8, 20, 10, 1, b'A', 0, 5, 1, b'C'][..],
+                "ascend and never overlap",
+            ),
+            (
+                "shorter than its motif",
+                &[1u8, 0, 2, 3, b'C', b'A', b'G'][..],
+                "holds no whole copy",
+            ),
+            ("no motif", &[1u8, 0, 2, 0][..], "a run's motif"),
+            (
+                "bytes after the last run",
+                &[1u8, 0, 2, 1, b'A', 7][..],
+                "bytes after the last",
+            ),
+            (
+                "past the hull's end",
+                &[1u8, 35, 6, 1, b'A'][..],
+                "past the 40-base hull",
+            ),
+        ] {
+            let refused = read_bundle_payload(&with_runs(runs), 0, 40).expect_err(case);
+            assert!(
+                matches!(&refused, RecordDecodeError::Malformed { field, reason, .. }
+                    if *field == STR_BUNDLE_PAYLOAD && reason.contains(expected)),
+                "{case}: {refused:?}"
+            );
+        }
+        // Touching runs are fine — one ends where the next starts — and so is a run ending on
+        // the hull's last base.
+        let detail =
+            read_bundle_payload(&with_runs(&[2u8, 0, 10, 1, b'A', 10, 30, 1, b'C']), 0, 40)
+                .expect("touching runs, the last ending on the hull's last base");
+        assert_eq!(detail.runs.len(), 2);
     }
 
     /// **Format 1.2: an observation's flank deletion round-trips** (`str_edge_deletion_alleles.md`
@@ -2753,17 +3123,19 @@ mod tests {
     }
 
     /// **A 1.1 file is still read, its observations all without a flank deletion** — which is
-    /// what a 1.1 writer measured. Its manifest is this build's minus the last body field.
+    /// what a 1.1 writer measured. Its manifest is this build's up to the repeat's right flank.
     #[test]
     fn a_format_1_1_manifest_is_read_as_carrying_no_flank_deletions() {
-        let mut fields = record_fields();
+        let fields: Vec<FieldSpec> =
+            fields_of_body(&RECORD_HEAD_FIELDS, &BODY_FIELDS[..BODY_FIELDS_BEFORE_1_2]).collect();
         assert_eq!(
-            fields.pop().map(|field| field.name.0),
-            Some("observation-flank-deletions".to_string())
+            fields.last().map(|field| field.name.0.as_str()),
+            Some("repeat-right-flank")
         );
         let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
             .expect("a 1.1 manifest is read");
         assert!(!layout.body_carries_flank_deletions);
+        assert!(!layout.body_carries_bundle_payload);
         assert_eq!(layout.unknown_field_count(), 0);
         assert!(
             RecordLayout::from_manifest(&a_manifest_declaring(record_fields()))
@@ -2786,7 +3158,7 @@ mod tests {
         for (kind, tag) in [
             (LocusKind::Generic, 0u8),
             (tract, 1),
-            (LocusKind::SsrBundle, 2),
+            (LocusKind::SsrBundle(SsrBundleDetail::default()), 2),
         ] {
             let mut out = Vec::new();
             put_kind(&mut out, &kind);
@@ -2985,6 +3357,7 @@ mod tests {
                 "repeat-left-flank",
                 "repeat-right-flank",
                 "observation-flank-deletions",
+                "str-bundle-payload",
             ]
         );
 
@@ -3128,12 +3501,21 @@ mod tests {
         for position in 0..declared.len() {
             let mut renamed = declared.clone();
             renamed[position].name = FieldName("something-else".to_string());
-            // **The last field renamed is a 1.1 file with one field this reader does not know**
-            // — the shape a later 1.1 writer's addition would have — and it is read as one.
+            // **The flank deletions renamed is a 1.1 file with two fields this reader does not
+            // know**, and the bundle payload renamed a 1.2 file with one — the shape a later
+            // writer's addition would have — and each is read as one.
             if declared[position].name.0 == "observation-flank-deletions" {
                 let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
-                    .expect("a 1.1 manifest with one unknown field is read");
+                    .expect("a 1.1 manifest with two unknown fields is read");
                 assert!(!layout.body_carries_flank_deletions);
+                assert_eq!(layout.unknown_field_count(), 2);
+                continue;
+            }
+            if declared[position].name.0 == "str-bundle-payload" {
+                let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
+                    .expect("a 1.2 manifest with one unknown field is read");
+                assert!(layout.body_carries_flank_deletions);
+                assert!(!layout.body_carries_bundle_payload);
                 assert_eq!(layout.unknown_field_count(), 1);
                 continue;
             }
@@ -3154,14 +3536,16 @@ mod tests {
             dropped.remove(position);
             // **Dropping the head's discarded-read copy is not damage: it is format 1.0**, which
             // this reader reads. Every other field dropped is refused.
-            // **Nor is dropping the last field, the flank deletions: that is format 1.1.**
+            // **Nor is dropping either of the last two fields: without the bundle payload it
+            // is format 1.2, and without the flank deletions a 1.1 body followed by one field
+            // this reader does not know.**
             if declared[position].name.0 == "reads-discarded-by-the-depth-cap-head-copy"
                 || declared[position].name.0 == "observation-flank-deletions"
+                || declared[position].name.0 == "str-bundle-payload"
             {
                 assert!(
                     RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_ok(),
-                    "the 1.0 head without the copy, and the 1.1 body without the flank \
-                     deletions, are read"
+                    "the 1.0 head without the copy, the 1.1 body, and the 1.2 body are read"
                 );
             } else {
                 assert!(
@@ -3825,8 +4209,9 @@ mod tests {
         let record = a_rich_record();
         let mut body = Vec::new();
         encode_record_body(&record, &mut body);
-        // The kind is the byte before the (empty) flank-deletion list that ends every body.
-        let last = body.len() - 2;
+        // The kind is the byte before the (empty) flank-deletion list and the (empty) bundle
+        // payload that end every body.
+        let last = body.len() - 3;
         assert_eq!(
             body[last], 0,
             "the fixture's kind is Generic, which is tag 0"
@@ -5872,7 +6257,20 @@ mod tests {
                     left_flank: vec![b'G'; index].into_boxed_slice(),
                     right_flank: vec![b'T'; 1 + index % 3].into_boxed_slice(),
                 }),
-                _ => LocusKind::SsrBundle,
+                // A bundle's payload differs from record to record too — its flanks and its
+                // runs, none for the first — for the reason the tracts' do.
+                _ => LocusKind::SsrBundle(SsrBundleDetail {
+                    left_flank: vec![b'C'; index].into_boxed_slice(),
+                    right_flank: vec![b'A'; 2 + index % 3].into_boxed_slice(),
+                    // Only the runs that fit this record's hull: a run past it is refused.
+                    runs: (0..index as u64 / 4)
+                        .filter(|run| run * 20 + 12 + run <= span)
+                        .map(|run| {
+                            ReferenceRun::new(run * 20, 12 + run, Motif::new(b"CA").unwrap())
+                                .expect("twelve bases or more hold a CA copy")
+                        })
+                        .collect(),
+                }),
             };
             // Chain ids on some observations, distinct per record so ids taken from another
             // record's list would be visible.
@@ -6053,11 +6451,9 @@ mod tests {
                 .iter()
                 .any(|record| matches!(record.kind, LocusKind::Generic))
         );
-        assert!(
-            records
-                .iter()
-                .any(|record| matches!(record.kind, LocusKind::SsrBundle))
-        );
+        assert!(records.iter().any(
+            |record| matches!(&record.kind, LocusKind::SsrBundle(detail) if !detail.runs.is_empty())
+        ));
         let tracts: Vec<&SsrDetail> = records
             .iter()
             .filter_map(|record| match &record.kind {

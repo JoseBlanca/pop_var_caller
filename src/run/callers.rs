@@ -1242,8 +1242,9 @@ pub struct TractOutcomes {
     /// **Not scored: a candidate carrying no whole motif copy**, which the stutter ladder has no
     /// rung for. See [`repeat_counts_the_tract_model_can_take`] for how often this fires.
     pub without_whole_repeats: u64,
-    /// **Not scored: a repeat cluster with no clean flanks**, which nothing in the run builds a
-    /// caller for — the bundle generator is deferred and has no model.
+    /// **Not scored: an STR bundle**, repeats too close together for any to have clean flanks.
+    /// The bundle generator measures it (`str_bundle_loci.md` §6); calling has no model for it
+    /// yet (step 4 there).
     pub bundles_set_aside: u64,
 }
 
@@ -1374,7 +1375,7 @@ where
             explanation.as_mut(),
             finish,
         ),
-        LocusKind::SsrBundle => {
+        LocusKind::SsrBundle(_) => {
             tracts.bundles_set_aside += 1;
             LocusOutcome::BundleSetAside
         }
@@ -4635,14 +4636,12 @@ mod what_the_fixtures_above_could_not_distinguish {
         );
     }
 
-    /// **A repeat tract is refused as unbuilt, not as out of scope**, and the two are different
-    /// answers to *why did this ground emit nothing*.
-    ///
-    /// Out of scope is permanent — a satellite is never going to be called. Not implemented is
-    /// this caller's own gap, and the run report's job is to say which. Swapping them is
-    /// invisible to every other test here.
+    /// **A run's generator set measures an STR bundle**, one locus over its hull — the slot
+    /// that was refused as unbuilt until 2026-10-11 (`str_bundle_loci.md` §6.1). Before, this
+    /// test pinned that refusal as `NotImplemented` rather than `OutOfScope`; now the region is
+    /// handled and neither unhandled counter moves.
     #[test]
-    fn a_repeat_tract_is_refused_as_unbuilt_rather_than_as_out_of_scope() {
+    fn a_run_measures_an_str_bundle_as_one_locus_over_its_hull() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
         let default_criteria_segmentation = super::tests::segmentation();
@@ -4674,18 +4673,19 @@ mod what_the_fixtures_above_could_not_distinguish {
                 members: Vec::new().into_boxed_slice(),
             },
         });
-        while generators.next_locus(&reads).expect("no failure").is_some() {}
+        let mut loci = Vec::new();
+        while let Some(locus) = generators.next_locus(&reads).expect("no failure") {
+            loci.push(locus);
+        }
 
+        assert_eq!(loci.len(), 1, "one locus per bundle");
+        assert_eq!(loci[0].region.start, Position(10));
+        assert_eq!(loci[0].region.end, Position(20));
+        assert!(matches!(loci[0].kind, LocusKind::SsrBundle(_)));
         let counts = generators.counts();
-        assert_eq!(
-            counts.unhandled_not_implemented, 1,
-            "a repeat tract is this caller's own gap",
-        );
-        assert_eq!(
-            counts.unhandled_out_of_scope, 0,
-            "and not a permanent refusal — that is the satellite's answer, and saying it here \
-             would tell a run report the tract will never be called",
-        );
+        assert_eq!(counts.regions_handled, 1);
+        assert_eq!(counts.unhandled_not_implemented, 0);
+        assert_eq!(counts.unhandled_out_of_scope, 0);
     }
 }
 

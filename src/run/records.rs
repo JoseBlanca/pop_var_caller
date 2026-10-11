@@ -606,7 +606,7 @@ pub fn evidence_for_output(
         // and each called allele's `REPCN` — is written from that one motif.
         repeat_tract: match locus.alleles().kind() {
             LocusKind::Ssr(detail) => Some(TractAnnotation::new(detail.motif)),
-            LocusKind::Generic | LocusKind::SsrBundle => None,
+            LocusKind::Generic | LocusKind::SsrBundle(_) => None,
         },
         filter: filter_for(locus, selection),
     }
@@ -641,7 +641,7 @@ fn filter_for(locus: &LocusInference, selection: SelectionVerdict) -> FilterVerd
         return FilterVerdict::EmDidNotConverge;
     }
     match locus.alleles().kind() {
-        LocusKind::Generic | LocusKind::SsrBundle => FilterVerdict::Pass,
+        LocusKind::Generic | LocusKind::SsrBundle(_) => FilterVerdict::Pass,
         LocusKind::Ssr(_) => match selection {
             SelectionVerdict::NotPeriodic => FilterVerdict::NotPeriodic,
             SelectionVerdict::Truncated { .. } => FilterVerdict::TooManyAlleles,

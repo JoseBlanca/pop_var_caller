@@ -378,7 +378,7 @@ impl RecordMeasurement for SingleBaseEquality {
                     self.found.wide_tract_records += 1;
                     self.found.bases_in_wide_tract_records += head.region.len();
                 }
-                LocusKind::SsrBundle => {
+                LocusKind::SsrBundle(_) => {
                     self.found.wide_bundle_records += 1;
                     self.found.bases_in_wide_tract_records += head.region.len();
                 }

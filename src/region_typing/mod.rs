@@ -34,6 +34,7 @@
 //! ng's. What sharing one function used to guarantee for free, a test now pins
 //! — see [`segment_criteria`]'s differential against production (spec §8.0).
 
+pub mod reference_runs;
 pub mod segment_criteria;
 
 use std::path::Path;
@@ -645,7 +646,7 @@ pub fn partition_resident_in(
     //    Each bundle member is described from the bases here, where the catalog reads the
     //    same description off its rows; `classify` ran with `bases_start = 1` over the whole
     //    contig, so a member's interval is already an offset into `bases`.
-    let features = resolve_features(
+    let (features, bundles_at_contig_ends) = resolve_features(
         &runs,
         classified.loci,
         &classified.bundled,
@@ -654,6 +655,15 @@ pub fn partition_resident_in(
         Bp(contig_len),
         config,
     );
+    // **A bundle dropped at a contig end is charged as a segment there is**
+    // (`str_bundle_loci.md` §5.3): to `FlankClamped`, its whole hull, where it starts.
+    for hull in &bundles_at_contig_ends {
+        if inside_requested(hull.start - 1, contig, &wanted) {
+            counts
+                .rejected_by_reason
+                .add(segment_criteria::RejectionReason::FlankClamped, hull.len());
+        }
+    }
 
     let mut out = Vec::new();
     let mut emitted_upto = 0;
@@ -800,7 +810,9 @@ fn charge_region(counts: &mut TypedRegionCounts, region: &TypedRegion, requested
 /// 2. **Otherwise, touching the contig's first or last base** → dropped, as an STR segment
 ///    is (`RejectionReason::FlankClamped`): no read can be anchored on a flank of zero
 ///    bases. Its bases become generic. The cap is asked first, because a satellite needs
-///    no flank.
+///    no flank. Its hull comes back in the second list, for the caller to charge as that
+///    rejection — a scan does; the catalog's tally has no contig-end counter
+///    (`repeat_catalog::tally`'s module doc).
 ///
 /// Both routes apply both rules, with the contig's own length. The contig-end rule rarely
 /// fires on the catalog's route, because the builder keeps a row only when `min_flank_bp`
@@ -864,11 +876,12 @@ pub(crate) fn resolve_features(
     contig: ContigId,
     contig_len: Bp,
     config: &TypedRegionConfig,
-) -> Vec<TypedRegion> {
+) -> (Vec<TypedRegion>, Vec<CoverageRun>) {
     let max_str_len = config.max_str_len.get();
     let max_str_bundle_len = config.max_str_bundle_len.get();
     let bundle_threshold = config.criteria.bundle_threshold;
     let mut features: Vec<TypedRegion> = Vec::new();
+    let mut bundles_at_contig_ends: Vec<CoverageRun> = Vec::new();
 
     // The satellites: over-cap coverage runs — as spans that can still GROW (below).
     let mut satellites: Vec<CoverageRun> = runs
@@ -984,6 +997,7 @@ pub(crate) fn resolve_features(
             continue;
         }
         if hull.start == 1 || hull.end == contig_len.get() {
+            bundles_at_contig_ends.push(hull);
             continue;
         }
         features.push(TypedRegion {
@@ -995,7 +1009,7 @@ pub(crate) fn resolve_features(
     }
 
     features.sort_by_key(|f| f.region.start);
-    features
+    (features, bundles_at_contig_ends)
 }
 
 /// The absorption fixed point of [`resolve_features`], reached in one start-sorted sweep:
@@ -2639,6 +2653,62 @@ mod tests {
             bundle.region.end,
             Position(199),
             "the hull ends one base before the end"
+        );
+    }
+
+    /// **A bundle dropped at a contig end is charged to `FlankClamped`, its whole hull, as a
+    /// segment there is** (`str_bundle_loci.md` §5.3) — and only where the hull starts inside
+    /// the stretch asked about. A bundle one base in, or a capped one, is not charged.
+    #[test]
+    fn a_bundle_dropped_at_a_contig_end_is_charged_as_flank_clamped() {
+        let whole = |len: usize| {
+            [GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(len as u64),
+            }]
+        };
+        let flank_clamped = |bases: &[u8], config: &TypedRegionConfig, wanted: &[GenomeRegion]| {
+            partition_resident_in("chr1", ContigId(0), bases, config, wanted)
+                .1
+                .rejected_by_reason
+                .flank_clamped
+        };
+        let capped = TypedRegionConfig {
+            max_str_bundle_len: Bp(10),
+            ..TypedRegionConfig::default()
+        };
+        for (offsets, side) in [(&[0usize, 30][..], "left"), (&[150, 180][..], "right")] {
+            let bases = contig_with_tracts_at(offsets, 200);
+            // The capped run makes the hull a satellite, which is how long the hull is.
+            let hull_len = partition_resident("chr1", ContigId(0), &bases, &capped)
+                .iter()
+                .find(|region| matches!(region.kind, RegionKind::Satellite))
+                .map(|region| region.region.len())
+                .expect("over the cap, the hull is a satellite");
+            assert_eq!(
+                flank_clamped(&bases, &TypedRegionConfig::default(), &whole(200)),
+                hull_len,
+                "the {side} end"
+            );
+            assert_eq!(flank_clamped(&bases, &capped, &whole(200)), 0, "capped");
+        }
+        // Asked about a stretch that does not hold the hull's first base: not charged here.
+        let bases = contig_with_tracts_at(&[0, 30], 200);
+        let elsewhere = [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(100),
+            end: Position(200),
+        }];
+        assert_eq!(
+            flank_clamped(&bases, &TypedRegionConfig::default(), &elsewhere),
+            0
+        );
+        // One base in from the end: a bundle, nothing clamped.
+        let bases = contig_with_tracts_at(&[1, 31], 200);
+        assert_eq!(
+            flank_clamped(&bases, &TypedRegionConfig::default(), &whole(200)),
+            0
         );
     }
 

@@ -272,7 +272,7 @@ pub enum Verdict {
 pub fn bounded_by_policy(kind: &LocusKind) -> bool {
     match kind {
         LocusKind::Generic => true,
-        LocusKind::Ssr(_) | LocusKind::SsrBundle => false,
+        LocusKind::Ssr(_) | LocusKind::SsrBundle(_) => false,
     }
 }
 
@@ -1773,7 +1773,7 @@ mod tests {
     #[test]
     fn a_bundle_wider_than_the_bound_is_not_failed() {
         let bundle = [SampleLocusObservations {
-            kind: LocusKind::SsrBundle,
+            kind: LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
             ..observation(region(10, 69), 4)
         }];
 

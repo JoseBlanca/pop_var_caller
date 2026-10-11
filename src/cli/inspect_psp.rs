@@ -52,6 +52,7 @@ pub const COLUMNS: [&str; 23] = [
     "start",
     "end",
     "locus_kind",
+    // A repeat tract's motif; for a bundle, its reference runs as `motif:offset:length,…`.
     "motif",
     "left_flank",
     "right_flank",
@@ -335,9 +336,27 @@ fn write_locus_columns(
             String::from_utf8_lossy(&detail.left_flank).into_owned(),
             String::from_utf8_lossy(&detail.right_flank).into_owned(),
         ),
-        Some(LocusKind::SsrBundle) => {
-            ("repeat_bundle", String::new(), String::new(), String::new())
-        }
+        // A bundle has no one motif: its `motif` cell lists the hull's reference runs as
+        // `motif:offset:length`, offsets from the hull's first base, joined by `,` (empty for a
+        // bundle with no run).
+        Some(LocusKind::SsrBundle(detail)) => (
+            "repeat_bundle",
+            detail
+                .runs
+                .iter()
+                .map(|run| {
+                    format!(
+                        "{}:{}:{}",
+                        String::from_utf8_lossy(run.motif().as_bytes()),
+                        run.offset(),
+                        run.length()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            String::from_utf8_lossy(&detail.left_flank).into_owned(),
+            String::from_utf8_lossy(&detail.right_flank).into_owned(),
+        ),
     };
     let reference_bases = record.map_or_else(String::new, |record| {
         String::from_utf8_lossy(&record.reference_bases).into_owned()
@@ -448,7 +467,7 @@ mod tests {
         let text = dump(&zeta, "chr1\t0\t100\n", cohort.directory.path());
 
         assert!(text.contains(&format!("#inspect_psp_columns_version={COLUMNS_VERSION}\n")));
-        assert!(text.contains("#psp_format_version=1.2\n"));
+        assert!(text.contains("#psp_format_version=2.0\n"));
         assert!(text.contains("#sample=zeta\n"));
         let mut lines = text.lines().filter(|line| !line.starts_with('#'));
         assert_eq!(lines.next(), Some(COLUMNS.join("\t").as_str()));

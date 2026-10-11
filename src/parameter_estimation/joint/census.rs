@@ -2452,7 +2452,7 @@ impl CensusWriter {
         match &locus.kind {
             LocusKind::Generic => self.add_generic(locus),
             LocusKind::Ssr(_) => self.add_ssr(locus),
-            LocusKind::SsrBundle => {}
+            LocusKind::SsrBundle(_) => {}
         }
     }
 

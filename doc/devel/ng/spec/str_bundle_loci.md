@@ -78,8 +78,9 @@ the STR path (`typed_regions.md` §10 named it as the only option that recovers 
   make a bundle a bundle; they are **not** where stutter is placed, because they overlap and nest
   (§5.1, the review's finding).
 - **Hull.** The bundle's region: the earliest member start to the furthest member end.
-- **Run.** A stretch of pure, whole copies of one of the members' motifs, at least the typing's copy
-  floor for that motif's length (`--min-copies`) — where a slip of the polymerase can happen. The
+- **Run.** A stretch of pure, whole copies of one motif of period 1 to 6, at least the typing's copy
+  floor for that motif's length (`--min-copies`) — where a slip of the polymerase can happen.
+  *(Changed in review, 2026-10-11: any motif, not only the members'; §6.1.)* The
   hull's **reference runs** are found once, from the reference sequence (§6.1).
 - **Fixed sequence.** Every hull base outside the runs. No stutter is modelled in it.
 - **Run counts.** For an allele, how many copies of each reference run's motif it carries at that
@@ -120,6 +121,8 @@ another** and **183 more have consecutive members that overlap**. Two of them:
 
 **Decision (owner, 2026-10-11): stutter is placed in runs found from the reference sequence, and the
 members serve only as the list of motifs to look for** (§6.1). The typing is left as built.
+*Changed in review, the same day: the members are not consulted at all; every motif of period 1 to
+6 is looked for (§6.1).*
 
 **5.2 The cap.** A hull longer than `--max-str-bundle-len` becomes a `Satellite`. No re-absorption
 follows: anything within 15 bases of a member would have joined the bundle, so nothing is within a
@@ -165,6 +168,13 @@ first, so a hull over the cap at a contig end is a satellite, which needs no fla
 apply the rule. It rarely fires on the catalog's, which keeps a row only with `min_flank_bp` bases
 beside its cut span, but a hull is drawn over detected spans, which can reach further.
 
+*Changed during implementation (2026-10-11, step 3).* **The count is a scan's only.** A scan charges
+a dropped bundle's whole hull to `FlankClamped`, where the hull starts, when the stretch asked about
+holds that base — as it charges a segment. The catalog's tally has no contig-end counter, by design
+(`repeat_catalog/tally.rs`: a row at a contig end is never stored, so such a counter would read zero
+for every genome), and the rare bundle the catalog's route drops there goes uncounted, as it did
+before.
+
 **5.4 The tallies** (`TypedRegionCounts`) count capped bundles as satellites; `ssr_bundles` counts
 what remains.
 
@@ -173,14 +183,17 @@ what remains.
 ### 6.1 The hull's reference runs, and measuring a read
 
 **The reference runs are found once per bundle, when its locus is built**, from the hull's reference
-bases and the members' motifs:
+bases alone:
 
-1. For each distinct motif among the members, find every maximal stretch of the hull that repeats
-   with that motif's period and whose unit is that motif or one of its rotations (`CT` also matches
-   `TCTC…`). Its copies are its length divided by the period, rounded down; a part copy at its end
-   stays in the run, as a reference segment keeps its part copy.
+1. For every period from 1 to 6, find every maximal stretch of the hull that repeats with that
+   period, counted under its smallest period (`ATATAT` is a period-2 stretch, not a period-4 or
+   period-6 one) and made of `A`, `C`, `G` and `T` only. A motif and its rotations are one motif
+   (`CT` also matches `TCTC…`). Its copies are its length divided by the period, rounded down; a part
+   copy at its end stays in the run, as a reference segment keeps its part copy.
 2. Keep the stretches with at least the typing's copy floor for that period (`--min-copies`,
-   default 6, 4, 4, 3, 3, 3 copies for periods 1 to 6).
+   default 6, 4, 4, 3, 3, 3 copies for periods 1 to 6). *(As built: the calling default has been
+   8, 6, 6, 6, 5, 4 since 2026-08-10, `MinCopies::default`; the run takes whatever the ground was
+   typed with.)*
 3. Choose runs **longest first** (in bases; a tie goes to the earlier start). A run that overlaps
    one already chosen gives up the shared bases, cut back to whole copies, and is kept if it still
    reaches the copy floor. The chosen runs never overlap.
@@ -191,6 +204,35 @@ units reach two clean copies, below the floor of three for period 6). A bundle c
 — a cluster of impure repeats, none with a stretch at the copy floor. It is still called, with no
 stutter modelled anywhere in it; how many there are is counted on HG002 at step 3.
 
+*Changed during implementation (2026-10-11): every motif, not the members' motifs.* Step 1 first
+looked only for the members' motifs, and **that missed the `AT` run of this section's own first
+example**. At chr1:8,007,443 the typing lists two members, `CT` over all 64 bases and `T` inside it,
+and no `AT` member (§5.1). So the hull came out as `(CT)20` at 0 and `T9` at 55, and the 16-base
+`AT` run between them was fixed sequence, with no stutter priced in it. Looking for every motif
+of period 1 to 6 (owner, in review) gives `(CT)20`, `(AT)8`, `T8` as written, and the second example
+still comes out as `A9` and fixed sequence. Both are pinned by tests
+(`region_typing/reference_runs.rs`). On HG002's 2,410 bundles the change finds 3,892 runs instead
+of 3,767, and bundles with no run fall from 141 to 130 (§10, step 3).
+
+What the rule as written left open, and how it was settled in the code
+(`find_reference_runs`):
+
+- **A stretch is at least one whole copy and one more base**: a single isolated copy, with nothing
+  repeating, is not a stretch. It matters only under a copy floor of 1.
+- **A motif and its rotations** (`CA` and `AC`) are one motif: a stretch is found once, in the
+  phase its first base gives it.
+- **Ties after length and start** go to the shorter period. Two stretches alike in length, start and
+  period have the same first bases, so the same motif, and nothing is left to break.
+- **"Cut back to whole copies"**: a stretch that gives up bases at its end is cut back to whole
+  copies counted from its start; one that gives them up at its start is re-read from its new first
+  base — still whole copies of a rotation of its motif — and keeps its natural end's part copy.
+  `(AT)8` in the first example is the latter: the `AT` stretch starts on the last `T` of `(CT)20`,
+  gives it up, and is read as `AT` from the next base.
+- **A stretch split in two** by a run chosen before it (possible only when that run was itself cut
+  back) keeps each piece that reaches the floor.
+- **A run's motif is phase-faithful**: the run's own first `period` bases, so it can be any rotation
+  of the unit (`TC` for a run `TCTC…`).
+
 The bundle generator is then the STR segment's generator run over the hull. **Three things differ:**
 
 - **The delimiter** — the aligner that finds where in the read the repeat starts and ends — is the
@@ -198,6 +240,8 @@ The bundle generator is then the STR segment's generator run over the hull. **Th
   only the hull's boundaries, not a motif (`alignment/mod.rs`, `RepeatGeometry`). The default
   delimiter for segments prices whole-unit slips of one motif and cannot describe a hull of
   several. Whether a per-run version of it earns its keep is measured, not assumed (§10, step 3).
+  *(Changed in review, 2026-10-11: the flat-gap delimiter is built for bundles with the segments'
+  firm-anchor test, `SsrFlatGapAligner::with_anchor_rule`; §10, step 3.)*
 - **The edge-escape check** (`reference_run_escapes_the_tract`) uses, at each edge of the hull, the
   motif of the run that reaches that edge, and none where fixed sequence reaches it.
 - **Only reads that cross the whole hull are used.** An STR segment also uses a read that ends
@@ -209,6 +253,20 @@ Everything else is unchanged and motif-free: the spelling of the read over the h
 deletion at the two outer edges in its smallest form (`str_edge_deletion_alleles.md` §4), the
 per-sample tally keyed on spelling, flank deletion and read group.
 
+*Changed during implementation (2026-10-11, step 3).* As built (`locus_generation/ssr_bundle.rs`),
+with these details the section left open:
+
+- **The flanks are the segments'**: 15 bases each side by default (`SsrGeneratorConfig`'s
+  `flank_bp`, held at or under the bundle radius as for a segment), clamped at a contig end.
+- **A read that ends inside the hull is dropped and counted**, as `ended_inside_a_bundle`, a fifth
+  no-observation reason; a read that never entered the hull is still `OutsideTract`. On the
+  stuttering benchmark (one sample, PCR, 30×) a bundle cell has 20 crossing reads and 23 reads that
+  yield no observation, against 20 and 6 at a segment.
+- **The geometry's motif is the first member's.** The flat-gap delimiter reads none, but the
+  geometry type carries one.
+- **The runs are found after the hull's bases are fetched and before any read is measured**, so the
+  edge-escape check has them; a bundle with no run at an edge asks nothing there.
+
 ### 6.2 The psp file
 
 **`LocusKind::SsrBundle` gets a payload**: the two flanks, as `SsrDetail` has, and the reference runs
@@ -218,6 +276,28 @@ record, so no reader has an expectation to break — but a reader built before t
 the tag and no payload, so the format version must make such a reader refuse a file with bundle
 records (`psp_file_format.md` §4.3). The typing a psp records changes too, so new psps are needed for
 any run that is compared.
+
+*Changed during implementation (2026-10-11, step 3).* **Where the payload sits, and the version.**
+
+- **The payload is one byte string at the very end of every record body**, `str-bundle-payload`,
+  empty on every record that is not a bundle — not fields after the kind tag. That follows format
+  1.2's flank deletions: a field every record carries is one a reader can step over without knowing
+  it, which a field written only for one kind is not (`psp_file_format.md` §4.3, `RecordLayout`).
+  It costs one byte a record before compression: on the stuttering benchmark's one-sample, 30×
+  psp, the file grew from 35,116,701 to 35,309,906 bytes (0.55%), the 500 bundle records' own
+  observations included.
+- **Format 2.0, not 1.3.** A reader accepts every later minor of its own major, so only a major
+  bump makes a reader built before this change refuse these files. Two things make refusal right.
+  The payload is the body's last field, so such a reader would skip it as an unknown final field
+  and read every bundle as one with no runs. And it ignores the header's `max-str-bundle-len-bp`
+  (§5.2), so it would accept a typing it cannot reproduce.
+- **A 1.x header passes a 2.0 reader's version check, but in practice every 1.x psp must be written
+  again.** The typing section refuses a psp without `max-str-bundle-len-bp` (§5.2), and no
+  released build wrote that key: only this branch's builds from 270da29f to format 2.0 did. A 1.x
+  file that does pass holds no bundle record, and one found in it is refused as damage.
+  *(Corrected in review, 2026-10-11: this said a 2.0 reader "still reads 1.x files".)*
+- `pvc inspect-psp` writes a bundle's runs in its `motif` cell as `motif:offset:length`, joined by
+  `,`, and the hull's flanks in the flank cells.
 
 The typing dump (`typed_regions_cli.md` §3.1) writes each member's motif in its `members` cell,
 beside its start, end and period. *(As built, 2026-10-11: the start and end are the member's cut
@@ -377,6 +457,48 @@ step.
    run. Counted on the benchmark psps: crossing reads per bundle against the truth's carriers. Here
    the flat-gap delimiter is compared with a per-run one on the simulated bundles, by how often the
    spelling equals the read's true sequence.
+   *Done 2026-10-11.* **HG002** (the 2,410 bundles, calling floors; `examples/ng_str_bundle_runs.rs`),
+   runs of every motif (§6.1): 130 bundles have no run, 869 one, 1,234 two, 155 three, 20 four, 2
+   five; the 3,892 runs are 2,384 of period 1, 1,268 of period 2, 83, 98, 35 and 24 of periods 3 to
+   6. With the members' motifs only, as first built: 141, 922, 1,210, 124, 12 and 1 bundles, 3,767
+   runs.
+   **The stuttering benchmark** (PCR, 30×; each crossing read's spelling put back into the truth's
+   window and compared with the sample's two true alleles; cells with a SNP beside the repeat left
+   out). Per 1,000 crossing reads:
+
+   | | spelled as a true allele | one whole-unit indel from one (stutter's shape) | same length, another base | a part of the hull only | another length |
+   |---|---|---|---|---|---|
+   | bundles, 1 sample (10,859 reads) | 921 | 23 | 45 | 7.4 | 3.2 |
+   | bundles, 1 sample, with the anchor test (9,910) | 939 | 16 | 44 | 0.2 | 0.7 |
+   | segments, 1 sample (59,653) | 932 | 28 | 39 | 0.0 | 0.8 |
+   | bundles, 50 samples (542,911) | 906 | 38 | 45 | 7.7 | 3.6 |
+   | bundles, 50 samples, with the anchor test (497,333) | 922 | 32 | 44 | 0.4 | 1.7 |
+   | segments, 50 samples (2,970,633) | 902 | 59 | 38 | 0.2 | 1.6 |
+
+   The flat-gap delimiter spells bundles as often right as the default delimiter spells segments,
+   and stutter-shaped reads are no more frequent, so **no per-run delimiter was built**. One
+   failure was its own: about 1 crossing read in 100 at a bundle was spelled over **part of the
+   hull only** (or part plus an error base) — a read that ends inside the hull, reported complete
+   because the flat-gap delimiter calls a flank anchored from the alignment's shape, not from
+   matched flank bases. A read at chr1:144,818 shows how: it carries `A11` against the hull's
+   `A10 CTACTC A8` and ends there; the path takes ten `A`s, deletes the rest of the hull, puts
+   the eleventh `A` against the right flank's first base and runs off the frame's end, and the
+   flank counts as anchored on one mismatched base. **Fixed in review (owner, 2026-10-11)**: the
+   bundle generator builds the flat-gap delimiter with the segments' firm-anchor test
+   (`SsrFlatGapAligner::with_anchor_rule`, the rule of `alignment/ssr_unit_robust.rs`), so such a
+   read is one-sided and dropped as ending inside the hull. The rows "with the anchor test" above
+   are that build: part-of-hull reads fall to 0.2 and 0.4 in 1,000, as low as at segments, and the
+   segments' rows do not move. A bundle cell now has 20 crossing reads and 23 that yield no
+   observation (a segment cell 20 and 6).
+   **Nothing else moved** on the one-sample 30× run: every non-bundle record of the psp is
+   byte-identical with main's build (4,120,085 dump rows), and the VCF's genotypes, QUALs and
+   filters are identical; the hidden-duplication filter's `PARALOG_LR` moved in 67 of 2,396 records
+   (66 with the anchor test) and its cut from 31.75 to 31.85, because its coverage now sees reads
+   at bundle hulls, which `window_coverage/depth.rs` already counted for any bundle record. That is
+   correct counting, not double counting: a hull is one typed region, so no other record reports
+   its positions, which before had no record at all and were absent from the windows. Its depth
+   there is the crossing reads only, about half the reads present (the review's Mi10). The
+   cross-platform checksums did not move.
 4. **Calling and the record** (§7). Measured on both benchmarks: HG002's bundles at 30× and 50×
    against the generic path's 901 right, 178 wrong, 46 missed, 16 false calls at 30×; the
    stuttering benchmark's bundles against both baselines of step 1, false calls first. The
@@ -389,9 +511,10 @@ step.
 
 1. **The size limit is the user's**: `--max-str-bundle-len`, default 100 (§5.2).
 2. **Stutter is modelled in every run** (§7.3), and **every allele has a count per run** (§7.1).
-3. **Runs, not members, carry the stutter**: runs of pure whole copies of the members' motifs, found
-   in the reference hull, non-overlapping, longest first, each at least the typing's copy floor
-   (§6.1). The members only list the motifs to look for.
+3. **Runs, not members, carry the stutter**: runs of pure whole copies of one motif, found in the
+   reference hull, non-overlapping, longest first, each at least the typing's copy floor (§6.1).
+   *(In review, the same day: every motif of period 1 to 6 is looked for, not only the members',
+   which missed the `AT` run of §5.1's first example.)*
 4. **Run counts are written as `REPCNB`** on bundle records (§7.5); `REPCN` keeps its type.
 5. **Reads that end inside a bundle are left out at first** (§6.1), and measured at 3–5× once the
    rest works. They are where segments gain most at low depth, so if bundles lag segments at 5×

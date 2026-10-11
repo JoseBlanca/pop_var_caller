@@ -479,9 +479,26 @@ pub const HEADER_FRAMING_BYTES: usize = HEAD_MAGIC.len() + 8 + HEAD_SENTINEL.len
 /// written once and read once per file, so nothing on any hot path notices the room.
 pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES as u64;
 
-/// The format this writer produces and this reader understands. A file whose **major**
-/// differs is refused as [`PspReadError::UnsupportedVersion`], not read as damaged.
-pub const FORMAT_VERSION: (u16, u16) = (1, 2);
+/// The format this writer produces and the newest this reader understands. A file whose
+/// **major** is later, or earlier than [`OLDEST_READABLE_MAJOR`], is refused as
+/// [`PspReadError::UnsupportedVersion`], not read as damaged.
+///
+/// **2.0 since 2026-10-11, when STR bundle records gained a payload** (their flanks and
+/// reference runs, `str_bundle_loci.md` §6.2). The payload is the body's last field, so a 1.x
+/// reader handed a later 1.x minor would skip it as an unknown final field — and so read every
+/// bundle as one with no runs, and ignore the header's `max-str-bundle-len-bp`, the bundle cap it
+/// cannot apply. A 1.x reader accepts any later 1.x minor; only a major bump makes it refuse
+/// these files, by name.
+pub const FORMAT_VERSION: (u16, u16) = (2, 0);
+
+/// The oldest major this reader reads. **A 1.x header passes this check, and in practice almost
+/// no 1.x psp is read**: the typing section then refuses a psp that does not record
+/// `max-str-bundle-len-bp` (`segmentation_section.rs`), and no released build wrote that key —
+/// only builds of the `str-bundles` branch from 270da29f to format 2.0 did. **So every psp
+/// written by main must be written again.** A 1.x file that does pass holds no bundle record
+/// (no 1.x writer had a bundle generator; one found is refused as damage), and its record layout
+/// is recognised from its manifest ([`RecordLayout`](crate::psp::record::RecordLayout)).
+pub const OLDEST_READABLE_MAJOR: u16 = 1;
 
 /// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
 ///
@@ -690,7 +707,7 @@ impl Header {
             .map_err(|e| malformed_by("the header body is not valid TOML", Box::new(e)))?;
 
         let format_version = version_in(&table, path)?;
-        if format_version.0 != FORMAT_VERSION.0 {
+        if !(OLDEST_READABLE_MAJOR..=FORMAT_VERSION.0).contains(&format_version.0) {
             return Err(PspReadError::UnsupportedVersion {
                 path: path.to_path_buf(),
                 found: format_version,
@@ -2019,7 +2036,7 @@ mod tests {
         assert_eq!(&bytes[..4], b"NGP\n");
         let body = body_of(&bytes);
         for expected in [
-            "format-version = \"1.2\"",
+            "format-version = \"2.0\"",
             "sample = \"SRR7279481\"",
             "genomic-block-size-bp = 100000",
             "look-back-window-log = 15",
@@ -2124,16 +2141,35 @@ mod tests {
     #[test]
     fn a_newer_major_version_is_refused_as_a_version_and_not_as_damage() {
         let bytes = framed(
-            "format-version = \"2.0\"\n\
-             whatever-version-two-added = { shape = \"nothing here knows\" }\n",
+            "format-version = \"3.0\"\n\
+             whatever-version-three-added = { shape = \"nothing here knows\" }\n",
         );
         match decoded(&bytes) {
             Err(PspReadError::UnsupportedVersion {
                 found, supported, ..
             }) => {
-                assert_eq!(found, (2, 0));
+                assert_eq!(found, (3, 0));
                 assert_eq!(supported, FORMAT_VERSION);
             }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    /// **A 1.x header still reads, and a major before 1 is refused as a version.** Format 2.0
+    /// gave STR bundle records a payload; a 1.x file holds no bundle record, so it reads as it
+    /// always did (its record layout is chosen from its manifest, `RecordLayout`).
+    #[test]
+    fn a_format_1_header_reads_and_a_major_before_it_is_refused() {
+        let mut written = a_written_header();
+        let bytes = written.encode().expect("a valid header encodes");
+        let body = body_of(&bytes).replace("format-version = \"2.0\"", "format-version = \"1.2\"");
+        written.format_version = (1, 2);
+        let (read_back, _) = decoded(&framed(&body)).expect("a 1.2 header reads");
+        assert_eq!(read_back, written);
+
+        let body = body_of(&bytes).replace("format-version = \"2.0\"", "format-version = \"0.9\"");
+        match decoded(&framed(&body)) {
+            Err(PspReadError::UnsupportedVersion { found, .. }) => assert_eq!(found, (0, 9)),
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
     }
@@ -2149,10 +2185,10 @@ mod tests {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
-            .replace("format-version = \"1.2\"", "format-version = \"1.4\"")
+            .replace("format-version = \"2.0\"", "format-version = \"2.4\"")
             .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
-        written.format_version = (1, 4);
+        written.format_version = (2, 4);
         let (read_back, _) = decoded(&framed(&body)).expect("a later minor of this major reads");
         assert_eq!(
             read_back, written,
@@ -2167,9 +2203,9 @@ mod tests {
     fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
         let mut header = a_written_header();
         header.format_version = (1, 7);
-        let refused = header.encode().expect_err("this writer produces 1.2");
+        let refused = header.encode().expect_err("this writer produces 2.0");
         assert!(
-            refused.to_string().contains("produces 1.2"),
+            refused.to_string().contains("produces 2.0"),
             "got {refused}"
         );
     }
@@ -2978,13 +3014,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the thirty are lists.** A count and
+    /// **The record's own fields, and which two of the thirty-one are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::psp::record::record_fields();
-        assert_eq!(fields.len(), 30);
+        assert_eq!(fields.len(), 31);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)

@@ -3178,8 +3178,9 @@ mod tests {
     #[test]
     fn a_manifest_declaring_a_layout_this_writer_cannot_honour_is_refused() {
         let mut manifest = a_manifest();
-        // Two fields short: one short is format 1.1, which a reader reads.
-        manifest.fields.truncate(manifest.fields.len() - 2);
+        // Three fields short: one short is format 1.2 and two short format 1.1, which a reader
+        // reads.
+        manifest.fields.truncate(manifest.fields.len() - 3);
 
         let refused = BlockBuilder::from_manifest(&manifest)
             .expect_err("a manifest missing a field this build writes");
@@ -4192,8 +4193,9 @@ mod tests {
         ));
 
         let mut manifest = a_manifest();
-        // Two fields short: one short is format 1.1, which a reader reads.
-        manifest.fields.truncate(manifest.fields.len() - 2);
+        // Three fields short: one short is format 1.2 and two short format 1.1, which a reader
+        // reads.
+        manifest.fields.truncate(manifest.fields.len() - 3);
         assert!(matches!(
             BlockStream::new([].as_slice(), &manifest),
             Err(BlockReadError::UnsupportedRecordLayout { .. })

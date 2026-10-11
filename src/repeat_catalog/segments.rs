@@ -257,16 +257,19 @@ fn repeat_features_of_contig(
             .expect("every bundled interval was described when it was bundled");
         members[at].1
     };
+    // A bundle dropped at a contig end is not charged here: the catalog's tally has no
+    // contig-end counter, by design (`tally.rs`'s module doc), and a scan charges it.
+    let (features, _bundles_at_contig_ends) = resolve_features(
+        &runs,
+        admitted.loci,
+        &admitted.bundled,
+        describe_member,
+        contig,
+        contig_len,
+        &config,
+    );
     (
-        resolve_features(
-            &runs,
-            admitted.loci,
-            &admitted.bundled,
-            describe_member,
-            contig,
-            contig_len,
-            &config,
-        ),
+        features,
         ContigTally {
             repeat_bp,
             rejected: admitted.rejected,

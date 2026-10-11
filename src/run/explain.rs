@@ -219,7 +219,7 @@ pub(crate) fn selection_rows(
     let kind = match observation.kind {
         LocusKind::Generic => "generic",
         LocusKind::Ssr(_) => "repeat_tract",
-        LocusKind::SsrBundle => "repeat_bundle",
+        LocusKind::SsrBundle(_) => "repeat_bundle",
     };
     rows.push(
         ExplainRow::of(region, ExplainStep::Locus, kind)

@@ -16,6 +16,7 @@
 
 pub mod pileup;
 pub mod ssr;
+pub mod ssr_bundle;
 mod witness;
 
 /// The witness vocabulary, re-exported so no consumer's import path names the file it
@@ -25,8 +26,9 @@ pub use witness::{LocusLen, ReadWitness, WitnessedLocusPositions};
 use crate::read::filtering::ReadFilterCounts;
 use crate::read::input::{IngestError, SampleReads};
 use crate::ref_seq::RefSeqError;
+use crate::region_typing::reference_runs::ReferenceRun;
 use crate::region_typing::segment_criteria::{Motif, SsrSegment};
-use crate::region_typing::{RegionKind, TypedRegion};
+use crate::region_typing::{BundleMember, RegionKind, TypedRegion};
 use crate::types::ChainId;
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
@@ -468,9 +470,9 @@ pub enum LocusKind {
     Generic,
     /// A microsatellite tract — carries the motif and the flanks the read model needs.
     Ssr(SsrDetail),
-    /// A repeat cluster with no clean flanks, coarser than a single tract. Its payload
-    /// is the bundle generator's to decide (deferred, spec §11).
-    SsrBundle,
+    /// An STR bundle, measured as one STR locus over its hull (`str_bundle_loci.md` §2,
+    /// §6) — carries the hull's flanks and its reference runs, where stutter is priced.
+    SsrBundle(SsrBundleDetail),
 }
 
 /// What an [`LocusKind::Ssr`] locus carries — grouped so a repeat's motif and flanks
@@ -489,6 +491,27 @@ pub struct SsrDetail {
     pub right_flank: Box<[u8]>,
 }
 
+/// What an [`LocusKind::SsrBundle`] locus carries: the hull's two flanks, as [`SsrDetail`]
+/// has them, and the hull's **reference runs** (`str_bundle_loci.md` §6.1, §6.2).
+///
+/// **The members are not here.** They serve only as the list of motifs the runs are looked
+/// for in, and once the runs are found nothing downstream reads them (§6.2). The locus's
+/// [`reference_bases`](SampleLocusObservations::reference_bases) are the hull's, so each run's
+/// offset is into them. The `Default` is the empty payload — no flanks, no runs — for tests
+/// and fixtures; a generator always fills all three.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SsrBundleDetail {
+    /// The reference flank left of the hull. Clamped at the contig end, so it may be
+    /// shorter than the right flank.
+    pub left_flank: Box<[u8]>,
+    /// The reference flank right of the hull (see `left_flank`).
+    pub right_flank: Box<[u8]>,
+    /// The hull's reference runs, in hull order and never overlapping. Empty for a bundle with
+    /// no stretch at the copy floor, which is still measured and called, with no stutter
+    /// modelled anywhere in it.
+    pub runs: Box<[ReferenceRun]>,
+}
+
 /// Generates a sample's loci from one segment of kind `S`, streaming **one locus at a
 /// time**.
 ///
@@ -497,7 +520,7 @@ pub struct SsrDetail {
 /// so two generators for the same kind stay interchangeable behind `Box<dyn
 /// LocusGenerator<S>>` (spec §4). A generator holds its own accessors (reference, aligner,
 /// scratch) as fields, so the only per-call context is the segment and the sample's reads.
-pub trait LocusGenerator<S> {
+pub trait LocusGenerator<S: ?Sized> {
     /// Start a new segment: reset progress. Does no gathering and cannot fail.
     fn begin_segment(&mut self, region: GenomeRegion);
 
@@ -610,7 +633,7 @@ pub enum UnhandledReason {
     NotImplemented,
 }
 
-impl<S> LocusGenerator<S> for NoLoci {
+impl<S: ?Sized> LocusGenerator<S> for NoLoci {
     fn begin_segment(&mut self, _region: GenomeRegion) {}
 
     fn next_locus(
@@ -832,14 +855,14 @@ impl LocusCounts {
 /// sweeps a calling run's walkers across threads, one thread at a time. A generator filled
 /// into a slot must therefore be `Send`; none holds thread-affine state, and the compiler
 /// checks it here rather than at whichever driver first crosses a thread.
-pub enum GeneratorSlot<S> {
+pub enum GeneratorSlot<S: ?Sized> {
     /// A generator supplied for this kind.
     Generator(Box<dyn LocusGenerator<S> + Send>),
     /// No generator; account every region of this kind to the reason.
     Unfilled(UnhandledReason),
 }
 
-impl<S> GeneratorSlot<S> {
+impl<S: ?Sized> GeneratorSlot<S> {
     /// Begin a region on this slot: reset a real generator, or account the region as
     /// unhandled. Returns whether a generator is filled, so the dispatcher knows whether
     /// there are loci to pull.
@@ -899,12 +922,14 @@ impl<S> GeneratorSlot<S> {
 ///
 /// `Satellite` has no slot: it is out of scope for the whole caller and always accounted
 /// `OutOfScope` (spec §5). The other three kinds each hold a [`GeneratorSlot`]. This is the
-/// `GeneratorSet` the arch left as an impl-time confirmation, pinned here; the payload types
-/// for `Generic` and `SsrBundle` are `()` for now and refine when those generators land.
+/// `GeneratorSet` the arch left as an impl-time confirmation, pinned here; the payload type
+/// for `Generic` is `()`, and `SsrBundle`'s is the bundle's members (2026-10-11).
 pub struct GeneratorSet {
     ssr: GeneratorSlot<SsrSegment>,
     generic: GeneratorSlot<()>,
-    ssr_bundle: GeneratorSlot<()>,
+    /// Handed each bundle's members — the motifs its reference runs are looked for in
+    /// (`str_bundle_loci.md` §6.1).
+    ssr_bundle: GeneratorSlot<[BundleMember]>,
     counts: LocusCounts,
     /// The region whose generator is mid-stream, if any. `None` between regions.
     current: Option<TypedRegion>,
@@ -923,7 +948,7 @@ impl GeneratorSet {
     pub fn new(
         ssr: GeneratorSlot<SsrSegment>,
         generic: GeneratorSlot<()>,
-        ssr_bundle: GeneratorSlot<()>,
+        ssr_bundle: GeneratorSlot<[BundleMember]>,
     ) -> Self {
         Self {
             ssr,
@@ -966,10 +991,8 @@ impl GeneratorSet {
         self.generic.counts()
     }
 
-    /// What the **`SsrBundle`** generator has counted, if one is filled and counts
-    /// anything. **Always `None`, and not because nobody got to it**: ng calls nothing in a
-    /// cluster of flankless repeats by decision, and a generator for that ground is deferred
-    /// sine die (`locus_generation.md` §5).
+    /// What the **STR bundle** generator has counted, if one is filled and counts anything
+    /// (`str_bundle_loci.md` §6.1).
     pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
         self.ssr_bundle.counts()
     }
@@ -981,8 +1004,7 @@ impl GeneratorSet {
     /// reader of its own over the same sample's files, so a read group's drops are spread
     /// across whichever generators walked its ground and no single slot holds the sample's
     /// answer. The three counts above are per-generator facts a reader compares; this is one
-    /// fact about the sample. Only one slot is filled today, which is what makes the sum look
-    /// like a forwarding.
+    /// fact about the sample.
     #[must_use]
     pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
         let mut total: std::collections::BTreeMap<Option<ReadGroupId>, ReadFilterCounts> =
@@ -1061,7 +1083,7 @@ impl GeneratorSet {
         let produced = match &region.kind {
             RegionKind::SsrSegment(segment) => self.ssr.next(segment, reads),
             RegionKind::Generic => self.generic.next(&(), reads),
-            RegionKind::SsrBundle { .. } => self.ssr_bundle.next(&(), reads),
+            RegionKind::SsrBundle { members } => self.ssr_bundle.next(members, reads),
             // Satellite is never made current — begin_region reports it unfilled.
             RegionKind::Satellite => Ok(None),
         }?;
@@ -1409,7 +1431,7 @@ mod tests {
         remaining: u32,
     }
 
-    impl<S> LocusGenerator<S> for FixedCountGenerator {
+    impl<S: ?Sized> LocusGenerator<S> for FixedCountGenerator {
         fn begin_segment(&mut self, _region: GenomeRegion) {
             self.remaining = self.per_segment;
         }
@@ -1427,7 +1449,7 @@ mod tests {
         }
     }
 
-    fn generator(per_segment: u32) -> GeneratorSlot<()> {
+    fn generator<S: ?Sized>(per_segment: u32) -> GeneratorSlot<S> {
         GeneratorSlot::Generator(Box::new(FixedCountGenerator {
             per_segment,
             remaining: 0,
@@ -1531,7 +1553,7 @@ mod tests {
         }
     }
 
-    impl<S> LocusGenerator<S> for EchoGenerator {
+    impl<S: ?Sized> LocusGenerator<S> for EchoGenerator {
         fn begin_segment(&mut self, region: GenomeRegion) {
             self.remaining = self.per_segment;
             self.region = Some(region);
@@ -1553,7 +1575,7 @@ mod tests {
         }
     }
 
-    fn echo_slot(per_segment: u32) -> GeneratorSlot<()> {
+    fn echo_slot<S: ?Sized>(per_segment: u32) -> GeneratorSlot<S> {
         GeneratorSlot::Generator(Box::new(EchoGenerator::new(per_segment)))
     }
 
@@ -1563,7 +1585,7 @@ mod tests {
         emitted: bool,
     }
 
-    impl<S> LocusGenerator<S> for FailAfterOneGenerator {
+    impl<S: ?Sized> LocusGenerator<S> for FailAfterOneGenerator {
         fn begin_segment(&mut self, _region: GenomeRegion) {
             self.emitted = false;
         }
@@ -1776,9 +1798,12 @@ mod tests {
             observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
-            kind: LocusKind::SsrBundle,
+            kind: LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
         };
-        assert_eq!(bundle.kind, LocusKind::SsrBundle);
+        assert_eq!(
+            bundle.kind,
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default())
+        );
     }
 
     /// A complete and a partial observation of the *same* bases are distinct evidence,

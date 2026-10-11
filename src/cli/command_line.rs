@@ -46,8 +46,9 @@ pub enum PopVarCallerCommand {
     ///
     /// Repeat tracts ARE called, through their own stutter model, and their
     /// records carry STR, RU, PERIOD and each called allele's REPCN. What is
-    /// still set aside is a repeat cluster too tangled to have clean flanks;
-    /// its ground is charged to `not built yet` and reported at the end.
+    /// still set aside is an STR bundle (repeats too close together for any
+    /// to have clean flanks): it is measured, but not yet called, and the
+    /// bundles set aside are counted and reported at the end.
     CallFromAlignments(CallFromAlignmentsArgs),
 
     /// Walk each sample's alignment files once and store what they showed as a psp,

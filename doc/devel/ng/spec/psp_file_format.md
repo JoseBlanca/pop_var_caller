@@ -426,6 +426,37 @@ would read as the cap's value rather than as the pile-up it is (owner, 2026-09-2
   2,169-sample tomato cohort's 8.6 TB — keep working unchanged.
 - **Writers write 1.1 only**, as before a writer produces exactly one version.
 
+#### Format 1.2 and format 2.0 — two fields at the body's end (2026-10-10, 2026-10-11)
+
+*Changed during implementation (2026-10-11).* Two fields have been added to the end of every
+record body since 1.1, each a length-prefixed byte string written on every record whatever its
+kind, so a reader can always walk past it as the unknown final field it is:
+
+- **1.2, `observation-flank-deletions`**: the flank bases each observation's deletion took beside
+  an STR segment ([`str_edge_deletion_alleles.md`](str_edge_deletion_alleles.md) §5.2). One empty
+  byte on nearly every record.
+- **2.0, `str-bundle-payload`**: an STR bundle's two flanks and its reference runs — each run's
+  offset into the hull, length and motif ([`str_bundle_loci.md`](str_bundle_loci.md) §6.2).
+  Empty on every record that is not a bundle; a non-empty payload on such a record, a bundle
+  payload with bytes left over, or runs that overlap, descend or hold no whole copy are refused.
+
+**Why 2.0 and not 1.3.** A reader accepts any later minor of its own major (`header.rs`'s version
+check), so a minor bump cannot make a reader built before a change refuse a file — and two things
+make refusal the right answer here. A pre-2.0 reader would skip the payload, the body's last field,
+as an unknown final field, and so read every bundle record as one with no runs; and it ignores the header's `max-str-bundle-len-bp`, the bundle cap the typing gained the
+same week, so it would read a psp typed under a cap it cannot reproduce as if its own typing
+matched it. Raising the major makes every reader before this change refuse every file after it,
+as `UnsupportedVersion`, by name.
+
+**A 1.x header passes a 2.0 reader's version check (`OLDEST_READABLE_MAJOR = 1`), but in practice
+every 1.x psp must be written again.** The typing section then refuses a psp that does not record
+`max-str-bundle-len-bp` ([`str_bundle_loci.md`](str_bundle_loci.md) §5.2), and no released build
+wrote that key: only builds of the `str-bundles` branch from 270da29f up to format 2.0 did. A 1.x
+file that does pass holds no bundle record, since no 1.x writer had a bundle generator; one found in
+it is refused as damage. Its layout is recognised from the manifest
+(`RecordLayout::from_manifest`). The writer writes 2.0 only, and does not append to a 1.x file.
+*(Corrected in review, 2026-10-11: this said a 2.0 reader "still reads 1.x".)*
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use super::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, ReadWitness,
-    SampleLocusObservations, SsrDetail,
+    SampleLocusObservations, SequenceObservation, SsrDetail,
 };
 #[cfg(test)]
 use crate::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
@@ -34,20 +34,124 @@ use crate::read::input::sample_cursor::SampleCursor;
 use crate::read::input::{SampleIdentity, SampleReads};
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqError};
 use crate::region_typing::segment_criteria::SsrSegment;
-use crate::types::{Bp, ContigId, GenomeRegion, Position, ReadGroupId};
+use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position, ReadGroupId};
 
-/// An STR locus ready to align against: the segment plus the reference bases the aligner
+/// The repeat ground one STR locus measures, as reading a read across it needs it: where it
+/// lies, the motif the delimiter is handed, the period of the reference run reaching each of
+/// its edges, and whether a read that ends inside it is kept.
+///
+/// **An STR segment and an STR bundle's hull are both one of these** (`str_bundle_loci.md`
+/// §6.1): the bundle generator is the segment's generator run over the hull, and these four
+/// facts are everything in which the two differ while a read is measured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasuredRepeat {
+    /// The repeat's first base, 1-based.
+    start: u64,
+    /// The repeat's last base, 1-based inclusive.
+    end: u64,
+    /// The motif [`RepeatGeometry`](crate::alignment::RepeatGeometry) hands the delimiter. A
+    /// segment's own; for a bundle, its first member's, which the flat-gap delimiter it is
+    /// measured with does not read.
+    delimiter_motif: Motif,
+    /// The period of the reference run reaching each edge, `None` where fixed sequence does.
+    edge_run_periods: EdgeRunPeriods,
+    /// What becomes of a read that anchors one edge and ends inside the repeat.
+    reads_ending_inside: ReadsEndingInside,
+}
+
+/// The period of the reference run that reaches each edge of a measured repeat — what decides
+/// whether the reference's own repeat carries on past that edge
+/// (`reference_run_escapes_the_tract`). `None` where fixed sequence reaches the edge, which no
+/// run continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeRunPeriods {
+    pub left: Option<usize>,
+    pub right: Option<usize>,
+}
+
+/// What a read that anchors one edge of the repeat and then ends inside it becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadsEndingInside {
+    /// A partial observation — a lower bound on the repeat's length, as an STR segment keeps
+    /// it (`locus_generation_ssr.md` §3).
+    KeptAsPartial,
+    /// Dropped and counted: in an STR bundle such a read bounds one run's count and says
+    /// nothing of the runs it did not reach, and using it needs a censored emission over run
+    /// counts that is left out (`str_bundle_loci.md` §6.1, §11.5).
+    Dropped,
+}
+
+impl MeasuredRepeat {
+    /// An STR bundle's hull, `start..=end` (1-based), measured with `delimiter_motif` in the
+    /// geometry and `runs` deciding its edges; reads ending inside it are dropped
+    /// (`str_bundle_loci.md` §6.1).
+    pub fn bundle_hull(
+        start: u64,
+        end: u64,
+        delimiter_motif: Motif,
+        edge_run_periods: EdgeRunPeriods,
+    ) -> Self {
+        Self {
+            start,
+            end,
+            delimiter_motif,
+            edge_run_periods,
+            reads_ending_inside: ReadsEndingInside::Dropped,
+        }
+    }
+
+    /// The repeat's first base, 1-based.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The repeat's last base, 1-based inclusive.
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    /// The repeat's length in reference bases.
+    pub fn tract_len(&self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+impl From<SsrSegment> for MeasuredRepeat {
+    /// A segment is one run of one motif reaching both its edges, and a read ending inside it
+    /// is a partial observation.
+    fn from(segment: SsrSegment) -> Self {
+        Self::from(&segment)
+    }
+}
+
+impl From<&SsrSegment> for MeasuredRepeat {
+    fn from(segment: &SsrSegment) -> Self {
+        let period = Some(segment.period());
+        Self {
+            start: segment.start(),
+            end: segment.end(),
+            delimiter_motif: segment.motif(),
+            edge_run_periods: EdgeRunPeriods {
+                left: period,
+                right: period,
+            },
+            reads_ending_inside: ReadsEndingInside::KeptAsPartial,
+        }
+    }
+}
+
+/// An STR locus ready to align against: the repeat plus the reference bases the aligner
 /// aligns the reads to.
 ///
 /// The ng counterpart of production's `Locus`, **split** so the coordinates come from region
-/// typing (`SsrSegment`) and the bases are fetched here (spec §2). Fetching them makes the
-/// port an *adaptation, not a lift* — the most likely place for the port to go subtly wrong,
-/// which is why the flank lengths are always **measured** from the clamped span, never
-/// assumed to be `flank_bp`.
+/// typing (`SsrSegment`, or an STR bundle's hull) and the bases are fetched here (spec §2).
+/// Fetching them makes the port an *adaptation, not a lift* — the most likely place for the
+/// port to go subtly wrong, which is why the flank lengths are always **measured** from the
+/// clamped span, never assumed to be `flank_bp`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SsrLocus {
-    /// The tract's coordinates, motif and purity — from region typing.
-    pub segment: SsrSegment,
+    /// The repeat measured: its coordinates and what measuring a read across it needs.
+    pub repeat: MeasuredRepeat,
     /// The tract plus its query margin, canonical `{A,C,G,T,N}` bases, **clamped at contig
     /// ends** — so this may be shorter than `2 * flank_bp + tract`, and each flank must be
     /// measured, never assumed (spec §2).
@@ -57,8 +161,8 @@ pub struct SsrLocus {
 }
 
 impl SsrLocus {
-    /// Fetch the tract ± `flank_bp` for `segment` into an [`SsrLocus`], clamped at the contig
-    /// ends, using the reused `buffer` as scratch (spec §2).
+    /// Fetch the tract ± `flank_bp` for `repeat` (an `SsrSegment`, or a bundle's hull) into an
+    /// [`SsrLocus`], clamped at the contig ends, using the reused `buffer` as scratch (spec §2).
     ///
     /// `contig` is the tract's contig (from the region handed to `begin_segment`); its length
     /// is read from `reference`'s contig table to clamp the right margin, and `fetch_into`
@@ -67,13 +171,14 @@ impl SsrLocus {
     pub fn fetch<R: RefSeq + ContigTable>(
         reference: &R,
         contig: ContigId,
-        segment: SsrSegment,
+        repeat: impl Into<MeasuredRepeat>,
         flank_bp: Bp,
         buffer: &mut Vec<u8>,
     ) -> Result<Self, RefSeqError> {
+        let repeat = repeat.into();
         let flank = flank_bp.get();
-        let tract_start = segment.start(); // 1-based inclusive
-        let tract_end = segment.end();
+        let tract_start = repeat.start(); // 1-based inclusive
+        let tract_end = repeat.end();
         // The left margin cannot run below base 1; the right cannot run past the contig.
         let margin_start = tract_start.saturating_sub(flank).max(1);
         let margin_end = match reference.contigs().entries.get(contig.get() as usize) {
@@ -89,7 +194,7 @@ impl SsrLocus {
 
         reference.fetch_into(contig, margin_start, length, buffer)?;
         Ok(Self {
-            segment,
+            repeat,
             tract_with_margin_bases: buffer.as_slice().into(),
             margin_start: Position(margin_start),
         })
@@ -98,7 +203,7 @@ impl SsrLocus {
     /// The left flank's length in bases — **measured** from the clamp (`tract_start −
     /// margin_start`), so a tract near the contig start reports a short flank, not `flank_bp`.
     pub fn left_flank_len(&self) -> usize {
-        (self.segment.start() - self.margin_start.get()) as usize
+        (self.repeat.start() - self.margin_start.get()) as usize
     }
 
     /// The right flank's length in bases — measured as what remains after the left flank and
@@ -106,7 +211,7 @@ impl SsrLocus {
     pub fn right_flank_len(&self) -> usize {
         self.tract_with_margin_bases.len()
             - self.left_flank_len()
-            - self.segment.tract_len() as usize
+            - self.repeat.tract_len() as usize
     }
 }
 
@@ -202,6 +307,10 @@ pub struct SsrGeneratorCounts {
     /// fetch window is wider than the locus: **6,704 reads against 7,085 real partials** on
     /// tomato chr01 of `SRR7279503` when this counter was added.
     pub outside_tract: u64,
+    /// Reads that anchored one edge of an STR bundle's hull and ended inside it — a partial
+    /// observation at a segment, dropped at a bundle (`str_bundle_loci.md` §6.1). Always zero
+    /// for a segment generator.
+    pub ended_inside_a_bundle: u64,
 }
 
 impl SsrGeneratorCounts {
@@ -233,8 +342,9 @@ impl SsrGeneratorCounts {
             low_quality,
             window_truncated,
             outside_tract,
+            ended_inside_a_bundle,
         } = self;
-        no_border_anchored + low_quality + window_truncated + outside_tract
+        no_border_anchored + low_quality + window_truncated + outside_tract + ended_inside_a_bundle
     }
 }
 
@@ -293,7 +403,14 @@ fn locus_seed(chrom: &str, start_0based: u32) -> u64 {
 /// truncates in practice and parity holds. `start() - 1` cannot underflow: `SsrSegment::new`
 /// enforces `1 <= start`.
 pub fn seed_for_segment(segment: &SsrSegment) -> u64 {
-    locus_seed(segment.chrom(), (segment.start() - 1) as u32)
+    seed_for_repeat(segment.chrom(), segment.start())
+}
+
+/// The reservoir seed for any repeat starting at 1-based `start` on the contig named `chrom` —
+/// [`seed_for_segment`]'s arithmetic, for an STR bundle's hull, which carries no contig name of
+/// its own. The same trap and the same discharge: the **name**, and the **0-based** start.
+pub(crate) fn seed_for_repeat(chrom: &str, start: u64) -> u64 {
+    locus_seed(chrom, (start - 1) as u32)
 }
 
 /// Reservoir sampler (Algorithm R) — an effectively-uniform sample of up to `capacity` items
@@ -813,6 +930,11 @@ mod classify {
         /// positions — 3,180 rows of the STR dump — contributing to `num_obs` while adding
         /// nothing to depth anywhere along the locus.
         OutsideTract,
+        /// The read anchored one edge of an STR bundle's hull and ended inside it. At a segment
+        /// that is a partial observation; at a bundle it is dropped, because a read reaching
+        /// into one run says nothing about the runs it did not reach (`str_bundle_loci.md`
+        /// §6.1, §11.5).
+        EndedInsideABundle,
     }
 
     /// What one read contributes to a locus: an observed tract (complete or partial), or a
@@ -874,7 +996,7 @@ mod classify {
         let geometry = RepeatGeometry {
             left_flank_len: Bp(left as u64),
             right_flank_len: Bp(right as u64),
-            motif: locus.segment.motif(),
+            motif: locus.repeat.delimiter_motif,
         };
         let context = RepeatContext {
             geometry: &geometry,
@@ -897,7 +1019,7 @@ mod classify {
         // last, with no unaligned bases on the side facing it — a soft clip or an insertion
         // there could be tract the mapper did not place, and goes to the delimiter as before.
         let tract_start = window_start + left as u32;
-        let tract_end = tract_start + locus.segment.tract_len() as u32;
+        let tract_end = tract_start + locus.repeat.tract_len() as u32;
         let (unaligned_before, unaligned_after) = unaligned_bases_at_the_ends(&read.cigar);
         let ends_before_the_tract = fp.ref_end <= tract_start && unaligned_after == 0;
         let starts_after_the_tract = fp.ref_start >= tract_end && unaligned_before == 0;
@@ -947,9 +1069,9 @@ mod classify {
                 &read.seq,
                 fp,
                 window_start + left as u32,
-                locus.segment.tract_len() as u32,
+                locus.repeat.tract_len() as u32,
                 reference[left - 1],
-                reference[left + locus.segment.tract_len() as usize - 1],
+                reference[left + locus.repeat.tract_len() as usize - 1],
             )
         } else {
             None
@@ -983,7 +1105,7 @@ mod classify {
             .unwrap_or(FlankDeletion::NONE);
         let (input_span, flank_deletion) = match input_span {
             Some(span) if !flank_deletion.is_none() => {
-                let tract_len = locus.segment.tract_len() as usize;
+                let tract_len = locus.repeat.tract_len() as usize;
                 let (span, deleted) = in_smallest_form(
                     &read.seq,
                     span,
@@ -1301,7 +1423,7 @@ mod classify {
             return None;
         }
         let left = locus.left_flank_len() as u64;
-        Some(left..left + locus.segment.tract_len())
+        Some(left..left + locus.repeat.tract_len())
     }
 
     /// Does the reference's own repeat run carry on past the tract region typing drew?
@@ -1313,15 +1435,27 @@ mod classify {
     ///
     /// A flank shorter than the period cannot be tested and is treated as escaping, which costs
     /// an alignment and never a wrong answer.
+    ///
+    /// **Each edge is asked about the run that reaches it** (`str_bundle_loci.md` §6.1): a
+    /// segment's one motif at both, a bundle's hull the run at that edge — and nothing where
+    /// fixed sequence reaches the edge, since no run is there to carry on.
     fn reference_run_escapes_the_tract(locus: &SsrLocus, reference: &[u8]) -> bool {
-        let period = locus.segment.motif().as_bytes().len();
         let left = locus.left_flank_len();
-        let tract_end = left + locus.segment.tract_len() as usize;
-        if period == 0 || left < period || reference.len() < tract_end + period {
-            return true;
-        }
-        reference[left - 1] == reference[left - 1 + period]
-            || reference[tract_end] == reference[tract_end - period]
+        let tract_end = left + locus.repeat.tract_len() as usize;
+        let periods = locus.repeat.edge_run_periods;
+        let escapes_left = periods.left.is_some_and(|period| {
+            period == 0
+                || left < period
+                || reference.len() < left + period
+                || reference[left - 1] == reference[left - 1 + period]
+        });
+        let escapes_right = periods.right.is_some_and(|period| {
+            period == 0
+                || reference.len() < tract_end + period
+                || tract_end < period
+                || reference[tract_end] == reference[tract_end - period]
+        });
+        escapes_left || escapes_right
     }
 
     /// Align the read's `region` slice against the reference frame.
@@ -1444,7 +1578,7 @@ mod classify {
         // `partial:both` rather than folding it into `partial:left` (spec §8; 2,530 of 6,216
         // partial observations on chr01 of tomato SRR7279503).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
-        let locus_len = LocusLen::from_positions(locus.segment.tract_len());
+        let locus_len = LocusLen::from_positions(locus.repeat.tract_len());
         // **The read is outside the locus, and this is where that is decided.** The
         // constructors answer `None` when the clamped run covers no position, which is
         // exactly the read that anchored a flank and crossed no tract position: the
@@ -1464,6 +1598,12 @@ mod classify {
         }) else {
             return Classified::NoObservation(NoObservationReason::OutsideTract);
         };
+        // **Only reads that cross the whole hull are used at a bundle** (`str_bundle_loci.md`
+        // §6.1). Asked after the outside-tract test, so a read that never entered the hull is
+        // still counted as that.
+        if locus.repeat.reads_ending_inside == super::ReadsEndingInside::Dropped {
+            return Classified::NoObservation(NoObservationReason::EndedInsideABundle);
+        }
         Classified::Observed {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: region_seq[tract.clone()].into(),
@@ -1487,8 +1627,9 @@ mod classify {
 
         fn locus() -> SsrLocus {
             SsrLocus {
-                segment: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"CA").unwrap(), 1.0)
-                    .unwrap(),
+                repeat: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"CA").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
                 tract_with_margin_bases: FRAME.into(),
                 margin_start: Position(1),
             }
@@ -1552,8 +1693,9 @@ mod classify {
 
         fn locus_a() -> SsrLocus {
             SsrLocus {
-                segment: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"A").unwrap(), 1.0)
-                    .unwrap(),
+                repeat: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"A").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
                 tract_with_margin_bases: FRAME_A.into(),
                 margin_start: Position(1),
             }
@@ -1754,14 +1896,15 @@ mod classify {
             let right_flank = b"CCACCAACGTGACCGTGACCGTACTAGCTC";
             let frame = [left_flank.as_slice(), &tract, right_flank].concat();
             let echo_locus = SsrLocus {
-                segment: SsrSegment::new(
+                repeat: SsrSegment::new(
                     "chr1".into(),
                     31,
                     30 + tract.len() as u64,
                     Motif::new(b"AACAAT").unwrap(),
                     1.0,
                 )
-                .unwrap(),
+                .unwrap()
+                .into(),
                 tract_with_margin_bases: frame.into(),
                 margin_start: Position(1),
             };
@@ -1793,8 +1936,9 @@ mod classify {
             let right_flank = b"CCACGATTGCAGTCAGCTTGACCATAGCAG";
             let frame = [left_flank.as_slice(), &tract, right_flank].concat();
             let locus = SsrLocus {
-                segment: SsrSegment::new("chr1".into(), 31, 60, Motif::new(b"AAGAG").unwrap(), 1.0)
-                    .unwrap(),
+                repeat: SsrSegment::new("chr1".into(), 31, 60, Motif::new(b"AAGAG").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
                 tract_with_margin_bases: frame.into(),
                 margin_start: Position(1),
             };
@@ -1868,14 +2012,15 @@ mod classify {
             ] {
                 let frame = [left_flank.as_slice(), &tract, right_flank].concat();
                 let locus = SsrLocus {
-                    segment: SsrSegment::new(
+                    repeat: SsrSegment::new(
                         "chr1".into(),
                         31,
                         60,
                         Motif::new(b"AAG").unwrap(),
                         1.0,
                     )
-                    .unwrap(),
+                    .unwrap()
+                    .into(),
                     tract_with_margin_bases: frame.into(),
                     margin_start: Position(1),
                 };
@@ -2047,6 +2192,192 @@ mod classify {
                 other => panic!("expected the recovered long allele, got {other:?}"),
             }
         }
+
+        // --- An STR bundle's hull, measured as one repeat (`str_bundle_loci.md` §6.1) ---
+
+        // 8-base flanks around a 19-base hull: (CA)4, a fixed TT, (GAT)3. Neither flank
+        // continues the run at its edge.
+        const BUNDLE_LEFT: &[u8] = b"GGATCCTG";
+        const BUNDLE_HULL: &[u8] = b"CACACACATTGATGATGAT";
+        const BUNDLE_RIGHT: &[u8] = b"CCTAGGAC";
+
+        fn bundle_frame() -> Vec<u8> {
+            [BUNDLE_LEFT, BUNDLE_HULL, BUNDLE_RIGHT].concat()
+        }
+
+        fn bundle_locus(edges: super::super::EdgeRunPeriods) -> SsrLocus {
+            SsrLocus {
+                repeat: super::super::MeasuredRepeat::bundle_hull(
+                    9,
+                    27,
+                    Motif::new(b"CA").unwrap(),
+                    edges,
+                ),
+                tract_with_margin_bases: bundle_frame().into(),
+                margin_start: Position(1),
+            }
+        }
+
+        fn runs_at_both_edges() -> super::super::EdgeRunPeriods {
+            super::super::EdgeRunPeriods {
+                left: Some(2),
+                right: Some(3),
+            }
+        }
+
+        fn classify_in_the_bundle(read: &AlignedRead) -> Classified {
+            let aligner = SsrFlatGapAligner::new(PerQualityEmission::new());
+            let stutter = StutterModel::hipstr_shipped();
+            let mut scratch = ViterbiScratch::new();
+            let mut qual_buffer = Vec::new();
+            classify_read(
+                read,
+                &bundle_locus(runs_at_both_edges()),
+                &aligner,
+                &stutter,
+                &mut scratch,
+                &mut qual_buffer,
+            )
+        }
+
+        /// A read crossing the hull is a complete observation spelled over the whole hull.
+        #[test]
+        fn a_read_crossing_the_hull_is_spelled_over_all_of_it() {
+            match classify_in_the_bundle(&read(&bundle_frame(), 40)) {
+                Classified::Observed {
+                    bases,
+                    read_witness: ReadWitness::Complete,
+                    flank_deletion: FlankDeletion::NONE,
+                    ..
+                } => assert_eq!(&*bases, BUNDLE_HULL),
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// A read one `CA` short in the first run, the mapper's deletion inside the hull, is
+        /// spelled from its own alignment over the hull, both runs and the fixed bases between.
+        #[test]
+        fn a_read_with_a_contraction_in_one_run_is_spelled_over_the_hull() {
+            let seq = [BUNDLE_LEFT, b"CACACA", b"TTGATGATGAT", BUNDLE_RIGHT].concat();
+            let mut contracted = read(&seq, 40);
+            contracted.cigar = vec![
+                CigarOp::Match(8 + 6),
+                CigarOp::Deletion(2),
+                CigarOp::Match(11 + 8),
+            ];
+            match classify_in_the_bundle(&contracted) {
+                Classified::Observed {
+                    bases,
+                    read_witness: ReadWitness::Complete,
+                    ..
+                } => assert_eq!(&*bases, b"CACACATTGATGATGAT"),
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// **A read that ends inside the hull is dropped, not kept as a partial** — at a
+        /// segment it would be a lower bound; at a bundle it bounds one run and says nothing
+        /// of the others (`str_bundle_loci.md` §6.1). The same read against the hull measured
+        /// as a segment would measure it is a partial, which is what makes this the bundle's
+        /// rule and not the delimiter's.
+        #[test]
+        fn a_read_ending_inside_the_hull_is_dropped_where_a_segment_keeps_a_partial() {
+            let seq = [BUNDLE_LEFT, b"CACACACATTGA"].concat();
+            assert_eq!(
+                classify_in_the_bundle(&read(&seq, 40)),
+                Classified::NoObservation(NoObservationReason::EndedInsideABundle)
+            );
+
+            let mut as_a_segment = bundle_locus(runs_at_both_edges());
+            as_a_segment.repeat =
+                SsrSegment::new("chr1".into(), 9, 27, Motif::new(b"CA").unwrap(), 1.0)
+                    .unwrap()
+                    .into();
+            let aligner = SsrFlatGapAligner::new(PerQualityEmission::new());
+            let stutter = StutterModel::hipstr_shipped();
+            match classify_read(
+                &read(&seq, 40),
+                &as_a_segment,
+                &aligner,
+                &stutter,
+                &mut ViterbiScratch::new(),
+                &mut Vec::new(),
+            ) {
+                Classified::Observed {
+                    read_witness: ReadWitness::Partial { .. },
+                    ..
+                } => {}
+                other => panic!("a segment keeps the read as a partial, got {other:?}"),
+            }
+        }
+
+        /// A read lying wholly in a flank is outside the hull, as it is outside a segment —
+        /// not counted as a read that ended inside.
+        #[test]
+        fn a_read_in_the_flank_alone_is_outside_the_hull() {
+            assert_eq!(
+                classify_in_the_bundle(&read(BUNDLE_LEFT, 40)),
+                Classified::NoObservation(NoObservationReason::OutsideTract)
+            );
+        }
+
+        /// **The edge-escape check asks about the run at each edge, and about nothing where
+        /// fixed sequence reaches it** (`str_bundle_loci.md` §6.1). The left flank ending in
+        /// `CA` continues a `CA` run at the hull's first base; with the run there the reference
+        /// run escapes, and with fixed sequence there it does not.
+        #[test]
+        fn the_edge_escape_check_follows_the_run_at_each_edge() {
+            let frame = [b"GGATCCCA".as_slice(), BUNDLE_HULL, BUNDLE_RIGHT].concat();
+            let at = |edges| {
+                let mut locus = bundle_locus(edges);
+                locus.tract_with_margin_bases = frame.clone().into();
+                reference_run_escapes_the_tract(&locus, &frame)
+            };
+            assert!(
+                at(runs_at_both_edges()),
+                "the CA run carries on into the flank"
+            );
+            assert!(
+                !at(super::super::EdgeRunPeriods {
+                    left: None,
+                    right: Some(3),
+                }),
+                "fixed sequence at the left edge: nothing to carry on"
+            );
+            assert!(!at(super::super::EdgeRunPeriods {
+                left: None,
+                right: None,
+            }));
+            // The untouched frame escapes at neither edge.
+            let locus = bundle_locus(runs_at_both_edges());
+            assert!(!reference_run_escapes_the_tract(&locus, &bundle_frame()));
+        }
+
+        /// The mirror at the right edge alone: a right flank starting `GAT` continues the
+        /// `(GAT)3` run, and escapes only when a period-3 run is said to reach that edge.
+        #[test]
+        fn the_edge_escape_check_asks_the_right_edge_on_its_own() {
+            let frame = [BUNDLE_LEFT, BUNDLE_HULL, b"GATAGGAC"].concat();
+            let at = |edges| {
+                let mut locus = bundle_locus(edges);
+                locus.tract_with_margin_bases = frame.clone().into();
+                reference_run_escapes_the_tract(&locus, &frame)
+            };
+            assert!(
+                at(super::super::EdgeRunPeriods {
+                    left: None,
+                    right: Some(3),
+                }),
+                "the GAT run carries on into the right flank"
+            );
+            assert!(
+                !at(super::super::EdgeRunPeriods {
+                    left: Some(2),
+                    right: None,
+                }),
+                "fixed sequence at the right edge, and the left run does not carry on"
+            );
+        }
     }
 }
 
@@ -2151,6 +2482,9 @@ mod tally {
                         NoObservationReason::LowQuality => counts.low_quality += 1,
                         NoObservationReason::WindowTruncated => counts.window_truncated += 1,
                         NoObservationReason::OutsideTract => counts.outside_tract += 1,
+                        NoObservationReason::EndedInsideABundle => {
+                            counts.ended_inside_a_bundle += 1
+                        }
                     }
                 }
             }
@@ -3147,13 +3481,9 @@ where
         segment: &SsrSegment,
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError> {
-        if self.produced {
+        let Some(region) = self.claim_the_one_locus() else {
             return Ok(None);
-        }
-        self.produced = true;
-        let region = self
-            .current_region
-            .expect("begin_segment is called before next_locus (the LocusGenerator contract)");
+        };
         let contig = region.contig;
 
         // The margin fetch and the read query key on `region.contig` (an id), the reservoir seed
@@ -3161,27 +3491,122 @@ where
         // pairing unenforced, so a mis-pairing would silently fetch the wrong contig. Guard it in
         // debug/test builds against the reference's own name for that id.
         debug_assert_eq!(
-            self.reference
-                .contigs()
-                .entries
-                .get(contig.get() as usize)
-                .map(|entry| entry.name.as_str()),
+            self.contig_name(contig),
             Some(segment.chrom()),
             "the region's contig and the segment must name the same contig"
         );
 
         // (1) Build the locus — fetch the tract ± flank, clamped at contig ends.
-        let locus = SsrLocus::fetch(
+        let locus = self.fetch_locus(region, segment)?;
+
+        // (2)–(4) Fetch, cap, classify and tally the reads.
+        let measured = self.measure_reads(&locus, region, seed_for_segment(segment), reads)?;
+
+        // Assemble the output: the tract coordinates, the tract bases only (flanks go in the
+        // kind), and the flanks split out of the fetched margin (spec §3).
+        let (left_flank, reference_bases, right_flank) = locus.split_flanks();
+        Ok(Some(SampleLocusObservations {
+            region: GenomeRegion {
+                contig,
+                start: Position(segment.start()),
+                end: Position(segment.end()),
+            },
+            reference_bases: reference_bases.into(),
+            observations: measured.observations,
+            reads_without_observation: measured.reads_without_observation,
+            reads_discarded_by_cap: measured.reads_discarded_by_cap,
+            kind: LocusKind::Ssr(SsrDetail {
+                motif: segment.motif(),
+                left_flank: left_flank.into(),
+                right_flank: right_flank.into(),
+            }),
+        }))
+    }
+}
+
+/// What one locus's reads came to: the tally, and how many reads the depth cap took away.
+pub(super) struct MeasuredReads {
+    pub(super) observations: Vec<SequenceObservation>,
+    pub(super) reads_without_observation: u32,
+    pub(super) reads_discarded_by_cap: u32,
+}
+
+impl SsrLocus {
+    /// The fetched bases as `(left flank, repeat, right flank)`.
+    pub(super) fn split_flanks(&self) -> (&[u8], &[u8], &[u8]) {
+        let left = self.left_flank_len();
+        let tract_len = self.repeat.tract_len() as usize;
+        let bases = &*self.tract_with_margin_bases;
+        (
+            &bases[..left],
+            &bases[left..left + tract_len],
+            &bases[left + tract_len..],
+        )
+    }
+}
+
+/// The steps of one locus that an STR segment and an STR bundle share — the bundle generator
+/// ([`super::ssr_bundle`]) is this generator run over a hull (`str_bundle_loci.md` §6.1), and
+/// these are what it runs.
+impl<R, A> SsrGenerator<R, A>
+where
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq + Send + 'static,
+    A: RepeatDelimiter,
+{
+    /// The region begun, the first time it is asked for and `None` after — a region yields one
+    /// locus (spec §2).
+    ///
+    /// # Panics
+    ///
+    /// When no region was begun: the `LocusGenerator` contract calls `begin_segment` first.
+    pub(super) fn claim_the_one_locus(&mut self) -> Option<GenomeRegion> {
+        if self.produced {
+            return None;
+        }
+        self.produced = true;
+        Some(
+            self.current_region
+                .expect("begin_segment is called before next_locus (the LocusGenerator contract)"),
+        )
+    }
+
+    /// The reference's name for `contig`, which the reservoir seed is taken over.
+    pub(super) fn contig_name(&self, contig: ContigId) -> Option<&str> {
+        self.reference
+            .contigs()
+            .entries
+            .get(contig.get() as usize)
+            .map(|entry| entry.name.as_str())
+    }
+
+    /// Step (1): the repeat ± flank, clamped at the contig ends.
+    pub(super) fn fetch_locus(
+        &mut self,
+        region: GenomeRegion,
+        repeat: impl Into<MeasuredRepeat>,
+    ) -> Result<SsrLocus, LocusGenerationError> {
+        SsrLocus::fetch(
             &self.reference,
-            contig,
-            segment.clone(),
+            region.contig,
+            repeat,
             self.config.flank_bp,
             &mut self.margin_buffer,
         )
-        .map_err(|source| LocusGenerationError::Reference { region, source })?;
+        .map_err(|source| LocusGenerationError::Reference { region, source })
+    }
 
-        // (2) Fetch the reads over the tract-plus-margin query span, admitting on relevance
-        // (overlap, which `SampleReads` applies) — not spanning — and depth-cap them.
+    /// Steps (2) to (4): fetch the reads over the repeat-plus-margin query span, admitting on
+    /// relevance (overlap, which `SampleReads` applies) — not spanning — and depth-cap them;
+    /// classify each against `locus` (delimit, recover, gate); tally the outcomes into the
+    /// locus's observed sequences and the run-level counts.
+    pub(super) fn measure_reads(
+        &mut self,
+        locus: &SsrLocus,
+        region: GenomeRegion,
+        seed: u64,
+        reads: &SampleReads,
+    ) -> Result<MeasuredReads, LocusGenerationError> {
+        let contig = region.contig;
         let margin_start = locus.margin_start.get();
         // `margin_len >= 1` on a successful `fetch` (the tract is non-empty), so the `- 1` for
         // the inclusive end cannot underflow.
@@ -3194,7 +3619,6 @@ where
         // Read out before the cursor is borrowed: `cursor_for` takes `&mut self`, and a config
         // field read in the same call would hold a shared borrow across it.
         let max_reads_per_locus = self.config.max_reads_per_locus;
-        let seed = seed_for_segment(segment);
         let capped = fetch_capped_reads(
             self.cursor_for(contig, reads, region)?,
             query_span,
@@ -3207,12 +3631,11 @@ where
         self.counts.reads_fetched += capped.fetched;
         self.counts.reads_discarded_by_cap += reads_discarded_by_cap;
 
-        // (3) Classify each kept read against the locus (delimit, recover, gate).
         let mut outcomes = Vec::with_capacity(capped.kept.len());
         for read in &capped.kept {
             outcomes.push(classify::classify_read(
                 read,
-                &locus,
+                locus,
                 &self.aligner,
                 &self.stutter,
                 &mut self.align_scratch,
@@ -3220,34 +3643,16 @@ where
             ));
         }
 
-        // (4) Tally the outcomes into the locus's observed sequences + the run-level counts.
         let tallied = tally::tally(
             capped.kept.iter().zip(outcomes),
-            segment.start(),
+            locus.repeat.start(),
             &mut self.counts,
         );
-
-        // Assemble the output: the tract coordinates, the tract bases only (flanks go in the
-        // kind), and the flanks split out of the fetched margin (spec §3).
-        let left = locus.left_flank_len();
-        let tract_len = segment.tract_len() as usize;
-        let bases = &locus.tract_with_margin_bases;
-        Ok(Some(SampleLocusObservations {
-            region: GenomeRegion {
-                contig,
-                start: Position(segment.start()),
-                end: Position(segment.end()),
-            },
-            reference_bases: bases[left..left + tract_len].into(),
+        Ok(MeasuredReads {
             observations: tallied.observations,
             reads_without_observation: tallied.reads_without_observation,
             reads_discarded_by_cap: reads_discarded_by_cap as u32,
-            kind: LocusKind::Ssr(SsrDetail {
-                motif: segment.motif(),
-                left_flank: bases[..left].into(),
-                right_flank: bases[left + tract_len..].into(),
-            }),
-        }))
+        })
     }
 }
 
@@ -4534,8 +4939,9 @@ mod tests {
 
         // --- ng: real classify + real tally ---------------------------------
         let ng_locus = SsrLocus {
-            segment: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"CA").unwrap(), 1.0)
-                .unwrap(),
+            repeat: SsrSegment::new("chr1".into(), 7, 12, Motif::new(b"CA").unwrap(), 1.0)
+                .unwrap()
+                .into(),
             tract_with_margin_bases: FRAME.into(),
             margin_start: Position(1),
         };
@@ -4559,7 +4965,7 @@ mod tests {
             .collect();
         let ng = tally::tally(
             reads.iter().zip(ng_outcomes),
-            ng_locus.segment.start(),
+            ng_locus.repeat.start(),
             &mut counts,
         );
         let ng_complete: Vec<(Vec<u8>, u32)> = ng

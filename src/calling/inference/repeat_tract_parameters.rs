@@ -940,7 +940,7 @@ pub fn tract_candidates<'a>(
     repeat_counts: &[NonZeroU32],
 ) -> Vec<SsrCandidate<'a>> {
     assert!(
-        !matches!(alleles.kind(), LocusKind::SsrBundle),
+        !matches!(alleles.kind(), LocusKind::SsrBundle(_)),
         "the locus at this table is a bundle of repeat tracts, and nothing scores a bundle \
          yet: this path is written for one tract, whose candidates are its own lengths. The \
          calling seam sends a bundle down the repeat path on purpose, so this is a gap in \
@@ -2706,7 +2706,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "nothing scores a bundle")]
     fn a_bundle_of_repeat_tracts_is_refused_as_one_tract() {
-        let alleles = CandidateAlleles::new(Box::from(tract(6).as_slice()), LocusKind::SsrBundle);
+        let alleles = CandidateAlleles::new(
+            Box::from(tract(6).as_slice()),
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
+        );
         let _ = tract_candidates(&alleles, &[repeats(6)]);
     }
 
