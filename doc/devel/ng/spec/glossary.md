@@ -21,12 +21,14 @@ to six bases repeated enough times, at enough purity, to meet the repeat criteri
 satellite — ordinary sequence.
 
 **STR bundle.** Two or more repeats within 15 bases of each other, too close for any of them to have
-clean flanks (`RegionKind::SsrBundle`). Its region is the hull of its repeats, first start to last
-end. Nothing calls them yet; `str_bundle_loci.md` designs an STR locus per bundle. Earlier documents
+clean flanks (`RegionKind::SsrBundle`). Its region is the hull of its repeats, first start to
+furthest end (repeats can nest and overlap). Each repeat is a **member**, carrying its span cut back to whole copies of its motif, and the
+motif. A bundle longer than `--max-str-bundle-len` (100 bases by default) is typed as a satellite.
+Nothing calls them yet; `str_bundle_loci.md` designs an STR locus per bundle. Earlier documents
 call it a *cluster of repeats*.
 
 **Satellite.** A tandem array longer than the longest STR the run types as callable (`--max-str-len`,
-100 bases by default). Never called.
+100 bases by default), or an STR bundle longer than `--max-str-bundle-len`. Never called.
 
 **Callable genome.** The part of the analysed ground the caller writes calls for: the generic
 regions and the STR segments — everything except STR bundles and satellites. The generic

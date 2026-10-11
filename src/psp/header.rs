@@ -2064,6 +2064,7 @@ mod tests {
             "bundle-threshold-bp = ",
             "min-flank-bp = ",
             "max-str-len-bp = ",
+            "max-str-bundle-len-bp = ",
             "reference-md5 = ",
             "match-reward = ",
             "mismatch-penalty = ",

@@ -2,6 +2,7 @@
 //! under and every reader asks with, plus the comparison that decides whether a file can
 //! answer a reader at all.
 
+use crate::region_typing::DEFAULT_MAX_STR_BUNDLE_LEN;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
 use crate::tandem_repeat::PeriodRange;
 use crate::types::Bp;
@@ -49,14 +50,15 @@ pub const CATALOG_MAX_PERIOD: u8 = 6;
 ///
 /// It **wraps** [`SsrSegmentCriteria`] rather than restating its five fields, so
 /// classification's own admission rules keep one home and two copies of a policy cannot
-/// drift apart. The two extra fields are the ones step 3 has no concept of: it drops a
-/// locus only when its flank clamps to zero, and its satellite cap doubles as a window
-/// margin it does not have here.
+/// drift apart. Two of the three extra fields are the ones step 3 has no concept of: it
+/// drops a locus only when its flank clamps to zero, and its satellite cap doubles as a
+/// window margin it does not have here. The third, the bundle cap, is step 3's own
+/// `TypedRegionConfig::max_str_bundle_len`, carried across unchanged.
 ///
 /// **Only three of its values are honoured by the builder** — the period range, the copy
 /// floors and the minimum flank. The rest are pure filters over stored fields, so a reader
-/// may change its purity floor, score floor, satellite cap or bundle radius without
-/// needing a new file (spec §4.2).
+/// may change its purity floor, score floor, satellite cap, bundle radius or bundle cap
+/// without needing a new file (spec §4.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrRepeatCriteria {
     /// Periods, copy floors, purity floor, score floor and bundle radius — step 3's own
@@ -71,6 +73,15 @@ pub struct StrRepeatCriteria {
     /// A tract longer than this is a satellite, not a locus — a read-time filter over
     /// stored spans (see [`CATALOG_MAX_STR_LEN_BP`]).
     pub max_str_len_bp: Bp,
+    /// An STR bundle whose hull is longer than this is a satellite, not a bundle
+    /// (`str_bundle_loci.md` §5.2) — a read-time rule over stored spans like the satellite
+    /// cap, so any value is serviceable from any catalog.
+    ///
+    /// **The catalog's own file does not record it**: its header predates the cap, and the
+    /// builder never applied it. A catalog's `built_under` therefore reads back with
+    /// [`DEFAULT_MAX_STR_BUNDLE_LEN`] here, which is what [`Default`] gives too, so every
+    /// catalog — built before the cap existed or after — compares equal on it.
+    pub max_str_bundle_len_bp: Bp,
 }
 
 impl Default for StrRepeatCriteria {
@@ -94,6 +105,7 @@ impl Default for StrRepeatCriteria {
             classification,
             min_flank_bp: Bp(CATALOG_MIN_FLANK_BP),
             max_str_len_bp: Bp(CATALOG_MAX_STR_LEN_BP),
+            max_str_bundle_len_bp: Bp(DEFAULT_MAX_STR_BUNDLE_LEN),
         }
     }
 }
@@ -106,8 +118,8 @@ impl StrRepeatCriteria {
     ///
     /// Only the three axes the builder honours can refuse (spec §4.1): a copy floor below
     /// the built table at any period, a flank floor below the built one, or a period range
-    /// reaching outside the built one. The purity floor, score floor, satellite cap and
-    /// bundle radius are filters over stored fields, so **any** value of them is
+    /// reaching outside the built one. The purity floor, score floor, satellite cap, bundle
+    /// radius and bundle cap are filters over stored fields, so **any** value of them is
     /// serviceable from any catalog and none of them appears here (spec §4.2).
     ///
     /// This is the only place the permissiveness rule is expressed; the read methods call
@@ -217,6 +229,7 @@ impl From<&crate::region_typing::TypedRegionConfig> for StrRepeatCriteria {
             classification: config.criteria.clone(),
             min_flank_bp: Bp(CATALOG_MIN_FLANK_BP),
             max_str_len_bp: config.max_str_len,
+            max_str_bundle_len_bp: config.max_str_bundle_len,
         }
     }
 }
@@ -364,13 +377,14 @@ mod tests {
                 ..StrRepeatCriteria::default().classification
             },
             max_str_len_bp: Bp(1_000_000),
+            max_str_bundle_len_bp: Bp(0),
             ..StrRepeatCriteria::default()
         };
 
         assert_eq!(
             built.serves(&wanted),
             Ok(()),
-            "purity, score, bundle radius and the satellite cap bound nothing"
+            "purity, score, bundle radius, the satellite cap and the bundle cap bound nothing"
         );
     }
 

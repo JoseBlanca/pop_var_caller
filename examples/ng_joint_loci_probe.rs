@@ -275,6 +275,7 @@ fn main() {
         classification: SsrSegmentCriteria::default(),
         min_flank_bp: Bp(30),
         max_str_len_bp: Bp(100),
+        max_str_bundle_len_bp: Bp(pop_var_caller::region_typing::DEFAULT_MAX_STR_BUNDLE_LEN),
     };
     println!(
         "\n--- STR strata at the calling floors {:?}, flank {}, satellite cap {} ---",

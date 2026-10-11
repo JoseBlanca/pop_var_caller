@@ -29,7 +29,8 @@ use crate::region_typing::segment_criteria::{
     DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies, SsrSegmentCriteria,
 };
 use crate::region_typing::{
-    DEFAULT_MAX_STR_LEN, GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig,
+    BundleMember, DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN, GenomeRegions, RegionKind,
+    TypedRegion, TypedRegionConfig,
 };
 use crate::regions::{BedError, ContigBounds};
 use crate::repeat_catalog::{
@@ -38,7 +39,7 @@ use crate::repeat_catalog::{
 };
 use crate::tandem_repeat::{
     DEFAULT_MATCH_REWARD, DEFAULT_MIN_COPIES, DEFAULT_MISMATCH_PENALTY, PeriodRange,
-    PeriodRangeError, RepeatInterval, ScanParams,
+    PeriodRangeError, ScanParams,
 };
 use crate::types::{Bp, ContigId, GenomeRegion};
 
@@ -118,6 +119,12 @@ pub struct TypedRegionsArgs {
     /// it, spec T3).
     #[arg(long, default_value_t = DEFAULT_MAX_STR_LEN, help_heading = "Advanced")]
     pub max_str_len: u64,
+
+    /// Bundle cap (bp): an STR bundle whose hull — its first repeat's start to the furthest
+    /// end of any of its repeats — is longer than this is a satellite. 0 makes every bundle
+    /// a satellite.
+    #[arg(long, default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN, help_heading = "Advanced")]
+    pub max_str_bundle_len: u64,
 
     /// Flank (bp) a locus needs each side, and the bundle radius (spec §2.4).
     ///
@@ -294,6 +301,7 @@ pub fn write_header<W: io::Write>(
     let TypedRegionConfig {
         scan,
         max_str_len,
+        max_str_bundle_len,
         criteria,
     } = config;
     let SsrSegmentCriteria {
@@ -317,6 +325,7 @@ pub fn write_header<W: io::Write>(
     writeln!(out, "## min_period: {}", periods.min())?;
     writeln!(out, "## max_period: {}", periods.max())?;
     writeln!(out, "## max_str_len: {}", max_str_len.get())?;
+    writeln!(out, "## max_str_bundle_len: {}", max_str_bundle_len.get())?;
     writeln!(out, "## flank_bp: {flank_bp}")?;
     writeln!(out, "## min_purity: {min_purity}")?;
     writeln!(out, "## min_score: {min_score}")?;
@@ -345,12 +354,9 @@ fn kind_label(kind: &RegionKind) -> &'static str {
 /// **half-open**. So the start loses one and the end does not move: 1-based
 /// `[1, 10]` is ten bases, and so is 0-based `[0, 10)`.
 ///
-/// A bundle's member `RepeatInterval`s are **not** converted — they are already
-/// 0-based half-open *and* already re-based to contig coordinates by the walk, so
-/// they are written through unchanged (see [`members_json`]). That is the trap:
-/// one row, two coordinate systems, in opposite directions. The conversion lives
-/// here, once, or it gets written twice and one of them is wrong — and a wrong
-/// one is a *wrong region*, not a panic.
+/// A bundle's members are converted the same way, in [`members_json`], so that every
+/// coordinate in a row is in one system: a [`BundleMember`] is 1-based inclusive, like the
+/// hull, and the JSON carries it 0-based half-open, like the row's own columns.
 fn hull_to_bed(region: &GenomeRegion) -> (u64, u64) {
     let start = region.start.get();
     let end = region.end.get();
@@ -370,18 +376,26 @@ fn hull_to_bed(region: &GenomeRegion) -> (u64, u64) {
 /// incidental whitespace, so the cell serialises deterministically for §6's
 /// byte-identity.
 ///
-/// The intervals are written through **unshifted**: they are already 0-based
-/// half-open contig coordinates (T4, and see [`hull_to_bed`] for the hull, which
-/// is not).
-fn members_json(tracts: &[RepeatInterval]) -> String {
+/// Each member is `{"start","end","period","motif"}`: its span **0-based half-open**,
+/// the way [`hull_to_bed`] writes the hull, then its repeat unit's length and the unit
+/// itself (`str_bundle_loci.md` §5.1, §6.2).
+///
+/// Public because `examples/ng_typed_region_dump.rs` writes the same cell, and two
+/// spellings of it would be two formats.
+pub fn members_json(members: &[BundleMember]) -> String {
     let mut out = String::from("[");
-    for (i, tract) in tracts.iter().enumerate() {
+    for (i, member) in members.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
+        let motif = member.motif();
+        let motif =
+            std::str::from_utf8(motif.as_bytes()).expect("motif bytes are ASCII by construction");
         out.push_str(&format!(
-            r#"{{"start":{},"end":{},"period":{}}}"#,
-            tract.start, tract.end, tract.period
+            r#"{{"start":{},"end":{},"period":{},"motif":"{motif}"}}"#,
+            member.start() - 1,
+            member.end(),
+            member.period(),
         ));
     }
     out.push(']');
@@ -444,10 +458,10 @@ pub fn write_row<W: io::Write>(
                 segment.purity_fraction()
             )
         }
-        RegionKind::SsrBundle { tracts } => writeln!(
+        RegionKind::SsrBundle { members } => writeln!(
             out,
             "{chrom}\t{start}\t{end}\t{kind}\t.\t.\t.\t.\t{}",
-            members_json(tracts)
+            members_json(members)
         ),
         RegionKind::Generic | RegionKind::Satellite => {
             writeln!(out, "{chrom}\t{start}\t{end}\t{kind}\t.\t.\t.\t.\t.")
@@ -597,6 +611,7 @@ fn walk_config(args: &TypedRegionsArgs) -> Result<TypedRegionConfig, TypedRegion
             min_copies: args.scan_min_copies,
         },
         max_str_len: Bp(args.max_str_len),
+        max_str_bundle_len: Bp(args.max_str_bundle_len),
         criteria: SsrSegmentCriteria {
             periods: PeriodRange::new(args.min_period, args.max_period)?,
             min_purity: args.min_purity,
@@ -765,6 +780,7 @@ mod tests {
         assert_eq!(args.min_period, 1, "period-1 homopolymers classified");
         assert_eq!(args.max_period, 6);
         assert_eq!(args.max_str_len, 100, "short-read satellite cap");
+        assert_eq!(args.max_str_bundle_len, 100, "the bundle cap");
         assert_eq!(args.flank_bp, 15, "short-read flank");
         assert_eq!(args.min_purity, 0.8);
         assert_eq!(args.min_score, 0);
@@ -815,6 +831,7 @@ mod tests {
             "min_period",
             "max_period",
             "max_str_len",
+            "max_str_bundle_len",
             "flank_bp",
             "min_purity",
             "min_score",
@@ -844,6 +861,7 @@ mod tests {
             "## min_period: 1",
             "## max_period: 6",
             "## max_str_len: 100",
+            "## max_str_bundle_len: 100",
             "## flank_bp: 15",
             "## min_purity: 0.8",
             "## min_score: 0",
@@ -911,6 +929,7 @@ mod tests {
         use crate::types::Bp;
         let config = TypedRegionConfig {
             max_str_len: Bp(250),
+            max_str_bundle_len: Bp(70),
             criteria: SsrSegmentCriteria {
                 periods: PeriodRange::new(2, 5).expect("2..=5 is valid"),
                 min_copies: MinCopies::new([9, 8, 7, 6, 5, 4], 3),
@@ -925,6 +944,7 @@ mod tests {
             "## min_period: 2",
             "## max_period: 5",
             "## max_str_len: 250",
+            "## max_str_bundle_len: 70",
             "## flank_bp: 44",
             "## min_copies: 9,8,7,6,5,4",
         ] {
@@ -955,8 +975,8 @@ mod tests {
         period: Option<usize>,
         copies: Option<f64>,
         purity: Option<f32>,
-        /// `(start, end, period)` per member.
-        members: Option<Vec<(u64, u64, u8)>>,
+        /// `(start, end, period, motif)` per member.
+        members: Option<Vec<(u64, u64, u8, String)>>,
     }
 
     fn cell(raw: &str) -> Option<&str> {
@@ -966,7 +986,7 @@ mod tests {
     /// Parse the `members` JSON cell. Deliberately a small hand parser: the cell
     /// is a fixed shape, and depending on a JSON library here would test the
     /// library rather than our serialisation.
-    fn parse_members(raw: &str) -> Vec<(u64, u64, u8)> {
+    fn parse_members(raw: &str) -> Vec<(u64, u64, u8, String)> {
         let inner = raw
             .strip_prefix('[')
             .and_then(|r| r.strip_suffix(']'))
@@ -981,6 +1001,7 @@ mod tests {
                 let mut start = None;
                 let mut end = None;
                 let mut period = None;
+                let mut motif = None;
                 for field in object.split(',') {
                     let (key, value) = field.split_once(':').expect("a JSON key:value pair");
                     let value = value.trim();
@@ -988,6 +1009,15 @@ mod tests {
                         "start" => start = Some(value.parse().expect("start is a number")),
                         "end" => end = Some(value.parse().expect("end is a number")),
                         "period" => period = Some(value.parse().expect("period is a number")),
+                        "motif" => {
+                            motif = Some(
+                                value
+                                    .strip_prefix('"')
+                                    .and_then(|v| v.strip_suffix('"'))
+                                    .expect("motif is a JSON string")
+                                    .to_string(),
+                            )
+                        }
                         other => panic!("unexpected key in the members cell: {other}"),
                     }
                 }
@@ -995,6 +1025,7 @@ mod tests {
                     start.expect("start"),
                     end.expect("end"),
                     period.expect("period"),
+                    motif.expect("motif"),
                 )
             })
             .collect()
@@ -1055,24 +1086,23 @@ mod tests {
         }
     }
 
-    fn tract(start: u64, end: u64, period: u8) -> RepeatInterval {
-        RepeatInterval {
+    /// A bundle member at 1-based inclusive `[start, end]` with repeat unit `motif`.
+    fn member(start: u64, end: u64, motif: &str) -> BundleMember {
+        BundleMember::new(
             start,
             end,
-            period,
-            score: 100,
-        }
+            Motif::new(motif.as_bytes()).expect("a valid motif"),
+        )
     }
 
     /// **THE ROUND-TRIP ORACLE (plan C2, spec §7).** Format each kind, parse the
     /// row back, and assert it equals the input field for field — including a
     /// bundle, without which the member coordinates are never exercised.
     ///
-    /// This is what pins **T4's two directions in one row**: the hull's start
-    /// loses one (1-based inclusive → 0-based half-open) while the members, which
-    /// are already 0-based half-open contig coordinates, do not move. An
-    /// off-by-one in either is a *wrong region*, not a panic — so it is checked
-    /// against the input rather than against the writer's own idea of itself.
+    /// This is what pins **T4's conversion in one row**: the hull's start and each
+    /// member's start lose one (1-based inclusive → 0-based half-open) and the ends do
+    /// not move. An off-by-one in either is a *wrong region*, not a panic — so it is
+    /// checked against the input rather than against the writer's own idea of itself.
     #[test]
     fn every_kind_round_trips_through_a_row() {
         let contigs = test_contigs();
@@ -1140,14 +1170,13 @@ mod tests {
              different region than the coordinates do"
         );
 
-        // --- SsrBundle: the hull, plus members that must NOT shift (T4) ---
-        // Members are 0-based half-open contig coordinates already.
-        let members = vec![tract(1990, 2010, 2), tract(2020, 2040, 5)];
+        // --- SsrBundle: the hull, plus members shifted the same way (T4) ---
+        let members = vec![member(1991, 2010, "AT"), member(2021, 2040, "AAAAG")];
         let bundle = TypedRegion {
             // The hull in 1-based inclusive terms: [1991, 2040].
             region: hull(1991, 2040),
             kind: RegionKind::SsrBundle {
-                tracts: members.clone().into_boxed_slice(),
+                members: members.into_boxed_slice(),
             },
         };
         let row = row_of(&bundle, &contigs);
@@ -1159,8 +1188,11 @@ mod tests {
         assert_eq!(row.kind, "ssr_bundle");
         assert_eq!(
             row.members,
-            Some(vec![(1990, 2010, 2), (2020, 2040, 5)]),
-            "members are already 0-based half-open — they must come back UNSHIFTED (T4)"
+            Some(vec![
+                (1990, 2010, 2, "AT".to_string()),
+                (2020, 2040, 5, "AAAAG".to_string())
+            ]),
+            "members are written 0-based half-open, like the hull, each with its motif (T4)"
         );
         assert_eq!(
             (row.motif, row.period, row.copies, row.purity),
@@ -1221,37 +1253,36 @@ mod tests {
             line_of(&TypedRegion {
                 region: hull(1991, 2040),
                 kind: RegionKind::SsrBundle {
-                    tracts: vec![tract(1990, 2010, 2), tract(2020, 2040, 5)].into_boxed_slice(),
+                    members: vec![member(1991, 2010, "AT"), member(2021, 2040, "AAAAG")]
+                        .into_boxed_slice(),
                 },
             }),
             "chr1\t1990\t2040\tssr_bundle\t.\t.\t.\t.\t\
-             [{\"start\":1990,\"end\":2010,\"period\":2},\
-             {\"start\":2020,\"end\":2040,\"period\":5}]\n"
+             [{\"start\":1990,\"end\":2010,\"period\":2,\"motif\":\"AT\"},\
+             {\"start\":2020,\"end\":2040,\"period\":5,\"motif\":\"AAAAG\"}]\n"
         );
     }
 
-    /// **The two directions are not the same direction** — the sharpest form of
-    /// T4. A bundle whose hull and whose first member describe the *same* first
-    /// base must render them as the *same* BED number: the hull via `-1`, the
-    /// member via no shift. If either conversion were applied to the other, these
-    /// two cells would differ by one.
+    /// **One conversion for both** — the sharpest form of T4. A bundle whose hull and
+    /// whose first member describe the *same* first base must render them as the
+    /// *same* BED number. If only one of them were shifted, these two cells would
+    /// differ by one.
     #[test]
     fn the_hull_and_its_first_member_agree_on_the_first_base() {
         let contigs = test_contigs();
-        // 0-based half-open member [1990, 2010) == 1-based inclusive [1991, 2010].
-        let first = tract(1990, 2010, 2);
         let region = TypedRegion {
             region: hull(1991, 2040),
             kind: RegionKind::SsrBundle {
-                tracts: vec![first, tract(2020, 2040, 5)].into_boxed_slice(),
+                members: vec![member(1991, 2010, "AT"), member(2021, 2040, "AAAAG")]
+                    .into_boxed_slice(),
             },
         };
         let row = row_of(&region, &contigs);
         let members = row.members.expect("a bundle has members");
         assert_eq!(
             row.start, members[0].0,
-            "the hull starts at its first member; a shift applied to the wrong one \
-             makes these differ by exactly 1 — silently, and it is a wrong region"
+            "the hull starts at its first member; a shift applied to one and not the \
+             other makes these differ by exactly 1 — silently, and it is a wrong region"
         );
     }
 
@@ -1289,12 +1320,12 @@ mod tests {
     /// whitespace — which is what §6's byte-identity rests on for a bundle.
     #[test]
     fn the_members_cell_serialises_deterministically() {
-        let tracts = [tract(1990, 2010, 2), tract(2020, 2040, 5)];
+        let members = [member(1991, 2010, "AT"), member(2021, 2040, "AAAAG")];
         assert_eq!(
-            members_json(&tracts),
-            r#"[{"start":1990,"end":2010,"period":2},{"start":2020,"end":2040,"period":5}]"#
+            members_json(&members),
+            r#"[{"start":1990,"end":2010,"period":2,"motif":"AT"},{"start":2020,"end":2040,"period":5,"motif":"AAAAG"}]"#
         );
-        assert_eq!(members_json(&tracts), members_json(&tracts));
+        assert_eq!(members_json(&members), members_json(&members));
     }
 
     /// `copies` is fractional in general (T5): a tract that is not a whole number

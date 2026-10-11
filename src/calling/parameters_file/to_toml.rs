@@ -466,9 +466,9 @@ impl ParametersFile {
                 &[
                     "What this run counted as a repeat. A tandem-repeat catalog is built below every floor a caller routes on, deliberately, so that a run can put its own line anywhere inside that gap by filtering the file rather than scanning the genome again. These are where this run put it: a stretch of reference clearing all of them went to the repeat-tract caller, and one that did not is ordinary sequence and went to the SNP and indel caller. Two runs over the same reference and the same catalog with different numbers here analysed different ground, and nothing else in this file would say so.",
                     "",
-                    "`min_copies` is one floor per repeat-unit length, 1 to 6 in order, so the first entry is how many bases a homopolymer needs and the last how many hexamer copies. `min_purity` is how much of a tract has to match a perfect tiling of its unit. `max_str_len` is where a tract stops being callable and becomes a satellite, which neither caller speaks for.",
+                    "`min_copies` is one floor per repeat-unit length, 1 to 6 in order, so the first entry is how many bases a homopolymer needs and the last how many hexamer copies. `min_purity` is how much of a tract has to match a perfect tiling of its unit. `max_str_len` is where a tract stops being callable and becomes a satellite, which neither caller speaks for; `max_str_bundle_len` is the same limit for an STR bundle, a group of repeats too close together to be called apart, measured from the start of its first repeat to the furthest end of any of them.",
                     "",
-                    "Five of the eight have flags on `call-from-alignments`, named as these keys are. The other three do not, and are written because a record that left them out would not say what the run actually asked the catalog for: `min_flank_bp` is pinned at the catalog's own floor, since tracts nearer than that to a contig's end were never written to the file; `min_score` gates a scanner's output and so gates nothing in a run that reads a catalog; `bundle_threshold` is how close two tracts have to be before they are one bundle rather than two loci.",
+                    "Six of the nine have flags on `call-from-alignments`, named as these keys are. The other three do not, and are written because a record that left them out would not say what the run actually asked the catalog for: `min_flank_bp` is pinned at the catalog's own floor, since tracts nearer than that to a contig's end were never written to the file; `min_score` gates a scanner's output and so gates nothing in a run that reads a catalog; `bundle_threshold` is how close two tracts have to be before they are one bundle rather than two loci.",
                     "",
                     "A run handed a parameters file whose numbers here differ from its own says so and calls on. Nothing is refused and nothing is demoted: the numbers in this file are as warranted as they ever were, and only the ground they are applied to has moved. What that costs is worth knowing — a tract the run admits that the fit's own selection did not is scored from strata fitted over other tracts, or from the stated defaults, and the warrants beside each number say which.",
                 ],
@@ -481,6 +481,13 @@ impl ParametersFile {
             scalar(&mut out, "min_period", &routing.min_period.to_string());
             scalar(&mut out, "max_period", &routing.max_period.to_string());
             scalar(&mut out, "max_str_len", &routing.max_str_len.to_string());
+            if let Some(max_str_bundle_len) = routing.max_str_bundle_len {
+                scalar(
+                    &mut out,
+                    "max_str_bundle_len",
+                    &max_str_bundle_len.to_string(),
+                );
+            }
             scalar(&mut out, "min_purity", &a_toml_purity(routing.min_purity));
             scalar(&mut out, "min_flank_bp", &routing.min_flank_bp.to_string());
             scalar(&mut out, "min_score", &routing.min_score.to_string());

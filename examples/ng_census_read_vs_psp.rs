@@ -59,10 +59,10 @@ use pop_var_caller::parameter_estimation::joint::loci::UnambiguousRuns;
 use pop_var_caller::psp::{PspReader, RecordHead};
 use pop_var_caller::read::input::reference::OpenReference;
 use pop_var_caller::reference_info::{ReferenceCheck, read_reference_observing_or_creating_fai};
-use pop_var_caller::region_typing::DEFAULT_MAX_STR_LEN;
 use pop_var_caller::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use pop_var_caller::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 use pop_var_caller::repeat_catalog::RepeatCatalog;
 use pop_var_caller::run::{CensusPlan, CensusSelection, Segmentation, census_from_psp};
 use pop_var_caller::types::{GenomePosition, GenomeRegion, ReadGroupId};
@@ -178,6 +178,7 @@ fn run(
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
     };

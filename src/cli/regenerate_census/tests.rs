@@ -8,10 +8,10 @@ use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
 use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk, a_varying_cohort_on_disk};
 use crate::psp::PspReader;
-use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> RegenerateCensusArgs {
@@ -48,6 +48,7 @@ fn a_walk_into(psps: &Path, reference: &Path, catalog: &Path, alignments: &[Path
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })

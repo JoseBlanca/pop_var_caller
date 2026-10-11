@@ -34,12 +34,14 @@
 //! Output: a `#` comment header, a bare TSV column line, then one row per typed region —
 //! `chrom  start  end  kind  motif  period  copies  purity  members`, coordinates 1-based
 //! inclusive, with `.` wherever a kind carries no such detail. `members` is a bundle's repeats as
-//! `pvc type-regions` writes them: a JSON array of `{"start","end","period"}`, each the detector's
-//! interval, **zero-based half-open** — not the row's own coordinates.
+//! `pvc type-regions` writes them: a JSON array of `{"start","end","period","motif"}`, each member's
+//! span cut back to whole copies of its motif, **zero-based half-open** — not the row's own
+//! coordinates.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use pop_var_caller::cli::typed_regions::members_json;
 use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
@@ -96,11 +98,12 @@ fn run(
         .map(|period| criteria.classification.min_copies.for_period(period))
         .collect();
     println!(
-        "## periods: {}..={}  min_copies: {:?}  max_str_len_bp: {}",
+        "## periods: {}..={}  min_copies: {:?}  max_str_len_bp: {}  max_str_bundle_len_bp: {}",
         criteria.classification.periods.min(),
         criteria.classification.periods.max(),
         floors_by_period,
         criteria.max_str_len_bp.get(),
+        criteria.max_str_bundle_len_bp.get(),
     );
     match bed {
         Some(path) => println!("## regions: {}", path.display()),
@@ -127,11 +130,11 @@ fn run(
                 ".".to_string(),
                 ".".to_string(),
             ),
-            RegionKind::SsrBundle { tracts } => (
+            RegionKind::SsrBundle { members } => (
                 "ssr_bundle",
                 ".".to_string(),
                 ".".to_string(),
-                format!("{}", tracts.len()),
+                format!("{}", members.len()),
                 ".".to_string(),
             ),
             RegionKind::SsrSegment(segment) => (
@@ -146,21 +149,10 @@ fn run(
                 format!("{:.2}", segment.purity_fraction()),
             ),
         };
-        // A bundle's members, written through as the walk hands them: zero-based half-open
-        // contig coordinates, the form `pvc type-regions` writes (`cli/typed_regions.rs`).
+        // A bundle's members, in the cell `pvc type-regions` writes — the same function, so
+        // the two files cannot spell it two ways.
         let members = match &region.kind {
-            RegionKind::SsrBundle { tracts } => {
-                let cells: Vec<String> = tracts
-                    .iter()
-                    .map(|tract| {
-                        format!(
-                            r#"{{"start":{},"end":{},"period":{}}}"#,
-                            tract.start, tract.end, tract.period
-                        )
-                    })
-                    .collect();
-                format!("[{}]", cells.join(","))
-            }
+            RegionKind::SsrBundle { members } => members_json(members),
             RegionKind::Generic | RegionKind::Satellite | RegionKind::SsrSegment(_) => {
                 ".".to_string()
             }

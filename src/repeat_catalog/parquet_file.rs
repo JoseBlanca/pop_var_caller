@@ -381,6 +381,10 @@ pub(crate) fn decode_header(
                     },
                     min_flank_bp: Bp(f[8].parse().map_err(|_| malformed("flank floor"))?),
                     max_str_len_bp: Bp(f[9].parse().map_err(|_| malformed("satellite cap"))?),
+                    // Not in the file: the header predates the bundle cap, and the builder
+                    // never applies it. Every catalog reads back with the default, so two
+                    // catalogs never differ on it (`StrRepeatCriteria::max_str_bundle_len_bp`).
+                    max_str_bundle_len_bp: Bp(crate::region_typing::DEFAULT_MAX_STR_BUNDLE_LEN),
                 });
             }
             "contig" => {

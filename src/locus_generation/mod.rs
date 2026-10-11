@@ -1342,15 +1342,10 @@ mod tests {
     }
 
     fn a_bundle() -> RegionKind {
-        use crate::tandem_repeat::RepeatInterval;
+        use crate::region_typing::BundleMember;
         RegionKind::SsrBundle {
-            tracts: vec![RepeatInterval {
-                start: 99,
-                end: 160,
-                period: 2,
-                score: 10,
-            }]
-            .into_boxed_slice(),
+            members: vec![BundleMember::new(100, 160, Motif::new(b"AT").unwrap())]
+                .into_boxed_slice(),
         }
     }
 

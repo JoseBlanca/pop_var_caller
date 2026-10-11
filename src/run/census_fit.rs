@@ -672,10 +672,10 @@ mod tests {
     /// fit untested. This one carries a deliberate ten-copy `GT` tract.
     pub(super) fn a_fitted_cohorts_inputs()
     -> (crate::cli::test_fixtures::AVaryingCohort, Vec<PathBuf>) {
-        use crate::region_typing::DEFAULT_MAX_STR_LEN;
         use crate::region_typing::segment_criteria::{
             DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
         };
+        use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 
         let cohort = a_varying_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
@@ -691,6 +691,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         };

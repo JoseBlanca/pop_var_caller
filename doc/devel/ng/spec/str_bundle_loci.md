@@ -73,7 +73,8 @@ the STR path (`typed_regions.md` §10 named it as the only option that recovers 
 ## 4. Vocabulary
 
 - **Member.** One repeat of a bundle: a reference span and a motif.
-- **Hull.** The bundle's region: first member's start to last member's end, gaps included.
+- **Hull.** The bundle's region: first member's start to last member's end, gaps included. *(As
+  built: the earliest detected start to the furthest detected end; members can nest, §5.1.)*
 - **Gap.** The reference bases between two consecutive members, 0 to 14 of them. Not a repeat; no
   stutter is modelled in it.
 - **Member counts.** For an allele, how many copies of each member's motif it carries, in member
@@ -93,6 +94,29 @@ through the copy floor, the purity gate or the flank test: membership stays what
 scan and the catalog — produce the same members, and the existing differential between them checks
 it.
 
+*Changed during implementation (2026-10-11).* Two things this section left open. **A member with no
+whole-motif cut** — an imperfect repeat with no two clean copies near one end — keeps its detected
+span; it is still a member, and its motif is the same either way. **The hull stays the detected
+spans' hull** — from the earliest detected start to the furthest detected end — so a member whose
+ragged end was cut lies strictly inside it. On HG002's regions, 385 of the 2,410 bundles end past
+every member's cut end, and 7 start before every member's cut start. Keeping the hull is what leaves
+every other region of the typing unchanged; §6.1's spelling over the hull covers those few bases as
+it covers a gap.
+
+*Found in review (2026-10-11), open for step 3.* **Members are not the ordered, disjoint runs §4
+describes.** The typing lists them in the detector's order (detected start, then end), and on
+HG002's 2,410 bundles: **551 hold one member wholly inside another** (`(CT)n` ending in a T run that
+is also detected as its own `T` member, for example), **734 have consecutive members that overlap**,
+6 list members whose cut starts are out of order, and in **520 the last-listed member is not the one
+that reaches the hull's end**. So §4's *gap* of 0 to 14 bases can be negative, §6.1's "the last
+member's motif at the right edge" must mean the member that reaches the edge, and §7.1's parse —
+each member as whole copies of its motif, in order, with a gap between — has no reading for a member
+inside another. Step 3 has to settle this before the parse is built; the choices are to drop a
+member contained in another at typing (the containing one already spells its bases), to clip
+overlapping members to each other, or to let the parse take overlapping members. This review
+recommends the first for nested members, measured before adopting it, and leaves overlaps to the
+parse.
+
 **5.2 The cap.** A hull longer than `--max-str-bundle-len` becomes a `Satellite`. No re-absorption
 follows: anything within 15 bases of a member would have joined the bundle, so nothing is within a
 satellite's reach that was not already inside the hull.
@@ -109,9 +133,33 @@ satellite's reach that was not already inside the hull.
 - **0 turns bundle calling off**: every bundle becomes a satellite and none is called, which is
   today's result for calls.
 
+*Changed during implementation (2026-10-11).* Where the cap is recorded, in detail:
+
+- **The repeat catalog's own file does not record it.** Its header predates the cap and the builder
+  never applies it, so every catalog reads back with the default 100 as its build setting; two
+  catalogs never differ on it, and no existing catalog has to be rebuilt.
+- **A psp records it** (`max-str-bundle-len-bp` in the header's repeat criteria). A psp written before
+  the cap has no such key and is **refused, naming the key**, rather than read as 100: its bundles
+  were typed with no cap, a typing no value of the key describes. Such psps must be written again.
+- **The parameters file's key is optional on reading**: a file written before the cap says nothing
+  about it and is compared on the other axes only. The census digests of the routing criteria and of
+  the catalog's build settings are taken over their printed form, which now carries the cap, so they
+  move (the cross-platform checksums of the parameters file moved for this and nothing else). **So a
+  parameters file fitted before the cap is demoted to `supplied` when a run with a census uses it**
+  (`parameters_file.md` §6), although its numbers were fitted from the same loci: bundles never
+  enter the census (§6.3).
+- **A windowed read of the catalog reaches as far as the cap** (`reach_into_window`). A bundle is a
+  chain of repeats, longer than any of them; a read padded only by the longest tract cut a chain
+  short and could type a satellite as a bundle (found in review, 2026-10-11).
+
 **5.3 A contig's ends.** A bundle whose hull has no flank on one side — it starts on the contig's
 first base or ends on its last — is dropped, as an STR segment is (`FlankClamped`). Its bases become
 generic, as today.
+
+*Changed during implementation (2026-10-11).* Before this, such a bundle was kept. The cap is asked
+first, so a hull over the cap at a contig end is a satellite, which needs no flank. Both routes
+apply the rule. It rarely fires on the catalog's, which keeps a row only with `min_flank_bp` bases
+beside its cut span, but a hull is drawn over detected spans, which can reach further.
 
 **5.4 The tallies** (`TypedRegionCounts`) count capped bundles as satellites; `ssr_bundles` counts
 what remains.
@@ -148,7 +196,8 @@ file with bundle records (`psp_file_format.md` §4.3). The typing a psp records 
 psps are needed for any run that is compared.
 
 The typing dump (`typed_regions_cli.md` §3.1) writes each member's motif in its `members` cell,
-beside its start, end and period.
+beside its start, end and period. *(As built, 2026-10-11: the start and end are the member's cut
+span, 0-based half-open as `pvc type-regions` writes its rows, where before they were the detected interval.)*
 
 ### 6.3 The parameter census
 

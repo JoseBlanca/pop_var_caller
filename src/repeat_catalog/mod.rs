@@ -458,17 +458,36 @@ impl RepeatCatalogHeader {
     }
 
     /// How far outside a requested stretch a row can sit and still change the answer inside
-    /// it: the contig's longest tract, plus the bundle radius the reader is asking with.
+    /// it: the longer of the contig's longest tract and the reader's bundle cap, plus the
+    /// bundle radius the reader is asking with.
     ///
-    /// A read window padded by this holds every row that can affect the answer, and no
-    /// policy the file serves can need more — a wider bundle radius is the reader's to pass
-    /// in, and a longer tract than the longest one stored does not exist in that contig.
-    pub fn reach_into_window(&self, contig: ContigId, bundle_threshold: u64) -> u64 {
+    /// **The longest tract** bounds a single row: a longer one does not exist in that
+    /// contig. **The bundle cap** bounds a chain of short rows, which a single tract's length
+    /// does not: an STR bundle is a chain of repeats each within the bundle radius of the
+    /// next, so its hull can be far longer than any of its members. With the cap in the
+    /// reach, a bundle that stays a bundle (hull at most the cap) has every member inside the
+    /// padded window, and a chain longer than the cap is still seen longer than the cap, so
+    /// it is typed a satellite as the whole contig types it (`str_bundle_loci.md` §5.2).
+    /// Measured before the cap was in the reach: a chain of six repeats of 20 to 24 bases,
+    /// 180 bases from first to last, on a contig whose longest tract is 24, came back as a
+    /// 55-base bundle from a read over its first repeat and as a 181-base satellite from the
+    /// whole contig.
+    ///
+    /// **What it does not bound** is the extent of such a satellite: a chain reaching further
+    /// than this past the requested stretch comes back cut at the padded window. That was so
+    /// before the cap, for bundles and for coverage runs of abutting tracts alike.
+    pub fn reach_into_window(
+        &self,
+        contig: ContigId,
+        bundle_threshold: u64,
+        max_str_bundle_len: u64,
+    ) -> u64 {
         let longest = self
             .longest_tract_bp
             .get(contig.get() as usize)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(max_str_bundle_len);
         // **Saturating, because both terms come from outside.** `longest_tract_bp` is read
         // from a file this build did not necessarily write, and `bundle_threshold` is an
         // axis a reader sets freely; a plain `+` panics in debug on a large value and, worse,

@@ -141,6 +141,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
         min_period: direct.min_period,
         max_period: direct.max_period,
         max_str_len: direct.max_str_len,
+        max_str_bundle_len: direct.max_str_bundle_len,
         min_purity: direct.min_purity,
     };
     assert_eq!(
@@ -517,6 +518,7 @@ fn a_cohort_on_disk() -> (
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };

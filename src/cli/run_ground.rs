@@ -34,8 +34,8 @@ use crate::run::{RunError, Segmentation};
 use crate::tandem_repeat::{PeriodRange, PeriodRangeError};
 use crate::types::Bp;
 
-/// **What this run counts as a repeat** — the five flags that say so, as both subcommands
-/// spell them.
+/// **What this run counts as a repeat** — the six flags that say so, as the three subcommands
+/// that type spell them.
 ///
 /// Grouped because they travel together into one question: which of the catalog's tracts
 /// this run treats as repeat ground and which it leaves to the SNP/indel path.
@@ -49,6 +49,8 @@ pub struct RepeatRouting {
     pub max_period: u8,
     /// A tract longer than this many bases is a satellite.
     pub max_str_len: u64,
+    /// An STR bundle whose hull is longer than this many bases is a satellite.
+    pub max_str_bundle_len: u64,
     /// How much of a tract must match a perfect tiling of its motif, 0 to 1.
     pub min_purity: f32,
 }
@@ -65,7 +67,7 @@ pub struct GroundRequest<'a> {
     pub catalog: Option<&'a Path>,
     /// The BED naming the ground, or `None` for every base of every contig.
     pub regions: Option<&'a Path>,
-    /// What this run counts as a repeat. **Owned**, because it is five small values a
+    /// What this run counts as a repeat. **Owned**, because it is six small values a
     /// subcommand builds from its flags rather than something it already holds.
     pub routing: RepeatRouting,
 }
@@ -227,7 +229,7 @@ pub fn catalog_path_for(catalog: Option<&Path>, reference: &Path) -> PathBuf {
     catalog.map_or_else(|| sibling_catalog_path(reference), Path::to_path_buf)
 }
 
-/// **What this run counts as a repeat**, built from the five flags that say so.
+/// **What this run counts as a repeat**, built from the six flags that say so.
 ///
 /// The catalog is a source of *candidates*: it is deliberately built below every calling
 /// floor, so that a caller can put its own line anywhere inside that gap by filtering the
@@ -256,6 +258,7 @@ pub fn routing_criteria(routing: &RepeatRouting) -> Result<StrRepeatCriteria, Gr
         .map_err(|source| GroundError::PeriodRange { source })?;
     Ok(StrRepeatCriteria::from(&TypedRegionConfig {
         max_str_len: Bp(routing.max_str_len),
+        max_str_bundle_len: Bp(routing.max_str_bundle_len),
         criteria: SsrSegmentCriteria {
             periods,
             min_copies: routing.min_copies,
@@ -269,7 +272,7 @@ pub fn routing_criteria(routing: &RepeatRouting) -> Result<StrRepeatCriteria, Gr
 }
 
 /// The run's segments: the analysed ground cut into the stretches each generator owns, drawn
-/// from the catalog, **with what counts as a repeat taken from this run's five flags**.
+/// from the catalog, **with what counts as a repeat taken from this run's six flags**.
 ///
 /// A command whose criteria come from somewhere else — a psp header, which carries the finished
 /// value the walk routed under — calls [`segments_cut_with`] instead, and everything past the
@@ -294,7 +297,7 @@ pub fn segments_over(
         &path,
         request.reference,
         &criteria,
-        CriteriaSource::TheFiveFlags,
+        CriteriaSource::TheCommandLineFlags,
         analysed,
         with_checksums,
     )
@@ -311,8 +314,8 @@ pub fn segments_over(
 /// not the one their psps were walked against, and that is what they have to fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CriteriaSource {
-    /// The five flags of this command line.
-    TheFiveFlags,
+    /// The repeat-routing flags of this command line ([`RepeatRouting`]).
+    TheCommandLineFlags,
     /// The psp headers of the cohort being read, where the walk recorded them
     /// (`psp_census_pair.md` §6).
     ThePspHeaders,
@@ -320,7 +323,7 @@ pub enum CriteriaSource {
 
 /// The same segments, cut with criteria the caller already holds.
 ///
-/// **What a psp-driven command enters at.** The five flags are one way to say what this run
+/// **What a psp-driven command enters at.** The six flags are one way to say what this run
 /// counts as a repeat; a psp header is the other, and it carries the finished
 /// [`StrRepeatCriteria`] with no way back to the flags it was built from
 /// (`psp_census_pair.md` §6). Everything past that — refusing a catalog that is not there,
@@ -404,7 +407,9 @@ pub fn segments_cut_from(
     let segments = catalog
         .genome_segments(criteria, ReadScope::Regions(&spans))
         .map_err(|source| match criteria_from {
-            CriteriaSource::TheFiveFlags => catalog_error_naming_the_flag(source, catalog_path),
+            CriteriaSource::TheCommandLineFlags => {
+                catalog_error_naming_the_flag(source, catalog_path)
+            }
             // **No flag to name**: these criteria are what the walk recorded, and this command
             // line cannot change them. What the reader can change is which catalog they pointed
             // it at, which the general refusal already names.
@@ -444,7 +449,7 @@ fn refuse_a_catalog_that_is_not_there(catalog: &Path, reference: &Path) -> Resul
 /// **The refusal is real and it is not policy** — the rows below the file's floors were never
 /// written, so the request cannot be served (`run_ssr_observations.md` §2.3) — but on its own
 /// it names two numbers and no way to change either. A person who typed `--min-copies 3,3,3,3,3,3`
-/// should be told that flag, not left to infer which of five knobs produced *"period 1: catalog
+/// should be told that flag, not left to infer which of six knobs produced *"period 1: catalog
 /// holds tracts of 5 copies and up, reader asked for 3"*.
 ///
 /// **The flank floor has no flag and so has no arm here**: a run pins it at the catalog's
@@ -452,7 +457,7 @@ fn refuse_a_catalog_that_is_not_there(catalog: &Path, reference: &Path) -> Resul
 /// is what the general catalog error already says.
 fn catalog_error_naming_the_flag(source: RepeatCatalogError, path: &Path) -> GroundError {
     // Exhaustive on the refusal on purpose: a new bounded axis must not silently inherit the
-    // no-flag answer and leave a person hunting five knobs for the one they moved.
+    // no-flag answer and leave a person hunting six knobs for the one they moved.
     let flag = match &source {
         RepeatCatalogError::CriteriaTooPermissive(refusal) => match refusal {
             CriteriaRefusal::CopyFloor { .. } => Some("--min-copies"),
@@ -489,7 +494,7 @@ mod tests {
     ///
     /// The catalog's own refusal names two numbers and no knob: *"period 1: catalog holds
     /// tracts of 5 copies and up, reader asked for 3"* leaves a person to work out which of
-    /// five flags produced it. Each bounded axis maps to the flag that moves it.
+    /// six flags produced it. Each bounded axis maps to the flag that moves it.
     ///
     /// Moved here with the function it tests when the ground assembly was lifted out of
     /// `call-from-alignments` for `generate-psps` to share.

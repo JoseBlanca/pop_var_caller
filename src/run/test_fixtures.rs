@@ -137,10 +137,10 @@ pub(crate) fn a_census_plan_over_selecting(
     use crate::cli::run_ground::{self, GroundRequest, RepeatRouting};
     use crate::parameter_estimation::joint::loci::UnambiguousRuns;
     use crate::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::region_typing::DEFAULT_MAX_STR_LEN;
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
     };
+    use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
     use crate::repeat_catalog::RepeatCatalog;
     use crate::run::{CensusPlan, CensusSelection};
 
@@ -166,6 +166,7 @@ pub(crate) fn a_census_plan_over_selecting(
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
     };

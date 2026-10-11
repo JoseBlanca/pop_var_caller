@@ -87,12 +87,7 @@ fn scanned(
     contig: ContigId,
     criteria: &StrRepeatCriteria,
 ) -> Vec<TypedRegion> {
-    let config = TypedRegionConfig {
-        criteria: criteria.classification.clone(),
-        max_str_len: criteria.max_str_len_bp,
-        ..TypedRegionConfig::default()
-    };
-    partition_resident(chrom, contig, seq.as_bytes(), &config)
+    partition_resident(chrom, contig, seq.as_bytes(), &scan_config(criteria))
 }
 
 /// The same segmentation, derived from the file.
@@ -129,7 +124,7 @@ fn away_from_contig_edges(
 
 /// The policies the comparison runs at: the catalog's own, then ones differing from it on
 /// every bounded axis (a higher copy floor, a narrower period range) and on the unbounded
-/// ones (purity, satellite cap).
+/// ones (purity, satellite cap, bundle cap).
 fn policies() -> Vec<(&'static str, StrRepeatCriteria)> {
     let base = StrRepeatCriteria::default();
 
@@ -177,7 +172,20 @@ fn policies() -> Vec<(&'static str, StrRepeatCriteria)> {
         ..base.clone()
     };
 
+    // `chr_bundled`'s hull is 74 bases and `chr_ragged_bundle`'s 69, so 50 makes both
+    // satellites, and 0 makes every bundle one (`str_bundle_loci.md` §5.2).
+    let small_bundle_cap = StrRepeatCriteria {
+        max_str_bundle_len_bp: Bp(50),
+        ..base.clone()
+    };
+    let no_bundles = StrRepeatCriteria {
+        max_str_bundle_len_bp: Bp(0),
+        ..base.clone()
+    };
+
     vec![
+        ("a smaller bundle cap", small_bundle_cap),
+        ("a bundle cap of 0", no_bundles),
         ("the catalog's own settings", base),
         ("the calling copy floors", calling_floors),
         ("a narrower period range", narrow_periods),
@@ -188,8 +196,9 @@ fn policies() -> Vec<(&'static str, StrRepeatCriteria)> {
 }
 
 /// A reference carrying the structures that make classification interesting: clean tracts
-/// of several periods, two tracts close enough to bundle, a long array, an impure tract,
-/// and tracts at both contig ends.
+/// of several periods, two tracts close enough to bundle — once clean and once with a ragged
+/// member the end-trim cuts back — a long array, an impure tract, and tracts at both contig
+/// ends.
 fn fixture() -> Vec<(&'static str, String)> {
     let clean = format!(
         "{}{}{}{}{}{}{}",
@@ -208,6 +217,18 @@ fn fixture() -> Vec<(&'static str, String)> {
         filler(200),
         "GATA".repeat(8),
         filler(10),
+        "TCTC".repeat(8),
+        filler(200),
+    );
+
+    // A bundle whose first member ends in part of a copy (`CA` after eight `CAG`), so its
+    // detected span and the span it carries as a member differ: the member is cut back to
+    // whole copies, on both routes alike (`str_bundle_loci.md` §5.1).
+    let ragged_bundle = format!(
+        "{}{}CA{}{}{}",
+        filler(200),
+        "CAG".repeat(8),
+        filler(9),
         "TCTC".repeat(8),
         filler(200),
     );
@@ -239,6 +260,7 @@ fn fixture() -> Vec<(&'static str, String)> {
     vec![
         ("chr_clean", clean),
         ("chr_bundled", bundled),
+        ("chr_ragged_bundle", ragged_bundle),
         ("chr_array", array),
         ("chr_mid_array", mid_array),
         ("chr_impure", impure),
@@ -312,6 +334,64 @@ fn the_derived_loci_are_the_scanned_loci() {
     assert!(
         compared >= 4,
         "the fixture must actually produce loci, or the comparison proves nothing ({compared})"
+    );
+}
+
+/// **A bundle's members are the same on both routes**: the same spans, cut back to whole
+/// motif copies the same way, and the same motifs (`str_bundle_loci.md` §5.1). The
+/// differential above compares whole regions and so covers this already; this names it, and
+/// checks the fixture has what makes it a test — a member whose cut moves its end.
+#[test]
+fn bundle_members_carry_the_same_motifs_and_spans_from_the_file_as_from_a_scan() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = fixture();
+    let (catalog_path, reference, _) = build_catalog(dir.path(), &contigs);
+    let criteria = StrRepeatCriteria::default();
+
+    let members_of = |regions: &[TypedRegion]| -> Vec<(u64, u64, String)> {
+        regions
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RegionKind::SsrBundle { members } => Some(members),
+                _ => None,
+            })
+            .flat_map(|members| members.iter())
+            .map(|m| {
+                (
+                    m.start(),
+                    m.end(),
+                    String::from_utf8_lossy(m.motif().as_bytes()).into_owned(),
+                )
+            })
+            .collect()
+    };
+
+    let mut seen = Vec::new();
+    for (index, (name, seq)) in contigs.iter().enumerate() {
+        let contig = ContigId(index as u32);
+        let live = members_of(&scanned(seq, name, contig, &criteria));
+        let from_file = members_of(&derived(&catalog_path, &reference, contig, &criteria));
+        assert_eq!(from_file, live, "{name}: the members differ");
+        seen.extend(live.into_iter().map(|member| (*name, member)));
+    }
+
+    // Each member carries its own motif, in the detector's phase (the `GATA` run is read from
+    // one base earlier, so as `AGAT`) and at its primitive period (`TCTC` is `TC` repeated).
+    let motifs: Vec<&str> = seen
+        .iter()
+        .map(|(_, (_, _, motif))| motif.as_str())
+        .collect();
+    assert_eq!(
+        motifs,
+        ["AGAT", "TC", "CAG", "TC"],
+        "each member carries its own motif: {seen:?}"
+    );
+    // The ragged member: eight `CAG` from 201 to 224, then `CA`. Cut back, it ends at 224.
+    assert!(
+        seen.iter()
+            .any(|(name, member)| *name == "chr_ragged_bundle"
+                && *member == (201, 224, "CAG".to_string())),
+        "the ragged member is cut back to whole copies: {seen:?}"
     );
 }
 
@@ -651,6 +731,122 @@ fn a_feature_outside_the_window_still_decides_what_is_inside_it() {
     );
 }
 
+/// **A read over one end of an STR bundle sees the whole bundle**, however short its members
+/// are (`str_bundle_loci.md` §5.2). A bundle is a chain of repeats each within the bundle
+/// radius of the next, so its hull is bounded by the bundle cap and not by the longest tract,
+/// and a read padded only by the longest tract cut the chain short.
+///
+/// Both chains here are built from repeats of 16 to 24 bases, far shorter than the chain, and
+/// the window covers only the first repeat. The first chain is a bundle of three members, 74
+/// bases first to last, under the default cap of 100: the file's answer must be the scan's,
+/// region for region. Before the cap was in the read's reach, a read padded by the longest
+/// tract (20 bases) and the bundle radius (15) never saw the third member.
+/// The second chain is six repeats, 180 bases first to last: the whole contig types it a
+/// satellite, and so must the window. Before, the window typed it a 55-base bundle.
+///
+/// The second comparison is of the kind and the start only: a satellite reaching further past
+/// the window than the read's reach comes back cut at the padded window, as every satellite
+/// built from short tracts did before the bundle cap (`reach_into_window`).
+#[test]
+fn a_window_over_one_end_of_a_bundle_types_the_whole_chain() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let bundle_chain = format!(
+        "{}{}{}{}{}{}{}",
+        filler(200),
+        "GATA".repeat(5),
+        filler(10),
+        "TC".repeat(8),
+        filler(10),
+        "CAG".repeat(6),
+        filler(200),
+    );
+    let satellite_chain = format!(
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        filler(200),
+        "GATA".repeat(6),
+        filler(10),
+        "TC".repeat(10),
+        filler(10),
+        "CAG".repeat(7),
+        filler(10),
+        "AAT".repeat(7),
+        filler(10),
+        "TG".repeat(10),
+        filler(10),
+        "GATA".repeat(6),
+        filler(200),
+    );
+    let contigs = vec![
+        ("chr_bundle_chain", bundle_chain),
+        ("chr_satellite_chain", satellite_chain),
+    ];
+    let sides = both_sides(dir.path(), &contigs);
+    let criteria = StrRepeatCriteria::default();
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)
+            .expect("opens");
+
+    let mut kinds_seen = Vec::new();
+    for (index, (name, seq)) in contigs.iter().enumerate() {
+        let contig = ContigId(index as u32);
+        // Inside the first repeat, which starts on base 201.
+        let window = [GenomeRegion {
+            contig,
+            start: Position(205),
+            end: Position(215),
+        }];
+        let (scanned_regions, _) = partition_resident_in(
+            name,
+            contig,
+            seq.as_bytes(),
+            &scan_config(&criteria),
+            &window,
+        );
+        let from_file: Vec<TypedRegion> = catalog
+            .genome_segments(&criteria, ReadScope::Regions(&window))
+            .expect("servable")
+            .map(|r| r.expect("a region"))
+            .collect();
+        let [scanned_one] = scanned_regions.as_slice() else {
+            panic!("{name}: the window lies inside one region: {scanned_regions:#?}");
+        };
+        let [from_file_one] = from_file.as_slice() else {
+            panic!("{name}: the file's answer is one region too: {from_file:#?}");
+        };
+        match &scanned_one.kind {
+            RegionKind::SsrBundle { members } => {
+                assert_eq!(
+                    members.len(),
+                    3,
+                    "{name}: the fixture's three repeats are one bundle"
+                );
+                assert_eq!(
+                    from_file_one, scanned_one,
+                    "{name}: the whole bundle, members and all"
+                );
+            }
+            RegionKind::Satellite => {
+                assert!(
+                    scanned_one.region.len() > 100,
+                    "{name}: a satellite because it is over the cap: {scanned_one:?}"
+                );
+                assert!(
+                    matches!(from_file_one.kind, RegionKind::Satellite)
+                        && from_file_one.region.start == scanned_one.region.start,
+                    "{name}: the window types the chain a satellite, as the whole contig does\n\
+                     file: {from_file_one:?}\nscan: {scanned_one:?}"
+                );
+            }
+            other => panic!("{name}: the chain is a bundle or a satellite, not {other:?}"),
+        }
+        kinds_seen.push(std::mem::discriminant(&scanned_one.kind));
+    }
+    assert_ne!(
+        kinds_seen[0], kinds_seen[1],
+        "the fixture holds one bundle and one satellite"
+    );
+}
+
 /// Sequence with no structure of its own, from a fixed seed — the same bases every run.
 fn pseudorandom(len: usize, seed: u64) -> String {
     let mut state = seed;
@@ -730,11 +926,17 @@ fn whole_contigs_named(reference: &ReferenceInfo, names: &[&str]) -> Vec<GenomeR
 }
 
 /// The policy both sides run, as the scan takes it.
+///
+/// **Every field named, no `..default()` tail**, as the catalog's side names them
+/// (`repeat_catalog/segments.rs`): a field added to `TypedRegionConfig` later must break this
+/// line, or the scan would run it at its default while the file's side ran the policy under
+/// test, and the comparison would pass whenever the policy left that field alone.
 fn scan_config(criteria: &StrRepeatCriteria) -> TypedRegionConfig {
     TypedRegionConfig {
         criteria: criteria.classification.clone(),
         max_str_len: criteria.max_str_len_bp,
-        ..TypedRegionConfig::default()
+        max_str_bundle_len: criteria.max_str_bundle_len_bp,
+        scan: ScanParams::default(),
     }
 }
 

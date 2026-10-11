@@ -64,10 +64,10 @@ use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
     read_reference_verifying_or_creating_fai,
 };
-use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
@@ -320,6 +320,20 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub max_str_len: u64,
 
+    /// An STR bundle — two or more repeats within 15 bases of each other, typed as one region —
+    /// whose stretch, from its first repeat's start to the furthest end of any of them, is
+    /// longer than this many bases is a satellite instead. 0 makes every bundle a satellite.
+    ///
+    /// Its own limit rather than `--max-str-len`'s, so that widening what one repeat may be
+    /// does not also widen bundles. 100 for the reason `--max-str-len` is: with 150 bp reads a
+    /// read crosses a bundle and an anchor each side only up to about that length.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
+        help_heading = "What counts as a repeat"
+    )]
+    pub max_str_bundle_len: u64,
+
     /// How much of a tract must match a perfect tiling of its motif, from 0 to 1. Below this
     /// the tract is ordinary sequence.
     #[arg(
@@ -482,6 +496,7 @@ fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_
             min_period: args.min_period,
             max_period: args.max_period,
             max_str_len: args.max_str_len,
+            max_str_bundle_len: args.max_str_bundle_len,
             min_purity: args.min_purity,
         },
     }

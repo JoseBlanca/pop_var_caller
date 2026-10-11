@@ -1179,6 +1179,40 @@ fn finish_locus(
     }
 }
 
+/// Describe one bundled repeat as a [`BundleMember`](crate::region_typing::BundleMember):
+/// the end-trim and the motif [`finish_locus`] would give it, and none of that function's
+/// gates (`str_bundle_loci.md` §5.1).
+///
+/// `interval` is an offset into `bases`, and `bases_start` is the 1-based contig coordinate
+/// of `bases[0]` — [`classify`]'s two conventions, so a member of [`Classified::bundled`]
+/// can be handed straight over with the slice `classify` was given.
+///
+/// **The catalog's rows hold the same two values** — the builder computes them with these
+/// same [`upper`] and [`minimal_trim`] — and the catalog route reads them off the row
+/// instead. When no whole-motif cut exists the member keeps its detected span.
+///
+/// # Panics
+///
+/// When the interval lies outside `bases`, is empty, or its period cannot form a motif.
+/// [`classify`] admits into `bundled` only intervals that pass all three (its slice bound,
+/// its `r.end > r.start` and its period gate, asserted `<= MAX_MOTIF_LEN`), so a panic here
+/// is a caller handing over intervals `classify` did not.
+pub(crate) fn bundle_member_from_bases(
+    interval: &RepeatInterval,
+    bases: &[u8],
+    bases_start: Position,
+) -> crate::region_typing::BundleMember {
+    let tract = upper(&bases[interval.start as usize..interval.end as usize]);
+    let motif_bytes = &tract[..usize::from(interval.period)];
+    let motif = Motif::new(motif_bytes).expect("a bundled repeat's period is a valid motif length");
+    let (start_offset, end_offset) = minimal_trim(&tract, motif_bytes).unwrap_or((0, tract.len()));
+    // `[s, e)` at offset `s` is `[bases_start + s, bases_start + e - 1]` — the one conversion
+    // `finish_locus` makes too.
+    let start = bases_start.get() + interval.start + start_offset as u64;
+    let end = bases_start.get() + interval.start + end_offset as u64 - 1;
+    crate::region_typing::BundleMember::new(start, end, motif)
+}
+
 /// ASCII upper-case copy of `bytes`.
 ///
 /// **Shared with the repeat catalog's builder** ([`crate::repeat_catalog`]), which
@@ -1453,6 +1487,30 @@ impl fmt::Display for SsrSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A bundle member gets a segment's end-trim and motif, in genomic coordinates.**
+    /// Eight `cag` then `CA`, read from a slice that starts at contig base 101: the motif is
+    /// the first three bases uppercased, and the span is cut back to the eight whole copies.
+    /// Without a clean cut the member keeps its detected span.
+    #[test]
+    fn a_bundle_member_is_trimmed_to_whole_copies_and_carries_its_motif() {
+        let bases = b"TTcagcagcagcagcagcagcagcagCATT";
+        let interval = iv(2, 28, 3, 50);
+        let member = bundle_member_from_bases(&interval, bases, Position(101));
+        assert_eq!(member.motif().as_bytes(), b"CAG");
+        assert_eq!(
+            (member.start(), member.end()),
+            (103, 126),
+            "slice offset 2 is contig base 103; the trailing `CA` is cut"
+        );
+        assert_eq!(member.period(), 3);
+
+        // `CAGTTT`: no two clean copies anywhere, so no cut — the detected span stands.
+        let impure = b"CAGTTTCAGAAA";
+        let member = bundle_member_from_bases(&iv(0, 12, 3, 5), impure, Position(1));
+        assert_eq!((member.start(), member.end()), (1, 12));
+        assert_eq!(member.motif().as_bytes(), b"CAG");
+    }
 
     /// The catalog's settings with a 5 bp flank, so the fixtures can be small.
     fn params() -> SsrSegmentCriteria {

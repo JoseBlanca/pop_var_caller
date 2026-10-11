@@ -4671,7 +4671,7 @@ mod what_the_fixtures_above_could_not_distinguish {
                 end: Position(20),
             },
             kind: RegionKind::SsrBundle {
-                tracts: Vec::new().into_boxed_slice(),
+                members: Vec::new().into_boxed_slice(),
             },
         });
         while generators.next_locus(&reads).expect("no failure").is_some() {}

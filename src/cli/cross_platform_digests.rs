@@ -52,10 +52,10 @@ mod tests {
         AVaryingCohort, a_larger_varying_cohort_with_sequencing_errors_on_disk,
         a_varying_cohort_on_disk, a_varying_cohort_with_sequencing_errors_on_disk,
     };
-    use crate::region_typing::DEFAULT_MAX_STR_LEN;
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
     };
+    use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
     use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 
     /// The width of the pool the pinned run uses; the other test checks other widths agree.
@@ -126,7 +126,18 @@ mod tests {
     /// moves but 8 lines of notes. Measured first on four tomato accessions: 52 of 188 rates move
     /// and nothing else in the file. Recorded in the Linux container (arm64, glibc), and the same on
     /// macOS (arm64); it was `a5e87936e968f9b855f91f88db828083`.
-    const FITTED_PARAMETERS_MD5: &str = "860c3c65f27a1700e401d102833215e1";
+    ///
+    /// **Re-recorded 2026-10-11** when the typing gained the STR bundle cap
+    /// (`str_bundle_loci.md` §5.2). No number moves. Three things in the file do: `[repeat_routing]`
+    /// gains a `max_str_bundle_len = 100` line, its note gains a clause on that key and now counts
+    /// six flags of nine, and the census digests of the STR routing criteria and of the repeat
+    /// catalog's build settings move, because each is taken over its criteria's printed form,
+    /// which now carries the cap. Reverting those three gives the old checksum byte for byte; the
+    /// calls do not move. Then again the same day, when the note's clause was reworded to say the
+    /// hull runs to the furthest end of any repeat: restoring the earlier wording in the written
+    /// file gives `4e643855f0dac8ee128f43a7a1a92095` exactly. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `860c3c65f27a1700e401d102833215e1`.
+    const FITTED_PARAMETERS_MD5: &str = "a5b4997bc35e77425525e25e821cf40c";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -201,7 +212,10 @@ mod tests {
     /// mismapped positions can be computed differently, even doubled, without moving a byte here, so
     /// a change confined to the cohort's own scores is not pinned by this pair. Recorded in the Linux container
     /// (arm64, glibc) and the same on macOS (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "8c71a5a95f1196e3dd8c05abdccf7355";
+    ///
+    /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
+    /// Recorded in the Linux container (arm64, glibc) only; it was `8c71a5a95f1196e3dd8c05abdccf7355`, then `9265d0273c5400d8a2b2554b3f7ecf0a`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "4859eacd5645e607b6f99b667d184dc0";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -229,7 +243,10 @@ mod tests {
     /// libraries' multipliers run 0.35 to 7.97 with errors of 1.66 to 3.01; its inbreeding
     /// coefficients carry none; its calls are the 22 records designed into it, one site a sample and
     /// the tract. Recorded in the Linux container (arm64, glibc) and the same on macOS (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "5e3dacbf558adc6787276897935dbbf8";
+    ///
+    /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
+    /// Recorded in the Linux container (arm64, glibc) only; it was `5e3dacbf558adc6787276897935dbbf8`, then `0cda09cc72a2a7bd9c46a4fe85388eff`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "0573095bb8f1ed6608ed74d62051ade1";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -291,6 +308,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
@@ -339,6 +357,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,

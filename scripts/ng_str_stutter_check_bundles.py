@@ -9,9 +9,10 @@ the typing makes no bundle the simulator did not lay.
 
 **A simulated bundle passes when exactly one typed `ssr_bundle` overlaps its hull, and that bundle's
 members are the drawn members**: the same number of them, in order, each with the drawn motif
-length and with a start and an end each within TOLERANCE bases of the drawn member's. The typed
-members are the repeat detector's intervals, which can differ from a drawn run by part of a unit
-when a gap base happens to continue the motif; the simulator draws gap bases so that none does
+length, with a start and an end each within TOLERANCE bases of the drawn member's, and — when the
+typing writes one — the drawn motif itself. The typed members are the repeat detector's intervals
+cut back to whole copies of their motif, which can differ from a drawn run by part of a unit when a
+gap base happens to continue the motif; the simulator draws gap bases so that none does
 (`draw_gap` in examples/ng_str_stutter_benchmark.rs), so the tolerance is 0 by default and a
 non-zero one is for measuring how far off a failing run is.
 
@@ -27,21 +28,24 @@ TOLERANCE = int(os.environ.get("BUNDLE_MEMBER_TOLERANCE", "0"))
 
 
 def read_simulated(path):
-    """Per contig, (start, end, name, members) with members [(start, end, period)], zero-based half-open."""
+    """Per contig, (start, end, name, members) with members [(start, end, period, motif)], zero-based
+    half-open."""
     bundles = collections.defaultdict(list)
     with open(path) as handle:
         for line in handle:
             if line.startswith("#"):
                 continue
-            chrom, start, end, name, periods, _motifs, _repeats, starts, ends = line.rstrip("\n").split("\t")
-            members = [(int(s), int(e), int(p))
-                       for s, e, p in zip(starts.split(","), ends.split(","), periods.split(","))]
+            chrom, start, end, name, periods, motifs, _repeats, starts, ends = line.rstrip("\n").split("\t")
+            members = [(int(s), int(e), int(p), m)
+                       for s, e, p, m in zip(starts.split(","), ends.split(","), periods.split(","),
+                                             motifs.split(","))]
             bundles[chrom].append((int(start), int(end), name, members))
     return bundles
 
 
 def read_typed(path):
-    """Per contig, typed bundles as (start, end, members), zero-based half-open, in start order."""
+    """Per contig, typed bundles as (start, end, members), zero-based half-open, in start order. A
+    member's motif is None when the typing predates writing one."""
     typed = collections.defaultdict(list)
     with open(path) as handle:
         for line in handle:
@@ -53,7 +57,8 @@ def read_typed(path):
             if len(fields) < 9:
                 sys.exit(f"{path}: an ssr_bundle row has no members column; the typing dump was "
                          "built before it wrote one (examples/ng_typed_region_dump.rs)")
-            members = sorted((one["start"], one["end"], one["period"]) for one in json.loads(fields[8]))
+            members = sorted((one["start"], one["end"], one["period"], one.get("motif"))
+                             for one in json.loads(fields[8]))
             typed[fields[0]].append((int(fields[1]) - 1, int(fields[2]), members))
     for chrom in typed:
         typed[chrom].sort()
@@ -88,6 +93,8 @@ def main():
                 members = overlapping[0][1][2]
                 if len(members) != len(drawn) or any(m[2] != d[2] for m, d in zip(members, drawn)):
                     outcome = "other_members"
+                elif any(m[3] is not None and m[3] != d[3] for m, d in zip(members, drawn)):
+                    outcome = "other_motifs"
                 else:
                     offset = max(max(abs(m[0] - d[0]), abs(m[1] - d[1])) for m, d in zip(members, drawn))
                     largest_offset = max(largest_offset, offset)

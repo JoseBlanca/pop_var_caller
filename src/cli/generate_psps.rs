@@ -70,10 +70,10 @@ use crate::read::input::reference::OpenReference;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoError, read_reference_observing_or_creating_fai,
 };
-use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 use crate::repeat_catalog::RepeatCatalog;
 use crate::run::report::{describe, plural, share_of};
 use crate::run::{
@@ -213,6 +213,20 @@ pub struct GeneratePspsArgs {
         help_heading = "What counts as a repeat"
     )]
     pub max_str_len: u64,
+
+    /// An STR bundle — two or more repeats within 15 bases of each other, typed as one region —
+    /// whose stretch, from its first repeat's start to the furthest end of any of them, is
+    /// longer than this many bases is a satellite instead. 0 makes every bundle a satellite.
+    ///
+    /// Its own limit rather than `--max-str-len`'s, so that widening what one repeat may be
+    /// does not also widen bundles. 100 for the reason `--max-str-len` is: with 150 bp reads a
+    /// read crosses a bundle and an anchor each side only up to about that length.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
+        help_heading = "What counts as a repeat"
+    )]
+    pub max_str_bundle_len: u64,
 
     /// How much of a tract must match a perfect tiling of its motif, from 0 to 1. Below this
     /// the tract is ordinary sequence.
@@ -519,6 +533,7 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
             min_period: args.min_period,
             max_period: args.max_period,
             max_str_len: args.max_str_len,
+            max_str_bundle_len: args.max_str_bundle_len,
             min_purity: args.min_purity,
         },
     }

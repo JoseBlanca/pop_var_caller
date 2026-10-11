@@ -190,7 +190,9 @@ impl RepeatCatalog {
     /// **widened by how far a row outside a region can reach into it**: a tract within the
     /// bundle radius bundles with what is inside, and a long array overlapping it swallows a
     /// locus inside. The longest tract in the contig plus the reader's bundle radius bounds
-    /// both, and the header stores that length per contig.
+    /// both, and the header stores that length per contig; a chain of short tracts — an STR
+    /// bundle — is bounded by the reader's bundle cap instead
+    /// ([`RepeatCatalogHeader::reach_into_window`](crate::repeat_catalog::RepeatCatalogHeader::reach_into_window)).
     ///
     /// The widened windows become a filter over `detected_start` / `detected_end`, so with
     /// the page index loaded the reader skips whole pages outside them — the file's own
@@ -208,9 +210,11 @@ impl RepeatCatalog {
             return Ok(Vec::new());
         }
 
-        let reach = self
-            .header
-            .reach_into_window(contig, criteria.classification.bundle_threshold);
+        let reach = self.header.reach_into_window(
+            contig,
+            criteria.classification.bundle_threshold,
+            criteria.max_str_bundle_len_bp.get(),
+        );
         let windows: Vec<(u64, u64)> = spans
             .iter()
             .map(|s| {

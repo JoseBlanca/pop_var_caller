@@ -40,7 +40,7 @@ use std::path::Path;
 
 use crate::regions::{BedError, ContigBounds, Region, RegionSet};
 use crate::tandem_repeat::{RepeatInterval, ScanParams, find_tandem_repeats};
-use crate::types::{Bp, ContigId, GenomeRegion, Position};
+use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position};
 use segment_criteria::{RejectionCounts, SsrSegment, SsrSegmentCriteria};
 use thiserror::Error;
 
@@ -282,25 +282,95 @@ pub enum RegionKind {
     /// wrapper: it is 1-based like the rest of ng (spec §4), and [`TypedRegion`]
     /// already carries the region.
     SsrSegment(SsrSegment),
-    /// A cluster of repeats none of which has clean flanks (spec §2.4). Carries
-    /// the tracts as coordinates — enough to see the structure (each interval has
-    /// its period) without this step pre-deciding what it is for. The hull is the
-    /// [`TypedRegion`]'s own region.
+    /// An STR bundle: two or more repeats within `bundle_threshold` of each other, so
+    /// none of them has clean flanks (spec §2.4). Carries each repeat as a
+    /// [`BundleMember`] — its span and its motif. The hull, from the earliest detected
+    /// start to the **furthest** detected end of any member, is the [`TypedRegion`]'s own
+    /// region.
     ///
-    /// `>= 2` members, coordinate-ordered. **This variant is why bundles exist as
-    /// a type at all**: production *deletes* these records, so their bases become
-    /// a hole nobody accounts for; carrying them lets the decision be taken later,
-    /// with the evidence in hand (spec §1, §10).
-    SsrBundle { tracts: Box<[RepeatInterval]> },
+    /// `>= 2` members, in the order the detector's intervals sort (start, then end). **The
+    /// order is by detected span, and the members are not disjoint**: one member can lie
+    /// inside another or overlap it, so the last-listed member need not end the hull, and
+    /// the members' own (cut) starts can be out of order. Measured on GIAB HG002's
+    /// tandem-repeat benchmark regions: of 2,410 bundles, 551 hold a member wholly inside
+    /// another, 734 have consecutive members that overlap, 520 end past the last-listed
+    /// member's end, and 6 list members whose cut starts are out of order.
+    ///
+    /// **This variant is why bundles exist as a type at all**: production *deletes*
+    /// these records, so their bases become a hole nobody accounts for; carrying them
+    /// lets the decision be taken later, with the evidence in hand (spec §1, §10).
+    SsrBundle { members: Box<[BundleMember]> },
     /// Nothing more specific can be said from the reference alone — **the
     /// default**, not a leftover. The other three are exceptions carved out of it
     /// (spec §2.2), and a repeat classification turns down for any reason other than
     /// bundling lands back here rather than becoming a hole.
     Generic,
-    /// A tandem array longer than `max_str_len` — an array, not a
-    /// microsatellite. A **typing** claim, and `max_str_len` is its parameter,
-    /// not a constant of nature (spec §2.1, §10).
+    /// A tandem array longer than `max_str_len`, or an STR bundle whose hull is longer
+    /// than `max_str_bundle_len` — an array, not a microsatellite. A **typing** claim,
+    /// and the two lengths are its parameters, not constants of nature (spec §2.1,
+    /// §10; `str_bundle_loci.md` §5.2).
     Satellite,
+}
+
+/// One repeat of an STR bundle: where it lies and what its repeat unit is
+/// (`str_bundle_loci.md` §5.1).
+///
+/// **Described the way an STR segment is, and admitted the way it is not.** The span is
+/// the detected repeat cut back to whole copies of its motif at both ends — the same
+/// end-trim a segment gets — and the motif is the detected repeat's first `period`
+/// bases, uppercased, which is the motif a segment carries. A member is *not* put
+/// through the copy floor, the purity gate or the flank test: which repeats are members
+/// is `typed_regions.md` §2.4's rule alone, and this only describes each one.
+///
+/// **When no whole-motif cut exists** (an imperfect repeat with no two clean copies near
+/// one of its ends) the span is the detected repeat itself, since that repeat is still a
+/// member. The motif is the same either way.
+///
+/// 1-based inclusive, like every other coordinate ng emits (spec §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundleMember {
+    start: u64,
+    end: u64,
+    motif: Motif,
+}
+
+impl BundleMember {
+    /// A member spanning `start..=end` (1-based inclusive) with repeat unit `motif`.
+    ///
+    /// # Panics
+    ///
+    /// When `start` is 0 or `end < start`. On a scan the span comes from a repeat the
+    /// detector found, so such a span means the arithmetic upstream is wrong. On the
+    /// catalog's route it comes from a stored row, and the catalog's decoder does not check
+    /// its spans, so a corrupt catalog file panics here (as it already underflows in
+    /// `detected_interval` on a stored start of 0) rather than being refused by name.
+    pub fn new(start: u64, end: u64, motif: Motif) -> Self {
+        assert!(
+            start >= 1 && end >= start,
+            "a bundle member is 1-based inclusive and non-empty; got [{start}, {end}]"
+        );
+        Self { start, end, motif }
+    }
+
+    /// The member's first base, 1-based.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The member's last base, 1-based inclusive.
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    /// The repeat unit, phase-faithful: the detected repeat's first `period` bases.
+    pub fn motif(&self) -> Motif {
+        self.motif
+    }
+
+    /// The motif's length in bases.
+    pub fn period(&self) -> usize {
+        self.motif.as_bytes().len()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -332,6 +402,13 @@ pub struct TypedRegionConfig {
     /// repeat that is not a satellite, so it is exactly the length at which a repeat
     /// becomes one.
     pub max_str_len: Bp,
+    /// The bundle cap: an STR bundle whose hull is longer than this is a `Satellite`
+    /// (`str_bundle_loci.md` §5.2). 0 makes every bundle a satellite.
+    ///
+    /// **Its own value, not [`Self::max_str_len`]**, although both answer one read-length
+    /// question today: a user who widens what a single repeat may be — for long reads, say
+    /// — need not also widen bundles, whose model is newer and less measured.
+    pub max_str_bundle_len: Bp,
     /// Admission's rules — all of them (spec §5).
     pub criteria: SsrSegmentCriteria,
 }
@@ -345,11 +422,18 @@ pub struct TypedRegionConfig {
 /// to sweep it (spec §10).
 pub const DEFAULT_MAX_STR_LEN: u64 = 100;
 
+/// The bundle cap: **100 bp** (`str_bundle_loci.md` §2, §5.2, owner 2026-10-11). The same
+/// read-length reasoning as [`DEFAULT_MAX_STR_LEN`]: a 150-base read crosses a hull and a
+/// usable anchor each side only up to about 100 bases. On GIAB HG002's tandem-repeat
+/// benchmark regions 2,410 of 2,473 bundles are this short or shorter.
+pub const DEFAULT_MAX_STR_BUNDLE_LEN: u64 = 100;
+
 impl Default for TypedRegionConfig {
     fn default() -> Self {
         Self {
             scan: ScanParams::default(),
             max_str_len: Bp(DEFAULT_MAX_STR_LEN),
+            max_str_bundle_len: Bp(DEFAULT_MAX_STR_BUNDLE_LEN),
             criteria: SsrSegmentCriteria::default(),
         }
     }
@@ -558,7 +642,18 @@ pub fn partition_resident_in(
 
     // 5. Partition — the whole contig as **one block** (below), then fill every gap
     //    with `Generic`.
-    let features = resolve_features(&runs, classified.loci, &classified.bundled, contig, config);
+    //    Each bundle member is described from the bases here, where the catalog reads the
+    //    same description off its rows; `classify` ran with `bases_start = 1` over the whole
+    //    contig, so a member's interval is already an offset into `bases`.
+    let features = resolve_features(
+        &runs,
+        classified.loci,
+        &classified.bundled,
+        |interval| segment_criteria::bundle_member_from_bases(interval, bases, Position(1)),
+        contig,
+        Bp(contig_len),
+        config,
+    );
 
     let mut out = Vec::new();
     let mut emitted_upto = 0;
@@ -691,6 +786,28 @@ fn charge_region(counts: &mut TypedRegionCounts, region: &TypedRegion, requested
 /// Generic is not this function's business: it is whatever is left over, and only the
 /// caller knows how far "left over" reaches.
 ///
+/// `describe_member` turns one bundled interval into its [`BundleMember`] — from the bases
+/// on a scan, from the stored row on the catalog's route. The two must describe a member
+/// identically, which the scan-against-catalog differential checks.
+///
+/// # A bundle becomes a satellite, or nothing, or stays a bundle
+///
+/// After clustering, each cluster's hull meets two rules (`str_bundle_loci.md` §5.2, §5.3):
+///
+/// 1. **Longer than `max_str_bundle_len`** → a `Satellite` over the hull. Nothing is
+///    re-absorbed: anything within `bundle_threshold` of a member would have joined the
+///    bundle, so nothing lies within the new satellite's reach that is not inside it.
+/// 2. **Otherwise, touching the contig's first or last base** → dropped, as an STR segment
+///    is (`RejectionReason::FlankClamped`): no read can be anchored on a flank of zero
+///    bases. Its bases become generic. The cap is asked first, because a satellite needs
+///    no flank.
+///
+/// Both routes apply both rules, with the contig's own length. The contig-end rule rarely
+/// fires on the catalog's route, because the builder keeps a row only when `min_flank_bp`
+/// bases (15 by default, as low as 1 if the catalog was built so) lie beside its **cut** span
+/// — but the hull is drawn over **detected** spans, which can reach further than the cut, so
+/// it is not unreachable there.
+///
 /// # How far a decision here can reach
 ///
 /// Every rule this function applies has a **radius**: runs merge only when they abut
@@ -743,10 +860,13 @@ pub(crate) fn resolve_features(
     runs: &[CoverageRun],
     loci: Vec<SsrSegment>,
     bundled: &[RepeatInterval],
+    describe_member: impl Fn(&RepeatInterval) -> BundleMember,
     contig: ContigId,
+    contig_len: Bp,
     config: &TypedRegionConfig,
 ) -> Vec<TypedRegion> {
     let max_str_len = config.max_str_len.get();
+    let max_str_bundle_len = config.max_str_bundle_len.get();
     let bundle_threshold = config.criteria.bundle_threshold;
     let mut features: Vec<TypedRegion> = Vec::new();
 
@@ -850,14 +970,26 @@ pub(crate) fn resolve_features(
         });
     }
     for (hull, cluster) in clusters {
+        let region = GenomeRegion {
+            contig,
+            start: Position(hull.start),
+            end: Position(hull.end),
+        };
+        // The two rules of this function's doc, in its order: the cap, then the contig ends.
+        if hull.len() > max_str_bundle_len {
+            features.push(TypedRegion {
+                region,
+                kind: RegionKind::Satellite,
+            });
+            continue;
+        }
+        if hull.start == 1 || hull.end == contig_len.get() {
+            continue;
+        }
         features.push(TypedRegion {
-            region: GenomeRegion {
-                contig,
-                start: Position(hull.start),
-                end: Position(hull.end),
-            },
+            region,
             kind: RegionKind::SsrBundle {
-                tracts: cluster.into_boxed_slice(),
+                members: cluster.iter().map(&describe_member).collect(),
             },
         });
     }
@@ -1603,6 +1735,9 @@ mod tests {
         use segment_criteria::MinCopies;
         TypedRegionConfig {
             max_str_len: Bp(1000),
+            // No bundle cap: these fixtures predate it, and a 1.5 kb chain below is a bundle
+            // on purpose.
+            max_str_bundle_len: Bp(u64::MAX),
             criteria: SsrSegmentCriteria {
                 periods: PeriodRange::new(2, 6).expect("2..=6 is a valid period range"),
                 min_copies: MinCopies::new([10, 5, 4, 3, 3, 3], 3),
@@ -2335,7 +2470,7 @@ mod tests {
         let bundles: Vec<_> = regions
             .iter()
             .filter_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts)),
+                RegionKind::SsrBundle { members } => Some((r.region, members)),
                 _ => None,
             })
             .collect();
@@ -2346,20 +2481,212 @@ mod tests {
         // ±1–2 bp boundary/phase wobble is expected of it (`scanner_parity`
         // documents the same thing against trf-mod); pinning the exact edge would
         // be testing the detector's phase, not the bundle's hull.
-        let (hull, tracts) = (bundles[0].0, bundles[0].1);
+        let (hull, members) = (bundles[0].0, bundles[0].1);
         assert!(hull.start <= Position(61), "hull reaches the first tract");
         assert!(hull.end >= Position(110), "hull reaches the last tract");
-        assert_eq!(
-            hull.start.get(),
-            tracts.iter().map(|t| t.start).min().unwrap() + 1,
-            "the hull IS the tracts' span, 1-based"
+        // The hull is the detected repeats' span; each member is its repeat cut back to
+        // whole motif copies, so it lies inside the hull.
+        assert!(
+            members
+                .iter()
+                .all(|m| m.start() >= hull.start.get() && m.end() <= hull.end.get()),
+            "every member lies inside the hull: {members:?} in {hull:?}"
         );
-        assert_eq!(hull.end.get(), tracts.iter().map(|t| t.end).max().unwrap());
+        for member in members.iter() {
+            let motif = member.motif();
+            assert!(
+                motif.as_bytes() == b"AT" || motif.as_bytes() == b"TA",
+                "each member carries its own repeat unit: {member:?}"
+            );
+        }
         assert!(
             !regions
                 .iter()
                 .any(|r| matches!(r.kind, RegionKind::SsrSegment(_))),
             "neither tract has a clean flank, so neither is a locus"
+        );
+    }
+
+    /// The typed regions and tally of a contig with two `(AT)*10` tracts 10 bases apart —
+    /// one bundle at the default cap — typed with bundle cap `cap`.
+    fn two_close_tracts_capped_at(cap: u64) -> (Vec<TypedRegion>, TypedRegionCounts) {
+        let bases = contig_with_tracts_at(&[60, 90], 240);
+        let config = TypedRegionConfig {
+            max_str_bundle_len: Bp(cap),
+            ..TypedRegionConfig::default()
+        };
+        let whole = [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(bases.len() as u64),
+        }];
+        let typed = partition_resident_in("chr1", ContigId(0), &bases, &config, &whole);
+        assert_partitions(
+            &typed.0,
+            ContigId(0),
+            bases.len() as u64,
+            "two close tracts",
+        );
+        typed
+    }
+
+    /// **The bundle cap** (`str_bundle_loci.md` §5.2): a hull longer than
+    /// `max_str_bundle_len` is a `Satellite` over the same span; a hull exactly that long,
+    /// or shorter, stays a bundle; and 0 makes every bundle a satellite. The tally counts a
+    /// capped bundle as a satellite, with its bases (§5.4).
+    #[test]
+    fn a_bundle_longer_than_the_cap_is_a_satellite_and_is_counted_as_one() {
+        // The hull's length as the detector draws it, read from an uncapped run, so the
+        // test does not pin the detector's phase.
+        let (uncapped, _) = two_close_tracts_capped_at(u64::MAX);
+        let hull = uncapped
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::SsrBundle { .. }))
+            .expect("the two tracts are one bundle")
+            .region;
+        let hull_len = hull.len();
+
+        for (cap, is_satellite) in [
+            (hull_len - 1, true),
+            (hull_len, false),
+            (hull_len + 1, false),
+            (0, true),
+        ] {
+            let (regions, counts) = two_close_tracts_capped_at(cap);
+            let at_hull = regions
+                .iter()
+                .find(|r| r.region == hull)
+                .unwrap_or_else(|| panic!("cap {cap}: a region over the hull: {regions:#?}"));
+            assert_eq!(
+                matches!(at_hull.kind, RegionKind::Satellite),
+                is_satellite,
+                "cap {cap}, hull {hull_len}: {at_hull:?}"
+            );
+            if is_satellite {
+                assert_eq!(
+                    (counts.ssr_bundles, counts.ssr_bundle_bp),
+                    (0, 0),
+                    "cap {cap}: a capped bundle is not counted as a bundle"
+                );
+                assert_eq!(
+                    (counts.satellites, counts.satellite_bp),
+                    (1, hull_len),
+                    "cap {cap}: it is counted as a satellite, with its bases"
+                );
+            } else {
+                assert_eq!((counts.ssr_bundles, counts.ssr_bundle_bp), (1, hull_len));
+                assert_eq!((counts.satellites, counts.satellite_bp), (0, 0));
+            }
+        }
+    }
+
+    /// **A bundle touching a contig's end is dropped**, as an STR segment is
+    /// (`str_bundle_loci.md` §5.3): no read can be anchored on a flank of zero bases. Its
+    /// bases become generic. One base in from the end it is kept, and over the cap it is a
+    /// satellite, which needs no flank.
+    #[test]
+    fn a_bundle_at_a_contig_end_is_dropped_unless_capped() {
+        let kinds_of = |offsets: &[usize], cap: u64| -> Vec<&'static str> {
+            let bases = contig_with_tracts_at(offsets, 200);
+            let config = TypedRegionConfig {
+                max_str_bundle_len: Bp(cap),
+                ..TypedRegionConfig::default()
+            };
+            let regions = partition_resident("chr1", ContigId(0), &bases, &config);
+            assert_partitions(&regions, ContigId(0), 200, "a bundle near a contig end");
+            regions
+                .iter()
+                .map(|r| match r.kind {
+                    RegionKind::SsrSegment(_) => "locus",
+                    RegionKind::SsrBundle { .. } => "bundle",
+                    RegionKind::Generic => "generic",
+                    RegionKind::Satellite => "satellite",
+                })
+                .collect()
+        };
+
+        // The first tract starts on base 1, then the second ends on base 200.
+        assert_eq!(kinds_of(&[0, 30], 100), ["generic"], "the left end");
+        assert_eq!(kinds_of(&[150, 180], 100), ["generic"], "the right end");
+        // One base of flank is enough not to be dropped.
+        assert_eq!(
+            kinds_of(&[1, 31], 100),
+            ["generic", "bundle", "generic"],
+            "a base in from the end"
+        );
+        // Over the cap, the hull is a satellite even at the end.
+        assert_eq!(
+            kinds_of(&[0, 30], 10),
+            ["satellite", "generic"],
+            "capped at the end"
+        );
+
+        // One base of flank on the right is enough too. The last base is set to `C`, which
+        // continues neither `AT` nor `TA`, so the detector cannot stretch the second tract
+        // onto it.
+        let mut bases = contig_with_tracts_at(&[149, 179], 200);
+        bases[199] = b'C';
+        let regions =
+            partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+        assert_partitions(&regions, ContigId(0), 200, "a base in from the right end");
+        let bundle = regions
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::SsrBundle { .. }))
+            .unwrap_or_else(|| {
+                panic!("a base in from the right end, still a bundle: {regions:#?}")
+            });
+        assert_eq!(
+            bundle.region.end,
+            Position(199),
+            "the hull ends one base before the end"
+        );
+    }
+
+    /// **The hull is drawn over the detected repeats, not over the members' cut spans**
+    /// (`str_bundle_loci.md` §5.1). The last member here is eight `CAG` and then `CA`, a
+    /// ragged end the cut removes: the member ends on the last whole `CAG`, and the hull
+    /// still ends past it, over the `CA`. Drawing the hull from the members would end it two
+    /// bases early and hand those bases to the generic region beside it.
+    #[test]
+    fn the_hull_ends_past_a_ragged_last_member() {
+        let bases: Vec<u8> = [
+            filler(200),
+            b"TCTC".repeat(8),
+            filler(9),
+            b"CAG".repeat(8),
+            b"CA".to_vec(),
+            filler(200),
+        ]
+        .concat();
+        let regions =
+            partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+        assert_partitions(
+            &regions,
+            ContigId(0),
+            bases.len() as u64,
+            "a ragged last member",
+        );
+        let (hull, members) = regions
+            .iter()
+            .find_map(|r| match &r.kind {
+                RegionKind::SsrBundle { members } => Some((r.region, members)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the two repeats are one bundle: {regions:#?}"));
+        let furthest_member_end = members
+            .iter()
+            .map(BundleMember::end)
+            .max()
+            .expect("members");
+        // The `CAG` run is bases 242..=265 and the `CA` is 266..=267.
+        assert_eq!(
+            furthest_member_end, 265,
+            "the cut ends on the last whole copy"
+        );
+        assert_eq!(
+            hull.end,
+            Position(267),
+            "the hull ends on the detected repeat's last base, past every member: {members:?}"
         );
     }
 
@@ -2380,7 +2707,7 @@ mod tests {
         let bundles: Vec<_> = regions
             .iter()
             .filter_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts)),
+                RegionKind::SsrBundle { members } => Some((r.region, members)),
                 _ => None,
             })
             .collect();
@@ -2682,7 +3009,7 @@ mod tests {
         let (truth_hull, truth_tracts) = whole
             .iter()
             .find_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts.clone())),
+                RegionKind::SsrBundle { members } => Some((r.region, members.clone())),
                 _ => None,
             })
             .expect("the chain is one bundle");
@@ -2702,7 +3029,7 @@ mod tests {
         let (hull, tracts) = got
             .iter()
             .find_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts.clone())),
+                RegionKind::SsrBundle { members } => Some((r.region, members.clone())),
                 _ => None,
             })
             .expect("still a bundle");
@@ -3220,14 +3547,14 @@ mod tests {
              (the effective region grows to hold it)",
             bundle.region.start.get()
         );
-        let RegionKind::SsrBundle { tracts } = &bundle.kind else {
+        let RegionKind::SsrBundle { members } = &bundle.kind else {
             unreachable!()
         };
         assert!(
-            tracts
+            members
                 .iter()
-                .all(|t| t.start + 1 >= bundle.region.start.get()
-                    && t.end <= bundle.region.end.get()),
+                .all(|m| m.start() >= bundle.region.start.get()
+                    && m.end() <= bundle.region.end.get()),
             "every member tract is inside the hull — which is what clipping would break"
         );
     }

@@ -217,6 +217,7 @@ impl RepeatRouting {
             classification,
             min_flank_bp,
             max_str_len_bp,
+            max_str_bundle_len_bp,
         } = criteria;
         let SsrSegmentCriteria {
             periods,
@@ -232,6 +233,7 @@ impl RepeatRouting {
             min_period: periods.min(),
             max_period: periods.max(),
             max_str_len: max_str_len_bp.get(),
+            max_str_bundle_len: Some(max_str_bundle_len_bp.get()),
             min_purity: *min_purity,
             min_flank_bp: min_flank_bp.get(),
             min_score: *min_score,
@@ -266,6 +268,7 @@ impl ParametersFile {
             min_period,
             max_period,
             max_str_len,
+            max_str_bundle_len,
             min_purity,
             min_flank_bp,
             min_score,
@@ -282,6 +285,11 @@ impl ParametersFile {
         }
         if *max_str_len != mine.max_str_len {
             return Some("--max-str-len");
+        }
+        // A file older than the bundle cap does not say, and absence is not a value: only a
+        // recorded cap can disagree.
+        if max_str_bundle_len.is_some() && *max_str_bundle_len != mine.max_str_bundle_len {
+            return Some("--max-str-bundle-len");
         }
         // Bit equality, not a tolerance: this is a recorded input rather than a fitted number,
         // and a run either typed the same value or typed another one.
@@ -2369,6 +2377,10 @@ mod what_the_run_counted_as_a_repeat {
         );
         assert_eq!(with(|c| c.max_str_len_bp = Bp(100)), Some("--max-str-len"));
         assert_eq!(
+            with(|c| c.max_str_bundle_len_bp = Bp(60)),
+            Some("--max-str-bundle-len"),
+        );
+        assert_eq!(
             with(|c| c.classification.min_purity = 0.9),
             Some("--min-purity"),
         );
@@ -2396,6 +2408,19 @@ mod what_the_run_counted_as_a_repeat {
             None,
             "a run must not be told a file disagrees when the file said nothing",
         );
+    }
+
+    /// **A file written before the bundle cap existed makes no claim about it**, so a run with
+    /// any cap does not disagree with it on that axis — absence is not the default here either.
+    #[test]
+    fn a_file_with_no_recorded_bundle_cap_does_not_disagree_on_it() {
+        let mut file = a_file_using_every_shape();
+        if let Some(routing) = &mut file.repeat_routing {
+            routing.max_str_bundle_len = None;
+        }
+        let mut criteria = the_fixtures_routing();
+        criteria.max_str_bundle_len_bp = Bp(60);
+        assert_eq!(file.routing_disagreement(&criteria), None);
     }
 
     /// **A routing difference does not touch a single warrant**, which is what separates it from

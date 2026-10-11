@@ -13,7 +13,8 @@ use crate::region_typing::segment_criteria::{
     self, RejectionReason, SsrSegment, SsrSegmentCriteria, is_compound, split_bundles,
 };
 use crate::region_typing::{
-    RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps, resolve_features,
+    BundleMember, RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps,
+    resolve_features,
 };
 use crate::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::repeat_catalog::tally::{CatalogRejectionCounts, ContigTally};
@@ -239,12 +240,33 @@ fn repeat_features_of_contig(
     let config = TypedRegionConfig {
         criteria: class.clone(),
         max_str_len: criteria.max_str_len_bp,
+        max_str_bundle_len: criteria.max_str_bundle_len_bp,
         // Nothing is scanned: the tracts came from the file. `resolve_features` reads the
         // weights not at all, so this value cannot reach an answer.
         scan: ScanParams::default(),
     };
+    let members = &admitted.bundle_members;
+    let describe_member = |interval: &RepeatInterval| {
+        // PANIC-FREE: `resolve_features` hands over only intervals of `admitted.bundled`, and
+        // `admit` keyed `bundle_members` by `detected_interval` of exactly the rows that
+        // `pair_with_rows_by_ref(&kept, &bundled)` matched to those intervals — the same
+        // equality, so every key is present. Two rows sharing a key share their detected
+        // span and period, so their bases, cut and motif too: either is the right answer.
+        let at = members
+            .binary_search_by_key(&interval_key(interval), |(key, _)| *key)
+            .expect("every bundled interval was described when it was bundled");
+        members[at].1
+    };
     (
-        resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config),
+        resolve_features(
+            &runs,
+            admitted.loci,
+            &admitted.bundled,
+            describe_member,
+            contig,
+            contig_len,
+            &config,
+        ),
         ContigTally {
             repeat_bp,
             rejected: admitted.rejected,
@@ -257,7 +279,32 @@ fn repeat_features_of_contig(
 struct Admitted {
     loci: Vec<SsrSegment>,
     bundled: Vec<RepeatInterval>,
+    /// Each interval of `bundled` described from its row, keyed by [`interval_key`] and
+    /// sorted by it, so `resolve_features` can look a member up from the interval it
+    /// clusters.
+    bundle_members: Vec<(IntervalKey, BundleMember)>,
     rejected: CatalogRejectionCounts,
+}
+
+/// Every field of a [`RepeatInterval`], as something that sorts: the identity a bundled
+/// interval is looked up by.
+type IntervalKey = (u64, u64, u8, i32);
+
+fn interval_key(interval: &RepeatInterval) -> IntervalKey {
+    (
+        interval.start,
+        interval.end,
+        interval.period,
+        interval.score,
+    )
+}
+
+/// A bundled row as a [`BundleMember`] — the cut and the motif the builder stored, which are
+/// what `segment_criteria::bundle_member_from_bases` computes from the bases on a scan.
+/// Without a cut the member keeps its detected span, as there.
+fn bundle_member_from_row(row: &FoundRepeat) -> BundleMember {
+    let span = row.trimmed.unwrap_or(row.detected);
+    BundleMember::new(span.start.get(), span.end.get(), row.motif)
 }
 
 /// `classify`'s gates, in `classify`'s order, over stored fields.
@@ -330,6 +377,19 @@ fn admit(
     // order, so the same cursor walk pairs them — the rows this time being `kept`, not the
     // contig's, since the bundling was fed `kept`'s order.
     let isolated_rows = pair_with_rows_by_ref(&kept, &kept_intervals);
+    // The bundled intervals are a subsequence of the same order, so the same walk finds
+    // each one's row — and with it the cut and the motif a member carries.
+    let mut bundle_members: Vec<(IntervalKey, BundleMember)> =
+        pair_with_rows_by_ref(&kept, &bundled)
+            .into_iter()
+            .map(|row| {
+                (
+                    interval_key(&detected_interval(row)),
+                    bundle_member_from_row(row),
+                )
+            })
+            .collect();
+    bundle_members.sort_unstable_by_key(|(key, _)| *key);
 
     let mut loci = Vec::with_capacity(isolated_rows.len());
     for row in isolated_rows {
@@ -348,6 +408,7 @@ fn admit(
     Admitted {
         loci,
         bundled,
+        bundle_members,
         rejected,
     }
 }

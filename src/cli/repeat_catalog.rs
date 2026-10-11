@@ -249,6 +249,9 @@ fn catalog_criteria(args: &RepeatCatalogArgs) -> Result<StrRepeatCriteria, Repea
         },
         min_flank_bp: Bp(args.min_flank_bp),
         max_str_len_bp: Bp(CATALOG_MAX_STR_LEN_BP),
+        // Not applied by the builder and not recorded in the file; the default, so the
+        // header this run holds is the one a reader decodes.
+        max_str_bundle_len_bp: Bp(crate::region_typing::DEFAULT_MAX_STR_BUNDLE_LEN),
     })
 }
 

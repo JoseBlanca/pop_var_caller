@@ -298,9 +298,9 @@ in it either refuses the file or demotes it (§6). This answers *what did this r
 repeat*, which is the same kind of fact as the ploidy of §3.2: written so that a supplied file
 cannot be paired with a run that routed differently without the difference being on the record.
 
-**Eight values, spelled as the flags that set them.** Five have flags on
+**Nine values, spelled as the flags that set them.** Six have flags on
 `call-from-alignments` — `min_copies` (six integers, one per period 1 to 6), `min_period`,
-`max_period`, `max_str_len`, `min_purity`. Three do not, and are written anyway because a record
+`max_period`, `max_str_len`, `max_str_bundle_len`, `min_purity`. Three do not, and are written anyway because a record
 that omitted them would not say what the run actually asked the catalog for: `min_flank_bp`, which
 is pinned at the catalog's own floor because the rows below it were never written; `min_score`,
 which gates a scanner's output and so gates nothing in a run that reads a file; and
@@ -312,11 +312,20 @@ min_copies = [8, 6, 6, 6, 5, 4]
 min_period = 1
 max_period = 6
 max_str_len = 100
+max_str_bundle_len = 100
 min_purity = 0.8
 min_flank_bp = 15
 min_score = 0
 bundle_threshold = 15
 ```
+
+**`max_str_bundle_len` was added 2026-10-11** ([`str_bundle_loci.md`](str_bundle_loci.md) §5.2): an
+STR bundle whose hull is longer than it is a satellite. A file written before then has no such key,
+which says nothing about the cap, so a run compares it only when the file records one. The two
+census digests a fit writes for the routing criteria and for the catalog's build settings (§6) are
+taken over those criteria's printed form, which now includes the cap, so a census written before
+the change no longer matches one written after, and a file fitted before it is demoted (§6) by a run
+whose census was built after.
 
 **Absent means the file does not say**, which is §5's rule and not a new one: a file written by a
 build older than this section, or one a person wrote by hand, records no routing, and a reader must

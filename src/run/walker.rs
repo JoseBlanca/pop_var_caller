@@ -349,7 +349,7 @@ impl Iterator for RunSegments {
     /// [`Motif`](crate::types::Motif) is a six-byte buffer and a length, not a heap
     /// string — and two of the four kinds allocate. A repeat tract copies its contig name
     /// (`SsrSegment`'s `chrom`, a `Box<str>`), and a bundle copies its tract list
-    /// (`RegionKind::SsrBundle`'s `Box<[RepeatInterval]>`, two or more members). So at most two
+    /// (`RegionKind::SsrBundle`'s `Box<[BundleMember]>`, two or more members). So at most two
     /// allocations a segment, paid once per segment rather than once per locus.
     fn next(&mut self) -> Option<Self::Item> {
         let segment = self.segmentation.segments().get(self.next)?;

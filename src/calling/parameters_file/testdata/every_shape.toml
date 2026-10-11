@@ -338,6 +338,7 @@ min_copies = [5, 5, 4, 4, 4, 3]
 min_period = 1
 max_period = 6
 max_str_len = 500
+max_str_bundle_len = 100
 min_purity = 0.8
 min_flank_bp = 15
 min_score = 0
