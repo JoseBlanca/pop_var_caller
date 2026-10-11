@@ -1343,6 +1343,7 @@ mod tests {
     /// ground, and nothing else.
     fn locus_over(span: GenomeRegion) -> crate::run::cohort_merge::build::CohortObservation {
         crate::run::cohort_merge::build::CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region: span,
             alleles: Vec::new(),
             per_sample: Vec::new(),

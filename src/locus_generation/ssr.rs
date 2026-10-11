@@ -780,7 +780,7 @@ mod classify {
     use super::{RepeatDelimiter, SsrLocus};
     use crate::alignment::{ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel};
     use crate::bam::alignment_input::CigarOp;
-    use crate::locus_generation::{LocusLen, ReadWitness};
+    use crate::locus_generation::{FlankDeletion, LocusLen, ReadWitness};
     use crate::read::aligned_read::AlignedRead;
     use crate::types::Bp;
     use std::ops::Range;
@@ -822,6 +822,10 @@ mod classify {
         Observed {
             bases: Box<[u8]>,
             read_witness: ReadWitness,
+            /// The flank bases the read's deletion took beside the tract, when the read is
+            /// spelled from its own alignment (`str_edge_deletion_alleles.md` §5.1); `NONE`
+            /// otherwise.
+            flank_deletion: FlankDeletion,
             /// The read's base-quality error mass over the tract, `Σ ln(P_err)`, in log-error
             /// space (freebayes' `q_sum` convention). The **BQ** support moment the spec names
             /// (spec §3, "strand/BQ/MAPQ moments") — computed here because the tract base
@@ -917,6 +921,7 @@ mod classify {
             return complete_or_low_quality(
                 read,
                 region.start + tract.start..region.start + tract.end,
+                FlankDeletion::NONE,
                 qual_buffer,
             );
         }
@@ -930,15 +935,15 @@ mod classify {
         // spells a collapsed long allele — the length change hidden as flank mismatches —
         // and rescuing that read is what the delimiter and its widen-and-retry are *for*,
         // so an indel-free read is left entirely to them.
+        let cigar: &[CigarOp] = &read.cigar;
         let input_span = if left > 0
             && right > 0
-            && read
-                .cigar
+            && cigar
                 .iter()
                 .any(|op| matches!(op, CigarOp::Insertion(_) | CigarOp::Deletion(_)))
         {
             tract_span_from_input(
-                &read.cigar,
+                cigar,
                 &read.seq,
                 fp,
                 window_start + left as u32,
@@ -961,14 +966,43 @@ mod classify {
         // over four runs for 16 more false calls in 321,116, +76 at one sample for none, and
         // +138 on HG002's tandem-repeat benchmark at 30× and 50×, where one tract a depth went
         // from right to wrong.
+        //
+        // **And the flank bases its deletion took are recorded beside the spelling** (owner,
+        // 2026-10-10; `str_edge_deletion_alleles.md` §5.1), so the whole deletion is one allele
+        // of the tract's record rather than a tract piece here and a flank piece on the generic
+        // path. A deletion reaching past the flank this locus holds is not recorded, since the
+        // record could not be widened over it.
+        //
+        // **In its smallest form** (`str_edge_deletion_alleles.md` §4): the mapper chooses where a
+        // deletion sits in a run of equal bases, so the same sequence can come as different
+        // splits between spelling and flank deletion, and a split that can give flank bases back
+        // does. A deletion that fits wholly inside the tract — a stutter contraction, whichever
+        // way the mapper or a left-aligner placed it — comes out as no flank deletion at all.
+        let flank_deletion = flank_bases_deleted(cigar, fp.ref_start, tract_start, tract_end)
+            .filter(|deleted| deleted.left as usize <= left && deleted.right as usize <= right)
+            .unwrap_or(FlankDeletion::NONE);
+        let (input_span, flank_deletion) = match input_span {
+            Some(span) if !flank_deletion.is_none() => {
+                let tract_len = locus.segment.tract_len() as usize;
+                let (span, deleted) = in_smallest_form(
+                    &read.seq,
+                    span,
+                    flank_deletion,
+                    &reference[left - flank_deletion.left as usize..left],
+                    &reference[left + tract_len..left + tract_len + flank_deletion.right as usize],
+                );
+                (Some(span), deleted)
+            }
+            other => (other, FlankDeletion::NONE),
+        };
         if let Some(span) = &input_span {
             let (aligned_before, aligned_after) =
-                aligned_bases_beyond_the_tract(&read.cigar, fp.ref_start, tract_start, tract_end);
-            if deletion_crosses_a_tract_edge(&read.cigar, fp.ref_start, tract_start, tract_end)
+                aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract_start, tract_end);
+            if deletion_crosses_a_tract_edge(cigar, fp.ref_start, tract_start, tract_end)
                 && aligned_before >= MIN_ALIGNED_FLANK_BASES
                 && aligned_after >= MIN_ALIGNED_FLANK_BASES
             {
-                return complete_or_low_quality(read, span.clone(), qual_buffer);
+                return complete_or_low_quality(read, span.clone(), flank_deletion, qual_buffer);
             }
         }
 
@@ -991,6 +1025,7 @@ mod classify {
                         complete_or_low_quality(
                             read,
                             wide.start + wtract.start..wide.start + wtract.end,
+                            FlankDeletion::NONE,
                             qual_buffer,
                         )
                     }
@@ -1010,9 +1045,17 @@ mod classify {
                 // confirms (`GC→G`, hom), the input span correctly reads eleven reference
                 // `T`s, and the delimiter re-absorbs the flank deletion as a spurious
                 // one-unit contraction, double-counting the deleted base.
-                let spelled =
-                    input_span.unwrap_or(region.start + tract.start..region.start + tract.end);
-                complete_or_low_quality(read, spelled, qual_buffer)
+                match input_span {
+                    Some(spelled) => {
+                        complete_or_low_quality(read, spelled, flank_deletion, qual_buffer)
+                    }
+                    None => complete_or_low_quality(
+                        read,
+                        region.start + tract.start..region.start + tract.end,
+                        FlankDeletion::NONE,
+                        qual_buffer,
+                    ),
+                }
             }
             // **An empty one-sided span is a read outside the locus, not a lower bound of
             // zero** — and `partial` is where that is decided, in one place.
@@ -1071,6 +1114,84 @@ mod classify {
             }
         }
         false
+    }
+
+    /// **How many flank bases the read's deletions take beside the tract**, or `None` when no
+    /// deletion crosses either edge (or one takes more than 255 flank bases, which no flank this
+    /// path holds is long enough for). A deletion crossing the tract's first base takes the flank
+    /// bases before it; one crossing its last base, the flank bases after; one covering the whole
+    /// tract, both. Coordinates as in [`deletion_crosses_a_tract_edge`].
+    fn flank_bases_deleted(
+        cigar: &[CigarOp],
+        ref_start: u32,
+        tract_start: u32,
+        tract_end: u32,
+    ) -> Option<FlankDeletion> {
+        let (mut left, mut right, mut at) = (0_u32, 0_u32, ref_start);
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    let (from, to) = (at, at + n);
+                    if from < tract_start && to > tract_start {
+                        left = tract_start - from;
+                    }
+                    if from < tract_end && to > tract_end {
+                        right = to - tract_end;
+                    }
+                    at = to;
+                }
+                _ => {}
+            }
+        }
+        let deleted = FlankDeletion {
+            left: u8::try_from(left).ok()?,
+            right: u8::try_from(right).ok()?,
+        };
+        (!deleted.is_none()).then_some(deleted)
+    }
+
+    /// **A read's spelling and flank deletion in their smallest form** — the split that gives
+    /// back every flank base it can (`str_edge_deletion_alleles.md` §4).
+    ///
+    /// With `left` flank bases missing, the read's sequence in place of the reference from `left`
+    /// bases before the tract to its end is the spelling. If the spelling begins with the
+    /// first of those flank bases, the same sequence is the spelling without that base in place
+    /// of one flank base fewer — the deletion placed one base further right. So while the spelling
+    /// begins with the first deleted flank base, that base moves back into the flank. The right
+    /// side is the mirror image: while the spelling ends with the last deleted flank base. The
+    /// result does not depend on where in a run of equal bases the mapper put the deletion, and a
+    /// deletion that fits wholly inside the tract — stutter — comes out as none.
+    ///
+    /// `span` is the spelling in read coordinates; `left_flank` and `right_flank` are the
+    /// reference bases the deletion took, the tract's side last.
+    fn in_smallest_form(
+        seq: &[u8],
+        mut span: Range<usize>,
+        mut deleted: FlankDeletion,
+        left_flank: &[u8],
+        right_flank: &[u8],
+    ) -> (Range<usize>, FlankDeletion) {
+        while deleted.left > 0 && !span.is_empty() {
+            let first_deleted = left_flank[left_flank.len() - deleted.left as usize];
+            if seq[span.start] != first_deleted {
+                break;
+            }
+            span.start += 1;
+            deleted.left -= 1;
+        }
+        while deleted.right > 0 && !span.is_empty() {
+            let last_deleted = right_flank[deleted.right as usize - 1];
+            if seq[span.end - 1] != last_deleted {
+                break;
+            }
+            span.end -= 1;
+            deleted.right -= 1;
+        }
+        (span, deleted)
     }
 
     /// **How many aligned bases a read has before the tract and after it**, as `(before,
@@ -1228,6 +1349,7 @@ mod classify {
     fn complete_or_low_quality(
         read: &AlignedRead,
         tract: Range<usize>,
+        flank_deletion: FlankDeletion,
         qual_buffer: &mut Vec<u8>,
     ) -> Classified {
         let tract_qual = &read.qual[tract.clone()];
@@ -1235,6 +1357,7 @@ mod classify {
             Classified::Observed {
                 bases: read.seq[tract].into(),
                 read_witness: ReadWitness::Complete,
+                flank_deletion,
                 q_sum: ln_p_err_sum(tract_qual),
             }
         } else {
@@ -1342,6 +1465,7 @@ mod classify {
             return Classified::NoObservation(NoObservationReason::OutsideTract);
         };
         Classified::Observed {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: region_seq[tract.clone()].into(),
             read_witness,
             // Partials are kept without the quality gate (spec §3), but still carry the BQ moment.
@@ -1410,6 +1534,7 @@ mod classify {
                 Classified::Observed {
                     bases,
                     read_witness: ReadWitness::Complete,
+                    flank_deletion: FlankDeletion::NONE,
                     q_sum,
                 } => {
                     assert_eq!(&*bases, b"CACACA");
@@ -1699,6 +1824,155 @@ mod classify {
                 }
                 other => panic!("expected a complete observation, got {other:?}"),
             }
+            // The four flank bases the deletion took are recorded beside the spelling (owner,
+            // 2026-10-10): the deletion cannot slide left, since the tract's `A` before it is not
+            // the flank's `C` at its end.
+            match classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            ) {
+                Classified::Observed { flank_deletion, .. } => {
+                    assert_eq!(flank_deletion, FlankDeletion { left: 0, right: 4 })
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// **Reads of one sequence get one key, whatever split the mapper chose** (owner,
+        /// 2026-10-10; `str_edge_deletion_alleles.md` §4). Two `A`s deleted from `…GA|AAGAAG…`
+        /// fit wholly inside the repeat: a mapper that put the gap across the edge, taking the
+        /// flank's last `A`, still yields the tract without its first two bases and no flank
+        /// deletion — the same observation as a read with the gap inside. Where the flank's last
+        /// base is a `C`, the same CIGAR takes a base the repeat cannot give back, and the read
+        /// records one flank base missing on the left.
+        #[test]
+        fn a_deletion_across_the_edge_is_recorded_in_its_smallest_form() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            let tract = b"AAG".repeat(10);
+            let right_flank = b"CCACGATTGCAGTCAGCTTGACCATAGCAG";
+            for (left_flank, expected_bases, expected_deleted) in [
+                (
+                    b"GTCAGCATTGCAGGTCATCGGACTTAGCGA",
+                    &tract[2..],
+                    FlankDeletion::NONE,
+                ),
+                (
+                    b"GTCAGCATTGCAGGTCATCGGACTTAGCGC",
+                    &tract[1..],
+                    FlankDeletion { left: 1, right: 0 },
+                ),
+            ] {
+                let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+                let locus = SsrLocus {
+                    segment: SsrSegment::new(
+                        "chr1".into(),
+                        31,
+                        60,
+                        Motif::new(b"AAG").unwrap(),
+                        1.0,
+                    )
+                    .unwrap(),
+                    tract_with_margin_bases: frame.into(),
+                    margin_start: Position(1),
+                };
+                let seq = [&left_flank[..29], &tract[1..], right_flank].concat();
+                let mut carrier = read(&seq, 40);
+                carrier.cigar = vec![CigarOp::Match(29), CigarOp::Deletion(2), CigarOp::Match(59)];
+                match classify_read(
+                    &carrier,
+                    &locus,
+                    &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                    &StutterModel::hipstr_shipped(),
+                    &mut UnitRobustScratch::default(),
+                    &mut Vec::new(),
+                ) {
+                    Classified::Observed {
+                        bases,
+                        read_witness,
+                        flank_deletion,
+                        ..
+                    } => {
+                        assert_eq!(&*bases, expected_bases);
+                        assert_eq!(read_witness, ReadWitness::Complete);
+                        assert_eq!(flank_deletion, expected_deleted);
+                    }
+                    other => panic!("expected a complete observation, got {other:?}"),
+                }
+            }
+        }
+
+        /// The smallest form on both sides: a spelling gives a flank base back while it starts
+        /// (or ends) with the deleted flank base nearest it, and stops at the first that differs.
+        /// And the flank bases a deletion takes are counted on each side of the tract.
+        #[test]
+        fn the_smallest_form_gives_back_flank_bases_and_deletions_are_counted() {
+            use CigarOp::{Deletion, Match};
+            // Spelling "AAT" with two left flank bases "AA" missing: both given back.
+            assert_eq!(
+                in_smallest_form(
+                    b"AAT",
+                    0..3,
+                    FlankDeletion { left: 2, right: 0 },
+                    b"GAA",
+                    b""
+                ),
+                (2..3, FlankDeletion::NONE)
+            );
+            // "CAT" with flank "GA" missing on the left: the first deleted base is `G`, kept.
+            assert_eq!(
+                in_smallest_form(
+                    b"CAT",
+                    0..3,
+                    FlankDeletion { left: 2, right: 0 },
+                    b"GA",
+                    b""
+                ),
+                (0..3, FlankDeletion { left: 2, right: 0 })
+            );
+            // Right side: "AGT" missing "TC" after the tract: the last deleted base is `C`, kept;
+            // "AGC" missing "TC": `C` given back, then `T` against `G`, kept.
+            assert_eq!(
+                in_smallest_form(
+                    b"AGT",
+                    0..3,
+                    FlankDeletion { left: 0, right: 2 },
+                    b"",
+                    b"TC"
+                ),
+                (0..3, FlankDeletion { left: 0, right: 2 })
+            );
+            assert_eq!(
+                in_smallest_form(
+                    b"AGC",
+                    0..3,
+                    FlankDeletion { left: 0, right: 2 },
+                    b"",
+                    b"TC"
+                ),
+                (0..2, FlankDeletion { left: 0, right: 1 })
+            );
+            // Tract at [30, 60).
+            assert_eq!(
+                flank_bases_deleted(&[Match(27), Deletion(6), Match(40)], 0, 30, 60),
+                Some(FlankDeletion { left: 3, right: 0 })
+            );
+            assert_eq!(
+                flank_bases_deleted(&[Match(51), Deletion(13), Match(26)], 0, 30, 60),
+                Some(FlankDeletion { left: 0, right: 4 })
+            );
+            assert_eq!(
+                flank_bases_deleted(&[Match(28), Deletion(34), Match(26)], 0, 30, 60),
+                Some(FlankDeletion { left: 2, right: 2 }),
+                "a deletion over the whole tract takes flank bases on both sides"
+            );
+            assert_eq!(
+                flank_bases_deleted(&[Match(40), Deletion(5), Match(40)], 0, 30, 60),
+                None
+            );
         }
 
         /// The two CIGAR measurements behind that rule: a deletion crosses an edge only when it
@@ -1787,7 +2061,7 @@ mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
     use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
-    use crate::locus_generation::{ReadWitness, SequenceObservation};
+    use crate::locus_generation::{FlankDeletion, ReadWitness, SequenceObservation};
     use crate::read::aligned_read::AlignedRead;
     use crate::types::ReadGroupId;
     use std::collections::HashMap;
@@ -1840,13 +2114,15 @@ mod tally {
         locus_start: u64,
         counts: &mut SsrGeneratorCounts,
     ) -> SsrTally {
-        let mut buckets: HashMap<(Box<[u8]>, ReadWitness, ReadGroupId), Support> = HashMap::new();
+        let mut buckets: HashMap<(Box<[u8]>, ReadWitness, ReadGroupId, FlankDeletion), Support> =
+            HashMap::new();
         let mut reads_without_observation = 0u32;
         for (read, outcome) in reads_and_outcomes {
             match outcome {
                 Classified::Observed {
                     bases,
                     read_witness,
+                    flank_deletion,
                     q_sum,
                 } => {
                     match read_witness {
@@ -1854,7 +2130,7 @@ mod tally {
                         ReadWitness::Partial { .. } => counts.observations_partial += 1,
                     }
                     let support = buckets
-                        .entry((bases, read_witness, read.read_group))
+                        .entry((bases, read_witness, read.read_group, flank_deletion))
                         .or_default();
                     support.num_obs += 1;
                     if read.flag & FLAG_REVERSE_STRAND == 0 {
@@ -1883,18 +2159,21 @@ mod tally {
         let mut observations: Vec<SequenceObservation> = buckets
             .into_iter()
             .map(
-                |((bases, read_witness, read_group), support)| SequenceObservation {
-                    bases,
-                    read_witness,
-                    read_group,
-                    num_obs: support.num_obs,
-                    num_fwd: support.num_fwd,
-                    q_sum: crate::types::SummedLogError::from_nats(support.q_sum),
-                    mapq_sum: support.mapq_sum,
-                    mapq_sum_sq: support.mapq_sum_sq,
-                    placed_left: support.placed_left,
-                    // The STR path does not phase — there is no chain id to fold (spec §3).
-                    chain_ids: Vec::new(),
+                |((bases, read_witness, read_group, flank_deletion), support)| {
+                    SequenceObservation {
+                        bases,
+                        read_witness,
+                        read_group,
+                        num_obs: support.num_obs,
+                        num_fwd: support.num_fwd,
+                        q_sum: crate::types::SummedLogError::from_nats(support.q_sum),
+                        mapq_sum: support.mapq_sum,
+                        mapq_sum_sq: support.mapq_sum_sq,
+                        placed_left: support.placed_left,
+                        // The STR path does not phase — there is no chain id to fold (spec §3).
+                        chain_ids: Vec::new(),
+                        flank_deletion,
+                    }
                 },
             )
             .collect();
@@ -1906,6 +2185,7 @@ mod tally {
                 .cmp(&b.bases)
                 .then_with(|| a.read_witness.sort_key().cmp(&b.read_witness.sort_key()))
                 .then_with(|| a.read_group.cmp(&b.read_group))
+                .then_with(|| a.flank_deletion.cmp(&b.flank_deletion))
         });
 
         SsrTally {
@@ -1952,6 +2232,7 @@ mod tally {
 
         fn observed(bases: &[u8], read_witness: ReadWitness, q_sum: f64) -> Classified {
             Classified::Observed {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: bases.into(),
                 read_witness,
                 q_sum,

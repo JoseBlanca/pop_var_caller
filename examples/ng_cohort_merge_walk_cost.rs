@@ -32,6 +32,7 @@ fn record_at(position: u64, observed: &[u8]) -> SampleLocusObservations {
         },
         reference_bases: Box::from(&b"A"[..]),
         observations: vec![SequenceObservation {
+            flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
             bases: Box::from(observed),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

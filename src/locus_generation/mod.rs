@@ -277,8 +277,8 @@ impl SampleLocusObservations {
     }
 }
 
-/// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
-/// pooled support of every read that showed it.
+/// One distinct `(bases, witness, read group, flank deletion)` the reads showed at a locus, with
+/// the pooled support of every read that showed it.
 ///
 /// The fields between `num_obs` and `chain_ids` are the per-read moments the SNP
 /// filters read (strand bias, base-quality error, the MAPQ multi-mapper test); an STR
@@ -365,6 +365,39 @@ pub struct SequenceObservation {
     /// Empty on the STR path, which does not phase and does not need to: an STR locus is one
     /// record, so [`ReadWitness`] already says whether a read spanned it.
     pub chain_ids: Vec<ChainId>,
+    /// **The flank bases these reads' deletion took beside an STR segment** — part of the
+    /// identity, since the same spelling of the repeat with and without a flank base missing
+    /// is two sequences. [`FlankDeletion::NONE`] everywhere but on an STR segment's complete
+    /// observations whose own alignment carries a deletion across the segment's edge
+    /// (`str_edge_deletion_alleles.md` §4, §5.1).
+    pub flank_deletion: FlankDeletion,
+}
+
+/// **How many flank bases a deletion running out of an STR segment removed, on each side.**
+///
+/// Beside a spelling of the repeat it says what a read's sequence is over a stretch wider than
+/// the segment: with `left` bases missing just before the segment and `right` just after it, the
+/// read's sequence over the reference from `left` bases before the segment to `right` bases after
+/// it is the spelling, nothing more. The deletion is placed as far left as the sequence allows
+/// — where the generic path, which left-aligns every read, puts it — so the flank bases counted
+/// here are exactly the ones the generic path sees deleted (`str_edge_deletion_alleles.md` §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct FlankDeletion {
+    /// Flank bases missing just before the segment's first base.
+    pub left: u8,
+    /// Flank bases missing just after the segment's last base.
+    pub right: u8,
+}
+
+impl FlankDeletion {
+    /// No flank base missing: every observation but an edge deletion's.
+    pub const NONE: Self = Self { left: 0, right: 0 };
+
+    /// Whether no flank base is missing.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        self == Self::NONE
+    }
 }
 
 impl SequenceObservation {
@@ -412,6 +445,10 @@ impl SequenceObservation {
     /// length. Naming the one-byte shape lets the compiler compare two bytes in place; every
     /// other length falls through to the same slice equality as before.
     pub fn matches_reference(&self, reference_bases: &[u8]) -> bool {
+        // A read missing flank bases is not the reference, whatever it spells over the repeat.
+        if !self.flank_deletion.is_none() {
+            return false;
+        }
         match (&*self.bases, reference_bases) {
             ([shown], [reference]) => shown == reference,
             (shown, reference) => *shown == *reference,
@@ -1219,6 +1256,7 @@ mod tests {
     /// fields are irrelevant to the depth derivation, so they are fixed.
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: Box::from(bases),
             read_witness,
             read_group: ReadGroupId(0),
@@ -1702,6 +1740,7 @@ mod tests {
             region: region(100, 100),
             reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: Box::from(&b"T"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
@@ -1753,6 +1792,7 @@ mod tests {
     #[test]
     fn same_bases_differ_by_read_witness() {
         let complete = SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: Box::from(&b"ATATAT"[..]),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

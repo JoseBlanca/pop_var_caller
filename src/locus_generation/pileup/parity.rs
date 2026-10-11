@@ -712,6 +712,7 @@ impl PartialEq for ComparableLocus {
                         mapq_sum_sq: our_mapq_sq,
                         placed_left: our_placed_left,
                         chain_ids: our_ids,
+                        flank_deletion: our_flank_deletion,
                     } = ours;
                     our_observation_bases == &theirs.bases
                         && our_witness == &theirs.read_witness
@@ -723,6 +724,7 @@ impl PartialEq for ComparableLocus {
                         && our_placed_left == &theirs.placed_left
                         && our_ids == &theirs.chain_ids
                         && our_q_sum == &theirs.q_sum
+                        && our_flank_deletion == &theirs.flank_deletion
                 })
     }
 }
@@ -1517,6 +1519,7 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
             },
             reference_bases: Box::from([reference]),
             observations: vec![SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: Box::from(&b"A"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: PLACEHOLDER_READ_GROUP,

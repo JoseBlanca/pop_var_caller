@@ -246,6 +246,7 @@ mod tests {
     /// not read is fixed, so a fixture's numbers are only the ones under test.
     fn obs(read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: Box::from(&b"A"[..]),
             read_witness,
             read_group: ReadGroupId(0),

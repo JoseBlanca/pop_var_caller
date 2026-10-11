@@ -67,6 +67,41 @@ pub struct SsrCandidate<'a> {
     /// holds no repeats is not a candidate, which is the same contract
     /// [`StutterModel::unreachable_mass`] states from the distribution's side.
     pub repeat_count: NonZeroU32,
+    /// **The flank bases this allele's deletion takes beside the tract** — none but for an
+    /// allele that is a deletion running from the repeat into a flank (`str_edge_deletion_alleles.md`
+    /// §5.6). A read whose own flank deletion differs is not this allele with stutter: the
+    /// emission is zero, and the read is left to the outlier term.
+    pub flank_deletion: crate::locus_generation::FlankDeletion,
+    /// The locus's reference flanks, left and right — what a read and an allele whose flank
+    /// extents differ are compared over (`str_edge_deletion_alleles.md` §5.6). Empty where the
+    /// locus carries none, as in the tests that predate flank extents.
+    pub reference_flanks: (&'a [u8], &'a [u8]),
+}
+
+/// **`bases`, read as the sequence over `extent`, respelled over the wider `target` extent**:
+/// the reference flank bases between the two are added on each side. `None` when `target` does
+/// not contain `extent` or reaches past the flanks the locus holds.
+pub(crate) fn respelled_over(
+    bases: &[u8],
+    extent: crate::locus_generation::FlankDeletion,
+    target: crate::locus_generation::FlankDeletion,
+    (left_flank, right_flank): (&[u8], &[u8]),
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    let (left, right) = (usize::from(extent.left), usize::from(extent.right));
+    let (to_left, to_right) = (usize::from(target.left), usize::from(target.right));
+    if to_left < left
+        || to_right < right
+        || to_left > left_flank.len()
+        || to_right > right_flank.len()
+    {
+        return None;
+    }
+    out.clear();
+    out.extend_from_slice(&left_flank[left_flank.len() - to_left..left_flank.len() - left]);
+    out.extend_from_slice(bases);
+    out.extend_from_slice(&right_flank[right..to_right]);
+    Some(())
 }
 
 /// Everything a model is handed for one `(read group, candidate)`, and the only channel it
@@ -946,6 +981,8 @@ mod tests {
         let motif = a_motif(b"CAG");
         let model = a_model();
         let candidate = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: b"AAACAGCAGCAGCAGTTT",
             repeat_count: repeats(4),
         };
@@ -972,10 +1009,14 @@ mod tests {
         let rate = ErrorRate::try_new(0.001).expect("a valid rate");
 
         let short = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: b"AAACAGCAGCAGCAGTTT",
             repeat_count: repeats(4),
         };
         let long = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: b"AAACAGCAGCAGCAGTTT",
             repeat_count: repeats(30),
         };
@@ -1000,6 +1041,8 @@ mod tests {
         let motif = a_motif(b"CA");
         let model = a_model();
         let candidate = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: b"AACACACATT",
             repeat_count: repeats(3),
         };
@@ -1046,6 +1089,8 @@ mod tests {
         let motif = a_motif(b"CA");
         let model = a_model();
         let candidate = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: b"AACACACATT",
             repeat_count: repeats(3),
         };
@@ -1070,6 +1115,8 @@ mod tests {
     ) -> f64 {
         let motif = a_motif(motif);
         let candidate = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: candidate_bases,
             repeat_count: repeats(repeat_count),
         };
@@ -1098,6 +1145,8 @@ mod tests {
             .iter()
             .map(|(bases, count)| {
                 let candidate = SsrCandidate {
+                    reference_flanks: (&[], &[]),
+                    flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                     bases,
                     repeat_count: repeats(*count),
                 };
@@ -1475,6 +1524,8 @@ mod tests {
     ) -> f64 {
         let motif = a_motif(motif);
         let candidate = SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: candidate_bases,
             repeat_count: repeats(repeat_count),
         };
@@ -1929,6 +1980,8 @@ mod tests {
                 let mut stretched = Vec::new();
                 resize_at_the_end(&candidate, motif_bytes, smallest_bp_diff, &mut stretched);
                 let candidate_view = SsrCandidate {
+                    reference_flanks: (&[], &[]),
+                    flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                     bases: &candidate,
                     repeat_count: repeats(repeat_count),
                 };

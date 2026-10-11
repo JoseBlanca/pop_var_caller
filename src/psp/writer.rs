@@ -951,6 +951,7 @@ pub(crate) mod tests_support {
             },
             reference_bases: bases.clone(),
             observations: vec![SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases,
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),

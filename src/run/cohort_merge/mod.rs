@@ -103,6 +103,7 @@ pub(super) mod fixtures {
             region,
             reference_bases: Box::from(reference_bases),
             observations: vec![SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: Box::from(observed_bases),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
@@ -308,8 +309,9 @@ pub(super) mod fixtures {
                     per_sample,
                     kind,
                     window_coverage: _,
+                    allele_flank_deletions,
                 } = observed;
-                format!("{region:?} {alleles:?} {per_sample:?} {kind:?}")
+                format!("{region:?} {alleles:?} {allele_flank_deletions:?} {per_sample:?} {kind:?}")
             })
             .chain(
                 failed_locus_spans

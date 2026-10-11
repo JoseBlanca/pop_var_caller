@@ -36,6 +36,7 @@ pub mod census_freshness;
 pub mod census_from_psp;
 pub mod cohort_merge;
 pub mod depth_ceiling;
+pub mod edge_deletion_gathering;
 pub mod explain;
 pub mod gatherer;
 pub mod paralog_filter;

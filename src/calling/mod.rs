@@ -139,6 +139,11 @@ use std::num::NonZeroU32;
 pub struct CandidateAlleles {
     alleles: Vec<Box<[u8]>>,
     kind: LocusKind,
+    /// Each allele's flank deletion, at the same index — **empty while every allele has
+    /// none**, which is every locus but an STR segment whose reads carried a deletion into a
+    /// flank (`str_edge_deletion_alleles.md` §5.5). Read through
+    /// [`flank_deletion`](Self::flank_deletion).
+    flank_deletions: Vec<crate::locus_generation::FlankDeletion>,
 }
 
 impl CandidateAlleles {
@@ -160,7 +165,44 @@ impl CandidateAlleles {
         Self {
             alleles: vec![reference],
             kind,
+            flank_deletions: Vec::new(),
         }
+    }
+
+    /// The flank deletion of allele `index`: the flank bases a deletion running out of an STR
+    /// segment took beside its spelling, none for every other allele.
+    #[inline]
+    pub fn flank_deletion(&self, index: usize) -> crate::locus_generation::FlankDeletion {
+        self.flank_deletions
+            .get(index)
+            .copied()
+            .unwrap_or(crate::locus_generation::FlankDeletion::NONE)
+    }
+
+    /// Whether some allele here has a flank deletion.
+    #[inline]
+    pub fn has_a_flank_deletion(&self) -> bool {
+        !self.flank_deletions.is_empty()
+    }
+
+    /// Admit `allele` with its flank deletion — [`admit`](Self::admit) for an STR segment's
+    /// allele, which may carry one (`str_edge_deletion_alleles.md` §5.5).
+    pub fn admit_with_flank_deletion(
+        &mut self,
+        allele: Box<[u8]>,
+        flank_deletion: crate::locus_generation::FlankDeletion,
+    ) -> AlleleId {
+        if !flank_deletion.is_none() && self.flank_deletions.is_empty() {
+            self.flank_deletions.resize(
+                self.alleles.len(),
+                crate::locus_generation::FlankDeletion::NONE,
+            );
+        }
+        let id = self.admit(allele);
+        if let Some(last) = self.flank_deletions.last_mut() {
+            *last = flank_deletion;
+        }
+        id
     }
 
     /// The bases of the reference allele. Infallible: allele 0 exists by construction.
@@ -238,6 +280,10 @@ impl CandidateAlleles {
         let id = u16::try_from(self.alleles.len())
             .expect("a locus cannot hold more alleles than an AlleleId can name");
         self.alleles.push(allele);
+        if !self.flank_deletions.is_empty() {
+            self.flank_deletions
+                .push(crate::locus_generation::FlankDeletion::NONE);
+        }
         AlleleId(id)
     }
 }

@@ -1300,6 +1300,7 @@ pub(super) mod fixtures {
     /// A cohort locus over `alleles`, the reference first, covered by `per_sample`.
     pub(super) fn locus_of(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservation {
         CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region: GenomeRegion {
                 contig: ContigId(0),
                 start: Position(100),

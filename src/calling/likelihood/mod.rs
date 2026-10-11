@@ -1712,6 +1712,9 @@ pub struct SsrRowScratch<ModelScratch> {
     emissions: Vec<f64>,
     candidates: usize,
     model: ModelScratch,
+    /// A read and an allele respelled over a common flank extent, reused per pair
+    /// (`str_edge_deletion_alleles.md` §5.6).
+    pub(crate) respelled: (Vec<u8>, Vec<u8>),
 }
 
 impl<ModelScratch> SsrRowScratch<ModelScratch> {
@@ -2235,6 +2238,7 @@ mod tests {
 
     fn ssr_observation(bases: &[u8], witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: bases.into(),
             read_witness: witness,
             read_group: ReadGroupId(2),

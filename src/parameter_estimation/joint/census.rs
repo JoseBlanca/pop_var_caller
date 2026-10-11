@@ -2649,6 +2649,13 @@ impl CensusWriter {
                 records.covering_not_crossing += u64::from(reads);
                 continue;
             }
+            // **A read missing flank bases is a different sequence, not a slip** (owner,
+            // 2026-10-10; `str_edge_deletion_alleles.md` §5.3): its spelling is the repeat a
+            // deletion into the flank left behind, and counting its length here would charge
+            // that deletion to the polymerase.
+            if !observation.flank_deletion.is_none() {
+                continue;
+            }
             let difference = observation.bases.len() as i64 - reference_length;
             if difference % period == 0 {
                 records.offsets[local].add((difference / period) as i32, reads);
@@ -3869,6 +3876,7 @@ mod tests {
 
     fn observation(bases: &[u8], group: u32, reads: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(group),

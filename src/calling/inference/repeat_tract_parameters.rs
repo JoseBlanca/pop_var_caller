@@ -963,9 +963,15 @@ pub fn tract_candidates<'a>(
     alleles
         .iter()
         .zip(repeat_counts)
-        .map(|(bases, repeat_count)| SsrCandidate {
+        .enumerate()
+        .map(|(index, (bases, repeat_count))| SsrCandidate {
             bases,
             repeat_count: *repeat_count,
+            flank_deletion: alleles.flank_deletion(index),
+            reference_flanks: match alleles.kind() {
+                LocusKind::Ssr(detail) => (&detail.left_flank, &detail.right_flank),
+                _ => (&[], &[]),
+            },
         })
         .collect()
 }
@@ -1073,6 +1079,8 @@ mod tests {
             .iter()
             .zip(CANDIDATE_REPEATS)
             .map(|(bases, count)| SsrCandidate {
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases,
                 repeat_count: repeats(count),
             })
@@ -1713,6 +1721,8 @@ mod tests {
         // is defaulted on both lookups.
         let lone_bases = tract(20);
         let lone = [SsrCandidate {
+            reference_flanks: (&[], &[]),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: &lone_bases,
             repeat_count: repeats(20),
         }];
@@ -1784,6 +1794,7 @@ mod tests {
     /// One observation of a tract, seen by `reads` reads that spanned the whole of it.
     fn spanning(bases: &[u8], reads: u32, read_group: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(read_group),
@@ -2032,6 +2043,8 @@ mod tests {
             .iter()
             .zip(CANDIDATE_REPEATS)
             .map(|(bases, count)| SsrCandidate {
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases,
                 repeat_count: repeats(count),
             })

@@ -1114,6 +1114,7 @@ mod tests {
 
     fn sequence(bases: &[u8], num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: Box::from(bases),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

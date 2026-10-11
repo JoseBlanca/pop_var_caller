@@ -66,7 +66,7 @@
 //! frozen.
 
 use super::ContaminationView;
-use super::ssr_emission::{SsrCandidate, SsrEmissionModel, SsrScoringContext};
+use super::ssr_emission::{SsrCandidate, SsrEmissionModel, SsrScoringContext, respelled_over};
 use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::calling::GenotypeTableView;
 use crate::float;
@@ -763,13 +763,91 @@ fn fill_emissions<Model: SsrEmissionModel>(
 ) {
     for (position, observation) in evidence.complete_observations() {
         for (candidate, allele) in candidates.iter().enumerate() {
+            // **A read and an allele over different flank extents are compared over the wider
+            // of the two** (`str_edge_deletion_alleles.md` §5.6): each is respelled with the
+            // reference flank bases it leaves out. Where the two come out the same length they
+            // differ only by substitutions, which the emission prices at the substitution rate.
+            // Where they do not, one has flank bases deleted that the other has not — not stutter,
+            // which changes whole units inside the repeat, but a sequencing indel across the
+            // edge if it is anything the read model knows: the repeat spellings are scored as
+            // ever, times the model's own price for an indel that is not whole units, sized by
+            // the flank bases. A read of an allele that lost a flank base to such an error then
+            // still counts for that allele, at that price, rather than for nothing (HG002 at 30×:
+            // two reads of an 11-`C` allele missing the base before the run, 2026-10-11).
             let context = contexts.of(observation.read_group, candidate);
-            let scored = model.emission(
-                &observation.bases,
-                allele,
-                context,
-                scratch.model_scratch_mut(),
-            );
+            let scored = if observation.flank_deletion == allele.flank_deletion {
+                model.emission(
+                    &observation.bases,
+                    allele,
+                    context,
+                    scratch.model_scratch_mut(),
+                )
+            } else {
+                let wider = crate::locus_generation::FlankDeletion {
+                    left: observation
+                        .flank_deletion
+                        .left
+                        .max(allele.flank_deletion.left),
+                    right: observation
+                        .flank_deletion
+                        .right
+                        .max(allele.flank_deletion.right),
+                };
+                let (read_over, allele_over) = &mut scratch.respelled;
+                let respelled = respelled_over(
+                    &observation.bases,
+                    observation.flank_deletion,
+                    wider,
+                    allele.reference_flanks,
+                    read_over,
+                )
+                .and_then(|()| {
+                    respelled_over(
+                        allele.bases,
+                        allele.flank_deletion,
+                        wider,
+                        allele.reference_flanks,
+                        allele_over,
+                    )
+                });
+                match respelled {
+                    Some(()) if read_over.len() == allele_over.len() => {
+                        let (read_over, allele_over) =
+                            (std::mem::take(read_over), std::mem::take(allele_over));
+                        let scored = model.emission(
+                            &read_over,
+                            &SsrCandidate {
+                                bases: &allele_over,
+                                ..*allele
+                            },
+                            context,
+                            scratch.model_scratch_mut(),
+                        );
+                        scratch.respelled = (read_over, allele_over);
+                        scored
+                    }
+                    _ => {
+                        let read_flank = i64::from(observation.flank_deletion.left)
+                            + i64::from(observation.flank_deletion.right);
+                        let allele_flank = i64::from(allele.flank_deletion.left)
+                            + i64::from(allele.flank_deletion.right);
+                        let flank_change = context
+                            .stutter
+                            .flank_length_change_probability(allele_flank - read_flank);
+                        if flank_change > 0.0 {
+                            flank_change
+                                * model.emission(
+                                    &observation.bases,
+                                    allele,
+                                    context,
+                                    scratch.model_scratch_mut(),
+                                )
+                        } else {
+                            0.0
+                        }
+                    }
+                }
+            };
             scratch.set_emission(position, candidate, scored);
         }
     }
@@ -835,6 +913,7 @@ mod tests {
     /// One observation: some bases, seen by `reads` reads that spanned the whole tract.
     fn spanning(bases: &[u8], reads: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -945,6 +1024,8 @@ mod tests {
                 .iter()
                 .zip(&self.repeat_counts)
                 .map(|(bases, count)| SsrCandidate {
+                    reference_flanks: (&[], &[]),
+                    flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                     bases,
                     repeat_count: repeats(*count),
                 })

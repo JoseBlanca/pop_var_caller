@@ -2700,6 +2700,7 @@ mod tests {
     /// emission model touches it. Zeroing it here would change no number below.
     fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: tract_bases(repeats).into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -2724,6 +2725,7 @@ mod tests {
         let bases = tract_bases(repeats);
         let covered = u16::try_from(bases.len()).expect("a short fixture tract");
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             read_witness: ReadWitness::from_left(
                 covered,
                 crate::locus_generation::LocusLen::from_positions(u64::from(covered) + 4),
@@ -9190,14 +9192,20 @@ mod tests {
         let interrupted = b"ATATATATCTAT".to_vec();
         let scored = [
             SsrCandidate {
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &clean,
                 repeat_count: NonZeroU32::new(6).expect("six repeats"),
             },
             SsrCandidate {
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &interrupted,
                 repeat_count: NonZeroU32::new(4).expect("four whole repeats"),
             },
             SsrCandidate {
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &seven,
                 repeat_count: NonZeroU32::new(7).expect("seven repeats"),
             },

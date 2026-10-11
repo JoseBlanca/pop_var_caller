@@ -184,6 +184,11 @@ fn alternatives_column(record: &VcfRecord) -> String {
 /// record rather than to the empty one alone: VCF states a deletion by giving all alleles a
 /// shared flanking base, so padding one and not the others would describe a different variant.
 fn padded(allele: &[u8], padding: Option<PaddingBase>) -> String {
+    // `*` is "deleted by an overlapping record" and is written as it is, never padded
+    // (`str_edge_deletion_alleles.md` §6).
+    if allele == b"*" {
+        return "*".to_string();
+    }
     let bases = std::str::from_utf8(allele)
         .expect("allele bases are A/C/G/T/N-validated at the merge boundary");
     match padding {
@@ -386,8 +391,10 @@ fn one_sample_column(record: &VcfRecord, column: &SampleColumn, ploidy: Ploidy) 
                 join_with_commas(genotype.alleles().iter().map(|allele| {
                     // PANIC-FREE: `VcfRecord::new` refused a genotype naming an allele past the
                     // table, so every id indexes the allele table.
-                    let bases = &record.alleles()[usize::from(allele.get())];
-                    tract.repeat_copies_of(bases).to_string()
+                    let index = usize::from(allele.get());
+                    tract
+                        .repeat_copies_of_allele(index, &record.alleles()[index])
+                        .to_string()
                 }))
             },
         );

@@ -538,6 +538,7 @@ impl SsrEvidenceScratch {
             rows.reserve(sample.supported.len() + sample.partials.len());
             for row in &sample.supported {
                 rows.push(SequenceObservation {
+                    flank_deletion: observation.flank_deletion_of(row.allele),
                     bases: observation.alleles[row.allele].clone(),
                     read_witness: ReadWitness::Complete,
                     read_group: row.read_group,
@@ -554,6 +555,7 @@ impl SsrEvidenceScratch {
             }
             for partial in &sample.partials {
                 rows.push(SequenceObservation {
+                    flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                     bases: partial.bases.clone(),
                     read_witness: ReadWitness::Partial {
                         positions: partial.witnessed_in_locus.clone(),
@@ -640,6 +642,7 @@ mod tests {
     fn merged_locus(alleles: usize, per_sample: Vec<SampleSupport>) -> CohortObservation {
         let sequences = [b"A".as_slice(), b"T", b"C", b"G"];
         CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
             window_coverage: vec![
@@ -690,6 +693,7 @@ mod tests {
     fn merged_tract(alleles: usize, per_sample: Vec<SampleSupport>) -> CohortObservation {
         let sequences = [b"ATAT".as_slice(), b"ATATAT", b"ATATATAT", b"AT"];
         CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
             window_coverage: vec![
@@ -1265,6 +1269,7 @@ mod tests {
             right_flank: Box::from(b"TTTAAA".as_slice()),
         };
         let seen = [SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: Box::from(b"ATAT".as_slice()),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

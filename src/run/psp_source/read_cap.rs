@@ -157,6 +157,7 @@ mod tests {
     fn observation(group: u32, bases: &[u8], ids: std::ops::Range<u64>) -> SequenceObservation {
         let reads = (ids.end - ids.start) as u32;
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: bases.into(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(group),

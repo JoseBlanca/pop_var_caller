@@ -41,7 +41,9 @@ pub mod encode;
 pub mod header;
 pub mod writer;
 
+pub(crate) use assemble::drop_alternatives_no_sample_calls;
 pub use assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput, assemble_record};
+pub(crate) use encode::written_position;
 pub use encode::{
     FREQUENCY_DECIMALS, MAPPING_QUALITY_DECIMALS, MISSING_FIELD, PENALTY_DECIMALS,
     QUALITY_DECIMALS, fixed_columns, format_keys, frequency_text, info_column,
@@ -724,16 +726,67 @@ impl FilterVerdict {
 /// bases by construction, never heap-allocated, and hands out its period as a checked type. So
 /// there is no empty motif to refuse here and no `PERIOD=0` to write — the state is
 /// unrepresentable rather than merely rejected.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TractAnnotation {
     motif: Motif,
+    /// How the record was widened over the tract's flanks, if it was
+    /// (`str_edge_deletion_alleles.md` §5.8). Boxed: nearly every tract record is not.
+    widening: Option<Box<TractWidening>>,
+}
+
+/// **How an STR record was widened over its flanks** (`str_edge_deletion_alleles.md` §5.8):
+/// what the gathering of the calls needs to find the generic records the widening overlaps,
+/// and what `REPCN` needs to count the repeat rather than the flank.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TractWidening {
+    /// Flank bases the record's reference took before the tract, and after it.
+    pub left: u8,
+    pub right: u8,
+    /// How many flank bases each allele was given around its spelling, at the allele's index.
+    pub flank_bases_per_allele: Vec<u8>,
+    /// How far each allele reaches into the left flank and into the right one, as the generic
+    /// path places its deletion — the flank bases a carrier of it has not got where the
+    /// generic path looks. At the allele's index; the reference's is `(0, 0)`.
+    pub reach_per_allele: Vec<(u8, u8)>,
 }
 
 impl TractAnnotation {
     /// Build the annotation from the tract's motif, on the reference strand.
     #[inline]
     pub fn new(motif: Motif) -> Self {
-        Self { motif }
+        Self {
+            motif,
+            widening: None,
+        }
+    }
+
+    /// The same annotation for a record widened over its flanks.
+    #[must_use]
+    pub fn widened(self, widening: TractWidening) -> Self {
+        Self {
+            widening: Some(Box::new(widening)),
+            ..self
+        }
+    }
+
+    /// How the record was widened over its flanks, if it was.
+    #[inline]
+    #[must_use]
+    pub fn widening(&self) -> Option<&TractWidening> {
+        self.widening.as_deref()
+    }
+
+    /// **`REPCN` for allele `index` of the record**: [`repeat_copies_of`](Self::repeat_copies_of)
+    /// over its bases less the flank bases a widened record gave it.
+    #[inline]
+    #[must_use]
+    pub fn repeat_copies_of_allele(&self, index: usize, allele: &[u8]) -> usize {
+        let flank_bases = self
+            .widening
+            .as_ref()
+            .and_then(|widening| widening.flank_bases_per_allele.get(index))
+            .map_or(0, |&bases| usize::from(bases));
+        self.repeat_copies_of(&allele[..allele.len().saturating_sub(flank_bases)])
     }
 
     /// The `RU` field: the motif's bases.

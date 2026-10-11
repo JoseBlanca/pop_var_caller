@@ -400,6 +400,25 @@ impl StutterModel {
         }
     }
 
+    /// **The probability of a read showing `bp_diff` more flank bases than its allele has** — negative
+    /// for fewer — by a sequencing indel across the edge of the repeat
+    /// (`str_edge_deletion_alleles.md` §5.6). Priced as the part-repeat regime prices an indel
+    /// that is not whole units, sized in bases: the model's own rate for a sequencing indel, the
+    /// only one this path has. Zero for no change, which is not a flank difference.
+    #[must_use]
+    pub fn flank_length_change_probability(&self, bp_diff: i64) -> f64 {
+        if bp_diff == 0 {
+            return 0.0;
+        }
+        Regime {
+            longer_share: self.part_repeat_longer_share,
+            shorter_share: self.part_repeat_shorter_share,
+            one_step_share: self.part_repeat_one_step_share,
+            max_steps: MAX_PART_REPEAT_SLIP,
+        }
+        .probability(bp_diff)
+    }
+
     /// **The mass this model never scores for a candidate of this shape** — one minus the
     /// total it puts on everything a read of that candidate could actually show.
     ///

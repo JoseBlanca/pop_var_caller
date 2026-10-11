@@ -39,7 +39,8 @@ use super::{
     SelectionVerdict,
 };
 use crate::calling::CandidateAlleles;
-use crate::locus_generation::{LocusKind, SsrDetail};
+use crate::calling::likelihood::ssr_emission::respelled_over;
+use crate::locus_generation::{FlankDeletion, LocusKind, SsrDetail};
 use crate::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::run::cohort_merge::{MinAltReadShare, MinAltReads};
 use crate::types::{AlleleId, GenomeRegion, Motif, Ploidy};
@@ -1097,6 +1098,38 @@ pub(super) fn admit_promoted_sequences(
         ranked_table_indices.sort_unstable();
     }
 
+    // **An allele over a flank extent one misread base away from an allele already standing is
+    // not a candidate of its own** (2026-10-11; `str_edge_deletion_alleles.md` §5.5). Respelled
+    // over the wider extent, such an allele differs from the reference or an admitted plain
+    // allele by a single substituted base — the shape a systematic read error beside a run
+    // takes: on HG002 at 30×, four reads in 36 showing the `G` after 25 `T`s misread, the same
+    // way, earned a candidate and a false heterozygote. Its reads still count for the allele
+    // they are one base from, at the substitution rate. **Only where, in every sample showing
+    // it, it is a small minority beside that allele** — under [`MISREAD_SHARE_CEILING`] of the
+    // two together: a misread base takes a share of the reads of the allele it came from, while
+    // a carrier of a real allele shows it at about half its reads or all of them. Folding every
+    // allele one base from another removed the commonest real edge deletion on the stuttering
+    // benchmark — one flank base, which once written out is one base from a plain contraction —
+    // and lost 36 to 77 carrier pairs a run at 50 samples.
+    let standing: Vec<usize> = std::iter::once(0)
+        .chain(ranked_table_indices.iter().map(|&index| index as usize))
+        .filter(|&index| observation.flank_deletion_of(index).is_none())
+        .collect();
+    ranked_table_indices.retain(|&index| {
+        let index = index as usize;
+        let extent = observation.flank_deletion_of(index);
+        extent.is_none()
+            || !standing.iter().any(|&other| {
+                one_base_apart(
+                    &observation.alleles[index],
+                    extent,
+                    &observation.alleles[other],
+                    observation.flank_deletion_of(other),
+                    detail,
+                ) && a_minority_beside_it_everywhere(observation, index, other)
+            })
+    });
+
     let allowed_alternatives = usize::from(config.shared.max_candidate_alleles.alternatives());
     let verdict = if ranked_table_indices.len() <= allowed_alternatives {
         SelectionVerdict::Selected
@@ -1128,7 +1161,10 @@ pub(super) fn admit_promoted_sequences(
     remap.admit(0, AlleleId::REFERENCE);
     for &table_index in ranked_table_indices.iter() {
         let table_index = table_index as usize;
-        let candidate = alleles.admit(observation.alleles[table_index].clone());
+        let candidate = alleles.admit_with_flank_deletion(
+            observation.alleles[table_index].clone(),
+            observation.flank_deletion_of(table_index),
+        );
         remap.admit(table_index, candidate);
     }
 
@@ -1312,7 +1348,11 @@ pub(super) fn locus_is_periodic(
         let mut off_grid_reads = 0_u32;
         for rows in super::one_run_per_allele(sample, observation.region) {
             let bases = &observation.alleles[rows[0].allele];
+            // A read with a flank deletion is an edge deletion known exactly, never off the grid
+            // (`str_edge_deletion_alleles.md` §5.5); the spelling test below is the guess the
+            // exception was first written with, for reads that record none.
             if !bases.len().abs_diff(reference_len).is_multiple_of(period)
+                && observation.flank_deletion_of(rows[0].allele).is_none()
                 && !is_an_edge_deletion_of(bases, &observation.alleles[0])
             {
                 let pooled_reads = rows.iter().fold(0_u32, |total, row| {
@@ -1329,6 +1369,62 @@ pub(super) fn locus_is_periodic(
     }
     // Nobody had a spanning read to judge, so there is no evidence the tract is not a tract.
     !any_sample_judged
+}
+
+/// **The largest share of a sample's reads, over a misread allele and the allele it is one base
+/// from, at which the first is still taken for a misreading of the second** (2026-10-11). A
+/// heterozygous carrier of a real allele shows it near a half; the systematic misreading this is
+/// for showed at 4 reads against 13 on HG002, under a quarter. A judgement between the two, not
+/// a fitted number.
+const MISREAD_SHARE_CEILING: f64 = 1.0 / 3.0;
+
+/// **Is allele `minor` a small minority beside allele `major` in every sample that shows it?**
+/// — under [`MISREAD_SHARE_CEILING`] of that sample's reads of the two together.
+fn a_minority_beside_it_everywhere(
+    observation: &CohortObservation,
+    minor: usize,
+    major: usize,
+) -> bool {
+    observation.per_sample.iter().all(|sample| {
+        let reads_of = |allele: usize| -> u32 {
+            sample
+                .supported
+                .iter()
+                .filter(|row| row.allele == allele)
+                .map(|row| row.support.num_reads)
+                .sum()
+        };
+        let (minor_reads, major_reads) = (reads_of(minor), reads_of(major));
+        minor_reads == 0
+            || f64::from(minor_reads) < MISREAD_SHARE_CEILING * f64::from(minor_reads + major_reads)
+    })
+}
+
+/// **Do two alleles, respelled over the wider of their flank extents, differ by exactly one
+/// substituted base?** — the test that keeps a systematic read error beside a run from standing
+/// as an allele of its own (`admit_promoted_sequences`).
+fn one_base_apart(
+    one: &[u8],
+    one_extent: FlankDeletion,
+    other: &[u8],
+    other_extent: FlankDeletion,
+    detail: &SsrDetail,
+) -> bool {
+    let wider = FlankDeletion {
+        left: one_extent.left.max(other_extent.left),
+        right: one_extent.right.max(other_extent.right),
+    };
+    let flanks = (&*detail.left_flank, &*detail.right_flank);
+    let (mut one_over, mut other_over) = (Vec::new(), Vec::new());
+    respelled_over(one, one_extent, wider, flanks, &mut one_over).is_some()
+        && respelled_over(other, other_extent, wider, flanks, &mut other_over).is_some()
+        && one_over.len() == other_over.len()
+        && one_over
+            .iter()
+            .zip(&other_over)
+            .filter(|(a, b)| a != b)
+            .count()
+            == 1
 }
 
 /// **Is `bases` the reference tract with a block missing from one end?** — what a deletion running

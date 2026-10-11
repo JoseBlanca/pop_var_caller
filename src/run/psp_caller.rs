@@ -750,26 +750,56 @@ impl PspVariantCaller {
             // more than one the regions of a round are built and genotyped on the pool and the
             // records fold back in genome order. **The VCF is the same either way**, which is what
             // `the_round_driver_writes_what_the_streaming_driver_writes` holds them to.
-        } = if merge_parameters
-            .cohort_locus_builder_regions_in_flight
-            .get()
-            > 1
-        {
-            call_cohort_from_sources_in_rounds(
-                cache_over(sources, Box::new(reference_for_the_merge), prefetch),
-                inputs,
-                genotyper,
-                prepare,
-                hand_over,
-            )?
-        } else {
-            call_cohort_from_sources_handing_each_record_over(
-                cache_over(sources, Box::new(reference_for_the_merge), prefetch),
-                inputs,
-                genotyper,
-                prepare,
-                hand_over,
-            )?
+        } = {
+            // **Every finished record passes the gathering of the calls before it is prepared**
+            // (`str_edge_deletion_alleles.md` §6): an STR record widened over a flank is
+            // reconciled with the generic records it overlaps, and held ones are released in
+            // the writer's order. So the drivers hand records over unprepared, and the records
+            // are prepared here, on this thread, as the gathering releases them.
+            let mut gathering =
+                crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
+            let pass_through = |record: VcfRecord, windows: &[WindowCoverage]| {
+                Ok::<_, E>((record, windows.to_vec()))
+            };
+            let mut gather = |(record, windows): (VcfRecord, Vec<WindowCoverage>),
+                              _: &[WindowCoverage]|
+             -> Result<(), E> {
+                for (record, windows) in gathering.accept(record, windows) {
+                    hand_over(prepare(record, &windows)?, &windows)?;
+                }
+                Ok(())
+            };
+            let outcome = if merge_parameters
+                .cohort_locus_builder_regions_in_flight
+                .get()
+                > 1
+            {
+                call_cohort_from_sources_in_rounds(
+                    cache_over(sources, Box::new(reference_for_the_merge), prefetch),
+                    inputs,
+                    genotyper,
+                    &pass_through,
+                    &mut gather,
+                )?
+            } else {
+                call_cohort_from_sources_handing_each_record_over(
+                    cache_over(sources, Box::new(reference_for_the_merge), prefetch),
+                    inputs,
+                    genotyper,
+                    &pass_through,
+                    &mut gather,
+                )?
+            };
+            for (record, windows) in gathering.finish() {
+                let locus = record.region();
+                prepare(record, &windows)
+                    .and_then(|ready| hand_over(ready, &windows))
+                    .map_err(|source| RunError::RecordNotWritten {
+                        locus,
+                        source: Box::new(source),
+                    })?;
+            }
+            outcome
         };
         // **The sources come back so that a mode can turn them into per-sample facts**, and
         // this is psp mode doing it: each spent source carries what it drew, which is the only

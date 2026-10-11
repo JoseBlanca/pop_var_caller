@@ -403,6 +403,7 @@ fn covering(sample: usize, rows: Vec<SupportedAllele>) -> SampleSupport {
 /// A cohort locus over `alleles`, covered by `per_sample`.
 fn observed(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservation {
     CohortObservation {
+        allele_flank_deletions: Vec::new(),
         region: region(100, 100),
         alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
         window_coverage: vec![WindowCoverage::absent(); per_sample.len()],
