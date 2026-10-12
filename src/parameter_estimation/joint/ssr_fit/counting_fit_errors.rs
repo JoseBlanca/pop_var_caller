@@ -89,6 +89,9 @@ struct Layout {
     /// The shares fitted, in order: every class but the pivot and the absent ones.
     free_shares: Vec<usize>,
     with_concentration: bool,
+    /// Which of the three stutter numbers sit at an end of their range: held there, with no slope
+    /// and no error, since the formula needs room either side.
+    held_stutter: [bool; 3],
 }
 
 impl Layout {
@@ -174,6 +177,11 @@ fn counting_slope(
     slope[0] = counts.slipped / level - counts.exact / (1.0 - level);
     slope[1] = counts.shorter / shorter_share - counts.longer / (1.0 - shorter_share);
     slope[2] = (counts.steps - counts.stepped) / fall_off - counts.stepped / (1.0 - fall_off);
+    for (index, held) in layout.held_stutter.iter().enumerate() {
+        if *held {
+            slope[index] = 0.0;
+        }
+    }
     let pivot = counts.draws[layout.pivot] / point.shares[layout.pivot];
     for (index, class) in layout.free_shares.iter().enumerate() {
         slope[3 + index] = counts.draws[*class] / point.shares[*class] - pivot;
@@ -347,6 +355,14 @@ fn errors_from_covariance(
     let variance = |row: usize, column: usize| -> f64 {
         covariance.map_or(f64::NAN, |matrix| matrix[row * size + column])
     };
+    // A stutter number held at an end of its range is not placed by the formula.
+    let stutter = |index: usize| {
+        if layout.held_stutter[index] {
+            StratumError::NotPlaced
+        } else {
+            error_of(variance(index, index))
+        }
+    };
     let mut shares = vec![StratumError::NoShare; layout.classes];
     for (index, class) in layout.free_shares.iter().enumerate() {
         shares[*class] = error_of(variance(3 + index, 3 + index));
@@ -381,9 +397,9 @@ fn errors_from_covariance(
         (StratumError::NotIdentified, StratumError::NotIdentified)
     };
     CountedClassErrors {
-        level: error_of(variance(0, 0)),
-        shorter_share: error_of(variance(1, 1)),
-        fall_off: error_of(variance(2, 2)),
+        level: stutter(0),
+        shorter_share: stutter(1),
+        fall_off: stutter(2),
         allele_length_variation: shares,
         concentration,
         between_locus_share,
@@ -397,6 +413,10 @@ fn errors_from_covariance(
 /// estimator has something to read: pairs need a tract with two samples, a sample's own two copies
 /// need a homozygote excess below one. Otherwise it is [`StratumError::NotIdentified`], and the
 /// other numbers' errors are those with the concentration held at its value.
+///
+/// **A stutter number at an end of its range** — a shorter share of exactly one when no read slipped
+/// longer, say — is held there and reported as [`StratumError::NotPlaced`]: the formula needs room
+/// either side of the answer. The other numbers' errors are those with it held.
 ///
 /// Costs two passes over the reads for each number fitted, plus one, in the counting fit's own
 /// per-round work; with the concentration from pairs, also the pairs' rows at seven stutters.
@@ -429,11 +449,19 @@ pub fn sandwich_errors(
                 .any(|sample| homozygote_excess[sample.sample as usize] < 1.0)
         }),
     };
+    let at_an_end = |value: f64, highest: f64| value <= 1e-6 || value >= highest - 1e-6;
+    let held_stutter = [
+        at_an_end(fitted.slippage.level, 1.0),
+        at_an_end(fitted.slippage.shorter_share, 1.0),
+        // The fit holds the fall-off at or below 0.99.
+        at_an_end(fitted.slippage.fall_off, 0.99),
+    ];
     let layout = Layout {
         classes,
         pivot,
         free_shares,
         with_concentration: concentration_identified,
+        held_stutter,
     };
     let size = layout.width();
     let at = Point {
@@ -459,6 +487,11 @@ pub fn sandwich_errors(
     // The slopes' change, column by column: minus the derivative of the summed slope.
     let mut change = vec![0.0; size * size];
     for column in 0..size {
+        if column < 3 && layout.held_stutter[column] {
+            // A held number is its own block: the identity, so it moves nothing else.
+            change[column * size + column] = 1.0;
+            continue;
+        }
         let step = at.step_for(&layout, column);
         let mut sides = [0.0, 0.0].map(|_| Vec::new());
         for (side, sign) in [1.0, -1.0].into_iter().enumerate() {
@@ -484,6 +517,9 @@ pub fn sandwich_errors(
             );
         }
         for row in 0..size {
+            if row < 3 && layout.held_stutter[row] {
+                continue;
+            }
             change[row * size + column] = -(sides[0][row] - sides[1][row]) / (2.0 * step);
         }
     }
@@ -735,6 +771,7 @@ mod tests {
             pivot: 2,
             free_shares: vec![0, 1, 3, 4],
             with_concentration: true,
+            held_stutter: [false; 3],
         };
         let source = ConcentrationSource::EachSamplesTwoCopies;
         let objective = |point: &Point| -> f64 {
