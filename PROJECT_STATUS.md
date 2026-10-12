@@ -2084,6 +2084,17 @@ comparisons one by one.
   finalised and deliberately not folded, the hold-back transient is 262 kB and not 120, and the
   ready deque's entry is 24 bytes and not 12.
 
+#### STR segments — a partial read is compared with the end of the tract it held
+
+- **Status:** fixes-applied (branch `str-partial-phase`, uncommitted)
+- **Spec:** [read_likelihoods.md](doc/devel/ng/spec/read_likelihoods.md) §5.2 and
+  [locus_generation_ssr.md](doc/devel/ng/spec/locus_generation_ssr.md) §3, dated notes 2026-10-12.
+- **Impl report:** [str_partial_read_phase_2026-10-12.md](doc/devel/reports/implementations/str_partial_read_phase_2026-10-12.md)
+- **Latest review:** [str_partial_read_phase_2026-10-12.md](doc/devel/reports/reviews/str_partial_read_phase_2026-10-12.md)
+- **Latest fixes-applied:** [fixes_applied_str_partial_read_phase_2026-10-12.md](doc/devel/reports/reviews/fixes_applied_str_partial_read_phase_2026-10-12.md)
+- **Open:** Mi1–Mi6, Mi9, Mi10 of the review, most to settle on the str-bundles rebase (one
+  `HeldFlank`, one side function, one locus-length source). Merge this branch before str-bundles.
+
 ---
 
 #### STR bundles called as one STR locus (`str_bundle_loci.md`)

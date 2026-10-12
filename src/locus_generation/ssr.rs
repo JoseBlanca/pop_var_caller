@@ -1744,16 +1744,14 @@ mod classify {
         }) else {
             return Classified::NoObservation(NoObservationReason::OutsideTract);
         };
-        // **At a bundle, the side the clamp loses is written down** (`str_bundle_loci.md` §7.6;
-        // the review's finding M3). A witness that covers the whole hull no longer says which
-        // flank the read anchored, and a bundle's emission reads a left-held read from the
-        // hull's start and a right-held one from its end. A segment is left as it was: it reads
-        // every partial from the tract's start, and its whole-tract partials from the two sides
-        // merge (`an_expanded_allele_merges_the_two_sides_into_one_observation`).
-        let held_flank = (locus.repeat.ground == MeasuredGround::BundleHull
-            && read_witness.is_flush_left()
-            && read_witness.is_flush_right(locus_len))
-        .then_some(border);
+        // **The side the clamp loses is written down** (`str_bundle_loci.md` §7.6, the review's
+        // finding M3; segments since the merge of main's partial-read phase fix, 2026-10-12). A
+        // witness that covers the whole locus no longer says which flank the read anchored, and
+        // both a segment and a bundle compare a left-held read with the start of the repeat and a
+        // right-held one with its end (`read_likelihoods.md` §5.2), so two such reads of the same
+        // bases from the two sides stay two observations.
+        let held_flank = (read_witness.is_flush_left() && read_witness.is_flush_right(locus_len))
+            .then_some(border);
         // **At a bundle, a read ending inside the hull is kept as a partial too**: it counts toward
         // the hull's depth, which the hidden-duplication filter's coverage windows read, and calling
         // scores it as a lower bound from the flank it held (`str_bundle_loci.md` §6.1, §7.6).
@@ -2090,21 +2088,29 @@ mod classify {
             }
         }
 
-        /// **A segment records no held flank, even over the whole tract**: a segment reads every
-        /// partial from the tract's start whichever flank it held, so its observations are left
-        /// as they were (`str_bundle_loci.md` §7.6).
+        /// **A segment records the held flank of a partial over the whole tract**, from either
+        /// side: the witness covers every position and no longer says it, and a segment compares
+        /// a left-held read with the tract's start and a right-held one with its end
+        /// (`read_likelihoods.md` §5.2; `str_bundle_loci.md` §7.6).
         #[test]
-        fn a_segment_partial_over_the_whole_tract_records_no_flank() {
-            match classify(&read(b"GGGGGGCACACACACA", 40)) {
-                Classified::Observed {
-                    read_witness: ReadWitness::Partial { positions },
-                    held_flank,
-                    ..
-                } => {
-                    assert_eq!(positions.runs().collect::<Vec<_>>(), vec![(0, 6)]);
-                    assert_eq!(held_flank, None);
+        fn a_segment_partial_over_the_whole_tract_records_its_flank() {
+            let mut right_held = read(b"CACACACACATTTTTT", 40);
+            right_held.pos = 3;
+            for (read, flank) in [
+                (read(b"GGGGGGCACACACACA", 40), HeldFlank::Left),
+                (right_held, HeldFlank::Right),
+            ] {
+                match classify(&read) {
+                    Classified::Observed {
+                        read_witness: ReadWitness::Partial { positions },
+                        held_flank,
+                        ..
+                    } => {
+                        assert_eq!(positions.runs().collect::<Vec<_>>(), vec![(0, 6)]);
+                        assert_eq!(held_flank, Some(flank));
+                    }
+                    other => panic!("expected a partial over the whole tract, got {other:?}"),
                 }
-                other => panic!("expected a partial over the whole tract, got {other:?}"),
             }
         }
 
@@ -3010,6 +3016,12 @@ mod tally {
         /// reference slices, and the plan's stated equivalence
         /// `PartialRight(n) ⇔ Partial { len - n, n }` silently stops holding at `n = len`.
         /// Pinned here so it is a decision on the record rather than a surprise in a dump.
+        ///
+        /// *Since 2026-10-12 the classifier writes the side down on such a read
+        /// ([`SequenceObservation::held_flank`]), at segments as at bundles, so two real reads
+        /// from opposite borders no longer merge
+        /// (`partials_held_from_two_flanks_stay_two_observations`). What this still pins is the
+        /// witness: once saturated, it alone cannot tell the sides apart.*
         #[test]
         fn an_expanded_allele_merges_the_two_sides_into_one_observation() {
             let locus_len = LocusLen::from_positions(6);

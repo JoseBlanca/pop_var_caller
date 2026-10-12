@@ -242,6 +242,7 @@ fn an_observation(bases: &[u8], reads: &[ChainId], group: u32) -> SequenceObserv
     let num_obs = reads.len() as u32;
     SequenceObservation {
         flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
+        held_flank: None,
         bases: Box::from(bases),
         read_witness: ReadWitness::Complete,
         read_group: ReadGroupId(group),

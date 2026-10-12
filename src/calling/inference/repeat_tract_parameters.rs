@@ -1279,7 +1279,6 @@ pub fn bundle_candidates<'a>(
                 runs: &detail.runs,
                 parse,
                 leading_flank_bases: 0,
-                reference_hull_len: alleles.reference().len() as u32,
             }),
         })
         .collect()
@@ -1288,6 +1287,7 @@ pub fn bundle_candidates<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
 
     use crate::calling::ContaminationView;
     use crate::calling::GenotypeTable;
@@ -1681,7 +1681,6 @@ mod tests {
                     runs: &runs,
                     parse,
                     leading_flank_bases: 0,
-                    reference_hull_len: hull.len() as u32,
                 }),
                 ..candidate
             })
@@ -2208,7 +2207,7 @@ mod tests {
         observations: &[SequenceObservation],
     ) -> Vec<LogProb> {
         let detail = detail();
-        let evidence = SsrSampleEvidence::new(observations, &detail);
+        let evidence = SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN);
         let contexts = gathered.scoring_contexts(alleles);
         let table = GenotypeTable::build(diploid(), alleles.len());
         let view = table.view();

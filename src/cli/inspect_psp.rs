@@ -75,8 +75,8 @@ pub const COLUMNS: [&str; 24] = [
     // `left,right`; empty where it took none.
     "flank_deletion",
     // Version 3: the flank the observation's reads held, `left` or `right`, where their witness
-    // covers the whole locus and the walk recorded it (an STR bundle's partials, psp format 2.1);
-    // empty elsewhere.
+    // covers the whole locus and the walk recorded it (an STR segment's or bundle's partials, psp
+    // format 2.1); empty elsewhere.
     "held_flank",
 ];
 

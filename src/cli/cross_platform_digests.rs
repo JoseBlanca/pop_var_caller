@@ -245,7 +245,23 @@ mod tests {
     /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
     /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
     /// was `f037a347e52634175a3eb5b4353fb8d0`. Recorded in the Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "977f08d389bdba037ee350ab38164e1b";
+    ///
+    /// **Re-recorded 2026-10-12** when a partial read that held the right flank of an STR segment
+    /// began to be compared with the candidate's end rather than its start (`read_likelihoods.md`
+    /// §5.2). Only the repeat tract's `AF` moves, in its sixth decimal (0.249923 to 0.249924).
+    /// Measured by scoring every partial from the left again, which restores the old checksum; the
+    /// benchmark measurement is `reports/implementations/str_partial_read_phase_2026-10-12.md`.
+    /// It was `f037a347e52634175a3eb5b4353fb8d0`. Recorded in the Linux container (arm64, glibc)
+    /// only.
+    ///
+    /// **Merged 2026-10-12** (main's partial-read phase fix into the STR-bundle branch): the two
+    /// notes above were each recorded from `f037a347e52634175a3eb5b4353fb8d0` on their own branch.
+    /// With both, the header is the bundle branch's and the repeat tract's record is main's to the
+    /// byte (`AF=0.249924`); segments now also record a whole-tract partial's held flank, and no
+    /// field of this fixture moves for it. It was `977f08d389bdba037ee350ab38164e1b` on str-bundles
+    /// and `e9e8aee5b6714aa33ce91bd04290984e` on main. Recorded in the Linux container (arm64,
+    /// glibc) only.
+    const WITH_ERRORS_CALLS_MD5: &str = "f65f586f58163d23d127d7f8c823e433";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -279,7 +295,18 @@ mod tests {
     /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
     /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
     /// was `fcc1a04573dbbdb08ac80127c554dc94`. Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "08a675fd6ba4bc8a627fa2bd2118b415";
+    ///
+    /// **Re-recorded 2026-10-12** with the partial-read change of [`WITH_ERRORS_CALLS_MD5`]'s
+    /// last note: only the repeat tract's `QUAL` (37.2 to 37.3) and `AF` (0.023717 to 0.023718)
+    /// move, and scoring every partial from the left again restores the old checksum.
+    /// It was `fcc1a04573dbbdb08ac80127c554dc94`. Recorded in the Linux container (arm64,
+    /// glibc) only.
+    ///
+    /// **Merged 2026-10-12**, as [`WITH_ERRORS_CALLS_MD5`]'s last note: the header is the bundle
+    /// branch's and the repeat tract's record main's to the byte (`QUAL` 37.3, `AF=0.023718`). It
+    /// was `08a675fd6ba4bc8a627fa2bd2118b415` on str-bundles and `efa3947cb4eacd394de0425ce87c40ed`
+    /// on main. Recorded in the Linux container (arm64, glibc) only.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "5c2414e47ecc6748f12db076d7513de1";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

@@ -461,10 +461,12 @@ pub fn shape_ssr_locus<'a>(
     // missing rather than a tract nobody covered — and that constructor refuses it by name.
     views.clear();
     views.reserve(observations_of_each_run_sample.len());
+    // The record's region is the tract, so its length is the axis the partial witnesses are on.
+    let tract_len = crate::locus_generation::LocusLen::of_region(region);
     views.extend(
         observations_of_each_run_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, detail)),
+            .map(|observations| SsrSampleEvidence::new(observations, detail, tract_len)),
     );
     LocusEvidence::ssr(region, views, detail, candidate_repeat_counts)
 }
@@ -480,10 +482,12 @@ pub fn shape_ssr_bundle_locus<'a>(
     views: &'a mut Vec<SsrSampleEvidence<'a>>,
 ) -> LocusEvidence<'a> {
     views.clear();
+    // The record's region is the hull, so its length is the axis the partial witnesses are on.
+    let hull_len = crate::locus_generation::LocusLen::of_region(region);
     views.extend(
         observations_of_each_run_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::of_bundle(observations)),
+            .map(|observations| SsrSampleEvidence::of_bundle(observations, hull_len)),
     );
     LocusEvidence::ssr_bundle(region, views, detail, candidate_parses)
 }
@@ -601,6 +605,7 @@ impl SsrEvidenceScratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
 
     use crate::calling::CandidateAlleles;
     use crate::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
@@ -805,7 +810,7 @@ mod tests {
         let mut scratch = SsrEvidenceScratch::default();
         let rebuilt = scratch.rebuild(&observation, 1);
 
-        let evidence = SsrSampleEvidence::new(&rebuilt[0], &detail);
+        let evidence = SsrSampleEvidence::new(&rebuilt[0], &detail, TEST_TRACT_LEN);
         assert_eq!(
             evidence
                 .complete_observations()

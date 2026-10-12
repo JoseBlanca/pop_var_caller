@@ -375,27 +375,66 @@ pub struct SequenceObservation {
     pub flank_deletion: FlankDeletion,
     /// **Which flank these reads anchored, where their witness cannot say it** — part of the
     /// identity, since one sequence read from the left flank and from the right is two pieces of
-    /// evidence about the carrier's hull (`str_bundle_loci.md` §7.6).
+    /// evidence about the carrier's repeat (`str_bundle_loci.md` §7.6).
     ///
     /// A partial witness says its side itself when it touches one border of the locus only. One
     /// that covers the whole locus does not: the classifier lays a read's reach down from the
     /// border it anchored and clamps it to the locus (`ReadWitness::from_left`), so a read that
-    /// ran past the far border from either side covers every position. **Set only there, and
-    /// only at an STR bundle**, whose emission reads the side; `None` on every other observation —
-    /// complete ones, partials whose witness says their side, and every STR segment's partials,
-    /// which a segment reads from the tract's start whichever flank they held.
+    /// ran past the far border from either side covers every position. **Set only there**, at an
+    /// STR segment and an STR bundle alike, since both compare a partial read with the end of
+    /// the repeat its flank is on (`read_likelihoods.md` §5.2); `None` on every other observation
+    /// — complete ones, and partials whose witness says their side. A psp written before format
+    /// 2.1 carries none, and such a read is scored from both sides, one half each
+    /// ([`HeldFlank::of_witness`]).
     pub held_flank: Option<HeldFlank>,
 }
 
 /// **Which flank of an STR locus a read anchored before it ran out inside the repeat** — the
 /// side its bases start from. A read that held the left flank shows the start of its carrier's
 /// repeat; one that held the right flank shows its end.
+///
+/// A partial witness says it when it touches one border of the locus only. One that covers the
+/// whole locus does not: the generator lays a read's reach down from the border it anchored and
+/// clamps it to the locus ([`ReadWitness::from_left`]), so a read that ran past the far border
+/// from either side covers every position. There the classifier writes the side down
+/// ([`SequenceObservation::held_flank`]); [`HeldFlank::of_witness`] reads both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum HeldFlank {
     /// The flank before the repeat's first base.
     Left,
     /// The flank after the repeat's last base.
     Right,
+}
+
+impl HeldFlank {
+    /// **The flank a partial read held** — the one place this is decided, for a segment and a
+    /// bundle alike. The witness, on a locus of `locus_len` positions, says it first: `Left` when
+    /// it is flush with the left border only, `Right` when flush with the right border only.
+    /// Where it covers the whole locus it cannot, and `recorded` — the side the classifier wrote
+    /// down ([`SequenceObservation::held_flank`]) — answers. The generator records a side only
+    /// there, so the two never disagree on a psp it wrote; where they would, the witness wins,
+    /// since it is what the read's bases were laid on.
+    ///
+    /// `None` where neither says — a complete read, a whole-locus witness from a psp written
+    /// before format 2.1, or a witness touching neither border, which no generator mints.
+    #[must_use]
+    pub fn of_witness(
+        witness: &ReadWitness,
+        locus_len: LocusLen,
+        recorded: Option<HeldFlank>,
+    ) -> Option<Self> {
+        let ReadWitness::Partial { positions } = witness else {
+            return None;
+        };
+        match (
+            positions.is_flush_left(),
+            positions.is_flush_right(locus_len),
+        ) {
+            (true, false) => Some(Self::Left),
+            (false, true) => Some(Self::Right),
+            _ => recorded,
+        }
+    }
 }
 
 /// **How many flank bases a deletion running out of an STR segment removed, on each side.**

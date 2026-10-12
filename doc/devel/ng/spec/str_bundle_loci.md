@@ -573,8 +573,8 @@ the first run, the fixed piece after it, and so on, then the right flank. **Each
 change, independently of the others**: a slip of `k` whole units at its stutter model's price
 `P_r(k)`, placed at each place in the run as at a complete read, or a sequencing indel of `Δ`
 bases that are not whole units, at that model's price for `Δ` (`|Δ| ≤ 2 · MAX_PART_REPEAT_SLIP`,
-the stretch long enough to lose it), resized at the run's end — the places and prices the
-part-repeat regime of §7.3 uses in that run.
+the stretch long enough to lose it), resized at the run's far end from the read — the places and
+prices the part-repeat regime of §7.3 uses in that run.
 
 ```text
 P(w | allele) = Σ over every way the runs the read reaches can change   Π over those runs   price of its change
@@ -594,6 +594,14 @@ So the three readings above are now exact:
   read can reach score it bit for bit alike** (`a_partial_read_scores_alike_against_alleles_that_differ_beyond_its_reach`).
 
 A read that held the right flank is walked from its last base backwards, the left flank last.
+*(Changed 2026-10-12, when main's partial-read phase fix was merged.)* **Each run is mirrored
+before its changes are placed**: written backwards, in the motif its last copy spells backwards, so
+a sequencing indel is resized at the run's start — its far end from the read — exactly as a
+segment now scores a right-held read (`read_likelihoods.md` §5.2). As first built, a right-held
+read's run was resized at its end, the end nearest the read, and then reversed: not the mirror
+image of the left-held rule, and not what a segment does. A bundle of one run now scores a read
+from either flank as a segment does (`a_one_run_bundles_partial_read_scores_as_the_segments`, both
+arms).
 
 **How this differs from a complete read, and why.** For one run it is the segment's censored sum,
 term for term (`a_one_run_bundles_partial_read_scores_as_the_segments`, to twelve digits). With
@@ -722,9 +730,14 @@ covers the whole hull, it now writes the side down on the observation
 (`SequenceObservation::held_flank`, part of the observation's identity, so the same bases read
 from the two sides stay two observations). The cohort merge carries it on the partial row, and
 the emission reads it: a whole-hull read is scored from the flank it held. The average of both
-readings is kept only where the side is genuinely unknown — a psp written before format 2.1, or a
-witness touching neither border, which no generator mints. Segments record nothing, since they
-read every partial from the tract's start (below), and their observations are unchanged.
+readings is kept only where the side is genuinely unknown — a psp written before format 2.1. A
+witness touching neither border, which no generator mints, stops the row. *(Changed 2026-10-12,
+when main's partial-read phase fix was merged: segments record the side too.)* A segment now
+compares a right-held read with the candidate's end, so its whole-tract partials carry their flank
+as a bundle's do, and the same bases read from the two sides are two observations there as well.
+The side is decided in one place, `HeldFlank::of_witness`: the witness where it touches one border
+only, the recorded side where it covers the whole locus; the row hands the emission a definite
+side and does the one-half-each mixture itself.
 
 In the psp the side is format 2.1's new last body field, `observation-held-flanks`: a list of
 `(observation, flank)` pairs, empty — one byte — on nearly every record. A minor bump, as format
@@ -744,8 +757,10 @@ what two crossing reads of one sample, and a tenth of them, show, and a partial 
 between those candidates. At low depth that leaves a bundle whose other allele no two crossing
 reads show with no candidate for it, whatever its partial reads show.
 
-**One difference from a segment, left as it is.** A segment reads every partial's bases as the
-start of its tract, whichever flank the read held (`censored_emission`). For a read that held the
+**One difference from a segment, since closed.** *(Closed 2026-10-12 by main's partial-read phase
+fix, `reports/implementations/str_partial_read_phase_2026-10-12.md`, and the merge that made
+segments record the held flank; the paragraph as written before is kept.)* A segment reads every
+partial's bases as the start of its tract, whichever flank the read held (`censored_emission`). For a read that held the
 right flank of a pure tract that is the same comparison when the read showed whole copies and a
 phase-shifted one otherwise; segments are not changed here. *(Measured in review, 2026-10-12, on
 one simulated sample, PCR, 30×: 14,175 of the segments' 22,661 right-flank partial reads are

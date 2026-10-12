@@ -468,8 +468,10 @@ anyway. The 1.x record layouts stay recognised by `RecordLayout`, for the record
 **Version 2.1 adds one field at the body's end, `observation-held-flanks`**, written on every
 record whatever its kind: a list of `(observation, flank)` varint pairs, the flank 0 for the left
 and 1 for the right, for each observation whose reads' held flank was recorded — a partial at an
-STR bundle whose witness covers the whole hull, which no longer says which flank the read anchored
-([`str_bundle_loci.md`](str_bundle_loci.md) §7.6). Empty, one byte before compression, on nearly
+STR bundle or an STR segment whose witness covers the whole locus, which no longer says which flank
+the read anchored ([`str_bundle_loci.md`](str_bundle_loci.md) §7.6; segments too since
+2026-10-12, when a segment began comparing a right-held read with the candidate's end,
+`read_likelihoods.md` §5.2). Empty, one byte before compression, on nearly
 every record. An index past the record's observations, or a flank other than 0 or 1, is refused.
 
 - **A minor bump, as 1.2 was.** A 2.0 reader accepts a 2.1 file and walks past the field as the
