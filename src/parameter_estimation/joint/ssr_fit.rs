@@ -75,6 +75,7 @@ pub mod counting_fit_errors;
 pub mod genotype_rows;
 pub mod library_stutter;
 pub mod neighbour_start;
+pub mod penalised_fit;
 
 use crate::float;
 use crate::parameter_estimation::joint::census::{

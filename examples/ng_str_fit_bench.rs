@@ -55,8 +55,8 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
     ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan, HeldOutSettings, PeriodFit,
-    Sampler, ScoringFallback, TheClimb, TheCountingFit, numbers_for_scoring, score_locus,
-    with_the_curves, without_fold,
+    Sampler, ScoringFallback, TheClimb, TheCountingFit, ThePenalisedFit, numbers_for_scoring,
+    score_locus, with_the_curves, without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence, TractReads,
@@ -98,7 +98,9 @@ struct Cli {
     #[arg(long)]
     multipliers_told: bool,
     /// The methods, comma-separated: `A` (the climb), `B` (the counting fit, spread from pairs),
-    /// `B_within` (the counting fit, spread from each sample's own two copies).
+    /// `B_within` (the counting fit, spread from each sample's own two copies), `D` (penalised
+    /// counting) and `D_working_F` (the same, reporting at one sample the concentration it worked
+    /// at); the `B_` variants in `method_named` are for measurements.
     #[arg(long, value_delimiter = ',', default_value = "B")]
     methods: Vec<String>,
     /// Folds for the held-out score; 0 switches it off.
@@ -171,6 +173,11 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
                 .unwrap_or(TheCountingFit::default().share_prior_tracts),
             ..TheCountingFit::default()
         }),
+        "D" => Box::new(ThePenalisedFit::default()),
+        "D_working_F" => Box::new(ThePenalisedFit {
+            report_working_concentration: true,
+            ..ThePenalisedFit::default()
+        }),
         "B_within" => Box::new(TheCountingFit {
             pairs: false,
             ..TheCountingFit::default()
@@ -195,7 +202,7 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
         }),
         other => panic!(
             "no method is called {other}; the methods are A, B, B_within, B_noerrors, \
-             B_noprior, B_tight and B_bootstrap"
+             B_noprior, B_tight, B_bootstrap, D and D_working_F"
         ),
     }
 }

@@ -47,6 +47,9 @@ pub struct CountedClass {
     /// How many rounds ran, and the largest change of any number in the last.
     pub rounds: usize,
     pub last_change: f64,
+    /// Rounds of counting over the whole fit: with the spread read off pairs of samples, every
+    /// counting after each reading, where [`rounds`](Self::rounds) is the last one's.
+    pub rounds_in_all: usize,
     /// The objective at the answer.
     pub composite_log_likelihood: f64,
 }
@@ -113,33 +116,39 @@ pub fn concentration_is_identified(
     }
 }
 
-/// The expected counts one round gathers over a class, or over one tract of it.
+/// **The expected counts one round gathers over a class, or over one tract of it**
+/// ([`expected_counts`], [`expected_counts_by_tract`]): every read shared between "read exactly"
+/// and "slipped", every sample's alleles shared among the lengths, given the class's current
+/// numbers. Each of the class's numbers is a closed-form function of them.
 ///
 /// **They are also the objective's slope.** The slope of the log of a sum over hidden genotypes
 /// and slips is the expected slope of the log-likelihood that knew them (Fisher's identity), and
 /// that slope is a function of these counts alone (`counting_fit_errors`).
 #[derive(Debug, Clone, Default)]
-pub(super) struct Counts {
+pub struct ClassCounts {
     /// Per allele class, how many independent allele draws.
-    pub(super) draws: Vec<f64>,
+    pub draws: Vec<f64>,
     /// Of each sample's two copies not identical by descent, how many pairs, and how many of those
     /// were one draw from the tract's frequencies.
-    pub(super) pairs_not_by_descent: f64,
-    pub(super) shared_in_tract: f64,
+    pub pairs_not_by_descent: f64,
+    pub shared_in_tract: f64,
     /// Reads that reported their allele's length, and reads that slipped.
-    pub(super) exact: f64,
-    pub(super) slipped: f64,
+    pub exact: f64,
+    pub slipped: f64,
     /// Slipped reads by direction; `steps` is the repeats they slipped summed, over the `stepped`
     /// reads whose direction and length were placed.
-    pub(super) shorter: f64,
-    pub(super) longer: f64,
-    pub(super) steps: f64,
-    pub(super) stepped: f64,
+    pub shorter: f64,
+    pub longer: f64,
+    pub steps: f64,
+    pub stepped: f64,
     /// The objective summed over what was counted.
-    pub(super) log_likelihood: f64,
+    pub log_likelihood: f64,
 }
 
-impl Counts {
+/// The counts one round gathers, by the name the counting fit's own code uses.
+pub(super) type Counts = ClassCounts;
+
+impl ClassCounts {
     pub(super) fn new(classes: usize) -> Self {
         Self {
             draws: vec![0.0; classes],
@@ -246,6 +255,33 @@ pub fn fit_class_by_counting(
         None,
         1.0,
         SHARE_PRIOR_TRACTS,
+        homozygote_excess,
+        config,
+        max_rounds,
+        tolerance,
+    )
+}
+
+/// [`fit_class_by_counting`] with the shares' prior weight `share_prior_tracts` in place of
+/// [`SHARE_PRIOR_TRACTS`] — zero is the fit before the prior, the plain maximum of its objective.
+/// **For measuring and for checks**, not for a run.
+#[must_use]
+pub fn fit_class_by_counting_at_share_prior(
+    evidence: &StratumEvidence,
+    start: Slippage,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    max_rounds: usize,
+    tolerance: f64,
+    share_prior_tracts: f64,
+) -> CountedClass {
+    count_class(
+        evidence,
+        start,
+        None,
+        None,
+        1.0,
+        share_prior_tracts,
         homozygote_excess,
         config,
         max_rounds,
@@ -361,6 +397,7 @@ fn count_class(
         share_prior_tracts,
         rounds,
         last_change,
+        rounds_in_all: rounds,
         composite_log_likelihood: log_likelihood,
     }
 }
@@ -501,6 +538,37 @@ pub(super) fn expected_counts_by_tract(
             counts
         })
         .collect()
+}
+
+/// **One round's expected counts over a class, at the class's current numbers** — the counting
+/// fit's E-step summed over the tracts, so that a fit across several classes can gather each
+/// class's counts and choose the numbers itself.
+///
+/// `slippage`, `shares` (one per allele class, `-allele_span ..= +allele_span`) and
+/// `concentration` are the class's numbers this round; `homozygote_excess` is indexed by sample.
+/// Every library is scored at `slippage` (multipliers are not fitted here).
+#[must_use]
+pub fn expected_counts(
+    evidence: &StratumEvidence,
+    slippage: Slippage,
+    shares: &[f64],
+    concentration: f64,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> ClassCounts {
+    let per_tract = expected_counts_by_tract(
+        evidence,
+        slippage,
+        shares,
+        concentration,
+        homozygote_excess,
+        config,
+    );
+    let mut counts = ClassCounts::new(allele_classes_of(config));
+    for tract in &per_tract {
+        counts.add(tract);
+    }
+    counts
 }
 
 /// Every library of `evidence` scored at the class's one stutter: one slippage group, every
@@ -675,6 +743,7 @@ fn alternate_with_pairs(
     tolerance: f64,
     alternations: usize,
 ) -> CountedClass {
+    let mut rounds_in_all = fitted.rounds_in_all;
     for _ in 0..alternations {
         let next = fit_spread_by_pairs(
             evidence,
@@ -695,12 +764,14 @@ fn alternate_with_pairs(
             max_rounds,
             tolerance,
         );
+        rounds_in_all += fitted.rounds;
         let settled = (float::ln(next) - float::ln(spread)).abs() < 0.01;
         spread = next;
         if settled {
             break;
         }
     }
+    fitted.rounds_in_all = rounds_in_all;
     fitted
 }
 
@@ -865,6 +936,140 @@ pub(super) fn scaled_ln_pairs_of_tract(
         total += float::ln(pair.max(1e-300));
     }
     total
+}
+
+/// **Every pair of samples a class's spread is read from**, with each sample's likelihood of every
+/// ordered allele pair at the stutter it was built at: at a tract, every sample with reads paired
+/// with the next (and the last with the first). Built once, then [`log_likelihood`](Self::log_likelihood)
+/// scores any spread.
+pub struct SamplePairs {
+    /// Per tract with two samples or more, per sample with reads, its likelihood of every ordered
+    /// allele pair, and its homozygote excess.
+    per_tract: Vec<Vec<(Vec<f64>, f64)>>,
+    classes: usize,
+}
+
+impl SamplePairs {
+    /// The pairs of `evidence`'s tracts, each sample's reads scored at `slippage`.
+    #[must_use]
+    pub fn of(
+        evidence: &StratumEvidence,
+        slippage: Slippage,
+        homozygote_excess: &[f64],
+        config: &SsrFitConfig,
+    ) -> Self {
+        let classes = allele_classes_of(config);
+        let genotypes = genotype_pairs(classes);
+        let libraries: Vec<Library> = evidence
+            .libraries
+            .iter()
+            .map(|library| Library {
+                slippage_group: 0,
+                stutter_multiplier: 1.0,
+                ..*library
+            })
+            .collect();
+        let distributions = ReadDistributionsByLevel::of(
+            &[slippage],
+            &libraries,
+            config.allele_span,
+            evidence.read_span,
+        );
+        let per_tract = evidence
+            .tracts
+            .par_iter()
+            .filter(|tract| tract.samples.len() >= 2)
+            .map(|tract| {
+                let likelihoods =
+                    TractLikelihoods::of(tract, &distributions, &genotypes, homozygote_excess);
+                likelihoods
+                    .scaled
+                    .chunks_exact(likelihoods.width)
+                    .zip(&likelihoods.homozygote_excess)
+                    .map(|(row, excess)| {
+                        let mut ordered = vec![0.0; classes * classes];
+                        for ((first, second), value) in genotypes.iter().zip(row) {
+                            ordered[first * classes + second] = *value;
+                            ordered[second * classes + first] = *value;
+                        }
+                        (ordered, *excess)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self { per_tract, classes }
+    }
+
+    /// **The pairwise log-likelihood of each tract with two samples or more**, in the order
+    /// [`log_likelihood`](Self::log_likelihood) sums them: what a standard error that treats the
+    /// tract as the independent unit needs. Computed as `log_likelihood` computes each term.
+    #[must_use]
+    pub fn log_likelihood_by_tract(&self, shares: &[f64], ln_spread: f64) -> Vec<f64> {
+        let classes = self.classes;
+        let spread = float::exp(ln_spread);
+        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+        self.per_tract
+            .par_iter()
+            .map(|samples| {
+                let mut total = 0.0;
+                let count = samples.len();
+                let pairs = if count == 2 { 1 } else { count };
+                for index in 0..pairs {
+                    let (one, one_excess) = &samples[index];
+                    let (other, other_excess) = &samples[(index + 1) % count];
+                    let pair = pair_likelihood(
+                        one,
+                        *one_excess,
+                        other,
+                        *other_excess,
+                        &weights,
+                        spread,
+                        classes,
+                    );
+                    total += float::ln(pair.max(1e-300));
+                }
+                total
+            })
+            .collect()
+    }
+
+    /// Whether any tract has two samples with reads.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.per_tract.is_empty()
+    }
+
+    /// **The pairwise log-likelihood at spread `exp(ln_spread)`**, the class's allele length
+    /// variation `shares`, up to a constant that depends on neither.
+    #[must_use]
+    pub fn log_likelihood(&self, shares: &[f64], ln_spread: f64) -> f64 {
+        let classes = self.classes;
+        let spread = float::exp(ln_spread);
+        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+        self.per_tract
+            .par_iter()
+            .map(|samples| {
+                let mut total = 0.0;
+                let count = samples.len();
+                let pairs = if count == 2 { 1 } else { count };
+                for index in 0..pairs {
+                    let (one, one_excess) = &samples[index];
+                    let (other, other_excess) = &samples[(index + 1) % count];
+                    let pair = pair_likelihood(
+                        one,
+                        *one_excess,
+                        other,
+                        *other_excess,
+                        &weights,
+                        spread,
+                        classes,
+                    );
+                    total += float::ln(pair.max(1e-300));
+                }
+                total
+            })
+            .sum()
+    }
 }
 
 /// One pair of samples' likelihood at a tract: both samples' reads summed over their alleles, each
