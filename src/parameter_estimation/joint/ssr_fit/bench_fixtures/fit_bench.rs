@@ -617,8 +617,6 @@ pub fn score_locus(
         allele_span,
         read_span,
     );
-    let likelihoods = TractLikelihoods::of(tract, &distributions, &genotypes, homozygote_excess);
-
     // The classes the Dirichlet can put frequency on.
     let kept: Vec<usize> = (0..classes)
         .filter(|class| numbers.allele_length_variation[*class] > 0.0)
@@ -627,8 +625,21 @@ pub fn score_locus(
         .iter()
         .map(|class| numbers.concentration * numbers.allele_length_variation[*class])
         .collect();
+    // **Only the genotypes the shares allow are scored**, so each sample's likelihoods are scaled
+    // to the best of those. Scaled to the best of all genotypes, a sample of 300 reads whose own
+    // allele has no share would see every allowed genotype underflow to zero and score −∞, where
+    // the true log-likelihood is finite, if very low.
+    let allowed: Vec<(usize, usize)> = genotypes
+        .iter()
+        .filter(|(first, second)| {
+            numbers.allele_length_variation[*first] > 0.0
+                && numbers.allele_length_variation[*second] > 0.0
+        })
+        .copied()
+        .collect();
+    let likelihoods = TractLikelihoods::of(tract, &distributions, &allowed, homozygote_excess);
     let mut position = vec![0_usize; classes * classes];
-    for (index, (first, second)) in genotypes.iter().enumerate() {
+    for (index, (first, second)) in allowed.iter().enumerate() {
         position[first * classes + second] = index;
         position[second * classes + first] = index;
     }
@@ -1270,6 +1281,32 @@ mod tests {
             scored.ln_likelihood
         );
         assert_eq!(scored.reads, 8);
+    }
+
+    /// **A deep sample whose own allele has no share scores a finite log-likelihood**: 300 reads at
+    /// the one length the shares leave out, so every allowed genotype is hundreds of log units less
+    /// likely than the excluded one.
+    #[test]
+    fn a_deep_sample_at_an_allele_without_a_share_scores_finitely() {
+        let numbers = ClassNumbers {
+            allele_length_variation: vec![0.5, 0.0, 0.5],
+            ..tiny_numbers()
+        };
+        let tract = tiny_locus(&[[2, 300, 1]]);
+        let scored = score_locus(
+            &tract,
+            &numbers,
+            &one_library(),
+            &[0.5],
+            1,
+            &HeldOutSettings::default(),
+            1,
+        );
+        assert!(
+            scored.ln_likelihood.is_finite() && scored.ln_likelihood < -500.0,
+            "{}",
+            scored.ln_likelihood
+        );
     }
 
     /// **Both Monte Carlo samplers agree with the brute-force sum within their own error**, and

@@ -197,7 +197,8 @@ def cost(rows):
             continue
         parameter = row["parameter"]
         if parameter in ("fit_seconds", "heldout_fit_seconds", "heldout_score_seconds",
-                         "peak_rss_mib", "draw_seconds", "rows_with_reads"):
+                         "peak_rss_mib", "draw_seconds", "rows_with_reads",
+                         "process_cpu_seconds"):
             value = number(row["estimate"])
             if value is not None:
                 method = row["method"].removesuffix("_raw")
@@ -205,8 +206,9 @@ def cost(rows):
     print("## Cost\n")
     print("Mean over the seeds. Peak memory is the process's, the drawn cohort included "
           "(`draw` rows: the draw alone, where a run without methods measured it).\n")
-    print("| cell | method | fit, s | held-out fits, s | held-out scoring, s | peak memory, MiB |")
-    print("|---|---|---|---|---|---|")
+    print("| cell | method | fit, s | held-out fits, s | held-out scoring, s | process CPU, s | "
+          "peak memory, MiB |")
+    print("|---|---|---|---|---|---|---|")
     for (cell, method), values in sorted(by.items()):
         if method in ("draw", "process", "truth"):
             continue
@@ -216,7 +218,7 @@ def cost(rows):
 
         print(f"| {cell_label(cell)} | {method} | {mean('fit_seconds')} | "
               f"{mean('heldout_fit_seconds')} | {mean('heldout_score_seconds')} | "
-              f"{mean('peak_rss_mib')} |")
+              f"{mean('process_cpu_seconds')} | {mean('peak_rss_mib')} |")
     print()
 
 

@@ -52,8 +52,8 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
     write_truth_tsv,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
-    ClassEstimate, ClassNumbers, FoldPlan, HeldOutSettings, PeriodFit, TheClimb, TheCountingFit,
-    score_locus, with_the_curves, without_fold,
+    ClassEstimate, ClassNumbers, FoldPlan, HeldOutSettings, PeriodFit, Sampler, TheClimb,
+    TheCountingFit, score_locus, with_the_curves, without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence,
@@ -110,6 +110,9 @@ struct Cli {
     /// The most Monte Carlo draws a locus gets.
     #[arg(long, default_value_t = 65_536)]
     max_draws: usize,
+    /// The held-out sampler beyond two samples: `automatic`, `dirichlet` or `sequential`.
+    #[arg(long, default_value = "automatic")]
+    sampler: String,
     /// How many classes the climb fits at once (all the machine's threads by default).
     #[arg(long)]
     climb_strata_at_once: Option<usize>,
@@ -475,6 +478,12 @@ fn main() {
         loci_scored_per_class: cli.heldout_loci,
         target_standard_error: cli.target_se,
         max_draws: cli.max_draws,
+        sampler: match cli.sampler.as_str() {
+            "automatic" => Sampler::Automatic,
+            "dirichlet" => Sampler::DirichletOnly,
+            "sequential" => Sampler::SequentialOnly,
+            other => panic!("no sampler is called {other}"),
+        },
         ..HeldOutSettings::default()
     };
     let curve_config = SsrFitConfig::default();
@@ -627,6 +636,7 @@ fn main() {
                         .map(|(class, locus, truth)| {
                             let numbers = numbers[*class].as_ref()?;
                             let score = score_of(*class, *locus, numbers);
+
                             Some((
                                 *class,
                                 score.ln_likelihood,

@@ -27,8 +27,8 @@
 #   cargo build --release --features bench-fixtures --example ng_str_fit_bench
 #
 # A run whose rows file already exists is skipped, so an interrupted grid resumes where it stopped.
-# Each run's peak memory is read by /usr/bin/time (-l on macOS, -v on Linux) and appended to its
-# rows file as `method = <name>, parameter = peak_rss_mib`: the whole process, the drawn cohort
+# Each run's peak memory and CPU time are read by /usr/bin/time (-l on macOS, -v on Linux) and appended to its
+# rows file as `method = <name>, parameter = peak_rss_mib` and `process_cpu_seconds`. Memory is the whole process, the drawn cohort
 # included, so a method's own share is that minus the draw's (run the same cell with METHODS=none
 # to see the draw alone).
 
@@ -84,6 +84,18 @@ peak_mib() {
     fi
 }
 
+# The process's CPU time, user plus system, in seconds: unlike wall time, not inflated by other runs
+# sharing the machine.
+cpu_seconds() {
+    local report="$1"
+    if [[ "$time_flag" == "-l" ]]; then
+        # macOS: "<real> real <user> user <sys> sys"
+        awk '/ real / { printf "%.1f", $3 + $5 }' "$report"
+    else
+        awk -F': ' '/User time|System time/ { total += $2 } END { printf "%.1f", total }' "$report"
+    fi
+}
+
 mkdir -p "$OUT"
 for cell in $CELLS; do
     samples="${cell%%:*}"
@@ -116,8 +128,11 @@ for cell in $CELLS; do
                         "$binary" "${arguments[@]}" 2> "$OUT/$name.log"; then
                     peak="$(peak_mib "$OUT/$name.time")"
                     cell_columns="$(sed -n 2p "$rows" | cut -f1-6)"
+                    cpu="$(cpu_seconds "$OUT/$name.time")"
                     printf '%s\t%s\tall\tpeak_rss_mib\tNA\t%s\tNA\n' \
                         "$cell_columns" "$method" "${peak:-NA}" >> "$rows"
+                    printf '%s\t%s\tall\tprocess_cpu_seconds\tNA\t%s\tNA\n' \
+                        "$cell_columns" "$method" "${cpu:-NA}" >> "$rows"
                     echo "  done in $(( $(date +%s) - started )) s, peak ${peak:-NA} MiB" >&2
                 else
                     echo "  FAILED after $(( $(date +%s) - started )) s; see $OUT/$name.log" >&2
