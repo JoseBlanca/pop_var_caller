@@ -142,6 +142,11 @@ struct Cli {
     /// concentration, in place of calling's flat bottom rung. For measurement only.
     #[arg(long)]
     fallback_keeps_own_shares: bool,
+    /// Score every method variant twice: at calling's fallback (as `<variant>`) and with the class's
+    /// own shares kept (as `<variant>_own_shares`). A class whose numbers are the same both ways is
+    /// scored once. For measurement only.
+    #[arg(long, conflicts_with = "fallback_keeps_own_shares")]
+    both_fallbacks: bool,
     /// The held-out score's stated concentration for a class without one, in place of the
     /// period's median (or one where no class has one). For measurement only.
     #[arg(long)]
@@ -471,13 +476,17 @@ fn locus_seed(settings: &HeldOutSettings, repeats: u64, locus: usize) -> u64 {
 fn main() {
     let cli = Cli::parse();
     let model = model_of(&cli);
-    let truth_variant = match cli.truth.as_str() {
+    let mut truth_variant = match cli.truth.as_str() {
         "pcr" | "pcr_free" => cli.truth.clone(),
         path => PathBuf::from(path).file_stem().map_or_else(
             || "file".to_owned(),
             |stem| stem.to_string_lossy().into_owned(),
         ),
     };
+    // A truth whose between-locus share was replaced is another truth, and its cells are named so.
+    if let Some(share) = cli.between_locus_share {
+        truth_variant = format!("{truth_variant}_F{share}");
+    }
     let cell = cli.cell.clone().unwrap_or_else(|| {
         format!(
             "p{}_n{}_d{}_{}",
@@ -665,7 +674,43 @@ fn main() {
         }
 
         if settings.folds > 0 {
-            let mut sums = vec![vec![HeldOut::default(); drawn.strata.len()]; full.len()];
+            // Each variant is scored at every fallback asked for, its rows named with the suffix.
+            let fallbacks: Vec<(&str, ScoringFallback)> = if cli.both_fallbacks {
+                vec![
+                    (
+                        "",
+                        ScoringFallback {
+                            keep_own_shares: false,
+                            stated_concentration: cli.stated_concentration,
+                        },
+                    ),
+                    (
+                        "_own_shares",
+                        ScoringFallback {
+                            keep_own_shares: true,
+                            stated_concentration: cli.stated_concentration,
+                        },
+                    ),
+                ]
+            } else {
+                vec![(
+                    "",
+                    ScoringFallback {
+                        keep_own_shares: cli.fallback_keeps_own_shares,
+                        stated_concentration: cli.stated_concentration,
+                    },
+                )]
+            };
+            let scored_variants: Vec<String> = full
+                .iter()
+                .flat_map(|(variant, _)| {
+                    fallbacks
+                        .iter()
+                        .map(move |(suffix, _)| format!("{variant}{suffix}"))
+                })
+                .collect();
+            let mut sums =
+                vec![vec![HeldOut::default(); drawn.strata.len()]; scored_variants.len()];
             let mut fit_seconds = 0.0;
             let mut score_seconds = 0.0;
             for fold in 0..settings.folds {
@@ -687,62 +732,72 @@ fn main() {
                     .map(|((class, locus, _), truth)| (*class, *locus, *truth))
                     .collect();
                 for (variant_index, (variant, estimates)) in fitted.iter().enumerate() {
-                    // A class without its own shares or concentration is scored at calling's
-                    // fallback rung and counted, not skipped.
-                    let scored_numbers = numbers_for_scoring(
-                        estimates,
-                        ScoringFallback {
-                            keep_own_shares: cli.fallback_keeps_own_shares,
-                            stated_concentration: cli.stated_concentration,
-                        },
-                    );
-                    let numbers: Vec<Option<ClassNumbers>> = scored_numbers
-                        .iter()
-                        .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))
-                        .collect();
-                    let on_the_fallback: Vec<bool> = scored_numbers
-                        .iter()
-                        .map(|scored| scored.as_ref().is_some_and(|s| s.on_the_fallback))
-                        .collect();
-                    let scores: Vec<Option<HeldOutLocus>> = in_fold
-                        .par_iter()
-                        .map(|(class, locus, truth)| {
-                            let numbers = numbers[*class].as_ref()?;
-                            let score = score_of(*class, *locus, numbers);
-
-                            Some((
-                                *class,
-                                score.ln_likelihood,
-                                score.variance,
-                                *truth,
-                                score.reads,
-                            ))
-                        })
-                        .collect();
-                    if cli.locus_out.is_some() {
-                        for ((class, locus, _), score) in in_fold.iter().zip(&scores) {
-                            let Some((_, ln, _, truth, reads)) = score else {
-                                continue;
-                            };
-                            let (offset, share) = most_reported_offset(
-                                &drawn.strata[*class].tracts[*locus],
-                                drawn.strata[*class].read_span,
-                                numbers[*class].as_ref(),
-                            );
-                            locus_lines.push(format!(
-                                "{variant}\t{}\t{locus}\t{ln}\t{truth}\t{reads}\t{offset}\t{share:e}",
-                                drawn.strata[*class].stratum.reference_repeats
-                            ));
+                    // The numbers and scores of the variant's previous fallback: a class scored at
+                    // the same numbers again reuses its scores.
+                    let mut previous: Option<(
+                        Vec<Option<ClassNumbers>>,
+                        Vec<Option<HeldOutLocus>>,
+                    )> = None;
+                    for (fallback_index, (suffix, fallback)) in fallbacks.iter().enumerate() {
+                        let output = variant_index * fallbacks.len() + fallback_index;
+                        // A class without its own shares or concentration is scored at the
+                        // fallback rung and counted, not skipped.
+                        let scored_numbers = numbers_for_scoring(estimates, *fallback);
+                        let numbers: Vec<Option<ClassNumbers>> = scored_numbers
+                            .iter()
+                            .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))
+                            .collect();
+                        let on_the_fallback: Vec<bool> = scored_numbers
+                            .iter()
+                            .map(|scored| scored.as_ref().is_some_and(|s| s.on_the_fallback))
+                            .collect();
+                        let scores: Vec<Option<HeldOutLocus>> = in_fold
+                            .par_iter()
+                            .enumerate()
+                            .map(|(index, (class, locus, truth))| {
+                                let numbers_here = numbers[*class].as_ref()?;
+                                if let Some((earlier_numbers, earlier_scores)) = &previous
+                                    && earlier_numbers[*class].as_ref() == Some(numbers_here)
+                                {
+                                    return earlier_scores[index];
+                                }
+                                let score = score_of(*class, *locus, numbers_here);
+                                Some((
+                                    *class,
+                                    score.ln_likelihood,
+                                    score.variance,
+                                    *truth,
+                                    score.reads,
+                                ))
+                            })
+                            .collect();
+                        if cli.locus_out.is_some() {
+                            for ((class, locus, _), score) in in_fold.iter().zip(&scores) {
+                                let Some((_, ln, _, truth, reads)) = score else {
+                                    continue;
+                                };
+                                let (offset, share) = most_reported_offset(
+                                    &drawn.strata[*class].tracts[*locus],
+                                    drawn.strata[*class].read_span,
+                                    numbers[*class].as_ref(),
+                                );
+                                locus_lines.push(format!(
+                                    "{variant}{suffix}\t{}\t{locus}\t{ln}\t{truth}\t{reads}\t{offset}\t{share:e}",
+                                    drawn.strata[*class].stratum.reference_repeats
+                                ));
+                            }
                         }
-                    }
-                    for (class, ln, variance, truth, reads) in scores.into_iter().flatten() {
-                        let into = &mut sums[variant_index][class];
-                        into.ln += ln;
-                        into.variance += variance;
-                        into.truth_ln += truth;
-                        into.reads += reads;
-                        into.loci += 1;
-                        into.fallback_loci += usize::from(on_the_fallback[class]);
+                        for (class, ln, variance, truth, reads) in scores.iter().flatten().copied()
+                        {
+                            let into = &mut sums[output][class];
+                            into.ln += ln;
+                            into.variance += variance;
+                            into.truth_ln += truth;
+                            into.reads += reads;
+                            into.loci += 1;
+                            into.fallback_loci += usize::from(on_the_fallback[class]);
+                        }
+                        previous = Some((numbers, scores));
                     }
                 }
                 score_seconds += started.elapsed().as_secs_f64();
@@ -768,7 +823,7 @@ fn main() {
                 Some(score_seconds),
                 None,
             );
-            for ((variant, _), per_class) in full.iter().zip(&sums) {
+            for (variant, per_class) in scored_variants.iter().zip(&sums) {
                 heldout_rows(&mut rows, variant, per_class, &drawn.truth);
             }
         }
