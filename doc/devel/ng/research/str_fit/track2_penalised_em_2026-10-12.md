@@ -5,7 +5,8 @@
 motif length composed with the per-class drawer `draw_stratum` along known curves with a deliberate
 kink (§3), and phase 0's shared bench at its corners (§4). Nothing in the caller changes. Every time
 quoted was measured while other fits compiled and ran on the same machine, so **every time is
-provisional**.
+provisional**. **§10 (2026-10-13) adds where the time goes and what was cut, standard errors and
+their honesty on the bench, and what lies behind the overshoot at 1 sample × 3 reads.**
 
 ---
 
@@ -616,3 +617,205 @@ The drawn rows are seeded and reproduce exactly; the times do not.
 | `src/parameter_estimation/joint/ssr_fit/composite_fit.rs` | `expected_counts` and `SamplePairs`, split out |
 | `src/parameter_estimation/joint/ssr_fit/bench_fixtures/fit_bench.rs` | `ThePenalisedFit`, methods D and D_working_F |
 | `examples/str_fit_penalised_em.rs` | the drawn motif length of §3 |
+
+---
+
+## 10. Follow-up, 2026-10-13: where the time goes, standard errors, the overshoot
+
+Three questions from the lead after the first report. Same branch; nothing merged from track 1.
+**Every time here is provisional and the machine's load swung widely between runs** (one round of
+E-steps over every class, run one class after another, took between 2 and 59 ms for the same cell on
+different runs). So the comparisons below are made **within one run**, where both fits met the same
+load in turn, or in units of that run's own single pass.
+
+**What penalised counting depends on in `composite_fit.rs`**, for the integration branch:
+`expected_counts` and `ClassCounts` (one round's E-step), `SamplePairs::of`, `::log_likelihood`,
+`::log_likelihood_by_tract` and `::is_empty` (F off pairs of samples). This follow-up added
+`log_likelihood_by_tract` and `CountedClass::rounds_in_all`; nothing the counting fit computes
+changed (its four tests pass).
+
+### 10.1 Where the time went, and what was cut
+
+**How it was measured.** `examples/str_fit_penalised_cost.rs` draws one bench cell (tomato-like PCR
+truth, at most 100 loci a class, the shipped ±9 window, seed 1) and runs, in one process: one round
+of E-steps over every class (a *pass*); the counting fit as the bench runs it (B); and penalised
+counting with its time split into E-step, strength search, pairs of samples and standard errors. A
+*class-round* is one class's E-step in one round.
+
+**Three causes, in order of size:**
+
+1. **Lockstep rounds.** B stops each class when that class settles; penalised counting ran every
+   class until the slowest settled. At 2,000 samples × 3 reads on two-base runs that was 1,051
+   rounds × 21 classes, 22,071 class-rounds, against B's 8,501.
+2. **E-steps one class at a time.** Each class's E-step spread only over its own loci. At one sample a
+   class has 100 loci and one sample each, far too little to fill 18 cores; B fits whole classes side
+   by side.
+3. **The strength search**, re-run for every curve every round: 2 to 4 s a fit at the small cells,
+   where the whole fit took 1 to 38 s; and a whole-range search at the start of every counting after
+   each reading of F.
+
+**What was changed:**
+
+- **A curve whose strength moves by less than 0.1 natural-log units when chosen keeps it**
+  (`strength_steady_within`), and only the fit's first round searches the whole range. The search's
+  time fell 4.5- to 16-fold in one run (for example 2.31 → 0.14 s, two-base runs at 1 × 3), and the rounds fell
+  where the strength had kept the numbers moving (two-base runs at 60 × 10: 534 → 288).
+- **Classes' E-steps run side by side.**
+- **A class whose numbers moved by less than the tolerance keeps its last expected counts**
+  (`reuse_settled_counts`) until the curves move it again; every class's numbers are still chosen
+  every round. Class-rounds counted fell 1.04- to 3.3-fold at the small cells (against the steady
+  schedule without it, same run), and 1.6-fold (one-base)
+  and 3.0-fold (two-base) at 2,000 × 3, where they are now below B's.
+
+**Accuracy is unchanged:** on the drawn motif length of §3, the reuse rule leaves every number at
+every setting identical to the third decimal; the steady strength moves the 1 × 3 setting within its
+draws' noise (slip rate at middling classes 0.39 → 0.30 relative error, at the unmeasured kink class
+0.81 → 0.92) and nothing else beyond 0.002.
+
+**Before and after**, penalised counting's time as a multiple of B's in the same run. *Before* is the
+version of §5 (strengths every round, classes one at a time, every class counted every round);
+*after* is the current default.
+
+| cell | B class-rounds | D class-rounds, before → after | D ÷ B time, before | D ÷ B time, after |
+|---|---:|---:|---:|---:|
+| one-base, 1 sample × 3 reads | 1,723 | 5,082 → 4,085 | 15 | 3.1 to 4.4 |
+| two-base, 1 sample × 3 reads | 2,917 | 4,809 → 4,561 | 22 | 2.9 to 8.2 |
+| one-base, 1 sample × 300 reads | 1,613 | 448 → 395 | 1.0 | 0.17 to 0.35 |
+| two-base, 1 sample × 300 reads | 1,136 | 945 → 837 | 2.4 | 1.1 to 1.7 |
+| one-base, 60 samples × 10 reads | 1,320 | 1,470 → 922 | 1.4 | 1.3 to 1.7 |
+| two-base, 60 samples × 10 reads | 2,698 | 11,214 → 1,847 | 2.5 | 1.3 to 1.9 |
+| one-base, 2,000 samples × 3 reads | 2,741 | 4,298 → 2,642 | 1.5 | 1.06 |
+| two-base, 2,000 samples × 3 reads | 8,501 | 22,071 → 7,247 | 4.7 | 0.69 |
+
+The *after* ranges are two runs under different loads; the lower of each pair is from a run with
+the steady strengths and side-by-side classes but before the reuse rule. At 2,000 samples the *before* ratio is the
+bench's (§4), the *after* ratio is in units of each run's single pass, because B and D ran in separate
+processes there. The *before* class-rounds at 2,000 samples are from the steady-strength,
+side-by-side run, the closest measured.
+
+**What remains:**
+
+- **At one sample, D still takes 3 to 8 times B's time**, though only seconds in all (0.3 to 8 s a
+  fit). Its rounds are short (100 loci of one sample each), so the cost of handing each round's work
+  to the threads is most of it: about 2 ms a class-round against B's 1.1 ms. B, which hands a whole
+  class's fit to one thread, does not pay it every round. Not changed.
+- **At 60 samples × 10 reads, reading F off pairs of samples is most of the time**: 29 to 36 s of
+  35 to 48 s in the second run (its 57-point table of the pairwise likelihood for every class, twice).
+  B's own search over the same likelihood (about 89 evaluations a class a reading) is in its 20 to 37
+  s. A table only near the current value would cut it; not done.
+
+### 10.2 Standard errors
+
+**What they are** (`PenalisedClassErrors`, the doc comment states it in full). Write `A` for the
+counting objective's curvature in the curves' unbounded values, `B` for the spread of its slope from
+locus to locus, and `P` for the bend penalties at the strengths and bend weights fitted. A penalised
+fit's Bayesian covariance would be `(A + P)⁻¹` if the objective were a true likelihood; it is not,
+because it treats samples at one locus as independent, so `A` overstates what the reads say. The
+covariance reported is `H⁻¹ (B + P) H⁻¹` with `H = A + P`: `B` in place of `A`, as the sandwich formula
+does for an unpenalised fit (track 1), with the penalty's part kept, which is the allowance a
+Bayesian interval makes for the curve's own bias. With `B = A` it is the usual Bayesian covariance.
+
+- `A` is taken numerically, class by class: the change in the class's slope over a step of 0.001 in
+  each of its numbers either way, the slope from the expected counts by Fisher's identity, exactly as
+  track 1 computes the counting fit's.
+- `B` sums each locus's slope times itself: the locus is the unit that repeats independently.
+- F read off pairs of samples answers a second objective, so it gets the same formula over its own
+  curve, its slope and curvature taken numerically locus by locus from the pairwise likelihood; the
+  other numbers' errors are taken with F held, so they leave out F's uncertainty. The pseudo-draw
+  floor is left out of `H` and `P`.
+- At one sample F is absent, and so is its error; the other numbers are conditional on the working F.
+
+**Honesty on the bench**: of the estimates with an error, the share whose truth lay within one and two
+errors (honest: about 0.68 and 0.95). Tomato-like PCR truth, at most 100 loci a class, seeds 1 to 6
+at the small cells, seed 1 at 2,000 samples (the 2,000-sample runs were made on the build before the
+reuse rule, which on the drawn grid changes no number at the third decimal).
+
+| cell | slip rate | shorter share | fall-off | F | shares ≥ 0.05 | shares 0.01–0.05 | shares < 0.01 |
+|---|---|---|---|---|---|---|---|
+| one-base, 1 × 3 | 0.69 / 0.98 | 0.56 / 0.90 | 0.58 / 0.93 | absent | 0.67 / 0.91 | 0.70 / 0.89 | 0.57 / 0.88 |
+| two-base, 1 × 3 | 0.68 / 0.90 | 0.49 / 0.83 | 0.60 / 0.86 | absent | 0.66 / 0.90 | 0.71 / 0.93 | 0.56 / 0.88 |
+| one-base, 1 × 300 | 0.67 / 0.92 | 0.57 / 0.85 | 0.51 / 0.90 | absent | 0.69 / 0.89 | 0.67 / 0.93 | 0.63 / 0.90 |
+| two-base, 1 × 300 | 0.64 / 0.95 | 0.65 / 0.96 | 0.77 / 0.98 | absent | 0.60 / 0.92 | 0.64 / 0.88 | 0.58 / 0.88 |
+| one-base, 60 × 10 | 0.62 / 0.92 | 0.63 / 0.99 | 0.77 / 0.96 | 0.63 / 0.95 | 0.67 / 0.94 | 0.53 / 0.68 | 0.27 / 0.34 |
+| two-base, 60 × 10 | 0.72 / 0.95 | 0.85 / 0.98 | 0.63 / 0.94 | 0.66 / 0.94 | 0.64 / 0.89 | 0.41 / 0.52 | 0.20 / 0.25 |
+| one-base, 2,000 × 3 | 0.57 / 0.86 | 0.43 / 0.86 | 0.64 / 0.86 | 0.64 / 1.00 | 0.57 / 0.90 | 0.55 / 0.67 | 0.23 / 0.31 |
+| two-base, 2,000 × 3 | 0.81 / 0.90 | 0.81 / 1.00 | 0.76 / 1.00 | 0.57 / 0.90 | 0.66 / 0.90 | 0.36 / 0.52 | 0.22 / 0.26 |
+
+Estimates a cell: 84 or 126 for each stutter number and F at the small cells, 14 or 21 at 2,000
+samples; 294 to 1,296 shares a group.
+
+**The stutter numbers, F and every share of 0.05 or more are honest within the noise of these
+counts**, the shorter share the least so (0.43 to 0.57 within one error at four cells). **Shares
+below 0.05 are not, from 60 samples up**: a share of 0.004 is reported as about 10⁻⁶ with an error of
+about 10⁻⁵, 10 to 100 errors below the truth. At a between-locus share of 0.7, most loci are fixed at
+one length, so a share of 0.004 at 100 loci is carried by a fraction of one locus. In most draws no
+locus carries the length, the estimate falls nearly to zero, and an error read off the loci's own
+spread cannot see a length that no locus carried. Track 1 reports the same limit for the counting
+fit's sandwich (shares below 0.01 at 60 samples: 36 within one error, 50 within two); ours is
+worse (20 to 27, and 25 to 34) because at 60 samples the floor of one allele draw a class is
+negligible against about 12,000 draws, so nothing holds the estimate off zero. At one sample the
+floor is large enough that small shares cover (0.56 to 0.63 / 0.88 to 0.90). **A share's error should
+be flagged where the share times the loci is below a few loci**, as track 1 recommends; a model-based
+error for such a share, or an interval on the log-ratio scale, is not tried.
+
+**Cost of the errors**: `2k + 1` E-step passes a class (`k` numbers: 22 at ±9, with F) plus one pass
+locus by locus, then dense matrices of up to about 480 rows. On the final build at the bench's small
+cells the whole fit with errors took 0.1 to 4.0 s (the summariser's fit time, seeds 1 to 6); in the
+cost runs, on an earlier build that took the classes one at a time, the errors took 2.8 to 21 s
+against fits of 0.4 to 48 s.
+
+### 10.3 The overshoot at 1 sample × 3 reads
+
+**The question:** at 1 sample × 3 reads the drawn slip rate's curve ran high at the top of the
+range (+49% at 20 repeats, §3.4). Is the strength chosen from expected counts too weak, too strong,
+or is it the rule that holds a curve flat beyond the fitted range?
+
+**It is not the hold-flat rule.** That rule applies only beyond the highest class with reads, and
+the classes at 18, 19 and 20 repeats all have reads (12, 8 and 5 loci).
+
+**It is not a wrong strength either: no strength removes it without adding an error elsewhere.** Every
+curve was held at fixed strengths from 1 to 10⁶ on the same ten draws (`str_fit_penalised_em`, ninth
+argument). Slip rate, root-mean-square relative error:
+
+| strength | rich | middling | thin | at 18 | at 19 | at 20 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 0.31 | 0.52 | 0.73 | 0.89 | 0.73 | 0.59 |
+| 10 | 0.25 | 0.45 | 0.59 | 0.64 | 0.58 | 0.55 |
+| 100 | 0.20 | 0.35 | 0.59 | 0.59 | 0.65 | 0.72 |
+| 1,000 | 0.18 | 0.20 | 0.66 | 0.64 | 0.79 | 0.96 |
+| 10⁴ | 0.19 | 0.19 | 0.72 | 0.69 | 0.88 | 1.08 |
+| 10⁶ | 0.19 | 0.19 | 0.73 | 0.69 | 0.89 | 1.10 |
+| chosen (mostly 10⁹) | 0.21 | 0.39 | 0.63 | 0.59 | 0.69 | 0.81 |
+
+A strong curve suits the rich and middling classes (0.19) and fails the top (1.08 at 20 repeats); a
+weak one does the reverse. The chosen strength lies between. **Two things combine at the top:**
+
+- **the classes' own counts are biased high at one sample**: the counting fit alone, class by class,
+  is +50 to +60% at 16 and 18 repeats on average; a weak curve follows them;
+- **the drawn truth bends down on the logit scale at the top**, and a strong curve's straight line
+  through the well-measured bottom classes cannot follow the bend it cannot see.
+
+**On the bench's truth the same thing appears at the other end.** At 1 × 3 the top of the range is
+nearly unbiased (within ±10% from 15 repeats up, both motif lengths), and the bottom class runs high: +86% at
+8 repeats on one-base runs and +127% at 6 on two-base runs, where the slip rate is lowest (0.005 to
+0.0075) and a class's few slipped reads cannot show where the curve bends. The errors cover it
+within two errors in 6 draws of 6 on one-base runs, but in only 2 of 6 on two-base runs.
+
+**The limit, stated:** with one strength for the whole curve, at a corner where the end classes'
+counts are biased and too few to show a bend, penalised counting extrapolates the shape of the
+classes that have evidence. The curve at the ends of the range at one sample × three reads is the
+least trustworthy part of the fit, and its errors widen there (relative error 0.20 to 0.68
+at the end classes against 0.08 to 0.16 mid-range on the bench) but do not always cover it. What
+might help, untried: a strength that varies along the curve (an adaptive penalty), or a first-order
+penalty near the ends so that a curve flattens rather than extends its slope where its evidence ends.
+
+### 10.4 What the shared harness should measure next, revised
+
+To §8's list:
+
+1. **The integration branch's head-to-head** against the fixed counting fit, held-out and recovery,
+   now that both have errors.
+2. **Small shares' errors**: a model-based or log-ratio interval for a share carried by fewer than a
+   few loci, scored as here.
+3. **Cost at kimura's scale** with the reuse rule, against the plan's budget of one hour on 64 GiB:
+   at 2,000 drawn samples D counted fewer class-rounds than B.

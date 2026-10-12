@@ -95,7 +95,7 @@ pub struct PenalisedFitConfig {
     /// starts of penalised counting, after each reading of F off pairs, search near the strength
     /// held). Zero chooses every curve's strength every round until the limits above, and searches
     /// the whole range at every start: the first version's schedule, kept as the measuring arm.
-    /// On the fitting bench's cells the steady schedule cut the strength search's time 6 to 12-fold
+    /// On the fitting bench's cells the steady schedule cut the strength search's time 4.5 to 16-fold
     /// and, at 60 samples × 10 reads on two-base runs, the rounds from 534 to 288 (track 2's
     /// report, follow-up section).
     pub strength_steady_within: f64,
