@@ -46,6 +46,12 @@ pub struct PenalisedFitConfig {
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
     /// copies, which says almost nothing in an inbred cohort.
     pub pair_alternations: usize,
+    /// **For how many rounds each curve's penalty strength is chosen afresh**, after which it is held
+    /// and the remaining rounds are penalised counting at fixed strengths, which climbs its
+    /// objective every round. Choosing afresh every round can leave a strength alternating
+    /// between two values and the fit never settling: one draw in five at 50 samples × 30 reads
+    /// ran its 500 rounds that way.
+    pub rounds_choosing_strength: usize,
 }
 
 impl Default for PenalisedFitConfig {
@@ -61,6 +67,7 @@ impl Default for PenalisedFitConfig {
             smoothing: Smoothing::MarginalLikelihood,
             kink_knee: 2.5,
             pair_alternations: 0,
+            rounds_choosing_strength: 30,
         }
     }
 }
@@ -74,6 +81,17 @@ pub enum Smoothing {
     /// Held at this strength for every curve. A strength near zero fits every class on its own,
     /// which is the counting fit.
     Fixed(f64),
+}
+
+/// **How a refit chooses its curve's penalty strength**, under [`Smoothing::MarginalLikelihood`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StrengthSearch {
+    /// Over the whole range searched.
+    Wide,
+    /// Within two natural-log units of the strength held, widening when the best lands on an edge.
+    Near,
+    /// The strength held, unchanged.
+    Held,
 }
 
 /// The penalty strengths searched, as natural logarithms.
@@ -207,7 +225,15 @@ pub fn fit_period_by_penalised_counting(
         let Some(tables) = period.pair_tables(classes, homozygote_excess, config) else {
             break;
         };
-        let spreads = period.between_curve.refit(&tables, fit, alternation == 0);
+        let spreads = period.between_curve.refit(
+            &tables,
+            fit,
+            if alternation == 0 {
+                StrengthSearch::Wide
+            } else {
+                StrengthSearch::Near
+            },
+        );
         let mut moved: f64 = 0.0;
         for (point, class) in period.class_at_point.iter().enumerate() {
             if class.is_some() {
@@ -324,7 +350,13 @@ impl Period {
         while self.rounds < fit.max_rounds {
             self.rounds += 1;
             rounds_here += 1;
-            let first_round = rounds_here == 1;
+            let search = if rounds_here == 1 {
+                StrengthSearch::Wide
+            } else if self.rounds <= fit.rounds_choosing_strength {
+                StrengthSearch::Near
+            } else {
+                StrengthSearch::Held
+            };
             let started = Instant::now();
             let counts: Vec<Option<ClassCounts>> = self
                 .class_at_point
@@ -364,19 +396,19 @@ impl Period {
             let level = self.level_curve.refit(
                 &binomial(&|c| c.slipped, &|c| c.slipped + c.exact),
                 fit,
-                first_round,
+                search,
             );
             let shorter = self.shorter_curve.refit(
                 &binomial(&|c| c.shorter, &|c| c.shorter + c.longer),
                 fit,
-                first_round,
+                search,
             );
             // A slip of k steps has probability (1 − f) f^(k − 1): k − 1 "one step further" against
             // one "stopped".
             let fall_off = self.fall_off_curve.refit(
                 &binomial(&|c| c.steps - c.stepped, &|c| c.steps),
                 fit,
-                first_round,
+                search,
             );
             let between = if spread_held {
                 None
@@ -384,7 +416,7 @@ impl Period {
                 Some(self.between_curve.refit(
                     &binomial(&|c| c.shared_in_tract, &|c| c.pairs_not_by_descent),
                     fit,
-                    first_round,
+                    search,
                 ))
             };
             let draws: Vec<Vec<f64>> = counts
@@ -397,7 +429,7 @@ impl Period {
                     reference: self.reference_allele,
                 },
                 fit,
-                first_round,
+                search,
             );
             self.maximisation_seconds += started.elapsed().as_secs_f64();
 
@@ -781,14 +813,12 @@ impl CurveState {
 
     /// **Refits the curve to `data`** and returns its unbounded values, point-major.
     ///
-    /// With [`Smoothing::MarginalLikelihood`] the penalty strength is searched over the whole range
-    /// when `search_widely`, and otherwise within two natural-log units of the last round's,
-    /// widening when the best lands on an edge.
+    /// With [`Smoothing::MarginalLikelihood`] the penalty strength is chosen as `search` says.
     pub(crate) fn refit(
         &mut self,
         data: &CurveData,
         config: &PenalisedFitConfig,
-        search_widely: bool,
+        search: StrengthSearch,
     ) -> Vec<f64> {
         let knee = config.kink_knee;
         let with_counts = (0..self.points).filter(|&p| data.has_counts(p)).count();
@@ -812,8 +842,17 @@ impl CurveState {
                 self.ln_smoothing = LN_SMOOTHING_RANGE.1;
                 fitted
             }
+            Smoothing::MarginalLikelihood if search == StrengthSearch::Held => self
+                .fit_robustly_at(
+                    data,
+                    self.ln_smoothing,
+                    &self.values,
+                    &self.bend_weights,
+                    knee,
+                ),
             Smoothing::MarginalLikelihood => {
-                let (ln_smoothing, fitted) = self.choose_strength(data, knee, search_widely);
+                let (ln_smoothing, fitted) =
+                    self.choose_strength(data, knee, search == StrengthSearch::Wide);
                 self.ln_smoothing = ln_smoothing;
                 fitted
             }
@@ -1342,7 +1381,7 @@ mod tests {
             };
             let config = PenalisedFitConfig::default();
             let mut state = CurveState::new(repeats.len(), 1);
-            let fitted = state.refit(&data, &config, true);
+            let fitted = state.refit(&data, &config, StrengthSearch::Wide);
             let at_nine = logistic(fitted[1]);
             let at_fifteen = logistic(fitted[7]);
 
