@@ -550,7 +550,7 @@ pub fn fit_class_by_counting_with_pairs(
     // With no tract of two samples there is no pair to read the spread from. The search would
     // return its upper end, and the stutter counted at that spread is wrong — at one sample and
     // three reads a slip rate a third of the truth (`track1_counting_fit_errors_2026-10-12.md`
-    // §4.3) — so the spread stays where each sample's own two copies put it.
+    // §7) — so the spread stays where each sample's own two copies put it.
     if !concentration_is_identified(
         evidence,
         ConcentrationSource::PairsOfSamples,
