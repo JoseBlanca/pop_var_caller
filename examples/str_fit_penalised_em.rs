@@ -66,8 +66,7 @@ fn loci_at(repeats: u64) -> usize {
 /// The class's true numbers.
 struct Truth {
     slippage: Slippage,
-    /// `None` where the method reports none (penalised counting at one sample).
-    between_locus_share: Option<f64>,
+    between_locus_share: f64,
     allele_length_variation: Vec<f64>,
 }
 
@@ -141,7 +140,8 @@ fn draw_period(
 /// One class's estimate in the terms every arm reports.
 struct Estimate {
     slippage: Slippage,
-    between_locus_share: f64,
+    /// `None` where the method reports none (penalised counting at one sample).
+    between_locus_share: Option<f64>,
     allele_length_variation: Vec<f64>,
 }
 

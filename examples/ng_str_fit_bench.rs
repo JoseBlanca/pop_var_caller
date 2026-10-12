@@ -53,7 +53,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
     ClassEstimate, ClassNumbers, FoldPlan, HeldOutSettings, PeriodFit, Sampler, TheClimb,
-    TheCountingFit, score_locus, with_the_curves, without_fold,
+    TheCountingFit, ThePenalisedFit, score_locus, with_the_curves, without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence,
@@ -142,7 +142,14 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
         }
         "B" => Box::new(TheCountingFit::default()),
         "B_within" => Box::new(BWithin),
-        other => panic!("no method is called {other}; the methods are A, B and B_within"),
+        "D" => Box::new(ThePenalisedFit::default()),
+        "D_working_F" => Box::new(ThePenalisedFit {
+            report_working_concentration: true,
+            ..ThePenalisedFit::default()
+        }),
+        other => {
+            panic!("no method is called {other}; the methods are A, B, B_within, D and D_working_F")
+        }
     }
 }
 

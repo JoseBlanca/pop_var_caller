@@ -314,6 +314,93 @@ impl PeriodFit for TheCountingFit {
     }
 }
 
+/// **Method D: penalised counting**, every class of the motif length at once, each number a
+/// penalised curve across repeat count
+/// ([`fit_period_by_penalised_counting`](super::super::penalised_fit::fit_period_by_penalised_counting)),
+/// the spread read off pairs of samples as method B reads it. It draws its own curves, fits every
+/// class with reads (no refusal floor: a thin class takes what its counts and its neighbours say),
+/// and gives no standard errors.
+///
+/// **The concentration is absent when no locus has two samples with reads**, as the project
+/// reports a number it cannot estimate. With `report_working_concentration` it reports the value
+/// the fit worked at instead, so that the held-out score, which needs every number, can be computed
+/// at one sample; that variant is `D_working_F` and its concentration is not an estimate.
+#[derive(Debug, Clone)]
+pub struct ThePenalisedFit {
+    pub config: super::super::penalised_fit::PenalisedFitConfig,
+    pub report_working_concentration: bool,
+}
+
+impl Default for ThePenalisedFit {
+    fn default() -> Self {
+        Self {
+            config: super::super::penalised_fit::PenalisedFitConfig {
+                start: Slippage {
+                    level: 0.05,
+                    shorter_share: 0.5,
+                    fall_off: 0.3,
+                },
+                max_rounds: 2000,
+                tolerance: 1e-7,
+                pair_alternations: 10,
+                ..super::super::penalised_fit::PenalisedFitConfig::default()
+            },
+            report_working_concentration: false,
+        }
+    }
+}
+
+impl PeriodFit for ThePenalisedFit {
+    fn name(&self) -> String {
+        if self.report_working_concentration {
+            "D_working_F".to_owned()
+        } else {
+            "D".to_owned()
+        }
+    }
+
+    fn fit_period(
+        &self,
+        classes: &[StratumEvidence],
+        homozygote_excess: &[f64],
+        allele_span: i32,
+    ) -> Vec<ClassEstimate> {
+        let config = SsrFitConfig {
+            allele_span,
+            ..SsrFitConfig::default()
+        };
+        let fitted = super::super::penalised_fit::fit_period_by_penalised_counting(
+            classes,
+            homozygote_excess,
+            &config,
+            &self.config,
+        );
+        classes
+            .iter()
+            .zip(fitted.classes)
+            .map(|(evidence, class)| match class {
+                None => ClassEstimate::absent(evidence),
+                Some(class) => ClassEstimate {
+                    stratum: evidence.stratum,
+                    slippage: Some(class.slippage),
+                    allele_length_variation: Some(class.allele_length_variation),
+                    concentration: if self.report_working_concentration {
+                        Some(class.working_concentration)
+                    } else {
+                        class.concentration
+                    },
+                    errors: ClassErrors::default(),
+                    reads_crossing: evidence.spanning_reads(),
+                },
+            })
+            .collect()
+    }
+
+    fn draws_its_own_curves(&self) -> bool {
+        true
+    }
+}
+
 // ---------------------------------------------------------------------
 // The curves, after any method
 // ---------------------------------------------------------------------
