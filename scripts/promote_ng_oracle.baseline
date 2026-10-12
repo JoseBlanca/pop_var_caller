@@ -68,6 +68,12 @@
 # filter's duplication rate 0.031605 → 0.031542, so PARALOG_LR and PARALOG_POST move on 3,541 default-parameter records
 # and 1,860 called with the fit, and nothing else in either file moves: no record, genotype, QUAL or filter
 # (6b86f72c → 6257aa6c, 42d02245 → b1b46ece). Fitted parameters unchanged.
+# Fit lines re-recorded 2026-10-12 (macOS, arm64) with the repeat-tract fit's allele window at ±9, one past the recorded
+# reads, where it was ±6 (str_allele_window.md): 53 lines of the fitted file move, all repeat-tract rows; the 37 slip rates
+# move by a median 1.2% (0.953 to 1.044 of their old values). With the fit, 302 repeat-tract records move QUAL (at most
+# 3.7), one record appears (a 1-repeat-short het at QUAL 6.8), one loses its +1 allele, and one sample genotype flips;
+# every genotype that changed was called at GQ 4 or less. Default-parameter lines unchanged.
+# They were 3338658c… / b1b46ece….
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -84,5 +90,5 @@ slice: 20 regions, 4 alignments
 b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
 9b503d9dbb13aaca231afe5b476f429a  from_alignments.windows.sorted
 4cda6ce3dd2389e386acb69c1cc745d7  from_alignments.windows.histograms
-3338658ce23b0ea15e77030840c1732a  fitted.parameters.toml
-b1b46ecef9a12f24412bd3e0ee425a28  from_fit.comparable
+4e69d2ce39a7529da855d07ecb763187  fitted.parameters.toml
+f9c97b294ff1228884b427ad666ff942  from_fit.comparable
