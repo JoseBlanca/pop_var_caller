@@ -266,6 +266,9 @@ fn between_share_grid() -> Vec<f64> {
 struct Period {
     /// Per grid point (consecutive repeat counts from `lowest`), the class there, if any.
     class_at_point: Vec<Option<usize>>,
+    /// Per grid point, the allele draws a locus of its class holds on average: two per sample with
+    /// reads there. Zero where there is no class.
+    allele_draws_per_locus: Vec<f64>,
     lowest: u64,
     alleles: usize,
     reference_allele: usize,
@@ -310,6 +313,16 @@ impl Period {
         }
         let alleles = allele_classes_of(config);
         Some(Self {
+            allele_draws_per_locus: class_at_point
+                .iter()
+                .map(|class| {
+                    class.map_or(0.0, |index| {
+                        let evidence = &classes[index];
+                        2.0 * evidence.rows_with_reads() as f64
+                            / evidence.tracts_with_reads().max(1) as f64
+                    })
+                })
+                .collect(),
             class_at_point,
             lowest,
             alleles,
@@ -332,6 +345,23 @@ impl Period {
 
     fn points(&self) -> usize {
         self.class_at_point.len()
+    }
+
+    /// **How much more the allele draws of one locus vary than independent draws would**:
+    /// `1 + (m − 1) · F`, with `m` the draws a locus holds and `F` the class's between-locus
+    /// share. It is the variance of a Dirichlet-multinomial count over a multinomial one, the
+    /// design effect of draws clustered by locus.
+    ///
+    /// **Why the allele counts are divided by it.** The E-step counts every sample's alleles as
+    /// independent draws from the class, which is what the counting fit's objective assumes; but
+    /// samples at one locus share its frequencies. At 2,000 samples a 5-locus class then holds
+    /// 20,000 draws and looks measured to the curve fit, which chose almost no smoothing for the
+    /// allele length variation and left its thin classes no better than the counting fit's
+    /// (track 2's report, §3). Dividing every count of a class by the same number leaves the
+    /// class's own shares where they were and gives its curve the information it actually has.
+    fn allele_draw_inflation(&self, point: usize) -> f64 {
+        let between_locus_share = 1.0 / (1.0 + self.concentration[point]);
+        1.0 + (self.allele_draws_per_locus[point] - 1.0).max(0.0) * between_locus_share
     }
 
     /// **Rounds of penalised counting** until no number moves by more than the tolerance or the
@@ -419,9 +449,17 @@ impl Period {
                     search,
                 ))
             };
+            // Samples at one locus share its frequencies, so a class's allele draws carry less than
+            // independent draws would: divide them by the clustering's variance inflation.
             let draws: Vec<Vec<f64>> = counts
                 .iter()
-                .map(|count| count.as_ref().map_or_else(Vec::new, |c| c.draws.clone()))
+                .enumerate()
+                .map(|(point, count)| {
+                    count.as_ref().map_or_else(Vec::new, |c| {
+                        let inflation = self.allele_draw_inflation(point);
+                        c.draws.iter().map(|d| d / inflation).collect()
+                    })
+                })
                 .collect();
             let share_logits = self.shares_curve.refit(
                 &CurveData::Multinomial {
