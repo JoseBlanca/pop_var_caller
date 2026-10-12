@@ -206,11 +206,20 @@ removes.
 
 ---
 
-## 6. Decisions for the owner
+## 6. Decisions
 
-1. **A computing budget.** For example: the fit at kimura's scale (2,169 samples) within an hour on
-   one machine with 64 GiB. Without a target, "fast enough" cannot be judged.
-2. **How many tracks at once.** Four is the natural split; two or three keeps each review
-   manageable.
-3. **Whether population structure (two subpopulations in the simulator) is in scope now**, or
-   deferred until the single-population model is settled.
+**Taken 2026-10-12.** The owner handed the plan to the assistant to run as its lead ("you're the PI,
+the manager, the orchestrator"), and these are the lead's recommendations, adopted:
+
+1. **The computing budget:** the fit at kimura's scale (2,169 samples) within one hour on one
+   machine with 64 GiB. A method over budget is reported, not discarded, with what it would take to
+   meet it.
+2. **Three tracks at once:** 1 (B and F), 2 (D) and 3 (C). Track 4 (E, the Stan yardstick) waits
+   until track 2 shows whether penalised EM is worth a yardstick, because it costs the most to set
+   up.
+3. **Population structure is deferred** until the one-population model is settled. The simulator
+   keeps a place for it.
+
+**Where the work lives.** Branch `str-fit-research` (worktree `../pop_var_caller-str-fit-research`)
+holds phase 0. Each track branches from phase 0's final commit into its own worktree,
+`../pop_var_caller-str-fit-<track>`, and reports under `doc/devel/ng/research/str_fit/`.
