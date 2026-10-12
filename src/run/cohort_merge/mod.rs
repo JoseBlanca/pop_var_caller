@@ -104,6 +104,7 @@ pub(super) mod fixtures {
             reference_bases: Box::from(reference_bases),
             observations: vec![SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: Box::from(observed_bases),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),

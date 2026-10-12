@@ -279,8 +279,8 @@ impl SampleLocusObservations {
     }
 }
 
-/// One distinct `(bases, witness, read group, flank deletion)` the reads showed at a locus, with
-/// the pooled support of every read that showed it.
+/// One distinct `(bases, witness, read group, flank deletion, held flank)` the reads showed at a
+/// locus, with the pooled support of every read that showed it.
 ///
 /// The fields between `num_obs` and `chain_ids` are the per-read moments the SNP
 /// filters read (strand bias, base-quality error, the MAPQ multi-mapper test); an STR
@@ -373,6 +373,29 @@ pub struct SequenceObservation {
     /// observations whose own alignment carries a deletion across the segment's edge
     /// (`str_edge_deletion_alleles.md` §4, §5.1).
     pub flank_deletion: FlankDeletion,
+    /// **Which flank these reads anchored, where their witness cannot say it** — part of the
+    /// identity, since one sequence read from the left flank and from the right is two pieces of
+    /// evidence about the carrier's hull (`str_bundle_loci.md` §7.6).
+    ///
+    /// A partial witness says its side itself when it touches one border of the locus only. One
+    /// that covers the whole locus does not: the classifier lays a read's reach down from the
+    /// border it anchored and clamps it to the locus (`ReadWitness::from_left`), so a read that
+    /// ran past the far border from either side covers every position. **Set only there, and
+    /// only at an STR bundle**, whose emission reads the side; `None` on every other observation —
+    /// complete ones, partials whose witness says their side, and every STR segment's partials,
+    /// which a segment reads from the tract's start whichever flank they held.
+    pub held_flank: Option<HeldFlank>,
+}
+
+/// **Which flank of an STR locus a read anchored before it ran out inside the repeat** — the
+/// side its bases start from. A read that held the left flank shows the start of its carrier's
+/// repeat; one that held the right flank shows its end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HeldFlank {
+    /// The flank before the repeat's first base.
+    Left,
+    /// The flank after the repeat's last base.
+    Right,
 }
 
 /// **How many flank bases a deletion running out of an STR segment removed, on each side.**
@@ -1279,6 +1302,7 @@ mod tests {
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(bases),
             read_witness,
             read_group: ReadGroupId(0),
@@ -1758,6 +1782,7 @@ mod tests {
             reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: Box::from(&b"T"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
@@ -1813,6 +1838,7 @@ mod tests {
     fn same_bases_differ_by_read_witness() {
         let complete = SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(&b"ATATAT"[..]),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

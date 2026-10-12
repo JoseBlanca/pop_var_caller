@@ -2049,6 +2049,7 @@ mod tests {
             reference_bases: vec![b'A'; width].into_boxed_slice(),
             observations: vec![SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: Box::from(&b"C"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),

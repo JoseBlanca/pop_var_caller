@@ -2787,6 +2787,7 @@ mod tests {
     fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: tract_bases(repeats).into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -2812,6 +2813,7 @@ mod tests {
         let covered = u16::try_from(bases.len()).expect("a short fixture tract");
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             read_witness: ReadWitness::from_left(
                 covered,
                 crate::locus_generation::LocusLen::from_positions(u64::from(covered) + 4),
@@ -5948,6 +5950,7 @@ mod tests {
         let view = table.view();
         let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
         let partials = [PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
                 .expect("one witnessed position"),
             read_group: ReadGroupId(0),
@@ -9933,6 +9936,7 @@ mod tests {
         let (alleles, _) = generic_locus(1);
         let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
         let partials = [PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
                 .expect("one witnessed position"),
             read_group: ReadGroupId(0),

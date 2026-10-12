@@ -295,6 +295,7 @@ mod tests {
     fn observation(bases: &[u8], witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.into(),
             read_witness: witness,
             read_group: ReadGroupId(0),

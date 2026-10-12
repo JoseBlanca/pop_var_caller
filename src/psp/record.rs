@@ -52,8 +52,8 @@
 //! handed the region rather than reading one.
 
 use crate::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, SsrBundleDetail,
-    SsrDetail, WitnessedLocusPositions,
+    HeldFlank, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    SsrBundleDetail, SsrDetail, WitnessedLocusPositions,
 };
 use crate::psp::chain_ids::{
     LiveSet, LiveSetReader, LiveSetWriter, as_a_read_set, decode_read_list, encode_read_list,
@@ -223,13 +223,14 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 
 /// Every field a record's **body** carries, in encoding order.
 ///
-/// **A field list, not a count of values per record.** Twelve of these twenty-four are written
+/// **A field list, not a count of values per record.** Twelve of these twenty-five are written
 /// more than once: ten once per *observation* — one of those ten for every observation but the
 /// residual — and two more once per *witness run* inside an observation. The repeat's motif and
-/// its two flanks are written only when the locus kind is a repeat tract. Two fields close every
+/// its two flanks are written only when the locus kind is a repeat tract. Three fields close every
 /// body whatever its kind, each a length-prefixed byte string empty on most records: the
-/// observations' flank deletions (format 1.2) and an STR bundle's payload — its flanks and its
-/// reference runs — (format 2.0). The manifest says
+/// observations' flank deletions (format 1.2), an STR bundle's payload — its flanks and its
+/// reference runs — (format 2.0), and the flank each observation held where its witness does not
+/// say it (format 2.1). The manifest says
 /// what one appearance of a field looks like — a single value, or a counted run of them
 /// ([`FieldShape`]); it does not say how often a field appears. So what this list gives a
 /// reader is the order, the encodings and each field's own shape; how many of each a body
@@ -256,7 +257,7 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 /// **The chain ids are not here either, and that is Milestone E.** A record's chain ids are
 /// dropped by [`encode_record_body`] and come back empty from [`decode_record_body`], which is
 /// stated on both and pinned by a test rather than left for a reader to discover.
-const BODY_FIELDS: [(&str, FieldEncoding); 24] = [
+const BODY_FIELDS: [(&str, FieldEncoding); 25] = [
     ("reference-bases", FieldEncoding::LengthPrefixedBytes),
     ("observation-count", FieldEncoding::Varint),
     // Which observation's reads are derived rather than stored, or the observation count for
@@ -314,6 +315,16 @@ const BODY_FIELDS: [(&str, FieldEncoding); 24] = [
     // length-prefixed; the run count; then each run's offset into the hull, its length and its
     // motif, the motif length-prefixed.
     ("str-bundle-payload", FieldEncoding::LengthPrefixedBytes),
+    // **Format 2.1: the flank each observation's reads held, where its witness cannot say it**
+    // (`str_bundle_loci.md` §7.6) — a partial at an STR bundle whose witness covers the whole
+    // hull. On every record whatever its kind, for the reason the two fields above are: a 2.0
+    // reader walks past it as an unknown final field and scores such a read from both flanks,
+    // one half each, as it did. A list of `(observation, flank)` varint pairs, the flank 0 for
+    // the left and 1 for the right — empty, one byte before compression, on nearly every record.
+    (
+        "observation-held-flanks",
+        FieldEncoding::LengthPrefixedBytes,
+    ),
 ];
 
 /// The body fields of formats 1.0 and 1.1, which end at the repeat's right flank.
@@ -321,6 +332,9 @@ const BODY_FIELDS_BEFORE_1_2: usize = 22;
 
 /// The body fields of format 1.2, which end at the flank deletions.
 const BODY_FIELDS_BEFORE_2_0: usize = 23;
+
+/// The body fields of format 2.0, which end at the STR bundle payload.
+const BODY_FIELDS_BEFORE_2_1: usize = 24;
 
 /// The declared name of one field, by its position in [`BODY_FIELDS`].
 ///
@@ -357,6 +371,7 @@ const REPEAT_LEFT_FLANK: &str = body_field(20);
 const REPEAT_RIGHT_FLANK: &str = body_field(21);
 const OBSERVATION_FLANK_DELETIONS: &str = body_field(22);
 const STR_BUNDLE_PAYLOAD: &str = body_field(23);
+const OBSERVATION_HELD_FLANKS: &str = body_field(24);
 
 /// The witness as a whole, for the two faults that are about the set rather than about one of
 /// its numbers. Not a declared field: the three `witness-run-*` entries are.
@@ -519,6 +534,10 @@ pub struct RecordLayout {
     /// for every 1.x file, none of which holds a bundle record: no 1.x writer had a bundle
     /// generator, so a bundle record in such a file is refused as damage.
     body_carries_bundle_payload: bool,
+    /// Whether the body ends with the flanks the observations held — format 2.1 and later.
+    /// `false` for 2.0 and earlier files, whose observations all read as having none recorded,
+    /// which is what those formats wrote down.
+    body_carries_held_flanks: bool,
 }
 
 impl RecordLayout {
@@ -535,6 +554,7 @@ impl RecordLayout {
             head_carries_discarded_reads: true,
             body_carries_flank_deletions: true,
             body_carries_bundle_payload: true,
+            body_carries_held_flanks: true,
         }
     }
 
@@ -549,32 +569,39 @@ impl RecordLayout {
         // **This build's fields first, then format 1.0's**, whose head lacks the discarded-read
         // copy. A file that is neither is refused with what it failed against this build's
         // list, which names the field it is missing or has wrong.
-        // Then format 1.1's, whose body ends before the flank deletions. Format 1.2's comes
-        // first of the three: this build's without the bundle payload format 2.0 added.
+        // Then format 1.1's, whose body ends before the flank deletions. Format 2.0's comes
+        // first of the others: this build's without the held flanks format 2.1 added; then 1.2's,
+        // without the bundle payload format 2.0 added.
         let before_1_2 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_1_2];
         let before_2_0 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_0];
+        let before_2_1 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_1];
         let (
             known,
             head_carries_discarded_reads,
             body_carries_flank_deletions,
             body_carries_bundle_payload,
+            body_carries_held_flanks,
         ) = match matches_fields(manifest, fields_this_build_knows()) {
-            Ok(known) => (known, true, true, true),
+            Ok(known) => (known, true, true, true, true),
             Err(against_this_build) => {
                 if let Ok(known) =
+                    matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_2_1))
+                {
+                    (known, true, true, true, false)
+                } else if let Ok(known) =
                     matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_2_0))
                 {
-                    (known, true, true, false)
+                    (known, true, true, false, false)
                 } else if let Ok(known) =
                     matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_1_2))
                 {
-                    (known, true, false, false)
+                    (known, true, false, false, false)
                 } else {
                     match matches_fields(
                         manifest,
                         fields_of_body(&RECORD_HEAD_FIELDS_1_0, before_1_2),
                     ) {
-                        Ok(known) => (known, false, false, false),
+                        Ok(known) => (known, false, false, false, false),
                         Err(_) => return Err(against_this_build),
                     }
                 }
@@ -583,6 +610,7 @@ impl RecordLayout {
         Ok(Self {
             body_carries_flank_deletions,
             body_carries_bundle_payload,
+            body_carries_held_flanks,
             unknown_final_encodings: manifest
                 .fields
                 .iter()
@@ -1074,6 +1102,7 @@ pub fn encode_record_body_reusing(
             placed_left,
             chain_ids,
             flank_deletion: _, // written once per record, after the kind
+            held_flank: _,     // written once per record, after the bundle payload
         } = observation;
         put_bytes(out, bases);
         put_witness(out, read_witness);
@@ -1100,6 +1129,31 @@ pub fn encode_record_body_reusing(
     put_kind(out, kind);
     put_flank_deletions(out, observations);
     put_bundle_payload(out, kind);
+    put_held_flanks(out, observations);
+}
+
+/// The flank written for [`HeldFlank::Left`] in `observation-held-flanks`; the right is one more.
+const HELD_FLANK_LEFT: u64 = 0;
+/// See [`HELD_FLANK_LEFT`].
+const HELD_FLANK_RIGHT: u64 = 1;
+
+/// The flanks the observations held, where recorded, as one length-prefixed field: a varint pair
+/// `(observation, flank)` for each observation that has one, in observation order (format 2.1).
+fn put_held_flanks(out: &mut Vec<u8>, observations: &[SequenceObservation]) {
+    let mut pairs: Vec<u8> = Vec::new();
+    for (at, observation) in observations.iter().enumerate() {
+        if let Some(held) = observation.held_flank {
+            put_varint(&mut pairs, at as u64);
+            put_varint(
+                &mut pairs,
+                match held {
+                    HeldFlank::Left => HELD_FLANK_LEFT,
+                    HeldFlank::Right => HELD_FLANK_RIGHT,
+                },
+            );
+        }
+    }
+    put_bytes(out, &pairs);
 }
 
 /// An STR bundle's flanks and reference runs as one length-prefixed field, empty for every
@@ -1296,6 +1350,7 @@ pub fn decode_record_body(
         };
         observations.push(SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases,
             read_witness,
             read_group,
@@ -1375,6 +1430,45 @@ pub fn decode_record_body(
             LOCUS_KIND,
             "an STR bundle record in a file whose format predates bundle records (2.0)".to_string(),
         ));
+    }
+
+    if layout.body_carries_held_flanks {
+        let pairs = body.read_length_prefixed(OBSERVATION_HELD_FLANKS)?;
+        let mut list = FieldReader::new(pairs);
+        while list.bytes_left() > 0 {
+            let at = list.read_varint(OBSERVATION_HELD_FLANKS)?;
+            let flank = list.read_varint(OBSERVATION_HELD_FLANKS)?;
+            let observation = usize::try_from(at)
+                .ok()
+                .and_then(|at| observations.get_mut(at));
+            let held = match flank {
+                HELD_FLANK_LEFT => Some(HeldFlank::Left),
+                HELD_FLANK_RIGHT => Some(HeldFlank::Right),
+                _ => None,
+            };
+            let (Some(observation), Some(held)) = (observation, held) else {
+                return Err(body.malformed(
+                    OBSERVATION_HELD_FLANKS,
+                    format!(
+                        "observation {at} holding flank {flank}, in a record of \
+                         {declared_observations} observations; a flank is 0 (left) or 1 (right)"
+                    ),
+                ));
+            };
+            // A flank is recorded once, and only for a read that ended inside the locus.
+            if observation.held_flank.is_some()
+                || matches!(observation.read_witness, ReadWitness::Complete)
+            {
+                return Err(body.malformed(
+                    OBSERVATION_HELD_FLANKS,
+                    format!(
+                        "observation {at} given a held flank twice, or given one though its \
+                         read spanned the locus"
+                    ),
+                ));
+            }
+            observation.held_flank = Some(held);
+        }
     }
 
     for encoding in &layout.unknown_final_encodings {
@@ -2611,6 +2705,7 @@ mod tests {
             observations: vec![
                 SequenceObservation {
                     flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                    held_flank: None,
                     bases: b"ACGTACG".to_vec().into_boxed_slice(),
                     read_witness: ReadWitness::Complete,
                     read_group: ReadGroupId(1),
@@ -2624,6 +2719,7 @@ mod tests {
                 },
                 SequenceObservation {
                     flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                    held_flank: None,
                     bases: b"ACGTACGTACGTAC".to_vec().into_boxed_slice(),
                     read_witness: a_witness_with_a_hole(),
                     read_group: ReadGroupId(7),
@@ -2637,6 +2733,7 @@ mod tests {
                 },
                 SequenceObservation {
                     flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                    held_flank: None,
                     bases: Box::from(&b""[..]),
                     read_witness: ReadWitness::Partial {
                         positions: WitnessedLocusPositions::one_run_from_offset_and_length(4, 2)
@@ -2752,6 +2849,10 @@ mod tests {
     ///
     /// ⚠ **And at format 2.0** (2026-10-11), with the major version raised: every body ends with
     /// an STR bundle's payload, one empty byte string here (`str_bundle_loci.md` §6.2).
+    ///
+    /// ⚠ **And at format 2.1** (2026-10-12): every body ends with the flanks its observations
+    /// held where their witness does not say it, one empty byte string here
+    /// (`str_bundle_loci.md` §7.6).
     #[test]
     fn the_fixture_encodes_to_these_exact_bytes() {
         let mut bytes = Vec::new();
@@ -2807,6 +2908,7 @@ mod tests {
                 0, // locus-kind: Generic
                 0, // observation-flank-deletions: none (format 1.2)
                 0, // str-bundle-payload: empty, the record is no bundle (format 2.0)
+                0, // observation-held-flanks: none (format 2.1)
             ]
         );
     }
@@ -2923,7 +3025,7 @@ mod tests {
         });
         let mut bytes = Vec::new();
         encode_record_body(&record, &mut bytes);
-        let tail = &bytes[bytes.len() - 21..];
+        let tail = &bytes[bytes.len() - 22..];
         assert_eq!(
             tail,
             [
@@ -2937,6 +3039,7 @@ mod tests {
                 2,    // two runs
                 0, 9, 1, b'A', // the first: offset, length, motif
                 130, 1, 16, 2, b'A', b'T', // the second, its offset two bytes long
+                0,    // observation-held-flanks: none
             ]
             .as_slice()
         );
@@ -2966,14 +3069,15 @@ mod tests {
         let mut bytes = Vec::new();
         encode_record_body(&record, &mut bytes);
         assert_eq!(
-            bytes[bytes.len() - 2..],
-            [0, 0],
-            "no flank deletion, and an empty payload"
+            bytes[bytes.len() - 3..],
+            [0, 0, 0],
+            "no flank deletion, an empty payload and no held flank"
         );
 
-        let last = bytes.len() - 1;
-        bytes[last] = 1;
-        bytes.push(b'A');
+        // The payload made one byte long, `A`, before the held flanks' empty list.
+        let payload_at = bytes.len() - 2;
+        bytes[payload_at] = 1;
+        bytes.insert(payload_at + 1, b'A');
         let refused = decode_record_body(
             &bytes,
             record.region,
@@ -3120,6 +3224,69 @@ mod tests {
         )
         .expect("what this encoder wrote, this decoder reads");
         assert_eq!(decoded.record, written);
+    }
+
+    /// **The flank an observation held round-trips where one was recorded** (format 2.1,
+    /// `str_bundle_loci.md` §7.6), and a flank that is neither left nor right is refused.
+    #[test]
+    fn the_held_flanks_round_trip_and_a_flank_out_of_range_is_refused() {
+        let mut written = a_rich_record();
+        written.observations[1].held_flank = Some(HeldFlank::Right);
+        written.observations[2].held_flank = Some(HeldFlank::Left);
+        let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&written));
+        let decode = |bytes: &[u8]| {
+            decode_a_record(
+                &mut a_live_set_reader(),
+                bytes,
+                A_CONTIG,
+                OffsetBase::at_block_start(block_starts_at),
+                &RecordLayout::as_this_build_writes_it(),
+            )
+        };
+        let decoded = decode(&bytes).expect("what this encoder wrote, this decoder reads");
+        assert_eq!(decoded.record, written);
+
+        // The body's last bytes are the field: its length, then (1, right) and (2, left).
+        let at = bytes.len() - 5;
+        assert_eq!(bytes[at..], [4, 1, 1, 2, 0]);
+        // A flank neither left nor right; an observation given one twice; one given to a read
+        // that spanned the locus (observation 0 is complete).
+        for (byte, value) in [(4, 2), (3, 1), (1, 0)] {
+            let mut damaged = bytes.clone();
+            damaged[at + byte] = value;
+            let refused = decode(&damaged);
+            assert!(
+                matches!(&refused, Err(error) if format!("{error:?}").contains("observation-held-flanks")),
+                "byte {byte} set to {value}: {refused:?}"
+            );
+        }
+    }
+
+    /// **A 2.0 file is still read, its observations all without a recorded held flank** — which
+    /// is what a 2.0 writer wrote down, and such a read is scored from both flanks, one half each.
+    /// Its manifest is this build's up to the STR bundle payload.
+    #[test]
+    fn a_format_2_0_manifest_is_read_as_carrying_no_held_flanks() {
+        let fields: Vec<FieldSpec> =
+            fields_of_body(&RECORD_HEAD_FIELDS, &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_1]).collect();
+        assert_eq!(
+            fields.last().map(|field| field.name.0.as_str()),
+            Some("str-bundle-payload")
+        );
+        assert!(
+            RecordLayout::check_this_build_writes(&a_manifest_declaring(fields.clone())).is_err(),
+            "a 2.0 file is read but not extended: its records would lack the held flanks"
+        );
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
+            .expect("a 2.0 manifest is read");
+        assert!(layout.body_carries_bundle_payload);
+        assert!(!layout.body_carries_held_flanks);
+        assert_eq!(layout.unknown_field_count(), 0);
+        assert!(
+            RecordLayout::from_manifest(&a_manifest_declaring(record_fields()))
+                .expect("this build's manifest is read")
+                .body_carries_held_flanks
+        );
     }
 
     /// **A 1.1 file is still read, its observations all without a flank deletion** — which is
@@ -3358,6 +3525,7 @@ mod tests {
                 "repeat-right-flank",
                 "observation-flank-deletions",
                 "str-bundle-payload",
+                "observation-held-flanks",
             ]
         );
 
@@ -3501,21 +3669,30 @@ mod tests {
         for position in 0..declared.len() {
             let mut renamed = declared.clone();
             renamed[position].name = FieldName("something-else".to_string());
-            // **The flank deletions renamed is a 1.1 file with two fields this reader does not
-            // know**, and the bundle payload renamed a 1.2 file with one — the shape a later
-            // writer's addition would have — and each is read as one.
+            // **The flank deletions renamed is a 1.1 file with three fields this reader does not
+            // know**, the bundle payload renamed a 1.2 file with two, and the held flanks
+            // renamed a 2.0 file with one — the shape a later writer's addition would have — and
+            // each is read as one.
             if declared[position].name.0 == "observation-flank-deletions" {
                 let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
-                    .expect("a 1.1 manifest with two unknown fields is read");
+                    .expect("a 1.1 manifest with three unknown fields is read");
                 assert!(!layout.body_carries_flank_deletions);
-                assert_eq!(layout.unknown_field_count(), 2);
+                assert_eq!(layout.unknown_field_count(), 3);
                 continue;
             }
             if declared[position].name.0 == "str-bundle-payload" {
                 let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
-                    .expect("a 1.2 manifest with one unknown field is read");
+                    .expect("a 1.2 manifest with two unknown fields is read");
                 assert!(layout.body_carries_flank_deletions);
                 assert!(!layout.body_carries_bundle_payload);
+                assert_eq!(layout.unknown_field_count(), 2);
+                continue;
+            }
+            if declared[position].name.0 == "observation-held-flanks" {
+                let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
+                    .expect("a 2.0 manifest with one unknown field is read");
+                assert!(layout.body_carries_bundle_payload);
+                assert!(!layout.body_carries_held_flanks);
                 assert_eq!(layout.unknown_field_count(), 1);
                 continue;
             }
@@ -3542,10 +3719,11 @@ mod tests {
             if declared[position].name.0 == "reads-discarded-by-the-depth-cap-head-copy"
                 || declared[position].name.0 == "observation-flank-deletions"
                 || declared[position].name.0 == "str-bundle-payload"
+                || declared[position].name.0 == "observation-held-flanks"
             {
                 assert!(
                     RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_ok(),
-                    "the 1.0 head without the copy, the 1.1 body, and the 1.2 body are read"
+                    "the 1.0 head without the copy, and the 1.1, 1.2 and 2.0 bodies, are read"
                 );
             } else {
                 assert!(
@@ -4031,6 +4209,7 @@ mod tests {
         };
         let cheapest_observation = SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(&b""[..]),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -4209,9 +4388,9 @@ mod tests {
         let record = a_rich_record();
         let mut body = Vec::new();
         encode_record_body(&record, &mut body);
-        // The kind is the byte before the (empty) flank-deletion list and the (empty) bundle
-        // payload that end every body.
-        let last = body.len() - 3;
+        // The kind is the byte before the (empty) flank-deletion list, the (empty) bundle
+        // payload and the (empty) held-flank list that end every body.
+        let last = body.len() - 4;
         assert_eq!(
             body[last], 0,
             "the fixture's kind is Generic, which is tag 0"
@@ -4301,6 +4480,7 @@ mod tests {
                 |(bases, run, group, obs, forward, steps, mapq, mapq_squared, left)| {
                     SequenceObservation {
                         flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                        held_flank: None,
                         bases: bases.into_boxed_slice(),
                         read_witness: match run.and_then(|(start, length)| {
                             WitnessedLocusPositions::one_run_from_offset_and_length(start, length)
@@ -4416,6 +4596,7 @@ mod tests {
             .observations
             .push(SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: b"A".to_vec().into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(1),
@@ -4517,6 +4698,7 @@ mod tests {
             .observations
             .push(SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: b"ACGTACT".to_vec().into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(1),
@@ -4560,6 +4742,7 @@ mod tests {
         let mut varying = a_rich_record();
         varying.observations.push(SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: b"ACGTACT".to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(1),
@@ -4834,6 +5017,7 @@ mod tests {
     fn the_head_this_version_writes_is_these_exact_bytes() {
         let observation = |bases: &[u8], num_obs: u32| SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(1),
@@ -6153,6 +6337,7 @@ mod tests {
         for read in 0..300u32 {
             deep.observations.push(SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 // Not the reference's own bases, so every one of these reads is non-reference.
                 bases: b"ACGTACT".to_vec().into_boxed_slice(),
                 read_witness: ReadWitness::Complete,

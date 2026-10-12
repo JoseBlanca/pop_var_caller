@@ -463,6 +463,22 @@ with `UnsupportedVersion` — the true reason, a psp written by an older pvc —
 later naming a typing key the user never set. Nothing readable is lost: every 1.x psp was refused
 anyway. The 1.x record layouts stay recognised by `RecordLayout`, for the record-level tests.*
 
+#### Format 2.1 — the flank a partial read held (2026-10-12)
+
+**Version 2.1 adds one field at the body's end, `observation-held-flanks`**, written on every
+record whatever its kind: a list of `(observation, flank)` varint pairs, the flank 0 for the left
+and 1 for the right, for each observation whose reads' held flank was recorded — a partial at an
+STR bundle whose witness covers the whole hull, which no longer says which flank the read anchored
+([`str_bundle_loci.md`](str_bundle_loci.md) §7.6). Empty, one byte before compression, on nearly
+every record. An index past the record's observations, or a flank other than 0 or 1, is refused.
+
+- **A minor bump, as 1.2 was.** A 2.0 reader accepts a 2.1 file and walks past the field as the
+  unknown final field it is; it then scores such a read from both flanks, one half each, as 2.0
+  always did — a proper mixture over a side it does not know, not a misreading. That is the case a
+  minor bump is for; 2.0 needed a major because a pre-2.0 reader would have *misread* every bundle.
+- **A 2.1 reader reads 2.0 files**, their observations without a recorded flank
+  (`RecordLayout::from_manifest` recognises the 2.0 field list). The writer writes 2.1 only.
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

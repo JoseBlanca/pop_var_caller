@@ -873,6 +873,7 @@ fn fill_emissions<Model: SsrEmissionModel>(
             let scored = model.censored_emission(
                 &observation.bases,
                 positions,
+                observation.held_flank,
                 allele,
                 context,
                 scratch.model_scratch_mut(),
@@ -930,6 +931,7 @@ mod tests {
     fn spanning(bases: &[u8], reads: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -1407,6 +1409,7 @@ mod tests {
                 &self,
                 witnessed_prefix: &[u8],
                 witnessed_positions: &crate::locus_generation::WitnessedLocusPositions,
+                held_flank: Option<crate::locus_generation::HeldFlank>,
                 candidate: &SsrCandidate<'_>,
                 context: &SsrScoringContext<'_>,
                 scratch: &mut Self::Scratch,
@@ -1415,6 +1418,7 @@ mod tests {
                 self.inner.censored_emission(
                     witnessed_prefix,
                     witnessed_positions,
+                    held_flank,
                     candidate,
                     context,
                     scratch,
@@ -1474,6 +1478,103 @@ mod tests {
         assert_eq!(model.censored.get(), 0, "no observation here is censored");
     }
 
+    /// **The row hands the emission the flank each partial read held** (`str_bundle_loci.md`
+    /// §7.6): an STR bundle scores a read over the whole hull from that flank, and a row passing
+    /// nothing would silently score it from both, one half each. Two partials of the same bases
+    /// and witness, one recorded as held from the right and one with nothing recorded, reach the
+    /// model with exactly those.
+    #[test]
+    fn the_row_hands_the_model_each_partials_held_flank() {
+        use crate::locus_generation::HeldFlank;
+        use std::cell::RefCell;
+
+        /// Records the held flank of every censored call and forwards to the real model.
+        struct Recording {
+            inner: StutterSubstitutionEmission,
+            held: RefCell<Vec<Option<HeldFlank>>>,
+        }
+
+        impl SsrEmissionModel for Recording {
+            type Scratch = StutterSubstitutionScratch;
+
+            fn emission(
+                &self,
+                observation: &[u8],
+                candidate: &SsrCandidate<'_>,
+                context: &SsrScoringContext<'_>,
+                scratch: &mut Self::Scratch,
+            ) -> f64 {
+                self.inner
+                    .emission(observation, candidate, context, scratch)
+            }
+
+            fn censored_emission(
+                &self,
+                witnessed_prefix: &[u8],
+                witnessed_positions: &crate::locus_generation::WitnessedLocusPositions,
+                held_flank: Option<HeldFlank>,
+                candidate: &SsrCandidate<'_>,
+                context: &SsrScoringContext<'_>,
+                scratch: &mut Self::Scratch,
+            ) -> f64 {
+                self.held.borrow_mut().push(held_flank);
+                self.inner.censored_emission(
+                    witnessed_prefix,
+                    witnessed_positions,
+                    held_flank,
+                    candidate,
+                    context,
+                    scratch,
+                )
+            }
+        }
+
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let partial = |held_flank| {
+            let mut seen = spanning(&a_tract(b"CA", 3), 2);
+            seen.read_witness =
+                ReadWitness::from_left(6, LocusLen::from_positions(10)).expect("a partial");
+            seen.held_flank = held_flank;
+            seen
+        };
+        let observations = [partial(Some(HeldFlank::Right)), partial(None)];
+        let detail = a_detail(b"CA");
+        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let candidates = fixture.candidates();
+        let contexts = fixture.contexts(&candidates);
+        let mut lengths = Vec::new();
+        fill_reachable_lengths(&candidates, &fixture.motif, &mut lengths);
+        let table = GenotypeTable::build(Ploidy::try_new(2).expect("a valid ploidy"), 2);
+        let view = table.view();
+        let model = Recording {
+            inner: StutterSubstitutionEmission,
+            held: RefCell::new(Vec::new()),
+        };
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut scratch = SsrRowScratch::<StutterSubstitutionScratch>::default();
+        genotype_log_likelihood_row(
+            &model,
+            &evidence,
+            SsrLocusParameters {
+                candidates: &candidates,
+                contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
+                outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                reachable_lengths: &lengths,
+                contamination: None,
+            },
+            &view,
+            &mut out,
+            &mut scratch,
+        );
+        let mut held = model.held.into_inner();
+        held.sort();
+        assert_eq!(
+            held,
+            vec![None, None, Some(HeldFlank::Right), Some(HeldFlank::Right)],
+            "each partial, against each of the two candidates, with its own held flank"
+        );
+    }
+
     /// **Spec §12's seventh test, first half: a biallelic diploid reproduced by hand.**
     ///
     /// The other ploidy test pins *orderings* — which genotype beats which — and every one of
@@ -1518,6 +1619,7 @@ mod tests {
                     .censored_emission(
                         &seen.bases,
                         positions,
+                        seen.held_flank,
                         &candidates[candidate],
                         &contexts[candidate],
                         scratch,

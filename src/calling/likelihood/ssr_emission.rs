@@ -37,7 +37,7 @@ use crate::alignment::StutterModel;
 use crate::alignment::emission::{BaseScores, Emission, FlatEmission};
 use crate::alignment::stutter::{MAX_PART_REPEAT_SLIP, MAX_WHOLE_REPEAT_SLIP};
 use crate::float;
-use crate::locus_generation::{LocusLen, WitnessedLocusPositions};
+use crate::locus_generation::{HeldFlank, LocusLen, WitnessedLocusPositions};
 use crate::parameter_estimation::Provenance;
 use crate::region_typing::reference_runs::ReferenceRun;
 use crate::region_typing::run_parse::RunParse;
@@ -173,6 +173,23 @@ pub struct SsrScoringContext<'a> {
     /// read whose flank extent differs from the allele's — or the shipped constants where the
     /// bundle has no run.
     pub run_stutter: &'a [StutterModel],
+    /// **At an STR bundle, the substitution rate of each reference run's bases**, in hull order —
+    /// each looked up as that run's stutter is, by read group, period and the run's count in this
+    /// candidate — for a read that ended inside the hull (`str_bundle_loci.md` §7.6). Empty at a
+    /// segment, and at a bundle context built without them, where such a read is compared at
+    /// [`substitution_rate`](Self::substitution_rate) throughout.
+    ///
+    /// **Why a partial read does not take the cell's one rate**: that rate is the mean of every
+    /// run's, so a run the read never reached would move the letters of what it did read, and
+    /// the read would not be neutral about that run (`str_bundle_loci.md` §7.6).
+    pub run_substitution_rates: &'a [ErrorRate],
+    /// **The rate a partial read's bases outside every run are compared at** — the fixed bases
+    /// between runs and the flank beyond the hull. It must not depend on the candidate's counts,
+    /// or a read ending in fixed sequence would hear about runs it never reached; the gather sets
+    /// it to the mean of the runs' rates at their reference counts. Equal to
+    /// [`substitution_rate`](Self::substitution_rate) wherever
+    /// [`run_substitution_rates`](Self::run_substitution_rates) is empty.
+    pub fixed_substitution_rate: ErrorRate,
     /// The weakest warrant behind any parameter in this context.
     ///
     /// **The model never branches on it; it propagates** (spec §4.4). A stratum whose numbers
@@ -210,6 +227,8 @@ impl<'a> SsrScoringContext<'a> {
             substitution_rate,
             unreachable_mass: stutter.unreachable_mass(period_of(motif), candidate.repeat_count),
             run_stutter: &[],
+            run_substitution_rates: &[],
+            fixed_substitution_rate: substitution_rate,
             weakest_provenance,
         }
     }
@@ -262,8 +281,34 @@ impl<'a> SsrScoringContext<'a> {
             substitution_rate,
             unreachable_mass: (1.0 - kept).max(0.0),
             run_stutter,
+            run_substitution_rates: &[],
+            fixed_substitution_rate: substitution_rate,
             weakest_provenance,
         }
+    }
+
+    /// **The rates a bundle's partial reads are compared at**: one per reference run, in hull
+    /// order, and one for the bases outside every run (see
+    /// [`run_substitution_rates`](Self::run_substitution_rates)). A complete read keeps
+    /// [`substitution_rate`](Self::substitution_rate).
+    ///
+    /// # Panics
+    ///
+    /// If `run_rates` is not one rate per run of this context.
+    #[must_use]
+    pub fn with_partial_read_rates(
+        mut self,
+        run_rates: &'a [ErrorRate],
+        fixed_rate: ErrorRate,
+    ) -> Self {
+        assert_eq!(
+            run_rates.len(),
+            self.run_stutter.len(),
+            "a bundle's partial reads are compared at one rate per reference run"
+        );
+        self.run_substitution_rates = run_rates;
+        self.fixed_substitution_rate = fixed_rate;
+        self
     }
 }
 
@@ -406,15 +451,19 @@ pub trait SsrEmissionModel {
     /// when this measurement was put to the owner and both were corrected. §5.2's correction
     /// box is the place to read the argument.)*
     ///
-    /// **`witnessed_positions` says which flank the read held**, and only an STR bundle reads it
-    /// (`str_bundle_loci.md` §7.6): there the read's bases are the start of the carrier's hull
-    /// for a read that held the left flank and its end for one that held the right, and the two
-    /// are compared differently. A segment reads every partial's bases as the start of the
-    /// tract, whichever flank it held, as it always has.
+    /// **`witnessed_positions` and `held_flank` say which flank the read held**, and only an STR
+    /// bundle reads them (`str_bundle_loci.md` §7.6): there the read's bases are the start of the
+    /// carrier's hull for a read that held the left flank and its end for one that held the
+    /// right, and the two are compared differently. The positions say it where they touch one
+    /// border only; `held_flank` is what the classifier recorded where they cover the whole locus
+    /// ([`SequenceObservation::held_flank`](crate::locus_generation::SequenceObservation::held_flank)).
+    /// A segment reads every partial's bases as the start of the tract, whichever flank it held,
+    /// as it always has.
     fn censored_emission(
         &self,
         witnessed_prefix: &[u8],
         witnessed_positions: &WitnessedLocusPositions,
+        held_flank: Option<HeldFlank>,
         candidate: &SsrCandidate<'_>,
         context: &SsrScoringContext<'_>,
         scratch: &mut Self::Scratch,
@@ -533,16 +582,41 @@ struct CensoredScratch {
     next_replaced: usize,
     /// The read's bases, from the flank it held.
     read: Vec<u8>,
-    /// `memo[run × read length + offset]`: the read's probability from that run on, given the
-    /// read's bases before `offset` are spent; then `memo[(runs + piece) × read length + offset]`,
-    /// the same from a fixed piece on. `NaN` until computed.
-    memo: Vec<f64>,
+    /// `reached[piece × read length + offset]`: how probable it is that the walk reaches that
+    /// piece with the read's first `offset` bases spent ([`walk_from_the_held_flank`]), the
+    /// pieces in reading order — fixed piece `i` at `2i`, run `i` at `2i + 1`.
+    reached: Vec<f64>,
     /// A run's stretch split into whole copies and interruptions, while a layout is built.
     segments: Vec<TractSegment>,
     /// A run's renderings under one slip, while a layout is built.
     placements: Vec<Vec<u8>>,
-    /// The read's comparisons, with the sums of agreeing bases kept.
-    matched: MatchedPrefixLetters,
+    /// The read's comparisons, with the sums of agreeing bases kept — one per distinct rate the
+    /// read is compared at: `matched[0]` the fixed bases' ([`SsrScoringContext::fixed_substitution_rate`]),
+    /// then each run's that differs from it ([`SsrScoringContext::run_substitution_rates`]).
+    matched: Vec<MatchedPrefixLetters>,
+    /// The rate behind each entry of `matched`.
+    matched_rates: Vec<ErrorRate>,
+    /// Per run, in the order the read meets them, its entry of `matched`.
+    run_matched: Vec<usize>,
+}
+
+/// **The comparisons a partial read's walk makes**, each at the rate of the piece compared
+/// ([`CensoredScratch::matched`]): a fixed piece at the fixed bases' rate, a run's renderings at
+/// that run's.
+struct WalkLetters<'a> {
+    matched: &'a [MatchedPrefixLetters],
+    /// Per run in reading order, its entry of `matched`.
+    run_matched: &'a [usize],
+}
+
+impl WalkLetters<'_> {
+    fn of_fixed_piece(&self) -> &MatchedPrefixLetters {
+        &self.matched[0]
+    }
+
+    fn of_run(&self, at: usize) -> &MatchedPrefixLetters {
+        &self.matched[self.run_matched[at]]
+    }
 }
 
 /// **What a layout was built from** — compared in full before a kept layout is reused.
@@ -598,8 +672,7 @@ impl CensoredLayoutInputs {
 
 /// **An STR bundle allele laid out from the flank a partial read held** — the pieces a carrier
 /// shows in the order the read meets them, so the read is compared from its first base whichever
-/// flank it held. From the right flank every piece is reversed, and so is the read. It also holds
-/// the part-repeat renderings, each followed (or, from the right, preceded) by the flank.
+/// flank it held. From the right flank every piece is reversed, and so is the read.
 ///
 /// Built by [`CensoredLayout::lay_out`], which clears and refills every buffer.
 #[derive(Debug, Default)]
@@ -615,51 +688,23 @@ struct CensoredLayout {
     rendering_bases: Vec<u8>,
     /// Each rendering's bases in `rendering_bases`.
     renderings: Vec<std::ops::Range<usize>>,
-    /// Each slip a run can make: its probability and its renderings.
+    /// Each change a run can make — a whole-unit slip or a sequencing indel — with its price
+    /// and its renderings.
     slips: Vec<CensoredSlip>,
-    /// Each run's slips in `slips`, in reading order.
+    /// Each run's changes in `slips`, in reading order.
     slips_of_run: Vec<std::ops::Range<usize>>,
-    /// `unreached_mass[i]`: the product, over the runs from reading position `i` on, of each
-    /// run's total probability over its slips — what those runs contribute when the read ended
-    /// before reaching them. One more entry than the runs; the last is one.
-    unreached_mass: Vec<f64>,
-    /// Every length change no single run's slip makes, in increasing order, with its places.
-    part_repeat_changes: Vec<PartRepeatChange>,
-    /// Every place of those changes with a non-zero price, in run order within a change.
-    part_repeat_places: Vec<PartRepeatPlace>,
-    /// The carriers of those places, one after another, in the read's own orientation: the
-    /// rendering then the flank from the left, the flank then the rendering from the right.
-    part_repeat_carrier_bases: Vec<u8>,
 }
 
-/// One slip a run can make, as [`CensoredLayout`] holds it.
+/// One change a run can make, as [`CensoredLayout`] holds it: a slip of whole units, placed at
+/// each place in the run, or a sequencing indel of part of a unit, resized at the run's end.
 #[derive(Debug, Clone)]
 struct CensoredSlip {
-    /// The run's probability of this slip.
+    /// The run's price for this change: its model's probability of that length change.
     probability: f64,
     /// Its renderings in [`CensoredLayout::renderings`], each weighted equally.
     renderings: std::ops::Range<usize>,
     /// The length of every rendering.
     length: usize,
-}
-
-/// One length change no single run's slip makes, as [`CensoredLayout`] holds it.
-#[derive(Debug, Clone)]
-struct PartRepeatChange {
-    /// How many runs it can be a sequencing indel in — the average's denominator, counting a
-    /// place whose price is zero.
-    places: usize,
-    /// Its places with a non-zero price, in [`CensoredLayout::part_repeat_places`].
-    priced: std::ops::Range<usize>,
-}
-
-/// One run a part-repeat change can be a sequencing indel in, as [`CensoredLayout`] holds it.
-#[derive(Debug, Clone)]
-struct PartRepeatPlace {
-    /// That run's price for the change, times the other runs' chance of not slipping.
-    probability: f64,
-    /// The carrier's bases in [`CensoredLayout::part_repeat_carrier_bases`].
-    carrier: std::ops::Range<usize>,
 }
 
 impl SsrEmissionModel for StutterSubstitutionEmission {
@@ -708,6 +753,7 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
         &self,
         witnessed_prefix: &[u8],
         witnessed_positions: &WitnessedLocusPositions,
+        held_flank: Option<HeldFlank>,
         candidate: &SsrCandidate<'_>,
         context: &SsrScoringContext<'_>,
         scratch: &mut Self::Scratch,
@@ -716,6 +762,7 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
             return bundle_censored_emission(
                 witnessed_prefix,
                 witnessed_positions,
+                held_flank,
                 candidate,
                 bundle,
                 context,
@@ -952,8 +999,13 @@ fn substitution_probability(
 /// logarithms, so a caller comparing one read many times looks them up once and calls
 /// [`letters_under`] (a read that ended inside an STR bundle, [`bundle_censored_emission`]).
 fn substitution_scores(context: &SsrScoringContext<'_>) -> BaseScores {
-    let flat = FlatEmission::try_new(context.substitution_rate.get())
-        .expect("an ErrorRate is a probability by construction");
+    scores_at(context.substitution_rate)
+}
+
+/// [`substitution_scores`] at a given rate.
+fn scores_at(rate: ErrorRate) -> BaseScores {
+    let flat =
+        FlatEmission::try_new(rate.get()).expect("an ErrorRate is a probability by construction");
     // A flat model's two scores do not vary with quality, so they are resolved once and the
     // loop is one comparison per base.
     // A flat model ignores the quality entirely, so any value resolves the same two
@@ -1539,8 +1591,9 @@ fn letters_over_every_combination(
 /// equal weight over the runs for which the change is not whole units. Zero where there is no
 /// such run.
 ///
-/// `letters` prices the read against each rendering. A read that ended inside the hull takes the
-/// renderings from [`part_repeat_places`] instead, once per allele ([`CensoredLayout::lay_out`]).
+/// `letters` prices the read against each rendering. A read that ended inside the hull does not
+/// take this regime: each run it reaches offers its own sequencing indels beside its slips
+/// ([`CensoredLayout::lay_out`], `str_bundle_loci.md` §7.6).
 fn part_repeat_emission(
     candidate: &[u8],
     bundle: BundleCandidate<'_>,
@@ -1723,29 +1776,27 @@ fn bundle_reachable_length_changes(bundle: BundleCandidate<'_>, out: &mut Vec<i6
 
 // ── STR bundles: reads that end inside the hull (`str_bundle_loci.md` §7.6) ──
 
-/// **Which flank of an STR bundle's hull a read that ended inside the hull held**, read off its
-/// witness. A witness from the hull's first position that stops short of its last is a read that
-/// held the left flank, and the mirror image one that held the right. A witness over the whole
-/// hull is a read that reached the far edge without anchoring there, from either flank; nothing
-/// in it says which.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeldFlank {
-    Left,
-    Right,
-    Either,
-}
-
-impl HeldFlank {
-    fn of(positions: &WitnessedLocusPositions, hull_len: u32) -> Self {
-        let hull_len = LocusLen::from_positions(u64::from(hull_len));
-        match (
-            positions.is_flush_left(),
-            positions.is_flush_right(hull_len),
-        ) {
-            (true, false) => Self::Left,
-            (false, true) => Self::Right,
-            _ => Self::Either,
-        }
+/// **Which flank of an STR bundle's hull a read that ended inside the hull held.** The witness
+/// says it where it touches one border only: a witness from the hull's first position that stops
+/// short of its last held the left flank, and the mirror image the right. A witness over the
+/// whole hull is a read that reached the far edge without anchoring there, and only the
+/// classifier knew which flank it anchored; `recorded` is what it wrote down
+/// ([`SequenceObservation::held_flank`](crate::locus_generation::SequenceObservation::held_flank),
+/// psp format 2.1). `None` where neither says — a psp written before 2.1, or a witness touching
+/// neither border, which no generator mints.
+fn held_flank_of(
+    positions: &WitnessedLocusPositions,
+    hull_len: u32,
+    recorded: Option<HeldFlank>,
+) -> Option<HeldFlank> {
+    let hull_len = LocusLen::from_positions(u64::from(hull_len));
+    match (
+        positions.is_flush_left(),
+        positions.is_flush_right(hull_len),
+    ) {
+        (true, false) => Some(HeldFlank::Left),
+        (false, true) => Some(HeldFlank::Right),
+        _ => recorded,
     }
 }
 
@@ -1756,44 +1807,64 @@ impl HeldFlank {
 /// # What the read says
 ///
 /// A read that held the left flank shows the start of what its carrier has from that flank on:
-/// the hull with whatever slips its runs made, then the right flank. Its bases are compared with
-/// that sequence's first bases — so it is evidence about every run and every fixed base it got
-/// past, priced exactly as a complete read prices them, slips included; a lower bound on the run
-/// it ended inside, since every length of that run long enough to hold what it showed agrees with
-/// it; and nothing about the runs it never reached, each of which contributes its total
-/// probability over its slips whatever the allele holds there. A read that held the right flank
-/// is the same read from the other end. One whose witness covers the whole hull is either, each
-/// weighted one half.
+/// the hull with whatever changes its runs made, then the right flank. Each run makes one change
+/// independently of the others — a slip of whole units at its stutter model's price, placed at
+/// each place in the run, or a sequencing indel of part of a unit at that model's price, resized
+/// at the run's end. The read's bases are compared with the carrier's first bases, piece by piece
+/// from the flank it held, and the sum runs only over the pieces the read reaches:
 ///
 /// ```text
-/// P(read | allele) = Σ over every slip set   Π_r P_r(kᵣ) × letters(read | first bases of the allele with the slips, then the flank)
-///                  + Σ over every change no single run makes   its part-repeat price × letters(read | first bases of that rendering, then the flank)
+/// P(read | allele) = Σ over every way the reached runs can change   Π over the runs the read reached   price of that run's change
+///                                                                  × letters(read | first bases of the carrier)
 /// ```
 ///
-/// That is a complete read's emission summed over every complete read whose first bases are these
-/// ones, which is what a segment's censored term is, and for one run over the whole hull with no
-/// flank bases it is the segment's own sum (`a_one_run_bundles_partial_read_scores_as_the_segments`).
+/// So it is evidence about every run and fixed base it got past; a lower bound on the run it
+/// ended inside, since every change of that run long enough to hold what it showed gives the same
+/// letters; and **nothing at all about the runs it never reached**: on a path where the read's
+/// bases run out before a run, that run and everything after it contribute exactly one, whatever
+/// the allele holds there (owner, 2026-10-12, the review's finding M2 — before, each such run
+/// contributed its total slip probability, which depends on its count). A read that held the
+/// right flank is the same read from the other end. One whose held flank neither the witness nor
+/// the classifier says ([`held_flank_of`]) is scored from both, each weighted one half.
+///
+/// **Where it differs from a complete read.** For a bundle of one run this is the segment's own
+/// censored sum (`a_one_run_bundles_partial_read_scores_as_the_segments`). With more runs a
+/// complete read prices a sequencing indel only for a length change no single run's slip makes,
+/// averaged over the runs it could be in with the others not slipping (§7.3); that rule reads
+/// every run of the allele, so a read that stopped short of some cannot follow it and stay
+/// neutral about them. Here every run that can take an indel of part of a unit offers one, beside
+/// its slips.
 ///
 /// # Cost
 ///
-/// A slip set's runs past the read's end do not change the bases compared, so the sum is walked
-/// run by run from the held flank, and the read's probability from a run on depends only on how
-/// many of the read's bases the pieces before it took. That is remembered, so a read costs a few
-/// slips per run per such offset — never the product of every run's slips.
+/// What follows a piece depends only on how many of the read's bases the pieces before it took,
+/// so the sum is walked piece by piece from the held flank, each such state once
+/// ([`walk_from_the_held_flank`]): a read costs a few changes per run per state — never the
+/// product of every run's changes — and, from two runs on, the states too improbable to matter
+/// are dropped within [`NEGLIGIBLE_PARTIAL_READ_MASS`].
+///
+/// # Rates
+///
+/// Each run's bases are compared at that run's rate and every other base at the fixed rate
+/// ([`SsrScoringContext::run_substitution_rates`], [`SsrScoringContext::fixed_substitution_rate`]),
+/// so the letters too depend only on what the read reached.
 fn bundle_censored_emission(
     witnessed: &[u8],
     witnessed_positions: &WitnessedLocusPositions,
+    recorded_held_flank: Option<HeldFlank>,
     candidate: &SsrCandidate<'_>,
     bundle: BundleCandidate<'_>,
     context: &SsrScoringContext<'_>,
     scratch: &mut StutterSubstitutionScratch,
 ) -> f64 {
     let scratch = &mut scratch.bundle;
-    match HeldFlank::of(witnessed_positions, bundle.reference_hull_len) {
-        held @ (HeldFlank::Left | HeldFlank::Right) => {
-            censored_from_one_flank(witnessed, candidate, bundle, context, held, scratch)
-        }
-        HeldFlank::Either => {
+    match held_flank_of(
+        witnessed_positions,
+        bundle.reference_hull_len,
+        recorded_held_flank,
+    ) {
+        Some(held) => censored_from_one_flank(witnessed, candidate, bundle, context, held, scratch),
+        None => {
             let left = censored_from_one_flank(
                 witnessed,
                 candidate,
@@ -1815,7 +1886,7 @@ fn bundle_censored_emission(
     }
 }
 
-/// [`bundle_censored_emission`] for a read that held `held`, which is `Left` or `Right`.
+/// [`bundle_censored_emission`] for a read that held `held`.
 fn censored_from_one_flank(
     witnessed: &[u8],
     candidate: &SsrCandidate<'_>,
@@ -1856,7 +1927,6 @@ fn censored_from_one_flank(
                     segments: &mut censored.segments,
                     placements: &mut censored.placements,
                     resized_stretch: &mut scratch.resized_stretch,
-                    rendered: &mut scratch.rendered,
                 },
             );
             at
@@ -1864,69 +1934,84 @@ fn censored_from_one_flank(
     };
     let layout = &censored.layouts[at];
 
-    // The two per-base scores, looked up once for every comparison below, and the sums of
-    // agreeing bases under them.
-    censored
-        .matched
-        .prepare(substitution_scores(context), witnessed.len());
+    // The per-base scores of each rate the read is compared at, looked up once for every
+    // comparison below, and the sums of agreeing bases under them. **Each run's bases at that
+    // run's rate, every other base at the fixed rate**: what scores the read then depends only
+    // on the pieces it reaches (`str_bundle_loci.md` §7.6).
+    censored.matched_rates.clear();
+    censored.matched_rates.push(context.fixed_substitution_rate);
+    censored.run_matched.clear();
+    let run_count = layout.slips_of_run.len();
+    for at in 0..run_count {
+        let run = if held == HeldFlank::Right {
+            run_count - 1 - at
+        } else {
+            at
+        };
+        let rate = context
+            .run_substitution_rates
+            .get(run)
+            .copied()
+            .unwrap_or(context.fixed_substitution_rate);
+        let slot = match censored
+            .matched_rates
+            .iter()
+            .position(|kept| kept.get().to_bits() == rate.get().to_bits())
+        {
+            Some(slot) => slot,
+            None => {
+                censored.matched_rates.push(rate);
+                censored.matched_rates.len() - 1
+            }
+        };
+        censored.run_matched.push(slot);
+    }
+    if censored.matched.len() < censored.matched_rates.len() {
+        censored
+            .matched
+            .resize_with(censored.matched_rates.len(), MatchedPrefixLetters::default);
+    }
+    for (matched, rate) in censored.matched.iter_mut().zip(&censored.matched_rates) {
+        matched.prepare(scores_at(*rate), witnessed.len());
+    }
+    let letters = WalkLetters {
+        matched: &censored.matched,
+        run_matched: &censored.run_matched,
+    };
     censored.read.clear();
     if held == HeldFlank::Right {
         censored.read.extend(witnessed.iter().rev());
     } else {
         censored.read.extend_from_slice(witnessed);
     }
-    censored.memo.clear();
-    censored.memo.resize(
-        (2 * layout.slips_of_run.len() + 1) * censored.read.len(),
-        f64::NAN,
-    );
-    let mut total = probability_on_from_fixed_piece(
+    // A bundle of one run is walked whole, so it stays the segment's sum to the last digit the
+    // order of addition allows (`a_one_run_bundles_partial_read_scores_as_the_segments`).
+    let budget = if layout.slips_of_run.len() >= 2 {
+        NEGLIGIBLE_PARTIAL_READ_MASS
+    } else {
+        0.0
+    };
+    walk_from_the_held_flank(
         layout,
         &censored.read,
-        &mut censored.memo,
-        0,
-        0,
-        &censored.matched,
-    );
-
-    // The part-repeat renderings: one run's sequencing indel, the others not slipping, for every
-    // change no single run's slip makes — the same set and price a complete read takes, each
-    // compared from the flank the read held. Consecutive places that show the read the same bases
-    // (an indel past where the read ended) are compared once.
-    let mut last_compared: Option<(&[u8], f64)> = None;
-    for change in &layout.part_repeat_changes {
-        let mut priced = 0.0;
-        for place in &layout.part_repeat_places[change.priced.clone()] {
-            let carrier = &layout.part_repeat_carrier_bases[place.carrier.clone()];
-            let letters = match carrier.len().checked_sub(witnessed.len()) {
-                // The carrier is shorter than what the read showed.
-                None => 0.0,
-                Some(from) => {
-                    let shown = if held == HeldFlank::Left {
-                        &carrier[..witnessed.len()]
-                    } else {
-                        &carrier[from..]
-                    };
-                    match last_compared {
-                        Some((bases, letters)) if bases == shown => letters,
-                        _ => {
-                            let letters = censored.matched.letters(witnessed, shown);
-                            last_compared = Some((shown, letters));
-                            letters
-                        }
-                    }
-                }
-            };
-            priced += place.probability * letters;
-        }
-        total += if change.places == 0 {
-            0.0
-        } else {
-            priced / change.places as f64
-        };
-    }
-    total
+        &mut censored.reached,
+        &letters,
+        budget,
+    )
 }
+
+/// **How much of a partial read's emission the walk may leave out**, at an STR bundle of two runs
+/// or more ([`walk_from_the_held_flank`]). Every probability the walk multiplies is at most one,
+/// so what a dropped state would have added is at most the probability of reaching it, and the
+/// dropped states' total is kept within this: the emission comes out at most this much low, never
+/// high. The row adds an outlier floor near `0.2 / 40` to every read (`likelihood/ssr.rs`), so a
+/// shortfall of a millionth of a millionth moves no genotype's likelihood in its ninth significant
+/// digit — the bound [`NEGLIGIBLE_SLIP_SET_PROBABILITY`] sets for a complete read.
+///
+/// What it buys: a sequencing indel in one run shifts the read against every piece after it, and
+/// most of the states that shift leads to are a few mismatches deep — each a factor near
+/// `ε / 3` — long before the read's bases are spent; they were most of what step 4c's walk cost.
+pub const NEGLIGIBLE_PARTIAL_READ_MASS: f64 = 1e-12;
 
 /// **The reference flank a carrier of this allele has past the hull, on the side a read that held
 /// `held` ran towards** — less any flank bases the allele's own deletion takes.
@@ -1935,7 +2020,7 @@ fn flank_beyond_the_hull<'a>(candidate: &SsrCandidate<'a>, held: HeldFlank) -> &
     let deletion = candidate.flank_deletion;
     match held {
         HeldFlank::Left => right.get(usize::from(deletion.right)..).unwrap_or_default(),
-        _ => left
+        HeldFlank::Right => left
             .get(..left.len().saturating_sub(usize::from(deletion.left)))
             .unwrap_or_default(),
     }
@@ -1947,18 +2032,15 @@ struct LayoutBuffers<'a> {
     segments: &'a mut Vec<TractSegment>,
     /// A run's renderings under one slip.
     placements: &'a mut Vec<Vec<u8>>,
-    /// One run's stretch resized by a part-repeat change.
+    /// One run's stretch resized by a sequencing indel of part of a unit.
     resized_stretch: &'a mut Vec<u8>,
-    /// The allele rendered with that change.
-    rendered: &'a mut Vec<u8>,
 }
 
 impl CensoredLayout {
-    /// Lay `allele` out from the flank `held` (`Left` or `Right`): its fixed pieces, the flank
-    /// beyond the hull after the last of them, every slip each run can make with its renderings,
-    /// and every part-repeat rendering with the flank — all in the order a read from that flank
-    /// meets them, reversed from the right except the part-repeat carriers, which are compared
-    /// with the read as it is.
+    /// Lay `allele` out from the flank `held`: its fixed pieces, the flank beyond the hull after
+    /// the last of them, and every change each run can make with its renderings — its slips of
+    /// whole units and its sequencing indels of part of a unit — all in the order a read from
+    /// that flank meets them, reversed from the right.
     fn lay_out(
         &mut self,
         allele: &[u8],
@@ -1972,7 +2054,6 @@ impl CensoredLayout {
             segments,
             placements,
             resized_stretch,
-            rendered,
         } = buffers;
         self.inputs.set(held, allele, beyond, bundle, context);
         let ranges = run_slip_ranges(bundle, context);
@@ -2010,7 +2091,8 @@ impl CensoredLayout {
             self.fixed.push(first..self.fixed_bases.len());
         }
 
-        // Every slip each run can make, with its renderings.
+        // Every change each run can make, with its renderings: its slips of whole units, then its
+        // sequencing indels of part of a unit.
         self.rendering_bases.clear();
         self.renderings.clear();
         self.slips.clear();
@@ -2059,145 +2141,142 @@ impl CensoredLayout {
                     length,
                 });
             }
+            // The run's sequencing indels: every change that is not whole units of its period, at
+            // most `2 · MAX_PART_REPEAT_SLIP` bases, priced by its own model and resized at its
+            // end — the places and prices a complete read's part-repeat regime takes in this run
+            // (`part_repeat_places`), without that regime's reading of the other runs. A run with
+            // no copy takes none, and a stretch shorter than the contraction cannot.
+            if placed[run].copies > 0 {
+                let period = period_of(&motif);
+                let model = &context.run_stutter[run];
+                let widest = 2 * i64::from(MAX_PART_REPEAT_SLIP);
+                for bp_diff in -widest..=widest {
+                    if bp_diff % i64::from(period.get()) == 0
+                        || (stretch.len() as i64) + bp_diff < 0
+                    {
+                        continue;
+                    }
+                    let probability = model.probability(bp_diff, period);
+                    if probability <= 0.0 {
+                        continue;
+                    }
+                    resize_at_the_end(stretch, motif.as_bytes(), bp_diff, resized_stretch);
+                    let first_rendering = self.renderings.len();
+                    push_rendering(
+                        &mut self.rendering_bases,
+                        &mut self.renderings,
+                        resized_stretch,
+                        from_right,
+                    );
+                    self.slips.push(CensoredSlip {
+                        probability,
+                        renderings: first_rendering..self.renderings.len(),
+                        length: resized_stretch.len(),
+                    });
+                }
+            }
             self.slips_of_run.push(first_slip..self.slips.len());
         }
+    }
+}
 
-        self.unreached_mass.clear();
-        self.unreached_mass.resize(run_count + 1, 1.0);
-        for at in (0..run_count).rev() {
-            let run_mass: f64 = self.slips[self.slips_of_run[at].clone()]
-                .iter()
-                .map(|slip| slip.probability)
-                .sum();
-            self.unreached_mass[at] = run_mass * self.unreached_mass[at + 1];
-        }
-
-        // The part-repeat renderings, each with the flank on the side the read ran towards. A
-        // part-repeat change is at most `2 · MAX_PART_REPEAT_SLIP` bases at any period of two or
-        // more.
-        self.part_repeat_changes.clear();
-        self.part_repeat_places.clear();
-        self.part_repeat_carrier_bases.clear();
-        let widest = 2 * i64::from(MAX_PART_REPEAT_SLIP);
-        for bp_diff in -widest..=widest {
-            if a_single_run_slip_reaches(&ranges, bp_diff) {
+/// **The read's probability under `layout`, walked piece by piece from the held flank** — the sum
+/// over every path through the runs' changes of the path's price times its letters, the pieces
+/// after the read's last base contributing exactly one (`str_bundle_loci.md` §7.6). `read` is in
+/// the layout's orientation.
+///
+/// **Forward, by how probable each state is.** A state is a piece reached with the read's first
+/// `offset` bases spent; what follows it depends on nothing else, so each is visited once, with
+/// the summed probability of every path that reaches it — the pieces in reading order, the
+/// offsets ascending, the changes of a run in layout order — and hands that on to the states its
+/// piece leads to. A path whose bases run out ends there and adds to the result; one whose
+/// carrier runs out before the read does adds nothing.
+///
+/// **A state no more probable than what is left of `budget` is dropped**, and the budget spent;
+/// see [`NEGLIGIBLE_PARTIAL_READ_MASS`]. A zero budget walks every state.
+///
+/// Renderings that show the read the same bases — every change of a pure run long enough to hold
+/// the rest of the read — are compared once: the letters are a function of those bases alone.
+fn walk_from_the_held_flank(
+    layout: &CensoredLayout,
+    read: &[u8],
+    reached: &mut Vec<f64>,
+    letters: &WalkLetters<'_>,
+    budget: f64,
+) -> f64 {
+    let read_len = read.len();
+    if read_len == 0 {
+        return 1.0;
+    }
+    let runs = layout.slips_of_run.len();
+    let pieces = 2 * runs + 1;
+    reached.clear();
+    reached.resize(pieces * read_len, 0.0);
+    reached[0] = 1.0;
+    let mut total = 0.0;
+    let mut dropped = 0.0;
+    for piece in 0..pieces {
+        let at = piece / 2;
+        for offset in 0..read_len {
+            let here = reached[piece * read_len + offset];
+            if here == 0.0 {
                 continue;
             }
-            let first_place = self.part_repeat_places.len();
-            let places = part_repeat_places(
-                allele,
-                bundle,
-                context,
-                bp_diff,
-                (&mut *resized_stretch, &mut *rendered),
-                |probability, rendered| {
-                    let first = self.part_repeat_carrier_bases.len();
-                    if from_right {
-                        self.part_repeat_carrier_bases.extend_from_slice(beyond);
-                        self.part_repeat_carrier_bases.extend_from_slice(rendered);
+            if dropped + here <= budget {
+                dropped += here;
+                continue;
+            }
+            if piece % 2 == 0 {
+                // Fixed piece `at`; the last carries the flank beyond the hull.
+                let bases = layout.fixed[at].clone();
+                let next = offset + bases.len();
+                if next < read_len && at == runs {
+                    // The carrier's sequence ran out before the read did.
+                    continue;
+                }
+                let compared = bases.len().min(read_len - offset);
+                let shown = letters.of_fixed_piece().letters(
+                    &read[offset..offset + compared],
+                    &layout.fixed_bases[bases.start..bases.start + compared],
+                );
+                if next >= read_len {
+                    total += here * shown;
+                } else {
+                    reached[(piece + 1) * read_len + next] += here * shown;
+                }
+            } else {
+                let matched = letters.of_run(at);
+                let mut last_compared: Option<(&[u8], f64)> = None;
+                for slip in &layout.slips[layout.slips_of_run[at].clone()] {
+                    let compared = slip.length.min(read_len - offset);
+                    let each = 1.0 / slip.renderings.len() as f64;
+                    let shown: f64 = layout.renderings[slip.renderings.clone()]
+                        .iter()
+                        .map(|bases| {
+                            let rendered =
+                                &layout.rendering_bases[bases.start..bases.start + compared];
+                            let letters = match last_compared {
+                                Some((before, letters)) if before == rendered => letters,
+                                _ => {
+                                    let letters =
+                                        matched.letters(&read[offset..offset + compared], rendered);
+                                    last_compared = Some((rendered, letters));
+                                    letters
+                                }
+                            };
+                            each * letters
+                        })
+                        .sum();
+                    let next = offset + slip.length;
+                    if next >= read_len {
+                        total += here * slip.probability * shown;
                     } else {
-                        self.part_repeat_carrier_bases.extend_from_slice(rendered);
-                        self.part_repeat_carrier_bases.extend_from_slice(beyond);
+                        reached[(piece + 1) * read_len + next] += here * slip.probability * shown;
                     }
-                    self.part_repeat_places.push(PartRepeatPlace {
-                        probability,
-                        carrier: first..self.part_repeat_carrier_bases.len(),
-                    });
-                },
-            );
-            self.part_repeat_changes.push(PartRepeatChange {
-                places,
-                priced: first_place..self.part_repeat_places.len(),
-            });
+                }
+            }
         }
     }
-}
-
-/// **The read's probability from fixed piece `at` of `layout` on**, its first `offset` bases
-/// already accounted for by the pieces before. `read` is in the layout's orientation.
-fn probability_on_from_fixed_piece(
-    layout: &CensoredLayout,
-    read: &[u8],
-    memo: &mut [f64],
-    at: usize,
-    offset: usize,
-    matched: &MatchedPrefixLetters,
-) -> f64 {
-    let read_len = read.len();
-    if offset >= read_len {
-        return layout.unreached_mass[at];
-    }
-    // A fixed piece is reached at one offset by several paths as often as a run is.
-    let key = (layout.slips_of_run.len() + at) * read_len + offset;
-    if !memo[key].is_nan() {
-        return memo[key];
-    }
-    let piece = layout.fixed[at].clone();
-    let compared = piece.len().min(read_len - offset);
-    let letters_here = matched.letters(
-        &read[offset..offset + compared],
-        &layout.fixed_bases[piece.start..piece.start + compared],
-    );
-    let next = offset + piece.len();
-    let total = if next >= read_len {
-        letters_here * layout.unreached_mass[at]
-    } else if at == layout.slips_of_run.len() {
-        // The carrier's sequence ran out before the read did.
-        0.0
-    } else {
-        letters_here * probability_on_from_run(layout, read, memo, at, next, matched)
-    };
-    memo[key] = total;
-    total
-}
-
-/// **The read's probability from run `at` of `layout` on**, its first `offset` bases already
-/// accounted for: each slip of the run, its renderings' letters averaged, times what follows it.
-///
-/// Renderings that show the read the same bases — every slip of a pure run long enough to hold
-/// the rest of the read — are compared once: the letters are a function of those bases alone.
-fn probability_on_from_run(
-    layout: &CensoredLayout,
-    read: &[u8],
-    memo: &mut [f64],
-    at: usize,
-    offset: usize,
-    matched: &MatchedPrefixLetters,
-) -> f64 {
-    let read_len = read.len();
-    let key = at * read_len + offset;
-    if !memo[key].is_nan() {
-        return memo[key];
-    }
-    let mut last_compared: Option<(&[u8], f64)> = None;
-    let mut total = 0.0;
-    for slip in &layout.slips[layout.slips_of_run[at].clone()] {
-        let compared = slip.length.min(read_len - offset);
-        let each = 1.0 / slip.renderings.len() as f64;
-        let letters: f64 = layout.renderings[slip.renderings.clone()]
-            .iter()
-            .map(|bases| {
-                let shown = &layout.rendering_bases[bases.start..bases.start + compared];
-                let letters = match last_compared {
-                    Some((before, letters)) if before == shown => letters,
-                    _ => {
-                        let letters = matched.letters(&read[offset..offset + compared], shown);
-                        last_compared = Some((shown, letters));
-                        letters
-                    }
-                };
-                each * letters
-            })
-            .sum();
-        let next = offset + slip.length;
-        let rest = if next >= read_len {
-            layout.unreached_mass[at + 1]
-        } else {
-            probability_on_from_fixed_piece(layout, read, memo, at + 1, next, matched)
-        };
-        total += slip.probability * letters * rest;
-    }
-    memo[key] = total;
     total
 }
 
@@ -2311,6 +2390,7 @@ mod tests {
             &self,
             _witnessed_prefix: &[u8],
             _witnessed_positions: &WitnessedLocusPositions,
+            _held_flank: Option<HeldFlank>,
             _candidate: &SsrCandidate<'_>,
             _context: &SsrScoringContext<'_>,
             _scratch: &mut Self::Scratch,
@@ -2910,6 +2990,7 @@ mod tests {
         StutterSubstitutionEmission.censored_emission(
             witnessed_prefix,
             &WitnessedLocusPositions::from_half_open_runs([(0, 1)]).expect("a witness"),
+            None,
             &candidate,
             &context,
             &mut scratch,
@@ -4337,6 +4418,23 @@ mod tests {
         models: &[StutterModel],
         flanks: (&[u8], &[u8]),
     ) -> f64 {
+        bundle_censored_scored_recorded(
+            witnessed, positions, None, allele, hull, runs, models, flanks,
+        )
+    }
+
+    /// [`bundle_censored_scored`] with the flank the classifier recorded for the read.
+    #[allow(clippy::too_many_arguments)]
+    fn bundle_censored_scored_recorded(
+        witnessed: &[u8],
+        positions: &WitnessedLocusPositions,
+        held_flank: Option<HeldFlank>,
+        allele: &[u8],
+        hull: &[u8],
+        runs: &[ReferenceRun],
+        models: &[StutterModel],
+        flanks: (&[u8], &[u8]),
+    ) -> f64 {
         let parse = parse_into_runs(allele, hull, runs);
         let candidate = SsrCandidate {
             bases: allele,
@@ -4363,6 +4461,7 @@ mod tests {
         StutterSubstitutionEmission.censored_emission(
             witnessed,
             positions,
+            held_flank,
             &candidate,
             &context,
             &mut StutterSubstitutionScratch::default(),
@@ -4438,63 +4537,33 @@ mod tests {
         );
     }
 
-    /// What a read that ended inside `two_run_hull(ca, ttg)` sums, written out by hand: every slip
-    /// set, each run's whole range, and every change no single run makes as a sequencing indel in
-    /// each run it can be one in — each rendering priced by `letters`.
+    /// **Whether the walk's emission is the hand-written sum, less what it may leave out**: never
+    /// above it beyond rounding, and below it by at most [`NEGLIGIBLE_PARTIAL_READ_MASS`] — the
+    /// states it drops at a bundle of two runs or more.
+    fn matches_the_hand_sum(scored: f64, expected: f64) -> bool {
+        scored <= expected * (1.0 + 1e-12)
+            && expected - scored <= 1e-12 * expected + NEGLIGIBLE_PARTIAL_READ_MASS
+    }
+
+    /// What a read that ended inside `two_run_hull(ca, ttg)` sums, written out by hand
+    /// ([`partial_by_hand`] over `GG`, the `CA` run, `GT`, the `TTG` run and `C`).
     fn two_run_partial_by_hand(
         ca: i64,
         ttg: i64,
         models: &[StutterModel; 2],
+        held: HeldFlank,
+        shown: usize,
         letters: impl Fn(&[u8]) -> f64,
     ) -> f64 {
-        let (two, three) = (NonZeroU8::new(2).unwrap(), NonZeroU8::new(3).unwrap());
-        let (ca_lowest, ttg_lowest) = ((1 - ca).max(-10), (1 - ttg).max(-10));
-        let mut total = 0.0;
-        for ca_slip in ca_lowest..=10 {
-            for ttg_slip in ttg_lowest..=10 {
-                total += models[0].probability(ca_slip * 2, two)
-                    * models[1].probability(ttg_slip * 3, three)
-                    * letters(&two_run_hull_counts(ca + ca_slip, ttg + ttg_slip));
-            }
-        }
-        let allele = two_run_hull_counts(ca, ttg);
-        let ca_stretch = 2..2 + 2 * ca as usize;
-        let ttg_stretch = ca_stretch.end + 2..ca_stretch.end + 2 + 3 * ttg as usize;
-        for bp_diff in -20_i64..=20 {
-            let one_run_makes_it = bp_diff == 0
-                || (bp_diff % 2 == 0 && (ca_lowest..=10).contains(&(bp_diff / 2)))
-                || (bp_diff % 3 == 0 && (ttg_lowest..=10).contains(&(bp_diff / 3)));
-            if one_run_makes_it {
-                continue;
-            }
-            let (mut places, mut sum) = (0.0, 0.0);
-            for (stretch, motif, own, other, period) in [
-                (ca_stretch.clone(), &b"CA"[..], &models[0], &models[1], two),
-                (
-                    ttg_stretch.clone(),
-                    &b"TTG"[..],
-                    &models[1],
-                    &models[0],
-                    three,
-                ),
-            ] {
-                if bp_diff % i64::from(period.get()) == 0 || stretch.len() as i64 + bp_diff < 0 {
-                    continue;
-                }
-                places += 1.0;
-                let mut resized = Vec::new();
-                resize_at_the_end(&allele[stretch.clone()], motif, bp_diff, &mut resized);
-                let rendered =
-                    [&allele[..stretch.start], &resized, &allele[stretch.end..]].concat();
-                sum += own.probability(bp_diff, period)
-                    * other.same_length_share()
-                    * letters(&rendered);
-            }
-            if places > 0.0 {
-                total += sum / places;
-            }
-        }
-        total
+        let fixed: [&[u8]; 3] = [b"GG", b"GT", b"C"];
+        partial_by_hand(
+            &fixed,
+            &[(&b"CA"[..], ca), (&b"TTG"[..], ttg)],
+            models,
+            held,
+            shown,
+            letters,
+        )
     }
 
     /// `letters` for a read that held the left flank: its bases against the first ones of the
@@ -4521,10 +4590,11 @@ mod tests {
         }
     }
 
-    /// **A read that ended inside a two-run hull sums every slip set and every sequencing indel,
+    /// **A read that ended inside a two-run hull sums every change of the runs it reaches,
     /// compared from the flank it held** — checked against that sum written out by hand, for a read
     /// that held the left flank, one that held the right, and one whose witness covers the whole
-    /// hull (either, one half each).
+    /// hull: scored from the flank the classifier recorded, and from both, one half each, where
+    /// none was recorded (the review's finding M3).
     #[test]
     fn a_partial_read_sums_every_rendering_from_the_flank_it_held() {
         let hull = two_run_hull(8, 5);
@@ -4533,7 +4603,7 @@ mod tests {
         let flanks = (LEFT_FLANK, RIGHT_FLANK);
         let close = |scored: f64, expected: f64| {
             assert!(
-                (scored - expected).abs() <= 1e-12 * expected,
+                matches_the_hand_sum(scored, expected),
                 "{scored} against {expected} by hand"
             );
         };
@@ -4551,7 +4621,14 @@ mod tests {
                     &models,
                     flanks,
                 ),
-                two_run_partial_by_hand(ca, ttg, &models, from_the_left(&from_left)),
+                two_run_partial_by_hand(
+                    ca,
+                    ttg,
+                    &models,
+                    HeldFlank::Left,
+                    from_left.len(),
+                    from_the_left(&from_left),
+                ),
             );
         }
         // Held the right flank; began inside the `CA` run of an allele with a `TTG` copy more.
@@ -4568,24 +4645,76 @@ mod tests {
                     &models,
                     flanks,
                 ),
-                two_run_partial_by_hand(ca, ttg, &models, from_the_right(&from_right)),
+                two_run_partial_by_hand(
+                    ca,
+                    ttg,
+                    &models,
+                    HeldFlank::Right,
+                    from_right.len(),
+                    from_the_right(&from_right),
+                ),
             );
         }
         // Crossed the whole hull and three bases of the right flank without anchoring there.
         let either = [&hull[..], &RIGHT_FLANK[..3]].concat();
         let allele = two_run_hull(8, 5);
-        close(
-            bundle_censored_scored(
+        let left = two_run_partial_by_hand(
+            8,
+            5,
+            &models,
+            HeldFlank::Left,
+            either.len(),
+            from_the_left(&either),
+        );
+        let right = two_run_partial_by_hand(
+            8,
+            5,
+            &models,
+            HeldFlank::Right,
+            either.len(),
+            from_the_right(&either),
+        );
+        let scored = |recorded| {
+            bundle_censored_scored_recorded(
                 &either,
                 &witness((0, 36)),
+                recorded,
                 &allele,
                 &hull,
                 &runs,
                 &models,
                 flanks,
+            )
+        };
+        close(scored(Some(HeldFlank::Left)), left);
+        close(scored(Some(HeldFlank::Right)), right);
+        close(scored(None), 0.5 * (left + right));
+        // The read is what a left-held read shows, so the recorded flank scores it twice what
+        // the average does: the right reading explains it about 4 parts in 10¹³ as well.
+        assert!(
+            right < 1e-9 * left,
+            "the right reading explains it: {right} against {left}"
+        );
+        // A recorded flank never overrides a witness that says its side.
+        close(
+            bundle_censored_scored_recorded(
+                &from_left,
+                &witness((0, 27)),
+                Some(HeldFlank::Right),
+                &two_run_hull(9, 5),
+                &hull,
+                &runs,
+                &models,
+                flanks,
             ),
-            0.5 * (two_run_partial_by_hand(8, 5, &models, from_the_left(&either))
-                + two_run_partial_by_hand(8, 5, &models, from_the_right(&either))),
+            two_run_partial_by_hand(
+                9,
+                5,
+                &models,
+                HeldFlank::Left,
+                from_left.len(),
+                from_the_left(&from_left),
+            ),
         );
     }
 
@@ -4636,90 +4765,105 @@ mod tests {
     }
 
     /// What a read that ended inside a bundle of **pure** runs sums, written out by hand for any
-    /// number of runs: every slip set (each run's whole range, by an odometer over the runs), and
-    /// every change no single run makes as a sequencing indel in each run it can be one in — each
-    /// rendering priced by `letters`. `fixed` holds the fixed pieces around and between the runs,
-    /// one more than `runs`; each run is its motif and its copies in the allele (at least one).
+    /// number of runs, as `str_bundle_loci.md` §7.6 states the rule: walking from the flank the
+    /// read held, every change each run it reaches can make — a slip of whole units, each run's
+    /// whole range, or a sequencing indel of part of a unit resized at the run's end — each priced
+    /// by that run's model, the renderings built out in full; once the bases laid down reach
+    /// `shown`, the walk stops and the runs past that point contribute nothing but a factor of
+    /// one. Each carrier so far is priced by `letters`. `fixed` holds the fixed pieces around and
+    /// between the runs, one more than `runs`; each run is its motif and its copies in the allele
+    /// (at least one).
     fn partial_by_hand(
         fixed: &[&[u8]],
         runs: &[(&[u8], i64)],
         models: &[StutterModel],
+        held: HeldFlank,
+        shown: usize,
         letters: impl Fn(&[u8]) -> f64,
     ) -> f64 {
         assert_eq!(fixed.len(), runs.len() + 1);
-        let period = |motif: &[u8]| NonZeroU8::new(motif.len() as u8).unwrap();
-        let render = |counts: &[i64]| -> Vec<u8> {
-            let mut out = fixed[0].to_vec();
-            for (run, &(motif, _)) in runs.iter().enumerate() {
-                out.extend(motif.repeat(counts[run] as usize));
-                out.extend_from_slice(fixed[run + 1]);
-            }
-            out
-        };
-        let lowest: Vec<i64> = runs
+        // Each run's changes: its price and its rendering.
+        let changes: Vec<Vec<(f64, Vec<u8>)>> = runs
             .iter()
-            .map(|&(_, copies)| (1 - copies).max(-10))
-            .collect();
-        let mut total = 0.0;
-        let mut slips = lowest.clone();
-        'sets: loop {
-            let mut probability = 1.0;
-            for (run, &(motif, _)) in runs.iter().enumerate() {
-                probability *=
-                    models[run].probability(slips[run] * motif.len() as i64, period(motif));
-            }
-            let counts: Vec<i64> = runs
-                .iter()
-                .zip(&slips)
-                .map(|(&(_, copies), &slip)| copies + slip)
-                .collect();
-            total += probability * letters(&render(&counts));
-            for run in 0..runs.len() {
-                if slips[run] < 10 {
-                    slips[run] += 1;
-                    continue 'sets;
-                }
-                slips[run] = lowest[run];
-            }
-            break;
-        }
-        let copies: Vec<i64> = runs.iter().map(|&(_, copies)| copies).collect();
-        let allele = render(&copies);
-        for bp_diff in -20_i64..=20 {
-            let one_run_makes_it = bp_diff == 0
-                || runs.iter().zip(&lowest).any(|(&(motif, _), &lowest)| {
-                    let period = motif.len() as i64;
-                    bp_diff % period == 0 && (lowest..=10).contains(&(bp_diff / period))
-                });
-            if one_run_makes_it {
-                continue;
-            }
-            let (mut places, mut sum) = (0.0, 0.0);
-            let mut start = fixed[0].len();
-            for (run, &(motif, copies)) in runs.iter().enumerate() {
-                let stretch = start..start + motif.len() * copies as usize;
-                start = stretch.end + fixed[run + 1].len();
-                if bp_diff % motif.len() as i64 == 0 || stretch.len() as i64 + bp_diff < 0 {
-                    continue;
-                }
-                places += 1.0;
-                let mut price = models[run].probability(bp_diff, period(motif));
-                for (other, model) in models.iter().enumerate() {
-                    if other != run {
-                        price *= model.same_length_share();
+            .zip(models)
+            .map(|(&(motif, copies), model)| {
+                let unit = motif.len() as i64;
+                let period = NonZeroU8::new(motif.len() as u8).unwrap();
+                let stretch = motif.repeat(copies as usize);
+                let mut out: Vec<(f64, Vec<u8>)> = ((1 - copies).max(-10)..=10)
+                    .map(|slip| {
+                        (
+                            model.probability(slip * unit, period),
+                            motif.repeat((copies + slip) as usize),
+                        )
+                    })
+                    .collect();
+                for bp_diff in -20_i64..=20 {
+                    if bp_diff % unit == 0 || stretch.len() as i64 + bp_diff < 0 {
+                        continue;
                     }
+                    let mut resized = Vec::new();
+                    resize_at_the_end(&stretch, motif, bp_diff, &mut resized);
+                    out.push((model.probability(bp_diff, period), resized));
                 }
-                let mut resized = Vec::new();
-                resize_at_the_end(&allele[stretch.clone()], motif, bp_diff, &mut resized);
-                let rendered =
-                    [&allele[..stretch.start], &resized, &allele[stretch.end..]].concat();
-                sum += price * letters(&rendered);
+                out
+            })
+            .collect();
+        // `built` is the carrier laid down so far, in the genome's order; `next` counts the runs
+        // walked past, in the order the read meets them.
+        #[allow(clippy::too_many_arguments)]
+        fn walk(
+            fixed: &[&[u8]],
+            changes: &[Vec<(f64, Vec<u8>)>],
+            held: HeldFlank,
+            shown: usize,
+            letters: &dyn Fn(&[u8]) -> f64,
+            built: Vec<u8>,
+            next: usize,
+            weight: f64,
+        ) -> f64 {
+            let run_count = changes.len();
+            if built.len() >= shown || next == run_count {
+                return weight * letters(&built);
             }
-            if places > 0.0 {
-                total += sum / places;
-            }
+            let run = match held {
+                HeldFlank::Left => next,
+                HeldFlank::Right => run_count - 1 - next,
+            };
+            changes[run]
+                .iter()
+                .map(|(price, rendering)| {
+                    let carrier = match held {
+                        HeldFlank::Left => [&built[..], rendering, fixed[run + 1]].concat(),
+                        HeldFlank::Right => [fixed[run], rendering, &built[..]].concat(),
+                    };
+                    walk(
+                        fixed,
+                        changes,
+                        held,
+                        shown,
+                        letters,
+                        carrier,
+                        next + 1,
+                        weight * price,
+                    )
+                })
+                .sum()
         }
-        total
+        let first = match held {
+            HeldFlank::Left => fixed[0],
+            HeldFlank::Right => fixed[runs.len()],
+        };
+        walk(
+            fixed,
+            &changes,
+            held,
+            shown,
+            &letters,
+            first.to_vec(),
+            0,
+            1.0,
+        )
     }
 
     /// `letters` for a read that held the left flank, against `rendered` then `right_flank`.
@@ -4774,10 +4918,16 @@ mod tests {
                     &models,
                     flanks,
                 );
-                let expected =
-                    partial_by_hand(&fixed, &pure_runs, &models, held_left(read, RIGHT_FLANK));
+                let expected = partial_by_hand(
+                    &fixed,
+                    &pure_runs,
+                    &models,
+                    HeldFlank::Left,
+                    read.len(),
+                    held_left(read, RIGHT_FLANK),
+                );
                 assert!(
-                    (scored - expected).abs() <= 1e-12 * expected && expected > 0.0,
+                    matches_the_hand_sum(scored, expected) && expected > 0.0,
                     "({ca}, {ttg}) from the left to {end}: {scored} against {expected}"
                 );
                 let read = &carrier[end..];
@@ -4790,10 +4940,16 @@ mod tests {
                     &models,
                     flanks,
                 );
-                let expected =
-                    partial_by_hand(&fixed, &pure_runs, &models, held_right(read, LEFT_FLANK));
+                let expected = partial_by_hand(
+                    &fixed,
+                    &pure_runs,
+                    &models,
+                    HeldFlank::Right,
+                    read.len(),
+                    held_right(read, LEFT_FLANK),
+                );
                 assert!(
-                    (scored - expected).abs() <= 1e-12 * expected && expected > 0.0,
+                    matches_the_hand_sum(scored, expected) && expected > 0.0,
                     "({ca}, {ttg}) from the right from {end}: {scored} against {expected}"
                 );
                 compared += 2;
@@ -4814,11 +4970,11 @@ mod tests {
         assert_eq!(compared, 18);
     }
 
-    /// **Over three runs a read sums every slip set, and the memo is read back**: at
+    /// **Over three runs a read sums every slip set, where paths meet as well**: at
     /// `G (CA)6 TT (AAG)4 CC (TG)5 A`, the `CA` run three copies longer with the `AAG` run two
-    /// shorter reaches the `TG` run at the same offset as no slip at all, so the run-by-run sum
-    /// answers that place from what it remembered (str_bundles_partial_reads review, 2026-10-12:
-    /// with two runs no remembered value is ever used).
+    /// shorter reaches the `TG` run at the same offset as no slip at all, so the walk carries the
+    /// two paths on as one state (str_bundles_partial_reads review, 2026-10-12: with two runs no
+    /// two paths meet).
     #[test]
     fn a_partial_read_over_three_runs_sums_every_slip_set() {
         let fixed: [&[u8]; 4] = [b"G", b"TT", b"CC", b"A"];
@@ -4859,6 +5015,8 @@ mod tests {
                         &fixed,
                         &pure_runs,
                         &models,
+                        HeldFlank::Left,
+                        from_left.len(),
                         held_left(from_left, RIGHT_FLANK),
                     ),
                 ),
@@ -4869,6 +5027,8 @@ mod tests {
                         &fixed,
                         &pure_runs,
                         &models,
+                        HeldFlank::Right,
+                        from_right.len(),
                         held_right(from_right, LEFT_FLANK),
                     ),
                 ),
@@ -4883,7 +5043,7 @@ mod tests {
                     flanks,
                 );
                 assert!(
-                    (scored - expected).abs() <= 1e-12 * expected && expected > 0.0,
+                    matches_the_hand_sum(scored, expected) && expected > 0.0,
                     "({ca}, {aag}, {tg}) witness {positions:?}: {scored} against {expected}"
                 );
             }
@@ -4906,12 +5066,16 @@ mod tests {
             &fixed,
             &[(&b"CA"[..], 10)],
             &models,
+            HeldFlank::Left,
+            read.len(),
             held_left(&read, flank),
         );
         let right = partial_by_hand(
             &fixed,
             &[(&b"CA"[..], 10)],
             &models,
+            HeldFlank::Right,
+            read.len(),
             held_right(&read, flank),
         );
         let scored = bundle_censored_scored(
@@ -4925,12 +5089,294 @@ mod tests {
         );
         let expected = 0.5 * (left + right);
         assert!(
-            (scored - expected).abs() <= 1e-12 * expected,
+            matches_the_hand_sum(scored, expected),
             "{scored} against {expected}"
         );
         assert!(
             right > 1e-3 * left && left > 1e-3 * right,
             "both readings explain the read: {left} and {right}"
+        );
+    }
+
+    /// **A read says nothing about the runs it never reached** (`str_bundle_loci.md` §7.6; the
+    /// review's finding M2): every allele that differs only beyond what the read's bases can
+    /// reach — under any change the runs it crossed can make — scores it bit for bit alike, from
+    /// either flank. Here a 20-base spacer of fixed sequence keeps the far run out of reach of
+    /// every contraction the near run can make. Before the fix each unreached run contributed its
+    /// total slip probability, which a run of one copy (it cannot contract) or none (a factor of
+    /// one) does not share with a longer one.
+    #[test]
+    fn a_partial_read_scores_alike_against_alleles_that_differ_beyond_its_reach() {
+        const SPACER: &[u8] = b"GATCCTAGGACTTCAGCAAT";
+        let hull_of = |ca: usize, ttg: usize| {
+            [
+                &b"GG"[..],
+                &b"CA".repeat(ca),
+                SPACER,
+                &b"TTG".repeat(ttg),
+                b"C",
+            ]
+            .concat()
+        };
+        let hull = hull_of(8, 5);
+        let runs = [reference_run(2, 16, b"CA"), reference_run(38, 15, b"TTG")];
+        let models = [a_model(), another_model()];
+        let flanks = (LEFT_FLANK, RIGHT_FLANK);
+        let scored = |read: &[u8], positions: (u16, u16), allele: &[u8]| {
+            bundle_censored_scored(
+                read,
+                &witness(positions),
+                allele,
+                &hull,
+                &runs,
+                &models,
+                flanks,
+            )
+        };
+        // Held the left flank: `GG (CA)8` and three spacer bases. The `CA` run contracts by 16
+        // bases at most, so the read reaches 37 bases into any carrier, short of the `TTG` run.
+        let from_left = &hull[..21];
+        let carrier = scored(from_left, (0, 21), &hull_of(8, 5));
+        assert!(carrier > 0.1, "the carrier explains the read: {carrier}");
+        for ttg in [0, 1, 2, 9, 12] {
+            assert_eq!(
+                scored(from_left, (0, 21), &hull_of(8, ttg)).to_bits(),
+                carrier.to_bits(),
+                "(8, {ttg}) from the left"
+            );
+        }
+        // A run the read crossed still separates alleles.
+        assert!(scored(from_left, (0, 21), &hull_of(7, 5)) < 0.1 * carrier);
+        // Held the right flank: `C`, `(TTG)5` and three spacer bases; the `CA` run is out of reach.
+        let from_right = &hull[hull.len() - 19..];
+        let carrier = scored(from_right, (35, 54), &hull_of(8, 5));
+        assert!(carrier > 0.1, "the carrier explains the read: {carrier}");
+        for ca in [0, 1, 3, 12] {
+            assert_eq!(
+                scored(from_right, (35, 54), &hull_of(ca, 5)).to_bits(),
+                carrier.to_bits(),
+                "({ca}, 5) from the right"
+            );
+        }
+    }
+
+    /// [`bundle_censored_scored`] with the context's own rate the mean of `run_rates`, as the
+    /// gather builds it, and — given `fixed`, the rate of the bases outside every run — the read
+    /// compared at each run's rate; without it, at the mean throughout, as before the fix.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a test helper spelling out every rate the context carries"
+    )]
+    fn bundle_censored_scored_at_rates(
+        witnessed: &[u8],
+        positions: &WitnessedLocusPositions,
+        allele: &[u8],
+        hull: &[u8],
+        runs: &[ReferenceRun],
+        models: &[StutterModel],
+        run_rates: &[f64],
+        fixed: Option<f64>,
+    ) -> f64 {
+        let parse = parse_into_runs(allele, hull, runs);
+        let candidate = SsrCandidate {
+            bases: allele,
+            repeat_count: repeats(1),
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            reference_flanks: (LEFT_FLANK, RIGHT_FLANK),
+            bundle: Some(BundleCandidate {
+                runs,
+                parse: &parse,
+                leading_flank_bases: 0,
+                reference_hull_len: hull.len() as u32,
+            }),
+        };
+        let motif = a_motif(b"A");
+        let rates: Vec<ErrorRate> = run_rates
+            .iter()
+            .map(|&rate| ErrorRate::try_new(rate).expect("a valid rate"))
+            .collect();
+        let cell = run_rates.iter().sum::<f64>() / run_rates.len() as f64;
+        let mut context = SsrScoringContext::for_bundle(
+            &motif,
+            &models[0],
+            models,
+            &candidate,
+            ErrorRate::try_new(cell).expect("a valid rate"),
+            [Provenance::FittedHere],
+        );
+        if let Some(fixed) = fixed {
+            context = context
+                .with_partial_read_rates(&rates, ErrorRate::try_new(fixed).expect("a valid rate"));
+        }
+        StutterSubstitutionEmission.censored_emission(
+            witnessed,
+            positions,
+            None,
+            &candidate,
+            &context,
+            &mut StutterSubstitutionScratch::default(),
+        )
+    }
+
+    /// **A run the read never reached does not move its letters either** (this review's
+    /// substitution-rate finding, 2026-10-12): the substitution rate is fitted per repeat count, so
+    /// alleles holding the far run at different counts are scored at different rates, and the
+    /// cell's one rate — the mean of its runs' — would carry the far run's count into every base
+    /// the read compared. Compared at each run's own rate, and the fixed bases at one rate no
+    /// count moves, the read scores bit for bit alike against every such allele, from either
+    /// flank; the run it crossed, at a rate of its own, still separates alleles.
+    #[test]
+    fn a_partial_read_is_compared_at_the_rates_of_what_it_reached() {
+        const SPACER: &[u8] = b"GATCCTAGGACTTCAGCAAT";
+        let hull_of = |ca: usize, ttg: usize| {
+            [
+                &b"GG"[..],
+                &b"CA".repeat(ca),
+                SPACER,
+                &b"TTG".repeat(ttg),
+                b"C",
+            ]
+            .concat()
+        };
+        let hull = hull_of(8, 5);
+        let runs = [reference_run(2, 16, b"CA"), reference_run(38, 15, b"TTG")];
+        let models = [a_model(), another_model()];
+        // A rate per count, as a fit gives: each count of a run its own.
+        let rate_at = |copies: usize| 1e-3 * (1.0 + copies as f64);
+        let scored = |read: &[u8], positions: (u16, u16), ca: usize, ttg: usize| {
+            bundle_censored_scored_at_rates(
+                read,
+                &witness(positions),
+                &hull_of(ca, ttg),
+                &hull,
+                &runs,
+                &models,
+                &[rate_at(ca), rate_at(ttg)],
+                Some(2e-3),
+            )
+        };
+        let from_left = &hull[..21];
+        let carrier = scored(from_left, (0, 21), 8, 5);
+        assert!(carrier > 0.1, "the carrier explains the read: {carrier}");
+        for ttg in [1, 2, 9, 12] {
+            assert_eq!(
+                scored(from_left, (0, 21), 8, ttg).to_bits(),
+                carrier.to_bits(),
+                "(8, {ttg}) from the left"
+            );
+        }
+        assert!(scored(from_left, (0, 21), 7, 5) < 0.1 * carrier);
+        let from_right = &hull[hull.len() - 19..];
+        let carrier = scored(from_right, (35, 54), 8, 5);
+        assert!(carrier > 0.1, "the carrier explains the read: {carrier}");
+        for ca in [1, 3, 12] {
+            assert_eq!(
+                scored(from_right, (35, 54), ca, 5).to_bits(),
+                carrier.to_bits(),
+                "({ca}, 5) from the right"
+            );
+        }
+
+        // What the fix is against: compared at the cell's one rate, the mean of both runs', the
+        // same read moves with the count of the run it never reached.
+        let at_the_mean = |ttg: usize| {
+            bundle_censored_scored_at_rates(
+                from_left,
+                &witness((0, 21)),
+                &hull_of(8, ttg),
+                &hull,
+                &runs,
+                &models,
+                &[rate_at(8), rate_at(ttg)],
+                None,
+            )
+        };
+        let (five, twelve) = (at_the_mean(5), at_the_mean(12));
+        assert!(
+            float::ln(five / twelve).abs() > 0.05,
+            "at the mean rate: {five} against 5 copies, {twelve} against 12"
+        );
+    }
+
+    /// **A partial read is at least as likely as the complete read of the same bases**, at a
+    /// two-run bundle as at a segment (`a_censored_read_is_at_least_as_likely_as_the_complete_read_of_the_same_bases`):
+    /// the two rules differ in how they price a sequencing indel — a complete read takes one only
+    /// where no single run's slip reaches the length and averages it over the runs, a partial read
+    /// lets every run it reaches offer its own — and the partial's sum holds every term of the
+    /// complete read's. Checked over reads one run longer or shorter, with a base more or fewer,
+    /// against the reference allele, less what the walk may leave out.
+    #[test]
+    fn a_two_run_partial_read_is_at_least_as_likely_as_the_complete_read() {
+        let hull = two_run_hull(8, 5);
+        let runs = two_runs();
+        let models = [a_model(), another_model()];
+        let mut compared = 0;
+        for (ca, ttg) in [(8, 5), (9, 5), (7, 5), (8, 6), (8, 4), (9, 4)] {
+            let shown = two_run_hull(ca, ttg);
+            let mut reads = vec![shown.clone()];
+            let mut longer = shown.clone();
+            longer.insert(10, b'C');
+            reads.push(longer);
+            let mut shorter = shown.clone();
+            shorter.remove(25);
+            reads.push(shorter);
+            for read in &reads {
+                let complete = bundle_scored(read, &hull, &hull, &runs, &models, 1e-3);
+                let partial = bundle_censored_scored_recorded(
+                    read,
+                    &witness((0, hull.len() as u16)),
+                    Some(HeldFlank::Left),
+                    &hull,
+                    &hull,
+                    &runs,
+                    &models,
+                    (LEFT_FLANK, RIGHT_FLANK),
+                );
+                assert!(
+                    partial >= complete * (1.0 - 1e-12) - NEGLIGIBLE_PARTIAL_READ_MASS,
+                    "{}: {partial} as a partial read, {complete} complete",
+                    String::from_utf8_lossy(read)
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 18);
+    }
+
+    /// **The review's own case, where the far run is in reach of a contraction**: `GG (CA)8 G`
+    /// stopping before the `TTG` run scored 0.863, 0.811, 0.852 and 0.854 against alleles with 0,
+    /// 1, 2 and 5 `TTG` copies before the fix. Now only the carriers whose `CA` run contracted
+    /// see the `TTG` run, and those mismatch the read at two bases or more, so the scores agree
+    /// to within a millionth.
+    #[test]
+    fn a_read_stopping_before_a_run_scores_alleles_differing_there_alike() {
+        let hull = two_run_hull(8, 5);
+        let runs = two_runs();
+        let models = [a_model(), another_model()];
+        let read = &hull[..19];
+        let scores: Vec<f64> = [0, 1, 2, 5, 9]
+            .iter()
+            .map(|&ttg| {
+                bundle_censored_scored(
+                    read,
+                    &witness((0, 19)),
+                    &two_run_hull(8, ttg),
+                    &hull,
+                    &runs,
+                    &models,
+                    (LEFT_FLANK, RIGHT_FLANK),
+                )
+            })
+            .collect();
+        eprintln!("GG (CA)8 G against 0, 1, 2, 5, 9 TTG copies: {scores:?}");
+        let (lowest, highest) = scores
+            .iter()
+            .fold((f64::INFINITY, 0.0_f64), |(lo, hi), &x| {
+                (lo.min(x), hi.max(x))
+            });
+        assert!(
+            highest - lowest <= 1e-6 * highest,
+            "{scores:?} differ by more than a millionth"
         );
     }
 }

@@ -566,7 +566,78 @@ bases past the hull's far edge, too few for the delimiter to anchor the far flan
 
 A read from the right flank is the same read from the other end.
 
-**The rule.** For a read that held the left flank and showed bases `w`:
+*Changed 2026-10-12 (session lead, the review's findings M2 and M3; the rule as first built is
+kept below it).* **The rule, as it stands.** For a read that held the left flank and showed bases
+`w`, the carrier is read piece by piece from that flank: the fixed piece before the first run,
+the first run, the fixed piece after it, and so on, then the right flank. **Each run makes one
+change, independently of the others**: a slip of `k` whole units at its stutter model's price
+`P_r(k)`, placed at each place in the run as at a complete read, or a sequencing indel of `Δ`
+bases that are not whole units, at that model's price for `Δ` (`|Δ| ≤ 2 · MAX_PART_REPEAT_SLIP`,
+the stretch long enough to lose it), resized at the run's end — the places and prices the
+part-repeat regime of §7.3 uses in that run.
+
+```text
+P(w | allele) = Σ over every way the runs the read reaches can change   Π over those runs   price of its change
+                                                                       × letters(w | the first |w| bases of that carrier)
+```
+
+**The sum stops where the read's bases run out.** On every path through the runs' changes, the
+pieces after the point where `|w|` bases have been laid down are not compared, and contribute
+exactly one: a run the read never reached says nothing, whatever count the allele holds there.
+So the three readings above are now exact:
+
+- about the runs and fixed bases it got past, it is evidence as at a complete read;
+- about the run it ended inside, a lower bound: every change of that run long enough to hold
+  what it showed gives the same letters, and only that run's own total price over those changes
+  separates its counts;
+- about the runs it never reached, nothing: **two alleles that differ only beyond everything the
+  read can reach score it bit for bit alike** (`a_partial_read_scores_alike_against_alleles_that_differ_beyond_its_reach`).
+
+A read that held the right flank is walked from its last base backwards, the left flank last.
+
+**How this differs from a complete read, and why.** For one run it is the segment's censored sum,
+term for term (`a_one_run_bundles_partial_read_scores_as_the_segments`, to twelve digits). With
+several runs, a complete read prices a sequencing indel only for a length change no single run's
+slip makes, averaged over the runs it could sit in, with the other runs not slipping (§7.3). That
+rule reads every run of the allele — which changes count as made by one run, how many places
+share the average, each other run's chance of not slipping — so a read that stopped short of a
+run cannot follow it and stay neutral about that run. Here each run the read reaches offers its
+own sequencing indels beside its slips, at its own model's price. **The two rules do not price
+the same renderings** *(corrected 2026-10-12, follow-up review)*: a partial read lets every run it
+reaches take a sequencing indel, whatever the other runs do, and adds them up; a complete read
+takes one only where no single run's slip reaches the length, averages it over the runs and has
+the other runs not slip. So some renderings the complete rule gives nothing get a price here — at
+`(CA)8 GT (TTG)5`, the `CA` run three bases longer, a length the `TTG` run's slip reaches alone.
+Each run's changes are still a distribution (they sum to at most one, and its
+indels skip every whole-unit length, so no length is counted twice), and the partial read's sum
+holds every term of the complete read's: a partial read is at least as likely as the complete read
+of the same bases, as at a segment
+(`a_two_run_partial_read_is_at_least_as_likely_as_the_complete_read`). What the change moved on
+the benchmark is in §10, step 4c.
+
+**The rate the letters are compared at** *(2026-10-12, follow-up review)*. The substitution rate is
+fitted per repeat count, and a cell's one rate — what a complete read is compared at — is the mean
+of its runs' (§7.3). Compared at that mean, a partial read would hear about a run it never reached
+through the far run's count. So a partial read compares **each run's bases at that run's own
+rate**, and **every other base** — the fixed pieces and the flank beyond the hull — at one rate per
+read group that no candidate's counts move: the mean of the runs' rates at their reference counts
+(`a_partial_read_is_compared_at_the_rates_of_what_it_reached`). Where no rate is fitted, every one
+of these is the defaulted rate, and the read is compared exactly as before.
+
+**What made the read depend on the runs it never reached (finding M2).** Two things, both in the
+rule as first built. Each run past the read's end contributed its total probability over the
+slips it can make, and that total depends on its count: a run of one copy cannot contract, and a
+run with no copy is a factor of one. And the part-repeat regime was taken whole from the complete
+read: which length changes it priced, how many runs shared its average and each other run's
+chance of not slipping all read the runs the read never reached. Under the shipped constants the
+read `GG (CA)8 G` stopping before the `TTG` run scored 0.863, 0.811, 0.852 and 0.854 against
+alleles with 0, 1, 2 and 5 `TTG` copies; it now scores 0.960567 against those four and against
+nine, equal to thirteen digits
+(`a_read_stopping_before_a_run_scores_alleles_differing_there_alike`; the carriers whose `CA` run
+contracted reach the `TTG` run, and they mismatch the read at two bases or more).
+
+**The rule as first built (2026-10-12, before the review)**, kept for the record. For a read that
+held the left flank and showed bases `w`:
 
 ```text
 P(w | allele) = Σ over every slip set (k₁, …, k_R)   Π_r P_r(kᵣ) × letters(w | the first |w| bases of: the allele with those slips, then the right flank)
@@ -595,7 +666,7 @@ As built (`ssr_emission.rs`, `bundle_censored_emission`), with what the rule lea
   hull's first position and stops short of its last held the left flank, and the mirror image the
   right. A witness over the whole hull is a read that reached the far edge without anchoring
   there, from either flank; nothing in the observation says which, so it is scored both ways and
-  the two averaged.
+  the two averaged. *(Changed 2026-10-12, finding M3: the classifier records the flank, below.)*
 - **The far flank is the reference's, less the bases the allele's own edge deletion takes on that
   side** (`str_edge_deletion_alleles.md`). The held flank is not compared: the delimiter anchored
   it. A read that showed more bases than the rendering and the flank hold together scores zero for
@@ -608,6 +679,14 @@ As built (`ssr_emission.rs`, `bundle_censored_emission`), with what the rule lea
 - **It is computed run by run from the held flank**, not set by set: what follows a run depends
   only on how many of the read's bases the pieces before it took, so that is remembered, and a read
   costs a few slips per run per such offset rather than every combination of slips.
+  *(Follow-up review, 2026-10-12.)* The walk now goes forward: each state — a piece reached with
+  so many of the read's bases spent — carries the probability of reaching it and hands it on. **At
+  a bundle of two runs or more, a state no more probable than what is left of a budget of 10⁻¹² is
+  dropped** (`NEGLIGIBLE_PARTIAL_READ_MASS`): everything after a state is at most one, so the read
+  comes out at most 10⁻¹² low and never high — against an outlier floor near `0.2 / 40`, the bound
+  a complete read's slip sets are pruned to (§7.3). What it drops are mostly the states a
+  sequencing indel shifts the read into, a few mismatches deep long before the read's bases are
+  spent. A bundle of one run is walked whole and stays the segment's sum to twelve digits.
   *(Review, 2026-10-12.)* What does not depend on the read is built once and kept: an allele's
   layout from one flank — its pieces, its runs' slips and renderings, its part-repeat renderings —
   is reused for every read the row scores against that allele from that flank, found by comparing
@@ -617,7 +696,9 @@ As built (`ssr_emission.rs`, `bundle_censored_emission`), with what the rule lea
   the calls are byte-identical (§10, step 4b).
 - **A bundle with no run** compares the read's letters with the allele and the flank alone.
 
-*Found in review (2026-10-12), left to the owner* (`doc/devel/reports/reviews/str_bundles_partial_reads_2026-10-12.md`, M2 and M3):
+*Found in review (2026-10-12)* (`doc/devel/reports/reviews/str_bundles_partial_reads_2026-10-12.md`,
+M2 and M3). *Both fixed the same day (session lead): the first by the rule at the top of this
+section, the second by the paragraph after this list.*
 
 - **A read says a little about the runs it never reached.** Each such run contributes its total
   probability over the slips it can make, and that total depends on its count: a run with one copy
@@ -632,6 +713,28 @@ As built (`ssr_emission.rs`, `bundle_censored_emission`), with what the rule lea
   readings; the wrong one is about 4 parts in 10¹³ of the right one, so the read scores half of
   what the same bases score as a left-only read, up to ln 2 = 0.69 nats against the outlier floor.
   Such reads were 185,000 of 1.6 million partial emissions at the 50-sample cost benchmark.
+
+*Changed 2026-10-12 (session lead, finding M3).* **The flank such a read held is carried to
+scoring.** The classifier lays a partial read's reach down from the border it anchored and clamps
+it to the locus, so a read that ran past the far edge covers every position and its witness no
+longer says its side; the classifier still knows it. At a bundle, and only where the witness
+covers the whole hull, it now writes the side down on the observation
+(`SequenceObservation::held_flank`, part of the observation's identity, so the same bases read
+from the two sides stay two observations). The cohort merge carries it on the partial row, and
+the emission reads it: a whole-hull read is scored from the flank it held. The average of both
+readings is kept only where the side is genuinely unknown — a psp written before format 2.1, or a
+witness touching neither border, which no generator mints. Segments record nothing, since they
+read every partial from the tract's start (below), and their observations are unchanged.
+
+In the psp the side is format 2.1's new last body field, `observation-held-flanks`: a list of
+`(observation, flank)` pairs, empty — one byte — on nearly every record. A minor bump, as format
+1.2's flank deletions were (`psp_file_format.md` §4.3): a 2.0 reader walks past it as an unknown
+final field and scores such a read as 2.0 did, from both flanks one half each — a proper mixture
+over a side it does not know, not a misreading. `pvc inspect-psp` writes it in a new last column,
+`held_flank` (columns version 3). On the benchmark's new psps every partial over a whole hull
+carries its flank, and none falls back to the average: 184 such reads at one sample 5×, 1,030 at
+30×, 50,776 at 50 samples 30× — about one in eight of the bundles' partial reads, split evenly
+between the two flanks (§10, step 4c).
 
 **Candidate selection counts these reads nowhere, as at a segment.** A segment's partial reads
 nominate no rung and count toward no denominator (`candidate_alleles_ssr.md` §8: "a read that ran
@@ -861,6 +964,43 @@ step.
    background load: about 8–9 ms more a bundle locus, from about 24. The calls are byte-identical
    on all three benchmark runs and HG002 30×. What is left is about 200 letter comparisons per
    partial read per candidate; `str_bundles_partial_reads_2026-10-12.md` §6.1.)*
+
+   **Step 4c (2026-10-12): the review's findings M2 and M3** — a partial read neutral about the
+   runs it never reached, and the flank a whole-hull partial held carried to scoring (§7.6). New
+   psps (format 2.1) for every run; the step 4b build reads them as 2.0 would, and calls them as
+   before, so both rows are over the same psps. Bundle cells with a variant: right / wrong /
+   missed; then false calls.
+
+   | | 1 sample, PCR, 5× | 1 sample, PCR, 30× | 50 samples, PCR, 30× | HG002 30× |
+   |---|---|---|---|---|
+   | step 4b, reviewed | 99 / 29 / 80; 0 | 207 / 1 / 0; 0 | 10,400 / 13 / 22; 1 | 862 / 150 / 119; 20 |
+   | step 4c | 99 / 29 / 80; 0 | 207 / 1 / 0; 0 | 10,407 / 11 / 17; 1 | 862 / 151 / 118; 20 |
+
+   **Every STR segment cell is unchanged** against main on all three runs (3,000, 3,000 and
+   150,000 cells). Records whose line changed, mostly in quality: 59 of 1,898, 151 of 2,591, 452 of
+   6,005, and 1,336 of 20,348 on HG002. No whole-hull partial fell back to the average of both
+   flanks (§7.6).
+
+   **Cost.** One thread, 50 samples at 30×, the 500 bundle loci, the two builds run alternately on
+   the same psps three times each on a host under heavy other load (load average 55): 12.8–13.3 s of
+   CPU for step 4b, 17.6–18.0 s for step 4c — about 1.37 times, some 9–10 ms more a bundle locus.
+   The extra work is the sequencing indels each run now offers inside the run-by-run walk: each
+   lands the next piece at a new offset, which the walk then follows through every later run.
+   *(The absolute times are about twice the review's session for the same step 4b build, from the
+   load; the ratio is the measurement.)*
+
+   *(Follow-up review, 2026-10-12: `str_bundles_partial_reads_followup_2026-10-12.md`.)* The HG002
+   column is not over shared psps: each build calls HG002 from the BAM, and its step 4b cell is
+   from an earlier run; the step 4c VCF also holds one record more (20,348 against 20,347). The
+   review's two changes — each run's bases compared at that run's substitution rate (§7.6) and the
+   forward walk that drops states within 10⁻¹² — **change no call**: the VCFs before and after are
+   byte for byte the same on all three runs and on HG002 30×, so the table above stands. (Every rate
+   on these runs is the defaulted constant, so the rate change cannot show here; it shows only on a
+   run with fitted rates.) **Cost**, the same 500 bundle loci at one thread, three alternating runs
+   of each build: 6.8–6.9 s of CPU with both changes, against 16.4–17.1 s for step 4c as first built
+   and 12.0–12.3 s for step 4b — 0.41 times step 4c's and 0.57 times step 4b's, about 20 ms less a
+   bundle locus. The forward walk alone, dropping nothing, measured 14.1–14.4 s: the dropped states
+   are what buys most of it.
 
 5. **The simulator's harder bundles** (§9): abutting, overlapping and impure repeats, measured as in
    step 4.

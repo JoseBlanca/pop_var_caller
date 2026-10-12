@@ -2087,11 +2087,11 @@ comparisons one by one.
 ---
 
 #### STR bundles called as one STR locus (`str_bundle_loci.md`)
-- **Status:** fixes-applied (step 4b, branch `str-bundles`, uncommitted)
+- **Status:** fixes-applied (step 4c, branch `str-bundles`, uncommitted)
 - **Spec:** [str_bundle_loci.md](doc/devel/ng/spec/str_bundle_loci.md); **Impl report:** [step 4](doc/devel/reports/implementations/str_bundles_calling_2026-10-11.md)
-- **Latest review:** [str_bundles_partial_reads_2026-10-12.md](doc/devel/reports/reviews/str_bundles_partial_reads_2026-10-12.md)
-- **Latest fixes-applied:** [fixes_applied_str_bundles_partial_reads_2026-10-12.md](doc/devel/reports/reviews/fixes_applied_str_bundles_partial_reads_2026-10-12.md)
-- **Open:** step 4b review M2, M3 (owner decisions: partial reads and unreached runs; whole-hull reads at half weight); M4 (segments compare right-flank partial reads out of phase — separate change); M7, Mi2–Mi5. From step 4: M4, M8–M12 (tests and a refactor).
+- **Latest review:** [str_bundles_partial_reads_followup_2026-10-12.md](doc/devel/reports/reviews/str_bundles_partial_reads_followup_2026-10-12.md)
+- **Latest fixes-applied:** [fixes_applied_str_bundles_partial_reads_followup_2026-10-12.md](doc/devel/reports/reviews/fixes_applied_str_bundles_partial_reads_followup_2026-10-12.md)
+- **Open:** step 4c follow-up review Mi2–Mi12 (deferred). Step 4b review M4 (segments compare right-flank partial reads out of phase — separate change); M7, Mi2–Mi5. From step 4: M4, M8–M12 (tests and a refactor).
 
 ## Standing project-wide items
 

@@ -265,6 +265,15 @@ pub struct TractScoringFits {
     /// [`Self::stutter`]; at a bundle, [`Self::stutter`] holds each cell's first run's model, or
     /// the shipped constants where the bundle has no run.
     run_stutter: Vec<StutterModel>,
+    /// Parallel to [`Self::run_stutter`]: **the substitution rate of each run's bases**, looked
+    /// up as the run's stutter is — what a read that ended inside the hull compares that run at
+    /// ([`SsrScoringContext::run_substitution_rates`]). A run the candidate holds no copy of has
+    /// no bases, and takes [`DEFAULT_SSR_SUBSTITUTION_RATE`] unread.
+    run_substitution_rate: Vec<ErrorRate>,
+    /// At an STR bundle, **one rate per read group for the bases outside every run**: the mean
+    /// of the runs' rates at their reference counts, so the same for every candidate
+    /// ([`SsrScoringContext::fixed_substitution_rate`]). Empty after a segment's gather.
+    fixed_substitution_rate: Vec<ErrorRate>,
     /// How many reference runs each cell of [`Self::run_stutter`] covers — zero after a
     /// segment's gather and at a bundle with no run.
     runs_per_cell: usize,
@@ -340,6 +349,8 @@ impl TractScoringFits {
         self.substitution_rate.clear();
         self.warrant.clear();
         self.run_stutter.clear();
+        self.run_substitution_rate.clear();
+        self.fixed_substitution_rate.clear();
         self.runs_per_cell = 0;
         self.gathered_a_bundle = false;
         self.motif = Some(*motif);
@@ -424,6 +435,12 @@ impl TractScoringFits {
     /// stutter is. A bundle with no run takes [`DEFAULT_SSR_SUBSTITUTION_RATE`], and its cells'
     /// warrant says so.
     ///
+    /// **A read that ended inside the hull is compared at other rates** (`str_bundle_loci.md`
+    /// §7.6): each run's bases at that run's own rate, and every other base at one rate per read
+    /// group that no candidate's counts move — the mean of the runs' rates at their reference
+    /// counts. The mean above reads every run, so a partial compared at it would hear about runs
+    /// it never reached. A cell's warrant and its defaulted count take that fixed rate in too.
+    ///
     /// **The per-locus slippage re-fit does not run at a bundle**: its cells' frozen slippage is
     /// left empty, so a round would have nothing to re-fit. It is off by default for segments too.
     ///
@@ -449,6 +466,8 @@ impl TractScoringFits {
         self.substitution_rate.clear();
         self.warrant.clear();
         self.run_stutter.clear();
+        self.run_substitution_rate.clear();
+        self.fixed_substitution_rate.clear();
         self.runs_per_cell = runs;
         self.gathered_a_bundle = true;
         // The bundle emission reads no motif; the field is shared with segments, so it carries
@@ -469,19 +488,52 @@ impl TractScoringFits {
             let read_group = ReadGroupId(
                 u32::try_from(group).expect("a run has fewer read groups than a u32 can name"),
             );
+            // The rate of the bases outside every run, which a partial read compares whatever
+            // the candidate: the runs' rates at their reference counts, averaged as a cell's are.
+            let mut fixed_warrant = Provenance::FittedHere;
+            let mut fixed_fell_back = false;
+            let mut reference_rates = 0.0;
+            for reference_run in &detail.runs {
+                let copies = u32::try_from(reference_run.copies())
+                    .expect("a reference run's copy count fits a u32");
+                reference_rates += match parameters.ssr_substitution_rate_at(
+                    read_group,
+                    reference_run.motif().ssr_period(),
+                    RepeatCount(copies),
+                ) {
+                    Some(fitted) => {
+                        fixed_warrant = fixed_warrant.weaker_of(fitted.provenance);
+                        fitted.value.get()
+                    }
+                    None => {
+                        fixed_fell_back = true;
+                        fixed_warrant = fixed_warrant.weaker_of(Provenance::Defaulted);
+                        default_substitution_rate().get()
+                    }
+                };
+            }
+            let fixed_rate = if detail.runs.is_empty() {
+                fixed_fell_back = true;
+                fixed_warrant = Provenance::Defaulted;
+                default_substitution_rate()
+            } else {
+                ErrorRate::try_new(reference_rates / detail.runs.len() as f64)
+                    .expect("a mean of error rates is an error rate")
+            };
+            self.fixed_substitution_rate.push(fixed_rate);
             for candidate in candidates {
                 let parse = candidate
                     .bundle
                     .expect("an STR bundle's candidates carry their run parse")
                     .parse;
-                let mut warrant = Provenance::FittedHere;
+                let mut warrant = fixed_warrant;
                 let mut rates = 0.0;
                 let mut rates_read = 0usize;
                 // **Counted per cell, as a segment's are**: a cell fell back where any run of it
                 // did, so the counts stay within the cell count the record reports them against.
                 let mut slippage_fell_back = false;
                 let mut read_group_unknown = false;
-                let mut rate_fell_back = false;
+                let mut rate_fell_back = fixed_fell_back;
                 for (reference_run, in_allele) in detail.runs.iter().zip(parse.runs()) {
                     let period = reference_run.motif().ssr_period();
                     let copies = in_allele.copies;
@@ -489,6 +541,7 @@ impl TractScoringFits {
                         // A run this candidate holds no copy of cannot slip and has no bases to
                         // read: nothing of it is looked up.
                         self.run_stutter.push(StutterModel::hipstr_shipped());
+                        self.run_substitution_rate.push(default_substitution_rate());
                         continue;
                     }
                     let slippage = parameters.ssr_slippage_fits().at(
@@ -527,6 +580,7 @@ impl TractScoringFits {
                             default_substitution_rate()
                         }
                     };
+                    self.run_substitution_rate.push(rate);
                     rates += rate.get();
                     rates_read += 1;
                 }
@@ -752,15 +806,18 @@ impl TractScoringFits {
             for (candidate, allele) in candidates.iter().enumerate() {
                 let cell = group * self.candidates + candidate;
                 contexts.push(if self.gathered_a_bundle {
-                    let runs = &self.run_stutter
-                        [cell * self.runs_per_cell..(cell + 1) * self.runs_per_cell];
+                    let runs = cell * self.runs_per_cell..(cell + 1) * self.runs_per_cell;
                     SsrScoringContext::for_bundle(
                         motif,
                         &self.stutter[cell],
-                        runs,
+                        &self.run_stutter[runs.clone()],
                         allele,
                         self.substitution_rate[cell],
                         [self.warrant[cell]],
+                    )
+                    .with_partial_read_rates(
+                        &self.run_substitution_rate[runs],
+                        self.fixed_substitution_rate[group],
                     )
                 } else {
                     SsrScoringContext::new(
@@ -1597,6 +1654,79 @@ mod tests {
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
     }
 
+    /// **At an STR bundle, a partial read's rates are its runs' own and one for the bases outside
+    /// every run that no candidate moves** (`str_bundle_loci.md` §7.6): each cell carries its
+    /// run's rate at the candidate's count, and the fixed rate is the run's at the reference
+    /// count — 6 repeats here — for the 11-repeat candidate as for the 6. The cell's own rate,
+    /// which a complete read takes, stays the mean of its runs', here the one run's.
+    #[test]
+    fn a_bundle_cell_carries_each_runs_rate_and_a_fixed_rate_no_candidate_moves() {
+        use crate::calling::genotype_prior::BundlePrior;
+        use crate::calling::likelihood::ssr_emission::BundleCandidate;
+        use crate::region_typing::reference_runs::ReferenceRun;
+        use crate::region_typing::run_parse::parse_into_runs;
+
+        let bases = candidate_bases();
+        let hull = bases[0].clone();
+        let runs = [ReferenceRun::new(0, hull.len() as u64, *motif()).expect("a run")];
+        let parses: Vec<RunParse> = bases
+            .iter()
+            .map(|allele| parse_into_runs(allele, &hull, &runs))
+            .collect();
+        let alleles: Vec<SsrCandidate<'_>> = candidates(&bases)
+            .into_iter()
+            .zip(&parses)
+            .map(|(candidate, parse)| SsrCandidate {
+                bundle: Some(BundleCandidate {
+                    runs: &runs,
+                    parse,
+                    leading_flank_bases: 0,
+                    reference_hull_len: hull.len() as u32,
+                }),
+                ..candidate
+            })
+            .collect();
+        let detail = SsrBundleDetail {
+            runs: runs.to_vec().into_boxed_slice(),
+            ..SsrBundleDetail::default()
+        };
+        let fits = fits_for_both_candidates();
+        let rates = all_substitution_rates();
+        let calibration = calibrations();
+        let inbreeding = outbred(1);
+        let parameters = run(&calibration, &inbreeding, &fits, &rates);
+        let prior = BundlePrior {
+            reference_run_counts: vec![CANDIDATE_REPEATS[0]],
+            run_spectra: vec![tract_prior(reference_repeats(), &parameters).length_spectrum],
+            stated_concentration: 1.0,
+        };
+
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_bundle(&detail, &alleles, &prior, &parameters);
+        let contexts = gathered.scoring_contexts(&alleles);
+        let table = SsrScoringContextTable::new(&contexts, alleles.len());
+        for group in 0..READ_GROUPS as u32 {
+            for (candidate, repeat_count) in CANDIDATE_REPEATS.iter().copied().enumerate() {
+                let cell = table.of(ReadGroupId(group), candidate);
+                let own = substitution_rate_at(group, repeat_count);
+                assert_eq!(cell.substitution_rate.get(), own);
+                assert_eq!(
+                    cell.run_substitution_rates
+                        .iter()
+                        .map(|rate| rate.get())
+                        .collect::<Vec<_>>(),
+                    vec![own],
+                    "read group {group}, candidate {candidate}: the run's own rate"
+                );
+                assert_eq!(
+                    cell.fixed_substitution_rate.get(),
+                    substitution_rate_at(group, CANDIDATE_REPEATS[0]),
+                    "read group {group}, candidate {candidate}: the reference count's rate"
+                );
+            }
+        }
+    }
+
     /// **The unreachable mass is the candidate's own**, so a context pairing one candidate's
     /// mass with another's model is visible without scoring anything.
     ///
@@ -2049,6 +2179,7 @@ mod tests {
     fn spanning(bases: &[u8], reads: u32, read_group: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.to_vec().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(read_group),

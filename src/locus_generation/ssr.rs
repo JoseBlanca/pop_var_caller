@@ -893,7 +893,7 @@ mod classify {
     use super::{MeasuredGround, RepeatDelimiter, SsrLocus};
     use crate::alignment::{ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel};
     use crate::bam::alignment_input::CigarOp;
-    use crate::locus_generation::{FlankDeletion, LocusLen, ReadWitness};
+    use crate::locus_generation::{FlankDeletion, HeldFlank, LocusLen, ReadWitness};
     use crate::read::aligned_read::AlignedRead;
     use crate::types::Bp;
     use std::ops::Range;
@@ -939,6 +939,9 @@ mod classify {
             /// spelled from its own alignment (`str_edge_deletion_alleles.md` §5.1); `NONE`
             /// otherwise.
             flank_deletion: FlankDeletion,
+            /// Which flank a partial read anchored, where its witness cannot say it: set only at
+            /// an STR bundle, on a witness covering the whole hull (`partial`); `None` otherwise.
+            held_flank: Option<HeldFlank>,
             /// The read's base-quality error mass over the tract, `Σ ln(P_err)`, in log-error
             /// space (freebayes' `q_sum` convention). The **BQ** support moment the spec names
             /// (spec §3, "strand/BQ/MAPQ moments") — computed here because the tract base
@@ -1194,12 +1197,8 @@ mod classify {
             // **unfalsifiable**: the Milestone C review deleted it outright and the whole
             // suite stayed green, because no input can tell the two paths apart. Two
             // spellings of one decision, one of them untestable, is worse than one.
-            RepeatSpan::FromLeft(tract) => {
-                partial(read, &region, &tract, AnchoredBorder::Left, locus)
-            }
-            RepeatSpan::FromRight(tract) => {
-                partial(read, &region, &tract, AnchoredBorder::Right, locus)
-            }
+            RepeatSpan::FromLeft(tract) => partial(read, &region, &tract, HeldFlank::Left, locus),
+            RepeatSpan::FromRight(tract) => partial(read, &region, &tract, HeldFlank::Right, locus),
             RepeatSpan::Unanchored => {
                 Classified::NoObservation(NoObservationReason::NoBorderAnchored)
             }
@@ -1649,6 +1648,7 @@ mod classify {
                 bases: read.seq[tract].into(),
                 read_witness: ReadWitness::Complete,
                 flank_deletion,
+                held_flank: None,
                 q_sum: ln_p_err_sum(tract_qual),
             }
         } else {
@@ -1665,25 +1665,14 @@ mod classify {
         quals.iter().map(|&q| -(q as f64) * LN10_OVER_10).sum()
     }
 
-    /// Which border of the tract a partial read held — the half of `RepeatSpan`'s answer that
-    /// decides where the witnessed run sits inside the locus.
-    ///
-    /// A plain marker, **not** a `ReadWitness` constructor passed by value: since the reshape
-    /// (spec §6) the run is a struct variant, which cannot be used as a function, and building it
-    /// needs the locus length as well as the reach.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum AnchoredBorder {
-        Left,
-        Right,
-    }
-
     /// A partial (lower-bound) observation: the tract bases the read showed, as the run of locus
-    /// positions it witnessed, anchored at whichever border held.
+    /// positions it witnessed, anchored at whichever border held — `border`, the half of
+    /// `RepeatSpan`'s answer that decides where the witnessed run sits inside the locus.
     fn partial(
         read: &AlignedRead,
         region: &Range<usize>,
         tract: &Range<u64>,
-        border: AnchoredBorder,
+        border: HeldFlank,
         locus: &SsrLocus,
     ) -> Classified {
         // **The span has to be ordered, and only a `debug_assert` upstream says so.**
@@ -1750,11 +1739,21 @@ mod classify {
         // Milestone C review showed no input could distinguish the two — C2's `Option` had
         // made this branch answer first. One decision, one place.
         let Some(read_witness) = (match border {
-            AnchoredBorder::Left => ReadWitness::from_left(reach, locus_len),
-            AnchoredBorder::Right => ReadWitness::from_right(reach, locus_len),
+            HeldFlank::Left => ReadWitness::from_left(reach, locus_len),
+            HeldFlank::Right => ReadWitness::from_right(reach, locus_len),
         }) else {
             return Classified::NoObservation(NoObservationReason::OutsideTract);
         };
+        // **At a bundle, the side the clamp loses is written down** (`str_bundle_loci.md` §7.6;
+        // the review's finding M3). A witness that covers the whole hull no longer says which
+        // flank the read anchored, and a bundle's emission reads a left-held read from the
+        // hull's start and a right-held one from its end. A segment is left as it was: it reads
+        // every partial from the tract's start, and its whole-tract partials from the two sides
+        // merge (`an_expanded_allele_merges_the_two_sides_into_one_observation`).
+        let held_flank = (locus.repeat.ground == MeasuredGround::BundleHull
+            && read_witness.is_flush_left()
+            && read_witness.is_flush_right(locus_len))
+        .then_some(border);
         // **At a bundle, a read ending inside the hull is kept as a partial too**: it counts toward
         // the hull's depth, which the hidden-duplication filter's coverage windows read, and calling
         // scores it as a lower bound from the flank it held (`str_bundle_loci.md` §6.1, §7.6).
@@ -1762,6 +1761,7 @@ mod classify {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: region_seq[tract.clone()].into(),
             read_witness,
+            held_flank,
             // Partials are kept without the quality gate (spec §3), but still carry the BQ moment.
             q_sum: ln_p_err_sum(&region_qual[tract]),
         }
@@ -1950,6 +1950,7 @@ mod classify {
                     bases,
                     read_witness: ReadWitness::Complete,
                     flank_deletion: FlankDeletion::NONE,
+                    held_flank: None,
                     q_sum,
                 } => {
                     assert_eq!(&*bases, b"CACACA");
@@ -2086,6 +2087,24 @@ mod classify {
                     assert_eq!(positions.runs().collect::<Vec<_>>(), vec![(0, 4)]);
                 }
                 other => panic!("expected a left partial, got {other:?}"),
+            }
+        }
+
+        /// **A segment records no held flank, even over the whole tract**: a segment reads every
+        /// partial from the tract's start whichever flank it held, so its observations are left
+        /// as they were (`str_bundle_loci.md` §7.6).
+        #[test]
+        fn a_segment_partial_over_the_whole_tract_records_no_flank() {
+            match classify(&read(b"GGGGGGCACACACACA", 40)) {
+                Classified::Observed {
+                    read_witness: ReadWitness::Partial { positions },
+                    held_flank,
+                    ..
+                } => {
+                    assert_eq!(positions.runs().collect::<Vec<_>>(), vec![(0, 6)]);
+                    assert_eq!(held_flank, None);
+                }
+                other => panic!("expected a partial over the whole tract, got {other:?}"),
             }
         }
 
@@ -2564,6 +2583,59 @@ mod classify {
             }
         }
 
+        /// **A partial whose witness covers the whole hull carries the flank it held; one whose
+        /// witness says its side does not** (`str_bundle_loci.md` §7.6; the review's finding
+        /// M3). A read from the left flank showing the hull and five bases more, with no right
+        /// flank to anchor, is clamped to every position of the hull, so only the recorded flank
+        /// says it was read from the left.
+        #[test]
+        fn a_partial_over_the_whole_hull_records_the_flank_it_held() {
+            let past_the_hull = [BUNDLE_LEFT, BUNDLE_HULL, b"GATGA"].concat();
+            match classify_in_the_bundle(&read(&past_the_hull, 40)) {
+                Classified::Observed {
+                    read_witness: ReadWitness::Partial { positions },
+                    held_flank,
+                    ..
+                } => {
+                    assert_eq!(positions.first_run(), (0, BUNDLE_HULL.len() as u16));
+                    assert_eq!(held_flank, Some(HeldFlank::Left));
+                }
+                other => panic!("expected a partial over the whole hull, got {other:?}"),
+            }
+            let short = [BUNDLE_LEFT, b"CACACACATTGA"].concat();
+            match classify_in_the_bundle(&read(&short, 40)) {
+                Classified::Observed {
+                    read_witness: ReadWitness::Partial { .. },
+                    held_flank,
+                    ..
+                } => assert_eq!(held_flank, None, "the witness says the side"),
+                other => panic!("expected a partial, got {other:?}"),
+            }
+        }
+
+        /// **The mirror image: a read from the right flank that ran past the hull's first base
+        /// records the right flank** — five more `CA` bases where the left flank would be, so it
+        /// anchors only the right flank, and its witness is clamped to every position of the hull
+        /// as the left-held read's is. Recording `Left` for it, or nothing, would score it from the
+        /// wrong end or as the half-and-half average (this review, 2026-10-12).
+        #[test]
+        fn a_partial_over_the_whole_hull_from_the_right_records_the_right_flank() {
+            let past_the_hull = [&b"ACACA"[..], BUNDLE_HULL, BUNDLE_RIGHT].concat();
+            let mut from_the_right = read(&past_the_hull, 40);
+            from_the_right.pos = 1 + (BUNDLE_LEFT.len() - 5) as u64;
+            match classify_in_the_bundle(&from_the_right) {
+                Classified::Observed {
+                    read_witness: ReadWitness::Partial { positions },
+                    held_flank,
+                    ..
+                } => {
+                    assert_eq!(positions.first_run(), (0, BUNDLE_HULL.len() as u16));
+                    assert_eq!(held_flank, Some(HeldFlank::Right));
+                }
+                other => panic!("expected a partial over the whole hull, got {other:?}"),
+            }
+        }
+
         /// A read lying wholly in a flank is outside the hull, as it is outside a segment —
         /// not counted as a read that ended inside.
         #[test]
@@ -2645,10 +2717,20 @@ mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
     use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
-    use crate::locus_generation::{FlankDeletion, ReadWitness, SequenceObservation};
+    use crate::locus_generation::{FlankDeletion, HeldFlank, ReadWitness, SequenceObservation};
     use crate::read::aligned_read::AlignedRead;
     use crate::types::ReadGroupId;
     use std::collections::HashMap;
+
+    /// What makes two reads one observation: their bases, witness, read group, flank deletion
+    /// and the flank they held where the witness does not say it.
+    type ObservationIdentity = (
+        Box<[u8]>,
+        ReadWitness,
+        ReadGroupId,
+        FlankDeletion,
+        Option<HeldFlank>,
+    );
 
     /// The per-locus tally the generator folds onto the `SampleLocusObservations`: the deduped
     /// observed sequences and how many reads reached the aligner but yielded nothing.
@@ -2698,8 +2780,7 @@ mod tally {
         locus_start: u64,
         counts: &mut SsrGeneratorCounts,
     ) -> SsrTally {
-        let mut buckets: HashMap<(Box<[u8]>, ReadWitness, ReadGroupId, FlankDeletion), Support> =
-            HashMap::new();
+        let mut buckets: HashMap<ObservationIdentity, Support> = HashMap::new();
         let mut reads_without_observation = 0u32;
         for (read, outcome) in reads_and_outcomes {
             match outcome {
@@ -2707,6 +2788,7 @@ mod tally {
                     bases,
                     read_witness,
                     flank_deletion,
+                    held_flank,
                     q_sum,
                 } => {
                     match read_witness {
@@ -2714,7 +2796,13 @@ mod tally {
                         ReadWitness::Partial { .. } => counts.observations_partial += 1,
                     }
                     let support = buckets
-                        .entry((bases, read_witness, read.read_group, flank_deletion))
+                        .entry((
+                            bases,
+                            read_witness,
+                            read.read_group,
+                            flank_deletion,
+                            held_flank,
+                        ))
                         .or_default();
                     support.num_obs += 1;
                     if read.flag & FLAG_REVERSE_STRAND == 0 {
@@ -2743,7 +2831,7 @@ mod tally {
         let mut observations: Vec<SequenceObservation> = buckets
             .into_iter()
             .map(
-                |((bases, read_witness, read_group, flank_deletion), support)| {
+                |((bases, read_witness, read_group, flank_deletion, held_flank), support)| {
                     SequenceObservation {
                         bases,
                         read_witness,
@@ -2757,6 +2845,7 @@ mod tally {
                         // The STR path does not phase — there is no chain id to fold (spec §3).
                         chain_ids: Vec::new(),
                         flank_deletion,
+                        held_flank,
                     }
                 },
             )
@@ -2770,6 +2859,7 @@ mod tally {
                 .then_with(|| a.read_witness.sort_key().cmp(&b.read_witness.sort_key()))
                 .then_with(|| a.read_group.cmp(&b.read_group))
                 .then_with(|| a.flank_deletion.cmp(&b.flank_deletion))
+                .then_with(|| a.held_flank.cmp(&b.held_flank))
         });
 
         SsrTally {
@@ -2817,6 +2907,7 @@ mod tally {
         fn observed(bases: &[u8], read_witness: ReadWitness, q_sum: f64) -> Classified {
             Classified::Observed {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: bases.into(),
                 read_witness,
                 q_sum,
@@ -3036,6 +3127,41 @@ mod tally {
             let result = tally(outcomes, 1, &mut counts);
             assert_eq!(result.observations.len(), 1);
             assert_eq!(result.observations[0].num_obs, 2);
+        }
+
+        /// **The held flank is part of the identity**: one sequence over a whole bundle hull read
+        /// from the left and from the right is two pieces of evidence, kept apart and carried
+        /// onto the observations (`str_bundle_loci.md` §7.6).
+        #[test]
+        fn partials_held_from_two_flanks_stay_two_observations() {
+            let fwd = read(0, 60);
+            let whole_hull = || {
+                ReadWitness::from_left(8, LocusLen::from_positions(6))
+                    .expect("a run covering at least one position")
+            };
+            let held = |flank| Classified::Observed {
+                bases: b"CACACACA"[..].into(),
+                read_witness: whole_hull(),
+                flank_deletion: FlankDeletion::NONE,
+                held_flank: Some(flank),
+                q_sum: -1.0,
+            };
+            let outcomes = vec![
+                (&fwd, held(HeldFlank::Right)),
+                (&fwd, held(HeldFlank::Left)),
+                (&fwd, held(HeldFlank::Left)),
+            ];
+            let mut counts = SsrGeneratorCounts::default();
+            let result = tally(outcomes, 1, &mut counts);
+            let flanks: Vec<_> = result
+                .observations
+                .iter()
+                .map(|observation| (observation.held_flank, observation.num_obs))
+                .collect();
+            assert_eq!(
+                flanks,
+                vec![(Some(HeldFlank::Left), 2), (Some(HeldFlank::Right), 1)]
+            );
         }
 
         /// The strand, BQ and MAPQ moments accumulate across the reads folded into a bucket:

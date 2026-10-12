@@ -335,6 +335,7 @@ mod tests {
     fn observation(read_group: u32, num_obs: u32, q_sum: f64) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: b"A"[..].into(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(read_group),

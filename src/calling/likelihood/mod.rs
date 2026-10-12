@@ -2219,6 +2219,7 @@ mod tests {
     /// equality does not license indexing one with the other.
     fn partial_row(num_reads: u32, q_sum: f64) -> PartialObservation {
         PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(2, 5)
                 .expect("a five-position run from offset two is a witness"),
             read_group: ReadGroupId(1),
@@ -2249,6 +2250,7 @@ mod tests {
     fn ssr_observation(bases: &[u8], witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.into(),
             read_witness: witness,
             read_group: ReadGroupId(2),

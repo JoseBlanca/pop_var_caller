@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use clap::Args;
 use thiserror::Error;
 
-use crate::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
+use crate::locus_generation::{HeldFlank, LocusKind, ReadWitness, SampleLocusObservations};
 use crate::psp::PspReadError;
 use crate::psp::block::StreamedRecord;
 use crate::psp::header::Header;
@@ -44,10 +44,10 @@ use crate::types::{ContigId, GenomePosition, GenomeRegion, Position};
 
 /// The layout of the TSV this writes. **Changes whenever a column is added, removed, renamed or
 /// moved**, so a script reading it can refuse a layout it does not know.
-pub const COLUMNS_VERSION: u32 = 2;
+pub const COLUMNS_VERSION: u32 = 3;
 
 /// The columns, in order. The names are the contract; see the module note.
-pub const COLUMNS: [&str; 23] = [
+pub const COLUMNS: [&str; 24] = [
     "contig",
     "start",
     "end",
@@ -74,6 +74,10 @@ pub const COLUMNS: [&str; 23] = [
     // Version 2: the flank bases the observation's deletion took beside an STR segment, as
     // `left,right`; empty where it took none.
     "flank_deletion",
+    // Version 3: the flank the observation's reads held, `left` or `right`, where their witness
+    // covers the whole locus and the walk recorded it (an STR bundle's partials, psp format 2.1);
+    // empty elsewhere.
+    "held_flank",
 ];
 
 /// How far before a region's first base the walk starts looking for records that reach into
@@ -262,11 +266,11 @@ fn write_record(
     let Some(record) = &streamed.record else {
         // Too large to hold: the head is all there is.
         write_locus_columns(out, header, head, None)?;
-        return writeln!(out, "\ttoo_large_to_hold\t\t\t\t\t\t\t\t\t\t");
+        return writeln!(out, "\ttoo_large_to_hold\t\t\t\t\t\t\t\t\t\t\t");
     };
     if record.observations.is_empty() {
         write_locus_columns(out, header, head, Some(record))?;
-        return writeln!(out, "\tdecoded\t\t\t\t\t\t\t\t\t\t");
+        return writeln!(out, "\tdecoded\t\t\t\t\t\t\t\t\t\t\t");
     }
     for observation in &record.observations {
         write_locus_columns(out, header, head, Some(record))?;
@@ -295,7 +299,7 @@ fn write_record(
         );
         writeln!(
             out,
-            "\tdecoded\t{}\t{witness}\t{positions}\t{read_group}\t{}\t{}\t{:.4}\t{}\t{}\t{}",
+            "\tdecoded\t{}\t{witness}\t{positions}\t{read_group}\t{}\t{}\t{:.4}\t{}\t{}\t{}\t{}",
             String::from_utf8_lossy(&observation.bases),
             observation.num_obs,
             observation.num_fwd,
@@ -309,6 +313,11 @@ fn write_record(
                     "{},{}",
                     observation.flank_deletion.left, observation.flank_deletion.right
                 )
+            },
+            match observation.held_flank {
+                None => "",
+                Some(HeldFlank::Left) => "left",
+                Some(HeldFlank::Right) => "right",
             },
         )?;
     }
@@ -467,7 +476,7 @@ mod tests {
         let text = dump(&zeta, "chr1\t0\t100\n", cohort.directory.path());
 
         assert!(text.contains(&format!("#inspect_psp_columns_version={COLUMNS_VERSION}\n")));
-        assert!(text.contains("#psp_format_version=2.0\n"));
+        assert!(text.contains("#psp_format_version=2.1\n"));
         assert!(text.contains("#sample=zeta\n"));
         let mut lines = text.lines().filter(|line| !line.starts_with('#'));
         assert_eq!(lines.next(), Some(COLUMNS.join("\t").as_str()));
@@ -499,7 +508,7 @@ mod tests {
     fn every_row_has_as_many_columns_as_the_header_names() {
         // The two head-only rows: 12 locus columns, then the rest padded.
         let locus_columns = 12;
-        let padded = "\ttoo_large_to_hold\t\t\t\t\t\t\t\t\t\t";
+        let padded = "\ttoo_large_to_hold\t\t\t\t\t\t\t\t\t\t\t";
         assert_eq!(locus_columns + padded.matches('\t').count(), COLUMNS.len());
     }
 }

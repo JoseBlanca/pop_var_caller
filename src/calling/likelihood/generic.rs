@@ -3408,6 +3408,7 @@ mod tests {
         q_sum: f64,
     ) -> PartialObservation {
         PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
                 .expect("the fixture's runs are a witness"),
             read_group: ReadGroupId(0),

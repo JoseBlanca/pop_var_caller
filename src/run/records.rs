@@ -333,6 +333,7 @@ where
                 return true;
             };
             sample.partials.push(PartialObservation {
+                held_flank: None,
                 witnessed_in_locus: whole_locus.clone(),
                 read_group: row.read_group,
                 bases: observation.alleles[row.allele].clone(),

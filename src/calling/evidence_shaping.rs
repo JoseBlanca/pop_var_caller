@@ -559,6 +559,7 @@ impl SsrEvidenceScratch {
             for row in &sample.supported {
                 rows.push(SequenceObservation {
                     flank_deletion: observation.flank_deletion_of(row.allele),
+                    held_flank: None,
                     bases: observation.alleles[row.allele].clone(),
                     read_witness: ReadWitness::Complete,
                     read_group: row.read_group,
@@ -576,6 +577,7 @@ impl SsrEvidenceScratch {
             for partial in &sample.partials {
                 rows.push(SequenceObservation {
                     flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                    held_flank: partial.held_flank,
                     bases: partial.bases.clone(),
                     read_witness: ReadWitness::Partial {
                         positions: partial.witnessed_in_locus.clone(),
@@ -790,6 +792,7 @@ mod tests {
             WitnessedLocusPositions::from_half_open_runs([(0_u16, 3_u16)]).expect("a witness");
         let mut sample = covering(0, vec![merge_row(0, 1, 5, -10.0)]);
         sample.partials.push(PartialObservation {
+            held_flank: Some(crate::locus_generation::HeldFlank::Right),
             witnessed_in_locus: witnessed.clone(),
             read_group: ReadGroupId(1),
             bases: Box::from(&b"ATA"[..]),
@@ -823,6 +826,11 @@ mod tests {
                 positions: witnessed
             },
             "the positions the read did witness travel with it",
+        );
+        assert_eq!(
+            rebuilt[0][1].held_flank,
+            Some(crate::locus_generation::HeldFlank::Right),
+            "and so does the flank it held",
         );
     }
 
@@ -1107,6 +1115,7 @@ mod tests {
 
         let mut support = covering(0, vec![merge_row(0, 0, 4, -4.0)]);
         support.partials.push(PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
                 .expect("one witnessed position"),
             read_group: ReadGroupId(0),
@@ -1290,6 +1299,7 @@ mod tests {
         };
         let seen = [SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(b"ATAT".as_slice()),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

@@ -158,6 +158,7 @@ mod tests {
         let reads = (ids.end - ids.start) as u32;
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.into(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(group),

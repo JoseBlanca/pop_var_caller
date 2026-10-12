@@ -489,7 +489,12 @@ pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES
 /// bundle as one with no runs, and ignore the header's `max-str-bundle-len-bp`, the bundle cap it
 /// cannot apply. A 1.x reader accepts any later 1.x minor; only a major bump makes it refuse
 /// these files, by name.
-pub const FORMAT_VERSION: (u16, u16) = (2, 0);
+///
+/// **2.1 since 2026-10-12, when observations gained the flank they held** where their witness
+/// cannot say it (`str_bundle_loci.md` §7.6), as the body's new last field. A minor bump: a 2.0
+/// reader walks past it as an unknown final field and scores such a read as 2.0 did, from both
+/// flanks one half each — a proper mixture over a side it does not know, not a misreading.
+pub const FORMAT_VERSION: (u16, u16) = (2, 1);
 
 /// The oldest major this reader reads: **2, so a 1.x psp is refused up front, by its version**
 /// (session lead, 2026-10-11, in building `str_bundle_loci.md` §7).
@@ -2047,7 +2052,7 @@ mod tests {
         assert_eq!(&bytes[..4], b"NGP\n");
         let body = body_of(&bytes);
         for expected in [
-            "format-version = \"2.0\"",
+            "format-version = \"2.1\"",
             "sample = \"SRR7279481\"",
             "genomic-block-size-bp = 100000",
             "look-back-window-log = 15",
@@ -2175,7 +2180,7 @@ mod tests {
         let bytes = written.encode().expect("a valid header encodes");
         for (spelled, major, minor) in [("1.2", 1, 2), ("1.0", 1, 0), ("0.9", 0, 9)] {
             let body = body_of(&bytes).replace(
-                "format-version = \"2.0\"",
+                "format-version = \"2.1\"",
                 &format!("format-version = \"{spelled}\""),
             );
             match decoded(&framed(&body)) {
@@ -2203,7 +2208,7 @@ mod tests {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
-            .replace("format-version = \"2.0\"", "format-version = \"2.4\"")
+            .replace("format-version = \"2.1\"", "format-version = \"2.4\"")
             .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
         written.format_version = (2, 4);
@@ -2221,9 +2226,9 @@ mod tests {
     fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
         let mut header = a_written_header();
         header.format_version = (1, 7);
-        let refused = header.encode().expect_err("this writer produces 2.0");
+        let refused = header.encode().expect_err("this writer produces 2.1");
         assert!(
-            refused.to_string().contains("produces 2.0"),
+            refused.to_string().contains("produces 2.1"),
             "got {refused}"
         );
     }
@@ -3032,13 +3037,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the thirty-one are lists.** A count and
+    /// **The record's own fields, and which two of the thirty-two are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::psp::record::record_fields();
-        assert_eq!(fields.len(), 31);
+        assert_eq!(fields.len(), 32);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)

@@ -244,6 +244,7 @@ mod chain_renaming_tests {
             reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: Box::from(&b"A"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),

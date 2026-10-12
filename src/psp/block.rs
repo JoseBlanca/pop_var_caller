@@ -2285,6 +2285,7 @@ mod tests {
             reference_bases: bases.clone(),
             observations: vec![SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases,
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
@@ -3178,9 +3179,9 @@ mod tests {
     #[test]
     fn a_manifest_declaring_a_layout_this_writer_cannot_honour_is_refused() {
         let mut manifest = a_manifest();
-        // Three fields short: one short is format 1.2 and two short format 1.1, which a reader
-        // reads.
-        manifest.fields.truncate(manifest.fields.len() - 3);
+        // Four fields short: one short is format 2.0, two short format 1.2 and three short
+        // format 1.1, which a reader reads.
+        manifest.fields.truncate(manifest.fields.len() - 4);
 
         let refused = BlockBuilder::from_manifest(&manifest)
             .expect_err("a manifest missing a field this build writes");
@@ -4090,6 +4091,7 @@ mod tests {
         enormous.observations = (0..4_000u32)
             .map(|read| SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 24].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
@@ -4193,9 +4195,9 @@ mod tests {
         ));
 
         let mut manifest = a_manifest();
-        // Three fields short: one short is format 1.2 and two short format 1.1, which a reader
-        // reads.
-        manifest.fields.truncate(manifest.fields.len() - 3);
+        // Four fields short: one short is format 2.0, two short format 1.2 and three short
+        // format 1.1, which a reader reads.
+        manifest.fields.truncate(manifest.fields.len() - 4);
         assert!(matches!(
             BlockStream::new([].as_slice(), &manifest),
             Err(BlockReadError::UnsupportedRecordLayout { .. })
@@ -4569,6 +4571,7 @@ mod tests {
         bulky.observations = (0..4u32)
             .map(|read| SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: bases[read as usize * 12..(read as usize + 1) * 12]
                     .to_vec()
                     .into_boxed_slice(),
@@ -4925,6 +4928,7 @@ mod tests {
         wide.observations = (0..observations)
             .map(|read| SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
@@ -5052,6 +5056,7 @@ mod tests {
         enormous.observations = (0..40_000u32)
             .map(|read| SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
@@ -5685,6 +5690,7 @@ mod tests {
         enormous.observations = (0..2_600u32)
             .map(|read| SequenceObservation {
                 flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 12].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),

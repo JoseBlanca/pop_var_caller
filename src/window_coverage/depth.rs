@@ -245,6 +245,7 @@ mod tests {
     fn obs(read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(&b"A"[..]),
             read_witness,
             read_group: ReadGroupId(0),

@@ -1287,6 +1287,7 @@ pub(super) mod fixtures {
     /// read.
     pub(super) fn partial_of(num_reads: u32) -> PartialObservation {
         PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(0, 2)
                 .expect("a two-position witness"),
             read_group: ReadGroupId(0),

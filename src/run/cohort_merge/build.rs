@@ -38,7 +38,7 @@ use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::observation_cache::WindowedCohort;
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::locus_generation::{
-    FlankDeletion, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    FlankDeletion, HeldFlank, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
     WitnessedLocusPositions,
 };
 use crate::run::explain::{DroppedLoci, MergeDrop};
@@ -1495,6 +1495,11 @@ pub struct PartialObservation {
     /// with every allele whose carrier would show the same bases there
     /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
     pub sequence_may_run_on_past: Option<LocusBorder>,
+    /// **Which flank of an STR locus the reads anchored, where their witness cannot say it** —
+    /// the mint's [`SequenceObservation::held_flank`], carried through unchanged: a partial at an
+    /// STR bundle whose witness covers the whole hull, and `None` everywhere else
+    /// (`doc/devel/ng/spec/str_bundle_loci.md` §7.6).
+    pub held_flank: Option<HeldFlank>,
 }
 
 /// One of a locus's two borders — see
@@ -1918,8 +1923,8 @@ struct ReadSighting {
 /// derivation's two shapes — one record, several — differ in how reads are placed, and a
 /// partial is placed nowhere; the walk is the same either way.
 ///
-/// Sorted ascending by `(witnessed stretch, read group, bases)`. The stretch alone does not
-/// order two rows — a substitution witnessed partially is two rows over one stretch — and the
+/// Sorted ascending by `(witnessed stretch, read group, bases, held flank)`. The stretch alone does
+/// not order two rows — a substitution witnessed partially is two rows over one stretch — and the
 /// order has to be total, because the sum over observations must run in a fixed one
 /// (`doc/devel/ng/spec/read_likelihoods.md` §8).
 fn partials_of_sample(
@@ -1954,12 +1959,14 @@ fn partials_of_sample(
                 num_reads: sequence.num_obs,
                 q_sum: sequence.q_sum.nats(),
                 sequence_may_run_on_past: None,
+                held_flank: sequence.held_flank,
             });
         }
     }
     // Unstable is enough: the key is total, and no two rows share one. Within a record the
-    // mint has already keyed its observations on `(bases, witness, read group)`, two of which
-    // are key components here and the third of which the shift preserves; across records the
+    // mint has already keyed its observations on `(bases, witness, read group, held flank)`,
+    // three of which are key components here and the fourth of which the shift preserves (the
+    // flank deletion is a complete observation's, never a partial's); across records the
     // shifted stretches cannot meet, because `LocusReferenceBases::over` asserts a sample's
     // records are disjoint and ascending before any of this runs. **That second half rests on
     // the mint's clamping** — `ReadWitness::Partial` is a public variant with a public field,
@@ -1967,11 +1974,18 @@ fn partials_of_sample(
     // type invariant" — so a hand-built witness reaching past its own record can produce two
     // equal keys, and their order is then unspecified rather than wrong.
     partials.sort_unstable_by(|left, right| {
-        (&left.witnessed_in_locus, left.read_group, &left.bases).cmp(&(
-            &right.witnessed_in_locus,
-            right.read_group,
-            &right.bases,
-        ))
+        (
+            &left.witnessed_in_locus,
+            left.read_group,
+            &left.bases,
+            left.held_flank,
+        )
+            .cmp(&(
+                &right.witnessed_in_locus,
+                right.read_group,
+                &right.bases,
+                right.held_flank,
+            ))
     });
     partials
 }
@@ -2353,6 +2367,7 @@ mod tests {
     fn sequence(bases: &[u8]) -> SequenceObservation {
         SequenceObservation {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(bases),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -5008,6 +5023,8 @@ mod tests {
             // the fixture: with `q_sum` left at `0.0` a build writing a constant zero into
             // every row would satisfy it just as well.
             q_sum: crate::types::SummedLogError::from_nats(-18.5),
+            // Carried through untouched, whatever it is (`str_bundle_loci.md` §7.6).
+            held_flank: Some(HeldFlank::Left),
             ..sequence(b"A")
         });
         let members = [with_a_partial];
@@ -5032,6 +5049,7 @@ mod tests {
         assert_eq!(
             observed.per_sample[0].partials,
             vec![PartialObservation {
+                held_flank: Some(HeldFlank::Left),
                 witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(2, 1)
                     .expect("one position of the locus"),
                 read_group: ReadGroupId(0),
@@ -5095,6 +5113,7 @@ mod tests {
         assert_eq!(
             sample.partials,
             vec![PartialObservation {
+                held_flank: None,
                 witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(4, 1)
                     .expect("one position of the locus"),
                 read_group: ReadGroupId(0),
