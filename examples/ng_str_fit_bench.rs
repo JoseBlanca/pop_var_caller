@@ -29,7 +29,9 @@
 //! Parameters: `level`, `shorter_share`, `fall_off`, `concentration`, `between_locus_share`
 //! (`1 / (1 + concentration)`), `share_<offset>` for every allele class; the held-out score
 //! `heldout_ln_per_read` and `heldout_ln_per_locus` (truth = the truth's own score on the same loci,
-//! standard error = the Monte Carlo error) with `heldout_loci` and `heldout_reads`; and the costs
+//! standard error = the Monte Carlo error) with `heldout_loci`, `heldout_reads` and
+//! `heldout_loci_on_fallback` (loci of classes scored at calling's fallback rung, a flat shape at the
+//! stated concentration, for want of their own shares or concentration); and the costs
 //! `fit_seconds` (the fit on every locus), `heldout_fit_seconds`, `heldout_score_seconds`,
 //! `draw_seconds` and `peak_rss_mib` (Linux only; elsewhere `NA`).
 //!
@@ -48,12 +50,13 @@ use rayon::prelude::*;
 
 use pop_var_caller::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
-    ClassTruth, CohortModel, HomozygoteExcessTruth, LociPerClass, StutterRegime, draw_period,
-    write_truth_tsv,
+    ClassTruth, CohortModel, HomozygoteExcessTruth, LociPerClass, ParameterCurve, StutterRegime,
+    draw_period, write_truth_tsv,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
     ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan, HeldOutSettings, PeriodFit,
-    Sampler, TheClimb, TheCountingFit, score_locus, with_the_curves, without_fold,
+    Sampler, TheClimb, TheCountingFit, numbers_for_scoring, score_locus, with_the_curves,
+    without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence, TractReads,
@@ -129,6 +132,12 @@ struct Cli {
     /// offset most of the locus's reads report and the share the fit gave that offset.
     #[arg(long)]
     locus_out: Option<PathBuf>,
+    /// How far either side of the reference alleles are drawn, in place of the truth's (14).
+    #[arg(long)]
+    allele_reach: Option<i32>,
+    /// One between-locus share F for every class, in place of the truth's curve.
+    #[arg(long)]
+    between_locus_share: Option<f64>,
 }
 
 /// The method a name on the command line stands for. **A new method adds a line here.**
@@ -153,13 +162,17 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
             errors: CountingFitErrorMethod::None,
             ..TheCountingFit::default()
         }),
+        "B_noprior" => Box::new(TheCountingFit {
+            share_prior_tracts: 0.0,
+            ..TheCountingFit::default()
+        }),
         "B_bootstrap" => Box::new(TheCountingFit {
             errors: CountingFitErrorMethod::Bootstrap(50),
             ..TheCountingFit::default()
         }),
         other => panic!(
-            "no method is called {other}; the methods are A, B, B_within, B_noerrors and \
-             B_bootstrap"
+            "no method is called {other}; the methods are A, B, B_within, B_noerrors, \
+             B_noprior and B_bootstrap"
         ),
     }
 }
@@ -215,6 +228,12 @@ fn model_of(cli: &Cli) -> CohortModel {
     };
     if let Some(repeats) = &cli.repeats {
         model.repeat_counts = Some(repeats_wanted(repeats));
+    }
+    if let Some(reach) = cli.allele_reach {
+        model.true_allele_reach = reach;
+    }
+    if let Some(share) = cli.between_locus_share {
+        model.between_locus_share = ParameterCurve::Constant(share);
     }
     if let Some(excess) = cli.excess {
         model.homozygote_excess = HomozygoteExcessTruth::Each(excess);
@@ -342,6 +361,9 @@ struct HeldOut {
     truth_ln: f64,
     reads: u64,
     loci: usize,
+    /// Of `loci`, those whose class was scored at calling's fallback rung (no concentration or no
+    /// shares of its own).
+    fallback_loci: usize,
 }
 
 fn heldout_rows(rows: &mut Rows, method: &str, per_class: &[HeldOut], truth: &[ClassTruth]) {
@@ -373,6 +395,14 @@ fn heldout_rows(rows: &mut Rows, method: &str, per_class: &[HeldOut], truth: &[C
         rows.push(
             method,
             repeats,
+            "heldout_loci_on_fallback",
+            None,
+            Some(sums.fallback_loci as f64),
+            None,
+        );
+        rows.push(
+            method,
+            repeats,
             "heldout_reads",
             None,
             Some(sums.reads as f64),
@@ -386,6 +416,7 @@ fn heldout_rows(rows: &mut Rows, method: &str, per_class: &[HeldOut], truth: &[C
         all.truth_ln += sums.truth_ln;
         all.reads += sums.reads;
         all.loci += sums.loci;
+        all.fallback_loci += sums.fallback_loci;
     }
     write(rows, "all", &all);
 }
@@ -626,8 +657,17 @@ fn main() {
                     .map(|((class, locus, _), truth)| (*class, *locus, *truth))
                     .collect();
                 for (variant_index, (variant, estimates)) in fitted.iter().enumerate() {
-                    let numbers: Vec<Option<ClassNumbers>> =
-                        estimates.iter().map(ClassEstimate::numbers).collect();
+                    // A class without its own shares or concentration is scored at calling's
+                    // fallback rung and counted, not skipped.
+                    let scored_numbers = numbers_for_scoring(estimates);
+                    let numbers: Vec<Option<ClassNumbers>> = scored_numbers
+                        .iter()
+                        .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))
+                        .collect();
+                    let on_the_fallback: Vec<bool> = scored_numbers
+                        .iter()
+                        .map(|scored| scored.as_ref().is_some_and(|s| s.on_the_fallback))
+                        .collect();
                     let scores: Vec<Option<HeldOutLocus>> = in_fold
                         .par_iter()
                         .map(|(class, locus, truth)| {
@@ -666,6 +706,7 @@ fn main() {
                         into.truth_ln += truth;
                         into.reads += reads;
                         into.loci += 1;
+                        into.fallback_loci += usize::from(on_the_fallback[class]);
                     }
                 }
                 score_seconds += started.elapsed().as_secs_f64();

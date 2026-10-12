@@ -41,6 +41,9 @@ pub struct CountedClass {
     pub concentration_counted_at: f64,
     /// Which estimator the concentration came from.
     pub concentration_from: ConcentrationSource,
+    /// The shares' prior weight the fit used, in tracts ([`SHARE_PRIOR_TRACTS`] unless a
+    /// measurement asked for another); a refit uses the same.
+    pub share_prior_tracts: f64,
     /// How many rounds ran, and the largest change of any number in the last.
     pub rounds: usize,
     pub last_change: f64,
@@ -242,6 +245,7 @@ pub fn fit_class_by_counting(
         None,
         None,
         1.0,
+        SHARE_PRIOR_TRACTS,
         homozygote_excess,
         config,
         max_rounds,
@@ -259,6 +263,7 @@ fn count_class(
     start_shares: Option<&[f64]>,
     held_spread: Option<f64>,
     start_spread: f64,
+    share_prior_tracts: f64,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
     max_rounds: usize,
@@ -290,7 +295,7 @@ fn count_class(
         // Each length's prior weight: one tract's worth of draws, spread evenly.
         let draws: f64 = counts.draws.iter().sum();
         let tracts = evidence.tracts_with_reads().max(1) as f64;
-        let prior = SHARE_PRIOR_TRACTS * draws / tracts / classes as f64;
+        let prior = share_prior_tracts * draws / tracts / classes as f64;
         let new_shares: Vec<f64> = counts
             .draws
             .iter()
@@ -353,6 +358,7 @@ fn count_class(
         .then_some(concentration),
         concentration_counted_at: concentration,
         concentration_from,
+        share_prior_tracts,
         rounds,
         last_change,
         composite_log_likelihood: log_likelihood,
@@ -539,9 +545,43 @@ pub fn fit_class_by_counting_with_pairs(
     tolerance: f64,
     alternations: usize,
 ) -> CountedClass {
-    let fitted = fit_class_by_counting(
+    fit_class_by_counting_with_pairs_at_share_prior(
         evidence,
         start,
+        homozygote_excess,
+        config,
+        max_rounds,
+        tolerance,
+        alternations,
+        SHARE_PRIOR_TRACTS,
+    )
+}
+
+/// [`fit_class_by_counting_with_pairs`] with the shares' prior weight `share_prior_tracts` in
+/// place of [`SHARE_PRIOR_TRACTS`] — zero is the fit before the prior. **For measuring what the
+/// prior does**, not for a run.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the counting fit's own settings, passed through"
+)]
+#[must_use]
+pub fn fit_class_by_counting_with_pairs_at_share_prior(
+    evidence: &StratumEvidence,
+    start: Slippage,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    max_rounds: usize,
+    tolerance: f64,
+    alternations: usize,
+    share_prior_tracts: f64,
+) -> CountedClass {
+    let fitted = count_class(
+        evidence,
+        start,
+        None,
+        None,
+        1.0,
+        share_prior_tracts,
         homozygote_excess,
         config,
         max_rounds,
@@ -602,6 +642,7 @@ pub fn refit_class_by_counting_from(
             Some(&from.allele_length_variation),
             None,
             from.concentration_counted_at,
+            from.share_prior_tracts,
             homozygote_excess,
             config,
             max_rounds,
@@ -648,6 +689,7 @@ fn alternate_with_pairs(
             Some(&fitted.allele_length_variation),
             Some(next),
             1.0,
+            fitted.share_prior_tracts,
             homozygote_excess,
             config,
             max_rounds,

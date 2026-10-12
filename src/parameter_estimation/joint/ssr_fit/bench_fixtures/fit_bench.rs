@@ -123,6 +123,75 @@ impl ClassEstimate {
     }
 }
 
+/// One class's numbers as the held-out score uses them, and whether they came from the caller's
+/// fallback rung.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScoredNumbers {
+    pub numbers: ClassNumbers,
+    /// **The class had no allele-length shares or no concentration of its own**, so it is scored
+    /// at a flat shape and the stated concentration, as calling would seed its prior.
+    pub on_the_fallback: bool,
+}
+
+/// **The numbers each class is scored at, with calling's fallback where a class lacks its own.**
+///
+/// Calling seeds a tract's genotype prior from the tract ladder
+/// ([`StratumFits::allele_length_variation_at`](crate::parameter_estimation::joint::stratum_fits::StratumFits::allele_length_variation_at)):
+/// the class's own shares and concentration where it has both, and otherwise a flat shape at the
+/// stated concentration — the median of the concentrations the run's classes fitted, or
+/// [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)
+/// where none fitted one. (The ladder's middle rung, a period's pooled tracts, is reached only when
+/// a run asks for it, and the bench does not.) So a class with shares but no concentration — the
+/// counting fit at one sample — is scored at the bottom rung, not skipped, and marked.
+///
+/// The median is over `estimates`, the classes of one motif length fitted together: the bench's
+/// stand-in for a run. A class with no stutter (no answer and no curve) is still not scored.
+#[must_use]
+pub fn numbers_for_scoring(estimates: &[ClassEstimate]) -> Vec<Option<ScoredNumbers>> {
+    let mut fitted: Vec<f64> = estimates
+        .iter()
+        .filter(|estimate| estimate.allele_length_variation.is_some())
+        .filter_map(|estimate| estimate.concentration)
+        .collect();
+    fitted.sort_by(f64::total_cmp);
+    let stated = match fitted.len() {
+        0 => crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION,
+        count if count % 2 == 1 => fitted[count / 2],
+        count => 0.5 * (fitted[count / 2 - 1] + fitted[count / 2]),
+    };
+    estimates
+        .iter()
+        .map(|estimate| {
+            let slippage = estimate.slippage?;
+            Some(
+                match (&estimate.allele_length_variation, estimate.concentration) {
+                    (Some(shares), Some(concentration)) => ScoredNumbers {
+                        numbers: ClassNumbers {
+                            slippage,
+                            allele_length_variation: shares.clone(),
+                            concentration,
+                        },
+                        on_the_fallback: false,
+                    },
+                    (shares, _) => {
+                        let lengths = shares
+                            .as_ref()
+                            .map_or(2 * ALLELE_SPAN as usize + 1, Vec::len);
+                        ScoredNumbers {
+                            numbers: ClassNumbers {
+                                slippage,
+                                allele_length_variation: vec![1.0 / lengths as f64; lengths],
+                                concentration: stated,
+                            },
+                            on_the_fallback: true,
+                        }
+                    }
+                },
+            )
+        })
+        .collect()
+}
+
 impl ClassNumbers {
     /// The truth as a fit at `allele_span` sees it.
     #[must_use]
@@ -243,6 +312,10 @@ pub struct TheCountingFit {
     /// Rounds of spread-then-counting, at most, when `pairs`.
     pub alternations: usize,
     pub errors: CountingFitErrorMethod,
+    /// The shares' prior weight, in tracts
+    /// ([`SHARE_PRIOR_TRACTS`](super::super::composite_fit::SHARE_PRIOR_TRACTS) by default; zero is
+    /// the fit before the prior). Read only with `pairs`.
+    pub share_prior_tracts: f64,
 }
 
 /// Which standard errors [`TheCountingFit`] reports.
@@ -263,13 +336,18 @@ impl Default for TheCountingFit {
             tolerance: 1e-7,
             alternations: 10,
             errors: CountingFitErrorMethod::Sandwich,
+            share_prior_tracts: super::super::composite_fit::SHARE_PRIOR_TRACTS,
         }
     }
 }
 
 impl PeriodFit for TheCountingFit {
     fn name(&self) -> String {
-        let estimator = if self.pairs { "B" } else { "B_within" };
+        let estimator = match (self.pairs, self.share_prior_tracts == 0.0) {
+            (true, false) => "B",
+            (true, true) => "B_noprior",
+            (false, _) => "B_within",
+        };
         match self.errors {
             CountingFitErrorMethod::Sandwich => estimator.to_owned(),
             CountingFitErrorMethod::None => format!("{estimator}_noerrors"),
@@ -304,7 +382,7 @@ impl PeriodFit for TheCountingFit {
                     return ClassEstimate::absent(evidence);
                 }
                 let fit = if self.pairs {
-                    super::super::composite_fit::fit_class_by_counting_with_pairs(
+                    super::super::composite_fit::fit_class_by_counting_with_pairs_at_share_prior(
                         evidence,
                         start,
                         homozygote_excess,
@@ -312,6 +390,7 @@ impl PeriodFit for TheCountingFit {
                         self.max_rounds,
                         self.tolerance,
                         self.alternations,
+                        self.share_prior_tracts,
                     )
                 } else {
                     super::super::composite_fit::fit_class_by_counting(
@@ -1560,5 +1639,58 @@ mod tests {
         assert_eq!(plan.scored.iter().filter(|s| **s).count(), 20);
         let training = without_fold(&evidence, &plan, 2);
         assert_eq!(training.tracts.len(), 53 - sizes[2]);
+    }
+
+    /// **A class without a concentration is scored at calling's bottom rung, not skipped**: a flat
+    /// shape at the median of the other classes' concentrations, marked; a class with no stutter is
+    /// still not scored; with no concentration anywhere the stated constant is used.
+    #[test]
+    fn a_class_without_a_concentration_is_scored_at_the_fallback() {
+        let slippage = Slippage {
+            level: 0.05,
+            shorter_share: 0.7,
+            fall_off: 0.2,
+        };
+        let stratum = |reference_repeats| Stratum {
+            period: 1,
+            reference_repeats,
+        };
+        let estimate = |repeats, concentration: Option<f64>, with_stutter: bool| ClassEstimate {
+            stratum: stratum(repeats),
+            slippage: with_stutter.then_some(slippage),
+            allele_length_variation: Some(vec![0.2, 0.6, 0.2]),
+            concentration,
+            errors: ClassErrors::default(),
+            reads_crossing: 100,
+        };
+        let estimates = [
+            estimate(8, Some(0.2), true),
+            estimate(9, Some(0.4), true),
+            estimate(10, Some(3.0), true),
+            estimate(11, None, true),
+            estimate(12, None, false),
+        ];
+        let scored = numbers_for_scoring(&estimates);
+        let own = scored[1]
+            .as_ref()
+            .expect("a class with its numbers is scored");
+        assert!(!own.on_the_fallback);
+        assert_eq!(own.numbers.concentration, 0.4);
+        let fallback = scored[3]
+            .as_ref()
+            .expect("a class without a concentration is scored");
+        assert!(fallback.on_the_fallback);
+        assert_eq!(
+            fallback.numbers.concentration, 0.4,
+            "the median of 0.2, 0.4 and 3.0"
+        );
+        assert_eq!(fallback.numbers.allele_length_variation, vec![1.0 / 3.0; 3]);
+        assert!(scored[4].is_none());
+
+        let none = numbers_for_scoring(&[estimate(8, None, true)]);
+        assert_eq!(
+            none[0].as_ref().map(|s| s.numbers.concentration),
+            Some(crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)
+        );
     }
 }
