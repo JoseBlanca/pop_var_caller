@@ -341,6 +341,13 @@ required-features = ["bench-fixtures"]
 name = "ng_ssr_strata_threads"
 required-features = ["bench-fixtures"]
 
+# Whether the counting fit's standard errors are honest: draws repeat classes from a known
+# truth and counts how often it lies within one and two reported errors, for the bootstrap,
+# the sandwich and the naive curvature (`ssr_fit::counting_fit_errors`).
+[[example]]
+name = "ng_str_counting_fit_errors"
+required-features = ["bench-fixtures"]
+
 # The site quality's cost across the cohort sizes the caller commits to —
 # `doc/devel/ng/spec/calling_quality.md` §13's Q3, which names this benchmark as the way to
 # settle it. It draws its own likelihood table, so it needs no fixture feature and

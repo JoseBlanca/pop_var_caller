@@ -37,34 +37,41 @@ pub struct CountedClass {
     pub composite_log_likelihood: f64,
 }
 
-/// The expected counts one round gathers over a class.
+/// The expected counts one round gathers over a class, or over one tract of it.
+///
+/// **They are also the objective's slope.** The slope of the log of a sum over hidden genotypes
+/// and slips is the expected slope of the log-likelihood that knew them (Fisher's identity), and
+/// that slope is a function of these counts alone (`counting_fit_errors`).
 #[derive(Debug, Clone, Default)]
-struct Counts {
+pub(super) struct Counts {
     /// Per allele class, how many independent allele draws.
-    draws: Vec<f64>,
+    pub(super) draws: Vec<f64>,
     /// Of each sample's two copies not identical by descent, how many pairs, and how many of those
     /// were one draw from the tract's frequencies.
-    pairs_not_by_descent: f64,
-    shared_in_tract: f64,
-    exact: f64,
-    slipped: f64,
-    /// Slipped reads whose bucket is not an end bucket, by direction, and their steps.
-    shorter: f64,
-    longer: f64,
-    steps: f64,
-    stepped: f64,
-    log_likelihood: f64,
+    pub(super) pairs_not_by_descent: f64,
+    pub(super) shared_in_tract: f64,
+    /// Reads that reported their allele's length, and reads that slipped.
+    pub(super) exact: f64,
+    pub(super) slipped: f64,
+    /// Slipped reads by direction; `steps` is the repeats they slipped summed, over the `stepped`
+    /// reads whose direction and length were placed.
+    pub(super) shorter: f64,
+    pub(super) longer: f64,
+    pub(super) steps: f64,
+    pub(super) stepped: f64,
+    /// The objective summed over what was counted.
+    pub(super) log_likelihood: f64,
 }
 
 impl Counts {
-    fn new(classes: usize) -> Self {
+    pub(super) fn new(classes: usize) -> Self {
         Self {
             draws: vec![0.0; classes],
             ..Self::default()
         }
     }
 
-    fn add(&mut self, other: &Counts) {
+    pub(super) fn add(&mut self, other: &Counts) {
         for (into, from) in self.draws.iter_mut().zip(&other.draws) {
             *into += from;
         }
@@ -161,6 +168,7 @@ pub fn fit_class_by_counting(
         start,
         None,
         None,
+        1.0,
         homozygote_excess,
         config,
         max_rounds,
@@ -169,163 +177,38 @@ pub fn fit_class_by_counting(
 }
 
 /// The rounds of counting, from `start` and `start_shares` (flat when `None`). With `held_spread`
-/// the spread is held there rather than counted from each sample's two copies.
+/// the spread is held there rather than counted from each sample's two copies, which otherwise
+/// starts at `start_spread`.
 #[allow(clippy::too_many_arguments, reason = "a prototype's internal entry")]
 fn count_class(
     evidence: &StratumEvidence,
     start: Slippage,
     start_shares: Option<&[f64]>,
     held_spread: Option<f64>,
+    start_spread: f64,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
     max_rounds: usize,
     tolerance: f64,
 ) -> CountedClass {
     let classes = allele_classes_of(config);
-    let genotypes = genotype_pairs(classes);
-    let span = config.allele_span;
-    let read_span = evidence.read_span;
-    let last_bucket = (2 * read_span) as usize;
-    let slot =
-        |class: usize| ((class as i32 - span).clamp(-read_span, read_span) + read_span) as usize;
     let mut slippage = start;
     let mut shares =
         start_shares.map_or_else(|| vec![1.0 / classes as f64; classes], <[f64]>::to_vec);
-    let mut concentration = held_spread.unwrap_or(1.0);
+    let mut concentration = held_spread.unwrap_or(start_spread);
     let mut rounds = 0;
     let mut last_change = f64::INFINITY;
     let mut log_likelihood = f64::NEG_INFINITY;
-    let libraries: Vec<Library> = evidence
-        .libraries
-        .iter()
-        .map(|library| Library {
-            slippage_group: 0,
-            stutter_multiplier: 1.0,
-            ..*library
-        })
-        .collect();
     while rounds < max_rounds {
         rounds += 1;
-        let distributions = ReadDistributionsByLevel::of(&[slippage], &libraries, span, read_span);
-        let per_allele = &distributions.read_distribution_by_allele[0];
-        let stay = 1.0 - slippage.level;
-        let slips_by_bucket: Vec<Vec<SlipsIntoBucket>> = (0..classes)
-            .map(|class| slips_into_each_bucket(slippage, class as i32 - span, read_span))
-            .collect();
-        // Each genotype's prior, given a sample's homozygote excess, split into the part where its two
-        // copies are one draw (identical by descent) and the part where they are two.
-        let one_draw: Vec<f64> = genotypes
-            .iter()
-            .map(|(a, b)| if a == b { shares[*a] } else { 0.0 })
-            .collect();
-        let two_draws: Vec<f64> = genotypes
-            .iter()
-            .map(|(a, b)| {
-                if a == b {
-                    shares[*a] * shares[*a]
-                } else {
-                    2.0 * shares[*a] * shares[*b]
-                }
-            })
-            .collect();
-        let per_tract: Vec<Counts> = evidence
-            .tracts
-            .par_iter()
-            .map(|tract| {
-                let mut counts = Counts::new(classes);
-                for sample in &tract.samples {
-                    let excess = homozygote_excess[sample.sample as usize];
-                    // Pool the sample's libraries: one stutter for all of them here.
-                    let mut reads = vec![0_u32; last_bucket + 1];
-                    for (_, library_reads) in &sample.by_library {
-                        for (into, count) in reads.iter_mut().zip(library_reads) {
-                            *into += count;
-                        }
-                    }
-                    // Each genotype's log-likelihood, then its posterior.
-                    let log_likelihoods: Vec<f64> = genotypes
-                        .iter()
-                        .map(|(a, b)| {
-                            let mut total = 0.0;
-                            add_ln_reads(&mut total, per_allele, &reads, *a, *b);
-                            total
-                        })
-                        .collect();
-                    let largest = log_likelihoods
-                        .iter()
-                        .copied()
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    // A sample's two copies are one draw if identical by descent, or, failing that, if they
-                    // drew the same chromosome lineage from the tract's own frequencies: chance
-                    // 1 / (1 + concentration) under a Dirichlet.
-                    let from_the_tract = (1.0 - excess) / (1.0 + concentration);
-                    let one_draw_chance = excess + from_the_tract;
-                    let two_draw_chance = (1.0 - excess) * concentration / (1.0 + concentration);
-                    let joint_one: Vec<f64> = log_likelihoods
-                        .iter()
-                        .zip(&one_draw)
-                        .map(|(ll, prior)| one_draw_chance * prior * float::exp(ll - largest))
-                        .collect();
-                    let joint_two: Vec<f64> = log_likelihoods
-                        .iter()
-                        .zip(&two_draws)
-                        .map(|(ll, prior)| two_draw_chance * prior * float::exp(ll - largest))
-                        .collect();
-                    let total: f64 = joint_one.iter().sum::<f64>() + joint_two.iter().sum::<f64>();
-                    if total <= 0.0 {
-                        continue;
-                    }
-                    counts.log_likelihood += float::ln(total) + largest;
-                    for (index, (a, b)) in genotypes.iter().enumerate() {
-                        let one = joint_one[index] / total;
-                        let two = joint_two[index] / total;
-                        let weight = one + two;
-                        if weight < 1e-12 {
-                            continue;
-                        }
-                        counts.draws[*a] += one + two;
-                        counts.draws[*b] += two;
-                        let shared = one * from_the_tract / one_draw_chance.max(1e-300);
-                        counts.shared_in_tract += shared;
-                        counts.pairs_not_by_descent += shared + two;
-                        for (bucket, count) in reads.iter().enumerate() {
-                            if *count == 0 {
-                                continue;
-                            }
-                            let reported = 0.5 * (per_allele[*a][bucket] + per_allele[*b][bucket]);
-                            if reported <= 0.0 {
-                                continue;
-                            }
-                            for allele in [*a, *b] {
-                                let from_allele = 0.5 * per_allele[allele][bucket] / reported;
-                                let share = weight * f64::from(*count) * from_allele;
-                                let unslipped = if slot(allele) == bucket {
-                                    stay / per_allele[allele][bucket]
-                                } else {
-                                    0.0
-                                };
-                                let exact = share * unslipped.min(1.0);
-                                let slipped = share - exact;
-                                counts.exact += exact;
-                                counts.slipped += slipped;
-                                // Which way the slipped reads went and how far, split by the
-                                // model's own terms: an end bucket can hold slips of both
-                                // directions from an allele at or past the recorded range.
-                                let into = slips_by_bucket[allele][bucket];
-                                let landed = into.shorter + into.longer;
-                                if slipped > 0.0 && landed > 0.0 {
-                                    counts.shorter += slipped * into.shorter / landed;
-                                    counts.longer += slipped * into.longer / landed;
-                                    counts.steps += slipped * into.steps / landed;
-                                    counts.stepped += slipped;
-                                }
-                            }
-                        }
-                    }
-                }
-                counts
-            })
-            .collect();
+        let per_tract = expected_counts_by_tract(
+            evidence,
+            slippage,
+            &shares,
+            concentration,
+            homozygote_excess,
+            config,
+        );
         let mut counts = Counts::new(classes);
         for tract in &per_tract {
             counts.add(tract);
@@ -382,6 +265,169 @@ fn count_class(
     }
 }
 
+/// **One round's expected counts, tract by tract**, in the order of `evidence.tracts`, at the
+/// stutter `slippage`, the allele-length shares `shares` and the spread `concentration`.
+///
+/// Weighs every genotype each sample could carry by its prior times how well it explains the
+/// sample's reads, then shares each read between "reported its allele's length" and "slipped this
+/// far, this way", and each sample's alleles among the lengths.
+pub(super) fn expected_counts_by_tract(
+    evidence: &StratumEvidence,
+    slippage: Slippage,
+    shares: &[f64],
+    concentration: f64,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> Vec<Counts> {
+    let classes = allele_classes_of(config);
+    let genotypes = genotype_pairs(classes);
+    let span = config.allele_span;
+    let read_span = evidence.read_span;
+    let last_bucket = (2 * read_span) as usize;
+    let slot =
+        |class: usize| ((class as i32 - span).clamp(-read_span, read_span) + read_span) as usize;
+    let libraries = one_stutter_for_every_library(evidence);
+    let distributions = ReadDistributionsByLevel::of(&[slippage], &libraries, span, read_span);
+    let per_allele = &distributions.read_distribution_by_allele[0];
+    let stay = 1.0 - slippage.level;
+    let slips_by_bucket: Vec<Vec<SlipsIntoBucket>> = (0..classes)
+        .map(|class| slips_into_each_bucket(slippage, class as i32 - span, read_span))
+        .collect();
+    // Each genotype's prior, given a sample's homozygote excess, split into the part where its two
+    // copies are one draw (identical by descent) and the part where they are two.
+    let one_draw: Vec<f64> = genotypes
+        .iter()
+        .map(|(a, b)| if a == b { shares[*a] } else { 0.0 })
+        .collect();
+    let two_draws: Vec<f64> = genotypes
+        .iter()
+        .map(|(a, b)| {
+            if a == b {
+                shares[*a] * shares[*a]
+            } else {
+                2.0 * shares[*a] * shares[*b]
+            }
+        })
+        .collect();
+    evidence
+        .tracts
+        .par_iter()
+        .map(|tract| {
+            let mut counts = Counts::new(classes);
+            for sample in &tract.samples {
+                let excess = homozygote_excess[sample.sample as usize];
+                let reads = pooled_reads(sample, last_bucket + 1);
+                // Each genotype's log-likelihood, then its posterior.
+                let log_likelihoods: Vec<f64> = genotypes
+                    .iter()
+                    .map(|(a, b)| {
+                        let mut total = 0.0;
+                        add_ln_reads(&mut total, per_allele, &reads, *a, *b);
+                        total
+                    })
+                    .collect();
+                let largest = log_likelihoods
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                // A sample's two copies are one draw if identical by descent, or, failing that, if they
+                // drew the same chromosome lineage from the tract's own frequencies: chance
+                // 1 / (1 + concentration) under a Dirichlet.
+                let from_the_tract = (1.0 - excess) / (1.0 + concentration);
+                let one_draw_chance = excess + from_the_tract;
+                let two_draw_chance = (1.0 - excess) * concentration / (1.0 + concentration);
+                let joint_one: Vec<f64> = log_likelihoods
+                    .iter()
+                    .zip(&one_draw)
+                    .map(|(ll, prior)| one_draw_chance * prior * float::exp(ll - largest))
+                    .collect();
+                let joint_two: Vec<f64> = log_likelihoods
+                    .iter()
+                    .zip(&two_draws)
+                    .map(|(ll, prior)| two_draw_chance * prior * float::exp(ll - largest))
+                    .collect();
+                let total: f64 = joint_one.iter().sum::<f64>() + joint_two.iter().sum::<f64>();
+                if total <= 0.0 {
+                    continue;
+                }
+                counts.log_likelihood += float::ln(total) + largest;
+                for (index, (a, b)) in genotypes.iter().enumerate() {
+                    let one = joint_one[index] / total;
+                    let two = joint_two[index] / total;
+                    let weight = one + two;
+                    if weight < 1e-12 {
+                        continue;
+                    }
+                    counts.draws[*a] += one + two;
+                    counts.draws[*b] += two;
+                    let shared = one * from_the_tract / one_draw_chance.max(1e-300);
+                    counts.shared_in_tract += shared;
+                    counts.pairs_not_by_descent += shared + two;
+                    for (bucket, count) in reads.iter().enumerate() {
+                        if *count == 0 {
+                            continue;
+                        }
+                        let reported = 0.5 * (per_allele[*a][bucket] + per_allele[*b][bucket]);
+                        if reported <= 0.0 {
+                            continue;
+                        }
+                        for allele in [*a, *b] {
+                            let from_allele = 0.5 * per_allele[allele][bucket] / reported;
+                            let share = weight * f64::from(*count) * from_allele;
+                            let unslipped = if slot(allele) == bucket {
+                                stay / per_allele[allele][bucket]
+                            } else {
+                                0.0
+                            };
+                            let exact = share * unslipped.min(1.0);
+                            let slipped = share - exact;
+                            counts.exact += exact;
+                            counts.slipped += slipped;
+                            // Which way the slipped reads went and how far, split by the
+                            // model's own terms: an end bucket can hold slips of both
+                            // directions from an allele at or past the recorded range.
+                            let into = slips_by_bucket[allele][bucket];
+                            let landed = into.shorter + into.longer;
+                            if slipped > 0.0 && landed > 0.0 {
+                                counts.shorter += slipped * into.shorter / landed;
+                                counts.longer += slipped * into.longer / landed;
+                                counts.steps += slipped * into.steps / landed;
+                                counts.stepped += slipped;
+                            }
+                        }
+                    }
+                }
+            }
+            counts
+        })
+        .collect()
+}
+
+/// Every library of `evidence` scored at the class's one stutter: one slippage group, every
+/// multiplier one. The counting fit does not fit libraries apart.
+fn one_stutter_for_every_library(evidence: &StratumEvidence) -> Vec<Library> {
+    evidence
+        .libraries
+        .iter()
+        .map(|library| Library {
+            slippage_group: 0,
+            stutter_multiplier: 1.0,
+            ..*library
+        })
+        .collect()
+}
+
+/// One sample's reads at a tract, its libraries summed bucket by bucket.
+fn pooled_reads(sample: &SampleTractReads, buckets: usize) -> Vec<u32> {
+    let mut reads = vec![0_u32; buckets];
+    for (_, library_reads) in &sample.by_library {
+        for (into, count) in reads.iter_mut().zip(library_reads) {
+            *into += count;
+        }
+    }
+    reads
+}
+
 /// **The class fitted by counting, its spread read off pairs of samples at a tract** — what an
 /// inbred cohort needs, where a sample's two copies are nearly always one draw and so say almost
 /// nothing about how much tracts differ.
@@ -399,7 +445,7 @@ pub fn fit_class_by_counting_with_pairs(
     tolerance: f64,
     alternations: usize,
 ) -> CountedClass {
-    let mut fitted = fit_class_by_counting(
+    let fitted = fit_class_by_counting(
         evidence,
         start,
         homozygote_excess,
@@ -407,7 +453,87 @@ pub fn fit_class_by_counting_with_pairs(
         max_rounds,
         tolerance,
     );
-    let mut spread = 1.0;
+    alternate_with_pairs(
+        evidence,
+        fitted,
+        1.0,
+        homozygote_excess,
+        config,
+        max_rounds,
+        tolerance,
+        alternations,
+    )
+}
+
+/// **Where a class's concentration is read from**: which of the counting fit's two estimators made
+/// a [`CountedClass`], so that its errors and its refits use the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConcentrationSource {
+    /// From how often each sample's own two copies match ([`fit_class_by_counting`]). Says almost
+    /// nothing in an inbred cohort, where the two copies are nearly always one draw.
+    EachSamplesTwoCopies,
+    /// From pairs of samples at a tract ([`fit_class_by_counting_with_pairs`]). Says nothing at one
+    /// sample, where there is no pair.
+    PairsOfSamples,
+}
+
+/// **The class refitted from an earlier answer `from`** rather than from flat shares: what a
+/// bootstrap replicate needs, whose answer lies near the full fit's. Uses the estimator `source`
+/// names, with the same rounds, tolerance and alternations as a fit from scratch.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the counting fit's own settings, passed through"
+)]
+#[must_use]
+pub fn refit_class_by_counting_from(
+    evidence: &StratumEvidence,
+    from: &CountedClass,
+    source: ConcentrationSource,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    max_rounds: usize,
+    tolerance: f64,
+    alternations: usize,
+) -> CountedClass {
+    match source {
+        ConcentrationSource::EachSamplesTwoCopies => count_class(
+            evidence,
+            from.slippage,
+            Some(&from.allele_length_variation),
+            None,
+            from.concentration,
+            homozygote_excess,
+            config,
+            max_rounds,
+            tolerance,
+        ),
+        ConcentrationSource::PairsOfSamples => alternate_with_pairs(
+            evidence,
+            from.clone(),
+            from.concentration,
+            homozygote_excess,
+            config,
+            max_rounds,
+            tolerance,
+            alternations,
+        ),
+    }
+}
+
+/// Alternates, from `fitted` and the spread `spread`: the spread that maximises the pairwise
+/// likelihood with the rest held, then the stutter and shares counted with that spread held,
+/// `alternations` times or until the spread moves by less than 1%.
+#[allow(clippy::too_many_arguments, reason = "a prototype's internal entry")]
+fn alternate_with_pairs(
+    evidence: &StratumEvidence,
+    mut fitted: CountedClass,
+    mut spread: f64,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+    max_rounds: usize,
+    tolerance: f64,
+    alternations: usize,
+) -> CountedClass {
     for _ in 0..alternations {
         let next = fit_spread_by_pairs(
             evidence,
@@ -421,6 +547,7 @@ pub fn fit_class_by_counting_with_pairs(
             fitted.slippage,
             Some(&fitted.allele_length_variation),
             Some(next),
+            1.0,
             homozygote_excess,
             config,
             max_rounds,
@@ -451,70 +578,12 @@ pub fn fit_spread_by_pairs(
     config: &SsrFitConfig,
 ) -> f64 {
     let classes = allele_classes_of(config);
-    let genotypes = genotype_pairs(classes);
-    let libraries: Vec<Library> = evidence
-        .libraries
-        .iter()
-        .map(|library| Library {
-            slippage_group: 0,
-            stutter_multiplier: 1.0,
-            ..*library
-        })
-        .collect();
-    let distributions = ReadDistributionsByLevel::of(
-        &[slippage],
-        &libraries,
-        config.allele_span,
-        evidence.read_span,
-    );
-    // Per tract, per sample with reads, its likelihood of every ordered allele pair, and its excess.
-    let per_tract: Vec<Vec<(Vec<f64>, f64)>> = evidence
-        .tracts
-        .par_iter()
-        .filter(|tract| tract.samples.len() >= 2)
-        .map(|tract| {
-            let likelihoods =
-                TractLikelihoods::of(tract, &distributions, &genotypes, homozygote_excess);
-            likelihoods
-                .scaled
-                .chunks_exact(likelihoods.width)
-                .zip(&likelihoods.homozygote_excess)
-                .map(|(row, excess)| {
-                    let mut ordered = vec![0.0; classes * classes];
-                    for ((first, second), value) in genotypes.iter().zip(row) {
-                        ordered[first * classes + second] = *value;
-                        ordered[second * classes + first] = *value;
-                    }
-                    (ordered, *excess)
-                })
-                .collect()
-        })
-        .collect();
+    let per_tract = pair_rows_by_tract(evidence, slippage, homozygote_excess, config);
     let objective = |ln_spread: f64| -> f64 {
         let spread = float::exp(ln_spread);
-        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
         per_tract
             .par_iter()
-            .map(|samples| {
-                let mut total = 0.0;
-                let count = samples.len();
-                let pairs = if count == 2 { 1 } else { count };
-                for index in 0..pairs {
-                    let (one, one_excess) = &samples[index];
-                    let (other, other_excess) = &samples[(index + 1) % count];
-                    let pair = pair_likelihood(
-                        one,
-                        *one_excess,
-                        other,
-                        *other_excess,
-                        &weights,
-                        spread,
-                        classes,
-                    );
-                    total += float::ln(pair.max(1e-300));
-                }
-                total
-            })
+            .map(|samples| scaled_ln_pairs_of_tract(samples, shares, spread, classes))
             .sum()
     };
     // A coarse grid, then golden-section search around its best point.
@@ -550,6 +619,110 @@ pub fn fit_spread_by_pairs(
         }
     }
     float::exp(0.5 * (low + high))
+}
+
+/// One sample's reads at a tract, in the form a pair's likelihood is summed from.
+pub(super) struct PairRow {
+    /// The likelihood of the sample's reads under every **ordered** allele pair, `first ·
+    /// classes + second`, divided by the largest of them.
+    pub(super) ordered: Vec<f64>,
+    /// The sample's homozygote excess.
+    pub(super) excess: f64,
+}
+
+/// **Every tract's samples as [`PairRow`]s at the stutter `slippage`**, in the order of
+/// `evidence.tracts`; a tract with fewer than two samples has none, since it has no pair.
+pub(super) fn pair_rows_by_tract(
+    evidence: &StratumEvidence,
+    slippage: Slippage,
+    homozygote_excess: &[f64],
+    config: &SsrFitConfig,
+) -> Vec<Vec<PairRow>> {
+    let classes = allele_classes_of(config);
+    let genotypes = genotype_pairs(classes);
+    let buckets = (2 * evidence.read_span + 1) as usize;
+    let libraries = one_stutter_for_every_library(evidence);
+    let distributions = ReadDistributionsByLevel::of(
+        &[slippage],
+        &libraries,
+        config.allele_span,
+        evidence.read_span,
+    );
+    let per_allele = &distributions.read_distribution_by_allele[0];
+    evidence
+        .tracts
+        .par_iter()
+        .map(|tract| {
+            if tract.samples.len() < 2 {
+                return Vec::new();
+            }
+            tract
+                .samples
+                .iter()
+                .map(|sample| {
+                    let reads = pooled_reads(sample, buckets);
+                    let log_likelihoods: Vec<f64> = genotypes
+                        .iter()
+                        .map(|(first, second)| {
+                            let mut total = 0.0;
+                            add_ln_reads(&mut total, per_allele, &reads, *first, *second);
+                            total
+                        })
+                        .collect();
+                    let largest = log_likelihoods
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let mut ordered = vec![0.0; classes * classes];
+                    for ((first, second), value) in genotypes.iter().zip(&log_likelihoods) {
+                        let scaled = float::exp(value - largest);
+                        ordered[first * classes + second] = scaled;
+                        ordered[second * classes + first] = scaled;
+                    }
+                    PairRow {
+                        ordered,
+                        excess: *homozygote_excess
+                            .get(sample.sample as usize)
+                            .expect("every sample in a tract has a homozygote excess"),
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// **One tract's pairwise log-likelihood, less its rows' offsets**: every sample paired with the
+/// next and the last with the first (one pair when there are two), at the allele-length `shares`
+/// and the spread `spread`. The rows' offsets are left out: they do not depend on the shares or
+/// the spread.
+pub(super) fn scaled_ln_pairs_of_tract(
+    samples: &[PairRow],
+    shares: &[f64],
+    spread: f64,
+    classes: usize,
+) -> f64 {
+    let count = samples.len();
+    if count < 2 {
+        return 0.0;
+    }
+    let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+    let pairs = if count == 2 { 1 } else { count };
+    let mut total = 0.0;
+    for index in 0..pairs {
+        let one = &samples[index];
+        let other = &samples[(index + 1) % count];
+        let pair = pair_likelihood(
+            &one.ordered,
+            one.excess,
+            &other.ordered,
+            other.excess,
+            &weights,
+            spread,
+            classes,
+        );
+        total += float::ln(pair.max(1e-300));
+    }
+    total
 }
 
 /// One pair of samples' likelihood at a tract: both samples' reads summed over their alleles, each
