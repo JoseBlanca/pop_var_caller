@@ -51,12 +51,16 @@ pub struct PenalisedFitConfig {
     /// and they keep it, and where no bend passes the knee the two give the same answer.
     pub kink_tail: f64,
     /// **Allele draws added to every allele length of every class before its shares are chosen:
-    /// half a draw**, after the draws are weighed as clustered by locus. Without it a length the
-    /// reads stop supporting in one round gets a share near zero, so the next round's E-step gives
-    /// it no draws and it can never return: EM has an absorbing boundary at zero, which costs a
-    /// held-out locus carrying that length hundreds of log-likelihood units. Half a draw a length
-    /// is the Jeffreys prior on a multinomial; it moves a class with thousands of draws by parts in
-    /// ten thousand.
+    /// one draw a class, spread evenly over the lengths** (1/19 of a draw each at ±9), after the
+    /// draws are weighed as clustered by locus. Without it a length the reads stop supporting in one
+    /// round gets a share near zero, so the next round's E-step gives it no draws and it can never
+    /// return: EM has an absorbing boundary at zero, which costs a held-out locus carrying that
+    /// length hundreds of log-likelihood units.
+    ///
+    /// **Why not half a draw a length (the Jeffreys prior).** At one sample and 100 loci a class
+    /// holds about 120 draws once clustering is allowed for, and 19 half-draws spread evenly moved
+    /// enough mass into the tails to bias the reference length's share by −0.13 (one-base runs) and
+    /// −0.20 (two-base runs) on the fitting bench's tomato-like truth.
     pub allele_pseudo_draws: f64,
     /// **How many times the between-locus share is read off pairs of samples at a locus**, each time
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
@@ -83,7 +87,7 @@ impl Default for PenalisedFitConfig {
             smoothing: Smoothing::MarginalLikelihood,
             kink_knee: 2.5,
             kink_tail: 2.0,
-            allele_pseudo_draws: 0.5,
+            allele_pseudo_draws: 1.0 / 19.0,
             pair_alternations: 0,
             rounds_choosing_strength: 30,
         }
