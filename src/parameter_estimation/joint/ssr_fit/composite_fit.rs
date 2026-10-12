@@ -26,7 +26,7 @@ pub struct CountedClass {
     /// The class's stutter.
     pub slippage: Slippage,
     /// How the class's chromosomes are spread over the allele lengths, `-allele_span ..= +allele_span`.
-    pub length_spectrum: Vec<f64>,
+    pub allele_length_variation: Vec<f64>,
     /// How much the class's tracts differ from one another: the Dirichlet concentration, read off
     /// how much more often a sample's two copies match than its homozygote excess alone explains.
     pub concentration: f64,
@@ -374,7 +374,7 @@ fn count_class(
     }
     CountedClass {
         slippage,
-        length_spectrum: shares,
+        allele_length_variation: shares,
         concentration,
         rounds,
         last_change,
@@ -412,14 +412,14 @@ pub fn fit_class_by_counting_with_pairs(
         let next = fit_spread_by_pairs(
             evidence,
             fitted.slippage,
-            &fitted.length_spectrum,
+            &fitted.allele_length_variation,
             homozygote_excess,
             config,
         );
         fitted = count_class(
             evidence,
             fitted.slippage,
-            Some(&fitted.length_spectrum),
+            Some(&fitted.allele_length_variation),
             Some(next),
             homozygote_excess,
             config,
@@ -783,7 +783,7 @@ mod tests {
             (fitted.slippage.shorter_share - 0.8).abs() < 0.05,
             "{fitted:?}"
         );
-        for (fitted, truth) in fitted.length_spectrum.iter().zip(&spectrum) {
+        for (fitted, truth) in fitted.allele_length_variation.iter().zip(&spectrum) {
             assert!((fitted - truth).abs() < 0.035, "{fitted} against {truth}");
         }
         assert!(
@@ -832,7 +832,7 @@ mod tests {
 
         let narrow = fit_at(6);
         assert!(narrow.slippage.level > 0.1, "{narrow:?}");
-        assert!(narrow.length_spectrum[0] > 0.15, "{narrow:?}");
+        assert!(narrow.allele_length_variation[0] > 0.15, "{narrow:?}");
 
         assert_eq!(SsrFitConfig::default().allele_span, recorded + 1);
         let shipped = fit_at(SsrFitConfig::default().allele_span);
@@ -850,7 +850,7 @@ mod tests {
         // Index 0 is −9 and index 1 is −8. They are held together, not apart: an allele at −8 and
         // one at −9 differ only in reads that slipped inwards, so the two trade mass (about 0.03 of
         // the 0.15 drawn at −8 sits at −9 on this draw).
-        let far = shipped.length_spectrum[0] + shipped.length_spectrum[1];
+        let far = shipped.allele_length_variation[0] + shipped.allele_length_variation[1];
         assert!((far - spectrum[at(-8)]).abs() < 0.035, "{shipped:?}");
     }
 

@@ -1,7 +1,7 @@
 # **All 7 groups of numbers in this file were fitted from reads**: the
 # base-quality calibration, contamination, the inbreeding coefficients, the
-# ordinary-site prior's seed, repeat-tract slippage, repeat-tract length spectra
-# and repeat-tract substitution rates.
+# ordinary-site prior's seed, repeat-tract slippage, repeat-tract allele length
+# variations and repeat-tract substitution rates.
 #
 # **Whose reads is a second question, and only 3 of the 7 groups answer it.**
 # The base-quality calibration, the inbreeding coefficients and repeat-tract
@@ -13,11 +13,11 @@
 # supplied, so a stated constant was used.
 #
 # The other 4 — contamination, the ordinary-site prior's seed, repeat-tract
-# slippage and repeat-tract length spectra — say how a number was arrived at and
-# not whose reads it came from: a smoothing origin, a rung, or which reads a
-# contamination fraction was fitted from. **So in a file whose numbers were
-# fitted over a different cohort those 4 still read as fitted**, and only the 3
-# above are marked down to `supplied`.
+# slippage and repeat-tract allele length variations — say how a number was
+# arrived at and not whose reads it came from: a smoothing origin, a rung, or
+# which reads a contamination fraction was fitted from. **So in a file whose
+# numbers were fitted over a different cohort those 4 still read as fitted**,
+# and only the 3 above are marked down to `supplied`.
 #
 # A group counts as fitted where any part of it was; within one, each number's
 # own `warrant` or origin says which.
@@ -65,9 +65,9 @@
 # it never writes one as a row here — so a `defaulted` warrant on a row of
 # `substitution_rate_by_stratum` is a claim no build makes.
 #
-# The slippage numbers, the prior's two concentrations and the length spectrum
-# rows carry no warrant — they say where they came from another way, and there
-# is nowhere in them to record that you changed one. Note such an edit
+# The slippage numbers, the prior's two concentrations and the allele length
+# variation rows carry no warrant — they say where they came from another way,
+# and there is nowhere in them to record that you changed one. Note such an edit
 # elsewhere.
 #
 # An absent key is not a zero. A missing section, a missing row and a missing
@@ -241,9 +241,9 @@ rung = "fitted_curve"
 # `slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage
 # group, and a triple with no row means that group put no read in that stratum —
 # so one stratum can have a row for one group and none for another. A stratum
-# with no row in `length_spectrum_by_stratum` was never fitted on its own tracts
-# and falls to its period's pooled one, or to the flat shape below. Neither
-# absence is a zero.
+# with no row in `allele_length_variation_by_stratum` was never fitted on its
+# own tracts and falls to its period's pooled one, or to the flat shape below.
+# Neither absence is a zero.
 #
 # Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports
 # a tract length other than its allele's; `shorter_share` — of the reads that
@@ -316,10 +316,10 @@ slippage_by_stratum_and_group = [
 # the **reference** tract length, so the middle entry is the reference length
 # itself, the count is odd, and the shares sum to one. An array read as starting
 # at zero shifts every length this stratum expects by one repeat.
-length_spectrum_by_stratum = [
+allele_length_variation_by_stratum = [
     { period = 2, reference_repeats = 6, concentration = 3.5, shares_by_repeat_offset = [0.1, 0.8, 0.1] },
 ]
-length_spectrum_by_period = [
+allele_length_variation_by_period = [
     { period = 2, concentration = 2.75, shares_by_repeat_offset = [0.15, 0.7, 0.15] },
 ]
 # How often a base reads wrong inside a tract — per read group as well as per

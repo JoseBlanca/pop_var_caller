@@ -141,11 +141,11 @@ fn main() {
             "NA".to_owned(),
         ];
         row.extend(
-            fit.length_spectrum
+            fit.allele_length_variation
                 .iter()
                 .map(|share| format!("{share:.8}")),
         );
-        row.extend((0..fit.length_spectrum.len()).map(|_| "NA".to_owned()));
+        row.extend((0..fit.allele_length_variation.len()).map(|_| "NA".to_owned()));
         row.push(fit.rounds.to_string());
         row.push(format!("{:.2}", fitting.elapsed().as_secs_f64()));
         println!("{}", row.join("\t"));

@@ -8,7 +8,7 @@ use crate::calling::quality::ArtifactTestCounts;
 use crate::calling::{ExpectedAlleleCopies, RepeatTractProvenance};
 use crate::locus_generation::{LocusKind, WitnessedLocusPositions};
 use crate::parameter_estimation::Provenance;
-use crate::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
+use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
 use crate::ref_seq::InMemoryRefSeq;
 use crate::run::cohort_merge::build::{
     AlleleSupport, PartialObservation, SampleSupport, SupportedAllele,
@@ -941,7 +941,7 @@ fn tract_called_over(
         // a tract carries and no test here reads: the record's own tract fields come from the
         // candidate table's kind, not from this.
         Some(RepeatTractProvenance::new(
-            LengthSpectrumRung::StatedFlat,
+            AlleleLengthVariationRung::StatedFlat,
             0,
             0,
             0,

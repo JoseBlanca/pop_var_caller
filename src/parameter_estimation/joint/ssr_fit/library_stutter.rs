@@ -25,7 +25,7 @@ pub struct HeldClass {
     /// direction and fall-off are held.
     pub slippage: Vec<Slippage>,
     /// How the class's chromosomes are spread over the allele lengths, `-allele_span ..= +allele_span`.
-    pub length_spectrum: Vec<f64>,
+    pub allele_length_variation: Vec<f64>,
     /// How monomorphic the class's tracts are.
     pub concentration: f64,
 }
@@ -53,12 +53,12 @@ pub fn expected_slips(
 ) -> SlipCounts {
     let classes = allele_classes_of(config);
     assert_eq!(
-        held.length_spectrum.len(),
+        held.allele_length_variation.len(),
         classes,
-        "period {} at {} repeats: a length spectrum of {} classes held against an allele span of {}",
+        "period {} at {} repeats: an allele length variation of {} classes held against an allele span of {}",
         evidence.stratum.period,
         evidence.stratum.reference_repeats,
-        held.length_spectrum.len(),
+        held.allele_length_variation.len(),
         config.allele_span
     );
     let genotypes = genotype_pairs(classes);
@@ -69,7 +69,7 @@ pub fn expected_slips(
         evidence.read_span,
     );
     let quadrature = dirichlet_points(
-        &held.length_spectrum,
+        &held.allele_length_variation,
         held.concentration,
         config.quadrature_points,
         &genotypes,
@@ -509,7 +509,7 @@ mod tests {
         let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 300, 20, 10, 1, 11);
         let held = HeldClass {
             slippage: vec![truth],
-            length_spectrum: spectrum,
+            allele_length_variation: spectrum,
             concentration: 0.5,
         };
         let counts = expected_slips(&evidence, &held, &[0.4; 20], &config);

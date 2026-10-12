@@ -62,7 +62,7 @@
 //! - [`seed_generic`] — the SNP/indel starting point, read off the pre-pass's fitted frequency
 //!   spectrum (plan step D). *Generic* is the crate's word for the non-STR path, as in
 //!   `parameter_estimation::generic`, so it pairs with [`seed_ssr`] on the same axis.
-//! - [`seed_ssr`] — the STR starting point, read off the fitted **length spectrum** and
+//! - [`seed_ssr`] — the STR starting point, read off the fitted **allele length variation** and
 //!   concentration the joint repeat fit produces for this tract's stratum (plan step E2e;
 //!   `doc/devel/ng/spec/population_diversity.md` §4). **Its two spectra are different
 //!   quantities and neither is ever called just "the spectrum"**: [`seed_generic`]'s is a
@@ -101,7 +101,7 @@ use crate::types::InbreedingF;
 /// [`RepeatGeneDiversity`](crate::types::RepeatGeneDiversity) — and reject with a
 /// `DomainError` rather than a panic: a degenerate fit that returns a `NaN` is a run the caller
 /// should refuse with a message, not abort. *(`SeedDecayPerRepeat` stood beside them until step
-/// E2e; it was the decay of a constructed geometric shape the fitted length spectrum replaced,
+/// E2e; it was the decay of a constructed geometric shape the fitted allele length variation replaced,
 /// and it went with the construction.)*
 ///
 /// The nesting is load-bearing rather than tidy, and it was measured. A private field is

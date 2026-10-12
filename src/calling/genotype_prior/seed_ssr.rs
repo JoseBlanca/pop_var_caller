@@ -1,4 +1,4 @@
-//! The STR starting point: the population's own fitted **length spectrum** at this tract's
+//! The STR starting point: the population's own fitted **allele length variation** at this tract's
 //! stratum, read onto the locus's candidate lengths.
 //!
 //! Everything the SNP/indel starting point leans on is false at a repeat tract, and the three
@@ -12,7 +12,7 @@
 //!
 //! ## The two questions, and both are answered by one fitted pair
 //!
-//! **Where the mass sits** is the stratum's fitted length spectrum: how that stratum's
+//! **Where the mass sits** is the stratum's fitted allele length variation: how that stratum's
 //! chromosomes are spread over tract lengths, indexed in whole repeat units either side of the
 //! **reference** tract length.
 //!
@@ -47,13 +47,13 @@
 //!
 //! ## Two words this project keeps apart, and they are both "spectrum"
 //!
-//! A **length spectrum** is this path's: how a stratum's chromosomes are spread over tract
+//! A **allele length variation** is this path's: how a stratum's chromosomes are spread over tract
 //! **lengths**. A **frequency spectrum** is the ordinary-site path's: how allele **frequencies**
 //! are spread across the population, which [`seed_generic`](super::seed_generic) reads. Neither
 //! is ever called just "the spectrum" (`population_diversity.md` §2).
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
-use crate::parameter_estimation::joint::stratum_fits::LengthSpectrum;
+use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariation;
 
 use super::Concentration;
 
@@ -77,7 +77,7 @@ use super::Concentration;
 /// count of chromosomes.
 const SHAPE_FLOOR: f64 = 1e-12;
 
-/// Fill `out` with the STR seed: the stratum's fitted length spectrum read onto this locus's
+/// Fill `out` with the STR seed: the stratum's fitted allele length variation read onto this locus's
 /// candidate lengths, at the concentration it was fitted with.
 ///
 /// ```text
@@ -124,7 +124,7 @@ const SHAPE_FLOOR: f64 = 1e-12;
 ///
 /// - **a candidate's repeat count passed as the reference tract's.** The shape re-centres on
 ///   that candidate, which is the flattening
-///   [`StratumFits::length_spectrum_at`](crate::parameter_estimation::joint::stratum_fits::StratumFits::length_spectrum_at)'s
+///   [`StratumFits::allele_length_variation_at`](crate::parameter_estimation::joint::stratum_fits::StratumFits::allele_length_variation_at)'s
 ///   own documentation warns about; measured as a difference within the prior row in
 ///   `tests::the_reference_repeat_count_is_the_tracts_and_nothing_here_can_check_it`.
 /// - **another stratum's spectrum.** Every fitted spectrum has the same shape and the same
@@ -188,7 +188,7 @@ const SHAPE_FLOOR: f64 = 1e-12;
 pub fn fill_ssr_seed<'a>(
     candidate_repeat_counts: &[u32],
     reference_repeat_count: u32,
-    spectrum: LengthSpectrum<'_>,
+    spectrum: AlleleLengthVariation<'_>,
     out: &'a mut [f64],
 ) -> Concentration<'a> {
     let _ = fill_candidate_weights(
@@ -266,7 +266,7 @@ pub fn fill_ssr_seed<'a>(
 pub fn fill_seed_share_per_candidate(
     candidate_repeat_counts: &[u32],
     reference_repeat_count: u32,
-    spectrum: LengthSpectrum<'_>,
+    spectrum: AlleleLengthVariation<'_>,
     out: &mut [f64],
 ) {
     let total = fill_candidate_weights(
@@ -296,7 +296,7 @@ pub fn fill_seed_share_per_candidate(
 fn fill_candidate_weights(
     candidate_repeat_counts: &[u32],
     reference_repeat_count: u32,
-    spectrum: LengthSpectrum<'_>,
+    spectrum: AlleleLengthVariation<'_>,
     out: &mut [f64],
 ) -> f64 {
     assert_lengths(candidate_repeat_counts, out);
@@ -391,14 +391,14 @@ mod tests {
         vec![11, 12, 9, 13]
     }
 
-    fn own_fit(weights: &[f64], concentration: f64) -> LengthSpectrum<'_> {
-        LengthSpectrum::fitted(weights, concentration, FittedFrom::ThisStratum)
+    fn own_fit(weights: &[f64], concentration: f64) -> AlleleLengthVariation<'_> {
+        AlleleLengthVariation::fitted(weights, concentration, FittedFrom::ThisStratum)
     }
 
     fn seed(
         candidate_repeat_counts: &[u32],
         reference: u32,
-        spectrum: LengthSpectrum<'_>,
+        spectrum: AlleleLengthVariation<'_>,
         out: &mut [f64],
     ) -> Vec<f64> {
         fill_ssr_seed(candidate_repeat_counts, reference, spectrum, out)
@@ -409,7 +409,7 @@ mod tests {
     fn shares(
         candidate_repeat_counts: &[u32],
         reference: u32,
-        spectrum: LengthSpectrum<'_>,
+        spectrum: AlleleLengthVariation<'_>,
     ) -> Vec<f64> {
         let mut out = vec![0.0; candidate_repeat_counts.len()];
         fill_seed_share_per_candidate(candidate_repeat_counts, reference, spectrum, &mut out);
@@ -479,7 +479,7 @@ mod tests {
         let filled = seed(
             &candidates(),
             REFERENCE_REPEATS,
-            LengthSpectrum::fitted(&weights, 12.0, FittedFrom::ItsPeriodsPooledTracts),
+            AlleleLengthVariation::fitted(&weights, 12.0, FittedFrom::ItsPeriodsPooledTracts),
             &mut out,
         );
 
@@ -740,7 +740,7 @@ mod tests {
             let filled = seed(
                 &counts,
                 REFERENCE_REPEATS,
-                LengthSpectrum::stated_flat(2.5),
+                AlleleLengthVariation::stated_flat(2.5),
                 &mut out,
             );
 
@@ -829,8 +829,8 @@ mod tests {
         let weights = leaning_long();
         for spectrum in [
             own_fit(&weights, 12.0),
-            LengthSpectrum::fitted(&weights, 3.0, FittedFrom::ItsPeriodsPooledTracts),
-            LengthSpectrum::stated_flat(2.5),
+            AlleleLengthVariation::fitted(&weights, 3.0, FittedFrom::ItsPeriodsPooledTracts),
+            AlleleLengthVariation::stated_flat(2.5),
         ] {
             let mut out = vec![0.0; 4];
             let filled = seed(&candidates(), REFERENCE_REPEATS, spectrum, &mut out);

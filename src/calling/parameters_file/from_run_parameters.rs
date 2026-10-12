@@ -17,11 +17,11 @@ use super::{
     BaseQualityCalibration, BaseQualityCalibrationRow, CensusIdentity, Contamination,
     ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach, EvidenceCount,
     FORMAT_VERSION, Inbreeding, InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing,
-    OrdinarySitePrior, ParametersFile, PeriodLengthSpectrumRow, ReadGroupBatchRow, ReadGroupRow,
-    RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve,
-    ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
-    SlippageRow, SnpIndelFitStart, StatedConstants, StratumLengthSpectrumRow, SubstitutionRateRow,
-    Warrant, WarrantedValue,
+    OrdinarySitePrior, ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow,
+    ReadGroupRow, RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches,
+    ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve,
+    SlippageGroupRow, SlippageRow, SnpIndelFitStart, StatedConstants,
+    StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant, WarrantedValue,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -240,7 +240,7 @@ impl ParametersFile {
     ///
     /// **Absence is written as absence.** A read group that identified no contamination gets a
     /// row with no `measurement`, never a fraction of zero beside two zero counts; a `(stratum ×
-    /// slippage group)` with no reads gets no row; a stratum with no length spectrum of its own
+    /// slippage group)` with no reads gets no row; a stratum with no allele length variation of its own
     /// gets no row. Those are three of spec §5's five states, and this is the only code that can
     /// get them wrong on the way out.
     ///
@@ -628,7 +628,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
         // to take a median over, defaulted where it had none, and *supplied* where a parameters
         // file handed the number over, which is the state no arithmetic over this run's strata
         // could reach. Until 2026-08-30 this worked the warrant out from
-        // `strata_with_a_length_spectrum()`, and a file demoted under spec §2.1 came back out
+        // `strata_with_a_allele_length_variation()`, and a file demoted under spec §2.1 came back out
         // saying `fitted_here`.
         //
         // **The value and the warrant can disagree about how interesting they are**: a median
@@ -693,26 +693,26 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
                 samples_fitted_on: fitted.samples_fitted_on,
             })
             .collect(),
-        length_spectrum_by_stratum: fits
-            .fitted_length_spectrum_of_each_stratum()
-            .map(
-                |(stratum, shares_by_repeat_offset, concentration)| StratumLengthSpectrumRow {
+        allele_length_variation_by_stratum: fits
+            .fitted_allele_length_variation_of_each_stratum()
+            .map(|(stratum, shares_by_repeat_offset, concentration)| {
+                StratumAlleleLengthVariationRow {
                     period: stratum.period,
                     reference_repeats: stratum.reference_repeats,
                     concentration,
                     shares_by_repeat_offset: shares_by_repeat_offset.to_vec(),
-                },
-            )
+                }
+            })
             .collect(),
-        length_spectrum_by_period: fits
-            .pooled_length_spectrum_of_each_period()
-            .map(
-                |(period, shares_by_repeat_offset, concentration)| PeriodLengthSpectrumRow {
+        allele_length_variation_by_period: fits
+            .pooled_allele_length_variation_of_each_period()
+            .map(|(period, shares_by_repeat_offset, concentration)| {
+                PeriodAlleleLengthVariationRow {
                     period,
                     concentration,
                     shares_by_repeat_offset: shares_by_repeat_offset.to_vec(),
-                },
-            )
+                }
+            })
             .collect(),
         substitution_rate_by_stratum: run
             .ssr_substitution_rate()
@@ -1008,8 +1008,8 @@ mod tests {
     };
     use crate::parameter_estimation::joint::slippage_curve::RiseShape;
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, DerivedStratum, PeriodLengthSpectrum, SharesProvenance, Slippage, StratumFit,
-        StratumOutcome, StratumRefusal,
+        ClimbEnding, DerivedStratum, PeriodAlleleLengthVariation, SharesProvenance, Slippage,
+        StratumFit, StratumOutcome, StratumRefusal,
     };
     use crate::parameter_estimation::repeat_strata::{
         RepeatCount, Stratum as SsrStratum, StratumKey,
@@ -1204,7 +1204,7 @@ mod tests {
 
     /// **Four strata, and only the first of them was fitted here.**
     ///
-    /// - period 2 at 6 repeats — **fitted**, so it carries a length spectrum of its own. Only
+    /// - period 2 at 6 repeats — **fitted**, so it carries an allele length variation of its own. Only
     ///   slippage group 0 put reads in it; group 1 has no numbers there, which is the
     ///   `(stratum × slippage group)` the file must leave out rather than write a zero for. Its
     ///   level is a **blend**, its shorter share is its own, and its fall-off came off the
@@ -1231,7 +1231,7 @@ mod tests {
                 }),
                 None,
             ],
-            length_spectrum: vec![0.1, 0.8, 0.1],
+            allele_length_variation: vec![0.1, 0.8, 0.1],
             concentration: 3.5,
             log_likelihood_a_tract: -1.25,
             tracts_fitted: 900,
@@ -1353,11 +1353,11 @@ mod tests {
                 (ReadGroupId(2), 1),
             ]),
         )
-        .with_period_length_spectra(BTreeMap::from([(
+        .with_period_allele_length_variations(BTreeMap::from([(
             2,
-            PeriodLengthSpectrum {
+            PeriodAlleleLengthVariation {
                 period: 2,
-                length_spectrum: vec![0.15, 0.7, 0.15],
+                allele_length_variation: vec![0.15, 0.7, 0.15],
                 concentration: 2.75,
                 tracts_fitted: 1_400,
                 strata_pooled: 2,
@@ -1844,7 +1844,7 @@ mod tests {
     }
 
     /// **A `(stratum × slippage group)` with no reads gets no row, and a stratum with no fit of
-    /// its own gets no length spectrum** — two more of spec §5's five states.
+    /// its own gets no allele length variation** — two more of spec §5's five states.
     ///
     /// The fixture's four strata would fill eight `(stratum × group)` cells if the file wrote a
     /// row for every pair; three of them have numbers.
@@ -1865,7 +1865,7 @@ mod tests {
         );
         assert_eq!(
             tracts
-                .length_spectrum_by_stratum
+                .allele_length_variation_by_stratum
                 .iter()
                 .map(|row| (row.period, row.reference_repeats))
                 .collect::<Vec<_>>(),
@@ -1873,14 +1873,17 @@ mod tests {
             "only the stratum fitted on its own tracts has a spectrum; the derived ones carry \
              none by construction, and that absence is what the middle rung answers"
         );
-        assert_eq!(tracts.length_spectrum_by_stratum[0].concentration, 3.5);
         assert_eq!(
-            tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset,
+            tracts.allele_length_variation_by_stratum[0].concentration,
+            3.5
+        );
+        assert_eq!(
+            tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset,
             vec![0.1, 0.8, 0.1]
         );
         assert_eq!(
             tracts
-                .length_spectrum_by_period
+                .allele_length_variation_by_period
                 .iter()
                 .map(|row| (row.period, row.concentration))
                 .collect::<Vec<_>>(),
@@ -1888,7 +1891,7 @@ mod tests {
             "the middle rung is present only where the run asked for it"
         );
         assert_eq!(
-            tracts.length_spectrum_by_period[0].shares_by_repeat_offset,
+            tracts.allele_length_variation_by_period[0].shares_by_repeat_offset,
             vec![0.15, 0.7, 0.15]
         );
         assert_eq!(

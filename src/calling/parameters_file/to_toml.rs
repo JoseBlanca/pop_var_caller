@@ -23,7 +23,7 @@
 //! # The layout, and where it departs from spec §4
 //!
 //! **One row a line, as an inline table**, for every table keyed by an axis — the read groups,
-//! the samples, the batches, the `(stratum × slippage group)` pairs, the length spectra and the
+//! the samples, the batches, the `(stratum × slippage group)` pairs, the allele length variations and the
 //! substitution rates. Each row names its own axis value, so a line can be read on its own and a
 //! person editing one sample's number can find that sample's line.
 //!
@@ -42,7 +42,7 @@
 //!   comments demanded one.
 //!
 //! **Arrays are one element a line where they are a table, and inline where they are a number.**
-//! A length spectrum's shares are three to a handful of numbers describing one thing and stay on
+//! An allele length variation's shares are three to a handful of numbers describing one thing and stay on
 //! their row; `samples` and every `by_*` table get a line each, which is what spec §9 prices.
 //!
 //! # One naming rule, stated because it is load-bearing
@@ -65,10 +65,10 @@ use crate::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
     EvidenceCount, GroupOfNumbers, InbreedingRow, LevelOrigin, LevelSmoothing, ParametersFile,
-    PeriodLengthSpectrumRow, ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung, ShareCurve,
-    ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow,
-    SlippageRow, SnpIndelFitStart, StartOutcome, StratumLengthSpectrumRow, SubstitutionRateRow,
-    Warrant, WarrantedValue,
+    PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung,
+    ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve,
+    SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome, StratumAlleleLengthVariationRow,
+    SubstitutionRateRow, Warrant, WarrantedValue,
 };
 
 impl ParametersFile {
@@ -109,7 +109,7 @@ impl ParametersFile {
                 "",
                 "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the inbreeding coefficient, whose built-in number is 0.0. The base-quality multiplier is not one of them: a `defaulted` multiplier is **not** fixed at 1.0, and the note beside `base_quality_calibration` says what it is instead. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
                 "",
-                "The slippage numbers, the prior's two concentrations and the length spectrum rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
+                "The slippage numbers, the prior's two concentrations and the allele length variation rows carry no warrant — they say where they came from another way, and there is nowhere in them to record that you changed one. Note such an edit elsewhere.",
                 "",
                 "An absent key is not a zero. A missing section, a missing row and a missing key each mean the thing was not measured. A zero is not automatically the opposite: a zero **under a `fitted_here` or `borrowed` warrant** was measured and found to be zero, and a zero under any other warrant is a stated number — the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`. The sections below say which is which where it matters.",
             ],
@@ -334,7 +334,7 @@ impl ParametersFile {
             &[
                 "Everything about repeat tracts. A **stratum** is a class of tract, and every row keyed by one spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries. A **slippage group** is a set of read groups whose reads are taken to slip alike; the run declares it, and `slippage_group_by_read_group` below is that declaration.",
                 "",
-                "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `length_spectrum_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
+                "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `allele_length_variation_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
                 "",
                 "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled. They are reads among the samples the stratum was fitted on: every sample, unless the row carries `samples_fitted_on` — then a large cohort's stratum was fitted on that many of its samples, taken in a fixed order that does not look at the data, and every count and error in the row is that subset's. A `samples_fitted_on` equal to the cohort's sample count means the subset grew to every sample.",
                 "",
@@ -401,19 +401,19 @@ impl ParametersFile {
         );
         one_a_line(
             &mut out,
-            "length_spectrum_by_stratum",
+            "allele_length_variation_by_stratum",
             tracts
-                .length_spectrum_by_stratum
+                .allele_length_variation_by_stratum
                 .iter()
-                .map(a_stratum_length_spectrum_row),
+                .map(a_stratum_allele_length_variation_row),
         );
         one_a_line(
             &mut out,
-            "length_spectrum_by_period",
+            "allele_length_variation_by_period",
             tracts
-                .length_spectrum_by_period
+                .allele_length_variation_by_period
                 .iter()
-                .map(a_period_length_spectrum_row),
+                .map(a_period_allele_length_variation_row),
         );
         note(
             &mut out,
@@ -1360,7 +1360,7 @@ fn a_share_curve(curve: &ShareCurve) -> String {
     ])
 }
 
-fn a_stratum_length_spectrum_row(row: &StratumLengthSpectrumRow) -> String {
+fn a_stratum_allele_length_variation_row(row: &StratumAlleleLengthVariationRow) -> String {
     an_inline_table(&[
         ("period", row.period.to_string()),
         ("reference_repeats", a_toml_integer(row.reference_repeats)),
@@ -1372,7 +1372,7 @@ fn a_stratum_length_spectrum_row(row: &StratumLengthSpectrumRow) -> String {
     ])
 }
 
-fn a_period_length_spectrum_row(row: &PeriodLengthSpectrumRow) -> String {
+fn a_period_allele_length_variation_row(row: &PeriodAlleleLengthVariationRow) -> String {
     an_inline_table(&[
         ("period", row.period.to_string()),
         ("concentration", a_toml_float(row.concentration)),
@@ -1393,7 +1393,7 @@ fn a_substitution_rate_row(row: &SubstitutionRateRow) -> String {
     ])
 }
 
-/// A length spectrum's shares — **on one line**, because they are a handful of numbers describing
+/// An allele length variation's shares — **on one line**, because they are a handful of numbers describing
 /// one thing rather than a table of rows.
 fn a_float_array(values: &[f64]) -> String {
     let mut out = String::from("[");
@@ -1914,7 +1914,7 @@ mod tests {
     ///
     /// An empty table is written `key = []` and not omitted: none of the shape's `Vec` fields
     /// carries a serde default, so a missing key is a hard parse error rather than an empty list.
-    /// Both empty paths — a table's and a length spectrum's float array — were reachable by no
+    /// Both empty paths — a table's and an allele length variation's float array — were reachable by no
     /// test until this one, and deleting either left the suite green.
     #[test]
     fn a_file_with_every_table_empty_writes_and_reads_back() {
@@ -1929,9 +1929,9 @@ mod tests {
         file.inbreeding.by_sample.clear();
         file.repeat_tracts.slippage_group_by_read_group.clear();
         file.repeat_tracts.slippage_by_stratum_and_group.clear();
-        file.repeat_tracts.length_spectrum_by_period.clear();
+        file.repeat_tracts.allele_length_variation_by_period.clear();
         file.repeat_tracts.substitution_rate_by_stratum.clear();
-        for row in &mut file.repeat_tracts.length_spectrum_by_stratum {
+        for row in &mut file.repeat_tracts.allele_length_variation_by_stratum {
             row.shares_by_repeat_offset.clear();
         }
 
@@ -2009,7 +2009,7 @@ mod tests {
         let mut nothing_to_fit = a_file_using_every_shape();
         nothing_to_fit
             .repeat_tracts
-            .length_spectrum_by_stratum
+            .allele_length_variation_by_stratum
             .clear();
         nothing_to_fit
             .repeat_tracts
@@ -2301,7 +2301,7 @@ mod tests {
         let mut nothing_fitted = a_file_using_every_shape();
         nothing_fitted
             .repeat_tracts
-            .length_spectrum_by_stratum
+            .allele_length_variation_by_stratum
             .clear();
         nothing_fitted
             .repeat_tracts
@@ -2525,9 +2525,10 @@ mod every_float_comes_back_bit_identical {
             // A bare scalar under a section header.
             file.ordinary_site_prior.reference_concentration = *value;
             // A field of a one-line inline table.
-            file.repeat_tracts.length_spectrum_by_stratum[0].concentration = *value;
+            file.repeat_tracts.allele_length_variation_by_stratum[0].concentration = *value;
             // An entry of an array of floats.
-            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset[1] = *value;
+            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset[1] =
+                *value;
             // A field of a table three deep inside a row.
             file.repeat_tracts.slippage_by_stratum_and_group[1]
                 .share_of_reads_that_slip_origin
@@ -2548,12 +2549,13 @@ mod every_float_comes_back_bit_identical {
                         read.ordinary_site_prior.reference_concentration,
                     ),
                     (
-                        "length_spectrum_by_stratum[0].concentration",
-                        read.repeat_tracts.length_spectrum_by_stratum[0].concentration,
+                        "allele_length_variation_by_stratum[0].concentration",
+                        read.repeat_tracts.allele_length_variation_by_stratum[0].concentration,
                     ),
                     (
-                        "length_spectrum_by_stratum[0].shares_by_repeat_offset[1]",
-                        read.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset[1],
+                        "allele_length_variation_by_stratum[0].shares_by_repeat_offset[1]",
+                        read.repeat_tracts.allele_length_variation_by_stratum[0]
+                            .shares_by_repeat_offset[1],
                     ),
                     (
                         "slippage_by_stratum_and_group[1]…expected_slipped_reads",
@@ -2585,7 +2587,7 @@ mod every_float_comes_back_bit_identical {
         file.repeat_tracts
             .fallback_length_spectrum_concentration
             .value = f64::MIN_POSITIVE;
-        file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+        file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
             vec![0.1 + 0.2, -0.0, 1.000_000_000_000_000_2];
         file.repeat_tracts.slippage_by_stratum_and_group[1].share_of_reads_that_slip = f64::MAX;
         file.stated_constants.repeat_tract_outlier_weight.value = 1e-5;
@@ -2603,7 +2605,7 @@ mod every_float_comes_back_bit_identical {
             // **And bit-identically**, which `PartialEq` on the shape cannot say: it compares
             // `f64`s with `==`, so a sign lost off a zero would pass the line above.
             assert_eq!(
-                read.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset[1]
+                read.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset[1]
                     .to_bits(),
                 (-0.0_f64).to_bits(),
                 "a negative zero keeps its sign through {writer}, which `==` cannot see"
@@ -2648,8 +2650,10 @@ mod what_the_file_says_about_itself {
         }
         file.ordinary_site_prior.rung = SeedRung::StatedHeterozygosity;
         file.repeat_tracts.slippage_by_stratum_and_group.clear();
-        file.repeat_tracts.length_spectrum_by_stratum.clear();
-        file.repeat_tracts.length_spectrum_by_period.clear();
+        file.repeat_tracts
+            .allele_length_variation_by_stratum
+            .clear();
+        file.repeat_tracts.allele_length_variation_by_period.clear();
         file.repeat_tracts.substitution_rate_by_stratum.clear();
         file.fitted_from.census.terms.clear();
         file

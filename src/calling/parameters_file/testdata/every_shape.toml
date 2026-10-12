@@ -304,13 +304,13 @@ fitted_to_repeats = 19
 held_out_error = 0.3333333333333333
 cells = 8
 
-[[repeat_tracts.length_spectrum_by_stratum]]
+[[repeat_tracts.allele_length_variation_by_stratum]]
 period = 2
 reference_repeats = 6
 concentration = 3.5
 shares_by_repeat_offset = [0.1, 0.8, 0.1]
 
-[[repeat_tracts.length_spectrum_by_period]]
+[[repeat_tracts.allele_length_variation_by_period]]
 period = 2
 concentration = 2.75
 shares_by_repeat_offset = [0.15, 0.7, 0.15]

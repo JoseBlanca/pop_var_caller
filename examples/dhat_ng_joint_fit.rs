@@ -382,7 +382,7 @@ fn main() {
                         fit.log_likelihood_a_tract,
                         fit.concentration,
                         fit.slippage[0],
-                        fit.length_spectrum[6],
+                        fit.allele_length_variation[6],
                     ),
                     None => println!("    (no fit)"),
                 }

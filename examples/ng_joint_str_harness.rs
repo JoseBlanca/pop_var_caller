@@ -6,7 +6,7 @@
 //! things:
 //!
 //! - **§4.1** — a locus's length frequencies are a latent vector drawn from a Dirichlet
-//!   whose mean is the stratum's own length spectrum and whose **concentration `κ` says how
+//!   whose mean is the stratum's own allele length variation and whose **concentration `κ` says how
 //!   monomorphic loci are**. A large `κ` is meant to return the per-stratum model exactly,
 //!   so that "per locus or per stratum" becomes a comparison of one fitted number.
 //! - **§4.2** — the integral over that vector is done by summing over the configurations a
@@ -54,7 +54,7 @@
 //! stratum at a time to bound memory, so it has to cap how many tracts a stratum keeps. It
 //! refits the same drawn truth at 20,000 / 5,000 / 1,000 / 250 / 100 / 50 tracts, several
 //! draws apiece, and reports **all five fitted numbers separately** — the four slippage and
-//! shape numbers plus the stratum's own length spectrum. They degrade at different rates, so
+//! shape numbers plus the stratum's own allele length variation. They degrade at different rates, so
 //! a pooled figure would call a size adequate after one of them had already gone.
 //!
 //! ```text
@@ -326,7 +326,7 @@ enum TruthModel {
 struct Truth {
     model: TruthModel,
     classes: usize,
-    /// The stratum's own length spectrum — the Dirichlet's mean.
+    /// The stratum's own allele length variation — the Dirichlet's mean.
     spectrum: Vec<f64>,
     /// How monomorphic loci are. Small is monomorphic.
     kappa: f64,
@@ -1217,7 +1217,7 @@ struct FittedNumbers {
     /// How monomorphic the tracts in the stratum are. Small is monomorphic.
     kappa: f64,
     /// The share of chromosomes at the stratum's commonest length — one number standing for
-    /// the whole length spectrum, and the one with the most data behind it.
+    /// the whole allele length variation, and the one with the most data behind it.
     commonest_length_share: f64,
 }
 
@@ -1478,8 +1478,8 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
         println!(
             "  spectrum[{class}]      {:>10.6}  {:>10.6}  {:>12.2e}  {:>10.6}",
             here.spectrum[class],
-            there.length_spectrum[class],
-            (there.length_spectrum[class] - here.spectrum[class]).abs()
+            there.allele_length_variation[class],
+            (there.allele_length_variation[class] - here.spectrum[class]).abs()
                 / here.spectrum[class].abs().max(1e-12),
             truth.spectrum[class],
         );

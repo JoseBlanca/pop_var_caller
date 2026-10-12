@@ -137,7 +137,7 @@ fn main() {
             .iter()
             .find(|row| (row.period, row.reference_repeats) == key && row.slippage_group == 0);
         let spectrum = tracts
-            .length_spectrum_by_stratum
+            .allele_length_variation_by_stratum
             .iter()
             .find(|row| (row.period, row.reference_repeats) == key);
         let (Some(slippage), Some(spectrum)) = (slippage, spectrum) else {
@@ -149,7 +149,7 @@ fn main() {
                 shorter_share: slippage.shorter_share,
                 fall_off: slippage.fall_off,
             }],
-            length_spectrum: spectrum.shares_by_repeat_offset.clone(),
+            allele_length_variation: spectrum.shares_by_repeat_offset.clone(),
             concentration: spectrum.concentration,
         });
         kept.push(stratum);

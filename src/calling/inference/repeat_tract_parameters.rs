@@ -65,7 +65,7 @@
 //! **Spec §4.5.1's third term is built here**, on every run whose fit found a fraction: how
 //! common each of this tract's reachable lengths is in the contaminating population. It is the
 //! genotype prior's own belief about which lengths this tract can be — the stratum's fitted
-//! **length spectrum** — converted from the per-candidate shape the prior builds into a
+//! **allele length variation** — converted from the per-candidate shape the prior builds into a
 //! distribution over lengths, which is what `c · seed(o)` asks for.
 //!
 //! **The cohort's own fitted frequencies at the locus would be the natural source and are
@@ -96,7 +96,7 @@ use crate::locus_generation::LocusKind;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::joint::stratum_fits::{
-    FittedSlippage, LengthSpectrum, NoSlippage,
+    AlleleLengthVariation, FittedSlippage, NoSlippage,
 };
 use crate::parameter_estimation::repeat_strata::RepeatCount;
 use crate::types::{ErrorRate, Motif, ReadGroupId};
@@ -294,7 +294,7 @@ impl TractScoringFits {
         // this is what stops the two coming apart.** The reference allele is id 0 of every
         // candidate table and these candidates are in that order, so the caller has the number
         // already; it is taken as an argument because *which* repeat count keys the prior's
-        // length spectrum is the one thing at a tract that is easy to get wrong, and naming it
+        // allele length variation is the one thing at a tract that is easy to get wrong, and naming it
         // makes the wrong one something somebody has to type. A candidate's count passed here
         // re-centres the spectrum on that candidate and flattens the prior, and the seed still
         // sums to one — which is why `fill_seed_share_per_candidate`'s own documentation lists
@@ -304,7 +304,7 @@ impl TractScoringFits {
             candidates[0].repeat_count.get(),
             "this tract's reference allele holds {} whole repeats and the prior was asked to \
              centre on {}: a candidate's count passed as the reference tract's re-centres the \
-             fitted length spectrum on that candidate",
+             fitted allele length variation on that candidate",
             candidates[0].repeat_count.get(),
             reference_repeats.get()
         );
@@ -401,7 +401,7 @@ impl TractScoringFits {
     ///
     /// # The two halves speak different units, and this is where they meet
     ///
-    /// **The prior speaks in whole repeats.** Its length spectrum is indexed by offset from the
+    /// **The prior speaks in whole repeats.** Its allele length variation is indexed by offset from the
     /// reference tract's repeat count, so what it hands back is one share per *candidate*, each
     /// candidate placed by the repeat count the locus generator measured for it.
     ///
@@ -451,7 +451,7 @@ impl TractScoringFits {
     ///
     /// The cohort's fitted frequencies at this locus are the natural answer to *how common is
     /// each length here*, and they are refused: contamination is frozen before calling, and
-    /// those are what the loop rewrites at every pass (spec §4.5.1). The fitted length spectrum
+    /// those are what the loop rewrites at every pass (spec §4.5.1). The fitted allele length variation
     /// is specific to this locus — it is indexed from this tract's own reference length — and it
     /// does not move while the loop iterates. **So a repeat tract's whole row is frequency-free
     /// even under contamination**, which is the opposite of the SNP/indel path, where `q(o)` is
@@ -494,7 +494,7 @@ impl TractScoringFits {
         fill_seed_share_per_candidate(
             &self.candidate_repeat_counts,
             tract_prior.reference_repeats.get(),
-            tract_prior.length_spectrum,
+            tract_prior.allele_length_variation,
             &mut self.share_of_each_candidate,
         );
 
@@ -844,7 +844,7 @@ impl TractScoringFits {
 ///
 /// The prior's belief is used twice at each tract: the genotype prior's own seed, and the third
 /// term of the read-likelihood mixture, which asks how common each length is in the
-/// contaminating population. Both read the same fitted **length spectrum**, and both must read
+/// contaminating population. Both read the same fitted **allele length variation**, and both must read
 /// the *same* one — the run reports which rung of the tract ladder answered, and a run that
 /// reported one rung while scoring against another would be saying something false about its own
 /// calls.
@@ -859,7 +859,7 @@ pub struct TractPrior<'a> {
     pub reference_repeats: RepeatCount,
     /// How that stratum's chromosomes are spread over tract lengths, and how strongly the fit
     /// holds them — with the rung of the tract ladder it came from on it.
-    pub length_spectrum: LengthSpectrum<'a>,
+    pub allele_length_variation: AlleleLengthVariation<'a>,
 }
 
 /// **What one cell's slippage numbers are entitled to claim**, from where the fit says they
@@ -1049,8 +1049,8 @@ mod tests {
     ) -> TractPrior<'a> {
         TractPrior {
             reference_repeats,
-            length_spectrum: parameters
-                .ssr_length_spectrum_at(motif().ssr_period(), reference_repeats),
+            allele_length_variation: parameters
+                .ssr_allele_length_variation_at(motif().ssr_period(), reference_repeats),
         }
     }
 
@@ -2347,7 +2347,7 @@ mod tests {
     /// contaminating read at a length no candidate carries falls to the outlier floor, which is
     /// where §4.5.1 puts it.
     ///
-    /// The fit behind this fixture carries no length spectrum, so the prior answers from the
+    /// The fit behind this fixture carries no allele length variation, so the prior answers from the
     /// ladder's bottom rung — a flat shape — and the two candidates take **half each**. A fit
     /// with a spectrum would divide it unevenly; what would not change is the width or the
     /// total.
@@ -2419,14 +2419,14 @@ mod tests {
     /// **A reference repeat count that is not the reference allele's is refused**, and this is
     /// the one mistake at a tract that would otherwise come back as a plausible number.
     ///
-    /// The prior's length spectrum is indexed by offset from the tract's *reference* length, so
+    /// The prior's allele length variation is indexed by offset from the tract's *reference* length, so
     /// a candidate's count passed in its place re-centres the whole shape on that candidate: the
     /// seed still sums to one, every genotype still gets a prior, and the locus is called under
     /// a belief about which lengths are common that the fit never expressed.
     /// `fill_seed_share_per_candidate`'s own documentation lists it among the mistakes nothing
     /// inside it can catch. Here the candidate table is in hand and it is catchable.
     #[test]
-    #[should_panic(expected = "re-centres the fitted length spectrum")]
+    #[should_panic(expected = "re-centres the fitted allele length variation")]
     fn a_reference_count_that_is_not_the_reference_alleles_is_refused() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);

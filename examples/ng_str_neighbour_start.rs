@@ -154,9 +154,15 @@ fn main() {
                 cli.precise_points,
             )
         };
-        let precise_loss = (precise(&own_slippage, &own.length_spectrum, own.concentration)
-            - precise(&walk.slippage, &walk.length_spectrum, walk.concentration))
-            * tracts;
+        let precise_loss = (precise(
+            &own_slippage,
+            &own.allele_length_variation,
+            own.concentration,
+        ) - precise(
+            &walk.slippage,
+            &walk.allele_length_variation,
+            walk.concentration,
+        )) * tracts;
         precise_losses.push(precise_loss);
         let usual_level = own.slippage[0].map_or(f64::NAN, |s| s.level);
         let error = own

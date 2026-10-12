@@ -135,10 +135,16 @@ impl ParametersFile {
             }
             // **Either rung of the tract ladder that a fit populates**, and they are one group
             // because they are one answer to the reader's question: a run that fitted its
-            // periods' curves and furnished every stratum from them fitted the length spectra.
-            GroupOfNumbers::RepeatTractLengthSpectra => {
-                !self.repeat_tracts.length_spectrum_by_stratum.is_empty()
-                    || !self.repeat_tracts.length_spectrum_by_period.is_empty()
+            // periods' curves and furnished every stratum from them fitted the allele length variations.
+            GroupOfNumbers::RepeatTractAlleleLengthVariations => {
+                !self
+                    .repeat_tracts
+                    .allele_length_variation_by_stratum
+                    .is_empty()
+                    || !self
+                        .repeat_tracts
+                        .allele_length_variation_by_period
+                        .is_empty()
             }
             // **A warrant, not the row's presence** — a substitution rate is the one repeat-tract
             // number that carries one, and the demotion of spec §2.1 moves it
@@ -169,7 +175,7 @@ impl GroupOfNumbers {
         Self::Inbreeding,
         Self::OrdinarySitePrior,
         Self::RepeatTractSlippage,
-        Self::RepeatTractLengthSpectra,
+        Self::RepeatTractAlleleLengthVariations,
         Self::RepeatTractSubstitutionRates,
     ];
 
@@ -187,7 +193,7 @@ impl GroupOfNumbers {
             Self::Inbreeding => "the inbreeding coefficients",
             Self::OrdinarySitePrior => "the ordinary-site prior's seed",
             Self::RepeatTractSlippage => "repeat-tract slippage",
-            Self::RepeatTractLengthSpectra => "repeat-tract length spectra",
+            Self::RepeatTractAlleleLengthVariations => "repeat-tract allele length variations",
             Self::RepeatTractSubstitutionRates => "repeat-tract substitution rates",
         }
     }
@@ -197,7 +203,7 @@ impl GroupOfNumbers {
     /// **Three of the seven do and four do not, and that is a property of the format.** A
     /// `warrant` is the word that answers it, and only the base-quality calibration, the
     /// inbreeding coefficients and the repeat-tract substitution rates carry one on every number.
-    /// A slippage row carries a *smoothing origin*, a length spectrum a *rung*, a contamination
+    /// A slippage row carries a *smoothing origin*, an allele length variation a *rung*, a contamination
     /// row *whose reads it was fitted from*, and the prior's seed a *rung* — each says how the
     /// number was arrived at, and none has a state meaning *somebody handed this over*.
     ///
@@ -220,7 +226,7 @@ impl GroupOfNumbers {
             Self::Contamination
             | Self::OrdinarySitePrior
             | Self::RepeatTractSlippage
-            | Self::RepeatTractLengthSpectra => false,
+            | Self::RepeatTractAlleleLengthVariations => false,
         }
     }
 
@@ -236,8 +242,8 @@ impl GroupOfNumbers {
             // **Both tables, because the group is both** — a run whose spectra came off its
             // periods' curves has rows in the second and none in the first, so naming only the
             // first sends that reader to an empty table.
-            Self::RepeatTractLengthSpectra => {
-                "repeat_tracts.length_spectrum_by_stratum and .length_spectrum_by_period"
+            Self::RepeatTractAlleleLengthVariations => {
+                "repeat_tracts.allele_length_variation_by_stratum and .allele_length_variation_by_period"
             }
             Self::RepeatTractSubstitutionRates => "repeat_tracts.substitution_rate_by_stratum",
         }
@@ -314,9 +320,11 @@ mod tests {
             GroupOfNumbers::RepeatTractSlippage => {
                 file.repeat_tracts.slippage_by_stratum_and_group.clear();
             }
-            GroupOfNumbers::RepeatTractLengthSpectra => {
-                file.repeat_tracts.length_spectrum_by_stratum.clear();
-                file.repeat_tracts.length_spectrum_by_period.clear();
+            GroupOfNumbers::RepeatTractAlleleLengthVariations => {
+                file.repeat_tracts
+                    .allele_length_variation_by_stratum
+                    .clear();
+                file.repeat_tracts.allele_length_variation_by_period.clear();
             }
             GroupOfNumbers::RepeatTractSubstitutionRates => {
                 file.repeat_tracts.substitution_rate_by_stratum.clear();
@@ -401,12 +409,14 @@ mod tests {
     }
 
     /// **Either rung of the tract ladder counts**, so a run that fitted its periods' curves and
-    /// furnished every stratum from them fitted the length spectra — the state spec §5's fourth
+    /// furnished every stratum from them fitted the allele length variations — the state spec §5's fourth
     /// row describes, where a stratum has no row of its own *because* its period had a curve.
     #[test]
-    fn a_length_spectrum_furnished_from_a_period_curve_is_still_fitted() {
+    fn an_allele_length_variation_furnished_from_a_period_curve_is_still_fitted() {
         let mut file = a_file_using_every_shape();
-        file.repeat_tracts.length_spectrum_by_stratum.clear();
+        file.repeat_tracts
+            .allele_length_variation_by_stratum
+            .clear();
         assert!(file.what_the_run_fitted().not_fitted().is_empty());
     }
 
@@ -482,7 +492,7 @@ mod tests {
                 GroupOfNumbers::Contamination,
                 GroupOfNumbers::OrdinarySitePrior,
                 GroupOfNumbers::RepeatTractSlippage,
-                GroupOfNumbers::RepeatTractLengthSpectra,
+                GroupOfNumbers::RepeatTractAlleleLengthVariations,
             ],
             "and exactly the four that carry none — the gap the file's prose discloses"
         );

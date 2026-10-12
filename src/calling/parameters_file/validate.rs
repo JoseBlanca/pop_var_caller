@@ -39,7 +39,7 @@
 //!   a curve weight a share in `[0, 1]`, a substitution rate a probability. Also, for every float
 //!   this walk reaches, a value that is not finite — which no range contains and which propagates
 //!   silently through every score it touches.
-//! - **A shape that is internally impossible.** A length spectrum with an even number of shares has
+//! - **A shape that is internally impossible.** An allele length variation with an even number of shares has
 //!   no middle entry to be the reference length; one with fewer than three cannot express a slip in
 //!   either direction; one whose shares do not sum to one is not a distribution.
 //! - **A shape that says the opposite of what it means.** These are spec §5's states written
@@ -69,7 +69,7 @@ use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// How far a length spectrum's shares may sum from one and still be a distribution.
+/// How far an allele length variation's shares may sum from one and still be a distribution.
 ///
 /// **Wide enough for the rounding a normalised vector carries, narrow enough to catch a hand
 /// edit.** The miss is in the *summation*, not in the round trip: a float written by this writer
@@ -411,8 +411,8 @@ impl ParametersFile {
             }),
         )?;
         names_each_key_once(
-            "repeat_tracts.length_spectrum_by_stratum",
-            tracts.length_spectrum_by_stratum.iter().map(|row| {
+            "repeat_tracts.allele_length_variation_by_stratum",
+            tracts.allele_length_variation_by_stratum.iter().map(|row| {
                 format!(
                     "period = {}, reference_repeats = {}",
                     row.period, row.reference_repeats
@@ -420,9 +420,9 @@ impl ParametersFile {
             }),
         )?;
         names_each_key_once(
-            "repeat_tracts.length_spectrum_by_period",
+            "repeat_tracts.allele_length_variation_by_period",
             tracts
-                .length_spectrum_by_period
+                .allele_length_variation_by_period
                 .iter()
                 .map(|row| format!("period = {}", row.period)),
         )?;
@@ -749,7 +749,7 @@ impl ParametersFile {
         // demoted file — recorded here because the check looked complete and was not.
         let warrant = tracts.fallback_length_spectrum_concentration.warrant;
         let value = tracts.fallback_length_spectrum_concentration.value;
-        if warrant == Warrant::FittedHere && tracts.length_spectrum_by_stratum.is_empty() {
+        if warrant == Warrant::FittedHere && tracts.allele_length_variation_by_stratum.is_empty() {
             return Err(refuse(
                 at,
                 "is `fitted_here`, and no stratum in this file was fitted on its own tracts, so \
@@ -866,19 +866,19 @@ impl ParametersFile {
             }
         }
 
-        for row in &tracts.length_spectrum_by_stratum {
+        for row in &tracts.allele_length_variation_by_stratum {
             let at = format!(
-                "repeat_tracts.length_spectrum_by_stratum[period = {}, reference_repeats = {}]",
+                "repeat_tracts.allele_length_variation_by_stratum[period = {}, reference_repeats = {}]",
                 row.period, row.reference_repeats
             );
-            a_length_spectrum(&at, row.concentration, &row.shares_by_repeat_offset)?;
+            an_allele_length_variation(&at, row.concentration, &row.shares_by_repeat_offset)?;
         }
-        for row in &tracts.length_spectrum_by_period {
+        for row in &tracts.allele_length_variation_by_period {
             let at = format!(
-                "repeat_tracts.length_spectrum_by_period[period = {}]",
+                "repeat_tracts.allele_length_variation_by_period[period = {}]",
                 row.period
             );
-            a_length_spectrum(&at, row.concentration, &row.shares_by_repeat_offset)?;
+            an_allele_length_variation(&at, row.concentration, &row.shares_by_repeat_offset)?;
         }
 
         for row in &tracts.substitution_rate_by_stratum {
@@ -1309,9 +1309,9 @@ fn no_count_is_a_saturation(
     Ok(())
 }
 
-/// A length spectrum: a positive concentration, and shares that are a distribution over an odd
+/// An allele length variation: a positive concentration, and shares that are a distribution over an odd
 /// number of offsets with a middle.
-fn a_length_spectrum(
+fn an_allele_length_variation(
     at: &str,
     concentration: f64,
     shares: &[f64],
@@ -1346,7 +1346,7 @@ fn a_length_spectrum(
         return Err(refuse(
             format!("{at}.shares_by_repeat_offset"),
             format!(
-                "sums to {total}, and a length spectrum is a distribution over the lengths a \
+                "sums to {total}, and an allele length variation is a distribution over the lengths a \
                  tract can take; if you edited one share, the others have to give up what it took"
             ),
         ));
@@ -1489,8 +1489,14 @@ mod tests {
         small.inbreeding.by_sample.truncate(1);
         small.repeat_tracts.slippage_group_by_read_group.clear();
         small.repeat_tracts.slippage_by_stratum_and_group.clear();
-        small.repeat_tracts.length_spectrum_by_stratum.clear();
-        small.repeat_tracts.length_spectrum_by_period.clear();
+        small
+            .repeat_tracts
+            .allele_length_variation_by_stratum
+            .clear();
+        small
+            .repeat_tracts
+            .allele_length_variation_by_period
+            .clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
         // **A run that fitted no stratum takes the compiled-in flat concentration**, which is
         // what `defaulted` says; the fixture's `fitted_here` is a claim about a median over
@@ -1558,17 +1564,21 @@ mod tests {
 
         for (table, at) in [
             (
-                "repeat_tracts.length_spectrum_by_stratum",
+                "repeat_tracts.allele_length_variation_by_stratum",
                 refused(|file| {
-                    let row = file.repeat_tracts.length_spectrum_by_stratum[0].clone();
-                    file.repeat_tracts.length_spectrum_by_stratum.push(row);
+                    let row = file.repeat_tracts.allele_length_variation_by_stratum[0].clone();
+                    file.repeat_tracts
+                        .allele_length_variation_by_stratum
+                        .push(row);
                 }),
             ),
             (
-                "repeat_tracts.length_spectrum_by_period",
+                "repeat_tracts.allele_length_variation_by_period",
                 refused(|file| {
-                    let row = file.repeat_tracts.length_spectrum_by_period[0].clone();
-                    file.repeat_tracts.length_spectrum_by_period.push(row);
+                    let row = file.repeat_tracts.allele_length_variation_by_period[0].clone();
+                    file.repeat_tracts
+                        .allele_length_variation_by_period
+                        .push(row);
                 }),
             ),
             (
@@ -1649,7 +1659,9 @@ mod tests {
         // **`fitted_here` says the number is a median of this file's fitted strata**, so a file
         // that names none has nothing for it to be the median of.
         let (field, problem) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_stratum.clear();
+            file.repeat_tracts
+                .allele_length_variation_by_stratum
+                .clear();
         });
         assert_eq!(
             field,
@@ -1707,7 +1719,9 @@ mod tests {
             // And with no fitted stratum beside it either, which is the other half of the
             // shape the old rule keyed on.
             accepted(|file| {
-                file.repeat_tracts.length_spectrum_by_stratum.clear();
+                file.repeat_tracts
+                    .allele_length_variation_by_stratum
+                    .clear();
                 file.repeat_tracts
                     .fallback_length_spectrum_concentration
                     .warrant = warrant;
@@ -2286,21 +2300,21 @@ mod tests {
         assert!(field.ends_with("blend.curve_weight"), "{field}");
     }
 
-    /// **A length spectrum that is not a distribution over an odd span is refused.**
+    /// **An allele length variation that is not a distribution over an odd span is refused.**
     ///
     /// The array runs from `-span` to `+span` in whole repeats, so the middle entry *is* the
     /// reference length. An even count has no middle; fewer than three cannot express a slip in
     /// both directions; and shares that do not sum to one are not a distribution — which is what
     /// a person who edits one share and does not rebalance the rest produces.
     #[test]
-    fn a_length_spectrum_that_is_not_a_distribution_is_refused() {
+    fn an_allele_length_variation_that_is_not_a_distribution_is_refused() {
         // **Even and long enough**, which is what tests the parity rule rather than the length
         // rule. A two-share spectrum is refused either way — it is also below three — so a
         // fixture of two would leave a reader believing the parity check is exercised when
         // deleting it changes nothing. Measured: with `[0.5, 0.5]` here, removing the parity
         // clause left all 100 tests green.
         let (field, problem) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
                 vec![0.25, 0.25, 0.25, 0.25];
         });
         assert!(field.ends_with("shares_by_repeat_offset"), "{field}");
@@ -2308,35 +2322,38 @@ mod tests {
 
         // And the short case, which is the other half of the same rule.
         let (_, problem) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
                 vec![0.5, 0.5];
         });
         assert!(problem.contains("odd and at least three"), "{problem}");
 
         let (_, problem) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset = vec![1.0];
+            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
+                vec![1.0];
         });
         assert!(problem.contains("odd and at least three"), "{problem}");
 
         let (_, problem) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_stratum[0].shares_by_repeat_offset =
+            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
                 vec![0.1, 0.9, 0.1];
         });
         assert!(problem.contains("sums to"), "{problem}");
 
         let (field, _) = refused(|file| {
-            file.repeat_tracts.length_spectrum_by_period[0].shares_by_repeat_offset =
+            file.repeat_tracts.allele_length_variation_by_period[0].shares_by_repeat_offset =
                 vec![0.2, 0.2, 0.2];
         });
         assert!(
-            field.starts_with("repeat_tracts.length_spectrum_by_period"),
+            field.starts_with("repeat_tracts.allele_length_variation_by_period"),
             "{field}"
         );
 
         assert!(
-            refused(|file| file.repeat_tracts.length_spectrum_by_stratum[0].concentration = 0.0)
-                .0
-                .ends_with("concentration")
+            refused(
+                |file| file.repeat_tracts.allele_length_variation_by_stratum[0].concentration = 0.0
+            )
+            .0
+            .ends_with("concentration")
         );
     }
 

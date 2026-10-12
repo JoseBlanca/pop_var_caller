@@ -14,7 +14,7 @@ pub struct NeighbourWalk {
     /// Its slippage numbers where it stopped, per slippage group.
     pub slippage: Vec<Slippage>,
     /// Its allele-length frequencies and their spread where it stopped.
-    pub length_spectrum: Vec<f64>,
+    pub allele_length_variation: Vec<f64>,
     pub concentration: f64,
 }
 
@@ -49,7 +49,7 @@ pub fn walk_from_a_neighbour(
                     .unwrap_or(fallback.slippage[group])
             })
             .collect(),
-        length_spectrum: neighbour.length_spectrum.clone(),
+        allele_length_variation: neighbour.allele_length_variation.clone(),
         concentration: neighbour.concentration,
     };
     let climb = climb_from_parameters(
@@ -65,7 +65,7 @@ pub fn walk_from_a_neighbour(
         record: climb.record(),
         log_likelihood_a_tract: climb.score,
         slippage: climb.parameters.slippage,
-        length_spectrum: climb.parameters.length_spectrum,
+        allele_length_variation: climb.parameters.allele_length_variation,
         concentration: climb.parameters.concentration,
     })
 }
@@ -77,7 +77,7 @@ pub fn walk_from_a_neighbour(
 pub fn mean_log_likelihood_at(
     evidence: &StratumEvidence,
     slippage: &[Slippage],
-    length_spectrum: &[f64],
+    allele_length_variation: &[f64],
     concentration: f64,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
@@ -97,7 +97,7 @@ pub fn mean_log_likelihood_at(
     );
     scorer.score(&Parameters {
         slippage: slippage.to_vec(),
-        length_spectrum: length_spectrum.to_vec(),
+        allele_length_variation: allele_length_variation.to_vec(),
         concentration,
     })
 }

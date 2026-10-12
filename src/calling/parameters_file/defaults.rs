@@ -495,7 +495,8 @@ mod tests {
     use crate::parameter_estimation::joint::slippage_curve::LevelSource;
     use crate::parameter_estimation::joint::ssr_fit::{LevelProvenance, Slippage};
     use crate::parameter_estimation::joint::stratum_fits::{
-        FittedSlippage, LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION, StratumFits,
+        AlleleLengthVariationRung, FittedSlippage, NoSlippage, STATED_FLAT_CONCENTRATION,
+        StratumFits,
     };
     use crate::parameter_estimation::repeat_strata::{
         RepeatCount, Stratum as SsrStratum, StratumKey,
@@ -613,8 +614,8 @@ mod tests {
         );
         assert_eq!(STATED_FLAT_CONCENTRATION, 1.0);
 
-        let spectrum = nothing_fitted.length_spectrum_at(2, 11);
-        assert_eq!(spectrum.rung(), LengthSpectrumRung::StatedFlat);
+        let spectrum = nothing_fitted.allele_length_variation_at(2, 11);
+        assert_eq!(spectrum.rung(), AlleleLengthVariationRung::StatedFlat);
         assert_eq!(spectrum.concentration(), STATED_FLAT_CONCENTRATION);
         assert!(
             spectrum.fitted_weights().is_none(),
@@ -638,8 +639,10 @@ mod tests {
         file.repeat_tracts.slippage_by_stratum_and_group.clear();
         file.repeat_tracts.slippage_group_by_read_group.clear();
         file.repeat_tracts.substitution_rate_by_stratum.clear();
-        file.repeat_tracts.length_spectrum_by_stratum.clear();
-        file.repeat_tracts.length_spectrum_by_period.clear();
+        file.repeat_tracts
+            .allele_length_variation_by_stratum
+            .clear();
+        file.repeat_tracts.allele_length_variation_by_period.clear();
         // The bottom rung is then the only thing left saying anything about a tract, and its
         // warrant has to be the one a run that fitted nothing carries.
         file.repeat_tracts

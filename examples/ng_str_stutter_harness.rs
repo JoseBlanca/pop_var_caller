@@ -28,7 +28,7 @@
 //!
 //! ## What is varied
 //!
-//! One **truth** — a slippage kernel, an allele-length spectrum, a depth distribution —
+//! One **truth** — a slippage kernel, an allele-allele length variation, a depth distribution —
 //! and several **keys**, each being one answer to a design question the spec leaves open:
 //!
 //! - **What the cell is.** One tally over every read in the stratum, which is what
@@ -210,7 +210,7 @@ impl Keying {
     }
 }
 
-/// Everything that defines one truth: the slippage, the allele-length spectrum the loci
+/// Everything that defines one truth: the slippage, the allele-allele length variation the loci
 /// are drawn from, how correlated a locus's two alleles are, and the depth.
 #[derive(Clone, Debug)]
 struct World {

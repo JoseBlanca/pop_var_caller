@@ -22,7 +22,7 @@
 //!   | no read group identified any contamination | no `[contamination]` section |
 //!   | a read group was measured and found clean | a row whose `measurement` has `share_of_reads_from_another_sample = 0` and non-zero evidence counts |
 //!   | a read group's error rate could not be fitted | a multiplier of 1.0 whose `warrant` is `defaulted` |
-//!   | a stratum was furnished from its period's curves | no row for it in `length_spectrum_by_stratum` |
+//!   | a stratum was furnished from its period's curves | no row for it in `allele_length_variation_by_stratum` |
 //!   | a slippage group put no read in a stratum | no row for that pair in `slippage_by_stratum_and_group` |
 //!
 //!   The rule underneath all five: **`Option<T>` is absence and never a sentinel**, and a warrant
@@ -95,8 +95,8 @@
 //! fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 //! slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 //! slippage_by_stratum_and_group = [ … one row a (stratum × slippage group) … ]
-//! length_spectrum_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
-//! length_spectrum_by_period = [ … only where the run asked for the middle rung … ]
+//! allele_length_variation_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
+//! allele_length_variation_by_period = [ … only where the run asked for the middle rung … ]
 //! substitution_rate_by_stratum = [ … ]
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
@@ -196,7 +196,7 @@ pub const FORMAT_VERSION: u32 = 2;
 /// **It lives here rather than in the reader**, because it is the module's answer and not one
 /// file's: reading the text is only the first of the three ways a file is refused. Step C2's
 /// `validate` refuses a file that parses and means nothing — an inbreeding coefficient outside
-/// its range, a length spectrum that does not sum to one — and step D2's bindings refuse one
+/// its range, an allele length variation that does not sum to one — and step D2's bindings refuse one
 /// fitted against a different reference, a different sample list, or a read-group axis with a
 /// gap in it (spec §6). Both add variants, and neither belongs to `from_toml`.
 ///
@@ -403,7 +403,7 @@ pub enum Warrant {
 /// - **a slippage number** carries its *origin* — [`LevelOrigin`] and [`SharesOrigin`], how much
 ///   of its period's curve went into it — because a level fitted from 8,000 slipped reads and a
 ///   level interpolated off a curve through four cells are the same `f64`;
-/// - **a length spectrum** is placed rather than annotated: *which table it is in* says whether
+/// - **an allele length variation** is placed rather than annotated: *which table it is in* says whether
 ///   it is a stratum's own fit, its period's pool, or neither;
 /// - **a read group's slippage group** is the run's own declaration and is not estimated at all.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -590,10 +590,10 @@ pub enum GroupOfNumbers {
     OrdinarySitePrior,
     /// `repeat_tracts.slippage_by_stratum_and_group` — how often a read slips a repeat.
     RepeatTractSlippage,
-    /// **Both fitted rungs of the tract ladder** — `length_spectrum_by_stratum` and
-    /// `length_spectrum_by_period` — because they are one answer to *did this run fit what
+    /// **Both fitted rungs of the tract ladder** — `allele_length_variation_by_stratum` and
+    /// `allele_length_variation_by_period` — because they are one answer to *did this run fit what
     /// lengths a tract's chromosomes are spread over*.
-    RepeatTractLengthSpectra,
+    RepeatTractAlleleLengthVariations,
     /// `repeat_tracts.substitution_rate_by_stratum` — how often a base reads wrong inside a
     /// tract.
     RepeatTractSubstitutionRates,
@@ -1032,7 +1032,7 @@ pub enum SeedRung {
 ///
 /// Its axes are what matter (spec §3.7). The slippage numbers are keyed by **slippage group**
 /// and not by read group, which is what stops the section growing with the number of libraries;
-/// the length spectra are keyed by stratum and by motif period, the two fitted rungs of the
+/// the allele length variations are keyed by stratum and by motif period, the two fitted rungs of the
 /// tract ladder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1050,7 +1050,7 @@ pub struct RepeatTracts {
     /// **The warrant is about this number, not about the locus that ends up using it**, which is
     /// why a run's own median is written `fitted_here` rather than `borrowed` even though every
     /// tract that reads it is one the run fitted nothing for. Which rung a *tract* landed on is
-    /// [`LengthSpectrumRung`](crate::parameter_estimation::joint::stratum_fits::LengthSpectrumRung),
+    /// [`AlleleLengthVariationRung`](crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung),
     /// carried per locus; this warrant answers the different question of whether the number in
     /// the file came out of this run's data or out of the binary.
     pub fallback_length_spectrum_concentration: WarrantedValue,
@@ -1064,10 +1064,10 @@ pub struct RepeatTracts {
     /// tracts has one**: a stratum furnished from its period's slippage curves carries no length
     /// spectrum at all, by construction, and that absence is what the middle rung exists to
     /// answer. So absence here is data, not a hole.
-    pub length_spectrum_by_stratum: Vec<StratumLengthSpectrumRow>,
+    pub allele_length_variation_by_stratum: Vec<StratumAlleleLengthVariationRow>,
     /// One row a motif period — the tract ladder's **middle** rung, present only where the run
     /// asked for it.
-    pub length_spectrum_by_period: Vec<PeriodLengthSpectrumRow>,
+    pub allele_length_variation_by_period: Vec<PeriodAlleleLengthVariationRow>,
     /// How often a base reads wrong inside a tract, per `(read group × stratum × ploidy)`.
     pub substitution_rate_by_stratum: Vec<SubstitutionRateRow>,
 }
@@ -1339,10 +1339,10 @@ pub enum ShareShape {
     Turning,
 }
 
-/// **One stratum's fitted length spectrum** — how its chromosomes are spread over tract lengths.
+/// **One stratum's fitted allele length variation** — how its chromosomes are spread over tract lengths.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct StratumLengthSpectrumRow {
+pub struct StratumAlleleLengthVariationRow {
     /// How many bases one repeat unit is.
     pub period: u8,
     /// How many copies of it the reference carries.
@@ -1355,14 +1355,14 @@ pub struct StratumLengthSpectrumRow {
     pub shares_by_repeat_offset: Vec<f64>,
 }
 
-/// **One motif period's pooled length spectrum** — the tract ladder's middle rung.
+/// **One motif period's pooled allele length variation** — the tract ladder's middle rung.
 ///
 /// **That the index is an offset is what makes pooling legitimate at all**: two strata of one
 /// period sit at different absolute repeat counts, and it is only because every tract is
 /// described relative to its own reference length that their evidence can be added up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PeriodLengthSpectrumRow {
+pub struct PeriodAlleleLengthVariationRow {
     /// The motif length these tracts share.
     pub period: u8,
     /// How monomorphic the period's tracts are.
@@ -1723,10 +1723,10 @@ mod tests {
             },
             repeat_tracts: RepeatTracts {
                 // **`fitted_here`, and the value is the median it says it is.** This fixture
-                // has one stratum with a length spectrum of its own, at a concentration of 3.5,
+                // has one stratum with an allele length variation of its own, at a concentration of 3.5,
                 // and the bottom rung states the median of the run's fitted concentrations
                 // wherever there is one to take — so a `defaulted` warrant here is a state the
-                // writer cannot produce beside `length_spectrum_by_stratum`. It said
+                // writer cannot produce beside `allele_length_variation_by_stratum`. It said
                 // `1.25, defaulted` until 2026-08-30, which is what the round trip through
                 // memory found: the projection out re-derives this warrant from whether any
                 // stratum was fitted, and re-derived it as `fitted_here` every time.
@@ -1832,13 +1832,13 @@ mod tests {
                         samples_fitted_on: None,
                     },
                 ],
-                length_spectrum_by_stratum: vec![StratumLengthSpectrumRow {
+                allele_length_variation_by_stratum: vec![StratumAlleleLengthVariationRow {
                     period: 2,
                     reference_repeats: 6,
                     concentration: 3.5,
                     shares_by_repeat_offset: vec![0.1, 0.8, 0.1],
                 }],
-                length_spectrum_by_period: vec![PeriodLengthSpectrumRow {
+                allele_length_variation_by_period: vec![PeriodAlleleLengthVariationRow {
                     period: 2,
                     concentration: 2.75,
                     shares_by_repeat_offset: vec![0.15, 0.7, 0.15],
@@ -2245,7 +2245,7 @@ mod tests {
     /// visiting the five by name, and **the two assertions catch different things**. A number
     /// written flat with its key spelled exactly `warrant` lands in a table that has no `value`,
     /// and the loop catches it. One written flat under a *suffixed* key —
-    /// `stated_length_spectrum_warrant`, the spelling this shape replaced — is invisible to the
+    /// `stated_allele_length_variation_warrant`, the spelling this shape replaced — is invisible to the
     /// walk, and only the list of paths catches it. A sixth warranted number, or a fifth that
     /// lost its warrant, is caught by the list too.
     #[test]
@@ -2441,9 +2441,9 @@ mod tests {
             )
         };
 
-        // 4. A stratum furnished from its period's curves has no length spectrum of its own. The
+        // 4. A stratum furnished from its period's curves has no allele length variation of its own. The
         //    fixture carries slippage for three strata and a spectrum for one of them.
-        let spectra = table_of("length_spectrum_by_stratum");
+        let spectra = table_of("allele_length_variation_by_stratum");
         let with_a_spectrum: Vec<(i64, i64)> = spectra.iter().map(stratum_of).collect();
         assert_eq!(
             with_a_spectrum,
@@ -2572,8 +2572,14 @@ mod tests {
         empty.inbreeding.by_sample.clear();
         empty.repeat_tracts.slippage_group_by_read_group.clear();
         empty.repeat_tracts.slippage_by_stratum_and_group.clear();
-        empty.repeat_tracts.length_spectrum_by_stratum.clear();
-        empty.repeat_tracts.length_spectrum_by_period.clear();
+        empty
+            .repeat_tracts
+            .allele_length_variation_by_stratum
+            .clear();
+        empty
+            .repeat_tracts
+            .allele_length_variation_by_period
+            .clear();
         empty.repeat_tracts.substitution_rate_by_stratum.clear();
 
         let text = toml::to_string(&empty).expect("an empty file serialises");
@@ -2715,8 +2721,8 @@ rung = "fitted_curve"
 fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
 slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.04, shorter_share = 0.8, fall_off = 0.3, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside_the_fitted_range", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, expected_slipped_reads = 8000.5 } } ]
-length_spectrum_by_stratum = []
-length_spectrum_by_period = []
+allele_length_variation_by_stratum = []
+allele_length_variation_by_period = []
 substitution_rate_by_stratum = []
 
 [stated_constants]

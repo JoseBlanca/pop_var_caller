@@ -20,7 +20,7 @@
 //! - **Offset** — a read's tract length minus the reference tract's, in whole repeat units.
 //!   The records store `-4 … +4` with the ends saturating
 //!   ([`RECORDED_OFFSET_RANGE`]).
-//! - **Length spectrum** — how the stratum's chromosomes are spread over the tract lengths.
+//! - **Allele length variation** — how the stratum's chromosomes are spread over the tract lengths.
 //! - **Concentration** — how monomorphic the stratum's tracts are. Small means most tracts are
 //!   fixed at one length while the stratum as a whole spans many.
 //!
@@ -29,7 +29,7 @@
 //! Per (read group × stratum), three numbers describing slippage: **how often** a read slips,
 //! **which way** — at tomato dinucleotides a slipped read shows a shorter tract 4.9 times as
 //! often as a longer one — and **how fast** two-unit slips fall off against one-unit slips.
-//! Per stratum, the length spectrum and the concentration. **None of them is per tract.**
+//! Per stratum, the allele length variation and the concentration. **None of them is per tract.**
 //!
 //! # Two things the design settles, and this module obeys
 //!
@@ -538,7 +538,7 @@ pub struct StratumFit {
     pub slippage: Vec<Option<Slippage>>,
     /// How the stratum's chromosomes are spread over the allele lengths, indexed from
     /// `-allele_span` to `+allele_span` in whole repeat units.
-    pub length_spectrum: Vec<f64>,
+    pub allele_length_variation: Vec<f64>,
     /// How monomorphic the stratum's tracts are. Small means most tracts carry one length.
     pub concentration: f64,
     /// The mean log-likelihood a tract, at the returned parameters.
@@ -609,8 +609,8 @@ pub struct StratumErrors {
     /// stratum, matching [`StratumFit::slippage`] index for index.
     pub slippage: Vec<Option<SlippageErrors>>,
     /// Per allele class, the error of its share of the stratum's chromosomes, indexed as
-    /// [`StratumFit::length_spectrum`] is.
-    pub length_spectrum: Vec<StratumError>,
+    /// [`StratumFit::allele_length_variation`] is.
+    pub allele_length_variation: Vec<StratumError>,
     /// The concentration's error.
     pub concentration: StratumError,
 }
@@ -654,7 +654,7 @@ impl StratumErrors {
         });
         slippage
             || self
-                .length_spectrum
+                .allele_length_variation
                 .iter()
                 .any(|error| error.value().is_some())
             || self.concentration.value().is_some()
@@ -815,7 +815,7 @@ impl SharesProvenance {
 /// set for the read likelihood and is what lets a stratum below the refusal floor be emitted at
 /// all (`str_slippage_level_curve.md` §1.1, §5.1).
 ///
-/// **It carries no length spectrum, no concentration and no log-likelihood**, because there was
+/// **It carries no allele length variation, no concentration and no log-likelihood**, because there was
 /// no fit to produce them. A separate shape rather than a [`StratumFit`] with those fields left
 /// empty, so that a consumer cannot read a spectrum that was never estimated.
 #[derive(Debug, Clone, PartialEq)]
@@ -1206,7 +1206,7 @@ struct Parameters {
     /// Per slippage group.
     slippage: Vec<Slippage>,
     /// Over the allele classes, `-allele_span … +allele_span`.
-    length_spectrum: Vec<f64>,
+    allele_length_variation: Vec<f64>,
     concentration: f64,
 }
 
@@ -1221,7 +1221,7 @@ impl Parameters {
                 };
                 groups
             ],
-            length_spectrum: vec![1.0 / classes as f64; classes],
+            allele_length_variation: vec![1.0 / classes as f64; classes],
             concentration: start.concentration,
         }
     }
@@ -1638,7 +1638,7 @@ fn the_fit_of(
             .enumerate()
             .map(|(group, live)| live.then_some(parameters.slippage[group]))
             .collect(),
-        length_spectrum: parameters.length_spectrum,
+        allele_length_variation: parameters.allele_length_variation,
         concentration: parameters.concentration,
         log_likelihood_a_tract: score,
         tracts_fitted: evidence.tracts_with_reads(),
@@ -1727,7 +1727,7 @@ fn the_best_walk(
     // **The one precondition on `SsrFitConfig::allele_span` that nothing else states.** It is a
     // public field with no lower bound, read from an environment variable by
     // `examples/ng_joint_records_walk.rs` and parsed with no floor, and at zero the fit returns
-    // a one-class length spectrum — which is a tract that can only ever be its reference length.
+    // a one-class allele length variation — which is a tract that can only ever be its reference length.
     // Nothing downstream can use that: `StratumFits::over` refuses it with a message about a
     // class count, naming the wrong thing. Refused here, where the message can name the knob.
     assert!(
@@ -1803,7 +1803,7 @@ struct CurvatureLayout {
 
 impl CurvatureLayout {
     fn of(parameters: &Parameters, live_groups: &[bool]) -> Self {
-        let spectrum = &parameters.length_spectrum;
+        let spectrum = &parameters.allele_length_variation;
         // PANIC-FREE: `fit_pooled` refuses an allele span below one, so a spectrum has at least three
         // classes.
         let largest_class = (0..spectrum.len())
@@ -1831,7 +1831,7 @@ impl CurvatureLayout {
 
     /// `parameters` on the climb's scales, in the layout's order.
     fn center(&self, parameters: &Parameters) -> Vec<f64> {
-        let largest = parameters.length_spectrum[self.largest_class];
+        let largest = parameters.allele_length_variation[self.largest_class];
         self.coordinates
             .iter()
             .map(|coordinate| match *coordinate {
@@ -1840,7 +1840,7 @@ impl CurvatureLayout {
                     float::ln(value / (1.0 - value))
                 }
                 CurvatureCoordinate::SpectrumRatio { class } => {
-                    float::ln(parameters.length_spectrum[class] / largest)
+                    float::ln(parameters.allele_length_variation[class] / largest)
                 }
                 CurvatureCoordinate::Concentration => float::ln(parameters.concentration),
             })
@@ -1851,11 +1851,11 @@ impl CurvatureLayout {
     fn parameters_at(&self, base: &Parameters, at: &[f64]) -> Parameters {
         let mut parameters = base.clone();
         let mut ratios: Vec<f64> = base
-            .length_spectrum
+            .allele_length_variation
             .iter()
             .map(|share| {
                 if *share > 0.0 {
-                    share / base.length_spectrum[self.largest_class]
+                    share / base.allele_length_variation[self.largest_class]
                 } else {
                     0.0
                 }
@@ -1872,7 +1872,7 @@ impl CurvatureLayout {
             }
         }
         normalise(&mut ratios);
-        parameters.length_spectrum = ratios;
+        parameters.allele_length_variation = ratios;
         parameters
     }
 }
@@ -2094,11 +2094,11 @@ fn newton_distances_on_the_natural_scale(
             })
         })
         .collect();
-    let spectrum = &parameters.length_spectrum;
+    let spectrum = &parameters.allele_length_variation;
     let ratio_steps: Vec<(usize, f64)> = (0..spectrum.len())
         .map(|class| (class, step_of(CurvatureCoordinate::SpectrumRatio { class })))
         .collect();
-    let length_spectrum = (0..spectrum.len())
+    let allele_length_variation = (0..spectrum.len())
         .map(|class| {
             ratio_steps
                 .iter()
@@ -2110,7 +2110,7 @@ fn newton_distances_on_the_natural_scale(
         .collect();
     StratumDistances {
         slippage,
-        length_spectrum,
+        allele_length_variation,
         concentration: parameters.concentration * step_of(CurvatureCoordinate::Concentration),
     }
 }
@@ -2120,7 +2120,7 @@ fn newton_distances_on_the_natural_scale(
 /// concentration's.
 struct StratumDistances {
     slippage: Vec<Option<SlippageDistances>>,
-    length_spectrum: Vec<f64>,
+    allele_length_variation: Vec<f64>,
     concentration: f64,
 }
 
@@ -2147,10 +2147,10 @@ fn furthest_in_errors(errors: &StratumErrors, distances: &StratumDistances) -> O
     }
     pairs.extend(
         errors
-            .length_spectrum
+            .allele_length_variation
             .iter()
             .copied()
-            .zip(distances.length_spectrum.iter().copied()),
+            .zip(distances.allele_length_variation.iter().copied()),
     );
     pairs.push((errors.concentration, distances.concentration));
     pairs
@@ -2230,12 +2230,12 @@ fn errors_on_the_natural_scale(
             })
         })
         .collect();
-    let spectrum = &parameters.length_spectrum;
+    let spectrum = &parameters.allele_length_variation;
     // The spectrum's coordinates the inverse kept, with their rows.
     let ratios: Vec<(usize, usize)> = (0..spectrum.len())
         .filter_map(|class| Some((class, row_of(CurvatureCoordinate::SpectrumRatio { class })?)))
         .collect();
-    let length_spectrum = (0..spectrum.len())
+    let allele_length_variation = (0..spectrum.len())
         .map(|class| {
             if spectrum[class] <= 0.0 {
                 return StratumError::NoShare;
@@ -2269,7 +2269,7 @@ fn errors_on_the_natural_scale(
     };
     StratumErrors {
         slippage,
-        length_spectrum,
+        allele_length_variation,
         concentration,
     }
 }
@@ -2312,19 +2312,19 @@ fn climb_one_round(
 
     // The spectrum, one class at a time on a log scale, renormalised each time.
     for class in 0..classes {
-        let current = float::ln(parameters.length_spectrum[class].max(1e-9));
+        let current = float::ln(parameters.allele_length_variation[class].max(1e-9));
         let (moved, score) = climb_scalar(
             |x| {
                 let mut trial = parameters.clone();
-                trial.length_spectrum[class] = float::exp(x);
-                normalise(&mut trial.length_spectrum);
+                trial.allele_length_variation[class] = float::exp(x);
+                normalise(&mut trial.allele_length_variation);
                 scorer.score(&trial)
             },
             current,
             2.0,
         );
-        parameters.length_spectrum[class] = float::exp(moved);
-        normalise(&mut parameters.length_spectrum);
+        parameters.allele_length_variation[class] = float::exp(moved);
+        normalise(&mut parameters.allele_length_variation);
         held.offer(parameters, score);
     }
 
@@ -3242,7 +3242,7 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
             &mut concentration,
             fit.concentration / 100.0,
         );
-        for share in &stratum.length_spectrum {
+        for share in &stratum.allele_length_variation {
             count(*share, &mut shares, 1.0);
         }
     }
@@ -3278,11 +3278,11 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
 // The tract prior's middle rung: one motif period's tracts pooled
 // ---------------------------------------------------------------------
 
-/// **One motif period's length spectrum and concentration, fitted over every tract of that
+/// **One motif period's allele length variation and concentration, fitted over every tract of that
 /// period at once** — the middle rung of the tract ladder
 /// (`doc/devel/ng/spec/population_diversity.md` §4.4).
 ///
-/// A stratum too thin to be fitted carries no length spectrum of its own
+/// A stratum too thin to be fitted carries no allele length variation of its own
 /// ([`DerivedStratum`]), and the caller's genotype prior at such a tract needs one. This is
 /// what it falls back to: the same two numbers a [`StratumFit`] produces, estimated from every
 /// tract that shares the motif period rather than from the stratum's own eight.
@@ -3308,7 +3308,7 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
 /// emits a slippage number. Bounded by the loci the rung applies to — 2 in 100 of HG002's tracts
 /// and at most 7 in 100 of tomato's.
 #[derive(Debug, Clone, PartialEq)]
-pub struct PeriodLengthSpectrum {
+pub struct PeriodAlleleLengthVariation {
     /// The motif length these tracts share.
     pub period: u8,
     /// How the period's chromosomes are spread over tract lengths, indexed from
@@ -3318,7 +3318,7 @@ pub struct PeriodLengthSpectrum {
     /// **That the index is an offset is what makes pooling legitimate at all**: two strata of
     /// one period sit at different absolute repeat counts, and it is only because every tract
     /// is described relative to its own reference length that their evidence can be added up.
-    pub length_spectrum: Vec<f64>,
+    pub allele_length_variation: Vec<f64>,
     /// How monomorphic the period's tracts are. Small means most tracts carry one length.
     pub concentration: f64,
     /// Tracts with at least one spanning read that went into the pool.
@@ -3330,7 +3330,7 @@ pub struct PeriodLengthSpectrum {
     pub converged: bool,
 }
 
-/// **Fit one length spectrum and concentration a motif period**, pooling every tract of that
+/// **Fit one allele length variation and concentration a motif period**, pooling every tract of that
 /// period — what a stratum with no fit of its own falls back to.
 ///
 /// **Separate from [`fit_strata`] and opt-in, because it is the one thing on this path that
@@ -3364,11 +3364,11 @@ pub struct PeriodLengthSpectrum {
 /// and the symptom otherwise is an index past the end of a bucket row, inside the scorer,
 /// naming neither period nor stratum.
 #[must_use]
-pub fn fit_period_length_spectra(
+pub fn fit_period_allele_length_variations(
     strata: &[StratumEvidence],
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
-) -> BTreeMap<u8, PeriodLengthSpectrum> {
+) -> BTreeMap<u8, PeriodAlleleLengthVariation> {
     for evidence in strata {
         evidence.check_libraries();
     }
@@ -3399,7 +3399,7 @@ pub fn fit_period_length_spectra(
         // independent of each other as the strata are, so this loop could be spread the other
         // way too; it is left alone because it runs over a handful of periods rather than over
         // a hundred and forty strata, and because no calling run reaches it yet.
-        // **No standard errors here**: only the length spectrum and the concentration are kept,
+        // **No standard errors here**: only the allele length variation and the concentration are kept,
         // and nothing reads their errors at this rung.
         let Some((best, walks, live_groups)) = the_best_walk(
             &pooled,
@@ -3412,9 +3412,9 @@ pub fn fit_period_length_spectra(
         let fit = the_fit_of(&pooled, &[], &live_groups, best, walks, None);
         fitted.insert(
             period,
-            PeriodLengthSpectrum {
+            PeriodAlleleLengthVariation {
                 period,
-                length_spectrum: fit.length_spectrum,
+                allele_length_variation: fit.allele_length_variation,
                 concentration: fit.concentration,
                 tracts_fitted: fit.tracts_fitted,
                 // **Strata that put a tract in, not strata of the period.** A stratum whose
@@ -3435,7 +3435,7 @@ pub fn fit_period_length_spectra(
 ///
 /// **The `stratum` field of the result is the smallest reference repeat count in the pool and
 /// means nothing.** [`fit_pooled`] copies it onto the [`StratumFit`] it returns and
-/// [`fit_period_length_spectra`] then keeps only the length spectrum and the concentration, so
+/// [`fit_period_allele_length_variations`] then keeps only the allele length variation and the concentration, so
 /// no repeat count is claimed for a pool that spans many. Nothing in the scorer reads it: a
 /// tract's evidence is buckets of reads at offsets from its own reference length, and the
 /// absolute length never enters.
@@ -3498,7 +3498,7 @@ fn pool_a_period(period: u8, members: &[&StratumEvidence]) -> StratumEvidence {
         libraries: Arc::clone(&first.libraries),
         // **The five diagnostic counters below are summed rather than zeroed, and nothing in the
         // fit reads any of them.** The pooled evidence never leaves this function —
-        // `fit_period_length_spectra` keeps only the length spectrum and the concentration — so
+        // `fit_period_allele_length_variations` keeps only the allele length variation and the concentration — so
         // these are dead in the sense that removing them changes no output. They are summed
         // anyway because a zero here would be a claim: *this period had no guarded tracts, no
         // reads that reached without crossing, no bases compared*, which is false of every real
@@ -3524,7 +3524,7 @@ fn pool_a_period(period: u8, members: &[&StratumEvidence]) -> StratumEvidence {
 ///
 /// **This is what spec §1.1's first goal asks for: every populated stratum carries a level.** All
 /// three of its numbers are its period's curves. Since nothing about it was estimated it comes
-/// back as a [`DerivedStratum`] — no length spectrum, no concentration, no log-likelihood —
+/// back as a [`DerivedStratum`] — no allele length variation, no concentration, no log-likelihood —
 /// rather than as a [`StratumFit`] with those left empty.
 ///
 /// **Two refusals survive**: a stratum no read crossed, and one whose period has no *level*
@@ -3670,7 +3670,7 @@ fn draw_a_curve_a_period(
 
 /// Draw one curve per motif period and re-emit every stratum's level through it.
 ///
-/// **Only the level moves.** The direction split, the fall-off and the length spectrum are the
+/// **Only the level moves.** The direction split, the fall-off and the allele length variation are the
 /// stratum's own and are not touched (`str_slippage_level_curve.md` §1.2).
 ///
 /// **Only a stratum fitted from its own tracts feeds a curve.** A stratum that borrowed carries
@@ -3839,7 +3839,7 @@ fn draw_share_curves_a_period(
 
 /// Re-emit every fitted stratum's two shares through its period's curves.
 ///
-/// **Only the two shares move.** The level has already had its own curve, and the length spectrum
+/// **Only the two shares move.** The level has already had its own curve, and the allele length variation
 /// and concentration are the stratum's own and are not touched.
 ///
 /// **The weight each stratum's own answer carries is its own slipped-read count**, read from the
@@ -4379,14 +4379,14 @@ impl<'a> Scorer<'a> {
             .held_quadrature
             .as_ref()
             .is_some_and(|(spectrum, held, _)| {
-                *held == parameters.concentration && *spectrum == parameters.length_spectrum
+                *held == parameters.concentration && *spectrum == parameters.allele_length_variation
             });
         if stale {
             self.held_quadrature = Some((
-                parameters.length_spectrum.clone(),
+                parameters.allele_length_variation.clone(),
                 parameters.concentration,
                 dirichlet_points(
-                    &parameters.length_spectrum,
+                    &parameters.allele_length_variation,
                     parameters.concentration,
                     self.quadrature_points,
                     self.genotypes,
@@ -5309,7 +5309,7 @@ mod tests {
             StratumError::NotPlaced => -2.0,
             StratumError::NoShare => -3.0,
         };
-        let mut flat: Vec<f64> = errors.length_spectrum.iter().map(code).collect();
+        let mut flat: Vec<f64> = errors.allele_length_variation.iter().map(code).collect();
         flat.push(code(&errors.concentration));
         for group in &errors.slippage {
             match group {
@@ -5330,7 +5330,7 @@ mod tests {
                     flat.push(1.0);
                     flat.push(fit.concentration);
                     flat.push(fit.log_likelihood_a_tract);
-                    flat.extend(fit.length_spectrum.iter().copied());
+                    flat.extend(fit.allele_length_variation.iter().copied());
                     flat.extend(every_error(fit));
                     // How the winner ended, and every walk's ending, rounds and judgements.
                     let code = |ending: ClimbEnding| match ending {
@@ -6125,7 +6125,7 @@ mod tests {
                 shorter_share: 0.8,
                 fall_off: 0.3,
             }],
-            length_spectrum: vec![0.2, 0.5, 0.3],
+            allele_length_variation: vec![0.2, 0.5, 0.3],
             concentration: 2.0,
         };
         let layout = CurvatureLayout::of(&parameters, &[true]);
@@ -6160,15 +6160,15 @@ mod tests {
         let share_error =
             |g0: f64, g2: f64| (g0 * g0 * v0 + 2.0 * g0 * g2 * c + g2 * g2 * v2).sqrt();
         close(
-            errors.length_spectrum[0],
+            errors.allele_length_variation[0],
             share_error(s[0] * (1.0 - s[0]), -s[0] * s[2]),
         );
         close(
-            errors.length_spectrum[1],
+            errors.allele_length_variation[1],
             share_error(-s[1] * s[0], -s[1] * s[2]),
         );
         close(
-            errors.length_spectrum[2],
+            errors.allele_length_variation[2],
             share_error(-s[2] * s[0], s[2] * (1.0 - s[2])),
         );
 
@@ -6186,9 +6186,15 @@ mod tests {
             inverse: dropped_inverse,
         };
         let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
-        assert_eq!(errors.length_spectrum[2], StratumError::NotIdentified);
-        close(errors.length_spectrum[0], (s[0] * (1.0 - s[0])) * v0.sqrt());
-        close(errors.length_spectrum[1], (s[1] * s[0]) * v0.sqrt());
+        assert_eq!(
+            errors.allele_length_variation[2],
+            StratumError::NotIdentified
+        );
+        close(
+            errors.allele_length_variation[0],
+            (s[0] * (1.0 - s[0])) * v0.sqrt(),
+        );
+        close(errors.allele_length_variation[1], (s[1] * s[0]) * v0.sqrt());
         close(errors.concentration, 0.06_f64.sqrt() * 2.0);
 
         // Class 2's log-ratio kept but its variance 10⁶: that ratio is not placed, and the shares
@@ -6202,7 +6208,7 @@ mod tests {
         };
         let errors = errors_on_the_natural_scale(&layout, &parameters, &[true], &identified);
         assert_eq!(
-            errors.length_spectrum,
+            errors.allele_length_variation,
             [StratumError::NotPlaced; 3],
             "class 2 on its own scale, classes 0 and 1 wider than the range"
         );
@@ -6245,7 +6251,7 @@ mod tests {
             assert!(errors.concentration.value().is_some(), "{errors:?}");
             assert!(
                 errors
-                    .length_spectrum
+                    .allele_length_variation
                     .iter()
                     .all(|error| error.value().is_some()),
                 "{errors:?}"
@@ -6286,7 +6292,7 @@ mod tests {
         let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
         let parameters = Parameters {
             slippage: vec![fitted.slippage[0].expect("fitted")],
-            length_spectrum: fitted.length_spectrum.clone(),
+            allele_length_variation: fitted.allele_length_variation.clone(),
             concentration: fitted.concentration,
         };
         let at = |step: f64| {
@@ -6309,7 +6315,7 @@ mod tests {
                 group.fall_off,
                 errors.concentration,
             ];
-            all.extend(errors.length_spectrum.iter().copied());
+            all.extend(errors.allele_length_variation.iter().copied());
             all.into_iter().map(StratumError::value).collect::<Vec<_>>()
         };
         for (index, (a, b)) in flatten(&default)
@@ -6412,7 +6418,7 @@ mod tests {
         let fitted = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
         let parameters = Parameters {
             slippage: vec![fitted.slippage[0].expect("fitted")],
-            length_spectrum: fitted.length_spectrum.clone(),
+            allele_length_variation: fitted.allele_length_variation.clone(),
             concentration: fitted.concentration,
         };
         let mut padded = evidence.clone();
@@ -6438,7 +6444,7 @@ mod tests {
                 group.fall_off,
                 errors.concentration,
             ];
-            all.extend(errors.length_spectrum.iter().copied());
+            all.extend(errors.allele_length_variation.iter().copied());
             all.into_iter()
                 .map(|error| error.value().expect("an error"))
                 .collect::<Vec<f64>>()
@@ -6465,7 +6471,7 @@ mod tests {
                     fall_off: 0.6,
                 },
             ],
-            length_spectrum: vec![0.1, 0.05, 0.6, 0.2, 0.05],
+            allele_length_variation: vec![0.1, 0.05, 0.6, 0.2, 0.05],
             concentration: 3.7,
         };
         let layout = CurvatureLayout::of(&parameters, &[true, true]);
@@ -6476,7 +6482,11 @@ mod tests {
             close(a.shorter_share, b.shorter_share);
             close(a.fall_off, b.fall_off);
         }
-        for (a, b) in back.length_spectrum.iter().zip(&parameters.length_spectrum) {
+        for (a, b) in back
+            .allele_length_variation
+            .iter()
+            .zip(&parameters.allele_length_variation)
+        {
             close(*a, *b);
         }
         close(back.concentration, parameters.concentration);
@@ -6497,7 +6507,7 @@ mod tests {
                     shorter_share: StratumError::Estimated(0.05),
                     fall_off: StratumError::NotPlaced,
                 })],
-                length_spectrum: vec![StratumError::Estimated(0.01)],
+                allele_length_variation: vec![StratumError::Estimated(0.01)],
                 concentration,
             });
             StratumOutcome::Fitted(fit)
@@ -6661,9 +6671,9 @@ mod tests {
                     .record(estimate, truth, error);
             }
             for (class, (estimate, error)) in fitted
-                .length_spectrum
+                .allele_length_variation
                 .iter()
-                .zip(&errors.length_spectrum)
+                .zip(&errors.allele_length_variation)
                 .enumerate()
             {
                 let kind = if class == span as usize {
@@ -6681,7 +6691,7 @@ mod tests {
     }
 
     /// **A stratum's errors mean what they say** (plan step C2, spec §4.5 item 1): strata drawn from
-    /// known slippage, a known length spectrum and concentration, many times in each regime, each
+    /// known slippage, a known allele length variation and concentration, many times in each regime, each
     /// fitted by the fit's own rule; of every estimate with an error, the share within one error of
     /// the truth and within two — about 68 in 100 and 95 in 100 for an error that means what it says —
     /// with the mean distance (a bias, in errors) and the spread of the distances (about one). At
@@ -7018,7 +7028,7 @@ mod tests {
                 .iter()
                 .map(|group| group.expect("every group live"))
                 .collect(),
-            length_spectrum: fit.length_spectrum.clone(),
+            allele_length_variation: fit.allele_length_variation.clone(),
             concentration: fit.concentration,
         }
     }
@@ -7158,7 +7168,7 @@ mod tests {
                 shorter_share: one,
                 fall_off: StratumError::NotPlaced,
             })],
-            length_spectrum: vec![one, one, StratumError::NoShare],
+            allele_length_variation: vec![one, one, StratumError::NoShare],
             concentration: one,
         };
         let distances = |level: f64| StratumDistances {
@@ -7167,12 +7177,12 @@ mod tests {
                 shorter_share: 0.01,
                 fall_off: 1e9,
             })],
-            length_spectrum: vec![0.02, 0.03, 1e9],
+            allele_length_variation: vec![0.02, 0.03, 1e9],
             concentration: 0.04,
         };
         assert_eq!(furthest_in_errors(&errors, &distances(0.05)), Some(0.05));
         let mut share_far = distances(0.05);
-        share_far.length_spectrum[1] = -0.5;
+        share_far.allele_length_variation[1] = -0.5;
         assert_eq!(furthest_in_errors(&errors, &share_far), Some(0.5));
         let mut concentration_far = distances(0.05);
         concentration_far.concentration = 0.7;
@@ -7188,7 +7198,7 @@ mod tests {
         );
         let none = StratumErrors {
             slippage: vec![None],
-            length_spectrum: vec![StratumError::NotIdentified; 3],
+            allele_length_variation: vec![StratumError::NotIdentified; 3],
             concentration: StratumError::NotPlaced,
         };
         assert_eq!(furthest_in_errors(&none, &distances(5.0)), None);
@@ -7206,7 +7216,7 @@ mod tests {
                 shorter_share: 0.8,
                 fall_off: 0.3,
             }],
-            length_spectrum: vec![0.2, 0.5, 0.3],
+            allele_length_variation: vec![0.2, 0.5, 0.3],
             concentration: 2.0,
         };
         let n = 6;
@@ -7265,9 +7275,9 @@ mod tests {
                         shares[class] * (if j == class { 1.0 } else { 0.0 } - shares[j]) * d
                     })
                     .sum();
-                close(distances.length_spectrum[class], want);
+                close(distances.allele_length_variation[class], want);
             }
-            close(distances.length_spectrum.iter().sum::<f64>(), 0.0);
+            close(distances.allele_length_variation.iter().sum::<f64>(), 0.0);
         };
         check((0..n).collect());
         check(vec![0, 1, 2, 3, 5]);
@@ -7519,9 +7529,9 @@ mod tests {
         close(a.fall_off, b.fall_off);
         close(plain.concentration, with_empty.concentration);
         for (a, b) in plain
-            .length_spectrum
+            .allele_length_variation
             .iter()
-            .zip(&with_empty.length_spectrum)
+            .zip(&with_empty.allele_length_variation)
         {
             close(*a, *b);
         }
@@ -7596,7 +7606,7 @@ mod tests {
         ];
         numbers.extend(
             parameters
-                .length_spectrum
+                .allele_length_variation
                 .iter()
                 .map(|share| ("length shares", *share)),
         );
@@ -7611,7 +7621,7 @@ mod tests {
             group.fall_off,
             errors.concentration,
         ];
-        all.extend(errors.length_spectrum.iter().copied());
+        all.extend(errors.allele_length_variation.iter().copied());
         all
     }
 
@@ -7768,7 +7778,7 @@ mod tests {
                 );
                 let answer = Parameters {
                     slippage: vec![fitted.slippage[0].expect("the one group has reads")],
-                    length_spectrum: fitted.length_spectrum.clone(),
+                    allele_length_variation: fitted.allele_length_variation.clone(),
                     concentration: fitted.concentration,
                 };
                 let settled = fitted.ending.settled();
@@ -8221,7 +8231,7 @@ mod tests {
                 shorter_share: 0.7,
                 fall_off: 0.3,
             })],
-            length_spectrum: vec![1.0],
+            allele_length_variation: vec![1.0],
             concentration: 0.6,
             log_likelihood_a_tract: -1.0,
             tracts_fitted: 500,
@@ -8309,7 +8319,7 @@ mod tests {
                 }),
                 None,
             ],
-            length_spectrum: vec![
+            allele_length_variation: vec![
                 StratumError::NotIdentified,
                 StratumError::NoShare,
                 StratumError::NotPlaced,
@@ -8331,7 +8341,7 @@ mod tests {
             group.fall_off = one;
         }
         let mut share = none.clone();
-        share.length_spectrum[2] = one;
+        share.allele_length_variation[2] = one;
         let concentration = StratumErrors {
             concentration: one,
             ..none.clone()
@@ -8404,7 +8414,10 @@ mod tests {
             assert_eq!(was.shorter_share, now.shorter_share);
             assert_eq!(was.fall_off, now.fall_off);
             assert_eq!(before.concentration, after.concentration);
-            assert_eq!(before.length_spectrum, after.length_spectrum);
+            assert_eq!(
+                before.allele_length_variation,
+                after.allele_length_variation
+            );
             assert_eq!(before.tracts_of_its_own, after.tracts_of_its_own);
         }
 
@@ -8867,7 +8880,7 @@ mod tests {
             drawn_at(stratum_at(2, 8), &leans_short, 300, 91),
             drawn_at(stratum_at(2, 14), &leans_long, 300, 92),
         ];
-        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+        let pools = fit_period_allele_length_variations(&strata, &[0.4; 8], &pooling_config());
 
         let pool = pools.get(&2).expect("period 2 has 600 tracts");
         assert_eq!(pool.strata_pooled, 2, "both strata of period 2 are in it");
@@ -8876,12 +8889,15 @@ mod tests {
             "300 tracts from each of the two strata"
         );
         assert_eq!(
-            pool.length_spectrum.len(),
+            pool.allele_length_variation.len(),
             3,
             "2 x span + 1 classes at span 1"
         );
 
-        let (short, long) = (pool.length_spectrum[0], pool.length_spectrum[2]);
+        let (short, long) = (
+            pool.allele_length_variation[0],
+            pool.allele_length_variation[2],
+        );
         assert!(
             short > leans_long[0] && short < leans_short[0],
             "the pooled share one repeat short is {short}, and pooling a stratum drawn at \
@@ -8911,7 +8927,7 @@ mod tests {
             drawn_at(stratum_at(2, 8), &leans_short, 300, 93),
             drawn_at(stratum_at(3, 8), &leans_long, 300, 94),
         ];
-        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+        let pools = fit_period_allele_length_variations(&strata, &[0.4; 8], &pooling_config());
 
         assert_eq!(pools.len(), 2, "one pool a period");
         let dinucleotide = &pools[&2];
@@ -8919,13 +8935,14 @@ mod tests {
         assert_eq!(dinucleotide.strata_pooled, 1);
         assert_eq!(trinucleotide.strata_pooled, 1);
         assert!(
-            dinucleotide.length_spectrum[0] > trinucleotide.length_spectrum[0] + 0.15,
+            dinucleotide.allele_length_variation[0]
+                > trinucleotide.allele_length_variation[0] + 0.15,
             "period 2 was drawn leaning short ({}) and period 3 leaning long ({}); pooled \
              together they would be one number twice, and they are {} and {}",
             leans_short[0],
             leans_long[0],
-            dinucleotide.length_spectrum[0],
-            trinucleotide.length_spectrum[0]
+            dinucleotide.allele_length_variation[0],
+            trinucleotide.allele_length_variation[0]
         );
     }
 
@@ -8941,7 +8958,7 @@ mod tests {
         let config = pooling_config();
         assert_eq!(config.refusal_floor, DEFAULT_REFUSAL_FLOOR);
 
-        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &config);
+        let pools = fit_period_allele_length_variations(&strata, &[0.4; 8], &config);
         assert!(
             pools.is_empty(),
             "seven tracts is below the floor of {}, and a pool below it is left out rather \
@@ -8955,7 +8972,7 @@ mod tests {
             drawn_at(stratum_at(2, 8), &spectrum, 4, 95),
             drawn_at(stratum_at(2, 14), &spectrum, 4, 96),
         ];
-        let pools = fit_period_length_spectra(&over, &[0.4; 8], &config);
+        let pools = fit_period_allele_length_variations(&over, &[0.4; 8], &config);
         assert_eq!(pools[&2].tracts_fitted, 8);
     }
 
@@ -8963,7 +8980,7 @@ mod tests {
     ///
     /// It is a public field with no lower bound, read from an environment variable by
     /// `examples/ng_joint_records_walk.rs` and parsed with no floor. At zero the fit returns a
-    /// one-class length spectrum — a tract that can only ever be its reference length — and
+    /// one-class allele length variation — a tract that can only ever be its reference length — and
     /// `StratumFits::over` then aborts the run with a message about a class count, which names
     /// the symptom and not the setting.
     #[test]
@@ -8993,7 +9010,11 @@ mod tests {
         assert_eq!(with_silent_tracts.tracts.len(), 8);
         assert_eq!(with_silent_tracts.tracts_with_reads(), 4);
 
-        let pools = fit_period_length_spectra(&[with_silent_tracts], &[0.4; 8], &pooling_config());
+        let pools = fit_period_allele_length_variations(
+            &[with_silent_tracts],
+            &[0.4; 8],
+            &pooling_config(),
+        );
         assert!(
             pools.is_empty(),
             "four tracts with reads is below the floor of {}, whatever the eight rows suggest",
@@ -9014,7 +9035,7 @@ mod tests {
             max_rounds: 1,
             ..pooling_config()
         };
-        let pools = fit_period_length_spectra(&strata, &[0.4; 8], &one_round);
+        let pools = fit_period_allele_length_variations(&strata, &[0.4; 8], &one_round);
         assert!(
             !pools[&2].converged,
             "one round cannot settle a 300-tract pool, and running out is not convergence"
@@ -9031,8 +9052,8 @@ mod tests {
         let strata = [drawn_at(stratum_at(2, 8), &spectrum, 200, 103)];
         let config = pooling_config();
 
-        let selfing = fit_period_length_spectra(&strata, &[0.9; 8], &config);
-        let outbred = fit_period_length_spectra(&strata, &[0.0; 8], &config);
+        let selfing = fit_period_allele_length_variations(&strata, &[0.9; 8], &config);
+        let outbred = fit_period_allele_length_variations(&strata, &[0.0; 8], &config);
 
         let (selfing, outbred) = (&selfing[&2], &outbred[&2]);
         // **The bar is "not the same number", not a size.** A fit that ignored the argument
@@ -9061,7 +9082,7 @@ mod tests {
         let mut wider = drawn_at(stratum_at(2, 14), &spectrum, 20, 98);
         wider.read_span = 2;
         let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 97), wider];
-        let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+        let _ = fit_period_allele_length_variations(&strata, &[0.4; 8], &pooling_config());
     }
 
     /// The same for the slippage-group count, which is also a property of the run.
@@ -9072,7 +9093,7 @@ mod tests {
         let mut more_groups = drawn_at(stratum_at(2, 14), &spectrum, 20, 100);
         more_groups.groups = 2;
         let strata = [drawn_at(stratum_at(2, 8), &spectrum, 20, 99), more_groups];
-        let _ = fit_period_length_spectra(&strata, &[0.4; 8], &pooling_config());
+        let _ = fit_period_allele_length_variations(&strata, &[0.4; 8], &pooling_config());
     }
 
     // -----------------------------------------------------------------
@@ -9378,7 +9399,7 @@ mod tests {
         };
         let mut errors = StratumErrors {
             slippage: vec![Some(group(0.001)), Some(group(0.005))],
-            length_spectrum: vec![StratumError::Estimated(0.1); 3],
+            allele_length_variation: vec![StratumError::Estimated(0.1); 3],
             concentration: StratumError::Estimated(0.1),
         };
         let live = [true, true];
@@ -9582,9 +9603,9 @@ mod tests {
             eprintln!(
                 "WINDOW ±{span}: level {level:.4} (drawn 0.08), outermost short shares {:.4} {:.4} \
                  {:.4}, {:.1} s",
-                fitted.length_spectrum[0],
-                fitted.length_spectrum[1],
-                fitted.length_spectrum[2],
+                fitted.allele_length_variation[0],
+                fitted.allele_length_variation[1],
+                fitted.allele_length_variation[2],
                 started.elapsed().as_secs_f64(),
             );
         }

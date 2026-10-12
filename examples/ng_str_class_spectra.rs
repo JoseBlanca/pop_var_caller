@@ -186,13 +186,13 @@ fn main() {
             errors.map_or("NA".to_owned(), |errors| error_of(&errors.concentration)),
         ];
         row.extend(
-            fit.length_spectrum
+            fit.allele_length_variation
                 .iter()
                 .map(|share| format!("{share:.8}")),
         );
-        row.extend((0..fit.length_spectrum.len()).map(|class| {
+        row.extend((0..fit.allele_length_variation.len()).map(|class| {
             errors.map_or("NA".to_owned(), |errors| {
-                error_of(&errors.length_spectrum[class])
+                error_of(&errors.allele_length_variation[class])
             })
         }));
         println!("{}", row.join("\t"));

@@ -38,7 +38,7 @@
 //! # What this module does not do, and where its diagnostics stop
 //!
 //! **It does not judge what the file says.** A document that parses and means nothing — an
-//! inbreeding coefficient of 1.7, a length spectrum whose shares do not sum to one, a
+//! inbreeding coefficient of 1.7, an allele length variation whose shares do not sum to one, a
 //! contamination table in which no row was measured — is accepted here and refused by step C2's
 //! `validate`, which runs after this and before the projection back to `RunParameters`.
 //!

@@ -1595,8 +1595,8 @@ impl<'a> TractEvidence<'a> {
         let reference_repeats = RepeatCount(self.candidate_repeat_counts[0].get());
         TractPrior {
             reference_repeats,
-            length_spectrum: parameters
-                .ssr_length_spectrum_at(self.detail.motif.ssr_period(), reference_repeats),
+            allele_length_variation: parameters
+                .ssr_allele_length_variation_at(self.detail.motif.ssr_period(), reference_repeats),
         }
     }
 }
@@ -1650,7 +1650,7 @@ fn tract_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> TractEvidence<'a> {
 ///
 /// **That holds under contamination too, which is where the two paths part.** An ordinary
 /// site's third mixture term is the cohort's own frequency for the allele an observation shows,
-/// which the loop rewrites at every pass; a tract's is the *fit's* length spectrum for this
+/// which the loop rewrites at every pass; a tract's is the *fit's* allele length variation for this
 /// tract's stratum, frozen before calling starts
 /// (`doc/devel/ng/spec/read_likelihoods.md` §4.5.1 against §3.6).
 ///
@@ -2085,7 +2085,7 @@ enum ContaminantFrequencies {
 /// **The tract's table is already filled**, by [`fill_what_no_pass_recomputes`], because the
 /// tract's row builder computes its emissions and assembles them in one call — and that table
 /// is final, because a tract's row reads no allele frequency. **Contaminated or not**: the
-/// tract's third mixture term is the fit's length spectrum for its stratum, frozen before
+/// tract's third mixture term is the fit's allele length variation for its stratum, frozen before
 /// calling starts, where an ordinary site's is the cohort's own estimate and moves with the
 /// loop (spec §4.5.1 against §3.6). So a contaminated tract reaches this function and returns
 /// from it having nothing to fold, and its table is assembled once like any other.
@@ -2358,7 +2358,7 @@ where
         // At an **ordinary site** it is: `q(o)`, the contaminating population's frequency for
         // the allele an observation shows, is the cohort's own estimate at this locus and the
         // loop rewrites it at every pass (`spec/read_likelihoods.md` §3.6). At a **repeat
-        // tract** it is not: the third term there is the *fit's* length spectrum for this
+        // tract** it is not: the third term there is the *fit's* allele length variation for this
         // tract's stratum, frozen before calling starts — §4.5.1 weighed the cohort's own
         // frequencies against it and refused them, because contamination must not move from one
         // pass to the next. So a contaminated tract is scored from one table like any other.
@@ -2385,7 +2385,7 @@ where
         // population's **frequency spectrum** — how allele frequencies are spread across the
         // population — which the run projected once, before any locus, into the two numbers and
         // the regime mark a `SpectrumSeed` carries. A repeat tract is seeded from its stratum's
-        // **length spectrum** — how that stratum's chromosomes are spread over tract lengths —
+        // **allele length variation** — how that stratum's chromosomes are spread over tract lengths —
         // which is looked up per locus.
         //
         // **Both have a fallback ladder and only one of them reports which rung it used.** The
@@ -2393,7 +2393,7 @@ where
         // `ordinary_site_seed.md` §4, and its rung is resolved when the run's seed is projected
         // and is not carried onto a locus; the tract ladder's three rungs are §4.4's, and the
         // rung comes back on the lookup and travels onto this locus's record.
-        let length_spectrum_rung = match evidence {
+        let allele_length_variation_rung = match evidence {
             LocusEvidence::Generic { .. } => {
                 let _ = fill_locus_concentration(
                     parameters.prior_seed(),
@@ -2411,11 +2411,11 @@ where
                 // **The reference tract's own repeat count is entry 0**, and that is a
                 // property of the candidate table rather than a convention agreed here: the
                 // reference allele is id 0 of every `CandidateAlleles` and stays there, and
-                // these counts are parallel to it. It is what the length spectrum's offsets are
+                // these counts are parallel to it. It is what the allele length variation's offsets are
                 // measured from, and passing a *candidate's* count instead would re-centre
                 // the shape on that candidate and flatten the prior.
                 //
-                // **A run whose fit produced no length spectrum anywhere is called here, at
+                // **A run whose fit produced no allele length variation anywhere is called here, at
                 // the ladder's bottom rung, rather than refused** — the owner's ruling of
                 // 2026-08-27, taken where `population_diversity.md` §5's *refuse a tract in a
                 // run carrying no tract parameters* met §4.4's *the ladder always answers*.
@@ -2425,7 +2425,7 @@ where
                 // distinguishable from one resting on a measurement without re-running
                 // anything. §5 and §6 of that spec carry the ruling.
                 let reference_repeats = candidate_repeat_counts[0].get();
-                let length_spectrum = parameters.ssr_length_spectrum_at(
+                let allele_length_variation = parameters.ssr_allele_length_variation_at(
                     detail.motif.ssr_period(),
                     RepeatCount(reference_repeats),
                 );
@@ -2441,10 +2441,10 @@ where
                 let _ = fill_ssr_seed(
                     &repeats_of_each_candidate,
                     reference_repeats,
-                    length_spectrum,
+                    allele_length_variation,
                     scratch.seed_concentration_mut(),
                 );
-                Some(length_spectrum.rung())
+                Some(allele_length_variation.rung())
             }
         };
 
@@ -2600,7 +2600,7 @@ where
         // and hold the *last* tract's counts at an ordinary site, so asking them whether they
         // describe this locus would answer about a locus already emitted. The rung is `Some`
         // exactly at a tract and was resolved for this one.
-        let repeat_tract = length_spectrum_rung.map(|rung| {
+        let repeat_tract = allele_length_variation_rung.map(|rung| {
             let fits = scratch.tract_fits();
             RepeatTractProvenance::new(
                 rung,
@@ -2628,7 +2628,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
+    use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
 
     /// The repeat unit every repeat tract in this file is built on — **a dinucleotide**, so that
     /// a whole repeat and a single base are different steps and the part-repeat half of the
@@ -2637,7 +2637,7 @@ mod tests {
 
     /// The two candidate lengths every repeat tract here is called over, in candidate-table
     /// order: **6 whole repeats and 7**. Entry 0 is the reference allele's, which is what the
-    /// prior's length spectrum measures its offsets from.
+    /// prior's allele length variation measures its offsets from.
     ///
     /// **Different from each other**, so a lookup that read one candidate's repeat count for
     /// another lands in a different stratum rather than the same one. **Neither is what a
@@ -2741,7 +2741,7 @@ mod tests {
     }
 
     /// **A repeat fit that reached every stratum this file's tracts are called over**, each
-    /// with its own slippage numbers and its own length spectrum.
+    /// with its own slippage numbers and its own allele length variation.
     ///
     /// **Three sources of coincidence are removed on purpose**, each because a mutation
     /// survived it:
@@ -2753,7 +2753,7 @@ mod tests {
     ///   libraries 1 and 2 in group 1, whose numbers differ — so a parameter table filled
     ///   candidate-major instead of read-group-major hands library 0's reads another group's
     ///   polymerase;
-    /// - **no length spectrum is a palindrome, no two of its classes share a weight, and no two
+    /// - **no allele length variation is a palindrome, no two of its classes share a weight, and no two
     ///   adjacent pairs of classes are in the same ratio.** Each is heavier on the contraction
     ///   side, as every real repeat fit is, so reversing one is a different prior; reading class
     ///   *i* for class *j* is a different number; and — the repair a review forced — a spectrum
@@ -2810,40 +2810,42 @@ mod tests {
                 }),
             ]
         };
-        let fitted_stratum =
-            |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
-                StratumOutcome::Fitted(Box::new(StratumFit {
-                    standard_errors: None,
-                    stratum: Stratum {
-                        period: 2,
-                        reference_repeats: repeats,
-                    },
-                    slippage: slippage_of_each_group(level_in_group_0),
-                    length_spectrum,
-                    concentration,
-                    log_likelihood_a_tract: -1.5,
-                    tracts_fitted: 40,
-                    borrowed: Vec::new(),
-                    ending: ClimbEnding::Settled,
-                    walks: Vec::new(),
-                    samples_fitted_on: None,
-                    tracts_of_its_own: 40,
-                    reads_crossing: 400,
-                    level_provenance: vec![Some(level), Some(level)],
-                    shares_provenance: vec![
-                        Some(SharesProvenance {
-                            slipped_reads: Some(400.0),
-                            shorter_share: share,
-                            fall_off: share,
-                        }),
-                        Some(SharesProvenance {
-                            slipped_reads: Some(400.0),
-                            shorter_share: share,
-                            fall_off: share,
-                        }),
-                    ],
-                }))
-            };
+        let fitted_stratum = |repeats: u64,
+                              level_in_group_0: f64,
+                              allele_length_variation: Vec<f64>,
+                              concentration: f64| {
+            StratumOutcome::Fitted(Box::new(StratumFit {
+                standard_errors: None,
+                stratum: Stratum {
+                    period: 2,
+                    reference_repeats: repeats,
+                },
+                slippage: slippage_of_each_group(level_in_group_0),
+                allele_length_variation,
+                concentration,
+                log_likelihood_a_tract: -1.5,
+                tracts_fitted: 40,
+                borrowed: Vec::new(),
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+                samples_fitted_on: None,
+                tracts_of_its_own: 40,
+                reads_crossing: 400,
+                level_provenance: vec![Some(level), Some(level)],
+                shares_provenance: vec![
+                    Some(SharesProvenance {
+                        slipped_reads: Some(400.0),
+                        shorter_share: share,
+                        fall_off: share,
+                    }),
+                    Some(SharesProvenance {
+                        slipped_reads: Some(400.0),
+                        shorter_share: share,
+                        fall_off: share,
+                    }),
+                ],
+            }))
+        };
         StratumFits::over(
             &[
                 // The weights run over offsets −2 … +2 whole repeats from the stratum's own
@@ -2873,8 +2875,8 @@ mod tests {
     }
 
     /// Which rung of the tract ladder that record's prior shape came from.
-    fn rung_of(inference: &LocusInference) -> LengthSpectrumRung {
-        tract_record(inference).length_spectrum_rung()
+    fn rung_of(inference: &LocusInference) -> AlleleLengthVariationRung {
+        tract_record(inference).allele_length_variation_rung()
     }
 
     /// The run's libraries, none of them calibrated — a tract's row never reads a calibration,
@@ -5441,7 +5443,7 @@ mod tests {
     ///
     /// The driver's own tests are where the counts are checked against a gather.
     fn a_tract_record_this_fixture_did_not_gather() -> RepeatTractProvenance {
-        RepeatTractProvenance::new(LengthSpectrumRung::StatedFlat, 0, 0, 0, 0, false)
+        RepeatTractProvenance::new(AlleleLengthVariationRung::StatedFlat, 0, 0, 0, 0, false)
     }
 
     /// The call this fixture expects, unwrapped — a `Missing` here is the test's failure and
@@ -8173,7 +8175,7 @@ mod tests {
         );
     }
 
-    /// **The tract's prior seed is its stratum's fitted length spectrum, restricted to the
+    /// **The tract's prior seed is its stratum's fitted allele length variation, restricted to the
     /// lengths this locus is called over and scaled by the strength the fit holds them with** —
     /// asserted as numbers, because nothing else in this file can fail if it is wrong.
     ///
@@ -8193,7 +8195,7 @@ mod tests {
     /// - the ordinary-site seed builder called instead of the tract's, which gives the run's two
     ///   numbers and no length in sight.
     #[test]
-    fn the_tracts_prior_seed_is_its_fitted_length_spectrum_over_the_candidates() {
+    fn the_tracts_prior_seed_is_its_fitted_allele_length_variation_over_the_candidates() {
         let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
         let mut scratch = worker_scratch();
         let _ = call_tract(
@@ -8211,7 +8213,7 @@ mod tests {
     }
 
     /// **A tract whose reads say nothing is decided by its fitted prior alone, and the prior it
-    /// is decided by is a length spectrum.**
+    /// is decided by is an allele length variation.**
     ///
     /// One sample with no reads at all. Its likelihood row is flat, so its posterior is its
     /// prior, and at one sample the leave-one-out subtraction removes its own vote from its own
@@ -8757,7 +8759,7 @@ mod tests {
     /// **The same comparison at the tract ladder's bottom rung, where the prior's shape is flat
     /// rather than fitted.**
     ///
-    /// A run whose repeat fit produced no length spectrum anywhere seeds every tract from the
+    /// A run whose repeat fit produced no allele length variation anywhere seeds every tract from the
     /// ladder's bottom rung: a **flat** shape at one chromosome of belief. Everything else is held
     /// at the fixture above's — the same three samples, the same four reads apiece, the same
     /// fitted substitution rates — so the one thing that changes is the prior's shape.
@@ -8812,7 +8814,7 @@ mod tests {
 
         assert_eq!(
             rung_of(&tight),
-            LengthSpectrumRung::StatedFlat,
+            AlleleLengthVariationRung::StatedFlat,
             "this fixture is about the bottom rung only while it is on the bottom rung"
         );
         for sample in 0..3 {
@@ -8838,7 +8840,7 @@ mod tests {
         );
     }
 
-    /// **A repeat tract's prior comes from its stratum's length spectrum, and the record says
+    /// **A repeat tract's prior comes from its stratum's allele length variation, and the record says
     /// which rung of the ladder answered.**
     ///
     /// The run's repeat fit reached this tract's own stratum, so the rung is the stratum's own
@@ -8860,7 +8862,7 @@ mod tests {
             &tract_libraries(),
             &mut scratch,
         );
-        assert_eq!(rung_of(&fitted), LengthSpectrumRung::StratumsOwnFit);
+        assert_eq!(rung_of(&fitted), AlleleLengthVariationRung::StratumsOwnFit);
 
         let mut unfitted_scratch = worker_scratch();
         let unfitted = call_tract(
@@ -8872,7 +8874,7 @@ mod tests {
         );
         assert_eq!(
             rung_of(&unfitted),
-            LengthSpectrumRung::StatedFlat,
+            AlleleLengthVariationRung::StatedFlat,
             "the ladder always answers, and says from how far down"
         );
     }
@@ -8883,7 +8885,7 @@ mod tests {
     /// show a clear that was dropped.
     ///
     /// **The defaulting tract runs first here too, and it does more work in this order.** The
-    /// first tract's fit reaches no stratum at all, so its length spectrum is the flat one at a
+    /// first tract's fit reaches no stratum at all, so its allele length variation is the flat one at a
     /// stated concentration and its seed is spread evenly over its candidates; the second's is
     /// the stratum's own fitted shape, which is not flat. A seed buffer left over from the first
     /// is therefore a visibly different distribution rather than a plausible one.
@@ -8923,14 +8925,14 @@ mod tests {
     /// two (`population_diversity.md` §8, check 3).
     #[test]
     fn a_tract_whose_stratum_the_fit_missed_is_seeded_from_its_motif_periods_pool() {
-        use crate::parameter_estimation::joint::ssr_fit::PeriodLengthSpectrum;
+        use crate::parameter_estimation::joint::ssr_fit::PeriodAlleleLengthVariation;
         // A fit that reached no stratum of its own, but pooled every dinucleotide tract it saw.
         let pooled = StratumFits::over(&[], std::collections::BTreeMap::new())
-            .with_period_length_spectra(std::collections::BTreeMap::from([(
+            .with_period_allele_length_variations(std::collections::BTreeMap::from([(
                 2,
-                PeriodLengthSpectrum {
+                PeriodAlleleLengthVariation {
                     period: 2,
-                    length_spectrum: vec![0.10, 0.20, 0.40, 0.20, 0.10],
+                    allele_length_variation: vec![0.10, 0.20, 0.40, 0.20, 0.10],
                     concentration: 12.0,
                     tracts_fitted: 900,
                     strata_pooled: 7,
@@ -8947,7 +8949,10 @@ mod tests {
             &tract_libraries(),
             &mut scratch,
         );
-        assert_eq!(rung_of(&inference), LengthSpectrumRung::PeriodsPooledTracts);
+        assert_eq!(
+            rung_of(&inference),
+            AlleleLengthVariationRung::PeriodsPooledTracts
+        );
     }
 
     /// **A tract's warrant is the weakest of the repeat parameters it was scored under, and the
@@ -9141,7 +9146,7 @@ mod tests {
         }
     }
 
-    /// **The contaminant seed's own numbers**, on a fitted length spectrum, over a candidate set
+    /// **The contaminant seed's own numbers**, on a fitted allele length variation, over a candidate set
     /// built so that no shortcut reproduces them.
     ///
     /// **Three candidates, and each is there to kill one shortcut.** The reference spells six
@@ -9212,8 +9217,10 @@ mod tests {
             &scored,
             TractPrior {
                 reference_repeats,
-                length_spectrum: parameters
-                    .ssr_length_spectrum_at(tract_detail().motif.ssr_period(), reference_repeats),
+                allele_length_variation: parameters.ssr_allele_length_variation_at(
+                    tract_detail().motif.ssr_period(),
+                    reference_repeats,
+                ),
             },
             &parameters,
         );
@@ -9259,7 +9266,7 @@ mod tests {
     /// At an ordinary site the contaminant's half of the mixture is `q(o)`, the cohort's own
     /// frequency for the allele an observation shows, which the loop rewrites at every pass — so
     /// a contaminated SNP is assembled again at the head of each one. **At a tract the third
-    /// term is the fit's length spectrum for this tract's stratum, frozen before calling
+    /// term is the fit's allele length variation for this tract's stratum, frozen before calling
     /// starts**: `read_likelihoods.md` §4.5.1 weighed the cohort's own frequencies against it and
     /// refused them, precisely because contamination must not move from one pass to the next. So
     /// a contaminated tract costs exactly what an uncontaminated one costs.

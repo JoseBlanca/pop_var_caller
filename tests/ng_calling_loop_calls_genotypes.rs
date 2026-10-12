@@ -73,7 +73,9 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ClimbEnding, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
     StratumOutcome,
 };
-use pop_var_caller::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, StratumFits};
+use pop_var_caller::parameter_estimation::joint::stratum_fits::{
+    AlleleLengthVariationRung, StratumFits,
+};
 use pop_var_caller::parameter_estimation::repeat_strata::{
     RepeatCount, Stratum as SsrStratum, StratumKey,
 };
@@ -314,8 +316,8 @@ fn tract_record(inference: &LocusInference) -> RepeatTractProvenance {
 }
 
 /// Which rung of the tract ladder that record's prior shape came from.
-fn rung_of(inference: &LocusInference) -> LengthSpectrumRung {
-    tract_record(inference).length_spectrum_rung()
+fn rung_of(inference: &LocusInference) -> AlleleLengthVariationRung {
+    tract_record(inference).allele_length_variation_rung()
 }
 
 /// **ng calls genotypes at a SNP, and the three a reader can derive by hand come out.**
@@ -828,9 +830,9 @@ fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
 }
 
 /// **A repeat fit that reached both of this tract's candidate strata**, each with its own
-/// slippage numbers and its own length spectrum.
+/// slippage numbers and its own allele length variation.
 ///
-/// The length spectrum is one share per whole-repeat offset from the reference tract length, two
+/// The allele length variation is one share per whole-repeat offset from the reference tract length, two
 /// repeats either way. **No two of its classes share a weight and neither spectrum is a
 /// palindrome**, so reading one class for another, or reading a spectrum backwards, is a
 /// different prior rather than the same one — and each leans toward contraction, as every real
@@ -864,51 +866,53 @@ fn tract_strata_describing(
         curve: None,
         reach: None,
     };
-    let fitted_stratum =
-        |repeats: u64, level_in_group_0: f64, length_spectrum: Vec<f64>, concentration: f64| {
-            StratumOutcome::Fitted(Box::new(StratumFit {
-                standard_errors: None,
-                stratum: FitStratum {
-                    period: 2,
-                    reference_repeats: repeats,
-                },
-                slippage: vec![
-                    Some(Slippage {
-                        level: level_in_group_0,
-                        shorter_share: 0.83,
-                        fall_off: 0.25,
-                    }),
-                    Some(Slippage {
-                        level: level_in_group_0 * 1.75,
-                        shorter_share: 0.62,
-                        fall_off: 0.41,
-                    }),
-                ],
-                length_spectrum,
-                concentration,
-                log_likelihood_a_tract: -1.5,
-                tracts_fitted: 40,
-                borrowed: Vec::new(),
-                ending: ClimbEnding::Settled,
-                walks: Vec::new(),
-                samples_fitted_on: None,
-                tracts_of_its_own: 40,
-                reads_crossing: 400,
-                level_provenance: vec![Some(level), Some(level)],
-                shares_provenance: vec![
-                    Some(SharesProvenance {
-                        slipped_reads: Some(400.0),
-                        shorter_share: share,
-                        fall_off: share,
-                    }),
-                    Some(SharesProvenance {
-                        slipped_reads: Some(400.0),
-                        shorter_share: share,
-                        fall_off: share,
-                    }),
-                ],
-            }))
-        };
+    let fitted_stratum = |repeats: u64,
+                          level_in_group_0: f64,
+                          allele_length_variation: Vec<f64>,
+                          concentration: f64| {
+        StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
+            stratum: FitStratum {
+                period: 2,
+                reference_repeats: repeats,
+            },
+            slippage: vec![
+                Some(Slippage {
+                    level: level_in_group_0,
+                    shorter_share: 0.83,
+                    fall_off: 0.25,
+                }),
+                Some(Slippage {
+                    level: level_in_group_0 * 1.75,
+                    shorter_share: 0.62,
+                    fall_off: 0.41,
+                }),
+            ],
+            allele_length_variation,
+            concentration,
+            log_likelihood_a_tract: -1.5,
+            tracts_fitted: 40,
+            borrowed: Vec::new(),
+            ending: ClimbEnding::Settled,
+            walks: Vec::new(),
+            samples_fitted_on: None,
+            tracts_of_its_own: 40,
+            reads_crossing: 400,
+            level_provenance: vec![Some(level), Some(level)],
+            shares_provenance: vec![
+                Some(SharesProvenance {
+                    slipped_reads: Some(400.0),
+                    shorter_share: share,
+                    fall_off: share,
+                }),
+                Some(SharesProvenance {
+                    slipped_reads: Some(400.0),
+                    shorter_share: share,
+                    fall_off: share,
+                }),
+            ],
+        }))
+    };
     StratumFits::over(
         &[
             // **No two adjacent pairs of these weights are in the same ratio.** The first
@@ -1064,7 +1068,7 @@ fn call_contaminated_tract(
 }
 
 /// **ng calls genotypes at a repeat tract** — reads in, genotypes out, over the run's own fitted
-/// slippage numbers and its own fitted length spectrum.
+/// slippage numbers and its own fitted allele length variation.
 ///
 /// Three samples at a dinucleotide `AT` tract called over 6 whole repeats — the reference — and
 /// 7. The first showed 20 reads of the 7-repeat tract, the second 10 of each length, the third
@@ -1103,8 +1107,8 @@ fn three_samples_at_a_repeat_tract_are_called_from_their_reads() {
 
     assert_eq!(
         rung_of(&inference),
-        LengthSpectrumRung::StratumsOwnFit,
-        "the tract's prior came from its own stratum's fitted length spectrum"
+        AlleleLengthVariationRung::StratumsOwnFit,
+        "the tract's prior came from its own stratum's fitted allele length variation"
     );
     assert_eq!(
         inference.weakest_provenance,
@@ -1150,7 +1154,7 @@ fn a_tract_in_a_run_that_fitted_nothing_is_still_called_and_says_what_it_rested_
     assert_eq!(genotype_of(&inference, 2), vec![0, 0]);
     assert_eq!(
         rung_of(&inference),
-        LengthSpectrumRung::StatedFlat,
+        AlleleLengthVariationRung::StatedFlat,
         "the ladder always answers, and says from how far down"
     );
     assert_eq!(inference.weakest_provenance, Provenance::Defaulted);
@@ -1163,7 +1167,7 @@ fn a_tract_in_a_run_that_fitted_nothing_is_still_called_and_says_what_it_rested_
 /// **This is the case the prior's old construction refused outright.** A tract's prior belief
 /// used to be built as a decay away from the cohort's commonest length and scaled to reproduce a
 /// measured diversity, which one outbred sample cannot supply. It is now read from the fit's own
-/// per-stratum length spectrum, which is fitted across *tracts* — and a single genome carries the
+/// per-stratum allele length variation, which is fitted across *tracts* — and a single genome carries the
 /// same tracts a panel does.
 #[test]
 fn one_sample_is_called_at_a_tract_on_its_own_reads() {
@@ -1174,7 +1178,7 @@ fn one_sample_is_called_at_a_tract_on_its_own_reads() {
     assert_eq!(genotype_of(&inference, 0), vec![1, 1]);
     assert_eq!(
         rung_of(&inference),
-        LengthSpectrumRung::StratumsOwnFit,
+        AlleleLengthVariationRung::StratumsOwnFit,
         "one sample reaches the same rung as a panel: the spectrum is fitted across tracts"
     );
 }
@@ -1215,7 +1219,7 @@ fn a_repeat_tract_carries_no_artifact_summary_where_a_snp_carries_one() {
 /// population's frequency for the allele an observation shows is the cohort's own estimate, so it
 /// moves as the loop iterates. At a tract there is no such number per length that is fixed before
 /// calling — so the mixture uses the genotype prior's own belief about which lengths this tract
-/// can be, which is the joint repeat fit's length spectrum for this tract's stratum. It is
+/// can be, which is the joint repeat fit's allele length variation for this tract's stratum. It is
 /// specific to the locus, because it is indexed from this tract's own reference length, and it is
 /// frozen, because the fit produced it before calling started.
 #[test]
@@ -1289,7 +1293,7 @@ fn a_contaminants_reads_at_a_tract_are_not_called_as_a_second_allele() {
 /// **What a tract's call rested on comes out beside the genotypes, and a SNP's does not.**
 ///
 /// This is the end-to-end half of what the run has to be able to say about itself. A genotype
-/// scored under a fitted length spectrum and one scored under a stated flat shape are different
+/// scored under a fitted allele length variation and one scored under a stated flat shape are different
 /// claims; so are one whose reads were shared out with a contaminant and one whose were not.
 /// Nothing in the called genotype says which, so the record carries it.
 ///
