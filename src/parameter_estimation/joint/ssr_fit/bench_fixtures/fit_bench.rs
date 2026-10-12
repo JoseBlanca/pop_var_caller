@@ -348,6 +348,9 @@ impl PeriodFit for TheCountingFit {
             (true, true) => "B_noprior",
             (false, _) => "B_within",
         };
+        if self.tolerance < 1e-7 {
+            return format!("{estimator}_tight");
+        }
         match self.errors {
             CountingFitErrorMethod::Sandwich => estimator.to_owned(),
             CountingFitErrorMethod::None => format!("{estimator}_noerrors"),

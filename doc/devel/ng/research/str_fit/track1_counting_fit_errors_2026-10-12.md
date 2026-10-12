@@ -463,8 +463,8 @@ replicate's counting takes more rounds and the advantage shrinks (8.9× for 50 r
 - **Only one truth on drawn classes**: slip rate 0.08, concentration 0.5. The fitting bench adds the
   tomato-like curves, at 60 and 2,000 samples.
 - **Few draws at the slow settings** (§3), and one seed at the bench's 2,000-sample cell.
-- **The stutter's bias at long tracts and 2,000 samples** (§5.2): seen on one seed, cause open.
-- **The bench's held-out score skips classes without a concentration** (§7).
+- **The stutter's bias at long tracts and 2,000 samples** (§5.2): established and traced in §12.1.
+- **The bench's held-out score skipped classes without a concentration** (§7): fixed in §12.2.
 - **Times are provisional** (§8).
 
 ---
@@ -488,6 +488,126 @@ target/release/examples/ng_str_fit_bench --period 1 --samples 60 --depth 3 --see
 Code: `src/parameter_estimation/joint/ssr_fit/counting_fit_errors.rs` (`sandwich_errors`,
 `bootstrap_errors`) and `composite_fit.rs` (the fixes); the bench's method B reports the sandwich
 errors, `B_bootstrap` the bootstrap's.
+
+## 12. Follow-up, 2026-10-12 evening: the stutter bias at 2,000 samples, and the held-out fallback
+
+### 12.1 The bias is real; the shares' prior causes most of it
+
+**The bias.** All runs here are on the bench, period 1, 2,000 samples, 3 reads, the tomato-like
+truth, at most 100 loci a class, restricted to the six classes of 16 to 21 repeats
+(`--repeats 16-21`; each class is fitted on its own, so restricting does not change their fits).
+The tomato2 counts give those classes only 16 to 60 loci each. Over six seeds, with the code as of
+§6 and §7:
+
+| fit | class fits | slip rate, mean relative bias (standard error) | mean z | sandwich: within 1 / 2 errors |
+|---|---|---|---|---|
+| as shipped (share prior 1 tract) | 36 | **−0.81% (0.13%)** | −1.50 | 39 / 61 |
+| share prior removed | 36 | −0.21% (0.11%) | −0.28 | 50 / 89 |
+
+z is (estimate − truth) / reported error, so the shipped fit's slip rate sits 1.5 of its errors low
+on average. The shorter share and the fall-off move with it, at smaller z: the shorter share
++0.69% (z +0.78), the fall-off −0.86% (z −0.91); without the prior, +0.35% and −0.41%. Without the
+prior 8 of the 36 class fits got no sandwich error (shares of exactly zero again); that was not
+followed up, since the prior stays.
+
+**Isolating it, cheapest first** (seeds 1 to 3 unless stated, mean relative bias of the slip rate;
+the shipped fit's is −0.87% on the same three seeds):
+
+| change | what it tests | slip rate bias | reading |
+|---|---|---|---|
+| tolerance 10⁻¹⁰, up to 20,000 rounds | the fit stopping early | −0.87%, identical to 4 digits | not convergence |
+| share prior 0.1 tract | the prior's size | −0.45% | the bias scales with the prior |
+| share prior 0.01 tract | | −0.33% | |
+| share prior 0 | | −0.30% | |
+| between-locus share 0.02 in place of 0.7 | the composite likelihood's shortcut, which is exact when loci do not differ | −0.71% | **not the shortcut** |
+| 30 reads a sample in place of 3 | how far reads tell slips from alleles | −0.19% | depth removes most of it |
+| alleles drawn only inside ±8 (seeds 1–5) | the ±9 edge's "9 or more" meaning | −0.48% (0.10%) | about 0.3 points of it |
+| alleles only inside ±8 and no prior (seeds 1–5) | both | **−0.10% (0.08%), z −0.01, 73 / 96** | **gone** |
+
+**The cause: mostly the shares' prior, partly alleles past the ±9 edge.**
+
+- **The prior** (§6) adds one tract's worth of allele draws, spread evenly over the 19 lengths. At
+  these thin classes that is 1/(19 × 16 to 60) of the draws on every length: about 0.001 to 0.003
+  of share. On the lengths one repeat either side of a common allele it is extra allele mass where
+  slips land, so some reads that slipped are explained as alleles instead and the slip rate comes
+  out low. That reading fits the measurements: the bias grows with the prior's weight, vanishes at
+  30 reads (where a sample's reads tell a slip from a second allele), and does not depend on the
+  between-locus share. The mechanism itself was not checked read by read.
+- **Alleles past the edge.** The bench draws alleles to ±14; the fit's outermost lengths mean "9 or
+  more". An allele 12 short sends its longer slips of up to 3 repeats into the same end bucket as
+  its exact reads, where the model's −9 length would send 2-step slips to −7. The fit can only
+  match "nothing escapes" by lowering the slip rate. With the prior on, drawing alleles only inside
+  ±8 moves the bias from −0.81% to −0.48%; with the prior off, from −0.21% to −0.10%, which is
+  inside its noise. At the drawn setting of §5.2 (slip rate 0.08, shorter share 0.8) it did not
+  show; here the longer slips are 40% of slips at a rate of 0.27, five times as many.
+
+**What the fix costs: the prior is a trade between stutter bias and held-out prediction.**
+Held-out score against the truth, seed 1, period 1 (the §6 cells), a locus:
+
+| share prior | slip rate bias, 16–21 repeats | held-out, 2,000 samples, 3 reads | held-out, 1 sample, 300 reads |
+|---|---|---|---|
+| 1 tract (shipped) | −0.81% (6 seeds) | **+0.56** | −0.85 |
+| 0.01 tract | −0.33% (3 seeds) | −1.06 | −1.17 |
+| none (before §6) | −0.21% (6 seeds) | −385 | −47.8 (575 loci) |
+
+**The larger prior predicts held-out loci better**, by 1.6 units a locus at 2,000 samples: shares
+fitted on 16 to 100 loci are noisy, and pulling them towards flat helps at loci the fit has not
+seen. The same pull costs the stutter its 0.5 points. **No change is made**: which side of the trade
+matters more is a design question, not a measurement. The data point both ways at once to the
+parametric shape of avenue C: a few numbers for the shares would remove the noise the prior is
+smoothing, and with it the reason for a prior that is large on lengths next to common alleles.
+The lead's options:
+
+1. **Keep 1 tract.** The slip rate is about 0.8% low (0.268 for 0.27) at long, thin classes and 2,000
+   samples; at 3 reads and fewer samples the bias is a small part of the error (§5, 60 samples: the
+   slip rate covers at 67–72 / 89–98). The errors should then not be read as covering a bias below
+   about 1%.
+2. **Lower it to 0.01 tract.** The stutter bias drops to −0.33%, and held-out prediction loses about
+   1.6 units a locus at 2,000 samples and 0.3 at one sample.
+3. **Change the prior's shape** (a design change, not measured): weight proportional to a smooth
+   shape, or a floor that lifts only shares near zero, so the lengths next to common alleles carry
+   almost no prior mass. A floor is not the maximum of any objective, which the sandwich assumes.
+
+The edge's catch-all meaning is a second design question: widening the allele window to ±12 would
+remove it at 325 genotypes in place of 190; at the tomato-like truth it is worth about 0.3 points of
+slip rate with the prior and is within noise without it.
+
+### 12.2 The held-out score now scores classes without a concentration
+
+**Calling's fallback, copied.** Calling seeds a tract's genotype prior from the tract ladder: the
+class's own shares and concentration where it has both; otherwise a flat shape at the stated
+concentration, the median of the run's fitted concentrations, or `STATED_FLAT_CONCENTRATION` (one)
+where none was fitted (`StratumFits::allele_length_variation_at`). The ladder's middle rung, a
+period's pooled tracts, is reached only when a run asks for it, and the bench does not.
+`fit_bench::numbers_for_scoring` does the same over the classes of one motif length, and the bench
+writes `heldout_loci_on_fallback` beside `heldout_loci` for every class. A class with shares but no
+concentration goes to the bottom rung, because calling's top rung needs both. Keeping the class's
+own shares at the stated concentration would likely score better, but it is not what calling does.
+
+**The one-sample corners, rescored** (period 1, B, seeds 1–3, at most 100 loci a class). Held-out
+score against the truth, a locus, before the curves / after them; then loci scored, and of them
+those on the fallback:
+
+| cell | seed 1 | seed 2 | seed 3 |
+|---|---|---|---|
+| 3 reads | −1.72 / −1.68; 911 loci, 893 on the fallback | −1.57 / −1.57; 925, all 925 | −1.45 / −1.44; 927, 834 |
+| 300 reads | −0.85 / −0.84; 971, 396 | −1.23 / −1.22; 971, 618 | −0.89 / −0.88; 971, 453 |
+
+**Every held-out locus is now scored.** The counting fit placed a concentration in 0, 0 and 1 of
+the 14 classes at 3 reads (excesses of 0.85–0.99 leave a single sample's two copies almost always
+one draw), and in 7 to 9 of 14 at 300 reads. At 3 reads no class had a concentration in seeds 1 and
+2, so the fallback's strength is the stated constant, one.
+
+**Against phase 0** (`phase0_bench_2026-10-12.md` §3.3, the fit before §6 and §7, which scored every
+locus at a concentration of 10⁴): at 300 reads the loss falls from 41–54 units a locus to 0.85–1.23.
+At 3 reads, after the curves, it rises from 0.46–0.68 to 1.44–1.68. That cell now scores nearly every
+class at a flat shape, where phase 0 scored them at the class's own shares, so the rise is the
+fallback's flat shape against the fitted one rather than a worse fit.
+
+**The climb (A) was not rescored.** Its one held-out one-sample cell in phase 0 took 2.9 hours
+(10,588 s); a single fit of every class took 15 to 40 minutes, and the held-out score needs six.
+None of its cells would finish within 30 minutes.
+
 
 ---
 

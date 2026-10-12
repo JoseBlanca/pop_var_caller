@@ -132,6 +132,10 @@ struct Cli {
     /// offset most of the locus's reads report and the share the fit gave that offset.
     #[arg(long)]
     locus_out: Option<PathBuf>,
+    /// The shares' prior weight method B fits at, in tracts, in place of the counting fit's own
+    /// (`SHARE_PRIOR_TRACTS`). For measuring what the prior does.
+    #[arg(long)]
+    share_prior_tracts: Option<f64>,
     /// How far either side of the reference alleles are drawn, in place of the truth's (14).
     #[arg(long)]
     allele_reach: Option<i32>,
@@ -153,12 +157,23 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
                 },
             })
         }
-        "B" => Box::new(TheCountingFit::default()),
+        "B" => Box::new(TheCountingFit {
+            share_prior_tracts: cli
+                .share_prior_tracts
+                .unwrap_or(TheCountingFit::default().share_prior_tracts),
+            ..TheCountingFit::default()
+        }),
         "B_within" => Box::new(TheCountingFit {
             pairs: false,
             ..TheCountingFit::default()
         }),
         "B_noerrors" => Box::new(TheCountingFit {
+            errors: CountingFitErrorMethod::None,
+            ..TheCountingFit::default()
+        }),
+        "B_tight" => Box::new(TheCountingFit {
+            tolerance: 1e-10,
+            max_rounds: 20_000,
             errors: CountingFitErrorMethod::None,
             ..TheCountingFit::default()
         }),
@@ -172,7 +187,7 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
         }),
         other => panic!(
             "no method is called {other}; the methods are A, B, B_within, B_noerrors, \
-             B_noprior and B_bootstrap"
+             B_noprior, B_tight and B_bootstrap"
         ),
     }
 }
