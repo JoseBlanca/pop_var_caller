@@ -55,8 +55,8 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
     ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan, HeldOutSettings, PeriodFit,
-    Sampler, TheClimb, TheCountingFit, numbers_for_scoring, score_locus, with_the_curves,
-    without_fold,
+    Sampler, ScoringFallback, TheClimb, TheCountingFit, numbers_for_scoring, score_locus,
+    with_the_curves, without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence, TractReads,
@@ -136,6 +136,14 @@ struct Cli {
     /// (`SHARE_PRIOR_TRACTS`). For measuring what the prior does.
     #[arg(long)]
     share_prior_tracts: Option<f64>,
+    /// Score a class with its own shares but no concentration at its own shares and the stated
+    /// concentration, in place of calling's flat bottom rung. For measurement only.
+    #[arg(long)]
+    fallback_keeps_own_shares: bool,
+    /// The held-out score's stated concentration for a class without one, in place of the
+    /// period's median (or one where no class has one). For measurement only.
+    #[arg(long)]
+    stated_concentration: Option<f64>,
     /// How far either side of the reference alleles are drawn, in place of the truth's (14).
     #[arg(long)]
     allele_reach: Option<i32>,
@@ -674,7 +682,13 @@ fn main() {
                 for (variant_index, (variant, estimates)) in fitted.iter().enumerate() {
                     // A class without its own shares or concentration is scored at calling's
                     // fallback rung and counted, not skipped.
-                    let scored_numbers = numbers_for_scoring(estimates);
+                    let scored_numbers = numbers_for_scoring(
+                        estimates,
+                        ScoringFallback {
+                            keep_own_shares: cli.fallback_keeps_own_shares,
+                            stated_concentration: cli.stated_concentration,
+                        },
+                    );
                     let numbers: Vec<Option<ClassNumbers>> = scored_numbers
                         .iter()
                         .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))

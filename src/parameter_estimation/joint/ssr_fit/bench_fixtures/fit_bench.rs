@@ -146,19 +146,25 @@ pub struct ScoredNumbers {
 ///
 /// The median is over `estimates`, the classes of one motif length fitted together: the bench's
 /// stand-in for a run. A class with no stutter (no answer and no curve) is still not scored.
+///
+/// `fallback` can depart from calling, for measurement only ([`ScoringFallback`]).
 #[must_use]
-pub fn numbers_for_scoring(estimates: &[ClassEstimate]) -> Vec<Option<ScoredNumbers>> {
+pub fn numbers_for_scoring(
+    estimates: &[ClassEstimate],
+    fallback: ScoringFallback,
+) -> Vec<Option<ScoredNumbers>> {
     let mut fitted: Vec<f64> = estimates
         .iter()
         .filter(|estimate| estimate.allele_length_variation.is_some())
         .filter_map(|estimate| estimate.concentration)
         .collect();
     fitted.sort_by(f64::total_cmp);
-    let stated = match fitted.len() {
+    let median = match fitted.len() {
         0 => crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION,
         count if count % 2 == 1 => fitted[count / 2],
         count => 0.5 * (fitted[count / 2 - 1] + fitted[count / 2]),
     };
+    let stated = fallback.stated_concentration.unwrap_or(median);
     estimates
         .iter()
         .map(|estimate| {
@@ -172,6 +178,14 @@ pub fn numbers_for_scoring(estimates: &[ClassEstimate]) -> Vec<Option<ScoredNumb
                             concentration,
                         },
                         on_the_fallback: false,
+                    },
+                    (Some(shares), None) if fallback.keep_own_shares => ScoredNumbers {
+                        numbers: ClassNumbers {
+                            slippage,
+                            allele_length_variation: shares.clone(),
+                            concentration: stated,
+                        },
+                        on_the_fallback: true,
                     },
                     (shares, _) => {
                         let lengths = shares
@@ -190,6 +204,19 @@ pub fn numbers_for_scoring(estimates: &[ClassEstimate]) -> Vec<Option<ScoredNumb
             )
         })
         .collect()
+}
+
+/// **How [`numbers_for_scoring`] fills a class that lacks its own numbers.** The default is what
+/// calling does; the two departures exist to measure what calling's choice costs, and calling is
+/// not changed by them.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScoringFallback {
+    /// For a class with its own shares but no concentration, keep its shares and take only the
+    /// stated concentration, where calling's ladder replaces both by the bottom rung's flat shape.
+    pub keep_own_shares: bool,
+    /// The stated concentration in place of the period's median (or
+    /// [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)).
+    pub stated_concentration: Option<f64>,
 }
 
 impl ClassNumbers {
@@ -1673,7 +1700,7 @@ mod tests {
             estimate(11, None, true),
             estimate(12, None, false),
         ];
-        let scored = numbers_for_scoring(&estimates);
+        let scored = numbers_for_scoring(&estimates, ScoringFallback::default());
         let own = scored[1]
             .as_ref()
             .expect("a class with its numbers is scored");
@@ -1690,10 +1717,27 @@ mod tests {
         assert_eq!(fallback.numbers.allele_length_variation, vec![1.0 / 3.0; 3]);
         assert!(scored[4].is_none());
 
-        let none = numbers_for_scoring(&[estimate(8, None, true)]);
+        let none = numbers_for_scoring(&[estimate(8, None, true)], ScoringFallback::default());
         assert_eq!(
             none[0].as_ref().map(|s| s.numbers.concentration),
             Some(crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)
         );
+
+        // Kept shares, and a stated concentration in place of the median.
+        let kept = numbers_for_scoring(
+            &estimates,
+            ScoringFallback {
+                keep_own_shares: true,
+                stated_concentration: Some(2.0),
+            },
+        );
+        let fallback = kept[3].as_ref().expect("scored");
+        assert!(fallback.on_the_fallback);
+        assert_eq!(
+            fallback.numbers.allele_length_variation,
+            vec![0.2, 0.6, 0.2]
+        );
+        assert_eq!(fallback.numbers.concentration, 2.0);
+        assert_eq!(kept[1].as_ref().map(|s| s.numbers.concentration), Some(0.4));
     }
 }

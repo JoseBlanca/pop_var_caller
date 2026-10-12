@@ -609,6 +609,64 @@ fallback's flat shape against the fitted one rather than a worse fit.
 None of its cells would finish within 30 minutes.
 
 
+### 12.3 The prior's size: decided
+
+**The lead's decision, 2026-10-13: the shares' prior stays at one tract.** At long, thin classes and
+2,000 samples the slip rate is therefore about 0.8% low (0.268 for 0.27 on the bench), and **the
+reported errors do not cover that bias**: there the slip rate falls within one error in 39 fits of
+100. The trade between that bias and held-out prediction (§12.1) goes to the comparison with
+penalised EM (avenue D) and the parametric shape (avenue C).
+
+## 13. Follow-up, 2026-10-13: what calling's fallback throws away at one sample
+
+**The question.** Calling's tract ladder needs a class's shares and its concentration together.
+When the concentration is absent it drops the class's own shares as well and seeds the prior from a
+flat shape (§12.2). At one sample and three reads that sends nearly every class to the flat shape.
+The bench now has an option, `--fallback-keeps-own-shares`, that keeps the class's own shares and
+takes only the stated concentration from the fallback. `--stated-concentration` replaces that
+stated value. **The default is unchanged and is what calling does; calling is not changed.**
+
+**Rescored** (bench, period 1, one sample, method B, at most 100 loci a class, every held-out locus
+scored). Held-out score against the truth, a locus, before the curves / after them:
+
+| reads | seed | calling's fallback (flat shape) | own shares kept |
+|---|---|---|---|
+| 3 | 1 | −1.72 / −1.68 | **−0.17 / −0.14** |
+| 3 | 2 | −1.57 / −1.57 | −0.14 / −0.14 |
+| 3 | 3 | −1.45 / −1.44 | −0.14 / −0.11 |
+| 300 | 1 | −0.85 / −0.84 | −0.17 / −0.15 |
+| 300 | 2 | −1.23 / −1.22 | −0.15 / −0.14 |
+| 300 | 3 | −0.89 / −0.88 | −0.17 / −0.16 |
+
+**Keeping the class's own shares cuts the held-out loss about tenfold** at three reads (from 1.4–1.7
+units a locus to 0.11–0.17) and five- to eightfold at 300 reads (from 0.84–1.23 to 0.14–0.17). At
+three reads it also beats phase 0's fit, which scored the same shares at the pairs search's bound
+(0.46–0.68 after the curves, `phase0_bench_2026-10-12.md` §3.3). At three reads almost no class has
+a concentration (0 or 1 of 14), so these figures are nearly all the fallback. At 300 reads 7 to 9 of
+14 classes have their own concentration, and the gap comes from the other 5 to 7.
+
+**The stated concentration hardly matters at one sample.** At three reads, seeds 1–3, after the
+curves:
+
+| stated concentration | calling's fallback | own shares kept |
+|---|---|---|
+| 0.5 | −1.68, −1.57, −1.44 | −0.14, −0.13, −0.11 |
+| 1 (the default here: no class has one) | −1.69, −1.57, −1.44 | −0.14, −0.14, −0.11 |
+| 2 | −1.69, −1.58, −1.44 | −0.14, −0.14, −0.11 |
+| 5 | −1.70, −1.58, −1.45 | −0.14, −0.14, −0.11 |
+
+With one sample at a locus, the concentration enters only through the chance that the sample's two
+copies are one draw, `h + (1 − h) / (1 + c)` for a homozygote excess `h`. At the bench's excesses of
+0.85–0.99 that chance moves by at most a few hundredths across these values. So the answer to "how
+sensitive" holds for one sample only; with several samples a locus the concentration sets how
+alike they are, and this measurement says nothing there.
+
+**What it means for calling (not changed here).** At one sample the shares the counting fit
+estimates are worth keeping even when the concentration cannot be placed: dropping them to a flat
+shape costs 1.3 to 1.6 log-likelihood units a held-out locus at three reads. A rung in the ladder
+for "own shares, stated concentration" would keep them. That is a change to calling's
+`StratumFits`, for the owner and the lead to decide.
+
 ---
 
 ## Appendix: full coverage tables
