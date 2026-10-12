@@ -31,8 +31,9 @@
 //! and `B` the tract-to-tract spread of the slopes.
 
 use super::composite_fit::{
-    ConcentrationSource, CountedClass, Counts, PairRow, expected_counts_by_tract,
-    pair_rows_by_tract, refit_class_by_counting_from, scaled_ln_pairs_of_tract,
+    ConcentrationSource, CountedClass, Counts, PairRow, SHARE_PRIOR_TRACTS,
+    expected_counts_by_tract, pair_rows_by_tract, refit_class_by_counting_from,
+    scaled_ln_pairs_of_tract,
 };
 use super::*;
 
@@ -384,7 +385,7 @@ fn errors_from_covariance(
                 (StratumError::NotPlaced, StratumError::NotPlaced)
             }
             StratumError::Estimated(ln_error) => {
-                let c = fitted.concentration;
+                let c = fitted.concentration_counted_at;
                 let share = 1.0 / (1.0 + c);
                 (
                     StratumError::Estimated(c * ln_error),
@@ -408,11 +409,14 @@ fn errors_from_covariance(
 
 /// **The sandwich errors of a counting fit, and the plain inverse curvature beside them.**
 ///
-/// `fitted` is the answer of the estimator `source` names, on `evidence`, at `homozygote_excess`
-/// and `config` — the same ones it was fitted with. The concentration has an error only where its
-/// estimator has something to read: pairs need a tract with two samples, a sample's own two copies
-/// need a homozygote excess below one. Otherwise it is [`StratumError::NotIdentified`], and the
-/// other numbers' errors are those with the concentration held at its value.
+/// `fitted` is a counting fit of `evidence`, at `homozygote_excess` and `config` — the same ones it
+/// was fitted with; its errors follow the estimator it records (`concentration_from`). **Where the
+/// fit gives no concentration** (`CountedClass::concentration` is `None`) neither it nor the
+/// between-locus share has an error ([`StratumError::NotIdentified`]), and the other numbers'
+/// errors are those with the concentration held where the fit counted at it.
+///
+/// **The shares' prior** ([`SHARE_PRIOR_TRACTS`]) enters the curvature, since the fit maximises the
+/// objective with it added; it does not vary from tract to tract, so it is not in the spread.
 ///
 /// **A stutter number at an end of its range** — a shorter share of exactly one when no read slipped
 /// longer, say — is held there and reported as [`StratumError::NotPlaced`]: the formula needs room
@@ -424,10 +428,10 @@ fn errors_from_covariance(
 pub fn sandwich_errors(
     evidence: &StratumEvidence,
     fitted: &CountedClass,
-    source: ConcentrationSource,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
 ) -> CurvatureErrors {
+    let source = fitted.concentration_from;
     let classes = allele_classes_of(config);
     let pivot = fitted
         .allele_length_variation
@@ -438,8 +442,7 @@ pub fn sandwich_errors(
     let free_shares: Vec<usize> = (0..classes)
         .filter(|class| *class != pivot && fitted.allele_length_variation[*class] > SMALLEST_SHARE)
         .collect();
-    let concentration_identified =
-        the_concentration_is_identified(evidence, source, homozygote_excess);
+    let concentration_identified = fitted.concentration.is_some();
     let at_an_end = |value: f64, highest: f64| value <= 1e-6 || value >= highest - 1e-6;
     let held_stutter = [
         at_an_end(fitted.slippage.level, 1.0),
@@ -458,7 +461,7 @@ pub fn sandwich_errors(
     let at = Point {
         slippage: fitted.slippage,
         shares: fitted.allele_length_variation.clone(),
-        concentration: fitted.concentration,
+        concentration: fitted.concentration_counted_at,
     };
     let from_pairs = layout.with_concentration && source == ConcentrationSource::PairsOfSamples;
     let rows_at = |slippage: Slippage| {
@@ -512,6 +515,33 @@ pub fn sandwich_errors(
                 continue;
             }
             change[row * size + column] = -(sides[0][row] - sides[1][row]) / (2.0 * step);
+        }
+    }
+    // The shares' prior, `p · Σ ln s_k` with the pivot one minus the rest, curves the objective by
+    // `p / s_k²` on each free share and `p / s_pivot²` between every two, `p` the prior weight a
+    // length that the fit added (as the fit computes it, from the draws at the answer).
+    let draws: f64 = expected_counts_by_tract(
+        evidence,
+        at.slippage,
+        &at.shares,
+        at.concentration,
+        homozygote_excess,
+        config,
+    )
+    .iter()
+    .map(|counts| counts.draws.iter().sum::<f64>())
+    .sum();
+    let prior =
+        SHARE_PRIOR_TRACTS * draws / evidence.tracts_with_reads().max(1) as f64 / classes as f64;
+    let pivot_curvature = prior / (at.shares[layout.pivot] * at.shares[layout.pivot]);
+    for (row_index, row_class) in layout.free_shares.iter().enumerate() {
+        for (column_index, column_class) in layout.free_shares.iter().enumerate() {
+            let own = if row_class == column_class {
+                prior / (at.shares[*row_class] * at.shares[*row_class])
+            } else {
+                0.0
+            };
+            change[(3 + row_index) * size + 3 + column_index] += own + pivot_curvature;
         }
     }
 
@@ -575,26 +605,6 @@ fn transpose_mean(matrix: &[f64], size: usize) -> Vec<f64> {
         }
     }
     out
-}
-
-/// **Whether `source` has anything to read the concentration from**: pairs need a tract with two
-/// samples, a sample's own two copies need a homozygote excess below one.
-fn the_concentration_is_identified(
-    evidence: &StratumEvidence,
-    source: ConcentrationSource,
-    homozygote_excess: &[f64],
-) -> bool {
-    match source {
-        ConcentrationSource::PairsOfSamples => {
-            evidence.tracts.iter().any(|tract| tract.samples.len() >= 2)
-        }
-        ConcentrationSource::EachSamplesTwoCopies => evidence.tracts.iter().any(|tract| {
-            tract
-                .samples
-                .iter()
-                .any(|sample| homozygote_excess[sample.sample as usize] < 1.0)
-        }),
-    }
 }
 
 /// A reproducible stream for drawing tracts, one a replicate.
@@ -676,7 +686,6 @@ fn standard_deviation(values: &[f64]) -> Option<f64> {
 pub fn bootstrap_errors(
     evidence: &StratumEvidence,
     fitted: &CountedClass,
-    source: ConcentrationSource,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
     settings: BootstrapSettings,
@@ -694,7 +703,6 @@ pub fn bootstrap_errors(
             refit_class_by_counting_from(
                 &drawn,
                 fitted,
-                source,
                 homozygote_excess,
                 config,
                 settings.max_rounds,
@@ -704,7 +712,7 @@ pub fn bootstrap_errors(
         })
         .collect();
     let mut errors = errors_from_replicates(&replicates, fitted);
-    if !the_concentration_is_identified(evidence, source, homozygote_excess) {
+    if fitted.concentration.is_none() {
         errors.concentration = StratumError::NotIdentified;
         errors.between_locus_share = StratumError::NotIdentified;
     }
@@ -720,14 +728,14 @@ fn errors_from_replicates(
         let values: Vec<f64> = replicates.iter().map(value).collect();
         standard_deviation(&values).map_or(StratumError::NotIdentified, error_of_spread)
     };
-    let ln_spread = spread_of(&|fit| float::ln(fit.concentration));
+    let ln_spread = spread_of(&|fit| float::ln(fit.concentration_counted_at));
     let not_placed = matches!(ln_spread, StratumError::Estimated(error) if error > NOT_PLACED);
     let (concentration, between_locus_share) = if not_placed {
         (StratumError::NotPlaced, StratumError::NotPlaced)
     } else {
         (
-            spread_of(&|fit| fit.concentration),
-            spread_of(&|fit| 1.0 / (1.0 + fit.concentration)),
+            spread_of(&|fit| fit.concentration_counted_at),
+            spread_of(&|fit| 1.0 / (1.0 + fit.concentration_counted_at)),
         )
     };
     CountedClassErrors {
@@ -756,9 +764,7 @@ fn error_of_spread(spread: f64) -> StratumError {
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
-    use crate::parameter_estimation::joint::ssr_fit::composite_fit::{
-        fit_class_by_counting, fit_class_by_counting_with_pairs,
-    };
+    use crate::parameter_estimation::joint::ssr_fit::composite_fit::fit_class_by_counting_with_pairs;
 
     const TRUTH: Slippage = Slippage {
         level: 0.08,
@@ -839,12 +845,10 @@ mod tests {
         };
         let fitted =
             fit_class_by_counting_with_pairs(&evidence, start, &excess, &config, 2000, 1e-7, 10);
-        let source = ConcentrationSource::PairsOfSamples;
-        let curvature = sandwich_errors(&evidence, &fitted, source, &excess, &config);
+        let curvature = sandwich_errors(&evidence, &fitted, &excess, &config);
         let bootstrap = bootstrap_errors(
             &evidence,
             &fitted,
-            source,
             &excess,
             &config,
             BootstrapSettings {
@@ -873,29 +877,46 @@ mod tests {
         assert!(curvature.sandwich.concentration.value().is_some());
     }
 
-    /// **One sample has no pair, so the concentration from pairs has no error**, and the other
-    /// numbers still get theirs.
+    /// **One sample whose two copies are always one draw says nothing about the concentration**:
+    /// the fit gives none, and neither method gives it or the between-locus share an error, while
+    /// the other numbers keep theirs.
     #[test]
-    fn one_sample_leaves_the_pairs_concentration_without_an_error() {
+    fn a_concentration_the_fit_cannot_place_has_no_error() {
         let config = SsrFitConfig {
             allele_span: 1,
             ..SsrFitConfig::default()
         };
-        let evidence = draw_stratum(TRUTH, &spectrum_of(3), 0.5, 0.4, 300, 1, 30, 1, 2);
-        let excess = [0.4];
-        let fitted = fit_class_by_counting(&evidence, TRUTH, &excess, &config, 2000, 1e-7);
-        let errors = sandwich_errors(
+        let evidence = draw_stratum(TRUTH, &spectrum_of(3), 0.5, 1.0, 300, 1, 30, 1, 2);
+        let excess = [1.0];
+        let fitted =
+            fit_class_by_counting_with_pairs(&evidence, TRUTH, &excess, &config, 2000, 1e-7, 10);
+        assert_eq!(fitted.concentration, None, "{fitted:?}");
+        let curvature = sandwich_errors(&evidence, &fitted, &excess, &config);
+        let bootstrap = bootstrap_errors(
             &evidence,
             &fitted,
-            ConcentrationSource::PairsOfSamples,
             &excess,
             &config,
+            BootstrapSettings {
+                replicates: 10,
+                seed: 3,
+                max_rounds: 2000,
+                tolerance: 1e-7,
+                alternations: 10,
+            },
         );
-        assert_eq!(
-            errors.sandwich.concentration,
-            StratumError::NotIdentified,
-            "{errors:?}"
-        );
-        assert!(errors.sandwich.level.value().is_some(), "{errors:?}");
+        for errors in [&curvature.sandwich, &curvature.naive, &bootstrap] {
+            assert_eq!(
+                errors.concentration,
+                StratumError::NotIdentified,
+                "{errors:?}"
+            );
+            assert_eq!(
+                errors.between_locus_share,
+                StratumError::NotIdentified,
+                "{errors:?}"
+            );
+            assert!(errors.level.value().is_some(), "{errors:?}");
+        }
     }
 }

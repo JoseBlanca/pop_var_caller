@@ -26,15 +26,88 @@ pub struct CountedClass {
     /// The class's stutter.
     pub slippage: Slippage,
     /// How the class's chromosomes are spread over the allele lengths, `-allele_span ..= +allele_span`.
+    /// **Never exactly zero**: each length carries a small prior share ([`SHARE_PRIOR_TRACTS`]).
     pub allele_length_variation: Vec<f64>,
-    /// How much the class's tracts differ from one another: the Dirichlet concentration, read off
-    /// how much more often a sample's two copies match than its homozygote excess alone explains.
-    pub concentration: f64,
+    /// How much the class's tracts differ from one another: the Dirichlet concentration, the
+    /// between-locus share being `1 / (1 + concentration)`.
+    ///
+    /// **`None` where the data cannot place it** ([`concentration_is_placed`]): the estimator has
+    /// nothing to read — no sample whose two copies can differ, for the own-copies estimator — or the
+    /// estimate stopped at an end of its search, `10⁻³` or `10⁴`. A class at one sample and an excess
+    /// of one gets `None`, never the search's bound.
+    pub concentration: Option<f64>,
+    /// The concentration the stutter and shares were counted at, placed or not. Only for refitting
+    /// and for the errors, which must evaluate the objective where the fit did.
+    pub concentration_counted_at: f64,
+    /// Which estimator the concentration came from.
+    pub concentration_from: ConcentrationSource,
     /// How many rounds ran, and the largest change of any number in the last.
     pub rounds: usize,
     pub last_change: f64,
     /// The objective at the answer.
     pub composite_log_likelihood: f64,
+}
+
+impl CountedClass {
+    /// The between-locus share `F = 1 / (1 + concentration)`, or `None` with the concentration.
+    #[must_use]
+    pub fn between_locus_share(&self) -> Option<f64> {
+        self.concentration.map(|c| 1.0 / (1.0 + c))
+    }
+}
+
+/// **How much prior weight each allele length's share gets, in tracts: one tract's worth of allele
+/// draws spread evenly over the lengths.**
+///
+/// Without it a length with no draw gets a share of exactly zero, and once zero it can never come
+/// back: its prior is zero, so it draws nothing in the next round. A held-out locus fixed at that
+/// length is then impossible, which cost the fit thousands of log-likelihood units a locus on the
+/// fitting bench (`research/str_fit/track1_counting_fit_errors_2026-10-12.md` §6). Counting the
+/// weight in tracts, not in allele draws, keeps it the same size against the evidence whatever the
+/// cohort: at 2,000 samples one tract holds about 4,000 draws, and a prior of a few draws would be
+/// lost among them. Each share moves by at most about `1 / tracts` — 0.005 at 200 tracts, a fifth
+/// of a standard error at the bench's base setting.
+pub const SHARE_PRIOR_TRACTS: f64 = 1.0;
+
+/// The ends of the concentration's search, where an estimate says the data did not place it.
+const CONCENTRATION_SEARCH: (f64, f64) = (1e-3, 1e4);
+
+/// **Whether a concentration `estimate` is placed**: its estimator `source` had something to read
+/// in `evidence` ([`concentration_is_identified`]), and the estimate stopped inside its search, not
+/// within 1% of either end.
+#[must_use]
+pub fn concentration_is_placed(
+    evidence: &StratumEvidence,
+    source: ConcentrationSource,
+    homozygote_excess: &[f64],
+    estimate: f64,
+) -> bool {
+    let (lowest, highest) = CONCENTRATION_SEARCH;
+    concentration_is_identified(evidence, source, homozygote_excess)
+        && estimate > lowest * 1.01
+        && estimate < highest / 1.01
+}
+
+/// **Whether `source` has anything to read the concentration from**: pairs need a tract with two
+/// samples; a sample's own two copies need a sample at some tract with a homozygote excess below
+/// one, since a sample whose copies are always one draw says nothing about how tracts differ.
+#[must_use]
+pub fn concentration_is_identified(
+    evidence: &StratumEvidence,
+    source: ConcentrationSource,
+    homozygote_excess: &[f64],
+) -> bool {
+    match source {
+        ConcentrationSource::PairsOfSamples => {
+            evidence.tracts.iter().any(|tract| tract.samples.len() >= 2)
+        }
+        ConcentrationSource::EachSamplesTwoCopies => evidence.tracts.iter().any(|tract| {
+            tract
+                .samples
+                .iter()
+                .any(|sample| homozygote_excess[sample.sample as usize] < 1.0)
+        }),
+    }
 }
 
 /// The expected counts one round gathers over a class, or over one tract of it.
@@ -214,14 +287,22 @@ fn count_class(
             counts.add(tract);
         }
         log_likelihood = counts.log_likelihood;
+        // Each length's prior weight: one tract's worth of draws, spread evenly.
         let draws: f64 = counts.draws.iter().sum();
-        let new_shares: Vec<f64> = counts.draws.iter().map(|d| d / draws).collect();
+        let tracts = evidence.tracts_with_reads().max(1) as f64;
+        let prior = SHARE_PRIOR_TRACTS * draws / tracts / classes as f64;
+        let new_shares: Vec<f64> = counts
+            .draws
+            .iter()
+            .map(|d| (d + prior) / (draws + prior * classes as f64))
+            .collect();
         let new_concentration = if let Some(held) = held_spread {
             held
         } else if counts.shared_in_tract > 0.0 {
-            (counts.pairs_not_by_descent / counts.shared_in_tract - 1.0).clamp(1e-3, 1e4)
+            (counts.pairs_not_by_descent / counts.shared_in_tract - 1.0)
+                .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1)
         } else {
-            1e4
+            CONCENTRATION_SEARCH.1
         };
         let new_slippage = Slippage {
             level: counts.slipped / (counts.slipped + counts.exact),
@@ -255,10 +336,23 @@ fn count_class(
             break;
         }
     }
+    let concentration_from = if held_spread.is_some() {
+        ConcentrationSource::PairsOfSamples
+    } else {
+        ConcentrationSource::EachSamplesTwoCopies
+    };
     CountedClass {
         slippage,
         allele_length_variation: shares,
-        concentration,
+        concentration: concentration_is_placed(
+            evidence,
+            concentration_from,
+            homozygote_excess,
+            concentration,
+        )
+        .then_some(concentration),
+        concentration_counted_at: concentration,
+        concentration_from,
         rounds,
         last_change,
         composite_log_likelihood: log_likelihood,
@@ -453,6 +547,17 @@ pub fn fit_class_by_counting_with_pairs(
         max_rounds,
         tolerance,
     );
+    // With no tract of two samples there is no pair to read the spread from. The search would
+    // return its upper end, and the stutter counted at that spread is wrong — at one sample and
+    // three reads a slip rate a third of the truth (`track1_counting_fit_errors_2026-10-12.md`
+    // §4.3) — so the spread stays where each sample's own two copies put it.
+    if !concentration_is_identified(
+        evidence,
+        ConcentrationSource::PairsOfSamples,
+        homozygote_excess,
+    ) {
+        return fitted;
+    }
     alternate_with_pairs(
         evidence,
         fitted,
@@ -473,35 +578,30 @@ pub enum ConcentrationSource {
     /// nothing in an inbred cohort, where the two copies are nearly always one draw.
     EachSamplesTwoCopies,
     /// From pairs of samples at a tract ([`fit_class_by_counting_with_pairs`]). Says nothing at one
-    /// sample, where there is no pair.
+    /// sample, where there is no pair; there [`fit_class_by_counting_with_pairs`] uses the other.
     PairsOfSamples,
 }
 
 /// **The class refitted from an earlier answer `from`** rather than from flat shares: what a
-/// bootstrap replicate needs, whose answer lies near the full fit's. Uses the estimator `source`
-/// names, with the same rounds, tolerance and alternations as a fit from scratch.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the counting fit's own settings, passed through"
-)]
+/// bootstrap replicate needs, whose answer lies near the full fit's. Uses the estimator `from` was
+/// made by, with the same rounds, tolerance and alternations as a fit from scratch.
 #[must_use]
 pub fn refit_class_by_counting_from(
     evidence: &StratumEvidence,
     from: &CountedClass,
-    source: ConcentrationSource,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
     max_rounds: usize,
     tolerance: f64,
     alternations: usize,
 ) -> CountedClass {
-    match source {
+    match from.concentration_from {
         ConcentrationSource::EachSamplesTwoCopies => count_class(
             evidence,
             from.slippage,
             Some(&from.allele_length_variation),
             None,
-            from.concentration,
+            from.concentration_counted_at,
             homozygote_excess,
             config,
             max_rounds,
@@ -510,7 +610,7 @@ pub fn refit_class_by_counting_from(
         ConcentrationSource::PairsOfSamples => alternate_with_pairs(
             evidence,
             from.clone(),
-            from.concentration,
+            from.concentration_counted_at,
             homozygote_excess,
             config,
             max_rounds,
@@ -960,9 +1060,11 @@ mod tests {
             assert!((fitted - truth).abs() < 0.035, "{fitted} against {truth}");
         }
         assert!(
-            (0.3..0.8).contains(&fitted.concentration),
+            fitted
+                .concentration
+                .is_some_and(|c| (0.3..0.8).contains(&c)),
             "concentration {} against 0.5",
-            fitted.concentration
+            fitted.concentration_counted_at
         );
     }
 
@@ -1051,10 +1153,81 @@ mod tests {
         let fitted =
             fit_class_by_counting_with_pairs(&evidence, start, &[0.95; 20], &config, 500, 1e-9, 10);
         assert!(
-            (0.35..0.7).contains(&fitted.concentration),
+            fitted
+                .concentration
+                .is_some_and(|c| (0.35..0.7).contains(&c)),
             "spread {} against 0.5: {fitted:?}",
-            fitted.concentration
+            fitted.concentration_counted_at
         );
         assert!((fitted.slippage.level - 0.08).abs() < 0.012, "{fitted:?}");
+    }
+
+    /// **A length no tract carries keeps a small share, never exactly zero**: drawn at three
+    /// lengths and fitted at five, the two outer lengths get about the prior's weight — one tract's
+    /// worth of draws spread over five lengths, so about `1 / (5 · 300)` — and the drawn shares are
+    /// still recovered.
+    #[test]
+    fn a_length_no_tract_carries_keeps_a_small_share() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let spectrum = [0.0, 0.25, 0.5, 0.25, 0.0];
+        let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 300, 20, 10, 2, 23);
+        let config = SsrFitConfig {
+            allele_span: 2,
+            ..SsrFitConfig::default()
+        };
+        let fitted =
+            fit_class_by_counting_with_pairs(&evidence, truth, &[0.4; 20], &config, 2000, 1e-7, 10);
+        for outer in [0, 4] {
+            let share = fitted.allele_length_variation[outer];
+            assert!(
+                (1e-4..2e-3).contains(&share),
+                "length {outer}: share {share}: {fitted:?}"
+            );
+        }
+        for (fitted, truth) in fitted.allele_length_variation.iter().zip(&spectrum) {
+            assert!((fitted - truth).abs() < 0.06, "{fitted} against {truth}");
+        }
+    }
+
+    /// **At one sample the spread comes from the sample's own two copies, and is absent when they
+    /// cannot differ.** The pairs fit has no pair at one sample: it uses the own-copies estimator,
+    /// which places the spread when the homozygote excess is below one and returns `None` at one.
+    #[test]
+    fn at_one_sample_the_spread_is_read_from_its_own_copies_or_absent() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let config = SsrFitConfig {
+            allele_span: 1,
+            ..SsrFitConfig::default()
+        };
+        let spectrum = spectrum_of(3);
+        let outbred = draw_stratum(truth, &spectrum, 0.5, 0.4, 2000, 1, 30, 1, 29);
+        let fitted =
+            fit_class_by_counting_with_pairs(&outbred, truth, &[0.4], &config, 2000, 1e-7, 10);
+        assert_eq!(
+            fitted.concentration_from,
+            ConcentrationSource::EachSamplesTwoCopies
+        );
+        assert!(
+            fitted
+                .concentration
+                .is_some_and(|c| (0.3..0.8).contains(&c)),
+            "{fitted:?}"
+        );
+        assert!((fitted.slippage.level - 0.08).abs() < 0.01, "{fitted:?}");
+
+        let inbred = draw_stratum(truth, &spectrum, 0.5, 1.0, 2000, 1, 30, 1, 31);
+        let fitted =
+            fit_class_by_counting_with_pairs(&inbred, truth, &[1.0], &config, 2000, 1e-7, 10);
+        assert_eq!(fitted.concentration, None, "{fitted:?}");
+        assert_eq!(fitted.between_locus_share(), None);
+        assert!((fitted.slippage.level - 0.08).abs() < 0.01, "{fitted:?}");
     }
 }

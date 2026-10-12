@@ -137,7 +137,8 @@ fn main() {
             format!("{:.6}", fit.slippage.level),
             format!("{:.6}", fit.slippage.shorter_share),
             format!("{:.6}", fit.slippage.fall_off),
-            format!("{:.6}", fit.concentration),
+            fit.concentration
+                .map_or_else(|| "NA".to_owned(), |c| format!("{c:.6}")),
             "NA".to_owned(),
         ];
         row.extend(

@@ -52,11 +52,11 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
     write_truth_tsv,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
-    ClassEstimate, ClassNumbers, FoldPlan, HeldOutSettings, PeriodFit, Sampler, TheClimb,
-    TheCountingFit, score_locus, with_the_curves, without_fold,
+    ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan, HeldOutSettings, PeriodFit,
+    Sampler, TheClimb, TheCountingFit, score_locus, with_the_curves, without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    ALLELE_SPAN, SsrFitConfig, StratumEvidence,
+    ALLELE_SPAN, SsrFitConfig, StratumEvidence, TractReads,
 };
 
 #[derive(Parser)]
@@ -125,6 +125,10 @@ struct Cli {
     /// The cell's name in the rows; built from the cell's settings by default.
     #[arg(long)]
     cell: Option<String>,
+    /// Where every held-out locus's score goes, one row a method variant and locus, with the read
+    /// offset most of the locus's reads report and the share the fit gave that offset.
+    #[arg(long)]
+    locus_out: Option<PathBuf>,
 }
 
 /// The method a name on the command line stands for. **A new method adds a line here.**
@@ -141,30 +145,22 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
             })
         }
         "B" => Box::new(TheCountingFit::default()),
-        "B_within" => Box::new(BWithin),
-        other => panic!("no method is called {other}; the methods are A, B and B_within"),
-    }
-}
-
-/// The counting fit with its spread read off each sample's own two copies.
-struct BWithin;
-
-impl PeriodFit for BWithin {
-    fn name(&self) -> String {
-        "B_within".to_owned()
-    }
-
-    fn fit_period(
-        &self,
-        classes: &[StratumEvidence],
-        homozygote_excess: &[f64],
-        allele_span: i32,
-    ) -> Vec<ClassEstimate> {
-        TheCountingFit {
+        "B_within" => Box::new(TheCountingFit {
             pairs: false,
             ..TheCountingFit::default()
-        }
-        .fit_period(classes, homozygote_excess, allele_span)
+        }),
+        "B_noerrors" => Box::new(TheCountingFit {
+            errors: CountingFitErrorMethod::None,
+            ..TheCountingFit::default()
+        }),
+        "B_bootstrap" => Box::new(TheCountingFit {
+            errors: CountingFitErrorMethod::Bootstrap(50),
+            ..TheCountingFit::default()
+        }),
+        other => panic!(
+            "no method is called {other}; the methods are A, B, B_within, B_noerrors and \
+             B_bootstrap"
+        ),
     }
 }
 
@@ -581,6 +577,7 @@ fn main() {
         Vec::new()
     };
 
+    let mut locus_lines: Vec<String> = Vec::new();
     // An empty name is no method: a run that only draws, to measure the draw's own memory.
     for name in cli.methods.iter().filter(|name| !name.is_empty()) {
         let method = method_named(name, &cli);
@@ -628,7 +625,7 @@ fn main() {
                     .filter(|((_, _, locus_fold), _)| *locus_fold == fold)
                     .map(|((class, locus, _), truth)| (*class, *locus, *truth))
                     .collect();
-                for (variant_index, (_, estimates)) in fitted.iter().enumerate() {
+                for (variant_index, (variant, estimates)) in fitted.iter().enumerate() {
                     let numbers: Vec<Option<ClassNumbers>> =
                         estimates.iter().map(ClassEstimate::numbers).collect();
                     let scores: Vec<Option<HeldOutLocus>> = in_fold
@@ -646,6 +643,22 @@ fn main() {
                             ))
                         })
                         .collect();
+                    if cli.locus_out.is_some() {
+                        for ((class, locus, _), score) in in_fold.iter().zip(&scores) {
+                            let Some((_, ln, _, truth, reads)) = score else {
+                                continue;
+                            };
+                            let (offset, share) = most_reported_offset(
+                                &drawn.strata[*class].tracts[*locus],
+                                drawn.strata[*class].read_span,
+                                numbers[*class].as_ref(),
+                            );
+                            locus_lines.push(format!(
+                                "{variant}\t{}\t{locus}\t{ln}\t{truth}\t{reads}\t{offset}\t{share:e}",
+                                drawn.strata[*class].stratum.reference_repeats
+                            ));
+                        }
+                    }
                     for (class, ln, variance, truth, reads) in scores.into_iter().flatten() {
                         let into = &mut sums[variant_index][class];
                         into.ln += ln;
@@ -683,6 +696,17 @@ fn main() {
             }
         }
     }
+    if let Some(path) = &cli.locus_out {
+        let mut out = BufWriter::new(File::create(path).expect("the locus file opens"));
+        writeln!(
+            out,
+            "variant\trepeats\tlocus\theldout_ln\ttruth_ln\treads\tmost_reported_offset\tfitted_share"
+        )
+        .expect("the locus file writes");
+        for line in &locus_lines {
+            writeln!(out, "{line}").expect("the locus file writes");
+        }
+    }
     rows.push("process", "all", "peak_rss_mib", None, peak_rss_mib(), None);
 
     let partial = cli.out.with_extension("partial");
@@ -700,4 +724,38 @@ fn main() {
         out.flush().expect("the rows file writes");
     }
     std::fs::rename(&partial, &cli.out).expect("the rows file moves into place");
+}
+
+/// **The read offset most of a locus's reads report**, summed over its samples, and the share the
+/// fit gave that offset's allele class; at an end bucket, the smaller of the two classes it can
+/// hold (`±8` and `±9`), since either could be the allele.
+fn most_reported_offset(
+    tract: &TractReads,
+    read_span: i32,
+    numbers: Option<&ClassNumbers>,
+) -> (i32, f64) {
+    let mut totals = vec![0_u64; (2 * read_span + 1) as usize];
+    for sample in &tract.samples {
+        for (_, counts) in &sample.by_library {
+            for (into, count) in totals.iter_mut().zip(counts) {
+                *into += u64::from(*count);
+            }
+        }
+    }
+    let bucket = totals
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, count)| **count)
+        .map_or(0, |(index, _)| index);
+    let offset = bucket as i32 - read_span;
+    let share = numbers.map_or(f64::NAN, |numbers| {
+        let span = (numbers.allele_length_variation.len() as i32 - 1) / 2;
+        let at = |offset: i32| numbers.allele_length_variation[(offset + span) as usize];
+        if offset.abs() == read_span && span > read_span {
+            at(offset).min(at(offset + offset.signum()))
+        } else {
+            at(offset)
+        }
+    });
+    (offset, share)
 }

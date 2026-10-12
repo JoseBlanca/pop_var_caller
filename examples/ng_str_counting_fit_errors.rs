@@ -127,7 +127,7 @@ const fn setting(
 
 use ConcentrationSource::{EachSamplesTwoCopies as OwnCopies, PairsOfSamples as Pairs};
 
-const SETTINGS: [Setting; 12] = [
+const SETTINGS: [Setting; 13] = [
     setting("base", 200, 20, 3, 0.4, Window::One, Pairs),
     setting("tracts_20", 20, 20, 3, 0.4, Window::One, Pairs),
     setting("tracts_2000", 2000, 20, 3, 0.4, Window::One, Pairs),
@@ -163,6 +163,15 @@ const SETTINGS: [Setting; 12] = [
         0.4,
         Window::One,
         OwnCopies,
+    ),
+    setting(
+        "one_sample_reads_30_inbred",
+        2000,
+        1,
+        30,
+        1.0,
+        Window::One,
+        Pairs,
     ),
 ];
 
@@ -320,13 +329,13 @@ fn numbers(
     push(
         "concentration".into(),
         CONCENTRATION,
-        fitted.concentration,
+        fitted.concentration.unwrap_or(f64::NAN),
         &|e| e.concentration,
     );
     push(
         "between_locus_share".into(),
         1.0 / (1.0 + CONCENTRATION),
-        1.0 / (1.0 + fitted.concentration),
+        fitted.between_locus_share().unwrap_or(f64::NAN),
         &|e| e.between_locus_share,
     );
     out
@@ -395,21 +404,30 @@ fn run_coverage(cli: &Cli, setting: &Setting) {
     let excess = vec![setting.homozygote_excess; setting.samples];
     let config = config_for(setting);
     let started = Instant::now();
+    let done = std::sync::atomic::AtomicUsize::new(0);
     let drawn: Vec<(usize, Vec<Number>)> = (0..cli.draws)
         .into_par_iter()
         .map(|draw_index| {
             let seed = 1_000_003 * (draw_index as u64 + 1);
             let evidence = draw(setting, seed);
             let fitted = fit(setting, &evidence, &excess);
-            let curvature = sandwich_errors(&evidence, &fitted, setting.source, &excess, &config);
+            let curvature = sandwich_errors(&evidence, &fitted, &excess, &config);
             let bootstrap = bootstrap_errors(
                 &evidence,
                 &fitted,
-                setting.source,
                 &excess,
                 &config,
                 bootstrap_settings(cli.replicates, seed ^ 0x5eed),
             );
+            let finished = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if finished.is_multiple_of(10) {
+                eprintln!(
+                    "{}: {finished} of {} draws, {:.0} s",
+                    setting.name,
+                    cli.draws,
+                    started.elapsed().as_secs_f64()
+                );
+            }
             (
                 fitted.rounds,
                 numbers(
@@ -521,13 +539,12 @@ fn run_cost(cli: &Cli, setting: &Setting) {
         let fitted = fit(setting, &evidence, &excess);
         fit_seconds += clock.elapsed().as_secs_f64();
         let clock = Instant::now();
-        let _ = sandwich_errors(&evidence, &fitted, setting.source, &excess, &config);
+        let _ = sandwich_errors(&evidence, &fitted, &excess, &config);
         sandwich_seconds += clock.elapsed().as_secs_f64();
         let clock = Instant::now();
         let _ = bootstrap_errors(
             &evidence,
             &fitted,
-            setting.source,
             &excess,
             &config,
             bootstrap_settings(cli.replicates, seed ^ 0x5eed),

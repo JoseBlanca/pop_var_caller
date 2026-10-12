@@ -231,7 +231,9 @@ impl PeriodFit for TheClimb {
 /// ([`fit_class_by_counting_with_pairs`](super::super::composite_fit::fit_class_by_counting_with_pairs)
 /// with `pairs`, the within-sample version without), as `examples/ng_str_counting_fit.rs` runs it.
 /// A class with fewer loci carrying reads than the climb's refusal floor is left absent, as that
-/// example leaves it. It gives no standard errors.
+/// example leaves it. Its concentration is absent where the fit cannot place it.
+///
+/// **Its standard errors** come from `counting_fit_errors`, by the method `errors` names.
 #[derive(Debug, Clone, Copy)]
 pub struct TheCountingFit {
     /// Read the spread off pairs of samples at a locus (what an inbred cohort needs).
@@ -240,6 +242,17 @@ pub struct TheCountingFit {
     pub tolerance: f64,
     /// Rounds of spread-then-counting, at most, when `pairs`.
     pub alternations: usize,
+    pub errors: CountingFitErrorMethod,
+}
+
+/// Which standard errors [`TheCountingFit`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountingFitErrorMethod {
+    None,
+    /// The composite likelihood's sandwich formula.
+    Sandwich,
+    /// The tracts resampled this many times, each draw refitted.
+    Bootstrap(usize),
 }
 
 impl Default for TheCountingFit {
@@ -249,13 +262,19 @@ impl Default for TheCountingFit {
             max_rounds: 2000,
             tolerance: 1e-7,
             alternations: 10,
+            errors: CountingFitErrorMethod::Sandwich,
         }
     }
 }
 
 impl PeriodFit for TheCountingFit {
     fn name(&self) -> String {
-        "B".to_owned()
+        let estimator = if self.pairs { "B" } else { "B_within" };
+        match self.errors {
+            CountingFitErrorMethod::Sandwich => estimator.to_owned(),
+            CountingFitErrorMethod::None => format!("{estimator}_noerrors"),
+            CountingFitErrorMethod::Bootstrap(_) => format!("{estimator}_bootstrap"),
+        }
     }
 
     fn fit_period(
@@ -264,6 +283,9 @@ impl PeriodFit for TheCountingFit {
         homozygote_excess: &[f64],
         allele_span: i32,
     ) -> Vec<ClassEstimate> {
+        use super::super::counting_fit_errors::{
+            BootstrapSettings, CountedClassErrors, bootstrap_errors, sandwich_errors,
+        };
         let config = SsrFitConfig {
             allele_span,
             ..SsrFitConfig::default()
@@ -301,12 +323,42 @@ impl PeriodFit for TheCountingFit {
                         self.tolerance,
                     )
                 };
+                let found: Option<CountedClassErrors> = match self.errors {
+                    CountingFitErrorMethod::None => None,
+                    CountingFitErrorMethod::Sandwich => {
+                        Some(sandwich_errors(evidence, &fit, homozygote_excess, &config).sandwich)
+                    }
+                    CountingFitErrorMethod::Bootstrap(replicates) => Some(bootstrap_errors(
+                        evidence,
+                        &fit,
+                        homozygote_excess,
+                        &config,
+                        BootstrapSettings {
+                            replicates,
+                            seed: u64::from(evidence.stratum.reference_repeats),
+                            max_rounds: self.max_rounds,
+                            tolerance: self.tolerance,
+                            alternations: self.alternations,
+                        },
+                    )),
+                };
+                let errors = found.map_or_else(ClassErrors::default, |errors| ClassErrors {
+                    level: errors.level.value(),
+                    shorter_share: errors.shorter_share.value(),
+                    fall_off: errors.fall_off.value(),
+                    concentration: errors.concentration.value(),
+                    allele_length_variation: errors
+                        .allele_length_variation
+                        .iter()
+                        .map(|error| error.value())
+                        .collect(),
+                });
                 ClassEstimate {
                     stratum: evidence.stratum,
                     slippage: Some(fit.slippage),
                     allele_length_variation: Some(fit.allele_length_variation),
-                    concentration: Some(fit.concentration),
-                    errors: ClassErrors::default(),
+                    concentration: fit.concentration,
+                    errors,
                     reads_crossing: evidence.spanning_reads(),
                 }
             })
