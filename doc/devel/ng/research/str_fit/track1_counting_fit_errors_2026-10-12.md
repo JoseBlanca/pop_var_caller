@@ -16,7 +16,7 @@ than a handful of tracts.** On drawn classes with more than one sample and 100 o
 setting, the truth lay within one reported error in 60 to 78 draws of 100 and within two in 86 to
 98 of 100, for every number, by the bootstrap over tracts and by the sandwich formula alike (§4).
 Honest errors give about 68 and 95. The settings run on 40 or 60 draws range from 50 to 80 and from
-80 to 100, within their wider noise, apart from shares below 0.01 (§5.1). At one sample both
+80 to 100, within their wider noise, apart from shares below 0.01 (§5.1) and one share biased by alleles past the window (§5.2). At one sample both
 methods cover every number.
 
 **2. The plain curvature is not honest for the allele-length shares and the concentration.** At 20
