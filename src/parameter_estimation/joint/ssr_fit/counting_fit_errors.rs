@@ -438,17 +438,8 @@ pub fn sandwich_errors(
     let free_shares: Vec<usize> = (0..classes)
         .filter(|class| *class != pivot && fitted.allele_length_variation[*class] > SMALLEST_SHARE)
         .collect();
-    let concentration_identified = match source {
-        ConcentrationSource::PairsOfSamples => {
-            evidence.tracts.iter().any(|tract| tract.samples.len() >= 2)
-        }
-        ConcentrationSource::EachSamplesTwoCopies => evidence.tracts.iter().any(|tract| {
-            tract
-                .samples
-                .iter()
-                .any(|sample| homozygote_excess[sample.sample as usize] < 1.0)
-        }),
-    };
+    let concentration_identified =
+        the_concentration_is_identified(evidence, source, homozygote_excess);
     let at_an_end = |value: f64, highest: f64| value <= 1e-6 || value >= highest - 1e-6;
     let held_stutter = [
         at_an_end(fitted.slippage.level, 1.0),
@@ -586,6 +577,26 @@ fn transpose_mean(matrix: &[f64], size: usize) -> Vec<f64> {
     out
 }
 
+/// **Whether `source` has anything to read the concentration from**: pairs need a tract with two
+/// samples, a sample's own two copies need a homozygote excess below one.
+fn the_concentration_is_identified(
+    evidence: &StratumEvidence,
+    source: ConcentrationSource,
+    homozygote_excess: &[f64],
+) -> bool {
+    match source {
+        ConcentrationSource::PairsOfSamples => {
+            evidence.tracts.iter().any(|tract| tract.samples.len() >= 2)
+        }
+        ConcentrationSource::EachSamplesTwoCopies => evidence.tracts.iter().any(|tract| {
+            tract
+                .samples
+                .iter()
+                .any(|sample| homozygote_excess[sample.sample as usize] < 1.0)
+        }),
+    }
+}
+
 /// A reproducible stream for drawing tracts, one a replicate.
 struct Draws(u64);
 
@@ -652,6 +663,9 @@ fn standard_deviation(values: &[f64]) -> Option<f64> {
 /// `settings.replicates` times, each draw refitted from `fitted` by the estimator `source` names,
 /// and each number's error the standard deviation of its refitted values.
 ///
+/// **The concentration has no error where its estimator has nothing to read** (as in
+/// [`sandwich_errors`]), whatever the replicates returned.
+///
 /// **The concentration's error is [`StratumError::NotPlaced`]** when the refitted log
 /// concentrations spread by more than [`NOT_PLACED`]: an estimate that runs to either end of the
 /// search between replicates has no error worth quoting on its own scale.
@@ -689,7 +703,12 @@ pub fn bootstrap_errors(
             )
         })
         .collect();
-    errors_from_replicates(&replicates, fitted)
+    let mut errors = errors_from_replicates(&replicates, fitted);
+    if !the_concentration_is_identified(evidence, source, homozygote_excess) {
+        errors.concentration = StratumError::NotIdentified;
+        errors.between_locus_share = StratumError::NotIdentified;
+    }
+    errors
 }
 
 /// Each number's error as the spread of its value over `replicates`.

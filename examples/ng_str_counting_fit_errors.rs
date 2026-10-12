@@ -127,7 +127,7 @@ const fn setting(
 
 use ConcentrationSource::{EachSamplesTwoCopies as OwnCopies, PairsOfSamples as Pairs};
 
-const SETTINGS: [Setting; 11] = [
+const SETTINGS: [Setting; 12] = [
     setting("base", 200, 20, 3, 0.4, Window::One, Pairs),
     setting("tracts_20", 20, 20, 3, 0.4, Window::One, Pairs),
     setting("tracts_2000", 2000, 20, 3, 0.4, Window::One, Pairs),
@@ -145,6 +145,15 @@ const SETTINGS: [Setting; 11] = [
         Pairs,
     ),
     setting("one_sample_reads_3", 2000, 1, 3, 0.4, Window::One, Pairs),
+    setting(
+        "one_sample_reads_3_own_copies",
+        2000,
+        1,
+        3,
+        0.4,
+        Window::One,
+        OwnCopies,
+    ),
     setting("one_sample_reads_30", 2000, 1, 30, 0.4, Window::One, Pairs),
     setting(
         "one_sample_reads_30_own_copies",
