@@ -3117,21 +3117,42 @@ fn fit_strata_with(
     // or not, which is the property the parity oracle checks.
     if config.curve.draw_curves {
         stage.always(|into| format!("repeat-tract fit: strata fitted, drawing the curves; {into}"));
-        // **All three curves are drawn here, before either blend runs**, and both read fits that
-        // nothing has touched. Drawing a curve after the levels had been blended would fit a
-        // curve to the previous curve's output, which is the circularity
-        // `str_slippage_level_curve.md` §5.1 forbids in so many words.
-        let levels = draw_a_curve_a_period(&outcomes, config);
-        let shares = draw_share_curves_a_period(&outcomes, config);
-
-        smooth_levels_across_repeat_count(&mut outcomes, &levels, config);
-        smooth_shares_across_repeat_count(&mut outcomes, &shares, config);
-        // **Last, because it needs all three**: a stratum too thin to fit anything of its own is
-        // furnished from its period's curves rather than refused.
-        derive_thin_strata(&mut outcomes, strata, &levels, &shares);
+        draw_and_apply_curves(&mut outcomes, strata, config);
     }
     stage.always(|into| format!("repeat-tract fit: done; {into}"));
     outcomes
+}
+
+/// **The curves across repeat count, drawn through every stratum's own answer and applied to it**
+/// — what [`fit_strata`] does once every stratum is fitted, when [`SlippageCurveConfig::draw_curves`]
+/// asks for it (`str_slippage_level_curve.md`).
+///
+/// Per motif period, one curve for the slippage level and one for each of the two shares, each
+/// drawn through the strata fitted on their own tracts ([`StratumOutcome::Fitted`] with nothing
+/// borrowed), weighted by how many of their reads slipped. Each fitted stratum's three numbers are
+/// then blended with its curve; a stratum refused for being below the floor is furnished from the
+/// curves ([`StratumOutcome::Derived`]). The allele length variation and the concentration are not
+/// touched. `strata` is the evidence the outcomes were fitted from, in any order.
+///
+/// **Public so that a fit other than the climb can be smoothed by the same code**: the fitting
+/// research bench applies it to every method's answers (`bench_fixtures::fit_bench`).
+pub fn draw_and_apply_curves(
+    outcomes: &mut [StratumOutcome],
+    strata: &[StratumEvidence],
+    config: &SsrFitConfig,
+) {
+    // **All three curves are drawn here, before either blend runs**, and both read fits that
+    // nothing has touched. Drawing a curve after the levels had been blended would fit a
+    // curve to the previous curve's output, which is the circularity
+    // `str_slippage_level_curve.md` §5.1 forbids in so many words.
+    let levels = draw_a_curve_a_period(outcomes, config);
+    let shares = draw_share_curves_a_period(outcomes, config);
+
+    smooth_levels_across_repeat_count(outcomes, &levels, config);
+    smooth_shares_across_repeat_count(outcomes, &shares, config);
+    // **Last, because it needs all three**: a stratum too thin to fit anything of its own is
+    // furnished from its period's curves rather than refused.
+    derive_thin_strata(outcomes, strata, &levels, &shares);
 }
 
 /// **What the run's log says about the subsets the strata were read from** (spec §4.4): over the
@@ -5029,6 +5050,9 @@ pub fn gather_strata(
 pub mod bench_fixtures {
     use super::*;
 
+    pub mod cohort_draw;
+    pub mod fit_bench;
+
     /// A reproducible stream, the same one the harnesses use.
     struct Rng(u64);
 
@@ -5077,6 +5101,47 @@ pub mod bench_fixtures {
             draws.into_iter().map(|d| d / total).collect()
         }
 
+        /// A Poisson number of mean `mean`: by multiplying uniforms below a mean of 10, by Hörmann's
+        /// transformed rejection (PTRS, the method numpy uses) above it.
+        fn poisson(&mut self, mean: f64) -> u32 {
+            if mean <= 0.0 {
+                return 0;
+            }
+            if mean < 10.0 {
+                let limit = float::exp(-mean);
+                let mut product = self.uniform();
+                let mut count = 0;
+                while product > limit {
+                    product *= self.uniform();
+                    count += 1;
+                }
+                return count;
+            }
+            let root = mean.sqrt();
+            let ln_mean = float::ln(mean);
+            let b = 0.931 + 2.53 * root;
+            let a = -0.059 + 0.02483 * b;
+            let inverse_alpha = 1.1239 + 1.1328 / (b - 3.4);
+            let v_r = 0.9277 - 3.6224 / (b - 2.0);
+            loop {
+                let u = self.uniform() - 0.5;
+                let v = self.uniform();
+                let us = 0.5 - u.abs();
+                let k = ((2.0 * a / us + b) * u + mean + 0.43).floor();
+                if us >= 0.07 && v <= v_r {
+                    return k as u32;
+                }
+                if k < 0.0 || (us < 0.013 && v > us) {
+                    continue;
+                }
+                if float::ln(v) + float::ln(inverse_alpha) - float::ln(a / (us * us) + b)
+                    <= -mean + k * ln_mean - ln_gamma(k + 1.0)
+                {
+                    return k as u32;
+                }
+            }
+        }
+
         fn categorical(&mut self, weights: &[f64]) -> usize {
             let mut u = self.uniform();
             for (index, weight) in weights.iter().enumerate() {
@@ -5102,6 +5167,10 @@ pub mod bench_fixtures {
     ///
     /// **Each sample is a library of its own**, library `s` read group `s`, every one in slippage
     /// group 0 at a multiplier of one ([`one_library_a_sample`]).
+    ///
+    /// **One class of the count-level simulator ([`cohort_draw`]) at a fixed depth**: the locus draw
+    /// is the simulator's, taking its random numbers in the order this function always took them,
+    /// so a seed draws what it drew before the simulator existed (tested).
     #[allow(
         clippy::too_many_arguments,
         reason = "the drawn stratum's own parameters, and the two axes CLAUDE.md §0 commits to \
@@ -5119,32 +5188,28 @@ pub mod bench_fixtures {
         seed: u64,
     ) -> StratumEvidence {
         let classes = spectrum.len();
-        let buckets = (2 * span + 1) as usize;
         let per_allele: Vec<Vec<f64>> = (0..classes)
             .map(|class| slippage.read_probabilities(class as i32 - span, span))
             .collect();
+        let per_library = [per_allele];
+        let excess = vec![homozygote_excess; samples];
+        // **One library for the reads' distribution, `samples` in the evidence**: each sample is a
+        // library of its own below, every one scored at the same stutter.
+        let drawing = cohort_draw::LocusDrawing {
+            per_library: &per_library,
+            libraries: 1,
+            homozygote_excess: &excess,
+            depth: cohort_draw::Depth::Fixed(depth),
+            buckets: (2 * span + 1) as usize,
+        };
         let mut rng = Rng(seed);
         let mut drawn = Vec::with_capacity(tracts);
         for _ in 0..tracts {
             let alpha: Vec<f64> = spectrum.iter().map(|q| concentration * q).collect();
-            let frequencies = rng.dirichlet(&alpha);
-            let mut reads = TractReads::default();
-            for sample in 0..samples {
-                let first = rng.categorical(&frequencies);
-                let second = if rng.uniform() < homozygote_excess {
-                    first
-                } else {
-                    rng.categorical(&frequencies)
-                };
-                let mut counts = vec![0_u32; buckets];
-                for _ in 0..depth {
-                    let allele = if rng.uniform() < 0.5 { first } else { second };
-                    counts[rng.categorical(&per_allele[allele])] += 1;
-                }
-                reads.samples.push(SampleTractReads {
-                    sample: sample as u32,
-                    by_library: vec![(LibraryIndex(sample as u32), counts)],
-                });
+            let frequencies = cohort_draw::draw_locus_frequencies(&mut rng, &alpha);
+            let mut reads = cohort_draw::draw_locus(&mut rng, &frequencies, &drawing);
+            for sample in &mut reads.samples {
+                sample.by_library[0].0 = LibraryIndex(sample.sample);
             }
             drawn.push(reads);
         }
