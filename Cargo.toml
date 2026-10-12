@@ -348,6 +348,13 @@ required-features = ["bench-fixtures"]
 name = "ng_str_counting_fit_errors"
 required-features = ["bench-fixtures"]
 
+# The repeat-tract fitting bench: draws a cohort from a known model and scores every fitting
+# method on it (`doc/devel/ng/research/str_fit_research_plan.md` §2, §3.1). Draws from
+# `ssr_fit::bench_fixtures`, so it needs the same feature.
+[[example]]
+name = "ng_str_fit_bench"
+required-features = ["bench-fixtures"]
+
 # The site quality's cost across the cohort sizes the caller commits to —
 # `doc/devel/ng/spec/calling_quality.md` §13's Q3, which names this benchmark as the way to
 # settle it. It draws its own likelihood table, so it needs no fixture feature and
