@@ -70,7 +70,7 @@ use super::ssr_emission::{SsrCandidate, SsrEmissionModel, SsrScoringContext, res
 use super::{SsrRowScratch, SsrSampleEvidence};
 use crate::calling::GenotypeTableView;
 use crate::float;
-use crate::locus_generation::{ReadWitness, SequenceObservation};
+use crate::locus_generation::{HeldFlank, ReadWitness, SequenceObservation};
 use crate::parameter_estimation::Provenance;
 use crate::types::{LogProb, ReadGroupId};
 
@@ -853,14 +853,40 @@ fn fill_emissions<Model: SsrEmissionModel>(
     }
 
     for (position, observation) in evidence.partial_observations() {
+        // **Which end of the candidate the read is compared with** (spec §5.2, changed
+        // 2026-10-12): the flank it held, read off its witness. A witness covering the whole
+        // tract cannot say — the read ran past the far border from one side or the other, and
+        // two such reads of the same bases are one observation (`locus_generation_ssr.md` §3) —
+        // so it is scored from both, each weighted one half.
+        let held = HeldFlank::of_witness(&observation.read_witness, evidence.tract_len);
+        // **Only a whole-tract witness may fail to say.** The generator lays every partial from
+        // the border its read held, so a witness touching neither border means the tract length
+        // here is not the one the witness was laid on — and scoring it half from each side would
+        // silently undo this comparison for every right-held read of the locus.
+        assert!(
+            held.is_some()
+                || (observation.read_witness.is_flush_left()
+                    && observation.read_witness.is_flush_right(evidence.tract_len)),
+            "a partial witness {:?} touches neither border of a {}-position STR segment: the \
+             witness and the segment length are on different axes",
+            observation.read_witness,
+            evidence.tract_len.get()
+        );
         for (candidate, allele) in candidates.iter().enumerate() {
             let context = contexts.of(observation.read_group, candidate);
-            let scored = model.censored_emission(
-                &observation.bases,
-                allele,
-                context,
-                scratch.model_scratch_mut(),
-            );
+            let mut from = |side| {
+                model.censored_emission(
+                    &observation.bases,
+                    side,
+                    allele,
+                    context,
+                    scratch.model_scratch_mut(),
+                )
+            };
+            let scored = match held {
+                Some(side) => from(side),
+                None => 0.5 * from(HeldFlank::Left) + 0.5 * from(HeldFlank::Right),
+            };
             scratch.set_emission(position, candidate, scored);
         }
     }
@@ -868,6 +894,7 @@ fn fill_emissions<Model: SsrEmissionModel>(
 
 #[cfg(test)]
 mod tests {
+    use crate::calling::likelihood::TEST_TRACT_LEN;
     use std::cell::Cell;
     use std::num::NonZeroU32;
 
@@ -1073,7 +1100,7 @@ mod tests {
         fractions: &[f64],
     ) -> Vec<LogProb> {
         let detail = a_detail(fixture.motif.as_bytes());
-        let evidence = SsrSampleEvidence::new(observations, &detail);
+        let evidence = SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN);
         let candidates = fixture.candidates();
         let contexts = fixture.contexts(&candidates);
         let mut lengths = Vec::new();
@@ -1389,13 +1416,14 @@ mod tests {
             fn censored_emission(
                 &self,
                 witnessed_prefix: &[u8],
+                held: HeldFlank,
                 candidate: &SsrCandidate<'_>,
                 context: &SsrScoringContext<'_>,
                 scratch: &mut Self::Scratch,
             ) -> f64 {
                 self.censored.set(self.censored.get() + 1);
                 self.inner
-                    .censored_emission(witnessed_prefix, candidate, context, scratch)
+                    .censored_emission(witnessed_prefix, held, candidate, context, scratch)
             }
         }
 
@@ -1406,7 +1434,7 @@ mod tests {
             spanning(&a_tract(b"CA", 6), 2),
         ];
         let detail = a_detail(b"CA");
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
         let candidates = fixture.candidates();
         let contexts = fixture.contexts(&candidates);
         let mut lengths = Vec::new();
@@ -1451,6 +1479,123 @@ mod tests {
         assert_eq!(model.censored.get(), 0, "no observation here is censored");
     }
 
+    /// **A partial read is scored from the flank its witness says it held**, and one whose
+    /// witness covers the whole tract — which cannot say — from both, each weighted one half
+    /// (spec §5.2, changed 2026-10-12). A model that answers 1 in 4 from the left and 3 in 4 from
+    /// the right shows which the row asked for in the emission cache.
+    #[test]
+    fn a_partial_read_is_scored_from_the_flank_its_witness_held() {
+        struct BySide;
+        impl SsrEmissionModel for BySide {
+            type Scratch = ();
+            fn emission(
+                &self,
+                _: &[u8],
+                _: &SsrCandidate<'_>,
+                _: &SsrScoringContext<'_>,
+                (): &mut (),
+            ) -> f64 {
+                1.0
+            }
+            fn censored_emission(
+                &self,
+                _: &[u8],
+                held: HeldFlank,
+                _: &SsrCandidate<'_>,
+                _: &SsrScoringContext<'_>,
+                (): &mut (),
+            ) -> f64 {
+                match held {
+                    HeldFlank::Left => 0.25,
+                    HeldFlank::Right => 0.75,
+                }
+            }
+        }
+
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let tract_len = LocusLen::from_positions(8);
+        let with_witness = |bases: &[u8], witness: Option<ReadWitness>| {
+            let mut observation = spanning(bases, 2);
+            observation.read_witness = witness.expect("a partial witness");
+            observation
+        };
+        let observations = [
+            spanning(&a_tract(b"CA", 4), 3),
+            with_witness(b"CACAC", ReadWitness::from_left(5, tract_len)),
+            with_witness(b"ACACA", ReadWitness::from_right(5, tract_len)),
+            with_witness(b"CACACACACA", ReadWitness::from_left(10, tract_len)),
+        ];
+        let detail = a_detail(b"CA");
+        let evidence = SsrSampleEvidence::new(&observations, &detail, tract_len);
+        let candidates = fixture.candidates();
+        let contexts = fixture.contexts(&candidates);
+        let mut lengths = Vec::new();
+        fill_reachable_lengths(&candidates, &fixture.motif, &mut lengths);
+        let table = GenotypeTable::build(Ploidy::try_new(2).expect("a valid ploidy"), 2);
+        let view = table.view();
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut scratch = SsrRowScratch::<()>::default();
+        genotype_log_likelihood_row(
+            &BySide,
+            &evidence,
+            SsrLocusParameters {
+                candidates: &candidates,
+                contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
+                outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                reachable_lengths: &lengths,
+                contamination: None,
+            },
+            &view,
+            &mut out,
+            &mut scratch,
+        );
+
+        for candidate in 0..candidates.len() {
+            let scored: Vec<f64> = (0..observations.len())
+                .map(|observation| scratch.emission_at(observation, candidate))
+                .collect();
+            assert_eq!(scored, [1.0, 0.25, 0.75, 0.5], "candidate {candidate}");
+        }
+    }
+
+    /// **A witness laid on a different tract length stops the row rather than being scored half
+    /// from each side.** A right-held read laid on an 8-position tract, scored against a
+    /// 10-position one, touches neither border; were it accepted, every right-held read of the
+    /// locus would quietly lose the comparison with the candidate's end.
+    #[test]
+    #[should_panic(expected = "touches neither border")]
+    fn a_partial_witness_touching_neither_border_is_refused() {
+        let fixture = Fixture::of(b"CA", &[4, 5]);
+        let mut right_held = spanning(b"ACACA", 2);
+        right_held.read_witness =
+            ReadWitness::from_right(5, LocusLen::from_positions(8)).expect("a partial witness");
+        let observations = [right_held];
+        let detail = a_detail(b"CA");
+        let evidence = SsrSampleEvidence::new(&observations, &detail, LocusLen::from_positions(10));
+        let candidates = fixture.candidates();
+        let contexts = fixture.contexts(&candidates);
+        let mut lengths = Vec::new();
+        fill_reachable_lengths(&candidates, &fixture.motif, &mut lengths);
+        let table = GenotypeTable::build(Ploidy::try_new(2).expect("a valid ploidy"), 2);
+        let view = table.view();
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut scratch = SsrRowScratch::default();
+        genotype_log_likelihood_row(
+            &StutterSubstitutionEmission,
+            &evidence,
+            SsrLocusParameters {
+                candidates: &candidates,
+                contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
+                outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                reachable_lengths: &lengths,
+                contamination: None,
+            },
+            &view,
+            &mut out,
+            &mut scratch,
+        );
+    }
+
     /// **Spec §12's seventh test, first half: a biallelic diploid reproduced by hand.**
     ///
     /// The other ploidy test pins *orderings* — which genotype beats which — and every one of
@@ -1491,8 +1636,10 @@ mod tests {
                     &contexts[candidate],
                     scratch,
                 ),
+                // The fixture's one partial holds the left flank and stops short of the right.
                 ReadWitness::Partial { .. } => StutterSubstitutionEmission.censored_emission(
                     &seen.bases,
+                    HeldFlank::Left,
                     &candidates[candidate],
                     &contexts[candidate],
                     scratch,
@@ -1624,7 +1771,7 @@ mod tests {
 
         let score_with = |observation: &SequenceObservation| {
             let held = [observation.clone()];
-            let evidence = SsrSampleEvidence::new(&held, &detail);
+            let evidence = SsrSampleEvidence::new(&held, &detail, TEST_TRACT_LEN);
             let genotypes = GenotypeTable::build(
                 Ploidy::try_new(2).expect("a valid ploidy"),
                 candidates.len(),
@@ -1688,7 +1835,7 @@ mod tests {
         // put first and a complete observation above it: a dense counter inside the filtered
         // loop addresses the wrong row for that one, and nothing else here would notice.
         let observations = [partial, spanning(&a_tract(b"CA", 8), 4)];
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
         assert_eq!(evidence.partial_observations().count(), 1);
         assert_eq!(evidence.complete_observations().count(), 1);
 
@@ -1755,7 +1902,7 @@ mod tests {
         let fixture = Fixture::of(b"CA", &[4, 5]);
         let observations = [spanning(&a_tract(b"CA", 4), 5)];
         let detail = a_detail(b"CA");
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
         let candidates = fixture.candidates();
         let contexts = fixture.contexts(&candidates);
         let table = GenotypeTable::build(Ploidy::try_new(2).expect("a valid ploidy"), 2);
@@ -1786,7 +1933,7 @@ mod tests {
         let fixture = Fixture::of(b"CA", &[4, 5, 6]);
         let detail = a_detail(b"CA");
         let observations = [spanning(&a_tract(b"CA", 4), 5)];
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
         let candidates = fixture.candidates();
         let contexts = fixture.contexts(&candidates);
         let mut lengths = Vec::new();

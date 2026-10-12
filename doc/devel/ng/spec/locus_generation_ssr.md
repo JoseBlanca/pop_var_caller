@@ -211,6 +211,18 @@ the carrying of partial observations to this spec.
 > Source: [locus_generation_pileup.md](locus_generation_pileup.md) §6,
 > [the prerequisites plan](../impl_plan/locus_generation_pileup_prerequisites.md) Milestone B.
 
+> **Changed (2026-10-12): the side a partial read held is now read, and the merged case is not one
+> constraint.** The generator stores a partial read's bases in read order — a left-held read's are
+> the start of its carrier's tract, a right-held read's its end — and the censored term now
+> compares each with the matching end of the candidate (`read_likelihoods.md` §5.2). Before, every
+> partial was compared with the candidate's start, and a right-held read out of phase with it fell
+> to the outlier term. The side comes from the witness: flush left only is left-held, flush right
+> only is right-held. **The merged case above is a prefix and a suffix of the same bases, not one
+> constraint** — they agree only when the read's length is a whole number of repeats from both
+> ends — so calling cannot know which a merged row holds and scores it from both sides, each
+> weighted one half. Keeping the side in the observation would close that, at the cost of a psp
+> format change; not done here.
+
 **We store the observed sequence, not a repeat count.** Two alleles of the same length can differ by
 an interior substitution — an interrupted repeat — and a count cannot tell them apart.
 

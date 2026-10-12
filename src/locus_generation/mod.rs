@@ -373,6 +373,44 @@ pub struct SequenceObservation {
     pub flank_deletion: FlankDeletion,
 }
 
+/// **Which flank of an STR locus a read anchored before it ran out inside the repeat** — the
+/// side its bases start from. A read that held the left flank shows the start of its carrier's
+/// repeat; one that held the right flank shows its end.
+///
+/// A partial witness says it when it touches one border of the locus only
+/// ([`HeldFlank::of_witness`]). One that covers the whole locus does not: the generator lays a
+/// read's reach down from the border it anchored and clamps it to the locus
+/// ([`ReadWitness::from_left`]), so a read that ran past the far border from either side covers
+/// every position, and two such reads of the same bases are one observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HeldFlank {
+    /// The flank before the repeat's first base.
+    Left,
+    /// The flank after the repeat's last base.
+    Right,
+}
+
+impl HeldFlank {
+    /// The flank a partial read held, read off its witness on a locus of `locus_len` positions:
+    /// `Left` for a witness flush with the left border only, `Right` for one flush with the
+    /// right border only, and `None` where the witness cannot say — a complete read, a witness
+    /// covering the whole locus, or one touching neither border.
+    #[must_use]
+    pub fn of_witness(witness: &ReadWitness, locus_len: LocusLen) -> Option<Self> {
+        let ReadWitness::Partial { positions } = witness else {
+            return None;
+        };
+        match (
+            positions.is_flush_left(),
+            positions.is_flush_right(locus_len),
+        ) {
+            (true, false) => Some(Self::Left),
+            (false, true) => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
 /// **How many flank bases a deletion running out of an STR segment removed, on each side.**
 ///
 /// Beside a spelling of the repeat it says what a read's sequence is over a stretch wider than

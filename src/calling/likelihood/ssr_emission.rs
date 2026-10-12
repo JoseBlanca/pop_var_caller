@@ -35,6 +35,7 @@ use std::num::{NonZeroU8, NonZeroU32};
 use crate::alignment::StutterModel;
 use crate::alignment::emission::{Emission, FlatEmission};
 use crate::float;
+use crate::locus_generation::HeldFlank;
 use crate::parameter_estimation::Provenance;
 use crate::types::{BaseQual, ErrorRate, Motif};
 
@@ -298,9 +299,18 @@ pub trait SsrEmissionModel {
     /// *(Spec §5.2 and §12's thirteenth test claimed the stronger property until 2026-08-25,
     /// when this measurement was put to the owner and both were corrected. §5.2's correction
     /// box is the place to read the argument.)*
+    ///
+    /// **`held` says which end of the candidate the read is compared with.** A read that held
+    /// the left flank shows the start of its carrier's tract, so `witnessed` is compared with
+    /// the candidate's first bases; one that held the right flank shows the tract's end, so it
+    /// is compared with the candidate's last bases, and every length change is placed as its
+    /// mirror image (spec §5.2, changed 2026-10-12). Before that change every partial was
+    /// compared with the start, and a right-held read whose length was not a whole number of
+    /// repeats from the tract's end fell to the outlier floor.
     fn censored_emission(
         &self,
-        witnessed_prefix: &[u8],
+        witnessed: &[u8],
+        held: HeldFlank,
         candidate: &SsrCandidate<'_>,
         context: &SsrScoringContext<'_>,
         scratch: &mut Self::Scratch,
@@ -370,6 +380,27 @@ pub struct StutterSubstitutionScratch {
     placements: Vec<Vec<u8>>,
     /// The candidate resized to the read's length, for the single-placement branch.
     resized: Vec<u8>,
+    /// A right-held partial read and its candidate, each reversed, and the motif in their phase —
+    /// what [`censored_from_the_tract_start`] is handed for a read compared with the candidate's
+    /// end.
+    mirrored: MirroredCensoredRead,
+}
+
+/// **A read that held the right flank, turned into one that held the left**: the read's bases,
+/// the candidate's tract and the motif, each written back to front — the motif in the phase
+/// the candidate ends on ([`motif_phased_to_the_end_reversed`]).
+///
+/// Comparing a read's bases with the end of a tract is comparing them reversed with the start
+/// of the reversed tract, and a reversed pure tract is a pure tract of the reversed motif
+/// (`CACACA` under `CA` is `ACACAC` under `AC`). So the left-held scoring serves both sides
+/// unchanged, and every length change lands as the mirror image of where it lands for a
+/// left-held read: a part-repeat change at the tract's start instead of its end, a whole-repeat
+/// slip in each run as found from the right.
+#[derive(Debug, Default)]
+struct MirroredCensoredRead {
+    read: Vec<u8>,
+    candidate: Vec<u8>,
+    motif: Vec<u8>,
 }
 
 impl SsrEmissionModel for StutterSubstitutionEmission {
@@ -413,93 +444,169 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
 
     fn censored_emission(
         &self,
-        witnessed_prefix: &[u8],
+        witnessed: &[u8],
+        held: HeldFlank,
         candidate: &SsrCandidate<'_>,
         context: &SsrScoringContext<'_>,
         scratch: &mut Self::Scratch,
     ) -> f64 {
-        let period = period_of(context.motif);
         let motif = context.motif.as_bytes();
-        let witnessed_bases = witnessed_prefix.len();
-
-        // The read got through `witnessed_bases` bases of tract, so the tract is at least that
-        // long — which for this candidate means a length change of at least this much. It is
-        // negative whenever the candidate is already long enough on its own, and that is the
-        // ordinary case rather than an edge one.
-        let smallest_bp_diff = witnessed_bases as i64 - candidate.bases.len() as i64;
-
-        if is_a_pure_tract(candidate.bases, motif) {
-            // **The factorised form, and on a pure tract it is exact.** Every stretching of a
-            // pure tract agrees on its first `witnessed_bases` bases — stretching appends or
-            // trims at the end — so the letters come out of the sum and what is left is the
-            // length factor (spec §5.2).
-            let length_probability_at_least =
-                context.stutter.probability_at_least_this_much_longer(
-                    smallest_bp_diff,
-                    period,
-                    candidate.repeat_count,
-                );
-            // An early exit rather than a correction: the letter factor is finite, so falling
-            // through would multiply out to this same zero. It saves a resize.
-            if length_probability_at_least <= 0.0 {
-                return 0.0;
-            }
-            resize_at_the_end(
+        match held {
+            HeldFlank::Left => censored_from_the_tract_start(
+                witnessed,
                 candidate.bases,
+                candidate.repeat_count,
                 motif,
-                smallest_bp_diff,
-                &mut scratch.resized,
-            );
-            return length_probability_at_least
-                * substitution_probability(witnessed_prefix, &scratch.resized, context);
-        }
-
-        // **The exact sum, on an interrupted tract.** Here the stretchings give genuinely
-        // different first-`witnessed_bases` bases, so the letters cannot come out of the sum:
-        // an interruption sits at a different offset in each one. Spec §5.2 bounds what the
-        // factorisation would cost here at `log(3(1−ε)/ε)` per distinguishing base — 6.4 nats
-        // at an error rate of 1 in 200 — and says to pay for the sum instead.
-        //
-        // **What that costs is one letter comparison per placement per length change**, not
-        // one per length change: the support is at most 41 changes wide and an interrupted
-        // tract offers one placement per run, so a two-run tract pays at most 82 comparisons
-        // of the tract's length. It reaches only candidates that are interrupted at all — a
-        // pure one took the branch above.
-        //
-        // **The runs are found once**, before the walk: they are a property of the candidate,
-        // and the candidate does not move inside the loop.
-        segment_tract_into(candidate.bases, motif, &mut scratch.segments);
-        let mut total = 0.0;
-        for (bp_diff, length_probability) in context
-            .stutter
-            .reachable_length_changes(period, candidate.repeat_count)
-        {
-            // Only the stretchings that leave the tract at least as long as what the read
-            // showed. Everything else is a tract the read could not have run out inside — and
-            // this filter is also what makes every prefix below well defined, because a
-            // stretching admitted here is by construction at least `witnessed_bases` long.
-            if bp_diff < smallest_bp_diff || length_probability <= 0.0 {
-                continue;
-            }
-            let Some(letters) = letters_over(
-                witnessed_prefix,
-                candidate.bases,
-                motif,
-                bp_diff,
                 context,
                 scratch,
-            ) else {
-                // Unreachable from this candidate's runs. A slip lands in *one* run, and the
-                // distribution's own reachability rule sees only the total, so the support can
-                // offer a contraction no single run can absorb — the recorded open question.
-                // Skipping is an early exit rather than a correction: an empty placement list
-                // contributes zero to this sum either way.
-                continue;
-            };
-            total += length_probability * letters;
+            ),
+            HeldFlank::Right => {
+                // Taken out of the scratch for the call, because the scoring borrows the rest
+                // of it, and put back after so its buffers are reused.
+                let mut mirrored = std::mem::take(&mut scratch.mirrored);
+                for (reversed, forward) in [
+                    (&mut mirrored.read, witnessed),
+                    (&mut mirrored.candidate, candidate.bases),
+                ] {
+                    reversed.clear();
+                    reversed.extend(forward.iter().rev());
+                }
+                motif_phased_to_the_end_reversed(candidate.bases, motif, &mut mirrored.motif);
+                let scored = censored_from_the_tract_start(
+                    &mirrored.read,
+                    &mirrored.candidate,
+                    candidate.repeat_count,
+                    &mirrored.motif,
+                    context,
+                    scratch,
+                );
+                scratch.mirrored = mirrored;
+                scored
+            }
         }
-        total
     }
+}
+
+/// **The motif a mirrored candidate is written in**: the copy the candidate ends on, written
+/// backwards — into `out`, cleared first.
+///
+/// The motif a tract is handed with is in phase with the tract's **start**. Written backwards,
+/// the tract starts where it used to end, so its motif is the phase it ended on, reversed. For a
+/// candidate of whole copies that is simply the motif reversed (`CACACA` under `CA` ends on
+/// `CA`, giving `AC`). For one that ends part-way through a copy it is not: `CACACAC` ends on
+/// `AC`, so its mirror image `CACACAC` is in phase with `CA`. Handing it `AC` would put every
+/// part-repeat lengthening out of phase — the bases a slipped polymerase would add before the
+/// candidate's start are `A`, `C`, …, and `AC` tiles `C`, `A`, ….
+///
+/// Where the candidate's last bases are not a copy of the motif in any phase — it ends on an
+/// interruption — there is no phase to read, and the motif reversed is used, as for a candidate
+/// of whole copies.
+fn motif_phased_to_the_end_reversed(candidate: &[u8], motif: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    let period = motif.len();
+    let ends_in_phase = candidate.len().checked_sub(period).and_then(|start| {
+        let last_copy = &candidate[start..];
+        (0..period)
+            .any(|shift| (0..period).all(|at| last_copy[at] == motif[(shift + at) % period]))
+            .then_some(last_copy)
+    });
+    out.extend(ends_in_phase.unwrap_or(motif).iter().rev());
+}
+
+/// [`SsrEmissionModel::censored_emission`] for a read whose bases start where the tract
+/// starts — a read that held the left flank, or a right-held one already reversed
+/// ([`MirroredCensoredRead`]).
+///
+/// `motif` is the motif as the tract is written here, which for a reversed tract is the copy the
+/// tract ended on, reversed; only its length is read from `context.motif`, and the two have the
+/// same one.
+fn censored_from_the_tract_start(
+    witnessed_prefix: &[u8],
+    candidate_bases: &[u8],
+    repeat_count: NonZeroU32,
+    motif: &[u8],
+    context: &SsrScoringContext<'_>,
+    scratch: &mut StutterSubstitutionScratch,
+) -> f64 {
+    let period = period_of(context.motif);
+    let witnessed_bases = witnessed_prefix.len();
+
+    // The read got through `witnessed_bases` bases of tract, so the tract is at least that
+    // long — which for this candidate means a length change of at least this much. It is
+    // negative whenever the candidate is already long enough on its own, and that is the
+    // ordinary case rather than an edge one.
+    let smallest_bp_diff = witnessed_bases as i64 - candidate_bases.len() as i64;
+
+    if is_a_pure_tract(candidate_bases, motif) {
+        // **The factorised form, and on a pure tract it is exact.** Every stretching of a
+        // pure tract agrees on its first `witnessed_bases` bases — stretching appends or
+        // trims at the end — so the letters come out of the sum and what is left is the
+        // length factor (spec §5.2).
+        let length_probability_at_least = context.stutter.probability_at_least_this_much_longer(
+            smallest_bp_diff,
+            period,
+            repeat_count,
+        );
+        // An early exit rather than a correction: the letter factor is finite, so falling
+        // through would multiply out to this same zero. It saves a resize.
+        if length_probability_at_least <= 0.0 {
+            return 0.0;
+        }
+        resize_at_the_end(
+            candidate_bases,
+            motif,
+            smallest_bp_diff,
+            &mut scratch.resized,
+        );
+        return length_probability_at_least
+            * substitution_probability(witnessed_prefix, &scratch.resized, context);
+    }
+
+    // **The exact sum, on an interrupted tract.** Here the stretchings give genuinely
+    // different first-`witnessed_bases` bases, so the letters cannot come out of the sum:
+    // an interruption sits at a different offset in each one. Spec §5.2 bounds what the
+    // factorisation would cost here at `log(3(1−ε)/ε)` per distinguishing base — 6.4 nats
+    // at an error rate of 1 in 200 — and says to pay for the sum instead.
+    //
+    // **What that costs is one letter comparison per placement per length change**, not
+    // one per length change: the support is at most 41 changes wide and an interrupted
+    // tract offers one placement per run, so a two-run tract pays at most 82 comparisons
+    // of the tract's length. It reaches only candidates that are interrupted at all — a
+    // pure one took the branch above.
+    //
+    // **The runs are found once**, before the walk: they are a property of the candidate,
+    // and the candidate does not move inside the loop.
+    segment_tract_into(candidate_bases, motif, &mut scratch.segments);
+    let mut total = 0.0;
+    for (bp_diff, length_probability) in context
+        .stutter
+        .reachable_length_changes(period, repeat_count)
+    {
+        // Only the stretchings that leave the tract at least as long as what the read
+        // showed. Everything else is a tract the read could not have run out inside — and
+        // this filter is also what makes every prefix below well defined, because a
+        // stretching admitted here is by construction at least `witnessed_bases` long.
+        if bp_diff < smallest_bp_diff || length_probability <= 0.0 {
+            continue;
+        }
+        let Some(letters) = letters_over(
+            witnessed_prefix,
+            candidate_bases,
+            motif,
+            bp_diff,
+            context,
+            scratch,
+        ) else {
+            // Unreachable from this candidate's runs. A slip lands in *one* run, and the
+            // distribution's own reachability rule sees only the total, so the support can
+            // offer a contraction no single run can absorb — the recorded open question.
+            // Skipping is an early exit rather than a correction: an empty placement list
+            // contributes zero to this sum either way.
+            continue;
+        };
+        total += length_probability * letters;
+    }
+    total
 }
 
 /// **How probable the letters are, given this candidate stretched by `bp_diff`** — compared
@@ -948,7 +1055,8 @@ mod tests {
 
         fn censored_emission(
             &self,
-            _witnessed_prefix: &[u8],
+            _witnessed: &[u8],
+            _held: HeldFlank,
             _candidate: &SsrCandidate<'_>,
             _context: &SsrScoringContext<'_>,
             _scratch: &mut Self::Scratch,
@@ -1522,6 +1630,27 @@ mod tests {
         model: &StutterModel,
         substitution_rate: f64,
     ) -> f64 {
+        score_censored_from(
+            HeldFlank::Left,
+            witnessed_prefix,
+            candidate_bases,
+            repeat_count,
+            motif,
+            model,
+            substitution_rate,
+        )
+    }
+
+    /// [`score_censored`] for a read that held the flank `held`.
+    fn score_censored_from(
+        held: HeldFlank,
+        witnessed_prefix: &[u8],
+        candidate_bases: &[u8],
+        repeat_count: u32,
+        motif: &[u8],
+        model: &StutterModel,
+        substitution_rate: f64,
+    ) -> f64 {
         let motif = a_motif(motif);
         let candidate = SsrCandidate {
             reference_flanks: (&[], &[]),
@@ -1539,6 +1668,7 @@ mod tests {
         let mut scratch = StutterSubstitutionScratch::default();
         StutterSubstitutionEmission.censored_emission(
             witnessed_prefix,
+            held,
             &candidate,
             &context,
             &mut scratch,
@@ -2291,5 +2421,270 @@ mod tests {
             22,
             "the disagreement between the scoring and the support changed size"
         );
+    }
+
+    // ── Which end of the candidate a partial read is compared with (2026-10-12) ──
+
+    /// **A read that held the right flank is compared with the candidate's end.** The case the
+    /// defect was found on: a `CA` tract read from the right showing `ACACA` — its last five
+    /// bases. Compared with the tract's first five, `CACAC`, every base disagrees, and the read
+    /// scored about 4 in 10¹⁸ against every candidate, below the outlier floor; compared with
+    /// the end it scores what the mirror-image read from the left, `CACAC`, does.
+    #[test]
+    fn a_right_held_read_is_compared_with_the_candidates_end() {
+        let model = a_model();
+        let candidate = a_tract(b"CA", 4);
+        assert_eq!(&candidate[candidate.len() - 5..], b"ACACA");
+
+        let from_right = score_censored_from(
+            HeldFlank::Right,
+            b"ACACA",
+            &candidate,
+            4,
+            b"CA",
+            &model,
+            1e-3,
+        );
+        let from_left = score_censored_from(
+            HeldFlank::Left,
+            b"CACAC",
+            &candidate,
+            4,
+            b"CA",
+            &model,
+            1e-3,
+        );
+        let as_main_read_it = score_censored_from(
+            HeldFlank::Left,
+            b"ACACA",
+            &candidate,
+            4,
+            b"CA",
+            &model,
+            1e-3,
+        );
+
+        assert_eq!(from_right.to_bits(), from_left.to_bits());
+        assert!(
+            from_right > 0.5,
+            "the read fits its own candidate: {from_right}"
+        );
+        assert!(
+            as_main_read_it < 1e-15,
+            "read from the wrong end it is five mismatches: {as_main_read_it}"
+        );
+    }
+
+    /// **The two sides are mirror images on every pure tract**: the last `k` bases of a pure
+    /// tract read from the right score exactly what its first `k` read from the left do, for
+    /// every read length that ends inside a reachable stretching, at periods 1 to 6.
+    #[test]
+    fn left_and_right_reads_of_a_pure_tract_score_alike() {
+        let model = a_model();
+        for motif in [&b"A"[..], b"CA", b"CAG", b"AAAG", b"AAAGG", b"AACCCT"] {
+            for repeat_count in [3_u32, 6, 10] {
+                let candidate = a_tract(motif, repeat_count as usize);
+                let longest = a_tract(motif, repeat_count as usize + 3);
+                for witnessed in 1..longest.len() {
+                    let first = &longest[..witnessed];
+                    // The last `witnessed` bases of the tract continued to the left by the motif.
+                    let last = &longest[longest.len() - witnessed..];
+                    let from_left = score_censored_from(
+                        HeldFlank::Left,
+                        first,
+                        &candidate,
+                        repeat_count,
+                        motif,
+                        &model,
+                        1e-3,
+                    );
+                    let from_right = score_censored_from(
+                        HeldFlank::Right,
+                        last,
+                        &candidate,
+                        repeat_count,
+                        motif,
+                        &model,
+                        1e-3,
+                    );
+                    assert_eq!(
+                        from_left.to_bits(),
+                        from_right.to_bits(),
+                        "motif {}, {repeat_count} repeats, {witnessed} bases: left {from_left}, \
+                         right {from_right}",
+                        String::from_utf8_lossy(motif)
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A period-1 tract does not change**: every read of a run of one letter is in phase
+    /// from either end, so a right-held read scores what main scored it at, which was the
+    /// left-held score of the same bases.
+    #[test]
+    fn a_period_one_read_scores_the_same_from_either_side() {
+        let model = a_model();
+        let candidate = a_tract(b"A", 12);
+        for witnessed in 1..=14 {
+            let read = a_tract(b"A", witnessed);
+            for observed in [read.clone(), {
+                // And with a sequencing error in it, away from the middle.
+                let mut with_error = read.clone();
+                with_error[0] = b'C';
+                with_error
+            }] {
+                let left = score_censored_from(
+                    HeldFlank::Left,
+                    &observed,
+                    &candidate,
+                    12,
+                    b"A",
+                    &model,
+                    1e-3,
+                );
+                let mut reversed = observed.clone();
+                reversed.reverse();
+                let right = score_censored_from(
+                    HeldFlank::Right,
+                    &reversed,
+                    &candidate,
+                    12,
+                    b"A",
+                    &model,
+                    1e-3,
+                );
+                assert_eq!(left.to_bits(), right.to_bits(), "{witnessed} bases");
+            }
+            // The error-free read is the same bases either way, so main's score is unchanged.
+            let right =
+                score_censored_from(HeldFlank::Right, &read, &candidate, 12, b"A", &model, 1e-3);
+            let main = score_censored(&read, &candidate, 12, b"A", &model, 1e-3);
+            assert_eq!(right.to_bits(), main.to_bits(), "{witnessed} bases");
+        }
+    }
+
+    /// **On an interrupted candidate that reads the same from either end, a read and its mirror
+    /// image score identically** — the interrupted route's exact sum, where whole-repeat slips
+    /// are placed run by run and a part-repeat change at the far end from the held flank.
+    #[test]
+    fn mirror_image_reads_of_a_symmetric_interrupted_candidate_score_alike() {
+        let model = a_model();
+        let symmetric = b"AAAATAAAA";
+        let mut reversed = symmetric.to_vec();
+        reversed.reverse();
+        assert_eq!(
+            &reversed[..],
+            &symmetric[..],
+            "the candidate is its own mirror image"
+        );
+        for witnessed in 1..=symmetric.len() + 3 {
+            let mut read = symmetric[..witnessed.min(symmetric.len())].to_vec();
+            read.resize(witnessed, b'A');
+            let mut mirrored = read.clone();
+            mirrored.reverse();
+            let from_left =
+                score_censored_from(HeldFlank::Left, &read, symmetric, 8, b"A", &model, 1e-3);
+            let from_right = score_censored_from(
+                HeldFlank::Right,
+                &mirrored,
+                symmetric,
+                8,
+                b"A",
+                &model,
+                1e-3,
+            );
+            assert_eq!(
+                from_left.to_bits(),
+                from_right.to_bits(),
+                "{} from the left against {} from the right",
+                String::from_utf8_lossy(&read),
+                String::from_utf8_lossy(&mirrored)
+            );
+            assert!(from_left > 0.0, "{witnessed} bases fit the candidate");
+        }
+    }
+
+    /// **The complete-read emission takes no side**, and is unchanged by this: a read that
+    /// spanned the tract scores the same whichever way the censored term would have read it.
+    /// Pinned as a value so a later change that threads the side into it shows up here.
+    #[test]
+    fn the_complete_read_emission_is_unchanged() {
+        let model = a_model();
+        let candidate = a_tract(b"CA", 6);
+        let scored = score(&a_tract(b"CA", 6), &candidate, 6, b"CA", &model, 1e-3);
+        let expected = model.same_length_share() * float::powi(1.0 - 1e-3, 12);
+        assert!(
+            (scored - expected).abs() <= expected * 1e-12,
+            "{scored} against {expected}"
+        );
+    }
+
+    /// **A candidate that ends part-way through a copy is mirrored in phase.** `CACACAC` under
+    /// `CA` ends on the first base of a copy, so its mirror image, `CACACAC`, starts on that
+    /// same phase: under the motif `CA`, not the motif written backwards, `AC`. A read that held
+    /// the right flank must score what the mirror-image read scores from the left against that
+    /// mirror-image tract — including where it reaches past the candidate, so that a change of
+    /// part of a repeat is lengthened with the bases that continue the tiling backwards from the
+    /// candidate's start (`A`, then `C`).
+    ///
+    /// Reference tracts are trimmed to whole copies, so the case is a candidate the reads
+    /// proposed. With the motif merely reversed, the part-repeat lengthening appends `C` where
+    /// the tiling continues with `A`: at 8 bases the right-held read scored 3.373e-3 against
+    /// the mirror image's 3.541e-3.
+    ///
+    /// The other two candidates are interrupted and **not** their own mirror images, so an
+    /// implementation that forgot to reverse the candidate, or reversed the read alone, fails
+    /// here too; the mirror-image motif of each is written out by hand rather than derived.
+    #[test]
+    fn a_right_held_read_of_a_candidate_ending_mid_copy_mirrors_the_left_held_score() {
+        let model = a_model();
+        /// A candidate, its motif, its whole copies, and the motif its mirror image starts in.
+        type MirrorCase = (&'static [u8], &'static [u8], u32, &'static [u8]);
+        let cases: [MirrorCase; 3] = [
+            (b"CACACAC", b"CA", 3, b"CA"),
+            (b"CACACAGCACA", b"CA", 5, b"AC"),
+            (b"CAGCAGCATCAGCA", b"CAG", 3, b"ACG"),
+        ];
+        for (candidate, ..) in &cases[1..] {
+            let mirrored: Vec<u8> = candidate.iter().rev().copied().collect();
+            assert_ne!(&mirrored[..], *candidate, "a case meant to be asymmetric");
+        }
+        for (candidate, motif, copies, mirrored_motif) in cases {
+            let mirrored_candidate: Vec<u8> = candidate.iter().rev().copied().collect();
+            // The candidate continued backwards from its start by the tiling: what a right-held
+            // read of a lengthened carrier shows.
+            let mut continued = motif.repeat(3);
+            continued.extend_from_slice(candidate);
+            for witnessed in 1..=continued.len() {
+                let read = &continued[continued.len() - witnessed..];
+                let mirrored_read: Vec<u8> = read.iter().rev().copied().collect();
+                let from_right = score_censored_from(
+                    HeldFlank::Right,
+                    read,
+                    candidate,
+                    copies,
+                    motif,
+                    &model,
+                    1e-3,
+                );
+                let mirror_from_left = score_censored_from(
+                    HeldFlank::Left,
+                    &mirrored_read,
+                    &mirrored_candidate,
+                    copies,
+                    mirrored_motif,
+                    &model,
+                    1e-3,
+                );
+                assert_eq!(
+                    from_right.to_bits(),
+                    mirror_from_left.to_bits(),
+                    "{}, {witnessed} bases: right {from_right}, mirror from the left \
+                     {mirror_from_left}",
+                    String::from_utf8_lossy(candidate)
+                );
+            }
+        }
     }
 }

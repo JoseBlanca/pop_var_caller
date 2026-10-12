@@ -3464,6 +3464,7 @@ impl LocusInference {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
     use crate::types::{ContigId, Motif, Position};
 
     fn generic_reference() -> CandidateAlleles {
@@ -4838,8 +4839,8 @@ mod tests {
         let (tract_alleles, _) = str_two_allele_locus();
         let detail = ssr_detail();
         let tract_samples = [
-            SsrSampleEvidence::new(&[], &detail),
-            SsrSampleEvidence::new(&[], &detail),
+            SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
+            SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
         ];
         let counts = two_repeat_counts();
         let tract = LocusEvidence::ssr(region(), &tract_samples, &detail, &counts);
@@ -5143,7 +5144,7 @@ mod tests {
 
         let bundle = CandidateAlleles::new(Box::from(b"CAGCAG".as_slice()), LocusKind::SsrBundle);
         let detail = ssr_detail();
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         // One repeat count, because a bundle built from a reference alone is called over one
         // allele — the counts run parallel to the candidate table, which the same method checks.
         let counts = [NonZeroU32::new(6).expect("six repeats")];
@@ -5206,7 +5207,7 @@ mod tests {
     #[should_panic(expected = "supplied no candidate repeat counts")]
     fn ssr_evidence_with_no_candidate_repeat_counts_is_refused() {
         let detail = ssr_detail();
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         let _ = LocusEvidence::ssr(region(), &per_sample, &detail, &[]);
     }
 
@@ -5239,7 +5240,7 @@ mod tests {
             LocusKind::Ssr(ssr_detail()),
         );
         alleles.admit(Box::from(b"ATATATAT".as_slice()));
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         // Two candidates, one count.
         let counts = [NonZeroU32::new(6).expect("six repeats")];
         let evidence = LocusEvidence::ssr(region(), &per_sample, &detail, &counts);

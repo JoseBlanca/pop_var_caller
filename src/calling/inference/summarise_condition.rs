@@ -2629,6 +2629,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
     use crate::parameter_estimation::joint::stratum_fits::LengthSpectrumRung;
 
     /// The repeat unit every repeat tract in this file is built on — **a dinucleotide**, so that
@@ -6035,7 +6036,7 @@ mod tests {
         alleles.admit(Box::from(b"ATATAT".as_slice()));
         let table = GenotypeTable::build(diploid(), 2);
         let view = table.view();
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
 
@@ -7809,7 +7810,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, repeat_counts);
         let inbreeding = vec![outbred(); per_sample.len()];
@@ -7885,7 +7886,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
@@ -7914,7 +7915,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
@@ -9052,7 +9053,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let samples = per_sample.len();
         let repeat_counts = tract_repeat_counts();
@@ -9921,7 +9922,7 @@ mod tests {
     #[should_panic(expected = "reached the SNP/indel path's evidence")]
     fn a_tract_handed_to_the_snp_paths_evidence_accessor_is_refused() {
         let detail = tract_detail();
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
         let _ = generic_evidence_of(&evidence);
@@ -9951,8 +9952,8 @@ mod tests {
             right_flank: Box::from(b"TTTAAA".as_slice()),
         };
         let per_sample = [
-            SsrSampleEvidence::new(&[], &detail),
-            SsrSampleEvidence::new(&[], &detail),
+            SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
+            SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
         ];
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);

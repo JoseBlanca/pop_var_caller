@@ -979,6 +979,7 @@ pub fn tract_candidates<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
 
     use crate::calling::ContaminationView;
     use crate::calling::GenotypeTable;
@@ -1823,7 +1824,7 @@ mod tests {
         observations: &[SequenceObservation],
     ) -> Vec<LogProb> {
         let detail = detail();
-        let evidence = SsrSampleEvidence::new(observations, &detail);
+        let evidence = SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN);
         let contexts = gathered.scoring_contexts(alleles);
         let table = GenotypeTable::build(diploid(), alleles.len());
         let view = table.view();

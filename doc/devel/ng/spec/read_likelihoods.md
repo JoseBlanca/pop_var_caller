@@ -1649,6 +1649,30 @@ Lr(partial of length ℓ | a)  =  Σ            P_stutter(Δ | a) · subst( the 
 **In words: sum the stutter distribution over every length change that would still leave the tract at
 least as long as what the read saw, weighting each by how well the letters matched.**
 
+> **Changed (2026-10-12): "the first ℓ bases" holds for a read that held the left flank only.** A
+> read that held the right flank shows the **end** of its carrier's tract, and is compared with the
+> last `ℓ` bases of `a` stretched by `Δ`. Everything above is applied to the mirror image: the
+> read, the candidate and the motif written back to front, so a part-repeat change is resized at
+> the tract's start rather than its end, and a whole-repeat slip is placed in each run as found
+> from the right. The motif written back to front is the copy the candidate **ends** on, reversed:
+> for a candidate of whole copies that is the motif reversed, but `CACACAC` under `CA` ends on
+> `AC`, so its mirror image is in phase with `CA` (added in review, 2026-10-12). The side is read
+> off the read's witness — flush with the left border only, or with the right border only. **A
+> witness covering the whole tract cannot say**: the read ran past the far border from one side or
+> the other, and two such reads of the same bases are one observation (`locus_generation_ssr.md`
+> §3). Such a read is scored from both sides, each weighted one half. A witness touching neither
+> border is not a read the generator makes; it means the tract length is not the one the witness
+> was laid on, and the row stops rather than score it.
+>
+> *Why.* Until this change every partial read was compared with the start of the candidate. A
+> `CA` tract read from the right showing `ACACA` was compared with `CACAC` — five mismatches,
+> about 4 in 10¹⁸ against every candidate — so the read fell to the outlier term. On one
+> simulated sample (PCR, 30×), 14,175 of 22,661 right-flank partial reads at segments were compared
+> out of phase: none at period 1, half at period 2, three in four at periods 4 to 6. That was 27 in
+> 100 of all partial observations at segments. Found in review on the STR-bundle branch
+> (`str_bundles_partial_reads_2026-10-12.md`, M4); the before-and-after measurement is in
+> `reports/implementations/str_partial_read_phase_2026-10-12.md`.
+
 **The factorised form, which is what to implement.** For a pure repeat every reachable stretching
 agrees on the first `ℓ` bases, because stretching appends or trims at the tract's end, so the
 substitution factor comes out of the sum:

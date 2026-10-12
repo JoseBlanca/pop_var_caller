@@ -219,7 +219,15 @@ mod tests {
     /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
     /// repeat tract's `QUAL` moves. It was `206e0f7bf9b5459b99b20477562642a1`. Recorded in the
     /// Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "f037a347e52634175a3eb5b4353fb8d0";
+    ///
+    /// **Re-recorded 2026-10-12** when a partial read that held the right flank of an STR segment
+    /// began to be compared with the candidate's end rather than its start (`read_likelihoods.md`
+    /// §5.2). Only the repeat tract's `AF` moves, in its sixth decimal (0.249923 to 0.249924).
+    /// Measured by scoring every partial from the left again, which restores the old checksum; the
+    /// benchmark measurement is `reports/implementations/str_partial_read_phase_2026-10-12.md`.
+    /// It was `f037a347e52634175a3eb5b4353fb8d0`. Recorded in the Linux container (arm64, glibc)
+    /// only.
+    const WITH_ERRORS_CALLS_MD5: &str = "e9e8aee5b6714aa33ce91bd04290984e";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -244,7 +252,13 @@ mod tests {
     /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
     /// repeat tract's `QUAL` moves. It was `102696ee67202548f35a28a698dbf244`. Recorded in the
     /// Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "fcc1a04573dbbdb08ac80127c554dc94";
+    ///
+    /// **Re-recorded 2026-10-12** with the partial-read change of [`WITH_ERRORS_CALLS_MD5`]'s
+    /// last note: only the repeat tract's `QUAL` (37.2 to 37.3) and `AF` (0.023717 to 0.023718)
+    /// move, and scoring every partial from the left again restores the old checksum.
+    /// It was `fcc1a04573dbbdb08ac80127c554dc94`. Recorded in the Linux container (arm64,
+    /// glibc) only.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "efa3947cb4eacd394de0425ce87c40ed";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
