@@ -23,7 +23,8 @@
 //!     [homozygote excess, default 0.3] [pair alternations, default 0] \
 //!     [slip rate at 9 repeats as a share of its curve, default 0.53] \
 //!     [cost of a bend beyond the knee per log unit, default 2] \
-//!     [1 to weigh allele draws as clustered by locus, default 0]
+//!     [1 to weigh allele draws as clustered by locus, default 0] \
+//!     [a penalty strength to hold every curve at, default: chosen]
 //! ```
 //!
 //! With pair alternations above zero both fits read the between-locus share off pairs of samples
@@ -37,7 +38,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
     fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
-    PenalisedFitConfig, fit_period_by_penalised_counting,
+    PenalisedFitConfig, Smoothing, fit_period_by_penalised_counting,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     FittedCell, Slippage, SlippageCurveConfig, SsrFitConfig, Stratum, StratumEvidence, blend_level,
@@ -223,10 +224,15 @@ fn main() {
         .get(7)
         .map_or(2.0, |a| a.parse().expect("a tail coefficient"));
     let weigh_allele_draws_by_locus = arguments.get(8).is_some_and(|a| a == "1");
+    // A strength held for every curve instead of chosen; for measuring what the choice gives.
+    let smoothing = arguments.get(9).map_or(Smoothing::MarginalLikelihood, |a| {
+        Smoothing::Fixed(a.parse().expect("a penalty strength"))
+    });
     let fit = PenalisedFitConfig {
         pair_alternations,
         kink_tail,
         weigh_allele_draws_by_locus,
+        smoothing,
         ..PenalisedFitConfig::default()
     };
     println!("row\tsetting\tdraw\tmethod\trepeats\tloci\tnumber\testimate\ttruth");

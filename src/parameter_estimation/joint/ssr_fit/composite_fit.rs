@@ -33,6 +33,9 @@ pub struct CountedClass {
     /// How many rounds ran, and the largest change of any number in the last.
     pub rounds: usize,
     pub last_change: f64,
+    /// Rounds of counting over the whole fit: with the spread read off pairs of samples, every
+    /// counting after each reading, where [`rounds`](Self::rounds) is the last one's.
+    pub rounds_in_all: usize,
     /// The objective at the answer.
     pub composite_log_likelihood: f64,
 }
@@ -256,6 +259,7 @@ fn count_class(
         concentration,
         rounds,
         last_change,
+        rounds_in_all: rounds,
         composite_log_likelihood: log_likelihood,
     }
 }
@@ -445,6 +449,7 @@ pub fn fit_class_by_counting_with_pairs(
         tolerance,
     );
     let mut spread = 1.0;
+    let mut rounds_in_all = fitted.rounds;
     for _ in 0..alternations {
         let next = fit_spread_by_pairs(
             evidence,
@@ -463,12 +468,14 @@ pub fn fit_class_by_counting_with_pairs(
             max_rounds,
             tolerance,
         );
+        rounds_in_all += fitted.rounds;
         let settled = (float::ln(next) - float::ln(spread)).abs() < 0.01;
         spread = next;
         if settled {
             break;
         }
     }
+    fitted.rounds_in_all = rounds_in_all;
     fitted
 }
 
@@ -584,6 +591,39 @@ impl SamplePairs {
             })
             .collect();
         Self { per_tract, classes }
+    }
+
+    /// **The pairwise log-likelihood of each tract with two samples or more**, in the order
+    /// [`log_likelihood`](Self::log_likelihood) sums them: what a standard error that treats the
+    /// tract as the independent unit needs. Computed as `log_likelihood` computes each term.
+    #[must_use]
+    pub fn log_likelihood_by_tract(&self, shares: &[f64], ln_spread: f64) -> Vec<f64> {
+        let classes = self.classes;
+        let spread = float::exp(ln_spread);
+        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+        self.per_tract
+            .par_iter()
+            .map(|samples| {
+                let mut total = 0.0;
+                let count = samples.len();
+                let pairs = if count == 2 { 1 } else { count };
+                for index in 0..pairs {
+                    let (one, one_excess) = &samples[index];
+                    let (other, other_excess) = &samples[(index + 1) % count];
+                    let pair = pair_likelihood(
+                        one,
+                        *one_excess,
+                        other,
+                        *other_excess,
+                        &weights,
+                        spread,
+                        classes,
+                    );
+                    total += float::ln(pair.max(1e-300));
+                }
+                total
+            })
+            .collect()
     }
 
     /// Whether any tract has two samples with reads.

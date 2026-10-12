@@ -319,7 +319,7 @@ impl PeriodFit for TheCountingFit {
 /// ([`fit_period_by_penalised_counting`](super::super::penalised_fit::fit_period_by_penalised_counting)),
 /// the spread read off pairs of samples as method B reads it. It draws its own curves, fits every
 /// class with reads (no refusal floor: a thin class takes what its counts and its neighbours say),
-/// and gives no standard errors.
+/// and gives standard errors for every number it reports (`PenalisedClassErrors`).
 ///
 /// **The concentration is absent when no locus has two samples with reads**, as the project
 /// reports a number it cannot estimate. With `report_working_concentration` it reports the value
@@ -343,6 +343,7 @@ impl Default for ThePenalisedFit {
                 max_rounds: 2000,
                 tolerance: 1e-7,
                 pair_alternations: 10,
+                standard_errors: true,
                 ..super::super::penalised_fit::PenalisedFitConfig::default()
             },
             report_working_concentration: false,
@@ -389,7 +390,19 @@ impl PeriodFit for ThePenalisedFit {
                     } else {
                         class.concentration
                     },
-                    errors: ClassErrors::default(),
+                    errors: class
+                        .errors
+                        .map_or_else(ClassErrors::default, |errors| ClassErrors {
+                            level: errors.level,
+                            shorter_share: errors.shorter_share,
+                            fall_off: errors.fall_off,
+                            concentration: errors.concentration,
+                            allele_length_variation: errors
+                                .allele_length_variation
+                                .into_iter()
+                                .map(Some)
+                                .collect(),
+                        }),
                     reads_crossing: evidence.spanning_reads(),
                 },
             })

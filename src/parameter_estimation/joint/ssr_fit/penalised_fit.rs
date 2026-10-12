@@ -90,6 +90,24 @@ pub struct PenalisedFitConfig {
     /// 12% wrong against the counting fit's 1.7%.
     pub rounds_choosing_strength: usize,
     pub settled_change_for_strength: f64,
+    /// **A curve whose strength moved by less than this many natural-log units when last chosen
+    /// keeps it from then on: 0.1**, and only the fit's first round searches the whole range (later
+    /// starts of penalised counting, after each reading of F off pairs, search near the strength
+    /// held). Zero chooses every curve's strength every round until the limits above, and searches
+    /// the whole range at every start: the first version's schedule, kept as the measuring arm.
+    /// On the fitting bench's cells the steady schedule cut the strength search's time 6 to 12-fold
+    /// and, at 60 samples × 10 reads on two-base runs, the rounds from 534 to 288 (track 2's
+    /// report, follow-up section).
+    pub strength_steady_within: f64,
+    /// **A class whose numbers moved by less than the tolerance in the last round keeps its last
+    /// expected counts** instead of gathering them again, until the curves move it by more. Each
+    /// round still chooses every class's numbers. Without it every class is counted every round
+    /// until the slowest settles: at 2,000 samples × 3 reads on one-base runs that was 4,298
+    /// class-rounds where the counting fit, which stops each class when it settles, needed 2,741.
+    pub reuse_settled_counts: bool,
+    /// **Whether standard errors are computed** for every number the fit reports (see
+    /// [`PenalisedClassErrors`]).
+    pub standard_errors: bool,
 }
 
 impl Default for PenalisedFitConfig {
@@ -110,6 +128,9 @@ impl Default for PenalisedFitConfig {
             pair_alternations: 0,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
+            strength_steady_within: 0.1,
+            reuse_settled_counts: true,
+            standard_errors: false,
         }
     }
 }
@@ -171,6 +192,31 @@ pub struct PenalisedClass {
     /// an estimate of how much loci differ when [`concentration`](Self::concentration) is `None`;
     /// there for a scorer that needs every number to compute a likelihood.
     pub working_concentration: f64,
+    /// Standard errors, when [`PenalisedFitConfig::standard_errors`] asked for them.
+    pub errors: Option<PenalisedClassErrors>,
+}
+
+/// **One class's standard errors**, each on its number's own scale; `None` for a number the fit
+/// does not report or could not place.
+///
+/// **What they are.** The fit's numbers are the peak of the counting fit's objective summed over the
+/// classes, minus each curve's bend penalty. Its curvature there, `H` (the objective's curvature
+/// `A` plus the penalty's `P`), would give the Bayesian covariance a penalised fit reports, `H⁻¹`, if
+/// the objective were a true likelihood. It is not: it treats the samples at one locus as
+/// independent, so `A` overstates what the reads say. The spread of the objective's slope from locus
+/// to locus, `B`, measures it honestly, and the covariance reported is `H⁻¹ (B + P) H⁻¹`: `H⁻¹` with
+/// `B` in place of `A`, the same substitution the sandwich formula makes for an unpenalised fit. The
+/// penalty's part keeps the allowance a Bayesian interval makes for the curve's own bias.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PenalisedClassErrors {
+    pub level: Option<f64>,
+    pub shorter_share: Option<f64>,
+    pub fall_off: Option<f64>,
+    /// Of the concentration `c`, and of the between-locus share `1 / (1 + c)`.
+    pub concentration: Option<f64>,
+    pub between_locus_share: Option<f64>,
+    /// One per allele class, `-allele_span ..= +allele_span`.
+    pub allele_length_variation: Vec<f64>,
 }
 
 /// **One number's curve across the repeat counts of a motif length**, on its natural scale.
@@ -228,6 +274,20 @@ pub struct PenalisedPeriodFit {
     /// Wall time spent gathering expected counts and choosing numbers, over every round.
     pub expectation_seconds: f64,
     pub maximisation_seconds: f64,
+    /// Of the M-step's time, the part spent in rounds that chose strengths, and how many such
+    /// rounds there were.
+    pub strength_search_seconds: f64,
+    pub rounds_choosing_strength: usize,
+    /// Time reading F off pairs of samples (building the tables and fitting F's curve), and how
+    /// many times it was read.
+    pub pair_seconds: f64,
+    pub pair_alternations: usize,
+    /// Rounds of each run of penalised counting: the first, then one after each reading of F.
+    pub rounds_per_counting: Vec<usize>,
+    /// Class-rounds whose expected counts were gathered (the rest reused a settled class's).
+    pub class_rounds_counted: usize,
+    /// Time computing standard errors.
+    pub error_seconds: f64,
 }
 
 /// **Fits every class of one motif length at once, by penalised counting.**
@@ -268,6 +328,13 @@ pub fn fit_period_by_penalised_counting(
             composite_log_likelihood: 0.0,
             expectation_seconds: 0.0,
             maximisation_seconds: 0.0,
+            strength_search_seconds: 0.0,
+            rounds_choosing_strength: 0,
+            pair_seconds: 0.0,
+            pair_alternations: 0,
+            rounds_per_counting: Vec::new(),
+            class_rounds_counted: 0,
+            error_seconds: 0.0,
         };
     };
     period.count(classes, homozygote_excess, config, fit, false);
@@ -285,6 +352,7 @@ pub fn fit_period_by_penalised_counting(
                 StrengthSearch::Near
             },
         );
+        period.pair_alternations += 1;
         let mut moved: f64 = 0.0;
         for (point, class) in period.class_at_point.iter().enumerate() {
             if class.is_some() {
@@ -294,13 +362,20 @@ pub fn fit_period_by_penalised_counting(
                 period.concentration[point] = concentration;
             }
         }
-        period.maximisation_seconds += started.elapsed().as_secs_f64();
+        period.pair_seconds += started.elapsed().as_secs_f64();
         period.count(classes, homozygote_excess, config, fit, true);
         if moved < 0.01 {
             break;
         }
     }
-    period.into_fit(classes)
+    let started = Instant::now();
+    let errors = if fit.standard_errors {
+        period.standard_errors(classes, homozygote_excess, config)
+    } else {
+        vec![None; period.points()]
+    };
+    period.error_seconds = started.elapsed().as_secs_f64();
+    period.into_fit(classes, errors)
 }
 
 /// The ln-spread grid a class's pairwise likelihood is tabulated on, as the logit of the
@@ -339,6 +414,19 @@ struct Period {
     composite_log_likelihood: f64,
     expectation_seconds: f64,
     maximisation_seconds: f64,
+    strength_search_seconds: f64,
+    rounds_choosing_strength: usize,
+    pair_seconds: f64,
+    pair_alternations: usize,
+    rounds_per_counting: Vec<usize>,
+    class_rounds_counted: usize,
+    /// Per grid point, how far the class's numbers moved in the last round, and the expected
+    /// counts last gathered for it.
+    class_change: Vec<f64>,
+    last_counts: Vec<Option<ClassCounts>>,
+    error_seconds: f64,
+    /// Whether F was read off pairs of samples, so is not a number of the counting objective.
+    spread_from_pairs: bool,
 }
 
 impl Period {
@@ -400,6 +488,16 @@ impl Period {
             composite_log_likelihood: f64::NEG_INFINITY,
             expectation_seconds: 0.0,
             maximisation_seconds: 0.0,
+            strength_search_seconds: 0.0,
+            rounds_choosing_strength: 0,
+            pair_seconds: 0.0,
+            pair_alternations: 0,
+            rounds_per_counting: Vec::new(),
+            class_rounds_counted: 0,
+            class_change: vec![f64::INFINITY; points],
+            last_counts: vec![None; points],
+            error_seconds: 0.0,
+            spread_from_pairs: false,
         })
     }
 
@@ -440,21 +538,39 @@ impl Period {
         while self.rounds < fit.max_rounds {
             self.rounds += 1;
             rounds_here += 1;
-            let search = if rounds_here == 1 {
-                StrengthSearch::Wide
-            } else if self.rounds <= fit.rounds_choosing_strength
-                && self.last_change >= fit.settled_change_for_strength
-            {
-                StrengthSearch::Near
-            } else {
-                StrengthSearch::Held
-            };
+            let search =
+                if self.rounds == 1 || (rounds_here == 1 && fit.strength_steady_within <= 0.0) {
+                    StrengthSearch::Wide
+                } else if self.rounds <= fit.rounds_choosing_strength
+                    && self.last_change >= fit.settled_change_for_strength
+                {
+                    StrengthSearch::Near
+                } else {
+                    StrengthSearch::Held
+                };
             let started = Instant::now();
-            let counts: Vec<Option<ClassCounts>> = self
+            // Classes side by side, each also spreading its loci over the pool: at one sample a
+            // class's loci alone leave most of the machine idle.
+            let reuse = |point: usize| {
+                fit.reuse_settled_counts
+                    && rounds_here > 1
+                    && self.class_change[point] < fit.tolerance
+                    && self.last_counts[point].is_some()
+            };
+            self.class_rounds_counted += self
                 .class_at_point
                 .iter()
                 .enumerate()
+                .filter(|(point, class)| class.is_some() && !reuse(*point))
+                .count();
+            let counts: Vec<Option<ClassCounts>> = self
+                .class_at_point
+                .par_iter()
+                .enumerate()
                 .map(|(point, class)| {
+                    if reuse(point) {
+                        return self.last_counts[point].clone();
+                    }
                     class.map(|index| {
                         expected_counts(
                             &classes[index],
@@ -538,7 +654,12 @@ impl Period {
                 fit,
                 search,
             );
-            self.maximisation_seconds += started.elapsed().as_secs_f64();
+            let elapsed = started.elapsed().as_secs_f64();
+            self.maximisation_seconds += elapsed;
+            if search != StrengthSearch::Held {
+                self.strength_search_seconds += elapsed;
+                self.rounds_choosing_strength += 1;
+            }
 
             let mut change: f64 = 0.0;
             for point in 0..points {
@@ -559,7 +680,7 @@ impl Period {
                     self.reference_allele,
                 );
                 let old = self.slippage[point];
-                change = new_shares
+                let class_change = new_shares
                     .iter()
                     .zip(&self.shares[point])
                     .map(|(new, old)| (new - old).abs())
@@ -570,16 +691,318 @@ impl Period {
                         (float::ln(new_concentration) - float::ln(self.concentration[point])).abs()
                             * 0.01,
                     ])
-                    .fold(change, f64::max);
+                    .fold(0.0, f64::max);
+                self.class_change[point] = class_change;
+                change = change.max(class_change);
                 self.slippage[point] = new_slippage;
                 self.shares[point] = new_shares;
                 self.concentration[point] = new_concentration;
             }
+            self.last_counts = counts;
             self.last_change = change;
             if self.last_change < fit.tolerance {
                 break;
             }
         }
+        self.rounds_per_counting.push(rounds_here);
+        if spread_held {
+            self.spread_from_pairs = true;
+        }
+    }
+
+    /// **The standard errors of every number at every repeat count with a class**
+    /// ([`PenalisedClassErrors`]): `H⁻¹ (B + P) H⁻¹` over the curves' unbounded values, carried to
+    /// each number's own scale.
+    ///
+    /// - `A`, the counting objective's curvature, class by class: the change in the class's slope
+    ///   over a small step of each of its numbers either way, the slope from the expected counts
+    ///   (Fisher's identity, as track 1 computes the counting fit's errors);
+    /// - `B`, the sum over loci of each locus's slope times itself: the locus is the unit that
+    ///   repeats independently;
+    /// - `P`, each curve's bend penalty at the strength and bend weights it was fitted at.
+    ///
+    /// F read off pairs of samples is the answer to a second objective, so it is handled on its own:
+    /// the same formula over F's curve, its slope and curvature taken numerically locus by locus
+    /// from the pairwise likelihood, and the other numbers' errors taken with F held. The half
+    /// allele draw a class adds is left out of `H` and `P`.
+    fn standard_errors(
+        &self,
+        classes: &[StratumEvidence],
+        homozygote_excess: &[f64],
+        config: &SsrFitConfig,
+    ) -> Vec<Option<PenalisedClassErrors>> {
+        let points = self.points();
+        let shares_block = self.alleles - 1;
+        let f_in_counting = !self.spread_from_pairs && self.between_locus_share_measurable;
+        let share_offset = 3 + usize::from(f_in_counting);
+        let width = share_offset + shares_block;
+        let size = points * width;
+        let reference = self.reference_allele;
+        let theta_at = |point: usize| -> Vec<f64> {
+            let mut theta = vec![
+                self.level_curve.values[point],
+                self.shorter_curve.values[point],
+                self.fall_off_curve.values[point],
+            ];
+            if f_in_counting {
+                theta.push(self.between_curve.values[point]);
+            }
+            theta.extend_from_slice(
+                &self.shares_curve.values[point * shares_block..(point + 1) * shares_block],
+            );
+            theta
+        };
+        let numbers_of = |point: usize, theta: &[f64]| {
+            let slippage = Slippage {
+                level: logistic(theta[0]),
+                shorter_share: logistic(theta[1]),
+                fall_off: logistic(theta[2]).clamp(0.0, 0.99),
+            };
+            let concentration = if f_in_counting {
+                (1.0 / logistic(theta[3]) - 1.0).clamp(1e-3, 1e4)
+            } else {
+                self.concentration[point]
+            };
+            let shares = softmax_with_reference(&theta[share_offset..], reference);
+            (slippage, shares, concentration)
+        };
+        // The slope of the counting objective in the unbounded numbers, from the expected counts.
+        let slope_of = |counts: &ClassCounts, theta: &[f64]| -> Vec<f64> {
+            let mut slope = Vec::with_capacity(width);
+            let level = logistic(theta[0]);
+            slope.push(counts.slipped - level * (counts.slipped + counts.exact));
+            let shorter = logistic(theta[1]);
+            slope.push(counts.shorter - shorter * (counts.shorter + counts.longer));
+            let fall_off = logistic(theta[2]);
+            slope.push((counts.steps - counts.stepped) - fall_off * counts.steps);
+            if f_in_counting {
+                let share = logistic(theta[3]);
+                slope.push(counts.shared_in_tract - share * counts.pairs_not_by_descent);
+            }
+            let shares = softmax_with_reference(&theta[share_offset..], reference);
+            let total: f64 = counts.draws.iter().sum();
+            for (allele, draws) in counts.draws.iter().enumerate() {
+                if allele != reference {
+                    slope.push(draws - total * shares[allele]);
+                }
+            }
+            slope
+        };
+        let class_slope = |evidence: &StratumEvidence, point: usize, theta: &[f64]| {
+            let (slippage, shares, concentration) = numbers_of(point, theta);
+            let counts = expected_counts(
+                evidence,
+                slippage,
+                &shares,
+                concentration,
+                homozygote_excess,
+                config,
+            );
+            slope_of(&counts, theta)
+        };
+        let step = 1e-3;
+        // Each class's curvature and spread blocks, classes side by side.
+        let blocks: Vec<Option<(Vec<f64>, Vec<f64>)>> = self
+            .class_at_point
+            .par_iter()
+            .enumerate()
+            .map(|(point, class)| {
+                let evidence = &classes[(*class)?];
+                let theta = theta_at(point);
+                let mut curvature = vec![0.0; width * width];
+                for column in 0..width {
+                    let mut up = theta.clone();
+                    up[column] += step;
+                    let mut down = theta.clone();
+                    down[column] -= step;
+                    let (above, below) = (
+                        class_slope(evidence, point, &up),
+                        class_slope(evidence, point, &down),
+                    );
+                    for row in 0..width {
+                        let value = -(above[row] - below[row]) / (2.0 * step);
+                        // Symmetrised: the objective's curvature is symmetric, its numerical
+                        // estimate nearly so.
+                        curvature[row * width + column] += 0.5 * value;
+                        curvature[column * width + row] += 0.5 * value;
+                    }
+                }
+                let by_locus: Vec<Vec<f64>> = evidence
+                    .tracts
+                    .par_iter()
+                    .filter(|tract| !tract.samples.is_empty())
+                    .map(|tract| {
+                        let one = StratumEvidence {
+                            stratum: evidence.stratum,
+                            tracts: vec![tract.clone()],
+                            read_span: evidence.read_span,
+                            groups: evidence.groups,
+                            libraries: Arc::clone(&evidence.libraries),
+                            tracts_over_guard_threshold: 0,
+                            reads_reaching_not_crossing: 0,
+                            guard_reads: 0,
+                            bases_compared: 0,
+                            mismatching_bases: 0,
+                        };
+                        class_slope(&one, point, &theta)
+                    })
+                    .collect();
+                let mut spread = vec![0.0; width * width];
+                for slope in &by_locus {
+                    for row in 0..width {
+                        for column in 0..width {
+                            spread[row * width + column] += slope[row] * slope[column];
+                        }
+                    }
+                }
+                Some((curvature, spread))
+            })
+            .collect();
+        let mut curvature = vec![0.0; size * size];
+        let mut spread = vec![0.0; size * size];
+        for (point, block) in blocks.iter().enumerate() {
+            let Some((block_curvature, block_spread)) = block else {
+                continue;
+            };
+            let base = point * width;
+            for row in 0..width {
+                for column in 0..width {
+                    curvature[(base + row) * size + base + column] =
+                        block_curvature[row * width + column];
+                    spread[(base + row) * size + base + column] =
+                        block_spread[row * width + column];
+                }
+            }
+        }
+        // The bend penalties, at each curve's strength and bend weights.
+        let mut penalty = vec![0.0; size * size];
+        let mut add_curve = |curve: &CurveState, first_component: usize| {
+            let strength = float::exp(curve.ln_smoothing);
+            let stencil = [1.0, -2.0, 1.0];
+            for bend in 0..curve.bends() {
+                for component in 0..curve.block {
+                    let weight = strength * curve.bend_weights[bend * curve.block + component];
+                    for (i, a) in stencil.iter().enumerate() {
+                        for (j, b) in stencil.iter().enumerate() {
+                            let row = (bend + i) * width + first_component + component;
+                            let column = (bend + j) * width + first_component + component;
+                            penalty[row * size + column] += weight * a * b;
+                        }
+                    }
+                }
+            }
+        };
+        add_curve(&self.level_curve, 0);
+        add_curve(&self.shorter_curve, 1);
+        add_curve(&self.fall_off_curve, 2);
+        if f_in_counting {
+            add_curve(&self.between_curve, 3);
+        }
+        add_curve(&self.shares_curve, share_offset);
+        let Some(covariance) = penalised_sandwich(&curvature, &spread, &penalty, size) else {
+            return vec![None; points];
+        };
+        // F off pairs of samples: the same formula over F's curve alone.
+        let pairs_variance: Option<Vec<f64>> = (self.spread_from_pairs
+            && self.between_locus_share_measurable)
+            .then(|| {
+                let mut curvature = vec![0.0; points * points];
+                let mut spread = vec![0.0; points * points];
+                let step = 0.02;
+                for (point, class) in self.class_at_point.iter().enumerate() {
+                    let Some(index) = class else { continue };
+                    let pairs = SamplePairs::of(
+                        &classes[*index],
+                        self.slippage[point],
+                        homozygote_excess,
+                        config,
+                    );
+                    if pairs.is_empty() {
+                        continue;
+                    }
+                    let theta = self.between_curve.values[point];
+                    let at =
+                        |value: f64| pairs.log_likelihood_by_tract(&self.shares[point], -value);
+                    let (above, middle, below) = (at(theta + step), at(theta), at(theta - step));
+                    let mut bend = 0.0;
+                    let mut slopes = 0.0;
+                    for ((up, mid), down) in above.iter().zip(&middle).zip(&below) {
+                        bend += (up - 2.0 * mid + down) / (step * step);
+                        let slope = (up - down) / (2.0 * step);
+                        slopes += slope * slope;
+                    }
+                    curvature[point * points + point] = -bend;
+                    spread[point * points + point] = slopes;
+                }
+                let mut penalty = vec![0.0; points * points];
+                let strength = float::exp(self.between_curve.ln_smoothing);
+                let stencil = [1.0, -2.0, 1.0];
+                for bend in 0..self.between_curve.bends() {
+                    let weight = strength * self.between_curve.bend_weights[bend];
+                    for (i, a) in stencil.iter().enumerate() {
+                        for (j, b) in stencil.iter().enumerate() {
+                            penalty[(bend + i) * points + bend + j] += weight * a * b;
+                        }
+                    }
+                }
+                penalised_sandwich(&curvature, &spread, &penalty, points)
+                    .map(|covariance| (0..points).map(|p| covariance[p * points + p]).collect())
+            })
+            .flatten();
+        (0..points)
+            .map(|point| {
+                self.class_at_point[point]?;
+                let variance = |component: usize| {
+                    let index = point * width + component;
+                    covariance[index * size + index].max(0.0)
+                };
+                let probability_error = |component: usize, value: f64| {
+                    Some(value * (1.0 - value) * variance(component).sqrt())
+                };
+                let slippage = self.slippage[point];
+                let concentration = self.concentration[point];
+                let share = 1.0 / (1.0 + concentration);
+                let f_variance = if !self.between_locus_share_measurable {
+                    None
+                } else if f_in_counting {
+                    Some(variance(3))
+                } else {
+                    pairs_variance.as_ref().map(|v| v[point].max(0.0))
+                };
+                // The shares through the softmax: d share_a / d ratio_b = share_a (δ_ab − share_b).
+                let shares = &self.shares[point];
+                let others: Vec<usize> = (0..self.alleles).filter(|a| *a != reference).collect();
+                let allele_length_variation = (0..self.alleles)
+                    .map(|allele| {
+                        let gradient: Vec<f64> = others
+                            .iter()
+                            .map(|&other| {
+                                let same = if other == allele { 1.0 } else { 0.0 };
+                                shares[allele] * (same - shares[other])
+                            })
+                            .collect();
+                        let mut total = 0.0;
+                        for (b, gb) in gradient.iter().enumerate() {
+                            for (c, gc) in gradient.iter().enumerate() {
+                                let row = point * width + share_offset + b;
+                                let column = point * width + share_offset + c;
+                                total += gb * covariance[row * size + column] * gc;
+                            }
+                        }
+                        total.max(0.0).sqrt()
+                    })
+                    .collect();
+                Some(PenalisedClassErrors {
+                    level: probability_error(0, slippage.level),
+                    shorter_share: probability_error(1, slippage.shorter_share),
+                    fall_off: probability_error(2, slippage.fall_off),
+                    // c = e^(−logit F), so dc / dlogit F = −c.
+                    concentration: f_variance.map(|v| concentration * v.sqrt()),
+                    between_locus_share: f_variance.map(|v| share * (1.0 - share) * v.sqrt()),
+                    allele_length_variation,
+                })
+            })
+            .collect()
     }
 
     /// **Every class's pairwise log-likelihood tabulated over the between-locus share**, at the
@@ -619,7 +1042,11 @@ impl Period {
             .then_some(CurveData::Tabulated { grid, values })
     }
 
-    fn into_fit(self, classes: &[StratumEvidence]) -> PenalisedPeriodFit {
+    fn into_fit(
+        self,
+        classes: &[StratumEvidence],
+        mut errors: Vec<Option<PenalisedClassErrors>>,
+    ) -> PenalisedPeriodFit {
         let alleles = self.alleles;
         let reference_allele = self.reference_allele;
         let lowest = self.lowest;
@@ -642,6 +1069,7 @@ impl Period {
                         .between_locus_share_measurable
                         .then(|| 1.0 / (1.0 + self.concentration[point])),
                     working_concentration: self.concentration[point],
+                    errors: errors[point].take(),
                 })
             })
             .collect();
@@ -693,6 +1121,13 @@ impl Period {
             composite_log_likelihood: self.composite_log_likelihood,
             expectation_seconds: self.expectation_seconds,
             maximisation_seconds: self.maximisation_seconds,
+            strength_search_seconds: self.strength_search_seconds,
+            rounds_choosing_strength: self.rounds_choosing_strength,
+            pair_seconds: self.pair_seconds,
+            pair_alternations: self.pair_alternations,
+            rounds_per_counting: self.rounds_per_counting,
+            class_rounds_counted: self.class_rounds_counted,
+            error_seconds: self.error_seconds,
         }
     }
 }
@@ -875,6 +1310,9 @@ pub(crate) struct CurveState {
     /// Per bend (second difference `i` of component `k`, at `i * block + k`), its weight in the
     /// penalty, in `(0, 1]`.
     bend_weights: Vec<f64>,
+    /// Whether the strength has stopped moving ([`PenalisedFitConfig::strength_steady_within`]),
+    /// after which a search near it keeps it.
+    steady: bool,
 }
 
 /// What a fit at one penalty strength reached.
@@ -938,6 +1376,7 @@ impl CurveState {
             values: vec![0.0; points * block],
             ln_smoothing: 0.0,
             bend_weights: vec![1.0; points.saturating_sub(2) * block],
+            steady: false,
         }
     }
 
@@ -985,17 +1424,27 @@ impl CurveState {
                 self.ln_smoothing = LN_SMOOTHING_RANGE.1;
                 fitted
             }
-            Smoothing::MarginalLikelihood if search == StrengthSearch::Held => self
-                .fit_robustly_at(
+            Smoothing::MarginalLikelihood
+                if search == StrengthSearch::Held
+                    || (search == StrengthSearch::Near && self.steady) =>
+            {
+                self.fit_robustly_at(
                     data,
                     self.ln_smoothing,
                     &self.values,
                     &self.bend_weights,
                     knee,
-                ),
+                )
+            }
             Smoothing::MarginalLikelihood => {
                 let (ln_smoothing, fitted) =
                     self.choose_strength(data, knee, search == StrengthSearch::Wide);
+                if search == StrengthSearch::Near
+                    && config.strength_steady_within > 0.0
+                    && (ln_smoothing - self.ln_smoothing).abs() < config.strength_steady_within
+                {
+                    self.steady = true;
+                }
                 self.ln_smoothing = ln_smoothing;
                 fitted
             }
@@ -1325,6 +1774,106 @@ impl CurveState {
         }
         out
     }
+}
+
+// ---------------------------------------------------------------------
+// The penalised sandwich, in dense matrices
+// ---------------------------------------------------------------------
+
+/// **`H⁻¹ (B + P) H⁻¹` with `H = A + P` plus the ridge**, every matrix `size × size` row by row.
+/// `None` when `H` cannot be made positive definite by a ridge up to a thousandth of its mean
+/// diagonal.
+fn penalised_sandwich(
+    curvature: &[f64],
+    spread: &[f64],
+    penalty: &[f64],
+    size: usize,
+) -> Option<Vec<f64>> {
+    let mean_diagonal = (0..size)
+        .map(|i| curvature[i * size + i] + penalty[i * size + i])
+        .sum::<f64>()
+        / size as f64;
+    let mut inverse = None;
+    // The fit's own ridge first; then larger ones, as shares of the mean diagonal.
+    let scale = mean_diagonal.abs().max(1.0);
+    for ridge in [
+        RIDGE,
+        1e-9 * scale,
+        1e-7 * scale,
+        1e-5 * scale,
+        1e-3 * scale,
+    ] {
+        let mut matrix: Vec<f64> = curvature.iter().zip(penalty).map(|(a, p)| a + p).collect();
+        for i in 0..size {
+            matrix[i * size + i] += ridge;
+        }
+        if let Some(found) = dense_inverse(&matrix, size) {
+            inverse = Some(found);
+            break;
+        }
+    }
+    let inverse = inverse?;
+    let middle: Vec<f64> = spread.iter().zip(penalty).map(|(b, p)| b + p).collect();
+    let left = dense_product(&inverse, &middle, size);
+    Some(dense_product(&left, &inverse, size))
+}
+
+/// The inverse of a symmetric positive-definite matrix by its Cholesky factor; `None` when it is
+/// not positive definite.
+fn dense_inverse(matrix: &[f64], size: usize) -> Option<Vec<f64>> {
+    let mut lower = vec![0.0; size * size];
+    for i in 0..size {
+        for j in 0..=i {
+            let mut sum = matrix[i * size + j];
+            for k in 0..j {
+                sum -= lower[i * size + k] * lower[j * size + k];
+            }
+            if i == j {
+                if sum <= 0.0 || !sum.is_finite() {
+                    return None;
+                }
+                lower[i * size + i] = sum.sqrt();
+            } else {
+                lower[i * size + j] = sum / lower[j * size + j];
+            }
+        }
+    }
+    let mut inverse = vec![0.0; size * size];
+    let mut column = vec![0.0; size];
+    for target in 0..size {
+        column.fill(0.0);
+        column[target] = 1.0;
+        for i in 0..size {
+            let known: f64 = (0..i).map(|k| lower[i * size + k] * column[k]).sum();
+            column[i] = (column[i] - known) / lower[i * size + i];
+        }
+        for i in (0..size).rev() {
+            let known: f64 = ((i + 1)..size)
+                .map(|k| lower[k * size + i] * column[k])
+                .sum();
+            column[i] = (column[i] - known) / lower[i * size + i];
+        }
+        for i in 0..size {
+            inverse[i * size + target] = column[i];
+        }
+    }
+    Some(inverse)
+}
+
+fn dense_product(left: &[f64], right: &[f64], size: usize) -> Vec<f64> {
+    let mut out = vec![0.0; size * size];
+    for i in 0..size {
+        for k in 0..size {
+            let a = left[i * size + k];
+            if a == 0.0 {
+                continue;
+            }
+            for j in 0..size {
+                out[i * size + j] += a * right[k * size + j];
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------

@@ -368,3 +368,8 @@ noodles-cram = { path = "vendor/noodles-cram" }
 [[example]]
 name = "str_fit_penalised_em"
 required-features = ["bench-fixtures"]
+
+# Where penalised counting's time goes against the counting fit's, on one bench cell.
+[[example]]
+name = "str_fit_penalised_cost"
+required-features = ["bench-fixtures"]
