@@ -65,12 +65,11 @@ use super::Concentration;
 /// that the candidate set nearly missed has to stay recoverable rather than fall into a prior it
 /// can never climb out of (`calling_priors.md` §5).
 ///
-/// **Two candidates reach it, and they are different situations.** One is a candidate *outside*
-/// the fitted spectrum's reach — further from the reference tract length than the fit was ever
-/// allowed to place mass — which is outside everything the fit saw rather than something it
-/// measured as rare. The other is a candidate inside the reach at a length class the fit put no
-/// mass on. Both take the floor, and the floor is what makes the shape's total strictly
-/// positive, so the shares are always a distribution
+/// **A candidate reaches it when the fit put no mass on its length class**, which includes an edge
+/// class the fit left empty. A candidate past the fit's reach does not take the floor: it shares
+/// the edge class, which holds every allele that far or further (see [`fill_ssr_seed`]). The
+/// floor is what makes the shape's total strictly positive, so the shares are always a
+/// distribution
 /// (`tests::a_candidate_the_fit_reaches_and_gives_nothing_still_keeps_a_share`).
 ///
 /// It has production's value, which happens to equal [`MIN_ALT_CONCENTRATION`], and **the two
@@ -84,6 +83,7 @@ const SHAPE_FLOOR: f64 = 1e-12;
 /// ```text
 /// offset:  d_j = repeat count of j − reference_repeat_count
 /// shape:   w_j = max(spectrum(d_j), SHAPE_FLOOR)          (1/K on the stated-flat rung)
+///          with d_j at or past ±span: spectrum(±span) / (candidate lengths at or past ±span)
 /// seed:    α_j = concentration · w_j,  floored at MIN_ALT_CONCENTRATION
 /// ```
 ///
@@ -140,6 +140,22 @@ const SHAPE_FLOOR: f64 = 1e-12;
 /// needs the interrupted-repeat work to say how it should be weighted; the signature takes
 /// counts rather than sequences precisely so that change lands in this one function
 /// (`calling_priors.md` §5.2, open as that spec's Q3).
+///
+/// ## The two outermost classes hold everything that far or further
+///
+/// The fit's window reaches one repeat past the read offsets the census records, and reads cannot
+/// tell apart alleles beyond that: every one of them lands in the census's end bucket. So the
+/// fit's class at `−span` holds every allele `span` or more repeats shorter, and `+span` every
+/// one `span` or more longer (`str_allele_window.md` §1.2). **A candidate at or past an
+/// edge therefore takes that edge's weight divided by how many candidate lengths sit at or past
+/// it**, which is the same Dirichlet split into equal parts: the data say nothing about how
+/// alleles beyond the edge are spread, so an equal split assumes the least (spec §5.2). With no
+/// candidate that far, the edge's weight goes unused, as any class's does without a candidate
+/// (`tests::candidates_at_or_past_an_edge_share_its_weight_equally`).
+///
+/// Spectra written before the window reached past the recording, at ±6, are read the same way.
+/// Their end classes collected every allele that far or further too, because the fit had nowhere
+/// else to put them (spec §1.1).
 ///
 /// ## The ends of the range
 ///
@@ -291,18 +307,37 @@ fn fill_candidate_weights(
                     .allele_span()
                     .expect("a fitted spectrum has a span"),
             );
+            let offset_of = |repeat_count: u32| {
+                (i64::from(repeat_count) - i64::from(reference_repeat_count)).clamp(-span, span)
+            };
+            // How many candidate lengths share each edge class: every distinct length at or past
+            // it. Lengths, not candidates, because two candidates of one length each take their
+            // class's full weight everywhere else (see `fill_ssr_seed`). Quadratic in the
+            // candidates, which number a handful.
+            let lengths_at_edge = |edge: i64| {
+                candidate_repeat_counts
+                    .iter()
+                    .enumerate()
+                    .filter(|&(index, &count)| {
+                        offset_of(count) == edge
+                            && !candidate_repeat_counts[..index].contains(&count)
+                    })
+                    .count()
+            };
+            let at_short_edge = lengths_at_edge(-span);
+            let at_long_edge = lengths_at_edge(span);
             for (slot, &repeat_count) in out.iter_mut().zip(candidate_repeat_counts) {
-                let offset = i64::from(repeat_count) - i64::from(reference_repeat_count);
-                // **Outside the fit's reach takes the floor, not the end class's weight.** The
-                // end class holds the mass the fit put at exactly `±span` repeats; handing it to
-                // a candidate twelve repeats away would assert that a twelve-repeat departure is
-                // as common as a six-repeat one, which the fit never said and its own span is
-                // the statement that it declined to say
-                // (`tests::a_candidate_past_the_fits_reach_takes_the_floor_and_not_the_end_class`).
-                let weight = if offset.abs() <= span {
-                    weights[(offset + span) as usize]
+                let offset = offset_of(repeat_count);
+                let class_weight = weights[(offset + span) as usize];
+                // **An edge class is shared, not copied**: it holds every allele that far or
+                // further, so its weight is divided among the candidate lengths there
+                // (`tests::candidates_at_or_past_an_edge_share_its_weight_equally`).
+                let weight = if offset == -span {
+                    class_weight / at_short_edge as f64
+                } else if offset == span {
+                    class_weight / at_long_edge as f64
                 } else {
-                    0.0
+                    class_weight
                 };
                 *slot = weight.max(SHAPE_FLOOR);
             }
@@ -546,33 +581,58 @@ mod tests {
         );
     }
 
-    /// **Outside the fit's reach takes the floor, not the end class's weight.** The end class
-    /// holds what the fit put at exactly two repeats out; handing it to a candidate five repeats
-    /// out would claim the fit measured something it declined to measure.
+    /// **An edge class holds every allele that far or further, so the candidate lengths there
+    /// share its weight equally** (`str_allele_window.md` §5.2). On the five-class spectrum the
+    /// +2 class holds 0.05: one candidate five repeats out takes all of it; that candidate and
+    /// one at +2 take half each; a second spelling of a length already there takes that length's
+    /// share and does not split the edge further; and the −2 edge, with its own one candidate,
+    /// is untouched.
     #[test]
-    fn a_candidate_past_the_fits_reach_takes_the_floor_and_not_the_end_class() {
+    fn candidates_at_or_past_an_edge_share_its_weight_equally() {
         let weights = leaning_long();
+        let past = REFERENCE_REPEATS + 5;
+        let edge = REFERENCE_REPEATS + 2;
+        let short = REFERENCE_REPEATS - 3;
+
         let mut out = vec![0.0; 2];
-        let filled = seed(
-            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 5],
+        let alone = seed(
+            &[REFERENCE_REPEATS, past],
             REFERENCE_REPEATS,
             own_fit(&weights, 12.0),
             &mut out,
         );
-
-        assert!(close(filled[0], 6.0));
+        assert!(close(alone[0], 6.0));
         assert!(
-            close(filled[1], 12.0 * SHAPE_FLOOR),
-            "the candidate five repeats out starts with {} chromosomes; the floor puts it at \
-             {}, and the end class at +2 repeats would put it at {}",
-            filled[1],
-            12.0 * SHAPE_FLOOR,
-            12.0 * 0.05
+            close(alone[1], 12.0 * 0.05),
+            "five repeats out is past the +2 edge and the only candidate there, so it takes the \
+             edge's whole weight, and it gave {}",
+            alone[1]
         );
+
+        let mut out = vec![0.0; 5];
+        let shared = seed(
+            &[REFERENCE_REPEATS, past, edge, past, short],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+        for (index, expected) in [
+            (0, 12.0 * 0.50),
+            (1, 12.0 * 0.025),
+            (2, 12.0 * 0.025),
+            (3, 12.0 * 0.025),
+            (4, 12.0 * 0.04),
+        ] {
+            assert!(
+                close(shared[index], expected),
+                "candidate {index}: {} against {expected}",
+                shared[index]
+            );
+        }
     }
 
-    /// **The span is read off the spectrum's own class count**, so the same candidate is outside
-    /// the reach of a three-class fit and inside a five-class one.
+    /// **The span is read off the spectrum's own class count**, so the same candidate sits in
+    /// the edge class of a three-class fit and in an ordinary class of a five-class one.
     #[test]
     fn how_far_the_spectrum_reaches_is_read_off_its_own_class_count() {
         let narrow = vec![0.2, 0.5, 0.3];
@@ -595,8 +655,9 @@ mod tests {
         );
 
         assert!(
-            close(at_span_one[0], 12.0 * SHAPE_FLOOR),
-            "two repeats out is past a three-class spectrum's reach, and it gave {}",
+            close(at_span_one[0], 12.0 * 0.3),
+            "two repeats out is past a three-class spectrum's +1 edge, which it takes whole, and it \
+             gave {}",
             at_span_one[0]
         );
         assert!(
@@ -639,11 +700,11 @@ mod tests {
     /// [`Concentration::new`] refuses in debug — so this is the check, and without it the
     /// builder panics rather than returning a small number.
     #[test]
-    fn a_far_candidate_at_a_weak_concentration_still_clears_the_concentration_floor() {
-        let weights = leaning_long();
+    fn an_empty_class_at_a_weak_concentration_still_clears_the_concentration_floor() {
+        let weights = vec![0.04, 0.0, 0.66, 0.25, 0.05];
         let mut out = vec![0.0; 2];
         let filled = seed(
-            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 5],
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS - 1],
             REFERENCE_REPEATS,
             own_fit(&weights, 1e-3),
             &mut out,
@@ -814,8 +875,8 @@ mod tests {
     /// what this test records.
     ///
     /// Measured on the four candidates above, with `9` passed as the reference instead of `11`:
-    /// the tract's own reference length falls from **0.595 of the prior's mass to 0.091**, a
-    /// factor of 6.5, while the candidate at 9 rises from **0.048 to 0.909**, a factor of 19.
+    /// the tract's own reference length falls from **0.595 of the prior's mass to 0.030**, a
+    /// factor of 20, while the candidate at 9 rises from **0.048 to 0.909**, a factor of 19.
     #[test]
     fn the_reference_repeat_count_is_the_tracts_and_nothing_here_can_check_it() {
         let weights = leaning_long();
@@ -823,7 +884,7 @@ mod tests {
         let wrong = shares(&candidates(), 9, own_fit(&weights, 12.0));
 
         assert!(
-            (right[0] - 0.5952).abs() < 5e-4 && (wrong[0] - 0.0909).abs() < 5e-4,
+            (right[0] - 0.5952).abs() < 5e-4 && (wrong[0] - 0.0303).abs() < 5e-4,
             "the tract's own length holds {} of the mass and {} when a candidate's count is \
              passed instead",
             right[0],

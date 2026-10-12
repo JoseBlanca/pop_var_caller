@@ -926,12 +926,30 @@ impl StratumOutcome {
 /// every slippage number, in half the time (spec §4.2).
 pub const QUADRATURE_POINTS: usize = 256;
 
-/// How far either side of the reference length the fit may place allele mass.
+/// How far either side of the reference length the fit may place allele mass: **the recorded
+/// offsets' range plus one**, so ±9 while reads are recorded to ±8.
 ///
-/// **Wider than the recorded offsets' `±4`**, and that is what lets an end bucket be
-/// attributed to a distant allele rather than to a far slip
-/// (`parameter_prepass_joint_records.md` §3.2).
-pub const ALLELE_SPAN: i32 = 6;
+/// **Wider than the recorded range**, and that is what lets a read in an end bucket be attributed
+/// to a distant allele rather than to a far slip (`parameter_prepass_joint_records.md` §3.2). A
+/// window narrower than the recording forces every allele past it into its outermost class and
+/// counts their reads as stutter (`str_allele_window.md` §1.1).
+///
+/// **No wider than the recorded range plus one**, because the reads cannot tell apart alleles
+/// past it: a read from 9 repeats short and one from 15 repeats short both land in the −8
+/// bucket. So **the outermost classes mean "this far or further"**: −9 holds every allele 9 or
+/// more repeats shorter, +9 every one 9 or more longer, and calling shares their weight among
+/// the candidates there (`str_allele_window.md` §1.2).
+///
+/// Tied to [`RECORDED_OFFSET_RANGE`] rather than written as a number, so that widening the
+/// recording widens this too. It was a number once, and the recording grew from ±4 to ±8 while
+/// this stayed at ±6.
+pub const ALLELE_SPAN: i32 = RECORDED_OFFSET_RANGE + 1;
+
+// The guard the paragraph above relies on, checked when the crate compiles.
+const _: () = assert!(
+    ALLELE_SPAN > RECORDED_OFFSET_RANGE,
+    "the allele window must reach past the recorded offsets"
+);
 
 /// How many strata are fitted at once when the run says nothing: **one**, the schedule whose
 /// memory is one likelihood table whatever the cohort ([`SsrFitConfig::strata_at_once`]).
@@ -987,7 +1005,7 @@ impl StartingPoint {
 /// the same bits.
 ///
 /// **What does differ is memory.** Fitting a stratum holds one likelihood row per sample per
-/// tract — `tracts × samples × 91 genotypes × 8 bytes`, which is about 46 kB a tract at 63
+/// tract — `tracts × samples × 190 genotypes × 8 bytes`, which is about 96 kB a tract at 63
 /// samples — for as long as that stratum is being fitted. Under
 /// [`AcrossTheTractsOfOneStratum`](Self::AcrossTheTractsOfOneStratum) one stratum is resident;
 /// under [`AcrossStrata`](Self::AcrossStrata) one per pool thread is, because a thread never
@@ -1053,7 +1071,7 @@ pub struct SsrFitConfig {
     ///
     /// **This is what decides whether the fit's memory fits the machine, so the run states it and
     /// nothing guesses it.** A stratum's fit holds one likelihood table, `tracts × samples with
-    /// reads × 91 genotype pairs × 8 bytes` — 7.4 GiB for a 5,000-tract stratum at 2,169 samples —
+    /// reads × 190 genotype pairs × 8 bytes` — 15.3 GiB for a 5,000-tract stratum at 2,169 samples —
     /// and `N` strata at once hold up to `N` of them. One, the default, holds one table whatever
     /// the cohort. **No choice moves a number**: both schedules return the same bits.
     ///
@@ -9527,6 +9545,50 @@ mod tests {
             }
         }
     }
+
+    /// **The climb on a class whose alleles reach 8 repeats short**, at a window of ±6 and at the
+    /// shipped ±9 (`str_allele_window.md` §6.1; the counting fit's test of the same name pins the
+    /// numbers). Prints each window's slip rate, far shares and time.
+    ///
+    /// Ignored by default: the climb at nineteen classes takes minutes.
+    #[test]
+    #[ignore = "a measurement: the climb at nineteen allele classes"]
+    fn the_climb_on_alleles_past_a_narrow_window() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let recorded = RECORDED_OFFSET_RANGE;
+        let mut spectrum = vec![0.002; (2 * recorded + 1) as usize];
+        let at = |offset: i32| (offset + recorded) as usize;
+        spectrum[at(-8)] = 0.15;
+        spectrum[at(-7)] = 0.05;
+        spectrum[at(-1)] = 0.10;
+        spectrum[at(0)] = 0.60;
+        spectrum[at(1)] = 0.10;
+        normalise(&mut spectrum);
+        let samples = 20;
+        let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 500, samples, 10, recorded, 19);
+        for span in [6, ALLELE_SPAN] {
+            let config = SsrFitConfig {
+                allele_span: span,
+                ..SsrFitConfig::default()
+            };
+            let started = std::time::Instant::now();
+            let fitted =
+                fit_stratum(&evidence, &vec![0.4; samples], &config).expect("reads were drawn");
+            let level = fitted.slippage[0].expect("live").level;
+            eprintln!(
+                "WINDOW ±{span}: level {level:.4} (drawn 0.08), outermost short shares {:.4} {:.4} \
+                 {:.4}, {:.1} s",
+                fitted.length_spectrum[0],
+                fitted.length_spectrum[1],
+                fitted.length_spectrum[2],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -9576,16 +9638,16 @@ mod the_largest_table {
         );
     }
 
-    /// One row a sample with reads a tract, 91 genotype pairs at the default span of six, eight
+    /// One row a sample with reads a tract, 190 genotype pairs at the default span of nine, eight
     /// bytes each — and the largest stratum's, not the sum.
     #[test]
     fn the_table_is_rows_times_genotypes_times_eight_bytes_for_the_largest_stratum() {
         let config = SsrFitConfig::default();
         assert_eq!(
-            config.allele_span, 6,
+            config.allele_span, 9,
             "the arithmetic below assumes the default span"
         );
         let strata = [stratum_with(&[3, 5]), stratum_with(&[10, 0, 2])];
-        assert_eq!(largest_table_bytes(&strata, &config), 12 * 91 * 8);
+        assert_eq!(largest_table_bytes(&strata, &config), 12 * 190 * 8);
     }
 }

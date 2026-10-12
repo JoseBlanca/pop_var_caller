@@ -132,8 +132,8 @@ pub struct EstimateParametersArgs {
     /// A stratum is every repeat tract with one motif length and one reference copy number, and
     /// the fit estimates each stratum's slippage on its own. **This decides how much memory that
     /// step needs.** Fitting one stratum holds one table, with a row for each tract and each
-    /// sample with reads there, 91 numbers wide (one for each pair of allele lengths a sample can
-    /// carry): for a 5,000-tract stratum, about 0.34 GiB at 100 samples and 7.4 GiB at 2,169.
+    /// sample with reads there, 190 numbers wide (one for each pair of allele lengths a sample can
+    /// carry): for a 5,000-tract stratum, about 0.71 GiB at 100 samples and 15.3 GiB at 2,169.
     /// N strata at once hold up to N of those tables.
     ///
     /// At 1, the default, the fit works on one stratum at a time with every thread on its tracts.

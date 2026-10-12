@@ -41,6 +41,14 @@ struct Cli {
     /// One homozygote excess for every sample, where no fitted file names them.
     #[arg(long, conflicts_with = "fitted")]
     homozygote_excess: Option<f64>,
+    /// How far either side of the reference length alleles may sit (the fit's `ALLELE_SPAN` by
+    /// default).
+    #[arg(long)]
+    allele_span: Option<i32>,
+    /// Fit only these classes, written `period:repeats` and separated by commas, one at a time with
+    /// every thread on each, and print each class's time; every class, several at once, without.
+    #[arg(long, value_delimiter = ',')]
+    classes: Vec<String>,
 }
 
 fn error_of(error: &StratumError) -> String {
@@ -59,9 +67,25 @@ fn main() {
     let names: Vec<String> = evidence.sample_names().map(str::to_owned).collect();
     let contig_of = contig_id_of(&plan);
     let pooled = every_read_group_pooled(&evidence);
-    let CohortTractStrata { strata, .. } =
+    let CohortTractStrata { mut strata, .. } =
         the_tract_strata_of_a_cohort(&mut evidence, &plan.loci, &contig_of, &pooled)
             .unwrap_or_else(|error| panic!("{error:?}"));
+    if !cli.classes.is_empty() {
+        let wanted: Vec<(u8, u64)> = cli
+            .classes
+            .iter()
+            .map(|class| {
+                let (period, repeats) = class.split_once(':').expect("a class is period:repeats");
+                (
+                    period.parse().expect("a whole period"),
+                    repeats.parse().expect("a whole repeat count"),
+                )
+            })
+            .collect();
+        strata.retain(|stratum| {
+            wanted.contains(&(stratum.stratum.period, stratum.stratum.reference_repeats))
+        });
+    }
     let excess: Vec<f64> = match &cli.fitted {
         Some(path) => {
             let file = ParametersFile::from_toml(
@@ -93,14 +117,38 @@ fn main() {
 
     let mut config = SsrFitConfig::default();
     config.curve.draw_curves = false;
-    config.strata_at_once = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    if let Some(span) = cli.allele_span {
+        config.allele_span = span;
+    }
+    if cli.classes.is_empty() {
+        config.strata_at_once = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+    }
     eprintln!(
         "{} classes from {} samples gathered in {:.1} s; fitting",
         strata.len(),
         names.len(),
         started.elapsed().as_secs_f64()
     );
-    let outcomes = fit_strata(&strata, &excess, &config);
+    let outcomes = if cli.classes.is_empty() {
+        fit_strata(&strata, &excess, &config)
+    } else {
+        strata
+            .iter()
+            .flat_map(|stratum| {
+                let class_started = Instant::now();
+                let outcome = fit_strata(std::slice::from_ref(stratum), &excess, &config);
+                eprintln!(
+                    "class {}:{}, {} tracts, window ±{}: {:.1} s",
+                    stratum.stratum.period,
+                    stratum.stratum.reference_repeats,
+                    stratum.tracts.len(),
+                    config.allele_span,
+                    class_started.elapsed().as_secs_f64()
+                );
+                outcome
+            })
+            .collect()
+    };
     eprintln!("fitted in {:.1} s", started.elapsed().as_secs_f64());
 
     let span = config.allele_span;

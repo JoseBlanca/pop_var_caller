@@ -318,8 +318,9 @@ mod checked_spectrum {
         /// How far either side of the reference tract length the fitted shares reach, in whole
         /// repeat units — `None` on the bottom rung, which reaches nowhere in particular.
         ///
-        /// A candidate further from the reference than this is outside everything the fit ever
-        /// saw, and the seed builder gives it a floor rather than the end class's weight.
+        /// The two outermost classes hold every allele this far or further, so the seed builder
+        /// shares an end class's weight among every candidate at or past it
+        /// (`str_allele_window.md` §1.2).
         ///
         /// **The subtraction cannot underflow**, because [`Self::fitted`] is the only door onto
         /// a `Some` and it refuses a class count below three.

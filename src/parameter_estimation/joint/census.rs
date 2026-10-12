@@ -421,10 +421,10 @@ impl GenericEvidence {
 /// 6-repeat tract cannot lose more than 6 — and is the better fix; it needs a variable-width
 /// record, which is the census's design and not this constant's. Deferred there.
 ///
-/// **Not the same constant as the span the fit may place allele mass on**, which reaches ±6.
-/// That is the load-bearing one — it is what lets an end bucket be attributed to a distant
-/// allele rather than to a far slip — and reading this width as that span is the confusion
-/// the two constants exist to prevent.
+/// **Not the same constant as the span the fit may place allele mass on**, which reaches one
+/// further (`ssr_fit::ALLELE_SPAN`). That is the load-bearing one — it is what lets an end bucket
+/// be attributed to a distant allele rather than to a far slip — and reading this width as that
+/// span is the confusion the two constants exist to prevent.
 pub const RECORDED_OFFSET_RANGE: i32 = 8;
 
 /// Buckets, `-8 … +8` with saturating ends.

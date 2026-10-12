@@ -122,18 +122,20 @@ supports.
 
 - **2026-10-12:** fix the window first, before the counting fit replaces the climb and before the
   library multipliers resume.
+- **2026-10-12, §5.1 settled:** widen the window in both fits now. Whether the counting fit replaces
+  the climb is decided afterwards, on the climb's measured cost at ±9.
+- **2026-10-12, §5.2 settled:** calling splits an edge class's weight equally among the candidate
+  lengths at or beyond the edge.
 
 ---
 
 ## 5. Open
 
-1. **Does the counting fit replace the climb first?** At ±9 the climb's tables and time double, and
-   its average gets worse (§3). The counting fit has no such average and costs little more. *Leaning:*
-   make the window change in both, then measure the climb's cost at ±9 on the oracle cohort and on
-   tomato2 before deciding. **Settled by** that measurement and the counting fit's own spec.
-2. **How calling shares an edge class's weight.** *Leaning:* split equally among the candidate lengths
-   at or beyond ±9. With no candidate that far, the edge's weight goes unused, as a share's does today
-   for a length with no candidate. **Settled by** the owner.
+1. **Does the counting fit replace the climb first?** Settled 2026-10-12 (§4): both fits widen
+   now; the order is decided on the climb's measured cost at ±9.
+2. **How calling shares an edge class's weight.** Settled 2026-10-12 (§4): equally among the
+   candidate lengths at or beyond the edge. With no candidate that far, the edge's weight goes
+   unused, as a share's does today for a length with no candidate.
 3. **The crossing bias for long alleles** (§3). Measure the chance a read crosses a tract of each length
    at the cohort's read length. Then decide whether the census should correct for it, or the fit
    should weight by it. **Not in this change.**

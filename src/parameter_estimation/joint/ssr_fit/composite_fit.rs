@@ -738,6 +738,57 @@ mod tests {
         );
     }
 
+    /// **A class whose alleles reach 8 repeats short needs a window past the recorded range**
+    /// (`str_allele_window.md` §6.1). A fifth of the chromosomes sit 7 or 8 repeats short and
+    /// reads are recorded to ±8. With a window of ±6 those alleles have no class of their own,
+    /// the −6 class takes them, and their reads can only be explained as slips, so the slip rate
+    /// comes out high. At the shipped window of ±9 the slip rate is the one drawn and the far
+    /// alleles keep their own shares.
+    #[test]
+    fn alleles_past_a_narrow_window_are_counted_as_stutter_and_the_shipped_window_keeps_them() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let recorded = RECORDED_OFFSET_RANGE;
+        // Over −8 ..= +8, with a small floor so that every class can be drawn.
+        let mut spectrum = vec![0.002; (2 * recorded + 1) as usize];
+        let at = |offset: i32| (offset + recorded) as usize;
+        spectrum[at(-8)] = 0.15;
+        spectrum[at(-7)] = 0.05;
+        spectrum[at(-1)] = 0.10;
+        spectrum[at(0)] = 0.60;
+        spectrum[at(1)] = 0.10;
+        normalise(&mut spectrum);
+        let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 2000, 20, 10, recorded, 19);
+        let start = Slippage {
+            level: 0.2,
+            shorter_share: 0.5,
+            fall_off: 0.5,
+        };
+        let fit_at = |span: i32| {
+            let config = SsrFitConfig {
+                allele_span: span,
+                ..SsrFitConfig::default()
+            };
+            fit_class_by_counting(&evidence, start, &[0.4; 20], &config, 500, 1e-9)
+        };
+
+        let narrow = fit_at(6);
+        assert!(narrow.slippage.level > 0.1, "{narrow:?}");
+        assert!(narrow.length_spectrum[0] > 0.15, "{narrow:?}");
+
+        assert_eq!(SsrFitConfig::default().allele_span, recorded + 1);
+        let shipped = fit_at(SsrFitConfig::default().allele_span);
+        assert!((shipped.slippage.level - 0.08).abs() < 0.01, "{shipped:?}");
+        // Index 0 is −9 and index 1 is −8. They are held together, not apart: an allele at −8 and
+        // one at −9 differ only in reads that slipped inwards, so the two trade mass (about 0.03 of
+        // the 0.15 drawn at −8 sits at −9 on this draw).
+        let far = shipped.length_spectrum[0] + shipped.length_spectrum[1];
+        assert!((far - spectrum[at(-8)]).abs() < 0.035, "{shipped:?}");
+    }
+
     /// **In an inbred cohort the spread comes from pairs of samples, not from each sample's two
     /// copies**: at a homozygote excess of 0.95 and three reads a sample, the pairs return the spread a
     /// class was drawn at, where a sample's own two copies carry too little to.
