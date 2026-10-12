@@ -62,16 +62,34 @@ pub struct PenalisedFitConfig {
     /// enough mass into the tails to bias the reference length's share by −0.13 (one-base runs) and
     /// −0.20 (two-base runs) on the fitting bench's tomato-like truth.
     pub allele_pseudo_draws: f64,
+    /// **Whether each class's allele draws are divided by the design effect of draws clustered by
+    /// locus** before its allele-length curve is fitted (`Period::allele_draw_inflation`). **Off by
+    /// default**, because measured both ways on drawn motif lengths (track 2's report, §3.5) it helps
+    /// the allele length variation and can wreck the stutter: at 50 samples × 30 reads it halved
+    /// the thin classes' allele-length error (0.090 to 0.050) with the slip rate unchanged, but at
+    /// 2,000 samples × 3 reads the honest information left a straight allele-length curve, slightly
+    /// wrong at rich classes (0.018 against 0.009), and with millions of reads the stutter absorbed
+    /// the misfit: the slip rate at rich classes came out 12% wrong against 1.7% without it. The
+    /// strength is chosen from the allele counts alone, which cannot see what the reads say about
+    /// the spread through the stutter.
+    pub weigh_allele_draws_by_locus: bool,
     /// **How many times the between-locus share is read off pairs of samples at a locus**, each time
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
     /// copies, which says almost nothing in an inbred cohort.
     pub pair_alternations: usize,
-    /// **For how many rounds each curve's penalty strength is chosen afresh**, after which it is held
-    /// and the remaining rounds are penalised counting at fixed strengths, which climbs its
-    /// objective every round. Choosing afresh every round can leave a strength alternating
-    /// between two values and the fit never settling: one draw in five at 50 samples × 30 reads
-    /// ran its 500 rounds that way.
+    /// **Each curve's penalty strength is chosen afresh every round until the fit has nearly
+    /// settled** — no number moving by more than `settled_change_for_strength` (10⁻⁵) — **or for
+    /// at most `rounds_choosing_strength` rounds (200)**, then held, so that the remaining rounds
+    /// are penalised counting at fixed strengths, which climbs its objective every round.
+    ///
+    /// Both limits are needed. Choosing afresh every round can leave a strength alternating
+    /// between two values and the fit never settling: one draw in five at 50 samples × 30 reads ran
+    /// 500 rounds that way. Holding after a fixed 30 rounds freezes strengths chosen on counts still
+    /// shaped by the flat starting shares: at 2,000 samples × 3 reads, where the fit took 303
+    /// rounds, the allele-length curve was held straight and the slip rate at rich classes came out
+    /// 12% wrong against the counting fit's 1.7%.
     pub rounds_choosing_strength: usize,
+    pub settled_change_for_strength: f64,
 }
 
 impl Default for PenalisedFitConfig {
@@ -88,8 +106,10 @@ impl Default for PenalisedFitConfig {
             kink_knee: 2.5,
             kink_tail: 2.0,
             allele_pseudo_draws: 1.0 / 19.0,
+            weigh_allele_draws_by_locus: false,
             pair_alternations: 0,
-            rounds_choosing_strength: 30,
+            rounds_choosing_strength: 200,
+            settled_change_for_strength: 1e-5,
         }
     }
 }
@@ -422,7 +442,9 @@ impl Period {
             rounds_here += 1;
             let search = if rounds_here == 1 {
                 StrengthSearch::Wide
-            } else if self.rounds <= fit.rounds_choosing_strength {
+            } else if self.rounds <= fit.rounds_choosing_strength
+                && self.last_change >= fit.settled_change_for_strength
+            {
                 StrengthSearch::Near
             } else {
                 StrengthSearch::Held
@@ -496,7 +518,11 @@ impl Period {
                 .enumerate()
                 .map(|(point, count)| {
                     count.as_ref().map_or_else(Vec::new, |c| {
-                        let inflation = self.allele_draw_inflation(point);
+                        let inflation = if fit.weigh_allele_draws_by_locus {
+                            self.allele_draw_inflation(point)
+                        } else {
+                            1.0
+                        };
                         c.draws
                             .iter()
                             .map(|d| d / inflation + fit.allele_pseudo_draws)

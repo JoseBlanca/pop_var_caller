@@ -22,7 +22,8 @@
 //!     [allele span, default 4] [draws, default 3] [settings, default "1x3,50x30"] \
 //!     [homozygote excess, default 0.3] [pair alternations, default 0] \
 //!     [slip rate at 9 repeats as a share of its curve, default 0.53] \
-//!     [cost of a bend beyond the knee per log unit, default 2]
+//!     [cost of a bend beyond the knee per log unit, default 2] \
+//!     [1 to weigh allele draws as clustered by locus, default 0]
 //! ```
 //!
 //! With pair alternations above zero both fits read the between-locus share off pairs of samples
@@ -221,9 +222,11 @@ fn main() {
     let kink_tail: f64 = arguments
         .get(7)
         .map_or(2.0, |a| a.parse().expect("a tail coefficient"));
+    let weigh_allele_draws_by_locus = arguments.get(8).is_some_and(|a| a == "1");
     let fit = PenalisedFitConfig {
         pair_alternations,
         kink_tail,
+        weigh_allele_draws_by_locus,
         ..PenalisedFitConfig::default()
     };
     println!("row\tsetting\tdraw\tmethod\trepeats\tloci\tnumber\testimate\ttruth");
