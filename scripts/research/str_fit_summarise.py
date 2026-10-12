@@ -170,6 +170,8 @@ def held_out(rows):
             continue
         per_read = values["heldout_ln_per_read"]
         per_locus = values["heldout_ln_per_locus"]
+        if None in (per_read[0], per_read[1], per_locus[0], per_locus[1]):
+            continue
         loci = values.get("heldout_loci", (None, float("nan"), None))[1]
         summary[(cell, method)].append((per_read[1] - per_read[0], per_read[2],
                                         per_locus[1] - per_locus[0], per_locus[2], loci))
