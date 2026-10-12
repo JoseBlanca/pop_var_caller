@@ -524,7 +524,8 @@ pub struct SsrSelectionConfig {
     /// place that departs from what the spec's text says.
     pub shared: CandidateSelectionConfig,
     /// How much of one sample's spanning reads may sit off the motif grid before that sample is
-    /// judged non-periodic (spec §7). Default [`DEFAULT_MAX_OFF_GRID_SHARE`].
+    /// judged non-periodic (spec §7). Default [`DEFAULT_MAX_OFF_GRID_SHARE`]. Read at STR segments
+    /// only: an STR bundle has no periodicity check (`str_bundle_loci.md` §7.2, since 2026-10-12).
     pub max_off_grid_share: MaxOffGridShare,
     /// Copies per genome — **how many rungs a sample promotes** (arch §3.1). From the run's
     /// parameters, never a constant in this module: production hard-asserts diploid at its own
@@ -1487,20 +1488,7 @@ pub(super) fn locus_is_periodic(
     motif: &Motif,
     max_off_grid_share: MaxOffGridShare,
 ) -> bool {
-    locus_is_periodic_on_a_grid_of(observation, motif.period(), max_off_grid_share)
-}
-
-/// [`locus_is_periodic`] with the grid's step given in bases: a length change is on the grid when
-/// it is a multiple of `grid_step`. A segment's step is its motif's period. **An STR bundle's is the
-/// greatest common divisor of its runs' periods** — a length change is a sum of whole units of the
-/// runs, `Σ kᵣ·periodᵣ` for whole numbers `kᵣ`, exactly when that divisor divides it — and **zero
-/// for a bundle with no run**, where every length change is off the grid (`str_bundle_loci.md`
-/// §7.2).
-pub(super) fn locus_is_periodic_on_a_grid_of(
-    observation: &CohortObservation,
-    grid_step: usize,
-    max_off_grid_share: MaxOffGridShare,
-) -> bool {
+    let grid_step = motif.period();
     assert!(
         !observation.alleles.is_empty(),
         "a cohort locus always holds at least its reference allele, and the repeat tract at {} \
@@ -1508,10 +1496,7 @@ pub(super) fn locus_is_periodic_on_a_grid_of(
         observation.region
     );
     let reference_len = observation.alleles[0].len();
-    let on_the_grid = |length_change: usize| match grid_step {
-        0 => length_change == 0,
-        step => length_change.is_multiple_of(step),
-    };
+    let on_the_grid = |length_change: usize| length_change.is_multiple_of(grid_step);
     let mut any_sample_judged = false;
 
     for sample in &observation.per_sample {
@@ -1720,8 +1705,8 @@ pub struct SsrBundleSelection {
 /// - **a rung is a vector of run counts**: every allele of the merge's table is parsed against the
 ///   reference runs once ([`parse_into_runs`]), and two alleles with the same run counts are two
 ///   spellings on one rung;
-/// - **the periodicity grid** is the greatest common divisor of the runs' periods
-///   ([`locus_is_periodic_on_a_grid_of`]); with no run every length change is off it;
+/// - **no periodicity check**: a length change that is no whole number of run units is an indel
+///   in the fixed sequence as often as anything (owner, 2026-10-12), so nothing is refused for it;
 /// - **the `±1` rescue** offers one copy more and one fewer in each run separately
 ///   ([`RungNeighbours::OneCopyEitherSideInEachRun`]);
 /// - **the tie-break toward the purest spelling** counts the parse's edited bases.
@@ -1745,22 +1730,9 @@ pub fn select_ssr_bundle(
         );
     };
     let hull = &observation.alleles[0];
-    let grid_step = detail
-        .runs
-        .iter()
-        .map(|run| run.period())
-        .fold(0, greatest_common_divisor);
-    if !locus_is_periodic_on_a_grid_of(observation, grid_step, config.max_off_grid_share) {
-        return SsrBundleSelection {
-            selection: reference_alone(
-                observation,
-                LocusKind::SsrBundle(detail.clone()),
-                SelectionVerdict::NotPeriodic,
-            ),
-            parses: vec![parse_into_runs(hull, hull, &detail.runs)],
-        };
-    }
-
+    // No periodicity check (owner, 2026-10-12): the fixed sequence between runs carries real
+    // indels of any length, so a change that is no whole number of run units is not a sign the
+    // locus is not a repeat.
     let parses: Vec<RunParse> = observation
         .alleles
         .iter()
@@ -1803,15 +1775,6 @@ pub fn select_ssr_bundle(
         .map(|bases| parse_into_runs(bases, hull, &detail.runs))
         .collect();
     SsrBundleSelection { selection, parses }
-}
-
-/// The greatest common divisor of two whole numbers, with `gcd(0, n) = n`.
-fn greatest_common_divisor(one: usize, other: usize) -> usize {
-    if other == 0 {
-        one
-    } else {
-        greatest_common_divisor(other, one % other)
-    }
 }
 
 /// A table holding the reference tract and nothing else, under `verdict` — what a tract this path
@@ -4260,37 +4223,51 @@ mod tests {
         assert_eq!(out, vec![1]);
     }
 
-    /// **The grid of a bundle is the greatest common divisor of its runs' periods.** With runs of
-    /// 2 and 3 every length change is a sum of whole units, so one extra base is on the grid; with
-    /// no run, no length change is.
+    /// **A bundle is never refused for length changes that are not whole units of its runs**
+    /// (owner, 2026-10-12; `str_bundle_loci.md` §7.2): the fixed sequence between runs carries
+    /// real indels of any length. A one-base insertion carried by half the reads is a candidate
+    /// at a bundle whose runs are both of period 2, and at one with no run at all.
     #[test]
-    fn a_bundles_grid_is_its_runs_common_divisor_and_no_run_puts_every_change_off_it() {
-        let reference = bundle_hull(8, 5);
-        let one_base_longer = [&reference[..], b"A"].concat();
+    fn a_bundle_keeps_a_length_change_that_is_no_whole_number_of_run_units() {
+        use crate::region_typing::reference_runs::ReferenceRun;
         let samples = || {
             vec![sample_showing(
                 0,
                 vec![row(0, 10, -10.0), row(1, 10, -10.0)],
             )]
         };
-        let with_runs = bundle_of(&[&reference, &one_base_longer], bundle_detail(), samples());
-        assert_eq!(
-            bundle_selected(&with_runs).selection.verdict(),
-            SelectionVerdict::Selected
-        );
-
+        let period_two_hull =
+            [&b"GG"[..], &b"CA".repeat(8), b"GG", &b"AT".repeat(6), b"C"].concat();
+        let period_two = SsrBundleDetail {
+            runs: vec![
+                ReferenceRun::new(2, 16, Motif::new(b"CA").unwrap()).unwrap(),
+                ReferenceRun::new(20, 12, Motif::new(b"AT").unwrap()).unwrap(),
+            ]
+            .into_boxed_slice(),
+            ..bundle_detail()
+        };
         let no_run = SsrBundleDetail {
             runs: Box::new([]),
             ..bundle_detail()
         };
-        let without_runs = bundle_of(&[&reference, &one_base_longer], no_run, samples());
-        let narrowed = bundle_selected(&without_runs);
-        assert_eq!(narrowed.selection.verdict(), SelectionVerdict::NotPeriodic);
-        assert_eq!(narrowed.selection.alleles().len(), 1);
-        assert_eq!(narrowed.parses.len(), 1);
-        assert_eq!(greatest_common_divisor(0, 0), 0);
-        assert_eq!(greatest_common_divisor(0, 6), 6);
-        assert_eq!(greatest_common_divisor(4, 6), 2);
+        for (reference, detail) in [
+            (bundle_hull(8, 5), bundle_detail()),
+            (period_two_hull, period_two),
+            (bundle_hull(8, 5), no_run),
+        ] {
+            // A base inserted in the fixed sequence between the runs.
+            let one_base_longer = [&reference[..18], b"T", &reference[18..]].concat();
+            let runs = detail.runs.len();
+            let observation = bundle_of(&[&reference, &one_base_longer], detail, samples());
+            let narrowed = bundle_selected(&observation);
+            assert_eq!(
+                narrowed.selection.verdict(),
+                SelectionVerdict::Selected,
+                "{runs} runs"
+            );
+            assert_eq!(narrowed.selection.alleles().len(), 2, "{runs} runs");
+            assert_eq!(narrowed.parses.len(), 2, "{runs} runs");
+        }
     }
 
     /// **The purest spelling of a rung is the one with the fewest edited bases in its run parse**:

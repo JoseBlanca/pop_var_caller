@@ -197,7 +197,7 @@ fn report_body_depths(
         // Nothing else reports this ground. An STR bundle has one record over its hull since
         // 2026-10-11 (`str_bundle_loci.md` §6.1), the only record over ground partitioned to
         // it, as a tract's is. A read ending inside the hull is kept as a partial there, as at a
-        // tract, and reports at the positions it witnessed — though calling leaves it out.
+        // tract, and reports at the positions it witnessed.
         LocusKind::Ssr(_) | LocusKind::SsrBundle(_) => {
             for (offset, &depth) in depth_along_the_locus.iter().enumerate() {
                 // The add cannot overflow: `offset` is below the region's length, so the

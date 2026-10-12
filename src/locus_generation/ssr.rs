@@ -83,8 +83,9 @@ pub struct EdgeRunPeriods {
 impl MeasuredRepeat {
     /// An STR bundle's hull, `start..=end` (1-based), measured with `delimiter_motif` in the
     /// geometry and `runs` deciding its edges. A read ending inside it is kept as a partial
-    /// observation, as at a segment, so that it counts toward the hull's depth; calling leaves it
-    /// out (`str_bundle_loci.md` §6.1, changed during implementation 2026-10-11).
+    /// observation, as at a segment, so that it counts toward the hull's depth; calling scores it as
+    /// a lower bound from the flank it held (`str_bundle_loci.md` §6.1, §7.6; changed during
+    /// implementation 2026-10-11, and scored since 2026-10-12).
     pub fn bundle_hull(
         start: u64,
         end: u64,
@@ -1754,10 +1755,9 @@ mod classify {
         }) else {
             return Classified::NoObservation(NoObservationReason::OutsideTract);
         };
-        // **At a bundle, a read ending inside the hull is kept as a partial too**, though only
-        // reads that cross the whole hull are used to call it (`str_bundle_loci.md` §6.1): the
-        // partial is what counts the read toward the hull's depth, which the hidden-duplication
-        // filter's coverage windows read, and calling leaves it out.
+        // **At a bundle, a read ending inside the hull is kept as a partial too**: it counts toward
+        // the hull's depth, which the hidden-duplication filter's coverage windows read, and calling
+        // scores it as a lower bound from the flank it held (`str_bundle_loci.md` §6.1, §7.6).
         Classified::Observed {
             flank_deletion: crate::locus_generation::FlankDeletion::NONE,
             bases: region_seq[tract.clone()].into(),
@@ -2550,8 +2550,8 @@ mod classify {
         }
 
         /// **A read that ends inside the hull is kept as a partial, as at a segment** — so it
-        /// counts toward the hull's depth — and calling leaves it out (`str_bundle_loci.md`
-        /// §6.1; changed during implementation, 2026-10-11, where it was first dropped).
+        /// counts toward the hull's depth and is scored by calling (`str_bundle_loci.md`
+        /// §6.1, §7.6; changed during implementation, 2026-10-11, where it was first dropped).
         #[test]
         fn a_read_ending_inside_the_hull_is_kept_as_a_partial() {
             let seq = [BUNDLE_LEFT, b"CACACACATTGA"].concat();

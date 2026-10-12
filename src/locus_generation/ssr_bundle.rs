@@ -15,10 +15,11 @@
 //!   reported complete over part of it (found in review, 2026-10-11);
 //! - **the edge-escape check** asks, at each edge, about the reference run reaching it, and
 //!   about nothing where fixed sequence reaches it;
-//! - **only reads that cross the whole hull are used to call it**: a read that anchors one edge
-//!   and ends inside is kept as a partial observation, as at a segment, so that it counts toward
-//!   the hull's depth, and calling leaves it out (changed during implementation, 2026-10-11:
-//!   such a read was first dropped).
+//! - **a read that anchors one edge and ends inside the hull is kept as a partial observation**,
+//!   as at a segment: it counts toward the hull's depth, and calling scores it as a lower bound
+//!   from the flank it held (`str_bundle_loci.md` §7.6; changed during implementation,
+//!   2026-10-11: such a read was first dropped, then kept and left out of calling until
+//!   2026-10-12).
 //!
 //! What it adds is the hull's **reference runs**, found once per bundle from the hull's bases
 //! alone, every motif of period 1 to 6 looked for ([`find_reference_runs`]), and carried on the

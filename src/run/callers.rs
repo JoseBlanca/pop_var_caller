@@ -45,8 +45,7 @@ use crate::calling::{CallingScratch, FrozenParameters, LocusInference, Reference
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::locus_generation::{
-    GeneratorCounts, LocusCounts, LocusKind, ReadWitness, SequenceObservation, SsrBundleDetail,
-    SsrDetail,
+    GeneratorCounts, LocusCounts, LocusKind, SequenceObservation, SsrBundleDetail, SsrDetail,
 };
 use crate::read::filtering::ReadFilterConfig;
 use crate::read::filtering::ReadFilterCounts;
@@ -1605,25 +1604,11 @@ where
     count_this_tract(verdict, observation.region, tracts);
 
     let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
-    // **Only the reads that crossed the whole hull** (`str_bundle_loci.md` §6.1, §11.5): a read
-    // ending inside is kept in the psp as a partial so that it counts toward the hull's depth,
-    // and is left out here. The rebuild writes each sample's complete observations first and its
-    // partials after them, so the complete ones are a prefix.
+    // **Every read, those that ended inside the hull included** (`str_bundle_loci.md` §7.6): the
+    // row scores a partial as a lower bound from the flank it held, as at a segment.
     let per_sample: Vec<&[SequenceObservation]> = observations_of_each_run_sample
         .iter()
-        .map(|rows| {
-            let complete = rows.partition_point(|row| row.read_witness == ReadWitness::Complete);
-            // Checked, not assumed (found in review, 2026-10-11): were the order ever to change,
-            // a complete read after a partial would be dropped and a partial before a complete
-            // one scored, with nothing to say so.
-            assert!(
-                rows[complete..]
-                    .iter()
-                    .all(|row| row.read_witness != ReadWitness::Complete),
-                "a sample's complete observations come before its partials"
-            );
-            &rows[..complete]
-        })
+        .map(Vec::as_slice)
         .collect();
     let mut views = Vec::new();
     let evidence =

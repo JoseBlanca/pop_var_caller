@@ -1222,6 +1222,7 @@ pub fn bundle_candidates<'a>(
                 runs: &detail.runs,
                 parse,
                 leading_flank_bases: 0,
+                reference_hull_len: alleles.reference().len() as u32,
             }),
         })
         .collect()

@@ -861,11 +861,18 @@ fn fill_emissions<Model: SsrEmissionModel>(
         }
     }
 
-    for (position, observation) in evidence.partial_observations() {
-        for (candidate, allele) in candidates.iter().enumerate() {
+    // Candidates outer, reads inner: what a model can reuse between reads is a property of the
+    // candidate (an STR bundle's laid-out allele, `ssr_emission.rs`), so one candidate's reads are
+    // scored together. Each cell is written once, so the order changes no value.
+    for (candidate, allele) in candidates.iter().enumerate() {
+        for (position, observation) in evidence.partial_observations() {
+            let ReadWitness::Partial { positions } = &observation.read_witness else {
+                unreachable!("the partial filter yields partial witnesses only");
+            };
             let context = contexts.of(observation.read_group, candidate);
             let scored = model.censored_emission(
                 &observation.bases,
+                positions,
                 allele,
                 context,
                 scratch.model_scratch_mut(),
@@ -1399,13 +1406,19 @@ mod tests {
             fn censored_emission(
                 &self,
                 witnessed_prefix: &[u8],
+                witnessed_positions: &crate::locus_generation::WitnessedLocusPositions,
                 candidate: &SsrCandidate<'_>,
                 context: &SsrScoringContext<'_>,
                 scratch: &mut Self::Scratch,
             ) -> f64 {
                 self.censored.set(self.censored.get() + 1);
-                self.inner
-                    .censored_emission(witnessed_prefix, candidate, context, scratch)
+                self.inner.censored_emission(
+                    witnessed_prefix,
+                    witnessed_positions,
+                    candidate,
+                    context,
+                    scratch,
+                )
             }
         }
 
@@ -1501,12 +1514,14 @@ mod tests {
                     &contexts[candidate],
                     scratch,
                 ),
-                ReadWitness::Partial { .. } => StutterSubstitutionEmission.censored_emission(
-                    &seen.bases,
-                    &candidates[candidate],
-                    &contexts[candidate],
-                    scratch,
-                ),
+                ReadWitness::Partial { ref positions } => StutterSubstitutionEmission
+                    .censored_emission(
+                        &seen.bases,
+                        positions,
+                        &candidates[candidate],
+                        &contexts[candidate],
+                        scratch,
+                    ),
             }
         };
         let scored: Vec<Vec<f64>> = (0..observations.len())

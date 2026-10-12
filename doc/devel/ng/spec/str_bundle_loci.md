@@ -248,6 +248,7 @@ The bundle generator is then the STR segment's generator run over the hull. **Th
   inside the repeat, as a lower bound on its length. In a bundle, such a read gives a lower bound on
   one run's count and says nothing about the runs it did not reach; using it needs a censored
   emission over run counts, which this design leaves out (§11).
+  *(Changed 2026-10-12, owner: such reads are used, scored from the flank they held — §7.6.)*
 
 Everything else is unchanged and motif-free: the spelling of the read over the hull, the flank
 deletion at the two outer edges in its smallest form (`str_edge_deletion_alleles.md` §4), the
@@ -269,13 +270,15 @@ with these details the section left open:
 
 *Changed during implementation (2026-10-11, step 4; session lead's decision).* **A read that ends
 inside the hull is kept in the psp as a partial observation, as at a segment, and calling leaves it
-out** (`call_one_ssr_bundle_locus` takes each sample's complete observations only). Dropping it
+out** (`call_one_ssr_bundle_locus` took each sample's complete observations only; since 2026-10-12 it
+takes them all, §7.6). Dropping it
 had kept it out of the hull's depth too, which the hidden-duplication filter's coverage windows
 read (`window_coverage/depth.rs`): a bundle's depth was its crossing reads alone, about half the
 reads there (step 3's note above). Kept as a partial, it reports depth at the positions it
 witnessed, as a segment's partial does. The `ended_inside_a_bundle` no-observation count is gone
 with the drop; such reads are counted as partial observations. A bundle record's `DP` now counts
-them as a segment record's does. What it moved is in §10, step 4.
+them as a segment record's does. What it moved is in §10, step 4. *(Since 2026-10-12 calling
+scores them too, §7.6.)*
 
 *Found in review (2026-10-11, step 4).* **A deletion across a hull's outer edge is recorded as a
 flank deletion even when the mapper wrote it some other way.** The simulator's edge deletions
@@ -392,6 +395,7 @@ The STR segment's selection (`candidate_alleles_ssr.md`), with each single-motif
 - **The periodicity check** asks whether an allele's length change from the reference is a sum of
   whole units of the runs' periods — `Σ kᵣ·periodᵣ` for some whole numbers `kᵣ`, one per run `r` —
   instead of a multiple of one period. With no run, every length change is off the grid.
+  *(Removed 2026-10-12, owner: a bundle has no periodicity check — see the end of this section.)*
 - **The ±1-unit rescue** offers one unit more and one unit less in each run separately.
 - **The tie-break toward the purest allele** counts the parse's mismatches instead of bases off the
   one motif.
@@ -405,14 +409,23 @@ segment selector's passes through `build_ladder_keyed`, `promote_rungs_for_cohor
   the divisor is zero and only no change is on the grid, so a no-run bundle whose reads change
   length in more than a tenth of a sample's reads (and two reads) is called over the reference
   alone, as `notPeriodic`. A deletion across the hull's edge never counts as off the grid, as at a
-  segment.
+  segment. *(Removed 2026-10-12, below.)*
 - **Rungs** are the distinct run-count vectors of the merge's alleles, numbered in ascending order;
   the rescue's neighbours are the vectors one copy either side in one run, among those.
 - **Every bundle allele can be scored** (a run it holds no copy of cannot slip), so a bundle has no
   counterpart of a segment's "candidate with no whole repeat" and nothing stops its locus.
 - **The discovery pre-pass is not run on bundles.** It is off by default for segments, and its bar
   is written in a segment's repeat counts.
-- `notPeriodic` and `tooManyAlleles` reach a bundle record's `FILTER` as a segment's.
+- `notPeriodic` and `tooManyAlleles` reach a bundle record's `FILTER` as a segment's. *(Since
+  2026-10-12 only `tooManyAlleles` can, below.)*
+
+*Changed 2026-10-12 (owner): **a bundle has no periodicity check.** The fixed sequence between and
+around a bundle's runs carries real indels of any length, so a length change that is not a sum of
+whole run units is evidence of an allele, not a sign that the locus is not a repeat. At step 4 the
+check refused 31 of HG002's 149 missed bundles, among them a 9-base insertion in a bundle with no
+run and a one-base insertion in fixed sequence, and refused nothing on the simulator. Selection
+at a bundle now goes straight to the rungs; `notPeriodic` is never a bundle's verdict, and
+`tooManyAlleles` still is. Segments keep the check unchanged. What it moved is in §10, step 4b.*
 
 ### 7.3 Read likelihood: stutter in every run
 
@@ -462,6 +475,7 @@ from `read groups × candidates` to `read groups × candidates × runs`.
   substitution rate — count a cell once where any run of it fell back.
 - **The per-locus slippage re-fit does not run at a bundle** (it is off by default for segments).
 - **No censored read**: calling hands a bundle only reads that crossed the hull (§6.1).
+  *(Changed 2026-10-12: it hands them all, §7.6.)*
 - *Found in review (2026-10-11).* **A run the allele holds no copy of is a factor of one** in
   every slip set and in the part-repeat regime, not its model's no-slip share: that share (0.88
   under the shipped model, which such a run is given) scaled down every read of an allele that
@@ -475,6 +489,22 @@ from `read groups × candidates` to `read groups × candidates × runs`.
   exactly as the segment over the same bases, bit for bit — checked over four hulls, every allele a
   few copies either side, interrupted and part-unit alleles, and reads from twelve copies short to
   twelve long (`a_one_run_bundle_scores_as_the_segment_it_is`).
+
+*Changed 2026-10-12 (owner; the review's finding M3).* **A length change that no single run's slip
+makes is priced as a sequencing indel as well as by the slip sets that reach it.** Before, the
+part-repeat regime priced only a change no slip set reached at all. At a bundle whose runs' periods
+share no divisor above one — periods 2 and 3, say — every change is some slip set's total, so a
+one-base indel was priced only as two runs slipping opposite ways: about 0.0024 under the shipped
+constants, against 0.0095 for the same indel at a dinucleotide segment. Now, for a change `Δ` that
+is not whole units of any run within that run's own reach, the emission is the slip sets' sum
+**plus** the part-repeat regime's price, the one described above. A change one run makes alone is
+that run's slip and takes no such term, as at a segment: one base more at a bundle with a
+homopolymer run is the homopolymer slipping. With one run nothing changes, since every change that
+run's slip does not make is one no slip set makes; the one-run regression above still holds bit for
+bit. Where every slip set reaching a change was pruned (three runs or more), a change one run makes
+alone scores zero as before, and one no single run makes takes the part-repeat price. Pinned by
+`a_change_no_single_run_makes_is_also_priced_as_a_sequencing_indel` and
+`a_change_one_run_makes_alone_takes_no_indel_term`.
 
 ### 7.4 The prior
 
@@ -517,6 +547,109 @@ cross-platform VCF checksums moved with the header alone**: with the four change
 back (`STR`'s description, `RU` and `PERIOD`'s `Number`, the new `REPCNB`), each new file hashes to
 its old checksum; they were re-recorded (`cli/cross_platform_digests.rs`).
 
+### 7.6 Reads that end inside a bundle
+
+*Added 2026-10-12. The owner's decision of 2026-10-11 (§11, fifth item) was to add these reads
+first if bundles lagged at low depth, and they did: at one sample, PCR, 5×, step 4 got 98 of 208
+bundle cells with a variant right against the generic path's 115.*
+
+**What such a read says.** A read that holds one of the hull's flanks and ends inside the hull
+shows the start of what its carrier has from that flank on. Coming from the left flank, it gets
+past some runs and fixed bases whole and then stops — inside a run, inside fixed sequence, or a few
+bases past the hull's far edge, too few for the delimiter to anchor the far flank. So:
+
+- **about every run and fixed base it got past, it says what a complete read says** — their
+  spelling, with the stutter of those runs priced exactly as at a complete read;
+- **about the run it ended inside, it gives a lower bound**, as a segment's censored read does on
+  its one run: every length of that run long enough to hold what the read showed agrees with it;
+- **about the runs it never reached, it says nothing.**
+
+A read from the right flank is the same read from the other end.
+
+**The rule.** For a read that held the left flank and showed bases `w`:
+
+```text
+P(w | allele) = Σ over every slip set (k₁, …, k_R)   Π_r P_r(kᵣ) × letters(w | the first |w| bases of: the allele with those slips, then the right flank)
+              + Σ over every length change Δ no single run's slip makes   its part-repeat price (§7.3) × letters(w | the first |w| bases of: that rendering, then the right flank)
+```
+
+— over every slip set, not only those of one total, because the read does not say how long its
+carrier's hull is. This is the complete read's emission of §7.3 summed over every complete read
+whose first bases are `w`, which is what a segment's censored term is (`read_likelihoods.md`
+§5.2). The three readings above are properties of the sum, not rules added to it:
+
+- a run past the read's end changes no base compared, so its slips sum to its total probability
+  over them, whatever count the allele holds there;
+- every rendering of the run the read ended inside that is long enough to hold what it showed
+  gives the same letters;
+- a rendering too short for what the read showed is compared, past its end, with the bases that
+  follow it in the carrier — the next fixed piece, or the flank — so a read showing more of a run
+  than an allele can reach scores low against it.
+
+A read that held the right flank is compared from its last base backwards: against the last `|w|`
+bases of the left flank followed by the rendering.
+
+As built (`ssr_emission.rs`, `bundle_censored_emission`), with what the rule leaves open:
+
+- **Which flank the read held is read off its witness** (`ReadWitness`): one that starts at the
+  hull's first position and stops short of its last held the left flank, and the mirror image the
+  right. A witness over the whole hull is a read that reached the far edge without anchoring
+  there, from either flank; nothing in the observation says which, so it is scored both ways and
+  the two averaged.
+- **The far flank is the reference's, less the bases the allele's own edge deletion takes on that
+  side** (`str_edge_deletion_alleles.md`). The held flank is not compared: the delimiter anchored
+  it. A read that showed more bases than the rendering and the flank hold together scores zero for
+  that rendering.
+- **One run over the hull, with no flank bases to read on into, scores as the segment over the same
+  bases**, to twelve digits (`a_one_run_bundles_partial_read_scores_as_the_segments`; not bit for
+  bit, since the segment takes the letters out of a pure tract's sum). Two runs are checked against
+  the sum written out by hand, from each flank and from both
+  (`a_partial_read_sums_every_rendering_from_the_flank_it_held`).
+- **It is computed run by run from the held flank**, not set by set: what follows a run depends
+  only on how many of the read's bases the pieces before it took, so that is remembered, and a read
+  costs a few slips per run per such offset rather than every combination of slips.
+  *(Review, 2026-10-12.)* What does not depend on the read is built once and kept: an allele's
+  layout from one flank — its pieces, its runs' slips and renderings, its part-repeat renderings —
+  is reused for every read the row scores against that allele from that flank, found by comparing
+  everything it was built from; the two per-base scores are looked up once a read; a fixed piece
+  reached at one offset by two paths is compared once, as a run is; and a comparison's sum of match
+  scores up to its first mismatch is taken from a table. Each gives the same numbers bit for bit;
+  the calls are byte-identical (§10, step 4b).
+- **A bundle with no run** compares the read's letters with the allele and the flank alone.
+
+*Found in review (2026-10-12), left to the owner* (`doc/devel/reports/reviews/str_bundles_partial_reads_2026-10-12.md`, M2 and M3):
+
+- **A read says a little about the runs it never reached.** Each such run contributes its total
+  probability over the slips it can make, and that total depends on its count: a run with one copy
+  cannot contract, and a run with no copy is a factor of one. Under the shipped constants a read
+  `GG (CA)8 G` that stops before the `TTG` run scores 0.863 against an allele with no `TTG` copy,
+  0.811 with one, 0.852 with two and 0.854 with five or more — about 6 in 100 between one copy and
+  none, in the same direction for every such read. A complete read's emission loses the same mass;
+  the claim above that the read "says nothing" about those runs is true only up to it. The choice
+  is a factor of one for every unreached run, or this paragraph as the record of the limitation.
+- **A read whose witness covers the whole hull is scored at half weight.** The read classifier
+  knows which flank it anchored, but the witness keeps only the positions, so §7.6 averages both
+  readings; the wrong one is about 4 parts in 10¹³ of the right one, so the read scores half of
+  what the same bases score as a left-only read, up to ln 2 = 0.69 nats against the outlier floor.
+  Such reads were 185,000 of 1.6 million partial emissions at the 50-sample cost benchmark.
+
+**Candidate selection counts these reads nowhere, as at a segment.** A segment's partial reads
+nominate no rung and count toward no denominator (`candidate_alleles_ssr.md` §8: "a read that ran
+out inside a tract gives a lower bound on the length, not a length"); the merge holds them off the
+support rows that selection reads, at bundles exactly as at segments. So the candidates are still
+what two crossing reads of one sample, and a tenth of them, show, and a partial read only weighs
+between those candidates. At low depth that leaves a bundle whose other allele no two crossing
+reads show with no candidate for it, whatever its partial reads show.
+
+**One difference from a segment, left as it is.** A segment reads every partial's bases as the
+start of its tract, whichever flank the read held (`censored_emission`). For a read that held the
+right flank of a pure tract that is the same comparison when the read showed whole copies and a
+phase-shifted one otherwise; segments are not changed here. *(Measured in review, 2026-10-12, on
+one simulated sample, PCR, 30×: 14,175 of the segments' 22,661 right-flank partial reads are
+compared out of phase — none at period 1, half at period 2, three in four at periods 4 to 6 — 27 in
+100 of all 51,818 partial observations. Such a read mismatches nearly every base against every
+candidate, so it falls to the outlier floor and its evidence is lost. A separate change.)*
+
 ## 8. One sample and thousands, three reads and three hundred
 
 - **One sample.** The candidate bar is the sample's own reads, as for segments; with no cohort the
@@ -529,7 +662,9 @@ its old checksum; they were re-recorded (`cli/cross_platform_digests.rs`).
   150-base read about 20 starting positions from which it crosses the hull and 15 bases of flank
   each side, against about 100 for a 20-base segment. At 3× a long bundle will often have no
   crossing read in a sample, and is uncalled there rather than called from partial reads. Short
-  bundles — the median is 35 bases — are close to segments.
+  bundles — the median is 35 bases — are close to segments. *(Since 2026-10-12 partial reads are
+  scored (§7.6), but they still nominate no candidate, so the bundle is still uncalled where no two
+  crossing reads show its other allele.)*
 - **Three hundred reads.** The candidate bar's tenth of the sample's crossing reads is what keeps
   stutter out of the candidates as depth grows, as for segments; the generic path's failure was
   exactly a bar with no stutter model behind it.
@@ -693,6 +828,40 @@ step.
    psps), about 2.9 ms a bundle locus; 2,000 segment regions take 4.0 s, generic loci in their
    flanks included, so at most 2 ms a segment locus.
 
+   **Step 4b (2026-10-12): the three owner's changes** — no periodicity check at bundles (§7.2),
+   reads that end inside the hull scored (§7.6), and the indel term for a change no single run
+   makes (§7.3). Measured as step 4 was (true stutter, no fit; new psps; HG002 per region over
+   main's typing), each change added in turn on one build with switches, which were then removed;
+   the final build reproduces the last row's VCFs byte for byte. Bundle cells with a variant:
+   right / wrong / missed; then false calls.
+
+   | | 1 sample, PCR, 5× (208; 292) | 1 sample, PCR, 30× (208; 292) | 50 samples, PCR, 30× (10,435; 14,565) | HG002 30× (1,131; 1,342) |
+   |---|---|---|---|---|
+   | step 4, reviewed | 98 / 30 / 80; 0 | 207 / 1 / 0; 0 | 10,374 / 26 / 35; 3 | 822 / 160 / 149; 32 |
+   | no periodicity check | 98 / 30 / 80; 0 | 207 / 1 / 0; 0 | 10,374 / 26 / 35; 3 | 840 / 171 / 120; 32 |
+   | + partial reads | 99 / 29 / 80; 0 | 207 / 1 / 0; 0 | 10,400 / 13 / 22; 1 | 862 / 150 / 119; 20 |
+   | + indel term | 99 / 29 / 80; 0 | 207 / 1 / 0; 0 | 10,400 / 13 / 22; 1 | 862 / 150 / 119; 20 |
+   | generic path | 115 / 34 / 59; 0 | 206 / 1 / 1; 0 | 10,071 / 229 / 157; 756 | 901 / 184 / 46; 16 |
+
+   **Every STR segment cell is unchanged** against main on all three benchmark runs. The indel
+   term moved no cell and no region; it changed the qualities of 7 records at 50 samples and 6 on
+   HG002. Partial reads leave the one-sample 5× misses where they were — 80 cells with no call —
+   because they nominate no candidate (§7.6): a cell whose other allele no two crossing reads show
+   still has no candidate for it.
+
+   **Cost of the partial reads.** With one thread, 50 samples at 30×, calling the 500 bundle loci
+   took 1.9 s without them and 14–17 s with them (two runs each), about 25 ms more a bundle locus:
+   each partial observation is laid out again for every candidate and walked over every slip of
+   the runs it reaches; nothing is shared between observations of one candidate. Where that time
+   goes was not profiled. *(Review, 2026-10-12: profiled — two logarithms per letter comparison
+   took 17 in 100 of the time, and the layout rebuilt per read most of another 15. With the
+   layouts kept, the scores looked up once a read and fixed pieces memoised (§7.6), the same
+   calling takes 5.7–9.4 s
+   of CPU against 13.9–23.8 s before and 1.9–3.0 s for step 4, the ranges spanning the host's
+   background load: about 8–9 ms more a bundle locus, from about 24. The calls are byte-identical
+   on all three benchmark runs and HG002 30×. What is left is about 200 letter comparisons per
+   partial read per candidate; `str_bundles_partial_reads_2026-10-12.md` §6.1.)*
+
 5. **The simulator's harder bundles** (§9): abutting, overlapping and impure repeats, measured as in
    step 4.
 
@@ -705,9 +874,10 @@ step.
    *(In review, the same day: every motif of period 1 to 6 is looked for, not only the members',
    which missed the `AT` run of §5.1's first example.)*
 4. **Run counts are written as `REPCNB`** on bundle records (§7.5); `REPCN` keeps its type.
-5. **Reads that end inside a bundle are left out at first** (§6.1), and measured at 3–5× once the
-   rest works. They are where segments gain most at low depth, so if bundles lag segments at 5×
-   this is the first thing to add.
+5. *Changed 2026-10-12 (owner): reads that end inside a bundle are scored, as a lower bound from
+   the flank they held (§7.6).* The first decision left them out until the rest worked and
+   bundles were measured at low depth; at 5× bundles lagged the generic path (§10, step 4), which
+   was the condition for adding them.
 6. **One name, *STR bundle*,** in the glossary, the specs and the code; the glossary's *cluster of
    repeats* is retired.
 7. **The simulator is extended to abutting, overlapping and impure bundles** once the caller works

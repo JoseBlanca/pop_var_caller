@@ -113,8 +113,9 @@ the psps' non-bundle records were byte-identical on the stuttering benchmark (4,
 one sample, 30×). The bundle generator (`locus_generation/ssr_bundle.rs`) is this generator with
 the flat-gap delimiter, run over the hull through the steps it exposes (`fetch_locus`,
 `measure_reads`); a read that ends inside the hull is kept as a partial observation, as at a
-segment, and calling leaves it out (`str_bundle_loci.md` §6.1; the `ended_inside_a_bundle`
-no-observation count of step 3 is gone).
+segment (`str_bundle_loci.md` §6.1; the `ended_inside_a_bundle` no-observation count of step 3 is
+gone). Calling left it out until 2026-10-12 and scores it since, as a lower bound from the flank it
+held (`str_bundle_loci.md` §7.6).
 
 ---
 
