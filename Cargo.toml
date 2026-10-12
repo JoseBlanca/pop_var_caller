@@ -355,3 +355,9 @@ harness = false
 # `doc/devel/ng/research/cram_read_path_2026-09-04.md`.
 [patch.crates-io]
 noodles-cram = { path = "vendor/noodles-cram" }
+
+# Penalised counting against the counting fit on one drawn motif length
+# (`doc/devel/ng/research/str_fit/`). Draws its classes from `ssr_fit::bench_fixtures`.
+[[example]]
+name = "str_fit_penalised_em"
+required-features = ["bench-fixtures"]

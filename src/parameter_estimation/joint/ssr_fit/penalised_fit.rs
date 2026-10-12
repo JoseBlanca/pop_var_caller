@@ -12,13 +12,14 @@
 //!
 //! **How sharply a curve may bend is measured, not chosen.** Each curve's penalty strength is the
 //! one that maximises an approximation to the marginal likelihood of its counts (the Laplace
-//! approximation that restricted maximum likelihood rests on, Wood 2011), re-chosen every round.
+//! approximation that restricted maximum likelihood rests on, Wood 2011), re-chosen for the first
+//! rounds and then held.
 //!
 //! **A strong, well-measured kink survives.** The penalty is quadratic in each bend up to
 //! [`PenalisedFitConfig::kink_knee`] standard deviations of what the curve's smoothness predicts,
-//! and grows only logarithmically beyond it, so a class whose own reads insist on a step pays a
-//! bounded price for it. The weight on such a bend is divided by `(bend / knee)²`, the rule the
-//! slippage curve's blend already uses (`str_slippage_level_curve.md` §7.2).
+//! and grows only logarithmically beyond it ([`PenalisedFitConfig::kink_tail`]), so a class whose own
+//! reads insist on a step pays a bounded price for it. The knee is the slippage curve's blend's
+//! (`str_slippage_level_curve.md` §7.2).
 
 use std::time::Instant;
 
@@ -42,6 +43,21 @@ pub struct PenalisedFitConfig {
     /// square**: 2.5, the knee of the slippage curve's blend. `f64::INFINITY` makes every bend
     /// purely quadratic.
     pub kink_knee: f64,
+    /// **How much a bend beyond the knee costs per natural-log unit of its size: 2**, so that a bend's
+    /// prior falls as `size^−2` past the knee. It must exceed one. Measured on drawn motif lengths
+    /// (track 2's report, §3.3): at the knee's square, 6.25, which keeps the penalty's slope
+    /// continuous, a kink at 9 repeats was cheaper to absorb by smoothing the whole slip-rate curve
+    /// 60 to 100 times less, and its thin classes lost what they had borrowed; at 2 the kink is eased
+    /// and they keep it, and where no bend passes the knee the two give the same answer.
+    pub kink_tail: f64,
+    /// **Allele draws added to every allele length of every class before its shares are chosen:
+    /// half a draw**, after the draws are weighed as clustered by locus. Without it a length the
+    /// reads stop supporting in one round gets a share near zero, so the next round's E-step gives
+    /// it no draws and it can never return: EM has an absorbing boundary at zero, which costs a
+    /// held-out locus carrying that length hundreds of log-likelihood units. Half a draw a length
+    /// is the Jeffreys prior on a multinomial; it moves a class with thousands of draws by parts in
+    /// ten thousand.
+    pub allele_pseudo_draws: f64,
     /// **How many times the between-locus share is read off pairs of samples at a locus**, each time
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
     /// copies, which says almost nothing in an inbred cohort.
@@ -66,6 +82,8 @@ impl Default for PenalisedFitConfig {
             tolerance: 1e-6,
             smoothing: Smoothing::MarginalLikelihood,
             kink_knee: 2.5,
+            kink_tail: 2.0,
+            allele_pseudo_draws: 0.5,
             pair_alternations: 0,
             rounds_choosing_strength: 30,
         }
@@ -117,10 +135,18 @@ pub struct PenalisedClass {
     /// How the class's chromosomes are spread over the allele lengths, `-allele_span ..=
     /// +allele_span`.
     pub allele_length_variation: Vec<f64>,
-    /// The Dirichlet concentration, as the counting fit reports it.
-    pub concentration: f64,
+    /// The Dirichlet concentration, as the counting fit reports it. **`None` when no locus of the
+    /// motif length has two samples with reads**: at one sample how much loci differ cannot be told
+    /// from that sample's own inbreeding, and the project reports such a number as absent rather
+    /// than as a fitted value. The fit still carries a working value internally, read off the
+    /// sample's own two copies, because the genotype prior needs one; it is not reported.
+    pub concentration: Option<f64>,
     /// The same, as the between-locus share `1 / (1 + concentration)`.
-    pub between_locus_share: f64,
+    pub between_locus_share: Option<f64>,
+    /// **The concentration the fit worked at**, reported or not: what the genotype prior used. Not
+    /// an estimate of how much loci differ when [`concentration`](Self::concentration) is `None`;
+    /// there for a scorer that needs every number to compute a likelihood.
+    pub working_concentration: f64,
 }
 
 /// **One number's curve across the repeat counts of a motif length**, on its natural scale.
@@ -154,7 +180,8 @@ pub struct SmoothCurves {
     pub level: ParameterCurve,
     pub shorter_share: ParameterCurve,
     pub fall_off: ParameterCurve,
-    pub between_locus_share: ParameterCurve,
+    /// `None` when no locus has two samples with reads, as [`PenalisedClass::concentration`].
+    pub between_locus_share: Option<ParameterCurve>,
     /// One curve per allele class, `-allele_span ..= +allele_span`: that class's share. **The
     /// shares' curves share one penalty strength**, and each offset's bends are eased on their own.
     pub allele_length_variation: Vec<ParameterCurve>,
@@ -269,6 +296,9 @@ struct Period {
     /// Per grid point, the allele draws a locus of its class holds on average: two per sample with
     /// reads there. Zero where there is no class.
     allele_draws_per_locus: Vec<f64>,
+    /// Whether any locus of the motif length has two samples with reads, without which the
+    /// between-locus share is not reported.
+    between_locus_share_measurable: bool,
     lowest: u64,
     alleles: usize,
     reference_allele: usize,
@@ -313,6 +343,12 @@ impl Period {
         }
         let alleles = allele_classes_of(config);
         Some(Self {
+            between_locus_share_measurable: with_reads.iter().any(|&index| {
+                classes[index]
+                    .tracts
+                    .iter()
+                    .any(|tract| tract.samples.len() >= 2)
+            }),
             allele_draws_per_locus: class_at_point
                 .iter()
                 .map(|class| {
@@ -457,7 +493,10 @@ impl Period {
                 .map(|(point, count)| {
                     count.as_ref().map_or_else(Vec::new, |c| {
                         let inflation = self.allele_draw_inflation(point);
-                        c.draws.iter().map(|d| d / inflation).collect()
+                        c.draws
+                            .iter()
+                            .map(|d| d / inflation + fit.allele_pseudo_draws)
+                            .collect()
                     })
                 })
                 .collect();
@@ -566,8 +605,13 @@ impl Period {
                     stratum: classes[index].stratum,
                     slippage: self.slippage[point],
                     allele_length_variation: self.shares[point].clone(),
-                    concentration: self.concentration[point],
-                    between_locus_share: 1.0 / (1.0 + self.concentration[point]),
+                    concentration: self
+                        .between_locus_share_measurable
+                        .then_some(self.concentration[point]),
+                    between_locus_share: self
+                        .between_locus_share_measurable
+                        .then(|| 1.0 / (1.0 + self.concentration[point])),
+                    working_concentration: self.concentration[point],
                 })
             })
             .collect();
@@ -591,8 +635,10 @@ impl Period {
             fall_off: scalar_curve(&self.fall_off_curve, &|value| {
                 logistic(value).clamp(0.0, 0.99)
             }),
-            between_locus_share: scalar_curve(&self.between_curve, &|value| {
-                logistic(value).clamp(1.0 / (1.0 + 1e4), 1.0 / (1.0 + 1e-3))
+            between_locus_share: self.between_locus_share_measurable.then(|| {
+                scalar_curve(&self.between_curve, &|value| {
+                    logistic(value).clamp(1.0 / (1.0 + 1e4), 1.0 / (1.0 + 1e-3))
+                })
             }),
             allele_length_variation: (0..alleles)
                 .map(|allele| ParameterCurve {
@@ -811,20 +857,46 @@ struct CurveFit {
     marginal: f64,
 }
 
-/// **The penalty on one bend, in standard deviations `size` of the curve's smoothness**: `size² /
-/// 2` up to `knee`, and beyond it growing only as `knee² · ln(size / knee)`. Its derivative over
-/// `size` is `size · weight` with the bend's weight `min(1, (knee / size)²)`.
+/// **What a bend costs, in standard deviations `size` of the curve's smoothness**: `size² / 2` up to
+/// `knee`, and beyond it growing only as `tail · ln(size / knee)`. Its derivative over `size` is
+/// `size · weight`, the bend's weight one up to the knee and `tail / size²` beyond.
 ///
-/// As a prior on a bend this is a normal distribution with tails falling as a power, `size^−knee²`,
-/// so a bend many deviations wide is rare but not ruled out. Its normalising constant does not
-/// depend on the strength once the bend is measured in deviations, which is what lets the marginal
-/// likelihood compare strengths.
-fn bend_penalty(size: f64, knee: f64) -> f64 {
-    let size = size.abs();
-    if size <= knee {
-        0.5 * size * size
-    } else {
-        0.5 * knee * knee + knee * knee * float::ln(size / knee)
+/// As a prior on a bend this is a normal distribution with tails falling as a power, `size^−tail`,
+/// so a bend many deviations wide is rare but not ruled out; `tail` must exceed one for the prior to
+/// be a distribution. Its normalising constant does not depend on the strength once the bend is
+/// measured in deviations, which is what lets the marginal likelihood compare strengths.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BendPrior {
+    knee: f64,
+    tail: f64,
+}
+
+impl BendPrior {
+    /// Every bend costs its square: no knee.
+    const QUADRATIC: Self = Self {
+        knee: f64::INFINITY,
+        tail: f64::INFINITY,
+    };
+
+    fn eases(self) -> bool {
+        self.knee.is_finite()
+    }
+
+    fn penalty(self, size: f64) -> f64 {
+        let size = size.abs();
+        if size <= self.knee {
+            0.5 * size * size
+        } else {
+            0.5 * self.knee * self.knee + self.tail * float::ln(size / self.knee)
+        }
+    }
+
+    fn weight(self, size: f64) -> f64 {
+        if size > self.knee {
+            self.tail / (size * size)
+        } else {
+            1.0
+        }
     }
 }
 
@@ -858,7 +930,10 @@ impl CurveState {
         config: &PenalisedFitConfig,
         search: StrengthSearch,
     ) -> Vec<f64> {
-        let knee = config.kink_knee;
+        let knee = BendPrior {
+            knee: config.kink_knee,
+            tail: config.kink_tail,
+        };
         let with_counts = (0..self.points).filter(|&p| data.has_counts(p)).count();
         let fitted = match config.smoothing {
             Smoothing::Fixed(strength) => self.fit_robustly_at(
@@ -875,7 +950,7 @@ impl CurveState {
                     LN_SMOOTHING_RANGE.1,
                     &self.values,
                     &vec![1.0; self.bend_weights.len()],
-                    f64::INFINITY,
+                    BendPrior::QUADRATIC,
                 );
                 self.ln_smoothing = LN_SMOOTHING_RANGE.1;
                 fitted
@@ -917,7 +992,12 @@ impl CurveState {
     /// values and eased bends, then golden-section search around the best. **Strong first, so that
     /// a kink is found where the curve is stiff**: at a weak penalty the curve can bend through a
     /// kink without easing anything, and a search started there stays there.
-    fn choose_strength(&self, data: &CurveData, knee: f64, search_widely: bool) -> (f64, CurveFit) {
+    fn choose_strength(
+        &self,
+        data: &CurveData,
+        knee: BendPrior,
+        search_widely: bool,
+    ) -> (f64, CurveFit) {
         let (low, high) = if search_widely {
             LN_SMOOTHING_RANGE
         } else {
@@ -1008,34 +1088,30 @@ impl CurveState {
         ln_smoothing: f64,
         from: &[f64],
         weights: &[f64],
-        knee: f64,
+        knee: BendPrior,
     ) -> CurveFit {
         let strength = float::exp(ln_smoothing);
         let deviation = float::exp(0.5 * ln_smoothing);
         let mut values = from.to_vec();
-        let mut weights = if knee.is_finite() {
+        let mut weights = if knee.eases() {
             weights.to_vec()
         } else {
             vec![1.0; weights.len()]
         };
-        let passes = if knee.is_finite() { 8 } else { 1 };
+        let passes = if knee.eases() { 8 } else { 1 };
         let mut log_likelihood = 0.0;
         let mut ln_determinant = 0.0;
         for _ in 0..passes {
             (values, log_likelihood, ln_determinant) =
                 self.newton(data, strength, &values, &weights);
-            if !knee.is_finite() {
+            if !knee.eases() {
                 break;
             }
             let mut moved: f64 = 0.0;
             for bend in 0..self.bends() {
                 for component in 0..self.block {
                     let size = (self.bend(&values, bend, component) * deviation).abs();
-                    let weight = if size > knee {
-                        float::powi(knee / size, 2)
-                    } else {
-                        1.0
-                    };
+                    let weight = knee.weight(size);
                     let held = &mut weights[bend * self.block + component];
                     moved = moved.max((weight - *held).abs());
                     *held = weight;
@@ -1048,7 +1124,7 @@ impl CurveState {
         let mut prior = 0.0;
         for bend in 0..self.bends() {
             for component in 0..self.block {
-                prior -= bend_penalty(self.bend(&values, bend, component) * deviation, knee);
+                prior -= knee.penalty(self.bend(&values, bend, component) * deviation);
             }
         }
         let rank = (self.bends() * self.block) as f64;
@@ -1467,6 +1543,7 @@ mod tests {
         let excess = [0.4; 10];
         let fit = PenalisedFitConfig {
             smoothing: Smoothing::Fixed(1e-8),
+            allele_pseudo_draws: 0.0,
             kink_knee: f64::INFINITY,
             tolerance: 1e-10,
             max_rounds: 2000,
@@ -1496,7 +1573,10 @@ mod tests {
                 assert!((a - b).abs() < 1e-4, "{fitted:?} against {alone:?}");
             }
             assert!(
-                (float::ln(fitted.concentration) - float::ln(alone.concentration)).abs() < 1e-3,
+                (float::ln(fitted.concentration.expect("ten samples"))
+                    - float::ln(alone.concentration))
+                .abs()
+                    < 1e-3,
                 "{fitted:?} against {alone:?}"
             );
         }
