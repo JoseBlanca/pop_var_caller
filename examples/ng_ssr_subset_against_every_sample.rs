@@ -154,7 +154,7 @@ fn spread_across_sizes(strata: &[StratumEvidence]) -> Vec<&StratumEvidence> {
 }
 
 /// The likelihood table one fit of `evidence` holds, as text: a row a (tract, sample with reads), of
-/// 91 genotype pairs of 8 bytes at thirteen allele classes.
+/// one entry of 8 bytes for each genotype pair over `classes` allele classes.
 fn table_size(evidence: &StratumEvidence, classes: usize) -> String {
     let rows: usize = evidence
         .tracts

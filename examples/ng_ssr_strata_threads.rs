@@ -54,9 +54,10 @@ const SLIPPAGE: Slippage = Slippage {
     fall_off: 0.25,
 };
 
-/// How far either side of the reference length the draw spreads allele mass. Six is
-/// production's `ALLELE_SPAN`: thirteen allele classes and the ninety-one genotypes of a
-/// diploid over them, which is the trip count of the innermost loop.
+/// How far either side of the reference length the draw spreads allele mass. Six was
+/// production's `ALLELE_SPAN` until 2026-10-12 (now nine): thirteen allele classes and the
+/// ninety-one genotypes of a diploid over them, which is the trip count of the innermost loop.
+/// The fit runs at the default span, so its tables are nineteen classes wide.
 const SPAN: i32 = 6;
 
 /// Reads a sample puts on a tract. Six sits between tomato's three and the GIAB trio's thirty.

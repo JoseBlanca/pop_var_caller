@@ -136,15 +136,17 @@ const SHAPE_FLOOR: f64 = 1e-12;
 ///
 /// The seed is keyed by repeat count, so two candidates that differ by an interior
 /// substitution — an interrupted repeat — sit at the same offset and **each receives that
-/// class's full weight**, which is production's behaviour. Whether to divide the class instead
+/// class's full weight**, which is production's behaviour. At an edge class each receives its
+/// length's part of the edge, the same rule over the edge's split (below). Whether to divide the class instead
 /// needs the interrupted-repeat work to say how it should be weighted; the signature takes
 /// counts rather than sequences precisely so that change lands in this one function
 /// (`calling_priors.md` §5.2, open as that spec's Q3).
 ///
 /// ## The two outermost classes hold everything that far or further
 ///
-/// The fit's window reaches one repeat past the read offsets the census records, and reads cannot
-/// tell apart alleles beyond that: every one of them lands in the census's end bucket. So the
+/// The fit's window reaches one repeat past the read offsets the census records, and reads can
+/// barely tell apart alleles beyond that: every unslipped read of theirs lands in the census's
+/// end bucket. So the
 /// fit's class at `−span` holds every allele `span` or more repeats shorter, and `+span` every
 /// one `span` or more longer (`str_allele_window.md` §1.2). **A candidate at or past an
 /// edge therefore takes that edge's weight divided by how many candidate lengths sit at or past
@@ -172,7 +174,8 @@ const SHAPE_FLOOR: f64 = 1e-12;
 /// ## Shape and cost
 ///
 /// Fills the caller's buffer and **allocates nothing**. Three passes over the locus's candidate
-/// lengths — write the weights, sum them, scale — and no `lgamma`, against one `lgamma` per
+/// lengths — write the weights, sum them, scale — plus, on a fitted spectrum, a count of the
+/// lengths at each edge that is quadratic in a handful of candidates; and no `lgamma`, against one `lgamma` per
 /// allele a genotype carries a copy of in the prior row this feeds. (The sum is the shared
 /// filler's, and `fill_ssr_seed` discards it: the seed scales the *unnormalised* weights, which
 /// is §4.2's conditioning argument above.)
@@ -226,7 +229,8 @@ pub fn fill_ssr_seed<'a>(
 /// lands on one of them, and three cases break that. **None is this function's to settle**; they
 /// are recorded here so the likelihood step meets them as a decision rather than as a surprise:
 ///
-/// - **Two candidates of one length each take that class's full share.** Read as a claim about
+/// - **Two candidates of one length each take that class's full share** (at an edge, that
+///   length's part of the edge). Read as a claim about
 ///   *lengths* it double-counts
 ///   (`tests::two_spellings_of_one_length_carry_that_lengths_share_twice`).
 /// - **A read at a length that is not a candidate has no entry.** The candidate set is

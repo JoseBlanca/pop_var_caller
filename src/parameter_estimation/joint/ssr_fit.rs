@@ -52,10 +52,10 @@
 //! Three things are generalised in the lift, and each is the specification catching up with
 //! the harness rather than a new idea:
 //!
-//! 1. **Alleles reach further than the read buckets.** The records store `±4`; the lengths the
-//!    fit may place allele mass on reach `±6` (`parameter_prepass_joint_records.md` §3.2),
-//!    which is what lets an end bucket be attributed to a distant allele rather than to a far
-//!    slip. With the two spans equal the arithmetic is the harness's exactly.
+//! 1. **Alleles reach further than the read buckets.** The records store `±8`
+//!    ([`RECORDED_OFFSET_RANGE`]); the lengths the fit may place allele mass on reach one further,
+//!    `±9` ([`ALLELE_SPAN`], `str_allele_window.md`), which is what lets an end bucket be
+//!    attributed to a distant allele rather than to a far slip. With the two spans equal the arithmetic is the harness's exactly.
 //! 2. **The homozygote excess is per sample**, as it arrives from the ordinary-position half,
 //!    where the harness supplied one number for the whole panel.
 //! 3. **Slippage is per read group**, as spec §4 has it, where the harness had one set of
@@ -934,9 +934,9 @@ pub const QUADRATURE_POINTS: usize = 256;
 /// window narrower than the recording forces every allele past it into its outermost class and
 /// counts their reads as stutter (`str_allele_window.md` §1.1).
 ///
-/// **No wider than the recorded range plus one**, because the reads cannot tell apart alleles
-/// past it: a read from 9 repeats short and one from 15 repeats short both land in the −8
-/// bucket. So **the outermost classes mean "this far or further"**: −9 holds every allele 9 or
+/// **No wider than the recorded range plus one**, because the reads can barely tell apart
+/// alleles past it: an unslipped read from 9 repeats short and one from 15 repeats short both
+/// land in the −8 bucket, and only reads that slipped two or more repeats longer differ. So **the outermost classes mean "this far or further"**: −9 holds every allele 9 or
 /// more repeats shorter, +9 every one 9 or more longer, and calling shares their weight among
 /// the candidates there (`str_allele_window.md` §1.2).
 ///

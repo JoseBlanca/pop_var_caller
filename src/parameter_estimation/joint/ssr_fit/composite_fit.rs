@@ -80,6 +80,70 @@ impl Counts {
     }
 }
 
+/// The slipped reads an allele sends into one read bucket, by direction: each direction's
+/// probability among all reads, and `steps`, the sum over both of probability times the repeats
+/// slipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct SlipsIntoBucket {
+    shorter: f64,
+    longer: f64,
+    steps: f64,
+}
+
+/// **Where an allele's slips land, bucket by bucket**, in the terms of
+/// [`Slippage::read_probabilities`]: the slipped part of each bucket's probability there,
+/// split by direction, with the expected steps.
+///
+/// **Measured from the allele's own offset, not from its bucket.** An allele past the recorded
+/// range shares its end bucket with the allele at the edge, and that bucket also holds its
+/// shorter slips and its one-step longer slip. A slip into an end bucket went at least that far;
+/// a geometric fall-off has no memory, so its expected length is the least step that reaches
+/// the bucket plus `f / (1 − f)`.
+fn slips_into_each_bucket(
+    slippage: Slippage,
+    allele_offset: i32,
+    read_span: i32,
+) -> Vec<SlipsIntoBucket> {
+    let mut out = vec![SlipsIntoBucket::default(); (2 * read_span + 1) as usize];
+    let slot = |offset: i32| (offset.clamp(-read_span, read_span) + read_span) as usize;
+    let fall_off = slippage.fall_off;
+    let beyond_the_least_step = fall_off / (1.0 - fall_off);
+    for (direction, share) in [
+        (-1_i32, slippage.shorter_share),
+        (1, 1.0 - slippage.shorter_share),
+    ] {
+        let mut add = |bucket: usize, probability: f64, steps: f64| {
+            let into = &mut out[bucket];
+            if direction < 0 {
+                into.shorter += probability;
+            } else {
+                into.longer += probability;
+            }
+            into.steps += probability * steps;
+        };
+        let inside_steps = if direction < 0 {
+            (allele_offset + read_span).max(0)
+        } else {
+            (read_span - allele_offset).max(0)
+        };
+        for step in 1..=inside_steps {
+            let weight = (1.0 - fall_off) * float::powi(fall_off, step - 1);
+            add(
+                slot(allele_offset + direction * step),
+                slippage.level * share * weight,
+                f64::from(step),
+            );
+        }
+        let tail = float::powi(fall_off, inside_steps);
+        add(
+            slot(allele_offset + direction * (inside_steps + 1)),
+            slippage.level * share * tail,
+            f64::from(inside_steps + 1) + beyond_the_least_step,
+        );
+    }
+    out
+}
+
 /// **Fits one class's stutter and shares by counting**, from `start`'s stutter and flat shares,
 /// until no number moves by more than `tolerance` or `max_rounds` pass. Every library is scored at
 /// the class's stutter (multipliers are not fitted here).
@@ -145,7 +209,9 @@ fn count_class(
         let distributions = ReadDistributionsByLevel::of(&[slippage], &libraries, span, read_span);
         let per_allele = &distributions.read_distribution_by_allele[0];
         let stay = 1.0 - slippage.level;
-        let censored_extra = slippage.fall_off / (1.0 - slippage.fall_off);
+        let slips_by_bucket: Vec<Vec<SlipsIntoBucket>> = (0..classes)
+            .map(|class| slips_into_each_bucket(slippage, class as i32 - span, read_span))
+            .collect();
         // Each genotype's prior, given a sample's homozygote excess, split into the part where its two
         // copies are one draw (identical by descent) and the part where they are two.
         let one_draw: Vec<f64> = genotypes
@@ -242,26 +308,15 @@ fn count_class(
                                 let slipped = share - exact;
                                 counts.exact += exact;
                                 counts.slipped += slipped;
-                                // Which way a slip went is read from any bucket; how far, only
-                                // from one the recording did not saturate.
-                                let from = slot(allele);
-                                if slipped > 0.0 && bucket < from {
-                                    counts.shorter += slipped;
-                                } else if slipped > 0.0 && bucket > from {
-                                    counts.longer += slipped;
-                                }
-                                // How far: a slip into an end bucket went at least that far, and a
-                                // geometric fall-off has no memory, so its expected length is the
-                                // distance plus f / (1 − f) at the current fall-off.
-                                if slipped > 0.0 && bucket != from {
-                                    let distance = bucket.abs_diff(from) as f64;
-                                    let censored = bucket == 0 || bucket == last_bucket;
-                                    let expected = if censored {
-                                        distance + censored_extra
-                                    } else {
-                                        distance
-                                    };
-                                    counts.steps += slipped * expected;
+                                // Which way the slipped reads went and how far, split by the
+                                // model's own terms: an end bucket can hold slips of both
+                                // directions from an allele at or past the recorded range.
+                                let into = slips_by_bucket[allele][bucket];
+                                let landed = into.shorter + into.longer;
+                                if slipped > 0.0 && landed > 0.0 {
+                                    counts.shorter += slipped * into.shorter / landed;
+                                    counts.longer += slipped * into.longer / landed;
+                                    counts.steps += slipped * into.steps / landed;
                                     counts.stepped += slipped;
                                 }
                             }
@@ -782,6 +837,16 @@ mod tests {
         assert_eq!(SsrFitConfig::default().allele_span, recorded + 1);
         let shipped = fit_at(SsrFitConfig::default().allele_span);
         assert!((shipped.slippage.level - 0.08).abs() < 0.01, "{shipped:?}");
+        // Which way and how far the far alleles' reads slipped is read from the model, not from
+        // their end bucket, which they share with the edge allele's own reads.
+        assert!(
+            (shipped.slippage.shorter_share - 0.8).abs() < 0.03,
+            "{shipped:?}"
+        );
+        assert!(
+            (shipped.slippage.fall_off - 0.25).abs() < 0.04,
+            "{shipped:?}"
+        );
         // Index 0 is −9 and index 1 is −8. They are held together, not apart: an allele at −8 and
         // one at −9 differ only in reads that slipped inwards, so the two trade mass (about 0.03 of
         // the 0.15 drawn at −8 sits at −9 on this draw).
