@@ -35,6 +35,7 @@ use std::time::Instant;
 use clap::Parser;
 use rayon::prelude::*;
 
+use pop_var_caller::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
     ConcentrationSource, CountedClass, fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
@@ -92,6 +93,9 @@ enum Window {
     One,
     /// −9 ..= +9, reads recorded to ±8: alleles at ±9 send their exact reads into the end buckets.
     Nine,
+    /// Alleles drawn over −12 ..= +12 and fitted at −9 ..= +9, reads recorded to ±8: the fit's
+    /// outermost lengths stand for "this far or further".
+    NineAllelesBeyond,
 }
 
 #[derive(Clone, Copy)]
@@ -127,7 +131,7 @@ const fn setting(
 
 use ConcentrationSource::{EachSamplesTwoCopies as OwnCopies, PairsOfSamples as Pairs};
 
-const SETTINGS: [Setting; 13] = [
+const SETTINGS: [Setting; 14] = [
     setting("base", 200, 20, 3, 0.4, Window::One, Pairs),
     setting("tracts_20", 20, 20, 3, 0.4, Window::One, Pairs),
     setting("tracts_2000", 2000, 20, 3, 0.4, Window::One, Pairs),
@@ -135,6 +139,15 @@ const SETTINGS: [Setting; 13] = [
     setting("reads_30", 200, 20, 30, 0.4, Window::One, Pairs),
     setting("excess_095", 200, 20, 3, 0.95, Window::One, Pairs),
     setting("window_9", 200, 20, 3, 0.4, Window::Nine, Pairs),
+    setting(
+        "window_9_alleles_beyond",
+        200,
+        20,
+        3,
+        0.4,
+        Window::NineAllelesBeyond,
+        Pairs,
+    ),
     setting(
         "window_9_tracts_2000",
         2000,
@@ -175,35 +188,61 @@ const SETTINGS: [Setting; 13] = [
     ),
 ];
 
-/// **The allele-length variation a setting is drawn at.** Over three classes, most chromosomes at
-/// the reference length. Over nineteen, the same fall-off from the reference plus extra mass 8 and
-/// 9 repeats short, so that the classes past the recorded reads carry something to estimate.
+/// **The allele-length variation a setting is drawn at**, over the lengths it is drawn at
+/// ([`drawn_span`]). Over three lengths, most chromosomes at the reference length. Over nineteen,
+/// the same fall-off from the reference plus extra mass 8 and 9 repeats short, so that the lengths
+/// past the recorded reads carry something to estimate. Over twenty-five, the same, the extra mass
+/// moved to 10 to 12 repeats short: alleles past the fit's outermost length.
 fn spectrum(window: Window) -> Vec<f64> {
+    let with_extra = |lengths: usize, extra: &[(usize, f64)]| {
+        let mut spectrum = bench_fixtures::spectrum_of(lengths);
+        for (index, mass) in extra {
+            spectrum[*index] += mass;
+        }
+        let total: f64 = spectrum.iter().sum();
+        spectrum.iter().map(|share| share / total).collect()
+    };
     match window {
         Window::One => bench_fixtures::spectrum_of(3),
-        Window::Nine => {
-            let mut spectrum = bench_fixtures::spectrum_of(19);
-            spectrum[0] += 0.04;
-            spectrum[1] += 0.03;
-            let total: f64 = spectrum.iter().sum();
-            spectrum.iter().map(|share| share / total).collect()
-        }
+        Window::Nine => with_extra(19, &[(0, 0.04), (1, 0.03)]),
+        Window::NineAllelesBeyond => with_extra(25, &[(0, 0.03), (1, 0.02), (2, 0.02)]),
     }
+}
+
+/// **The shares the fit should return**: the drawn variation with every length past the fit's
+/// outermost one counted in that outermost one, which means "this far or further".
+fn truth_shares(window: Window) -> Vec<f64> {
+    let drawn = spectrum(window);
+    let beyond = (drawn_span(window) - allele_span(window)) as usize;
+    let mut shares = drawn[beyond..drawn.len() - beyond].to_vec();
+    let last = shares.len() - 1;
+    shares[0] += drawn[..beyond].iter().sum::<f64>();
+    shares[last] += drawn[drawn.len() - beyond..].iter().sum::<f64>();
+    shares
 }
 
 /// The fit's allele span for a window.
 fn allele_span(window: Window) -> i32 {
     match window {
         Window::One => 1,
-        Window::Nine => 9,
+        Window::Nine | Window::NineAllelesBeyond => 9,
     }
 }
 
-/// **One class drawn at `setting`.** At the ±9 window the reads are drawn over ±9 and the two
-/// outermost buckets either side folded into one, which is the ±8 recording exactly: an end bucket
-/// holds every read at least that far.
+/// How far either side of the reference the alleles are drawn.
+fn drawn_span(window: Window) -> i32 {
+    match window {
+        Window::One => 1,
+        Window::Nine => 9,
+        Window::NineAllelesBeyond => 12,
+    }
+}
+
+/// **One class drawn at `setting`.** At the ±9 windows the reads are drawn over the drawn span and
+/// every bucket past ±8 folded into the end bucket, which is the ±8 recording exactly: an end
+/// bucket holds every read at least that far.
 fn draw(setting: &Setting, seed: u64) -> StratumEvidence {
-    let span = allele_span(setting.window);
+    let span = drawn_span(setting.window);
     let mut evidence = bench_fixtures::draw_stratum(
         TRUTH,
         &spectrum(setting.window),
@@ -215,19 +254,22 @@ fn draw(setting: &Setting, seed: u64) -> StratumEvidence {
         span,
         seed,
     );
-    if let Window::Nine = setting.window {
+    let recorded = RECORDED_OFFSET_RANGE;
+    if span > recorded {
+        let beyond = (span - recorded) as usize;
         for tract in &mut evidence.tracts {
             for sample in &mut tract.samples {
                 for (_, counts) in &mut sample.by_library {
-                    let last = counts.len() - 1;
-                    let mut folded = counts[1..last].to_vec();
-                    folded[0] += counts[0];
-                    *folded.last_mut().expect("seventeen buckets") += counts[last];
+                    let last = counts.len() - beyond;
+                    let mut folded = counts[beyond..last].to_vec();
+                    folded[0] += counts[..beyond].iter().sum::<u32>();
+                    *folded.last_mut().expect("seventeen buckets") +=
+                        counts[last..].iter().sum::<u32>();
                     *counts = folded;
                 }
             }
         }
-        evidence.read_span = span - 1;
+        evidence.read_span = recorded;
     }
     evidence
 }
@@ -284,7 +326,7 @@ fn numbers(
     naive: &CountedClassErrors,
 ) -> Vec<Number> {
     let span = allele_span(setting.window);
-    let truth_shares = spectrum(setting.window);
+    let truth_shares = truth_shares(setting.window);
     let mut out = Vec::new();
     let mut push = |name: String,
                     truth: f64,
