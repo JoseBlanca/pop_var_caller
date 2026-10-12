@@ -815,10 +815,20 @@ nothing here could be measured under PCR stutter or in a cohort. Built first (§
 - **Checks.** The driver's typing check also expects the bundles, as `ssr_bundle` regions. HipSTR
   is left off bundles.
 
-**What it does not lay yet: bundles whose repeats abut, overlap or carry impurities** — the 734 of
-HG002's 2,410 bundles of §5.1. Its bundles are pure members separated by gaps, the easy case for the
-run finder. Extending it to those shapes, with stutter in the runs the caller would find, is step 5
-(§10; owner, 2026-10-11).
+**What it did not lay at first: bundles whose repeats abut, overlap or carry impurities.** Its
+bundles were pure members separated by gaps, the easy case for the run finder. *Added 2026-10-12
+(§10 step 5; `str_stutter_benchmark.md` §11.4):* a share of the bundles, by default HG002's 6 in 10,
+are laid in a **hard shape** — repeats that abut, most often a short repeat running into a
+homopolymer of its main base (`(AAAC)4 A8`), or repeats cut into pure pieces by a substituted copy,
+a stray base or a copy that lost a base. Measured on HG002 with the members' cut spans and the
+reference runs, 1,447 of the 2,410 bundles are not the separated shape — more than the 734 of §5.1,
+which counted nested and overlapping members only; 1,223 of the 1,447 hold a member that is not
+exactly periodic. In a hard shape **stutter is placed in the runs of each allele's own sequence**,
+found by a copy of §6.1's rule, each at its own period and count, so the truth stutters on pure
+stretches whatever the drawn members were; each pure piece is a member for the length changes. The
+typing check now asks, for every bundle, that the typed hull is the laid one and that the caller's
+reference runs are the simulator's stutter sites; members are compared for the separated shape
+only.
 
 ## 10. Building and measuring it
 
@@ -1019,6 +1029,81 @@ step.
 
 5. **The simulator's harder bundles** (§9): abutting, overlapping and impure repeats, measured as in
    step 4.
+   *Done 2026-10-12* (`str_stutter_benchmark.md` §11.4, branch `str-bundles-hard`). At the default
+   `hard_bundle_share` of 0.6 each run lays 183 separated bundles and 317 in a hard shape (115
+   abutting, 136 interrupted, 66 both); 310 of the 500 are hard by the classification applied to
+   HG002, against HG002's 1,447 of 2,410. Every run's typing check passed: all 500 bundles typed as
+   one bundle over the laid hull, and the caller's reference runs equal to the simulator's stutter
+   sites in every one. Four ways to call them, each on its own psps, all with the simulator's true
+   stutter and no fit: **the new bundle caller** (main at b2714614), **our STR caller** (each bundle
+   typed as one STR segment, the experiment build of the report `str_bundles_2026-10-12.md`),
+   **the generic path** (its other experiment build) and **uncalled** (main with
+   `--max-str-bundle-len 0`, every bundle a satellite). Bundle cells with a variant right, then
+   false calls; separated bundles: 3,589 variant and 5,561 reference cells at 50 samples, 73 and 110
+   at one; hard bundles: 6,447 and 9,403 at 50, 127 and 190 at one. *This table was measured on
+   2026-10-12, before the simulator laid bundles with no reference run; the one-sample rows were
+   measured again after, below.*
+
+   | right; false calls | new bundle caller | our STR caller | generic path | uncalled |
+   |---|---|---|---|---|
+   | 50 samples, PCR, 30×: separated | 3,578; 1 | 3,562; 28 | 3,499; 230 | 74; 0 |
+   | same: hard | 6,435; 0 | 6,371; 118 | 6,189; 279 | 172; 0 |
+   | 50 samples, PCR, 5×: separated | 2,774; 43 | 2,614; 93 | 2,740; 267 | 65; 6 |
+   | same: hard | 4,897; 55 | 4,618; 167 | 4,789; 290 | 146; 5 |
+   | 50 samples, PCR-free, 30×: separated | 3,587; 0 | 3,584; 2 | 3,574; 11 | 74; 0 |
+   | same: hard | 6,439; 0 | 6,425; 7 | 6,331; 9 | 172; 0 |
+   | 50 samples, PCR-free, 5×: separated | 2,820; 25 | 2,715; 34 | 2,828; 69 | 65; 3 |
+   | same: hard | 5,035; 37 | 4,798; 73 | 4,992; 67 | 152; 7 |
+   | 1 sample, PCR, 30×: separated / hard | 73 / 125; 0 | 52 / 78; 0 | 71 / 121; 0 | 1 / 2; 0 |
+   | 1 sample, PCR, 5×: separated / hard | 23 / 47; 1 | 19 / 35; 1 | 31 / 59; 1 | 1 / 1; 1 |
+   | 1 sample, PCR-free, 30×: separated / hard | 73 / 127; 0 | 51 / 81; 0 | 72 / 124; 0 | 1 / 2; 0 |
+   | 1 sample, PCR-free, 5×: separated / hard | 37 / 54; 0 | 24 / 31; 0 | 38 / 67; 0 | 1 / 2; 0 |
+
+   **Hard shapes cost the new caller nothing at 30× or in a cohort**: at 50 samples, PCR, 30× it
+   gets 6,435 of 6,447 hard variant cells right with no false call, as it gets 3,578 of 3,589
+   separated ones; the generic path makes 279 false calls on hard bundles and our STR caller 118. In
+   the 50-sample 5× runs it is ahead of the generic path in every hull-length band. **At one sample
+   and 5× it trails the generic path, and by more on hard shapes** — 47 against 59 and 54 against
+   67 of 127 hard cells, 23 against 31 and 37 against 38 of 73 separated. The lag is mostly cells
+   with no call, in the longer hulls: hard hulls carrying a variant have a median of 46 bases
+   against 32 for separated ones, a longer hull is crossed whole by fewer reads, and only reads
+   that cross it nominate a candidate (§7.6). It is the low-depth limit of step 4 meeting longer
+   hulls, not a failure particular to abutting or interrupted repeats; in hard hulls of 30 bases or
+   less the gap is small — 13 against 13 cells right at PCR, 15 against 18 at PCR-free, of 29 —
+   against 18 against 25 and 24 against 30 of 52 in hulls over 50 bases.
+
+   *Measured again 2026-10-13, one sample, with the no-run share* (`str_stutter_benchmark.md`
+   §11.4: 31 of the 500 bundles now have no reference run, and the junction after a homopolymer tail
+   abuts less often, so every hard bundle is redrawn). Separated bundles: 79 variant and 116
+   reference cells; hard: 124 and 181, of which 16 variant cells are in bundles with no run.
+
+   | right; false calls | new bundle caller | our STR caller | generic path | uncalled |
+   |---|---|---|---|---|
+   | 1 sample, PCR, 30×: separated / hard | 79 / 119; 2 | 59 / 81; 14 | 76 / 117; 22 | 1 / 3; 0 |
+   | 1 sample, PCR, 5×: separated / hard | 29 / 46; 4 | 24 / 35; 10 | 40 / 64; 10 | 0 / 3; 0 |
+   | 1 sample, PCR-free, 30×: separated / hard | 79 / 123; 0 | 61 / 86; 0 | 78 / 119; 0 | 1 / 3; 0 |
+   | 1 sample, PCR-free, 5×: separated / hard | 27 / 35; 1 | 20 / 28; 1 | 34 / 55; 1 | 0 / 1; 0 |
+
+   At 30× the new caller still leads, and makes the fewest false calls by far (2 at PCR against 22
+   for the generic path). At 5× it trails the generic path by more than before — 46 against 64 and
+   35 against 55 of 124 hard cells — and the lag is again in long hulls: in hard hulls over 50 bases
+   it gets 14 of 64 right against the generic path's 27 (PCR) and 29 (PCR-free), and in hulls of 30
+   bases or less 12 against 14 and 6 against 6 of 20. The hard hulls carrying a variant are longer
+   in this draw (a median of 53 bases against 46). **Bundles with no run are its weakest case at
+   5×**: 2 and 3 of their 16 variant cells right, against 9 and 8 for the generic path; at 30× it
+   gets 14 and 15, the generic path 15 and 15. Sixteen cells is too few to say more than that the
+   gap is there. The 50-sample rows were not re-run.
+
+   **STR segments are unchanged**: the new caller and the uncalled build agree on every segment
+   cell's outcome and quality in six runs, and differ on 4 of 150,000 cells at 50 samples, PCR, 5×
+   and 1 at PCR-free, 5×. The four are one segment (chr3:420,408) whose record the uncalled build
+   drops under the hidden-duplication filter, its `PARALOG_LR` moved because bundle hulls count in
+   the coverage windows only when bundles are called (step 3).
+
+   *Doubtful or left out.* The 50-sample rows predate the no-run share, so no cohort run has
+   bundles with no reference run yet. Fewer simulated hard bundles nest (35 in 100 against 51).
+   Because the simulator places stutter by the caller's own run rule, this benchmark cannot show
+   that rule putting stutter in the wrong stretch. GATK was not run.
 
 ## 11. Decided (owner, 2026-10-11)
 

@@ -43,6 +43,11 @@
 //!   segments only. Written with their header alone when `bundles=0`, and then every other file
 //!   is byte for byte what the simulator wrote before bundles existed; with bundles laid, the
 //!   segments sit elsewhere along the genome, so a default run is a different cohort.
+//! - `bundle_runs.tsv` — each bundle's shape (`separated`, `abutting`, `interrupted` or
+//!   `abutting_interrupted`) and where its reference stutters, as `motif:offset:length` from the
+//!   hull's first base: the format `ng_str_bundle_runs` writes the caller's reference runs in, so
+//!   the typing check compares the two. A file of its own, so that with `hard_bundle_share=0` every
+//!   other file is byte for byte what the simulator wrote before hard shapes existed.
 //! - `libraries.tsv` — each sample's library: its stutter level and its own multiplier.
 //! - `stutter_rates.tsv` — the share of molecules that stutter, by level, motif length and
 //!   repeat count, before a library's multiplier (§3.2's table, laid out per repeat count).
@@ -57,7 +62,10 @@
 //!    repeats (*members*) separated by gaps of 1 to 14 bases, so close that none of them has
 //!    clean flanks of its own, the whole stretch from the first member's start to the last one's
 //!    end (the *hull*) at most 100 bases and wrapped in 150 bases of clean flank as a segment is
-//!    (`doc/devel/ng/spec/str_bundle_loci.md` §9).
+//!    (`doc/devel/ng/spec/str_bundle_loci.md` §9). A share `hard_bundle_share` of them are laid in
+//!    a **hard shape** instead: repeats that abut, often a repeat running into a homopolymer of its
+//!    main base (`(TTTC)4 T(11)`), or repeats split into pure pieces by an interruption — the
+//!    shapes six in ten of HG002's bundles have. Each pure piece is then a member.
 //! 2. **The population**: at each segment two to six alleles differing by whole units, the
 //!    non-reference ones sharing a frequency drawn from a Beta(0.5, 1.5); one segment in ten
 //!    gains an allele with a substitution inside the repeat, one in ten an allele with a SNP
@@ -76,9 +84,11 @@
 //!    or loses whole units: it stutters with probability `rate(level, motif length, repeats) ×
 //!    multiplier`, shorter with the level's shorter share, by one unit with probability 0.85,
 //!    two with 0.85 × 0.15 and so on, at most four. **Stutter acts on the molecule, so both mates
-//!    of a pair report the same length**, as both read one PCR product. A bundle stutters in
-//!    every member independently, each at the rate for its own motif length and its own repeat
-//!    count in the allele the molecule copies.
+//!    of a pair report the same length**, as both read one PCR product. A separated bundle
+//!    stutters in every member independently, each at the rate for its own motif length and its
+//!    own repeat count in the allele the molecule copies; a hard-shaped one in every **run** of the
+//!    allele's sequence — each stretch of pure whole copies of one motif at or above its calling
+//!    floor, found by the rule the caller uses for a bundle's reference runs — each at its own rate.
 //! 6. **The reads**: the first 150 bases of the molecule and the reverse complement of its last
 //!    150, from either strand at random; base qualities drawn around Q32 with a tail falling to
 //!    about Q22 at the read's end, and each base misread with the probability its quality
@@ -104,6 +114,7 @@
 //! | `depth` | 30 | reads a position, both mates counted, averaged over the genome |
 //! | `segments_per_period` | 500 | STR segments of each motif length |
 //! | `bundles` | 500 | STR bundles, all motif lengths together; `0` lays none and leaves every other output as it was without them |
+//! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle as before hard shapes existed, byte for byte |
 //! | `genome_bp` | 4000000 | the reference's length, all contigs together |
 //! | `contigs` | 4 | how many contigs the reference is cut into |
 //! | `inbreeding` | 0 | the chance a sample's two copies at a site are one draw |
@@ -266,6 +277,58 @@ const SECOND_MEMBER_CHANGE_SHARE: f64 = 0.25;
 /// Mixed into the seed for the bundles' own draw, so that laying bundles takes nothing from the
 /// draw everything else comes from, and `bundles=0` leaves that draw untouched.
 const BUNDLE_SEED_SALT: u64 = 0x5851_F42D_4C95_7F2D;
+
+/// The share of bundles laid in a **hard shape** — members that abut or carry an interruption —
+/// by default: HG002's. Of the 2,410 bundles of at most 100 bases the typing finds in HG002's
+/// tandem-repeat regions, 1,447 are not the separated shape (each member exactly periodic, no two
+/// members touching or overlapping, no two reference runs abutting); measured 2026-10-12, the
+/// classification and its numbers recorded in `str_stutter_benchmark.md` §11.4 (the script that
+/// measured it was scratch and is not in the repository).
+const DEFAULT_HARD_BUNDLE_SHARE: f64 = 0.6;
+
+/// In a hard shape, the chance that two neighbouring members abut, with no base between them,
+/// instead of being separated by a gap, when the first is not a homopolymer.
+const ABUTTING_JUNCTION_SHARE: f64 = 0.4;
+
+/// How much less often a junction abuts after a homopolymer. In HG002, 19 of the 191 pairs of
+/// abutting reference runs start with a homopolymer, although homopolymers are half of all bundle
+/// members.
+const AFTER_HOMOPOLYMER_ABUTTING_FACTOR: f64 = 0.1;
+
+/// When two members abut and the first is not a homopolymer, the chance the second is a homopolymer
+/// of the first's most frequent base — the `(TTTC)n T(m)` shape. In HG002, 118 of the 191 pairs of
+/// abutting reference runs are a repeat and a homopolymer of one of its bases; and a repeat mostly
+/// of one base runs on into such a homopolymer in the scanner's reading, which is where most of
+/// HG002's nested members come from.
+const HOMOPOLYMER_TAIL_SHARE: f64 = 0.8;
+
+/// In a hard shape, the chance that each member is interrupted: split into pure pieces of its motif
+/// by a substituted copy, an inserted base or a copy that lost a base.
+const INTERRUPTED_MEMBER_SHARE: f64 = 0.45;
+
+/// How many interruptions an interrupted member carries — one, two or three — as weights: HG002's
+/// impure bundle members hold 852 with one cluster of bases off their period, 414 with two and 199
+/// with three or more.
+const INTERRUPTION_COUNT_WEIGHTS: [f64; 3] = [852.0, 414.0, 199.0];
+
+/// The mean number of whole copies, geometric, an interrupted member gains on top of its drawn
+/// count, plus one. HG002's impure members are longer than its pure ones — a median of 12 copies
+/// for mono- and dinucleotides against 9 and 6 — and a member split at the floor would leave
+/// pieces too short for the typing to see as a repeat at all.
+const INTERRUPTED_MEMBER_MEAN_EXTRA_COPIES: f64 = 1.0;
+
+/// The most extra copies an interrupted member gains on top of its drawn count. The hull cap
+/// ([`LONGEST_BUNDLE_HULL`]) binds long before it; it only bounds the geometric draw.
+const INTERRUPTED_MEMBER_MOST_EXTRA_COPIES: u32 = 30;
+
+/// The fewest copies of the short repeat a homopolymer tail follows (`(TTC)4 T9`); it is drawn
+/// from this up to its calling floor, as HG002's are.
+const TAIL_LEAD_LEAST_COPIES: u32 = 3;
+
+/// The share of hard bundles laid with **no reference run**: every repeat impure, no stretch of
+/// pure copies at its calling floor. HG002: 123 of the 1,447 hard bundles
+/// (`str_stutter_benchmark.md` §11.4). Without it the simulator laid 6 in 3,000.
+const NO_RUN_HARD_BUNDLE_SHARE: f64 = 123.0 / 1447.0;
 
 /// The extra bases a molecule is cut with before its stutter is applied, so a removal still
 /// leaves it its full length.
@@ -504,6 +567,9 @@ struct Settings {
     depth: f64,
     segments_per_period: usize,
     bundles: usize,
+    /// The share of bundles laid in a hard shape ([`draw_hard_bundle_shape`]); the rest are laid
+    /// separated ([`draw_bundle_shape`]). `0` lays every bundle as before hard shapes existed.
+    hard_bundle_share: f64,
     genome_bp: usize,
     contigs: usize,
     inbreeding: f64,
@@ -519,6 +585,7 @@ impl Default for Settings {
             depth: 30.0,
             segments_per_period: 500,
             bundles: DEFAULT_BUNDLES,
+            hard_bundle_share: DEFAULT_HARD_BUNDLE_SHARE,
             genome_bp: 4_000_000,
             contigs: 4,
             inbreeding: 0.0,
@@ -548,6 +615,7 @@ impl Settings {
                 "depth" => settings.depth = number()?,
                 "segments_per_period" => settings.segments_per_period = number()? as usize,
                 "bundles" => settings.bundles = number()? as usize,
+                "hard_bundle_share" => settings.hard_bundle_share = number()?,
                 "genome_bp" => settings.genome_bp = number()? as usize,
                 "contigs" => settings.contigs = number()? as usize,
                 "inbreeding" => settings.inbreeding = number()?,
@@ -561,6 +629,12 @@ impl Settings {
         }
         if settings.depth.is_nan() || settings.depth <= 0.0 {
             return Err(format!("depth must be above zero, got {}", settings.depth));
+        }
+        if !(0.0..=1.0).contains(&settings.hard_bundle_share) {
+            return Err(format!(
+                "hard_bundle_share must be in [0, 1], got {}",
+                settings.hard_bundle_share
+            ));
         }
         if !(0.0..=1.0).contains(&settings.inbreeding) {
             return Err(format!(
@@ -627,13 +701,45 @@ fn segment_name(index: usize) -> String {
 /// **An STR bundle's reference sequence, before it is placed**: its members in order along the
 /// contig, each a motif and how many whole copies of it the reference holds, and the bases
 /// between consecutive members.
+///
+/// In a hard shape a *member* is one pure piece: an interrupted repeat is several members of one
+/// motif, with the interruption as the bases between them, and two abutting repeats have no base
+/// between them. So a member is always pure whole copies, which is what a length change moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BundleShape {
     /// Each member's motif and reference repeat count, first member first.
     members: Vec<(Vec<u8>, u32)>,
-    /// The gap after each member but the last: one to [`LONGEST_BUNDLE_GAP`] bases, none of
-    /// them continuing either neighbour's motif.
+    /// The bases after each member but the last. In the separated shape, one to
+    /// [`LONGEST_BUNDLE_GAP`] bases, none of them continuing either neighbour's motif; in a hard
+    /// shape also none (two members that abut) or an interruption (a mangled copy, or one stray
+    /// base, between two pieces of one repeat).
     gaps: Vec<Vec<u8>>,
+    kind: BundleShapeKind,
+}
+
+/// Which of the shapes [`draw_bundle_shape`] and [`draw_hard_bundle_shape`] lay a bundle is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BundleShapeKind {
+    /// Pure members separated by gaps, each seen by the typing exactly as drawn: the shape the
+    /// simulator laid before hard shapes existed.
+    Separated,
+    /// Some neighbouring members abut, none is interrupted.
+    Abutting,
+    /// Some member is interrupted, none abut.
+    Interrupted,
+    /// Both.
+    AbuttingAndInterrupted,
+}
+
+impl BundleShapeKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Separated => "separated",
+            Self::Abutting => "abutting",
+            Self::Interrupted => "interrupted",
+            Self::AbuttingAndInterrupted => "abutting_interrupted",
+        }
+    }
 }
 
 impl BundleShape {
@@ -803,7 +909,11 @@ fn draw_bundle_shape(draw: &mut Draw) -> BundleShape {
         if gaps.len() < gap_lengths.len() {
             continue;
         }
-        let shape = BundleShape { members, gaps };
+        let shape = BundleShape {
+            members,
+            gaps,
+            kind: BundleShapeKind::Separated,
+        };
         if scanner_reports_exactly_the_members(&shape) {
             return shape;
         }
@@ -837,21 +947,315 @@ fn draw_bundle_member(draw: &mut Draw) -> (Vec<u8>, u32) {
         .expect("the ticket is below the weights' sum");
     let motifs = MOTIFS[period - 1];
     let motif = motifs[draw.below(motifs.len() as u64) as usize];
+    (motif.as_bytes().to_vec(), draw_member_repeats(period, draw))
+}
+
+/// A bundle member's reference repeat count for its motif length, as [`draw_bundle_member`]
+/// states it: long with probability [`LONG_MEMBER_SHARE`] for a mono- or dinucleotide, otherwise
+/// the floor plus a geometric number of extra copies.
+fn draw_member_repeats(period: usize, draw: &mut Draw) -> u32 {
     let floor = CALLING_FLOOR[period - 1];
     let highest = HIGHEST_REFERENCE_REPEATS[period - 1];
-    let repeats = if period <= 2 && draw.unit() < LONG_MEMBER_SHARE {
+    if period <= 2 && draw.unit() < LONG_MEMBER_SHARE {
         let span = highest - LONG_MEMBER_LEAST_REPEATS + 1;
         LONG_MEMBER_LEAST_REPEATS + draw.below(u64::from(span)) as u32
     } else {
-        // Each further copy with probability mean / (1 + mean): a geometric count of that mean.
-        let another_copy = BUNDLE_MEAN_EXTRA_COPIES / (1.0 + BUNDLE_MEAN_EXTRA_COPIES);
-        let mut extra = 0;
-        while floor + extra < highest && draw.unit() < another_copy {
-            extra += 1;
-        }
-        floor + extra
+        floor + draw_geometric(BUNDLE_MEAN_EXTRA_COPIES, highest - floor, draw)
+    }
+}
+
+/// A geometric count with this mean, held at `most`: each further one with probability
+/// `mean / (1 + mean)`.
+fn draw_geometric(mean: f64, most: u32, draw: &mut Draw) -> u32 {
+    let another = mean / (1.0 + mean);
+    let mut count = 0;
+    while count < most && draw.unit() < another {
+        count += 1;
+    }
+    count
+}
+
+/// **One STR bundle in a hard shape**: repeats that abut, or that carry an interruption — the
+/// shapes about six in ten of HG002's bundles have ([`DEFAULT_HARD_BUNDLE_SHARE`]), which
+/// [`draw_bundle_shape`] does not lay. Drawn as that function draws, then hardened:
+///
+/// - **Two or three repeats**, each by [`draw_bundle_member`], as in the separated shape.
+/// - **Each neighbouring pair abuts** with probability [`ABUTTING_JUNCTION_SHARE`], a tenth of it
+///   after a homopolymer ([`AFTER_HOMOPOLYMER_ABUTTING_FACTOR`]); otherwise a gap
+///   is drawn between them as in the separated shape. When they abut, the second becomes a
+///   homopolymer of the first's most frequent base with probability [`HOMOPOLYMER_TAIL_SHARE`] — the
+///   `(TTTC)n T(m)` shape, and the first is then drawn short, three copies up to its floor, as
+///   HG002's are. Two abutting repeats of one motif would be one longer repeat, and are redrawn.
+/// - **Each repeat is interrupted** with probability [`INTERRUPTED_MEMBER_SHARE`]: lengthened, then
+///   cut into pure pieces of its motif by one to three interruptions ([`draw_interrupted_member`]).
+/// - **At least one of the two happens**, or the shape is redrawn: a hard shape is never the
+///   separated one by construction.
+/// - **With probability [`NO_RUN_HARD_BUNDLE_SHARE`], a bundle with no run**: every repeat is
+///   interrupted, and the shape is redrawn until no stretch of pure copies in the hull reaches
+///   its calling floor ([`reference_runs`] finds nothing) — a cluster of impure repeats the
+///   caller calls with no stutter modelled, as 123 of HG002's 1,447 hard bundles are.
+/// - **A hull of at most [`LONGEST_BUNDLE_HULL`] bases.**
+/// - **The typing must see one bundle over exactly the laid hull**
+///   ([`scanner_reports_one_bundle_over_the_hull`]). Which repeats it reports inside is left to it:
+///   they may nest, overlap or join two pieces, as on HG002.
+///
+/// Each pure piece is one of the returned shape's members, so a length change moves one pure
+/// stretch, and the stutter sites are found from the sequence (`stutter_sites_of`), not the members.
+///
+/// # Panics
+///
+/// If no shape keeps every rule in [`BUNDLE_SHAPE_ATTEMPTS`] redraws.
+fn draw_hard_bundle_shape(draw: &mut Draw) -> BundleShape {
+    let repeat_count = if draw.unit() < THREE_MEMBER_SHARE {
+        3
+    } else {
+        2
     };
-    (motif.as_bytes().to_vec(), repeats)
+    let without_runs = draw.unit() < NO_RUN_HARD_BUNDLE_SHARE;
+    'attempt: for _ in 0..BUNDLE_SHAPE_ATTEMPTS {
+        let mut repeats: Vec<(Vec<u8>, u32)> = (0..repeat_count)
+            .map(|_| draw_bundle_member(draw))
+            .collect();
+        // Junction by junction, so a homopolymer tail made at one junction lowers the chance
+        // that the next one abuts, as for any homopolymer.
+        let mut abutting: Vec<bool> = Vec::with_capacity(repeat_count - 1);
+        for index in 0..repeat_count - 1 {
+            let left_is_homopolymer = repeats[index].0.len() == 1;
+            let share = if left_is_homopolymer {
+                ABUTTING_JUNCTION_SHARE * AFTER_HOMOPOLYMER_ABUTTING_FACTOR
+            } else {
+                ABUTTING_JUNCTION_SHARE
+            };
+            let abuts = draw.unit() < share;
+            abutting.push(abuts);
+            if abuts && !left_is_homopolymer && draw.unit() < HOMOPOLYMER_TAIL_SHARE {
+                let left = &repeats[index].0;
+                let base = majority_base(left);
+                // HG002's tails follow a short repeat — `(AAAC)4 A8`, `(TTC)4 T9` — that the
+                // scanner reads by running on into the tail: three copies up to its floor.
+                let floor = CALLING_FLOOR[left.len() - 1];
+                let span = floor - TAIL_LEAD_LEAST_COPIES + 1;
+                repeats[index].1 = TAIL_LEAD_LEAST_COPIES + draw.below(u64::from(span)) as u32;
+                repeats[index + 1] = (vec![base], draw_member_repeats(1, draw));
+            }
+        }
+        let interruptions: Vec<usize> = repeats
+            .iter()
+            .map(|_| {
+                // A bundle with no run has every repeat interrupted: a pure repeat is a run.
+                if without_runs || draw.unit() < INTERRUPTED_MEMBER_SHARE {
+                    1 + draw.categorical(&INTERRUPTION_COUNT_WEIGHTS)
+                } else {
+                    0
+                }
+            })
+            .collect();
+        let abuts_somewhere = abutting.contains(&true);
+        let interrupted_somewhere = interruptions.iter().any(|count| *count > 0);
+        if !abuts_somewhere && !interrupted_somewhere {
+            continue;
+        }
+        for (index, abuts) in abutting.iter().enumerate() {
+            if *abuts && is_rotation_of(&repeats[index].0, &repeats[index + 1].0) {
+                continue 'attempt;
+            }
+        }
+
+        let mut members: Vec<(Vec<u8>, u32)> = Vec::new();
+        let mut gaps: Vec<Vec<u8>> = Vec::new();
+        let mut hull: Vec<u8> = Vec::new();
+        for (index, ((motif, repeats), count)) in repeats.iter().zip(&interruptions).enumerate() {
+            if index > 0 {
+                if abutting[index - 1] {
+                    gaps.push(Vec::new());
+                } else {
+                    let len = 1 + draw.below(LONGEST_BUNDLE_GAP as u64) as usize;
+                    let left = &members.last().expect("a member before every gap").0;
+                    let Some(gap) = draw_gap(&hull, left, motif, len, draw) else {
+                        continue 'attempt;
+                    };
+                    hull.extend_from_slice(&gap);
+                    gaps.push(gap);
+                }
+            }
+            let (pieces, between) = draw_interrupted_member(motif, *repeats, *count, draw);
+            for (piece, copies) in pieces.into_iter().enumerate() {
+                if piece > 0 {
+                    hull.extend_from_slice(&between[piece - 1]);
+                    gaps.push(between[piece - 1].clone());
+                }
+                hull.extend(motif.repeat(copies as usize));
+                members.push((motif.clone(), copies));
+            }
+            if hull.len() > LONGEST_BUNDLE_HULL {
+                continue 'attempt;
+            }
+        }
+        if without_runs && !reference_runs(&hull).is_empty() {
+            continue 'attempt;
+        }
+        let kind = match (abuts_somewhere, interrupted_somewhere) {
+            (true, true) => BundleShapeKind::AbuttingAndInterrupted,
+            (true, false) => BundleShapeKind::Abutting,
+            (false, true) => BundleShapeKind::Interrupted,
+            (false, false) => {
+                unreachable!("a shape that neither abuts nor is interrupted is redrawn")
+            }
+        };
+        let shape = BundleShape {
+            members,
+            gaps,
+            kind,
+        };
+        if scanner_reports_one_bundle_over_the_hull(&shape)
+            && !scanner_reads_it_as_separated(&shape)
+        {
+            return shape;
+        }
+    }
+    panic!(
+        "no hard {repeat_count}-repeat bundle shape kept every rule in {BUNDLE_SHAPE_ATTEMPTS} \
+         draws: the hull cap, the gap rules or the one-bundle rule can no longer be met together"
+    );
+}
+
+/// One repeat of `repeats` copies of `motif`, cut by `interruptions` interruptions (none leaves it
+/// whole): the whole copies of each pure piece, in order, and the bases between consecutive
+/// pieces. With any interruption the repeat first gains `1 +` a geometric number of copies of mean
+/// [`INTERRUPTED_MEMBER_MEAN_EXTRA_COPIES`], so its pieces stay long enough to be seen; the cut
+/// points are drawn among its copies, each piece keeping at least one. Each interruption is, with
+/// these chances:
+///
+/// - **a substituted copy** (one in two): a copy of the motif with one base changed;
+/// - **a stray base** (one in four): one base, not the motif's first, inserted between two copies;
+/// - **a copy that lost a base** (one in four): a copy of the motif with one base removed — for a
+///   homopolymer, which would only be one copy fewer, a substituted copy instead.
+///
+/// The pieces keep the motif's phase: each starts on the motif's first base.
+fn draw_interrupted_member(
+    motif: &[u8],
+    repeats: u32,
+    interruptions: usize,
+    draw: &mut Draw,
+) -> (Vec<u32>, Vec<Vec<u8>>) {
+    if interruptions == 0 {
+        return (vec![repeats], Vec::new());
+    }
+    let extra = 1 + draw_geometric(
+        INTERRUPTED_MEMBER_MEAN_EXTRA_COPIES,
+        INTERRUPTED_MEMBER_MOST_EXTRA_COPIES,
+        draw,
+    );
+    let total = (repeats + extra).max(interruptions as u32 + 1);
+    let mut cuts: Vec<u32> = Vec::with_capacity(interruptions);
+    while cuts.len() < interruptions {
+        let cut = 1 + draw.below(u64::from(total - 1)) as u32;
+        if !cuts.contains(&cut) {
+            cuts.push(cut);
+        }
+    }
+    cuts.sort_unstable();
+    let mut pieces = Vec::with_capacity(interruptions + 1);
+    let mut from = 0;
+    for cut in cuts.iter().copied().chain(std::iter::once(total)) {
+        pieces.push(cut - from);
+        from = cut;
+    }
+    let between = (0..interruptions)
+        .map(|_| {
+            let kind = draw.below(4);
+            let at = draw.below(motif.len() as u64) as usize;
+            match kind {
+                2 => vec![draw.other_base(motif[0])],
+                3 if motif.len() > 1 => {
+                    let mut copy = motif.to_vec();
+                    copy.remove(at);
+                    copy
+                }
+                _ => {
+                    let mut copy = motif.to_vec();
+                    copy[at] = draw.other_base(copy[at]);
+                    copy
+                }
+            }
+        })
+        .collect();
+    (pieces, between)
+}
+
+/// The base a motif holds most often, the earliest on a tie: `T` for `TTTC`, `A` for `AC`.
+fn majority_base(motif: &[u8]) -> u8 {
+    let count = |base: u8| motif.iter().filter(|one| **one == base).count();
+    let mut best = motif[0];
+    for base in motif {
+        if count(*base) > count(best) {
+            best = *base;
+        }
+    }
+    best
+}
+
+/// Whether two motifs of one length are rotations of each other — one repeat read from another
+/// base, so that two abutting runs of them would be a single run.
+fn is_rotation_of(first: &[u8], second: &[u8]) -> bool {
+    first.len() == second.len()
+        && [first, first]
+            .concat()
+            .windows(second.len())
+            .any(|w| w == second)
+}
+
+/// Whether the repeats the typing's scanner finds in this shape, with a spacer either side as it
+/// will be laid, make **one bundle over exactly the hull**: at least two repeats, each within the
+/// bundle radius of the reach of those before it (the typing's chaining, `segment_criteria.rs`,
+/// `joins_cluster`), the first starting on the hull's first base and the furthest ending on its
+/// last. The hull is what the typing calls the bundle (`str_bundle_loci.md` §5.1), so the bundle
+/// laid is the bundle typed.
+fn scanner_reports_one_bundle_over_the_hull(shape: &BundleShape) -> bool {
+    let (probe, offset, hull_end) = scanner_probe(shape);
+    let repeats = scanner_repeats(&probe);
+    let Some(((first_start, first_end, _), rest)) = repeats.split_first() else {
+        return false;
+    };
+    if rest.is_empty() || *first_start != offset {
+        return false;
+    }
+    let bundle_radius = LONGEST_BUNDLE_GAP + 1;
+    let mut reach = *first_end;
+    for (start, end, _) in rest {
+        if start.saturating_sub(reach) >= bundle_radius {
+            return false;
+        }
+        reach = reach.max(*end);
+    }
+    reach == hull_end
+}
+
+/// Whether the typing's scanner reads this shape as the separated one — every repeat it reports
+/// pure (each base equal to the one a period before it) and starting past the end of every repeat
+/// before it — so that the typing could not tell it from a shape [`draw_bundle_shape`] lays. A hard
+/// shape read so is redrawn: an interruption the scanner splits a repeat at, leaving two pure
+/// repeats a few bases apart, is a separated bundle to the typing, and HG002's share of hard
+/// bundles ([`DEFAULT_HARD_BUNDLE_SHARE`]) counts what the typing sees.
+fn scanner_reads_it_as_separated(shape: &BundleShape) -> bool {
+    let (probe, _, _) = scanner_probe(shape);
+    let repeats = scanner_repeats(&probe);
+    let pure = repeats.iter().all(|(start, end, period)| {
+        (start + period..*end).all(|at| probe[at] == probe[at - period])
+    });
+    pure && repeats.windows(2).all(|pair| pair[1].0 > pair[0].1)
+}
+
+/// A shape's hull with the spacer either side as [`build_reference`] lays it, for the scanner
+/// copy: the bases, and where the hull starts and ends in them.
+fn scanner_probe(shape: &BundleShape) -> (Vec<u8>, usize, usize) {
+    let mut probe = Vec::new();
+    append_spacer(&mut probe, shape.first_motif());
+    let offset = probe.len();
+    probe.extend(shape.spell(&shape.reference_repeats()));
+    let hull_end = probe.len();
+    append_spacer(&mut probe, shape.last_motif());
+    (probe, offset, hull_end)
 }
 
 /// `len` gap bases to follow `hull` (which ends with a whole copy of `left`) and precede a run
@@ -1458,6 +1862,12 @@ struct BundleAllele {
     /// repeat, where stutter adds or removes units of that member. `None` when it is shorter
     /// than two units.
     pure_spans: Vec<Option<(usize, usize)>>,
+    /// Where a molecule copying this allele can stutter, within `sequence`, in order. In the
+    /// separated shape, each member's pure span (one site per member, as before hard shapes
+    /// existed); in a hard shape, the runs the caller's own rule finds in the allele's sequence
+    /// ([`stutter_sites_of`]), so stutter acts on the pure stretches and not on how the shape was
+    /// drawn.
+    stutter_sites: Vec<StutterSite>,
 }
 
 /// Every allele the population carries at one bundle, with its frequency — the bundle's
@@ -1492,6 +1902,7 @@ fn draw_bundle_alleles(bundle: &Bundle, window: &[u8], draw: &mut Draw) -> Vec<B
             frequency,
             member_runs,
             pure_spans: Vec::new(),
+            stutter_sites: Vec::new(),
         }
     };
     let step = |draw: &mut Draw| {
@@ -1642,8 +2053,121 @@ fn draw_bundle_alleles(bundle: &Bundle, window: &[u8], draw: &mut Draw) -> Vec<B
                 longest_periodic_stretch(&allele.sequence, *start, *end, *period)
             })
             .collect();
+        allele.stutter_sites = if shape.kind == BundleShapeKind::Separated {
+            allele
+                .pure_spans
+                .iter()
+                .zip(&periods)
+                .zip(&allele.repeats)
+                .filter_map(|((span, period), repeats)| {
+                    span.map(|(pure_start, pure_end)| StutterSite {
+                        pure_start,
+                        pure_end,
+                        period: *period,
+                        repeats: *repeats,
+                    })
+                })
+                .collect()
+        } else {
+            stutter_sites_of(&allele.sequence)
+        };
     }
     alleles
+}
+
+/// **Where a molecule stutters in a hard-shaped bundle allele**: one site per run of `sequence` —
+/// the allele's window — as the caller finds a hull's reference runs ([`reference_runs`]), each
+/// stuttering at its own motif length and its whole copies. A pure stretch below its calling
+/// floor does not stutter, which is what the caller assumes and what keeps an interrupted repeat's
+/// short pieces quiet; a piece a length change lifts to the floor does.
+///
+/// In the reference allele the window's flanks hold no run (no unit of one to six bases more than
+/// twice in a row, and a spacer beside the hull that continues no copy), so its sites are the
+/// hull's runs — what the caller finds. In a derived allele a SNP beside the hull or a deletion
+/// across its edge can lengthen a run into the flank; the molecule then slips on the longer
+/// stretch, as a real one would.
+fn stutter_sites_of(sequence: &[u8]) -> Vec<StutterSite> {
+    reference_runs(sequence)
+        .into_iter()
+        .map(|(start, length, period)| StutterSite {
+            pure_start: start,
+            pure_end: start + length,
+            period,
+            repeats: (length / period) as u32,
+        })
+        .collect()
+}
+
+/// **The runs of `bases`** as `(start, length, period)`, in order — this file's own copy of the
+/// rule the caller uses for a bundle's reference runs (`region_typing/reference_runs.rs`,
+/// `find_reference_runs`; `str_bundle_loci.md` §6.1), at the calling floors, so the fixture does
+/// not change when the caller's code does:
+///
+/// 1. for each period from one to six, every maximal stretch that repeats with that period, of at
+///    least one copy and one more base, whose first `period` bases are not a repeat of a shorter
+///    unit;
+/// 2. kept when its whole copies reach [`CALLING_FLOOR`];
+/// 3. chosen longest first (then earlier, then shorter period); a stretch overlapping a chosen
+///    run gives up the shared bases — cut back to whole copies where it lost its end, re-read from
+///    its new first base where it lost its start — and each remaining piece is kept if it still
+///    reaches the floor.
+///
+/// The test `the_run_rule_copy_agrees_with_the_library` fails when the two part.
+fn reference_runs(bases: &[u8]) -> Vec<(usize, usize, usize)> {
+    let mut stretches: Vec<(usize, usize, usize)> = Vec::new();
+    for period in 1..=6_usize {
+        let floor = CALLING_FLOOR[period - 1] as usize;
+        let last_comparable = bases.len().saturating_sub(period);
+        let mut at = 0;
+        while at < last_comparable {
+            if bases[at] != bases[at + period] {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            while at < last_comparable && bases[at] == bases[at + period] {
+                at += 1;
+            }
+            let length = at + period - start;
+            if is_primitive(&bases[start..start + period]) && length / period >= floor {
+                stretches.push((start, length, period));
+            }
+        }
+    }
+    stretches.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)).then(a.2.cmp(&b.2)));
+    let mut chosen: Vec<(usize, usize, usize)> = Vec::new();
+    for (start, length, period) in stretches {
+        let end = start + length;
+        let mut covered: Vec<(usize, usize)> = chosen
+            .iter()
+            .filter(|(other, other_length, _)| *other < end && other + other_length > start)
+            .map(|(other, other_length, _)| (*other, other + other_length))
+            .collect();
+        covered.sort_unstable();
+        let mut pieces = Vec::new();
+        let mut from = start;
+        for (covered_start, covered_end) in covered {
+            if covered_start > from {
+                pieces.push((from, covered_start.min(end)));
+            }
+            from = from.max(covered_end);
+        }
+        if from < end {
+            pieces.push((from, end));
+        }
+        for (piece_start, piece_end) in pieces {
+            let piece_length = if piece_end < end {
+                (piece_end - piece_start) / period * period
+            } else {
+                piece_end - piece_start
+            };
+            if piece_length / period >= CALLING_FLOOR[period - 1] as usize {
+                chosen.push((piece_start, piece_length, period));
+            }
+        }
+    }
+    chosen.sort_unstable();
+    chosen
 }
 
 /// [`add_derived`] for a bundle: add `derived`, which came from `donor`, with a share of the
@@ -1780,8 +2304,16 @@ enum Event {
 /// `bundles=0` it makes exactly the draws it made before bundles existed.
 fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
     let mut bundle_draw = Draw::new(settings.seed ^ BUNDLE_SEED_SALT);
+    // At a share of 0 no draw is spent choosing, so the bundles are the ones drawn before hard
+    // shapes existed.
     let bundle_shapes: Vec<BundleShape> = (0..settings.bundles)
-        .map(|_| draw_bundle_shape(&mut bundle_draw))
+        .map(|_| {
+            if settings.hard_bundle_share > 0.0 && bundle_draw.unit() < settings.hard_bundle_share {
+                draw_hard_bundle_shape(&mut bundle_draw)
+            } else {
+                draw_bundle_shape(&mut bundle_draw)
+            }
+        })
         .collect();
     let LaidReference {
         contigs,
@@ -1917,22 +2449,12 @@ fn build_haplotype(cohort: &Cohort, contig: usize, sample: usize, copy: usize) -
                 bases.extend_from_slice(&reference[cursor..bundle.window_start()]);
                 let offset = bases.len();
                 bases.extend_from_slice(&allele.sequence);
-                // One site per member, each stuttering at its own motif length and count.
-                for ((pure_span, period), repeats) in allele
-                    .pure_spans
-                    .iter()
-                    .zip(bundle.shape.periods())
-                    .zip(&allele.repeats)
-                {
-                    if let Some((start, end)) = pure_span {
-                        sites.push(StutterSite {
-                            pure_start: offset + start,
-                            pure_end: offset + end,
-                            period,
-                            repeats: *repeats,
-                        });
-                    }
-                }
+                // Each site stutters at its own motif length and count.
+                sites.extend(allele.stutter_sites.iter().map(|site| StutterSite {
+                    pure_start: offset + site.pure_start,
+                    pure_end: offset + site.pure_end,
+                    ..*site
+                }));
                 cursor = bundle.window_end();
             }
             Event::Generic(index) => {
@@ -2440,10 +2962,17 @@ fn write_truth_vcf(out: &mut impl std::io::Write, cohort: &Cohort) -> std::io::R
 ///   segment's span, the per-member lists for its period, motif and repeat counts, and `repeats`
 ///   the allele's own count in each member.
 /// - `bundle_genotypes.tsv` — each sample's two alleles, as indices into `bundle_alleles.tsv`.
+/// - `bundle_runs.tsv` — `bundle chrom hull_start hull_end shape runs`: the shape's kind
+///   ([`BundleShapeKind::name`]) and where the reference stutters, each site as
+///   `motif:offset:length` from the hull's first base, joined by `,` (`.` for none) — the
+///   format `ng_str_bundle_runs` writes the caller's reference runs in, so the typing check can
+///   compare the two. A file of its own, so the three above are unchanged by it.
 fn write_bundle_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
     let mut bed = create(&out_dir.join("bundles.bed"))?;
     let mut alleles = create(&out_dir.join("bundle_alleles.tsv"))?;
     let mut genotypes = create(&out_dir.join("bundle_genotypes.tsv"))?;
+    let mut runs = create(&out_dir.join("bundle_runs.tsv"))?;
+    writeln!(runs, "bundle\tchrom\thull_start\thull_end\tshape\truns")?;
     writeln!(
         bed,
         "#chrom\tstart\tend\tname\tperiods\tmotifs\treference_repeats\tmember_starts\tmember_ends"
@@ -2488,10 +3017,40 @@ fn write_bundle_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
         for (sample, pair) in cohort.samples.iter().zip(&cohort.bundle_genotypes[index]) {
             writeln!(genotypes, "{name}\t{sample}\t{}\t{}", pair[0], pair[1])?;
         }
+        let reference = &bundle.alleles[0];
+        let sites: Vec<String> = reference
+            .stutter_sites
+            .iter()
+            .map(|site| {
+                format!(
+                    "{}:{}:{}",
+                    String::from_utf8_lossy(
+                        &reference.sequence[site.pure_start..site.pure_start + site.period]
+                    ),
+                    site.pure_start
+                        .checked_sub(WINDOW_FLANK_BP)
+                        .expect("a reference stutter site lies inside the hull"),
+                    site.pure_end - site.pure_start
+                )
+            })
+            .collect();
+        writeln!(
+            runs,
+            "{name}\t{contig}\t{}\t{}\t{}\t{}",
+            bundle.start,
+            bundle.end(),
+            bundle.shape.kind.name(),
+            if sites.is_empty() {
+                ".".to_string()
+            } else {
+                sites.join(",")
+            }
+        )?;
     }
     bed.flush()?;
     alleles.flush()?;
-    genotypes.flush()
+    genotypes.flush()?;
+    runs.flush()
 }
 
 fn write_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
@@ -2675,14 +3234,19 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
         .iter()
         .filter(|bundle| bundle.shape.members.len() == 3)
         .count();
+    let hard_bundles = cohort
+        .bundles
+        .iter()
+        .filter(|bundle| bundle.shape.kind != BundleShapeKind::Separated)
+        .count();
     let varying_bundles = cohort
         .bundle_genotypes
         .iter()
         .filter(|genotypes| genotypes.iter().flatten().any(|one| *one != 0))
         .count();
     println!(
-        "STR bundles         : {} ({three_member_bundles} with three members), \
-         {varying_bundles} varying in some sample",
+        "STR bundles         : {} ({three_member_bundles} with three members, {hard_bundles} in a \
+         hard shape), {varying_bundles} varying in some sample",
         cohort.bundles.len()
     );
     println!(
@@ -2893,6 +3457,8 @@ mod tests {
             samples,
             segments_per_period: 40,
             bundles,
+            // Hard shapes on, as a default run lays them.
+            hard_bundle_share: DEFAULT_HARD_BUNDLE_SHARE,
             genome_bp: 300_000,
             contigs: 2,
             inbreeding: 0.3,
@@ -3083,11 +3649,12 @@ mod tests {
         assert_eq!(kinds.len(), 5, "{kinds:?}");
     }
 
-    /// **A bundle stutters in every member**: each copy of each bundle carries one stutter site
-    /// per member with a pure run, at that member's motif length and its count in the allele the
-    /// copy carries.
+    /// **A separated bundle stutters in every member, a hard one in its runs**: each copy of a
+    /// separated bundle carries one stutter site per member with a pure run, at that member's motif
+    /// length and its count in the allele the copy carries; a hard-shaped one carries one per run
+    /// of the allele's sequence ([`stutter_sites_of`]).
     #[test]
-    fn a_bundle_has_one_stutter_site_per_member() {
+    fn a_bundle_stutters_in_its_members_or_its_runs() {
         let cohort = small_cohort(3, 60);
         for sample in 0..3 {
             for copy in 0..2 {
@@ -3111,14 +3678,21 @@ mod tests {
                                 let allele = &bundle.alleles
                                     [cohort.bundle_genotypes[index][sample][copy] as usize];
                                 assert_eq!(allele.pure_spans.len(), bundle.shape.members.len());
-                                allele
-                                    .pure_spans
-                                    .iter()
-                                    .zip(bundle.shape.periods())
-                                    .zip(&allele.repeats)
-                                    .filter(|((span, _), _)| span.is_some())
-                                    .map(|((_, period), repeats)| (period, *repeats))
-                                    .collect()
+                                if bundle.shape.kind == BundleShapeKind::Separated {
+                                    allele
+                                        .pure_spans
+                                        .iter()
+                                        .zip(bundle.shape.periods())
+                                        .zip(&allele.repeats)
+                                        .filter(|((span, _), _)| span.is_some())
+                                        .map(|((_, period), repeats)| (period, *repeats))
+                                        .collect()
+                                } else {
+                                    stutter_sites_of(&allele.sequence)
+                                        .iter()
+                                        .map(|site| (site.period, site.repeats))
+                                        .collect()
+                                }
                             }
                             Event::Generic(_) => Vec::new(),
                         };
@@ -3394,6 +3968,256 @@ mod tests {
             differing, 0,
             "{differing} of 3000 sequences scanned differently"
         );
+    }
+
+    /// **A zero hard share lays the bundles laid before hard shapes existed**: the truth VCF and the
+    /// reference hash to a recorded value for these settings (`samples=6 segments_per_period=40
+    /// bundles=40 genome_bp=300000 contigs=2 inbreeding=0.3`, the default seed). The value was
+    /// taken from this build at share 0, after every output file of a full run on these settings
+    /// was compared byte for byte with the build before hard shapes and found equal
+    /// (`str_stutter_benchmark.md` §11.4); the comparison is the evidence, the hash guards it.
+    #[test]
+    fn a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes() {
+        let settings = Settings {
+            samples: 6,
+            segments_per_period: 40,
+            bundles: 40,
+            hard_bundle_share: 0.0,
+            genome_bp: 300_000,
+            contigs: 2,
+            inbreeding: 0.3,
+            ..Settings::default()
+        };
+        let cohort =
+            draw_cohort(&settings, &mut Draw::new(settings.seed)).expect("the settings fit");
+        assert!(
+            cohort
+                .bundles
+                .iter()
+                .all(|bundle| bundle.shape.kind == BundleShapeKind::Separated)
+        );
+        let mut vcf = Vec::new();
+        write_truth_vcf(&mut vcf, &cohort).expect("writing to memory");
+        let hash = cohort
+            .contigs
+            .iter()
+            .fold(fnv(&vcf, 0xcbf2_9ce4_8422_2325), |hash, contig| {
+                fnv(&contig.bases, fnv(contig.name.as_bytes(), hash))
+            });
+        assert_eq!(hash, ZERO_HARD_SHARE_HASH);
+    }
+
+    /// The hash [`a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes`] expects.
+    const ZERO_HARD_SHARE_HASH: u64 = 0xe542_83ee_1512_eb5b;
+
+    /// Every hard shape keeps its rules: not the separated kind; every member at least one copy; a
+    /// hull of at most 100 bases; two abutting members never of one motif; at least one abutting
+    /// junction or interruption, as its kind says; and the scanner's arithmetic — which agrees with
+    /// the library's scanner on these hulls too — sees one bundle over exactly the hull. And the
+    /// kinds all turn up, with members nested or overlapping in a good share of them, as on HG002.
+    #[test]
+    fn hard_shapes_keep_their_rules() {
+        use pop_var_caller::tandem_repeat::{PeriodRange, ScanParams, find_tandem_repeats};
+        let periods = PeriodRange::new(1, 6).expect("1..=6 is a valid range");
+        let mut draw = Draw::new(31);
+        let mut kinds = std::collections::HashMap::new();
+        let mut nested_or_overlapping = 0;
+        let mut without_runs = 0;
+        let shapes = 2_000;
+        for _ in 0..shapes {
+            let shape = draw_hard_bundle_shape(&mut draw);
+            *kinds.entry(shape.kind).or_insert(0) += 1;
+            assert_ne!(shape.kind, BundleShapeKind::Separated);
+            assert!(shape.hull_len() <= LONGEST_BUNDLE_HULL, "{shape:?}");
+            assert_eq!(shape.gaps.len(), shape.members.len() - 1);
+            assert!(shape.members.iter().all(|(_, copies)| *copies >= 1));
+            let abutting = shape.gaps.iter().filter(|gap| gap.is_empty()).count();
+            for (index, gap) in shape.gaps.iter().enumerate() {
+                if gap.is_empty() {
+                    assert!(!is_rotation_of(
+                        &shape.members[index].0,
+                        &shape.members[index + 1].0
+                    ));
+                }
+            }
+            let interrupted = shape
+                .gaps
+                .iter()
+                .enumerate()
+                .filter(|(index, gap)| {
+                    !gap.is_empty() && shape.members[*index].0 == shape.members[index + 1].0
+                })
+                .count();
+            match shape.kind {
+                // Two repeats of one motif a gap apart look interrupted here, so an abutting
+                // shape is only asked to abut.
+                BundleShapeKind::Abutting => assert!(abutting > 0, "{shape:?}"),
+                BundleShapeKind::Interrupted => {
+                    assert!(abutting == 0 && interrupted > 0, "{shape:?}")
+                }
+                BundleShapeKind::AbuttingAndInterrupted => {
+                    assert!(abutting > 0 && interrupted > 0, "{shape:?}")
+                }
+                BundleShapeKind::Separated => unreachable!("asserted above"),
+            }
+            without_runs +=
+                usize::from(reference_runs(&shape.spell(&shape.reference_repeats())).is_empty());
+            assert!(
+                scanner_reports_one_bundle_over_the_hull(&shape),
+                "{shape:?}"
+            );
+
+            let mut probe = Vec::new();
+            append_spacer(&mut probe, shape.first_motif());
+            probe.extend(shape.spell(&shape.reference_repeats()));
+            append_spacer(&mut probe, shape.last_motif());
+            let mut library: Vec<(usize, usize, usize)> =
+                find_tandem_repeats(&probe, periods, &ScanParams::default())
+                    .into_iter()
+                    .map(|one| {
+                        (
+                            one.start as usize,
+                            one.end as usize,
+                            usize::from(one.period),
+                        )
+                    })
+                    .filter(|(start, end, period)| {
+                        (end - start) / period >= CALLING_FLOOR[period - 1] as usize
+                    })
+                    .collect();
+            library.sort_unstable();
+            let found = scanner_repeats(&probe);
+            assert_eq!(found, library, "{shape:?}");
+            nested_or_overlapping +=
+                usize::from(found.windows(2).any(|pair| pair[1].0 < pair[0].1));
+        }
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        assert!(
+            nested_or_overlapping > shapes / 5,
+            "{nested_or_overlapping}"
+        );
+        // NO_RUN_HARD_BUNDLE_SHARE is about 1 in 12: 2,000 draws give about 170.
+        assert!(
+            (shapes / 20..shapes / 8).contains(&without_runs),
+            "{without_runs} of {shapes} hard shapes have no run"
+        );
+    }
+
+    /// **The run rule's copy finds what the caller finds**: on HG002's two examples
+    /// (`str_bundle_loci.md` §5.1), on hard hulls, on every allele window of a cohort's bundles
+    /// (flanks, length changes, substitutions and edge deletions included — what
+    /// [`stutter_sites_of`] is called on) and on bundle-like sequences whose gaps follow no rule,
+    /// [`reference_runs`] equals `find_reference_runs` at the default floors.
+    #[test]
+    fn the_run_rule_copy_agrees_with_the_library() {
+        use pop_var_caller::region_typing::reference_runs::find_reference_runs;
+        use pop_var_caller::region_typing::segment_criteria::MinCopies;
+        let library = |bases: &[u8]| -> Vec<(usize, usize, usize)> {
+            find_reference_runs(bases, &MinCopies::default())
+                .into_iter()
+                .map(|run| (run.offset() as usize, run.length() as usize, run.period()))
+                .collect()
+        };
+        let ct_at_t = [b"CT".repeat(20), b"AT".repeat(8), b"T".repeat(8)].concat();
+        assert_eq!(
+            reference_runs(&ct_at_t),
+            vec![(0, 40, 2), (40, 16, 2), (56, 8, 1)]
+        );
+        assert_eq!(
+            reference_runs(b"AAAAAAAAATAAAAATAAAATAAAAATAAA"),
+            vec![(0, 9, 1)]
+        );
+        let mut draw = Draw::new(37);
+        let mut differing = 0;
+        for _ in 0..1_000 {
+            let shape = draw_hard_bundle_shape(&mut draw);
+            let hull = shape.spell(&shape.reference_repeats());
+            differing += usize::from(reference_runs(&hull) != library(&hull));
+        }
+        for _ in 0..2_000 {
+            let mut bases = Vec::new();
+            for _ in 0..2 + draw.below(3) {
+                let period = 1 + draw.below(6) as usize;
+                let motifs = MOTIFS[period - 1];
+                let motif = motifs[draw.below(motifs.len() as u64) as usize].as_bytes();
+                bases.extend(motif.repeat(2 + draw.below(14) as usize));
+                for _ in 0..draw.below(4) {
+                    bases.push(FOUR_BASES[draw.below(4) as usize]);
+                }
+            }
+            differing += usize::from(reference_runs(&bases) != library(&bases));
+        }
+        let cohort = small_cohort(4, 150);
+        let mut windows = 0;
+        for allele in cohort.bundles.iter().flat_map(|bundle| &bundle.alleles) {
+            windows += 1;
+            differing += usize::from(reference_runs(&allele.sequence) != library(&allele.sequence));
+        }
+        assert!(windows > 300, "{windows} allele windows");
+        assert_eq!(differing, 0, "{differing} sequences found different runs");
+    }
+
+    /// **A hard bundle's truth names its stutter sites**: in every allele of every hard-shaped
+    /// bundle, each site is pure whole copies of its period at or above its calling floor and the
+    /// sites do not overlap; the reference's are exactly the caller's runs of the hull
+    /// (`find_reference_runs`), moved by the window's flank; and some bundles have none.
+    #[test]
+    fn a_hard_bundle_stutters_in_pure_stretches_at_the_floor() {
+        use pop_var_caller::region_typing::reference_runs::find_reference_runs;
+        use pop_var_caller::region_typing::segment_criteria::MinCopies;
+        let cohort = small_cohort(1, 150);
+        let mut hard = 0;
+        let mut sites = 0;
+        let mut without_sites = 0;
+        for bundle in &cohort.bundles {
+            if bundle.shape.kind == BundleShapeKind::Separated {
+                continue;
+            }
+            hard += 1;
+            let reference = &bundle.alleles[0];
+            let hull =
+                &reference.sequence[WINDOW_FLANK_BP..WINDOW_FLANK_BP + bundle.shape.hull_len()];
+            let callers: Vec<(usize, usize, usize)> =
+                find_reference_runs(hull, &MinCopies::default())
+                    .into_iter()
+                    .map(|run| {
+                        let start = WINDOW_FLANK_BP + run.offset() as usize;
+                        (start, start + run.length() as usize, run.period())
+                    })
+                    .collect();
+            let laid: Vec<(usize, usize, usize)> = reference
+                .stutter_sites
+                .iter()
+                .map(|site| (site.pure_start, site.pure_end, site.period))
+                .collect();
+            assert_eq!(laid, callers, "{:?}", bundle.shape);
+            sites += laid.len();
+            without_sites += usize::from(laid.is_empty());
+            for (index, allele) in bundle.alleles.iter().enumerate() {
+                let mut previous_end = 0;
+                for site in &allele.stutter_sites {
+                    assert!(site.pure_start >= previous_end);
+                    previous_end = site.pure_end;
+                    let stretch = &allele.sequence[site.pure_start..site.pure_end];
+                    assert!(
+                        (site.period..stretch.len())
+                            .all(|at| stretch[at] == stretch[at - site.period])
+                    );
+                    assert!(site.repeats >= CALLING_FLOOR[site.period - 1]);
+                    assert_eq!(site.repeats as usize, stretch.len() / site.period);
+                    if index == 0 {
+                        assert!(site.pure_start >= WINDOW_FLANK_BP);
+                        assert!(site.pure_end <= WINDOW_FLANK_BP + bundle.shape.hull_len());
+                    }
+                }
+            }
+        }
+        assert!(hard > 50, "{hard} hard bundles");
+        assert!(
+            sites > hard,
+            "{sites} reference sites in {hard} hard bundles"
+        );
+        assert!(without_sites > 0, "no hard bundle without a run");
     }
 
     /// The scanner copy's scores and the widest gap laid are the library's, so a retuned scanner or

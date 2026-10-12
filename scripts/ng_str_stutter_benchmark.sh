@@ -21,6 +21,8 @@
 #   bams/<sample>.bam          minimap2 -ax sr, sorted and indexed; one read group a sample
 #   typing_check.tsv           the regions the calling typing makes of the reference (checked
 #                              against segments.bed and bundles.bed before anything is mapped)
+#   bundle_runs_check.tsv      the caller's reference runs of every typed STR bundle (checked
+#                              against the simulator's stutter sites, bundle_runs.tsv)
 #   ng_defaults.vcf            call-from-alignments --defaults
 #   ng_fitted.vcf              call-from-psps with that fit
 #   ng_true_stutter.vcf        call-from-psps with the defaults and the simulator's true stutter
@@ -39,8 +41,8 @@
 #   FIT_FROM    a run directory of the same cohort at another depth whose fit is reused (see ng_fit)
 #   REDO        stage names to run again although done, space-separated (e.g. REDO=score)
 #   MAIN_BIN    a build of main: adds main's defaults, fitted and true-stutter runs (ng_main_*)
-#   BIN_DIR     a directory holding pvc, ng_str_stutter_benchmark and
-#               ng_typed_region_dump, used instead of the newest build — so a grid can run on a
+#   BIN_DIR     a directory holding pvc, ng_str_stutter_benchmark, ng_typed_region_dump and
+#               ng_str_bundle_runs, used instead of the newest build — so a grid can run on a
 #               frozen copy while the tree is rebuilt
 set -euo pipefail
 
@@ -69,10 +71,12 @@ if [[ -n "${BIN_DIR:-}" ]]; then
     ng=$BIN_DIR/pvc
     simulator=$BIN_DIR/ng_str_stutter_benchmark
     typing_dump=$BIN_DIR/ng_typed_region_dump
+    bundle_runs=$BIN_DIR/ng_str_bundle_runs
 else
     ng=$(newest pvc)
     simulator=$(newest examples/ng_str_stutter_benchmark)
     typing_dump=$(newest examples/ng_typed_region_dump)
+    bundle_runs=$(newest examples/ng_str_bundle_runs)
 fi
 for tool in minimap2 samtools bcftools "$gatk" "$hipstr"; do
     command -v "$tool" > /dev/null || { echo "$tool not found; run this in the dev container" >&2; exit 1; }
@@ -107,8 +111,9 @@ simulate() {
 
 # **The typed STR segments must be the planted ones**, exactly: a segment the typing misses is
 # scored for ng on the generic path alone, and one it invents has no truth. **And every planted STR
-# bundle must be typed as one bundle with the drawn members** (scripts/ng_str_stutter_check_bundles.py
-# says exactly what matches). Stops the run if not.
+# bundle must be typed as one bundle over the laid hull, a separated one with the drawn members, and
+# the caller's reference runs there must be the simulator's stutter sites**
+# (scripts/ng_str_stutter_check_bundles.py says exactly what matches). Stops the run if not.
 check_typing() {
     NG_REFERENCE_CHECK=skip "$typing_dump" "$reference" "$out/confident.bed" calling \
         > "$out/typing_check.tsv"
@@ -123,6 +128,12 @@ check_typing() {
     fi
     echo "       typing: $(echo "$planted" | wc -l) STR segments, all as planted"
     if [[ -f "$out/bundles.bed" ]]; then
+        if ! NG_REFERENCE_CHECK=skip "$bundle_runs" "$reference" "$out/confident.bed" \
+                > "$out/bundle_runs_check.tsv" 2> "$out/bundle_runs_check.log"; then
+            echo "ng_str_bundle_runs failed; its log, $out/bundle_runs_check.log:" >&2
+            tail -n 20 "$out/bundle_runs_check.log" >&2
+            exit 1
+        fi
         python3 "$root/scripts/ng_str_stutter_check_bundles.py" "$out"
     fi
 }

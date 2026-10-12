@@ -291,7 +291,9 @@ measured under PCR stutter and in a cohort.*
 **An STR bundle is two or more repeats within 15 bases of each other**, so that none of them has the
 15 repeat-free bases either side an STR segment needs; the typing calls the stretch from the first
 repeat's start to the last one's end — the **hull** — one bundle, and each repeat in it a
-**member**. The simulator now lays bundles beside the segments.
+**member**. The simulator now lays bundles beside the segments: in the **separated** shape of §11.1
+(pure members a few bases apart) and, since 2026-10-12, in the **hard shapes** of §11.4 (repeats
+that abut or carry an interruption).
 
 ### 11.1 What is laid
 
@@ -382,6 +384,11 @@ Per-member values are listed in member order, comma-separated; coordinates are z
   frequency sequence`. The window is the hull and 30 bases either side; `repeats` is the allele's
   count in each member; `change` takes the segments' values.
 - `bundle_genotypes.tsv` — `bundle sample first_copy second_copy`, indices into the allele table.
+- `bundle_runs.tsv` *(added 2026-10-12, §11.4)* — `bundle chrom hull_start hull_end shape runs`:
+  the shape (`separated`, `abutting`, `interrupted` or `abutting_interrupted`) and where the
+  reference allele stutters, each site as `motif:offset:length` from the hull's first base, joined
+  by `,` (`.` for none) — the format `ng_str_bundle_runs` writes the caller's reference runs in. A
+  file of its own, so the three above keep their columns.
 - `truth.vcf` — one record per bundle window any sample varies at, spelled as a segment's (trimmed to
   the stretch its alleles differ over), with ID the bundle's name and INFO `BUNDLE`, `MOTIFS`
   (`Number=.`), `CHANGE` and `MEMBER_REPEATS` (`Number=R`, each allele's member counts joined by
@@ -393,7 +400,11 @@ Per-member values are listed in member order, comma-separated; coordinates are z
 - **Typing** (`scripts/ng_str_stutter_check_bundles.py`, run by the driver's typing check): every
   simulated bundle must be typed as exactly one `ssr_bundle` overlapping its hull, with as many
   members, in order, each of the drawn motif length and with a start and an end within a tolerance
-  of the drawn member's — **0 bases by default**. The typed members are the repeat detector's
+  of the drawn member's — **0 bases by default**. *(Changed 2026-10-12 for the hard shapes, §11.4:
+  every bundle's typed hull must start and end where the laid hull does; the members are compared
+  for separated bundles only; and for every bundle the caller's reference runs over the hull —
+  `ng_str_bundle_runs`, which the driver now runs — must be the simulator's stutter sites on the
+  reference, `bundle_runs.tsv`, motif, offset and length.)* The typed members are the repeat detector's
   intervals, which differ from a drawn run only when a gap base continues a motif, and the gap rule
   stops that; on three runs (the default seed, 7 and 2026; 300 segments and 500 bundles on 1.5 Mb)
   all 500 matched with no offset in each, and the typing made no bundle the simulator did not lay.
@@ -410,3 +421,128 @@ Per-member values are listed in member order, comma-separated; coordinates are z
   is summarised by its **number of members** and its **longest member** — the one with the most
   reference bases — with that member's motif length and repeat band (§6). vcfeval gains a third
   stretch, `bundles`, and `outside` now leaves out the bundles' windows as well as the segments'.
+
+### 11.4 Hard shapes (added 2026-10-12)
+
+*Built for [`str_bundle_loci.md`](str_bundle_loci.md) §10 step 5 (owner, 2026-10-11 and
+2026-10-12).*
+
+**What was missing.** The separated shape of §11.1 is the easy case for the caller: every member is
+pure and stands apart, so the hull's reference runs are exactly the members. Most of HG002's bundles
+are not like that. Classified from the typing of HG002's tandem-repeat regions and the reference
+(the typing dump's members, each repeat's span cut back to whole copies, and the reference runs
+`examples/ng_str_bundle_runs.rs` finds), **963 of the 2,410 bundles of at most 100 bases are
+separated** — every member exactly periodic, no two members touching or overlapping, no two
+reference runs abutting — **and 1,447, six in ten, are not**. Of those 1,447 (one bundle can be in
+several rows):
+
+| | HG002 | simulated, hard shapes only (2,937 of 3,000 typed hard) |
+|---|---|---|
+| a member that is not exactly periodic (an interior substitution, a stray base, or a member that runs on into a neighbouring repeat) | 1,223 (85 in 100) | 79 in 100 |
+| a member nested in or overlapping another | 734 (51 in 100) | 35 in 100 |
+| two reference runs that abut | 182 (13 in 100) | 16 in 100 |
+| two members that touch | 142 (10 in 100) | 19 in 100 |
+| hull, median and 90th percentile | 40 and 76 bases | 48 and 80 bases |
+| no reference run at all | 123 (8.5 in 100) | 243 (8.3 in 100) |
+
+*(Simulated column re-measured 2026-10-13, after the no-run share below was added and the junction
+after a homopolymer tail was given the homopolymer's lower abutting chance; before them the same
+3,000 draws gave 79, 37, 17 and 19 in 100, a hull of 46 and 76 bases, and 6 bundles with no run.)*
+
+Two HG002 examples: chr1:28,487,365, `AAAAAAAAATAAAAATAAAATAAAAATAAA`, an `A` member over bases 1–9 and
+an `AAAAAT` member over 5–30, overlapping, whose only run is `A9`; and chr21:14,690,445,
+`(AAAC)4 A8`, a short repeat that the scanner reads on into the homopolymer after it, the two members
+touching. The classification is `tmp/hg002/shapes.py` on branch `str-bundles-hard` (not committed);
+its copy of the run rule agrees with `ng_str_bundle_runs` on all 2,410 bundles.
+
+**The setting** `hard_bundle_share` (default **0.6**, HG002's 1,447 of 2,410) is the share of bundles
+laid in a hard shape; the rest are laid separated as in §11.1. **At 0 every file the simulator wrote
+before is written byte for byte as before**: no draw is spent choosing a shape, so the bundles' own
+stream (§11.1) makes the same draws. Checked on 2026-10-12 against the build before hard shapes on
+three configurations — 6 samples, 40 bundles, 0.3 Mb; 2 samples, no bundles; 3 samples, the default
+500 bundles and genome — comparing every file, reads decompressed; the only new file is
+`bundle_runs.tsv`; re-checked 2026-10-13 after the no-run share, all 55 files equal. (The
+simulator's printed summary, which the driver keeps as `simulate.log`, does change: its bundle line
+now counts the hard shapes.) The unit test
+`a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes` pins the truth VCF and reference of
+the first.
+
+**What a hard shape is.** Two or three repeats are drawn as in §11.1, then hardened
+(`draw_hard_bundle_shape`):
+
+- **Abutting.** Each pair of neighbouring repeats abuts — no base between them — with probability
+  0.4, or 0.04 after a homopolymer — including one the rule below has just made a tail (in HG002, 19 of the 191 pairs of abutting reference runs start
+  with a homopolymer, though homopolymers are half of all members). When the first repeat of an
+  abutting pair is not a homopolymer, then with probability 0.8 the second becomes a homopolymer of
+  the first's most frequent base and the first is drawn short, three copies up to its floor:
+  `(AAAC)4 A8`, `(TTC)4 T9`, the shape of 118 of HG002's 191 abutting pairs. Two abutting repeats of
+  one motif would be one longer repeat, and are redrawn.
+- **Interrupted.** Each repeat, with probability 0.45, gains one copy plus a geometric number of mean
+  one (HG002's impure members are longer than its pure ones: a median of 12 copies for mono- and
+  dinucleotides, against 9 and 6), and is cut into pure pieces of its motif by one, two or three
+  interruptions, in the proportions 852 : 414 : 199 in which HG002's impure members hold one, two,
+  and three or more stretches off their period. Each interruption is a copy with one base
+  substituted (one in two), one stray base inserted between two copies (one in four), or a copy that
+  lost a base (one in four; for a homopolymer, where a lost base is only a copy fewer, a substituted
+  copy). Each piece keeps the motif's phase.
+- **No run** *(added 2026-10-13)*. With probability 123 in 1,447 (HG002's share of hard bundles
+  with no reference run), every repeat is interrupted and the shape is redrawn until no stretch of
+  pure copies in the hull reaches its calling floor: a cluster of impure repeats, which the caller
+  calls with no stutter modelled.
+- **At least one of the two**, a hull of at most 100 bases, and the typing must see **one bundle over
+  exactly the hull**: the simulator's copy of the scanner (§11.1) must report at least two repeats,
+  each within the bundle radius of the reach of those before it, the first starting on the hull's
+  first base and the furthest ending on its last — and must not read the shape as a separated one
+  (every repeat pure, none touching the one before), which an interruption the scanner splits a
+  repeat at can produce. Which repeats the typing reports inside the hull is left to it: they nest,
+  overlap and join pieces, as on HG002. The shape is redrawn until all of this holds.
+
+The probabilities were set by drawing 3,000 hard shapes, typing them with the caller and classifying
+them as HG002's were, a few times over, until the table above came close; they are fitted to HG002 by
+eye, not estimated.
+
+**Each pure piece is a member** in the tables and the truth (§11.2): an interrupted repeat is several
+members of one motif with the interruption as the bases between them, and two abutting members have
+none. So `bundles.bed`, `MEMBER_REPEATS` and the allele tables need no new columns.
+
+**Truth alleles.** As in §11.1, per member: a length change moves one pure piece by whole copies of
+its motif, a second piece too in one allele in four; the derived alleles are a substitution inside a
+piece of at least three copies, a SNP beside the hull, a deletion across its edge. The interruptions
+belong to the reference shape, so every allele carries them.
+
+**Stutter acts on the runs, not on the members.** A polymerase slips on a stretch of pure copies,
+and an interruption breaks the stretch. So in a hard-shaped allele there is **one stutter site per
+run of that allele's own sequence**: every stretch of pure whole copies of one motif of period 1 to 6
+at or above its calling floor, found longest first with overlaps given up — the caller's rule for a
+bundle's reference runs (`str_bundle_loci.md` §6.1), held in the simulator as its own copy
+(`reference_runs`, checked against the library by `the_run_rule_copy_agrees_with_the_library`). Each
+site stutters at the rate for its own motif length and whole copies (§3.1). The sites are found per
+allele, not once from the reference: a length change that lifts a piece to its floor makes it a
+site, and a substitution that splits a run leaves two shorter ones. The separated shape keeps its one
+site per member, as before, so that a zero share stays byte-identical.
+
+*What this leaves out.* A pure stretch below its calling floor does not stutter here, where a real
+one slips a little — under a thirtieth of the plateau rate at the floor (§3.2), and less below it —
+and no slip spans an interruption. Nor does a stretch that gives up bases to a longer overlapping run
+and so falls below its floor (a homopolymer tail whose first bases a longer repeat reads on into).
+All three are what the caller assumes: **the simulator places stutter by the caller's own rule**, so
+this benchmark cannot show the rule placing stutter in the wrong stretch; it tests how well the
+caller calls given stutter where it expects it.
+
+**How the drawn shapes compare with HG002** is the table above. At the default share a run's 500
+bundles come out 203 separated and 297 hard by HG002's classification (59 in 100, against HG002's
+60; 200 and 300 at seed 7). The shapes are close on impure members, abutting runs and bundles with
+no run; fewer nest (35 in 100 against 51), more members touch (19 against 10), and hulls are a
+little longer (a median of 48 bases against 40). *Before 2026-10-13* bundles with no reference run
+were almost never laid (6 of 3,000): the interrupted repeats kept at least one piece long enough to
+be a run. The no-run share now lays them at HG002's rate — 31 of the 500 bundles of a default run.
+
+**The typing check** (§11.3, as changed) on every run of step 5: all 500 bundles typed as one bundle
+over the laid hull, the separated ones with their drawn members, and in every bundle the caller's
+reference runs equal to the simulator's stutter sites on the reference; no bundle the simulator did
+not lay. With the no-run share (2026-10-13), the same at the default seed and seed 7. On the 3,000
+hard shapes of the table, 2,999 pass: in one (`(AAT)6 A8`) the scanner reads the `AAT` repeat on
+through the one-base spacer into the flank, five bases past the laid hull, and the check fails it
+as `other_hull`. The simulator's scanner copy cannot see this, because it scans the hull and its
+spacers but not the flank laid after them; a run that meets such a bundle stops at the typing check
+and needs another seed.
