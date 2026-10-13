@@ -21,7 +21,7 @@ with its standard error over seeds and the paired difference D − B, the two he
 sample (the bench's `--both-fallbacks`), recovery and error honesty with shares grouped by size.
 
 Usage:
-    uv run --no-project --with numpy python scripts/research/str_fit_summarise.py DIR [--compare ...]
+    uv run --no-project --with numpy python scripts/research/str_fit_summarise.py DIR [DIR ...] [--compare ...]
 """
 
 import argparse
@@ -44,9 +44,10 @@ def number(text):
     return None if text in ("NA", "", None) else float(text)
 
 
-def read_rows(directory):
+def read_rows(directories):
     rows = []
-    for path in sorted(Path(directory).glob("*.tsv")):
+    paths = sorted(path for directory in directories for path in Path(directory).glob("*.tsv"))
+    for path in paths:
         if path.name.endswith(".truth.tsv") or path.name.startswith("recovery_by_class"):
             continue
         with open(path) as handle:
@@ -274,8 +275,10 @@ def comparison(rows, methods):
           "numbers. Mean over the seeds ± its standard error. The last columns are the paired "
           "difference, seed by seed, of D against B: above zero means D predicts better.\n")
     head = " | ".join(methods)
-    print(f"| cell | seeds | loci a seed | {head} | D − B_raw | D − B_curves |")
-    print("|---|---|---|" + "---|" * len(methods) + "---|---|")
+    pairs = [("D", "B_raw")] + [(m, "B_curves") for m in methods if not m.startswith("B")]
+    pair_head = " | ".join(f"{m} − {b}" for m, b in pairs)
+    print(f"| cell | seeds | loci a seed | {head} | {pair_head} |")
+    print("|---|---|---|" + "---|" * (len(methods) + len(pairs)))
     for cell in cells:
         columns = []
         seeds_seen = set()
@@ -286,8 +289,8 @@ def comparison(rows, methods):
             loci += [v[1] for v in values.values()]
             columns.append(show(*mean_and_error([v[0] for v in values.values()])[:2]))
         differences = []
-        for base in ("B_raw", "B_curves"):
-            d = scores.get((cell, "D"), {})
+        for method, base in pairs:
+            d = scores.get((cell, method), {})
             b = scores.get((cell, base), {})
             paired = [d[seed][0] - b[seed][0] for seed in d if seed in b]
             differences.append(show(*mean_and_error(paired)[:2]))
@@ -405,18 +408,18 @@ def comparison(rows, methods):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("directory")
+    parser.add_argument("directory", nargs="+", help="one or more directories of rows files")
     parser.add_argument("--compare", default=None,
                         help="comma-separated method variants to set side by side (e.g. "
                              "B_raw,B_curves,D,D_working_F); prints only the side-by-side tables")
     arguments = parser.parse_args()
     rows = read_rows(arguments.directory)
     if not rows:
-        sys.exit(f"no rows files in {arguments.directory}")
+        sys.exit(f"no rows files in {' '.join(arguments.directory)}")
     if arguments.compare:
         comparison(rows, arguments.compare.split(","))
         return
-    recovery(rows, Path(arguments.directory) / "recovery_by_class.txt")
+    recovery(rows, Path(arguments.directory[0]) / "recovery_by_class.txt")
     honesty(rows)
     held_out(rows)
     cost(rows)
