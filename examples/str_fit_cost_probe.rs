@@ -1,5 +1,5 @@
 //! **Where the repeat-tract fits' time goes, a class at a time, on real or drawn evidence** — for
-//! the cost study `doc/devel/ng/research/str_fit/cost_2026-10-13.md`, which asks why the fitting
+//! the cost study `doc/devel/ng/research/str_fit/cost_2026-10-14.md`, which asks why the fitting
 //! bench costs more a sample-locus row than the counting fit's real runs.
 //!
 //! Loads one cohort's classes, either a real one from its censuses (`real`, the arguments of
@@ -74,6 +74,9 @@ struct Cli {
     /// Only the classes of this motif length.
     #[arg(long, global = true)]
     only_period: Option<u8>,
+    /// The counting fit's tolerance: it stops when no number moves by more than this in a round.
+    #[arg(long, global = true, default_value_t = 1e-7)]
+    tolerance: f64,
     /// Write every fitted number and error at full precision here, a line each, so that two
     /// builds' fits can be compared number by number.
     #[arg(long, global = true)]
@@ -133,11 +136,16 @@ fn timed<T>(work: impl FnOnce() -> T) -> (T, f64, f64) {
     (out, cpu_seconds() - cpu, wall.elapsed().as_secs_f64())
 }
 
-/// Reads a row holds, and read-length buckets with at least one read, summed over the class.
-fn read_shape(evidence: &StratumEvidence) -> (u64, u64) {
+/// Reads a row holds and read-length buckets with at least one read, summed over the class; then
+/// how many distinct rows of reads the class holds (two samples whose reads fall in the same
+/// buckets in the same numbers are one), over the whole class and summed tract by tract.
+fn read_shape(evidence: &StratumEvidence) -> (u64, u64, usize, usize) {
     let mut reads = 0_u64;
     let mut buckets = 0_u64;
+    let mut in_class = std::collections::HashSet::new();
+    let mut by_tract = 0;
     for tract in &evidence.tracts {
+        let mut in_tract = std::collections::HashSet::new();
         for sample in &tract.samples {
             let width = sample.by_library.first().map_or(0, |(_, r)| r.len());
             let mut pooled = vec![0_u32; width];
@@ -148,9 +156,12 @@ fn read_shape(evidence: &StratumEvidence) -> (u64, u64) {
             }
             reads += pooled.iter().map(|count| u64::from(*count)).sum::<u64>();
             buckets += pooled.iter().filter(|count| **count > 0).count() as u64;
+            in_tract.insert(pooled.clone());
+            in_class.insert(pooled);
         }
+        by_tract += in_tract.len();
     }
-    (reads, buckets)
+    (reads, buckets, in_class.len(), by_tract)
 }
 
 fn main() {
@@ -182,7 +193,7 @@ fn main() {
 
     if methods.contains(&"B") {
         println!(
-            "source\tspan\tperiod\trepeats\ttracts\trows\treads_per_row\tbuckets_per_row\testep_cpu\testep_wall\tpairs_cpu\tpairs_wall\tfit_cpu\tfit_wall\trounds_in_all\treadings\terrors_cpu\tlevel\tconcentration"
+            "source\tspan\tperiod\trepeats\ttracts\trows\treads_per_row\tbuckets_per_row\testep_cpu\testep_wall\tpairs_cpu\tpairs_wall\tfit_cpu\tfit_wall\trounds_in_all\treadings\terrors_cpu\tlevel\tconcentration\tdistinct_rows_in_class\tdistinct_rows_by_tract"
         );
         let mut totals = (0_usize, 0.0, 0.0, 0_usize, 0_usize);
         for evidence in strata.iter().filter(|e| wanted(e)) {
@@ -190,7 +201,7 @@ fn main() {
                 continue;
             }
             let rows = evidence.rows_with_reads();
-            let (reads, buckets) = read_shape(evidence);
+            let (reads, buckets, in_class, by_tract) = read_shape(evidence);
             let (_, estep_cpu, estep_wall) =
                 timed(|| expected_counts(evidence, start, &flat, 1.0, &excess, &config));
             let (_, pairs_cpu, pairs_wall) =
@@ -200,7 +211,13 @@ fn main() {
             } else {
                 let (fit, cpu, wall) = timed(|| {
                     fit_class_by_counting_with_pairs(
-                        evidence, start, &excess, &config, 2000, 1e-7, 10,
+                        evidence,
+                        start,
+                        &excess,
+                        &config,
+                        2000,
+                        cli.tolerance,
+                        10,
                     )
                 });
                 (Some(fit), cpu, wall)
@@ -252,7 +269,7 @@ fn main() {
                 totals.4 += fit.spread_readings * rows;
             }
             println!(
-                "{label}\t{}\t{}\t{}\t{}\t{rows}\t{:.3}\t{:.3}\t{estep_cpu:.3}\t{estep_wall:.3}\t{pairs_cpu:.3}\t{pairs_wall:.3}\t{fit_cpu:.3}\t{fit_wall:.3}\t{}\t{}\t{errors_cpu:.3}\t{}\t{}",
+                "{label}\t{}\t{}\t{}\t{}\t{rows}\t{:.3}\t{:.3}\t{estep_cpu:.3}\t{estep_wall:.3}\t{pairs_cpu:.3}\t{pairs_wall:.3}\t{fit_cpu:.3}\t{fit_wall:.3}\t{}\t{}\t{errors_cpu:.3}\t{}\t{}\t{in_class}\t{by_tract}",
                 config.allele_span,
                 evidence.stratum.period,
                 evidence.stratum.reference_repeats,
@@ -278,7 +295,7 @@ fn main() {
         let fit_config = PenalisedFitConfig {
             start,
             max_rounds: 2000,
-            tolerance: 1e-7,
+            tolerance: cli.tolerance,
             pair_alternations: 10,
             standard_errors: true,
             allele_prior_tracts: if *method == "D_tract_prior" { 1.0 } else { 0.0 },
