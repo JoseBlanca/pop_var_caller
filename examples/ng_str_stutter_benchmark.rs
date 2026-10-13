@@ -1213,7 +1213,14 @@ fn is_rotation_of(first: &[u8], second: &[u8]) -> bool {
 /// laid is the bundle typed.
 fn scanner_reports_one_bundle_over_the_hull(shape: &BundleShape) -> bool {
     let (probe, offset, hull_end) = scanner_probe(shape);
-    let repeats = scanner_repeats(&probe);
+    scanner_types_one_bundle_over(&probe, offset, hull_end)
+}
+
+/// Whether the repeats the typing's scanner finds in `probe` make one bundle over exactly
+/// `offset..hull_end`, by the rule [`scanner_reports_one_bundle_over_the_hull`] states. A repeat
+/// that runs on past either end of the hull, or one in the bases around it, fails it.
+fn scanner_types_one_bundle_over(probe: &[u8], offset: usize, hull_end: usize) -> bool {
+    let repeats = scanner_repeats(probe);
     let Some(((first_start, first_end, _), rest)) = repeats.split_first() else {
         return false;
     };
@@ -1299,19 +1306,24 @@ fn draw_gap(
 /// Whether the repeats the typing's scanner finds in this bundle, with a spacer either side as
 /// it will be laid, are exactly its members, each over its drawn span.
 fn scanner_reports_exactly_the_members(shape: &BundleShape) -> bool {
-    let mut probe = Vec::new();
-    append_spacer(&mut probe, shape.first_motif());
-    let offset = probe.len();
-    probe.extend(shape.spell(&shape.reference_repeats()));
-    append_spacer(&mut probe, shape.last_motif());
+    let (probe, offset, _) = scanner_probe(shape);
+    scanner_finds_exactly_the_members(shape, &probe, offset)
+}
+
+/// Whether the repeats the typing's scanner finds in `probe`, which holds the shape's hull from
+/// `offset`, are exactly its members, each over its drawn span.
+fn scanner_finds_exactly_the_members(shape: &BundleShape, probe: &[u8], offset: usize) -> bool {
     let expected: Vec<(usize, usize, usize)> = shape
         .member_runs(&shape.reference_repeats())
         .into_iter()
         .zip(shape.periods())
         .map(|((start, end), period)| (offset + start, offset + end, period))
         .collect();
-    scanner_repeats(&probe) == expected
+    scanner_repeats(probe) == expected
 }
+
+/// How many times [`build_reference`] lays a bundle's flanks before giving up.
+const BUNDLE_FLANK_ATTEMPTS: usize = 1_000;
 
 /// **The repeats the region typing would see in `bases`**, as `(start, end, period)`,
 /// zero-based half-open, in start order — this file's own copy of the typing's arithmetic, so
@@ -1500,13 +1512,7 @@ fn build_reference(
                     });
                 }
                 PlannedFeature::Bundle(shape) => {
-                    let (first_motif, last_motif) = (shape.first_motif(), shape.last_motif());
-                    append_aperiodic(&mut bases, FLANK_BP - first_motif.len(), draw);
-                    append_spacer(&mut bases, first_motif);
-                    let start = bases.len();
-                    bases.extend(shape.spell(&shape.reference_repeats()));
-                    append_spacer(&mut bases, last_motif);
-                    append_aperiodic(&mut bases, FLANK_BP - last_motif.len(), draw);
+                    let start = lay_bundle(&mut bases, shape, draw);
                     bundles.push(Bundle {
                         contig: contig_index,
                         shape: shape.clone(),
@@ -1528,6 +1534,50 @@ fn build_reference(
         segments,
         bundles,
     })
+}
+
+/// **Lay one bundle with its flanks** at the end of `bases`, and return where its hull starts.
+///
+/// The shape was accepted on its hull and a spacer either side ([`scanner_probe`]), but the
+/// typing scans the flanks too, and a repeat can read on through a one-base spacer into them:
+/// `(AAT)6 A8` followed by the spacer `C` and a flank starting `AACA…` was typed five bases
+/// longer than laid. So once the flanks are drawn the scanner copy is run again over them, and the
+/// flanks are redrawn until the typing sees the bundle as accepted — the drawn members for a
+/// separated shape, one bundle over exactly the hull for a hard one. A shape accepted at the first
+/// try costs no extra draw. Separated shapes nearly always are (all but 2 of 20,000,
+/// `separated_bundles_rarely_need_new_flanks`), so a zero hard share lays what the build before
+/// hard shapes laid wherever that was typed as laid; where it was not, that build's run stopped at
+/// the typing check.
+///
+/// # Panics
+///
+/// If no flanks pass in [`BUNDLE_FLANK_ATTEMPTS`] draws.
+fn lay_bundle(bases: &mut Vec<u8>, shape: &BundleShape, draw: &mut Draw) -> usize {
+    let (first_motif, last_motif) = (shape.first_motif(), shape.last_motif());
+    let mark = bases.len();
+    for _ in 0..BUNDLE_FLANK_ATTEMPTS {
+        bases.truncate(mark);
+        append_aperiodic(bases, FLANK_BP - first_motif.len(), draw);
+        append_spacer(bases, first_motif);
+        let start = bases.len();
+        bases.extend(shape.spell(&shape.reference_repeats()));
+        let hull_end = bases.len();
+        append_spacer(bases, last_motif);
+        append_aperiodic(bases, FLANK_BP - last_motif.len(), draw);
+        let probe = &bases[mark..];
+        let typed_as_laid = if shape.kind == BundleShapeKind::Separated {
+            scanner_finds_exactly_the_members(shape, probe, start - mark)
+        } else {
+            scanner_types_one_bundle_over(probe, start - mark, hull_end - mark)
+        };
+        if typed_as_laid {
+            return start;
+        }
+    }
+    panic!(
+        "no flanks in {BUNDLE_FLANK_ATTEMPTS} draws let the typing see the bundle as laid: \
+         {shape:?}"
+    );
 }
 
 /// **`period` bases that cannot be read as another copy of the motif** — the segment's
@@ -4218,6 +4268,106 @@ mod tests {
             "{sites} reference sites in {hard} hard bundles"
         );
         assert!(without_sites > 0, "no hard bundle without a run");
+    }
+
+    /// **A repeat that reads on into the flank is caught when the bundle is laid**: `(AAT)6 A8`
+    /// passes the hull-and-spacers check, but with the flank one hard-only run laid after it
+    /// (`C` spacer, then `AACAG…`) the scanner reads the `AAT` repeat five bases past the hull —
+    /// the typing check's one failure in 3,000 shapes before [`lay_bundle`] re-scanned the flanks.
+    /// Laid now, the same shape gets flanks the typing sees it through exactly; and every bundle of
+    /// a hard-only cohort is typed over exactly its hull with the flanks around it.
+    #[test]
+    fn a_bundle_is_never_typed_past_its_flanks() {
+        let shape = BundleShape {
+            members: vec![(b"AAT".to_vec(), 6), (b"A".to_vec(), 8)],
+            gaps: vec![Vec::new()],
+            kind: BundleShapeKind::Abutting,
+        };
+        assert!(scanner_reports_one_bundle_over_the_hull(&shape));
+        let left = b"TCATGAGGTAGCGGTTAGCCATTAACTCCA";
+        let right = b"CAACAGAGGTGCGTCAGGCCAAGCATTGCAACGTCCGCAT";
+        let hull = shape.spell(&shape.reference_repeats());
+        assert_eq!(hull, b"AATAATAATAATAATAATAAAAAAAA");
+        let as_laid_then = [&left[..], &hull, &right[..]].concat();
+        assert!(!scanner_types_one_bundle_over(
+            &as_laid_then,
+            left.len(),
+            left.len() + hull.len()
+        ));
+
+        for seed in 0..50 {
+            let mut bases = Vec::new();
+            append_aperiodic(&mut bases, 200, &mut Draw::new(seed));
+            let start = lay_bundle(&mut bases, &shape, &mut Draw::new(seed + 1_000));
+            assert_eq!(&bases[start..start + hull.len()], &hull[..]);
+            assert!(scanner_types_one_bundle_over(
+                &bases,
+                start,
+                start + hull.len()
+            ));
+        }
+
+        let settings = Settings {
+            samples: 1,
+            segments_per_period: 20,
+            bundles: 400,
+            hard_bundle_share: 1.0,
+            genome_bp: 600_000,
+            contigs: 2,
+            ..Settings::default()
+        };
+        let cohort =
+            draw_cohort(&settings, &mut Draw::new(settings.seed)).expect("the settings fit");
+        for bundle in &cohort.bundles {
+            let bases = &cohort.contigs[bundle.contig].bases;
+            let from = bundle.start - FLANK_BP;
+            let to = bundle.end() + FLANK_BP;
+            assert!(
+                scanner_types_one_bundle_over(
+                    &bases[from..to],
+                    FLANK_BP,
+                    FLANK_BP + bundle.shape.hull_len()
+                ),
+                "{:?}",
+                bundle.shape
+            );
+        }
+    }
+
+    /// **A separated bundle almost always passes with the first flanks drawn**, and [`lay_bundle`]
+    /// spends extra draws only on the ones that do not. Measured: of 20,000 separated shapes, each
+    /// given one draw of flanks as the build before hard shapes laid them, 2 were typed otherwise —
+    /// `T8 A (TC)6` after a flank ending `…GATATAT`, the `TC` repeat read back into the flank; and
+    /// `(TG)7 GT G8` before a flank starting `AGGAG…`, read on as a `GGA`-like repeat. Each would
+    /// have stopped the run at the typing check. So a zero hard share lays byte for byte what it
+    /// laid before wherever that was typed as laid, and redraws the flanks where it was not.
+    #[test]
+    fn separated_bundles_rarely_need_new_flanks() {
+        let mut draw = Draw::new(41);
+        let mut failing = 0;
+        for _ in 0..20_000 {
+            let shape = draw_bundle_shape(&mut draw);
+            let mut bases = Vec::new();
+            append_aperiodic(&mut bases, 50, &mut draw);
+            let mark = bases.len();
+            append_aperiodic(&mut bases, FLANK_BP - shape.first_motif().len(), &mut draw);
+            append_spacer(&mut bases, shape.first_motif());
+            let start = bases.len();
+            bases.extend(shape.spell(&shape.reference_repeats()));
+            append_spacer(&mut bases, shape.last_motif());
+            append_aperiodic(&mut bases, FLANK_BP - shape.last_motif().len(), &mut draw);
+            if !scanner_finds_exactly_the_members(&shape, &bases[mark..], start - mark) {
+                failing += 1;
+                bases.truncate(mark);
+                let start = lay_bundle(&mut bases, &shape, &mut draw);
+                assert!(scanner_finds_exactly_the_members(
+                    &shape,
+                    &bases[mark..],
+                    start - mark
+                ));
+            }
+        }
+        assert_eq!(failing, 2);
     }
 
     /// The scanner copy's scores and the widest gap laid are the library's, so a retuned scanner or

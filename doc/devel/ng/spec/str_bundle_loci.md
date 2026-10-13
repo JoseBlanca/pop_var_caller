@@ -1029,20 +1029,96 @@ step.
 
 5. **The simulator's harder bundles** (§9): abutting, overlapping and impure repeats, measured as in
    step 4.
-   *Done 2026-10-12* (`str_stutter_benchmark.md` §11.4, branch `str-bundles-hard`). At the default
-   `hard_bundle_share` of 0.6 each run lays 183 separated bundles and 317 in a hard shape (115
-   abutting, 136 interrupted, 66 both); 310 of the 500 are hard by the classification applied to
-   HG002, against HG002's 1,447 of 2,410. Every run's typing check passed: all 500 bundles typed as
-   one bundle over the laid hull, and the caller's reference runs equal to the simulator's stutter
-   sites in every one. Four ways to call them, each on its own psps, all with the simulator's true
-   stutter and no fit: **the new bundle caller** (main at b2714614), **our STR caller** (each bundle
-   typed as one STR segment, the experiment build of the report `str_bundles_2026-10-12.md`),
-   **the generic path** (its other experiment build) and **uncalled** (main with
-   `--max-str-bundle-len 0`, every bundle a satellite). Bundle cells with a variant right, then
-   false calls; separated bundles: 3,589 variant and 5,561 reference cells at 50 samples, 73 and 110
-   at one; hard bundles: 6,447 and 9,403 at 50, 127 and 190 at one. *This table was measured on
-   2026-10-12, before the simulator laid bundles with no reference run; the one-sample rows were
-   measured again after, below.*
+   *Done 2026-10-12, measured again 2026-10-13* (`str_stutter_benchmark.md` §11.4, branch
+   `str-bundles-hard`).
+
+   **Current table, 2026-10-13.** The simulator as it now stands: hard shapes at the default
+   `hard_bundle_share` of 0.6, one hard bundle in twelve with no reference run, the junction after
+   a homopolymer tail drawn at the homopolymer's lower abutting chance, and every bundle's flanks
+   re-scanned so the typing sees it as laid (§11.4). Each run lays 195 separated bundles and 305 in
+   a hard shape (94 abutting, 158 interrupted, 53 both), 31 of them with no reference run; 297 of
+   the 500 are hard by the classification applied to HG002, against HG002's 1,447 of 2,410. Every
+   run's typing check passed: all 500 bundles typed as one bundle over the laid hull, and the
+   caller's reference runs equal to the simulator's stutter sites in every one.
+
+   Four ways to call the bundles, each on its own psps, all with the simulator's true stutter and
+   no fit:
+   - **the new bundle caller** (main at b2714614);
+   - **our STR caller** (each bundle typed as one STR segment, the experiment build of the report
+     `str_bundles_2026-10-12.md`);
+   - **the generic path** (that report's other experiment build);
+   - **uncalled** (main with `--max-str-bundle-len 0`, every bundle a satellite).
+
+   Each cell gives the bundle cells with a variant called right, then the false calls. Separated
+   bundles have 3,768 variant and 5,982 reference cells at 50 samples, and 79 and 116 at one. Hard
+   bundles have 6,215 and 9,035 at 50, and 124 and 181 at one; of their variant cells, 713 at 50
+   samples and 16 at one are in bundles with no reference run. Scores are in
+   `tmp/bench/runs_m5/`, summarised by `tmp/bench/summary_m5.py`.
+
+   | right; false calls | new bundle caller | our STR caller | generic path | uncalled |
+   |---|---|---|---|---|
+   | 50 samples, PCR, 30×: separated | 3,760; 1 | 3,628; 85 | 3,598; 399 | 111; 0 |
+   | same: hard | 6,182; 0 | 6,138; 173 | 6,012; 460 | 172; 0 |
+   | 50 samples, PCR, 5×: separated | 2,857; 35 | 2,702; 97 | 2,773; 335 | 102; 6 |
+   | same: hard | 4,556; 48 | 4,325; 173 | 4,606; 374 | 157; 10 |
+   | 50 samples, PCR-free, 30×: separated | 3,761; 0 | 3,656; 2 | 3,717; 36 | 111; 0 |
+   | same: hard | 6,186; 0 | 6,169; 16 | 6,088; 34 | 172; 0 |
+   | 50 samples, PCR-free, 5×: separated | 2,929; 21 | 2,808; 48 | 2,930; 109 | 101; 2 |
+   | same: hard | 4,590; 40 | 4,417; 70 | 4,641; 105 | 149; 7 |
+   | 1 sample, PCR, 30×: separated | 79; 1 | 59; 6 | 76; 10 | 1; 0 |
+   | same: hard | 119; 1 | 81; 8 | 117; 12 | 3; 0 |
+   | 1 sample, PCR, 5×: separated | 29; 2 | 24; 4 | 40; 3 | 0; 0 |
+   | same: hard | 46; 2 | 35; 6 | 64; 7 | 3; 0 |
+   | 1 sample, PCR-free, 30×: separated | 79; 0 | 61; 0 | 78; 0 | 1; 0 |
+   | same: hard | 123; 0 | 86; 0 | 119; 0 | 3; 0 |
+   | 1 sample, PCR-free, 5×: separated | 27; 0 | 20; 0 | 34; 0 | 0; 0 |
+   | same: hard | 35; 1 | 28; 1 | 55; 1 | 1; 0 |
+
+   **At 30× the new caller leads in every run and makes almost no false calls.** At 50 samples,
+   PCR, 30× it gets 6,182 of 6,215 hard variant cells right with no false call, and 3,760 of 3,768
+   separated ones with one. On the same cells the generic path makes 460 and 399 false calls, and
+   our STR caller 173 and 85.
+
+   **At 50 samples and 5× it trails the generic path on hard bundles, and only because of the
+   bundles with no reference run.** It gets 4,556 hard cells right against 4,606 at PCR, and 4,590
+   against 4,641 PCR-free. Split by whether the reference has a run:
+   - **no reference run, 713 variant cells**: 430 right against the generic path's 543 at PCR, and
+     423 against 509 PCR-free;
+   - **with a run, 5,502 cells**: it leads, 4,126 against 4,063 at PCR and 4,167 against 4,132
+     PCR-free, with 41 and 38 false calls against 363 and 103.
+
+   At 30× the no-run cells are level: 693 against 690 at PCR, 693 against 692 PCR-free. On
+   separated bundles at 5× it leads at PCR (2,857 against 2,773) and ties PCR-free (2,929 against
+   2,930), with a third or less of the generic path's false calls.
+
+   **At one sample and 5× it trails the generic path on both shapes**: 46 against 64 and 35
+   against 55 of 124 hard cells, and 29 against 40 and 27 against 34 of 79 separated. The lag is in
+   the long hulls. In hard hulls over 50 bases it gets 14 of 64 right, against 27 (PCR) and 29
+   (PCR-free) for the generic path. A longer hull is crossed whole by fewer reads, and only reads
+   that cross it nominate a candidate (§7.6). The no-run bundles are again its weakest case: 2 and
+   3 of their 16 variant cells right, against 9 and 8.
+
+   **Decided (owner, 2026-10-13): bundles with no reference run go to the generic path.** With no
+   run, the bundle caller has no stutter to model and nothing to gain over the generic path, and at
+   5× it loses to it. The change is being built on branch `bundles-norun-generic`.
+
+   **STR segments are unchanged**: the new caller and the uncalled build agree on every segment
+   cell's outcome and quality in all eight runs (0 of 150,000 cells differ at 50 samples, 0 of
+   3,000 at one).
+
+   *Doubtful or left out.* Fewer simulated hard bundles nest (35 in 100 against HG002's 51).
+   Because the simulator places stutter by the caller's own run rule, this benchmark cannot show
+   that rule putting stutter in the wrong stretch. GATK was not run.
+
+   *Superseded history.* The two tables below were measured before the current simulator and are
+   kept as the record. The first was taken on 2026-10-12, before bundles with no reference run were
+   laid and before the flank re-scan. The second re-measured one sample on 2026-10-13 with no-run
+   bundles but before the flank re-scan. The default seed needed no new flanks, so its numbers
+   equal the current table's 1-sample rows.
+
+   *2026-10-12* (183 separated and 317 hard bundles; separated bundles: 3,589 variant and 5,561
+   reference cells at 50 samples, 73 and 110 at one; hard: 6,447 and 9,403 at 50, 127 and 190 at
+   one):
 
    | right; false calls | new bundle caller | our STR caller | generic path | uncalled |
    |---|---|---|---|---|
@@ -1059,23 +1135,13 @@ step.
    | 1 sample, PCR-free, 30×: separated / hard | 73 / 127; 0 | 51 / 81; 0 | 72 / 124; 0 | 1 / 2; 0 |
    | 1 sample, PCR-free, 5×: separated / hard | 37 / 54; 0 | 24 / 31; 0 | 38 / 67; 0 | 1 / 2; 0 |
 
-   **Hard shapes cost the new caller nothing at 30× or in a cohort**: at 50 samples, PCR, 30× it
-   gets 6,435 of 6,447 hard variant cells right with no false call, as it gets 3,578 of 3,589
-   separated ones; the generic path makes 279 false calls on hard bundles and our STR caller 118. In
-   the 50-sample 5× runs it is ahead of the generic path in every hull-length band. **At one sample
-   and 5× it trails the generic path, and by more on hard shapes** — 47 against 59 and 54 against
-   67 of 127 hard cells, 23 against 31 and 37 against 38 of 73 separated. The lag is mostly cells
-   with no call, in the longer hulls: hard hulls carrying a variant have a median of 46 bases
-   against 32 for separated ones, a longer hull is crossed whole by fewer reads, and only reads
-   that cross it nominate a candidate (§7.6). It is the low-depth limit of step 4 meeting longer
-   hulls, not a failure particular to abutting or interrupted repeats; in hard hulls of 30 bases or
-   less the gap is small — 13 against 13 cells right at PCR, 15 against 18 at PCR-free, of 29 —
-   against 18 against 25 and 24 against 30 of 52 in hulls over 50 bases.
+   That draw showed the bundle caller ahead of the generic path in every hull-length band at 50
+   samples and 5×. Its segment cells differed from the uncalled build's in 4 of 150,000 at PCR, 5×,
+   all at one segment (chr3:420,408) whose record the uncalled build drops under the
+   hidden-duplication filter, and in 1 PCR-free.
 
-   *Measured again 2026-10-13, one sample, with the no-run share* (`str_stutter_benchmark.md`
-   §11.4: 31 of the 500 bundles now have no reference run, and the junction after a homopolymer tail
-   abuts less often, so every hard bundle is redrawn). Separated bundles: 79 variant and 116
-   reference cells; hard: 124 and 181, of which 16 variant cells are in bundles with no run.
+   *2026-10-13, one sample, before the flank re-scan* (separated bundles 79 variant and 116
+   reference cells; hard 124 and 181):
 
    | right; false calls | new bundle caller | our STR caller | generic path | uncalled |
    |---|---|---|---|---|
@@ -1083,27 +1149,6 @@ step.
    | 1 sample, PCR, 5×: separated / hard | 29 / 46; 4 | 24 / 35; 10 | 40 / 64; 10 | 0 / 3; 0 |
    | 1 sample, PCR-free, 30×: separated / hard | 79 / 123; 0 | 61 / 86; 0 | 78 / 119; 0 | 1 / 3; 0 |
    | 1 sample, PCR-free, 5×: separated / hard | 27 / 35; 1 | 20 / 28; 1 | 34 / 55; 1 | 0 / 1; 0 |
-
-   At 30× the new caller still leads, and makes the fewest false calls by far (2 at PCR against 22
-   for the generic path). At 5× it trails the generic path by more than before — 46 against 64 and
-   35 against 55 of 124 hard cells — and the lag is again in long hulls: in hard hulls over 50 bases
-   it gets 14 of 64 right against the generic path's 27 (PCR) and 29 (PCR-free), and in hulls of 30
-   bases or less 12 against 14 and 6 against 6 of 20. The hard hulls carrying a variant are longer
-   in this draw (a median of 53 bases against 46). **Bundles with no run are its weakest case at
-   5×**: 2 and 3 of their 16 variant cells right, against 9 and 8 for the generic path; at 30× it
-   gets 14 and 15, the generic path 15 and 15. Sixteen cells is too few to say more than that the
-   gap is there. The 50-sample rows were not re-run.
-
-   **STR segments are unchanged**: the new caller and the uncalled build agree on every segment
-   cell's outcome and quality in six runs, and differ on 4 of 150,000 cells at 50 samples, PCR, 5×
-   and 1 at PCR-free, 5×. The four are one segment (chr3:420,408) whose record the uncalled build
-   drops under the hidden-duplication filter, its `PARALOG_LR` moved because bundle hulls count in
-   the coverage windows only when bundles are called (step 3).
-
-   *Doubtful or left out.* The 50-sample rows predate the no-run share, so no cohort run has
-   bundles with no reference run yet. Fewer simulated hard bundles nest (35 in 100 against 51).
-   Because the simulator places stutter by the caller's own run rule, this benchmark cannot show
-   that rule putting stutter in the wrong stretch. GATK was not run.
 
 ## 11. Decided (owner, 2026-10-11)
 

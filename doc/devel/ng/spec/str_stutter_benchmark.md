@@ -461,7 +461,10 @@ before is written byte for byte as before**: no draw is spent choosing a shape, 
 stream (§11.1) makes the same draws. Checked on 2026-10-12 against the build before hard shapes on
 three configurations — 6 samples, 40 bundles, 0.3 Mb; 2 samples, no bundles; 3 samples, the default
 500 bundles and genome — comparing every file, reads decompressed; the only new file is
-`bundle_runs.tsv`; re-checked 2026-10-13 after the no-run share, all 55 files equal. (The
+`bundle_runs.tsv`; re-checked 2026-10-13 after the no-run share and again after the flank re-scan,
+all 55 files equal, by `cmp` and by a checksum over each configuration's files. Since the flank
+re-scan the identity holds for every configuration the build before hard shapes laid typed as laid;
+one it did not (about 1 separated bundle in 10,000) now gets new flanks instead of a stopped run. (The
 simulator's printed summary, which the driver keeps as `simulate.log`, does change: its bundle line
 now counts the hard shapes.) The unit test
 `a_zero_hard_share_draws_the_bundles_drawn_before_hard_shapes` pins the truth VCF and reference of
@@ -541,8 +544,13 @@ be a run. The no-run share now lays them at HG002's rate — 31 of the 500 bundl
 over the laid hull, the separated ones with their drawn members, and in every bundle the caller's
 reference runs equal to the simulator's stutter sites on the reference; no bundle the simulator did
 not lay. With the no-run share (2026-10-13), the same at the default seed and seed 7. On the 3,000
-hard shapes of the table, 2,999 pass: in one (`(AAT)6 A8`) the scanner reads the `AAT` repeat on
-through the one-base spacer into the flank, five bases past the laid hull, and the check fails it
-as `other_hull`. The simulator's scanner copy cannot see this, because it scans the hull and its
-spacers but not the flank laid after them; a run that meets such a bundle stops at the typing check
-and needs another seed.
+hard shapes of the table, 2,999 passed at first: in one (`(AAT)6 A8`) the scanner read the `AAT`
+repeat on through the one-base spacer into the flank, five bases past the laid hull. The
+simulator's scanner copy had accepted the shape on its hull and spacers alone, never seeing the
+flanks. **Fixed 2026-10-13**: once a bundle's flanks are drawn, `lay_bundle` runs the scanner copy
+again over flank, hull and flank, and redraws the flanks until the typing sees the bundle as
+accepted — the drawn members for a separated shape, one bundle over exactly the hull for a hard
+one. The same flaw reached separated shapes, more rarely: 2 of 20,000, each a repeat read on into a
+flank (`separated_bundles_rarely_need_new_flanks`); before the fix such a run stopped at the typing
+check. After it, every bundle passed on two hard-only runs of 3,000 shapes (the default seed and
+seed 11) and on the default seed and seed 7 at the default share.

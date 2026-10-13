@@ -17,10 +17,10 @@
 - Nits: 7 (grouped)
 
 ### Outcome totals
-- Applied: 16 (M1–M4, Mi1, Mi2, Mi4–Mi11, Mi21, Mi22)
+- Applied: 17 (M1–M5, Mi1, Mi2, Mi4–Mi11, Mi21, Mi22; M5 in a second pass, on top of 90659177)
 - Applied with adaptation: 2 (Mi3, Mi18)
 - Already fixed: 0
-- Deferred: 8 (M5, Mi12–Mi17, Mi20)
+- Deferred: 7 (Mi12–Mi17, Mi20)
 - Disputed: 1 (Mi19)
 - Failed validation: 0
 - Blocked by context mismatch: 0
@@ -35,7 +35,7 @@
 - Performance check → not applicable: no `benches/` path touched.
 
 ### Unresolved high-priority findings
-- **M5**: the scanner copy cannot see the flank laid after the spacer. 1 of 3,000 hard-only shapes is typed with a longer hull, and the typing check stops such a run. Deferred because the fix changes `build_reference`.
+None.
 
 ## 2. Findings table
 
@@ -44,8 +44,8 @@
 | M1 | Major | Run-rule test misses allele windows | Apply | Applied | No | `examples/ng_str_stutter_benchmark.rs` | Pass | No |
 | M2 | Major | Hard-site test checks properties, not the rule | Apply | Applied | No | same | Pass | No |
 | M3 | Major | `ng_str_bundle_runs` failure is silent | Apply | Applied | No | `scripts/ng_str_stutter_benchmark.sh` | Pass (success path in 4 runs) | No |
-| M4 | Major | Bundles with no reference run almost never laid | Apply | Applied | No | example, both specs | Pass | 50-sample re-run |
-| M5 | Major | Scanner copy blind to the flank | Defer | Deferred | No | None (documented in §11.4) | N/A | Yes |
+| M4 | Major | Bundles with no reference run almost never laid | Apply | Applied | No | example, both specs | Pass | No |
+| M5 | Major | Scanner copy blind to the flank | Defer, then Apply (coordinator) | Applied | No | example, `str_stutter_benchmark.md` | Pass | No |
 | Mi1 | Minor | Junction after a tail abuts at 0.4 | Apply | Applied | No | example, spec | Pass | No |
 | Mi2 | Minor | Zero-share test doc comment | Apply | Applied | No | example | Pass | No |
 | Mi3 | Minor | Kinds test cannot tell both-kinds shapes | Apply | Applied with adaptation | No | example | Pass | No |
@@ -101,11 +101,15 @@ None. Open question 1 of the review (should stutter ever be placed by anything b
   - **Default-share runs**: 297 of 500 hard by HG002's classification at the default seed and 300 at seed 7. 31 no-run bundles in a default run.
   - **Truth scored as a caller** on the new `pcr_1s_5x`: all 1,202 variant and 1,798 reference segment cells right, and all 203 variant and 297 reference bundle cells.
   - **1-sample comparisons re-run** (PCR and PCR-free, 5× and 30×, `tmp/bench/run_norun.sh`, results in `tmp/bench/runs_norun/`, summary `tmp/bench/summary_norun.tsv`). Step 5 of `str_bundle_loci.md` gains the new table. The 2026-10-12 table stays, labelled as measured before the change.
-- **Follow-up:** the 50-sample rows were not re-run.
+- **Follow-up:** none; the 50-sample rows were re-run after the M5 fix (see Notes).
 
 ### M5: scanner copy blind to the flank
-- **Final status:** Deferred.
-- **Reasoning:** the fix needs `build_reference` to lay a different spacer for hard shapes, or to re-type after laying the flank. Either way the zero-share identity must be re-proved. The failure is loud: the typing check stops the run. The case and its rate are now written into §11.4.
+- **Final status:** Applied (second pass, at the coordinator's request, on top of commit 90659177).
+- **Cause:** shapes were accepted by scanning the hull with a spacer either side, never the 150-base flanks laid after. A repeat can read on through a one-base spacer: `(AAT)6 A8`, spacer `C`, flank `AACAG…` was typed 5 bases longer than laid.
+- **Implementation summary:** `build_reference` now lays each bundle through `lay_bundle`, which re-runs the scanner copy over flank, hull and flank and redraws the flanks (truncating back) until the typing sees the bundle as accepted: the drawn members for a separated shape, one bundle over exactly the hull for a hard one. `scanner_types_one_bundle_over` and `scanner_finds_exactly_the_members` were split out of the two existing checks so both take any probe.
+- **Separated shapes were affected too**: 2 of 20,000 failed with their first flanks (a `TC` repeat read back into the left flank; a `GGA`-like repeat read on into the right). Under the old build those runs would have stopped at the typing check.
+- **Tests added:** `a_bundle_is_never_typed_past_its_flanks` (the literal M5 sequence fails the flank-aware check though it passed the old one; `lay_bundle` gives that shape passing flanks over 50 seeds; every bundle of a 400-bundle hard-only cohort is typed over exactly its hull with its flanks) and `separated_bundles_rarely_need_new_flanks` (pins 2 of 20,000 and that `lay_bundle` fixes each).
+- **Validation:** tests 24 passed; fmt clean; clippy no example warnings. Byte identity at share 0 and at no bundles: `tmp/identity.sh`, 0 of 23, 15 and 17 files differ, and checksums over each configuration's files equal (760193a0bec5092c, ef2c3c6bb4c53991, e453af587b0d1937). Typing check: 3,000 of 3,000 on hard-only runs at the default seed and seed 11; 500 of 500 at the default seed and seed 7.
 
 ### Mi1: junction after a tail
 - **Final status:** Applied. Junctions are now drawn in order, each after any tail rewrite at the junction before it. The spec states the rule.
@@ -151,7 +155,6 @@ None. Open question 1 of the review (should stutter ever be placed by anything b
   - §11.4 now says stutter is placed by the caller's own rule, so this benchmark cannot show that rule wrong, and adds the overlap-cut stretch to what is left out.
 
 ## 5. Deferred findings to carry forward
-- M5: the scanner copy cannot see the flank; a run that draws such a bundle stops at the typing check.
 - Mi12–Mi17, Mi20: structure and naming cleanups, and direct tests of three helpers.
 
 ## 6. Disputed findings to return to reviewer
@@ -181,9 +184,9 @@ Skipped: no `Apply` touched code reachable from `benches/`.
 - Typing check:
   - default seed: 500 of 500 (94 abutting, 53 both, 158 interrupted, 195 separated);
   - seed 7: 500 of 500;
-  - hard-only: 2,999 of 3,000 (M5).
+  - hard-only: 2,999 of 3,000 (M5); after the M5 fix 3,000 of 3,000 at two seeds.
 - The four 1-sample runs → typing 500 of 500 each, scored. STR segment cells: 0 of 3,000 differ between the bundle caller and the uncalled build in each.
 
 ## 12. Notes
 - `PROJECT_STATUS.md` has no block for STR bundles, so it was not edited.
-- The comparison's 50-sample rows describe the draw before M4 and Mi1. The spec says so beside the table.
+- After the M5 fix all eight runs were re-run (`tmp/bench/runs_m5/`, `tmp/bench/summary_m5.py`); `str_bundle_loci.md` §10 step 5 now holds one current table dated 2026-10-13, the earlier two kept as superseded history.
