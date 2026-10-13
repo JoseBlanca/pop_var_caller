@@ -183,6 +183,11 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
             report_working_concentration: true,
             ..ThePenalisedFit::default()
         }),
+        "D_tract_prior" => {
+            let mut fit = ThePenalisedFit::default();
+            fit.config.allele_prior_tracts = 1.0;
+            Box::new(fit)
+        }
         "B_within" => Box::new(TheCountingFit {
             pairs: false,
             ..TheCountingFit::default()
@@ -207,7 +212,7 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
         }),
         other => panic!(
             "no method is called {other}; the methods are A, B, B_within, B_noerrors, \
-             B_noprior, B_tight, B_bootstrap, D and D_working_F"
+             B_noprior, B_tight, B_bootstrap, D, D_working_F and D_tract_prior"
         ),
     }
 }

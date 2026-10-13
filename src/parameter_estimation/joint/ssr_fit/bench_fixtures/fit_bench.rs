@@ -516,6 +516,8 @@ impl PeriodFit for ThePenalisedFit {
     fn name(&self) -> String {
         if self.report_working_concentration {
             "D_working_F".to_owned()
+        } else if self.config.allele_prior_tracts > 0.0 {
+            "D_tract_prior".to_owned()
         } else {
             "D".to_owned()
         }

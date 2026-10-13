@@ -62,6 +62,13 @@ pub struct PenalisedFitConfig {
     /// enough mass into the tails to bias the reference length's share by −0.13 (one-base runs) and
     /// −0.20 (two-base runs) on the fitting bench's tomato-like truth.
     pub allele_pseudo_draws: f64,
+    /// **A further prior on the allele draws, sized as the counting fit sizes its own: this many
+    /// tracts' worth of a class's allele draws, spread evenly over the lengths** (the counting fit's
+    /// `SHARE_PRIOR_TRACTS` is one). **Zero by default**, which is penalised counting as track 2
+    /// built it. For measuring only: the floor of [`allele_pseudo_draws`](Self::allele_pseudo_draws)
+    /// is one draw a class whatever the cohort, so from tens of samples up it no longer holds a
+    /// length that no training locus carries off zero, where this prior grows with the cohort.
+    pub allele_prior_tracts: f64,
     /// **Whether each class's allele draws are divided by the design effect of draws clustered by
     /// locus** before its allele-length curve is fitted (`Period::allele_draw_inflation`). **Off by
     /// default**, because measured both ways on drawn motif lengths (track 2's report, §3.5) it helps
@@ -124,6 +131,7 @@ impl Default for PenalisedFitConfig {
             kink_knee: 2.5,
             kink_tail: 2.0,
             allele_pseudo_draws: 1.0 / 19.0,
+            allele_prior_tracts: 0.0,
             weigh_allele_draws_by_locus: false,
             pair_alternations: 0,
             rounds_choosing_strength: 200,
@@ -639,9 +647,20 @@ impl Period {
                         } else {
                             1.0
                         };
+                        // The counting fit's prior, when asked for: tracts' worth of the class's
+                        // draws, spread evenly.
+                        let prior = if fit.allele_prior_tracts > 0.0 {
+                            let tracts = self.class_at_point[point]
+                                .map_or(1, |index| classes[index].tracts_with_reads().max(1))
+                                as f64;
+                            let total: f64 = c.draws.iter().map(|d| d / inflation).sum();
+                            fit.allele_prior_tracts * total / tracts / c.draws.len() as f64
+                        } else {
+                            0.0
+                        };
                         c.draws
                             .iter()
-                            .map(|d| d / inflation + fit.allele_pseudo_draws)
+                            .map(|d| d / inflation + fit.allele_pseudo_draws + prior)
                             .collect()
                     })
                 })

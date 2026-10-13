@@ -16,8 +16,12 @@ Markdown, one table per measure of the research plan (doc/devel/ng/research/str_
    Monte Carlo error.
 4. Cost: seconds to fit every locus, seconds for the held-out fits, peak memory.
 
+With `--compare B_raw,B_curves,D`, it prints instead the methods side by side: the held-out score
+with its standard error over seeds and the paired difference D − B, the two held-out fallbacks at one
+sample (the bench's `--both-fallbacks`), recovery and error honesty with shares grouped by size.
+
 Usage:
-    uv run --no-project --with numpy python scripts/research/str_fit_summarise.py DIR
+    uv run --no-project --with numpy python scripts/research/str_fit_summarise.py DIR [--compare ...]
 """
 
 import argparse
@@ -224,13 +228,194 @@ def cost(rows):
     print()
 
 
+def mean_and_error(values):
+    """The mean over seeds and its standard error (the seeds' spread over the root of their count)."""
+    values = np.array([v for v in values if v is not None and not math.isnan(v)], dtype=float)
+    if len(values) == 0:
+        return float("nan"), float("nan"), 0
+    error = float(values.std(ddof=1) / math.sqrt(len(values))) if len(values) > 1 else float("nan")
+    return float(values.mean()), error, len(values)
+
+
+def show(mean, error, digits=3):
+    if math.isnan(mean):
+        return "—"
+    if math.isnan(error):
+        return f"{mean:+.{digits}f}"
+    return f"{mean:+.{digits}f} ± {error:.{digits}f}"
+
+
+def held_out_by_seed(rows):
+    """(cell, variant) -> {seed: (per-locus score minus the truth's, loci, loci on the fallback)}."""
+    by = defaultdict(dict)
+    for row in rows:
+        if row["repeats"] != "all" or not row["parameter"].startswith("heldout_"):
+            continue
+        by[(cell_key(row), row["method"], row["seed"])][row["parameter"]] = (
+            number(row["truth"]), number(row["estimate"]))
+    out = defaultdict(dict)
+    for (cell, method, seed), values in by.items():
+        per_locus = values.get("heldout_ln_per_locus")
+        if per_locus is None or None in per_locus:
+            continue
+        loci = values.get("heldout_loci", (None, float("nan")))[1]
+        fallback = values.get("heldout_loci_on_fallback", (None, float("nan")))[1]
+        out[(cell, method)][seed] = (per_locus[1] - per_locus[0], loci, fallback)
+    return out
+
+
+def comparison(rows, methods):
+    """The head-to-head tables: held-out score, recovery and error honesty side by side."""
+    scores = held_out_by_seed(rows)
+    cells = sorted({cell for cell, _ in scores})
+    print("## Held-out prediction, side by side\n")
+    print("Log-likelihood a held-out locus under each fit minus under the truth (zero is as good as "
+          "the truth; below zero is worse), at calling's fallback for a class without its own "
+          "numbers. Mean over the seeds ± its standard error. The last columns are the paired "
+          "difference, seed by seed, of D against B: above zero means D predicts better.\n")
+    head = " | ".join(methods)
+    print(f"| cell | seeds | loci a seed | {head} | D − B_raw | D − B_curves |")
+    print("|---|---|---|" + "---|" * len(methods) + "---|---|")
+    for cell in cells:
+        columns = []
+        seeds_seen = set()
+        loci = []
+        for method in methods:
+            values = scores.get((cell, method), {})
+            seeds_seen |= set(values)
+            loci += [v[1] for v in values.values()]
+            columns.append(show(*mean_and_error([v[0] for v in values.values()])[:2]))
+        differences = []
+        for base in ("B_raw", "B_curves"):
+            d = scores.get((cell, "D"), {})
+            b = scores.get((cell, base), {})
+            paired = [d[seed][0] - b[seed][0] for seed in d if seed in b]
+            differences.append(show(*mean_and_error(paired)[:2]))
+        print(f"| {cell_label(cell)} | {len(seeds_seen)} | {np.nanmean(loci):.0f} | "
+              f"{' | '.join(columns)} | {' | '.join(differences)} |")
+    print()
+
+    one_sample = [cell for cell in cells if cell[1] == "1"]
+    if one_sample:
+        print("## Held-out prediction at one sample: the two fallbacks\n")
+        print("Calling's fallback scores a class with no concentration of its own at a flat shape and "
+              "the stated concentration; the other keeps the class's own shares at the stated "
+              "concentration. D at one sample has no concentration in any class, so every class falls "
+              "back; `D_working_F` is D scored at the concentration it worked at. The last column is "
+              "the share of held-out loci whose class B left without a concentration. Mean over the "
+              "seeds ± its standard error, a locus, against the truth; the paired column is seed by "
+              "seed, above zero where D predicts better.\n")
+        print("| cell | B_raw: calling / own | B_curves: calling / own | D: calling / own | "
+              "D_working_F | D − B_curves, own shares | B classes on fallback |")
+        print("|---|---|---|---|---|---|---|")
+        for cell in one_sample:
+            def pair(method):
+                calling = scores.get((cell, method), {})
+                own = scores.get((cell, f"{method}_own_shares"), {})
+                return (show(*mean_and_error([v[0] for v in calling.values()])[:2]) + " / "
+                        + show(*mean_and_error([v[0] for v in own.values()])[:2]))
+            d = scores.get((cell, "D_own_shares"), {})
+            b = scores.get((cell, "B_curves_own_shares"), {})
+            paired = [d[seed][0] - b[seed][0] for seed in d if seed in b]
+            calling = scores.get((cell, "B_curves"), {})
+            on = [v[2] / v[1] for v in calling.values() if v[1]]
+            working = scores.get((cell, "D_working_F"), {})
+            print(f"| {cell_label(cell)} | {pair('B_raw')} | {pair('B_curves')} | {pair('D')} | "
+                  f"{show(*mean_and_error([v[0] for v in working.values()])[:2])} | "
+                  f"{show(*mean_and_error(paired)[:2])} | "
+                  f"{np.mean(on) if on else float('nan'):.2f} |")
+        print()
+
+    # Recovery side by side: the median over classes of each class's RMSE over seeds.
+    draws = defaultdict(list)
+    for row in rows:
+        parameter = row["parameter"]
+        if parameter not in ("level", "shorter_share", "fall_off", "between_locus_share",
+                             "share_0"):
+            continue
+        truth, estimate = number(row["truth"]), number(row["estimate"])
+        if truth is None:
+            continue
+        draws[(cell_key(row), row["method"], parameter, row["repeats"])].append(
+            None if estimate is None else
+            ((estimate - truth) / truth if parameter == "level" else estimate - truth))
+    numbers = ("level", "shorter_share", "fall_off", "between_locus_share", "share_0")
+    print("## Recovery, side by side\n")
+    print("Median over the classes of each class's root mean square error over the seeds: relative "
+          "for the slip rate (`level`), absolute otherwise. A dash: the method gave no estimate "
+          "(F at one sample is absent by design for B and D).\n")
+    print("| cell | method | " + " | ".join(numbers) + " |")
+    print("|---|---|" + "---|" * len(numbers))
+    recovery_cells = sorted({key[0] for key in draws})
+    for cell in recovery_cells:
+        for method in methods:
+            entries = []
+            for parameter in numbers:
+                per_class = []
+                for (c, m, p, _), values in draws.items():
+                    if c != cell or m != method or p != parameter:
+                        continue
+                    answered = [v for v in values if v is not None]
+                    if answered:
+                        per_class.append(math.sqrt(np.mean(np.square(answered))))
+                entries.append(f"{np.median(per_class):.4f}" if per_class else "—")
+            if all(entry == "—" for entry in entries):
+                continue
+            print(f"| {cell_label(cell)} | {method} | " + " | ".join(entries) + " |")
+    print()
+
+    # Honesty side by side, shares grouped by the size of their truth.
+    counts = defaultdict(lambda: [0, 0, 0])
+    for row in rows:
+        error, truth, estimate = (number(row["standard_error"]), number(row["truth"]),
+                                  number(row["estimate"]))
+        parameter = row["parameter"]
+        if parameter.startswith("heldout") or None in (error, truth, estimate):
+            continue
+        if parameter.startswith("share_"):
+            group = ("shares ≥ 0.05" if truth >= 0.05 else
+                     "shares 0.01–0.05" if truth >= 0.01 else "shares < 0.01")
+        elif parameter in ("level", "shorter_share", "fall_off", "between_locus_share"):
+            group = parameter
+        else:
+            continue
+        key = (cell_key(row), row["method"], group)
+        counts[key][0] += 1
+        counts[key][1] += abs(estimate - truth) <= error
+        counts[key][2] += abs(estimate - truth) <= 2 * error
+    groups = ("level", "shorter_share", "fall_off", "between_locus_share", "shares ≥ 0.05",
+              "shares 0.01–0.05", "shares < 0.01")
+    print("## Error honesty, side by side\n")
+    print("Share of estimates within one / two of their reported errors of the truth, pooled over "
+          "classes and seeds (honest: about 0.68 / 0.95); in brackets, how many estimates had an "
+          "error. Only the fits as they come carry errors (the curves replace them).\n")
+    print("| cell | method | " + " | ".join(groups) + " |")
+    print("|---|---|" + "---|" * len(groups))
+    for cell in sorted({key[0] for key in counts}):
+        for method in methods:
+            entries = []
+            for group in groups:
+                total, one, two = counts.get((cell, method, group), (0, 0, 0))
+                entries.append(f"{one / total:.2f} / {two / total:.2f} ({total})" if total else "—")
+            if all(entry == "—" for entry in entries):
+                continue
+            print(f"| {cell_label(cell)} | {method} | " + " | ".join(entries) + " |")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("directory")
+    parser.add_argument("--compare", default=None,
+                        help="comma-separated method variants to set side by side (e.g. "
+                             "B_raw,B_curves,D,D_working_F); prints only the side-by-side tables")
     arguments = parser.parse_args()
     rows = read_rows(arguments.directory)
     if not rows:
         sys.exit(f"no rows files in {arguments.directory}")
+    if arguments.compare:
+        comparison(rows, arguments.compare.split(","))
+        return
     recovery(rows, Path(arguments.directory) / "recovery_by_class.txt")
     honesty(rows)
     held_out(rows)
