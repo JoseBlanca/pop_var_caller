@@ -257,6 +257,8 @@ merge-timing = []
 
 [dev-dependencies]
 bstr = "1"
+# rustix's `time`: the process CPU clock `str_fit_cost_probe` reads, without `unsafe`.
+rustix = { version = "1", features = ["process", "time"] }
 criterion = "0.8.2"
 proptest = "1"
 
@@ -379,4 +381,9 @@ required-features = ["bench-fixtures"]
 # Where penalised counting's time goes against the counting fit's, on one bench cell.
 [[example]]
 name = "str_fit_penalised_cost"
+required-features = ["bench-fixtures"]
+
+# Where the repeat-tract fits' time goes, a class at a time, on real or drawn evidence.
+[[example]]
+name = "str_fit_cost_probe"
 required-features = ["bench-fixtures"]

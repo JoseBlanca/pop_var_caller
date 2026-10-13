@@ -50,6 +50,9 @@ pub struct CountedClass {
     /// Rounds of counting over the whole fit: with the spread read off pairs of samples, every
     /// counting after each reading, where [`rounds`](Self::rounds) is the last one's.
     pub rounds_in_all: usize,
+    /// How many times the spread was read off pairs of samples (each reading builds the pairs and
+    /// searches the spread); zero for the within-sample estimator. For measuring the fit's cost.
+    pub spread_readings: usize,
     /// The objective at the answer.
     pub composite_log_likelihood: f64,
 }
@@ -398,6 +401,7 @@ fn count_class(
         rounds,
         last_change,
         rounds_in_all: rounds,
+        spread_readings: 0,
         composite_log_likelihood: log_likelihood,
     }
 }
@@ -744,7 +748,9 @@ fn alternate_with_pairs(
     alternations: usize,
 ) -> CountedClass {
     let mut rounds_in_all = fitted.rounds_in_all;
+    let mut spread_readings = fitted.spread_readings;
     for _ in 0..alternations {
+        spread_readings += 1;
         let next = fit_spread_by_pairs(
             evidence,
             fitted.slippage,
@@ -772,6 +778,7 @@ fn alternate_with_pairs(
         }
     }
     fitted.rounds_in_all = rounds_in_all;
+    fitted.spread_readings = spread_readings;
     fitted
 }
 
@@ -782,6 +789,11 @@ fn alternate_with_pairs(
 /// chance its homozygote excess and two otherwise, the draws from the tract's frequencies weighted
 /// as a Pólya urn: a draw takes length `a` with chance `(spread · share_a + earlier draws of a) /
 /// (spread + earlier draws)`. Searched on the log scale between 10⁻³ and 10⁴.
+///
+/// **Each pair is reduced to four numbers before the search** ([`PairCubic`]): with the shares
+/// held, a pair's likelihood is a ratio of two cubics in the spread, so the search's 61 evaluations
+/// cost four multiply-adds a pair rather than a sweep of both samples' allele-pair tables, and the
+/// tables are never held for more than one tract at a time.
 #[must_use]
 pub fn fit_spread_by_pairs(
     evidence: &StratumEvidence,
@@ -790,13 +802,12 @@ pub fn fit_spread_by_pairs(
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
 ) -> f64 {
-    let classes = allele_classes_of(config);
-    let per_tract = pair_rows_by_tract(evidence, slippage, homozygote_excess, config);
+    let per_tract = pair_cubics_by_tract(evidence, slippage, shares, homozygote_excess, config);
     let objective = |ln_spread: f64| -> f64 {
         let spread = float::exp(ln_spread);
         per_tract
             .par_iter()
-            .map(|samples| scaled_ln_pairs_of_tract(samples, shares, spread, classes))
+            .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
             .sum()
     };
     // A coarse grid, then golden-section search around its best point.
@@ -834,23 +845,188 @@ pub fn fit_spread_by_pairs(
     float::exp(0.5 * (low + high))
 }
 
-/// One sample's reads at a tract, in the form a pair's likelihood is summed from.
-pub(super) struct PairRow {
-    /// The likelihood of the sample's reads under every **ordered** allele pair, `first ·
-    /// classes + second`, divided by the largest of them.
-    pub(super) ordered: Vec<f64>,
-    /// The sample's homozygote excess.
-    pub(super) excess: f64,
+/// **One pair of samples' likelihood at a tract as a function of the spread `α` alone**, the
+/// shares held: `N(α) / ((α + 1)(α + 2)(α + 3))`, with `N(α) = c₀ + c₁α + c₂α² + c₃α³` and these
+/// the four coefficients, lowest power first. Every coefficient is a sum of products of
+/// likelihoods, shares and excesses, so none is negative and `N` is evaluated without cancellation.
+///
+/// **Why a cubic.** Write `w = α · s` for the urn's weights. Every term of the pair's likelihood
+/// ([`pair_likelihood`]) is a sum over alleles of a row's likelihoods times a product of weights,
+/// over the urn's denominator `α(α + 1)…`: each sample one draw over `α(α + 1)`, one and two over
+/// `α(α + 1)(α + 2)`, two and two over `α(α + 1)(α + 2)(α + 3)`. Pulling `α` out of each weight
+/// leaves sums that depend on the shares only, a polynomial in `α` over each denominator, and
+/// putting the four terms over the largest denominator gives a cubic over `(α + 1)(α + 2)(α + 3)`.
+/// The sums, with `L` a sample's row, `D_x = L(x, x)`, `U_x = Σ_c L(c, x) s_c`, `Q = Σ_x U_x s_x`
+/// and `R = Σ_x D_x s_x`:
+///
+/// - `S = Σ_a D¹_a D²_a s_a`, `X₁₂ = Σ_a D¹_a s_a U²_a`, `X₂₁ = Σ_a D²_a s_a U¹_a`,
+///   `Y = Σ_a s_a U¹_a U²_a`, `Z = Σ_ab L¹(a, b) L²(a, b) s_a s_b`;
+/// - each one draw: `(α R¹R² + S) / (α + 1)`;
+/// - the first one draw, the other two: `(α² R¹Q² + α (R¹R² + 2 X₁₂) + 2 S) / ((α + 1)(α + 2))`,
+///   and the other way round with 1 and 2 exchanged;
+/// - each two draws: `(α³ Q¹Q² + α² (Q¹R² + R¹Q² + 4 Y) + α (R¹R² + 4 X₁₂ + 4 X₂₁ + 2 Z) + 6 S) /
+///   ((α + 1)(α + 2)(α + 3))`.
+///
+/// Checked against [`pair_likelihood`] in `a_pairs_cubic_is_its_closed_form_likelihood`.
+pub(super) type PairCubic = [f64; 4];
+
+/// A sample's row of ordered allele-pair likelihoods summarised at the shares: its diagonal `D`,
+/// `U_x = Σ_c L(c, x) s_c`, `Q = Σ_x U_x s_x` and `R = Σ_x D_x s_x` ([`PairCubic`]).
+struct RowAtShares {
+    diagonal: Vec<f64>,
+    u: Vec<f64>,
+    q: f64,
+    r: f64,
 }
 
-/// **Every tract's samples as [`PairRow`]s at the stutter `slippage`**, in the order of
-/// `evidence.tracts`; a tract with fewer than two samples has none, since it has no pair.
-pub(super) fn pair_rows_by_tract(
+impl RowAtShares {
+    fn of(row: &[f64], shares: &[f64], classes: usize) -> Self {
+        let diagonal: Vec<f64> = (0..classes).map(|x| row[x * classes + x]).collect();
+        let u: Vec<f64> = (0..classes)
+            .map(|x| (0..classes).map(|c| row[c * classes + x] * shares[c]).sum())
+            .collect();
+        let q = (0..classes).map(|x| u[x] * shares[x]).sum();
+        let r = (0..classes).map(|x| diagonal[x] * shares[x]).sum();
+        Self { diagonal, u, q, r }
+    }
+}
+
+/// **One pair's [`PairCubic`]** from both samples' rows and excesses at `shares`.
+fn pair_cubic(
+    (one, one_at, one_excess): (&[f64], &RowAtShares, f64),
+    (other, other_at, other_excess): (&[f64], &RowAtShares, f64),
+    shares: &[f64],
+    classes: usize,
+) -> PairCubic {
+    let (d1, u1, q1, r1) = (&one_at.diagonal, &one_at.u, one_at.q, one_at.r);
+    let (d2, u2, q2, r2) = (&other_at.diagonal, &other_at.u, other_at.q, other_at.r);
+    let mut s = 0.0;
+    let mut x12 = 0.0;
+    let mut x21 = 0.0;
+    let mut y = 0.0;
+    for a in 0..classes {
+        s += d1[a] * d2[a] * shares[a];
+        x12 += d1[a] * shares[a] * u2[a];
+        x21 += d2[a] * shares[a] * u1[a];
+        y += shares[a] * u1[a] * u2[a];
+    }
+    let mut z = 0.0;
+    for a in 0..classes {
+        let mut inner = 0.0;
+        for b in 0..classes {
+            inner += one[a * classes + b] * other[a * classes + b] * shares[b];
+        }
+        z += inner * shares[a];
+    }
+    let rr = r1 * r2;
+    // Each one draw, over (α + 1): times (α + 2)(α + 3) = α² + 5α + 6.
+    let both_one = one_excess * other_excess;
+    let (e1, e0) = (both_one * rr, both_one * s);
+    // One draw and two, over (α + 1)(α + 2): times (α + 3).
+    let first_one = one_excess * (1.0 - other_excess);
+    let second_one = (1.0 - one_excess) * other_excess;
+    let m2 = first_one * r1 * q2 + second_one * r2 * q1;
+    let m1 = first_one * (rr + 2.0 * x12) + second_one * (rr + 2.0 * x21);
+    let m0 = (first_one + second_one) * 2.0 * s;
+    // Each two draws, over (α + 1)(α + 2)(α + 3).
+    let both_two = (1.0 - one_excess) * (1.0 - other_excess);
+    let t3 = both_two * q1 * q2;
+    let t2 = both_two * (q1 * r2 + r1 * q2 + 4.0 * y);
+    let t1 = both_two * (rr + 4.0 * x12 + 4.0 * x21 + 2.0 * z);
+    let t0 = both_two * 6.0 * s;
+    [
+        6.0 * e0 + 3.0 * m0 + t0,
+        6.0 * e1 + 5.0 * e0 + 3.0 * m1 + m0 + t1,
+        5.0 * e1 + e0 + 3.0 * m2 + m1 + t2,
+        e1 + m2 + t3,
+    ]
+}
+
+/// **A tract's pairs as [`PairCubic`]s**: every sample paired with the next and the last with the
+/// first (one pair when there are two, none when fewer), from each sample's row of ordered
+/// allele-pair likelihoods and its excess, at `shares`.
+fn cubics_of_tract(rows: &[(Vec<f64>, f64)], shares: &[f64], classes: usize) -> Vec<PairCubic> {
+    let count = rows.len();
+    if count < 2 {
+        return Vec::new();
+    }
+    let at: Vec<RowAtShares> = rows
+        .iter()
+        .map(|(row, _)| RowAtShares::of(row, shares, classes))
+        .collect();
+    let pairs = if count == 2 { 1 } else { count };
+    (0..pairs)
+        .map(|index| {
+            let next = (index + 1) % count;
+            pair_cubic(
+                (&rows[index].0, &at[index], rows[index].1),
+                (&rows[next].0, &at[next], rows[next].1),
+                shares,
+                classes,
+            )
+        })
+        .collect()
+}
+
+/// **One tract's pairwise log-likelihood at the spread `spread`, less its rows' offsets**, from its
+/// pairs' [`PairCubic`]s. The rows' offsets are left out: they depend on neither the shares nor the
+/// spread.
+pub(super) fn scaled_ln_pairs_of_tract(cubics: &[PairCubic], spread: f64) -> f64 {
+    if cubics.is_empty() {
+        return 0.0;
+    }
+    let below = (spread + 1.0) * (spread + 2.0) * (spread + 3.0);
+    cubics
+        .iter()
+        .map(|[c0, c1, c2, c3]| {
+            let above = ((c3 * spread + c2) * spread + c1) * spread + c0;
+            float::ln((above / below).max(1e-300))
+        })
+        .sum()
+}
+
+/// **One sample's row of ordered allele-pair likelihoods** at a tract: the likelihood of its reads
+/// under every ordered pair, `first · classes + second`, divided by the largest of them.
+fn ordered_row(
+    sample: &SampleTractReads,
+    per_allele: &[Vec<f64>],
+    genotypes: &[(usize, usize)],
+    classes: usize,
+    buckets: usize,
+) -> Vec<f64> {
+    let reads = pooled_reads(sample, buckets);
+    let log_likelihoods: Vec<f64> = genotypes
+        .iter()
+        .map(|(first, second)| {
+            let mut total = 0.0;
+            add_ln_reads(&mut total, per_allele, &reads, *first, *second);
+            total
+        })
+        .collect();
+    let largest = log_likelihoods
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut ordered = vec![0.0; classes * classes];
+    for ((first, second), value) in genotypes.iter().zip(&log_likelihoods) {
+        let scaled = float::exp(value - largest);
+        ordered[first * classes + second] = scaled;
+        ordered[second * classes + first] = scaled;
+    }
+    ordered
+}
+
+/// **Every tract's pairs as [`PairCubic`]s at the stutter `slippage` and the shares `shares`**, in
+/// the order of `evidence.tracts`; a tract with fewer than two samples has none, since it has no
+/// pair. Each tract's rows of allele-pair likelihoods are built, reduced and dropped before the
+/// next: 32 bytes a pair are kept, where the rows take `8 · classes²` a sample (2.9 kB at ±9).
+pub(super) fn pair_cubics_by_tract(
     evidence: &StratumEvidence,
     slippage: Slippage,
+    shares: &[f64],
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
-) -> Vec<Vec<PairRow>> {
+) -> Vec<Vec<PairCubic>> {
     let classes = allele_classes_of(config);
     let genotypes = genotype_pairs(classes);
     let buckets = (2 * evidence.read_span + 1) as usize;
@@ -869,106 +1045,46 @@ pub(super) fn pair_rows_by_tract(
             if tract.samples.len() < 2 {
                 return Vec::new();
             }
-            tract
+            let rows: Vec<(Vec<f64>, f64)> = tract
                 .samples
                 .iter()
                 .map(|sample| {
-                    let reads = pooled_reads(sample, buckets);
-                    let log_likelihoods: Vec<f64> = genotypes
-                        .iter()
-                        .map(|(first, second)| {
-                            let mut total = 0.0;
-                            add_ln_reads(&mut total, per_allele, &reads, *first, *second);
-                            total
-                        })
-                        .collect();
-                    let largest = log_likelihoods
-                        .iter()
-                        .copied()
-                        .fold(f64::NEG_INFINITY, f64::max);
-                    let mut ordered = vec![0.0; classes * classes];
-                    for ((first, second), value) in genotypes.iter().zip(&log_likelihoods) {
-                        let scaled = float::exp(value - largest);
-                        ordered[first * classes + second] = scaled;
-                        ordered[second * classes + first] = scaled;
-                    }
-                    PairRow {
-                        ordered,
-                        excess: *homozygote_excess
+                    (
+                        ordered_row(sample, per_allele, &genotypes, classes, buckets),
+                        *homozygote_excess
                             .get(sample.sample as usize)
                             .expect("every sample in a tract has a homozygote excess"),
-                    }
+                    )
                 })
-                .collect()
+                .collect();
+            cubics_of_tract(&rows, shares, classes)
         })
         .collect()
 }
 
-/// **One tract's pairwise log-likelihood, less its rows' offsets**: every sample paired with the
-/// next and the last with the first (one pair when there are two), at the allele-length `shares`
-/// and the spread `spread`. The rows' offsets are left out: they do not depend on the shares or
-/// the spread.
-pub(super) fn scaled_ln_pairs_of_tract(
-    samples: &[PairRow],
-    shares: &[f64],
-    spread: f64,
-    classes: usize,
-) -> f64 {
-    let count = samples.len();
-    if count < 2 {
-        return 0.0;
-    }
-    let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
-    let pairs = if count == 2 { 1 } else { count };
-    let mut total = 0.0;
-    for index in 0..pairs {
-        let one = &samples[index];
-        let other = &samples[(index + 1) % count];
-        let pair = pair_likelihood(
-            &one.ordered,
-            one.excess,
-            &other.ordered,
-            other.excess,
-            &weights,
-            spread,
-            classes,
-        );
-        total += float::ln(pair.max(1e-300));
-    }
-    total
-}
-
-/// **Every pair of samples a class's spread is read from**, with each sample's likelihood of every
-/// ordered allele pair at the stutter it was built at: at a tract, every sample with reads paired
-/// with the next (and the last with the first). Built once, then [`log_likelihood`](Self::log_likelihood)
-/// scores any spread.
+/// **Every pair of samples a class's spread is read from**, at the stutter and shares it was built
+/// at: at a tract, every sample with reads paired with the next (and the last with the first), each
+/// pair held as its [`PairCubic`]. Built once, then [`log_likelihood`](Self::log_likelihood) scores
+/// any spread.
 pub struct SamplePairs {
-    /// Per tract with two samples or more, per sample with reads, its likelihood of every ordered
-    /// allele pair, and its homozygote excess.
-    per_tract: Vec<Vec<(Vec<f64>, f64)>>,
-    classes: usize,
+    /// Per tract with two samples or more, its pairs.
+    per_tract: Vec<Vec<PairCubic>>,
 }
 
 impl SamplePairs {
-    /// The pairs of `evidence`'s tracts, each sample's reads scored at `slippage`.
+    /// The pairs of `evidence`'s tracts, each sample's reads scored at `slippage`, the pairs reduced
+    /// at the allele-length shares `shares`.
     #[must_use]
     pub fn of(
         evidence: &StratumEvidence,
         slippage: Slippage,
+        shares: &[f64],
         homozygote_excess: &[f64],
         config: &SsrFitConfig,
     ) -> Self {
         let classes = allele_classes_of(config);
         let genotypes = genotype_pairs(classes);
-        let libraries: Vec<Library> = evidence
-            .libraries
-            .iter()
-            .map(|library| Library {
-                slippage_group: 0,
-                stutter_multiplier: 1.0,
-                ..*library
-            })
-            .collect();
+        let libraries = one_stutter_for_every_library(evidence);
         let distributions = ReadDistributionsByLevel::of(
             &[slippage],
             &libraries,
@@ -982,7 +1098,7 @@ impl SamplePairs {
             .map(|tract| {
                 let likelihoods =
                     TractLikelihoods::of(tract, &distributions, &genotypes, homozygote_excess);
-                likelihoods
+                let rows: Vec<(Vec<f64>, f64)> = likelihoods
                     .scaled
                     .chunks_exact(likelihoods.width)
                     .zip(&likelihoods.homozygote_excess)
@@ -994,42 +1110,22 @@ impl SamplePairs {
                         }
                         (ordered, *excess)
                     })
-                    .collect()
+                    .collect();
+                cubics_of_tract(&rows, shares, classes)
             })
             .collect();
-        Self { per_tract, classes }
+        Self { per_tract }
     }
 
     /// **The pairwise log-likelihood of each tract with two samples or more**, in the order
     /// [`log_likelihood`](Self::log_likelihood) sums them: what a standard error that treats the
-    /// tract as the independent unit needs. Computed as `log_likelihood` computes each term.
+    /// tract as the independent unit needs.
     #[must_use]
-    pub fn log_likelihood_by_tract(&self, shares: &[f64], ln_spread: f64) -> Vec<f64> {
-        let classes = self.classes;
+    pub fn log_likelihood_by_tract(&self, ln_spread: f64) -> Vec<f64> {
         let spread = float::exp(ln_spread);
-        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
         self.per_tract
             .par_iter()
-            .map(|samples| {
-                let mut total = 0.0;
-                let count = samples.len();
-                let pairs = if count == 2 { 1 } else { count };
-                for index in 0..pairs {
-                    let (one, one_excess) = &samples[index];
-                    let (other, other_excess) = &samples[(index + 1) % count];
-                    let pair = pair_likelihood(
-                        one,
-                        *one_excess,
-                        other,
-                        *other_excess,
-                        &weights,
-                        spread,
-                        classes,
-                    );
-                    total += float::ln(pair.max(1e-300));
-                }
-                total
-            })
+            .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
             .collect()
     }
 
@@ -1039,35 +1135,14 @@ impl SamplePairs {
         self.per_tract.is_empty()
     }
 
-    /// **The pairwise log-likelihood at spread `exp(ln_spread)`**, the class's allele length
-    /// variation `shares`, up to a constant that depends on neither.
+    /// **The pairwise log-likelihood at spread `exp(ln_spread)`**, at the shares the pairs were built
+    /// at, up to a constant that depends on neither.
     #[must_use]
-    pub fn log_likelihood(&self, shares: &[f64], ln_spread: f64) -> f64 {
-        let classes = self.classes;
+    pub fn log_likelihood(&self, ln_spread: f64) -> f64 {
         let spread = float::exp(ln_spread);
-        let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
         self.per_tract
             .par_iter()
-            .map(|samples| {
-                let mut total = 0.0;
-                let count = samples.len();
-                let pairs = if count == 2 { 1 } else { count };
-                for index in 0..pairs {
-                    let (one, one_excess) = &samples[index];
-                    let (other, other_excess) = &samples[(index + 1) % count];
-                    let pair = pair_likelihood(
-                        one,
-                        *one_excess,
-                        other,
-                        *other_excess,
-                        &weights,
-                        spread,
-                        classes,
-                    );
-                    total += float::ln(pair.max(1e-300));
-                }
-                total
-            })
+            .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
             .sum()
     }
 }
@@ -1080,6 +1155,7 @@ impl SamplePairs {
 /// sum over the later sample's alleles reduces to a few totals of its row: `Q = Σ L(c,d) w_c w_d`,
 /// `R = Σ L(c,c) w_c`, `u_x = Σ_c L(c,x) w_c` and the diagonal `D_x = L(x,x)`. Checked against the
 /// four nested sums in `the_closed_form_pair_likelihood_is_the_four_nested_sums`.
+#[cfg(test)]
 fn pair_likelihood(
     one: &[f64],
     one_excess: f64,
@@ -1216,6 +1292,72 @@ mod tests {
             + one_excess * (1.0 - other_excess) * one_two
             + (1.0 - one_excess) * other_excess * two_one
             + (1.0 - one_excess) * (1.0 - other_excess) * two_two
+    }
+
+    /// **A pair's cubic in the spread is its closed-form likelihood**, to within rounding, on random
+    /// rows at nineteen classes (the shipped ±9), every excess, spreads across the search's range,
+    /// and a row with exact zeros, as a sample whose reads rule alleles out has.
+    #[test]
+    fn a_pairs_cubic_is_its_closed_form_likelihood() {
+        let classes = 19;
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut row = |zeros: bool| {
+            let mut values = vec![0.0; classes * classes];
+            for a in 0..classes {
+                for b in a..classes {
+                    let value = if zeros && (a + b) % 3 == 0 {
+                        0.0
+                    } else {
+                        uniform()
+                    };
+                    values[a * classes + b] = value;
+                    values[b * classes + a] = value;
+                }
+            }
+            values
+        };
+        let (one, other) = (row(false), row(true));
+        let shares: Vec<f64> = {
+            let raw: Vec<f64> = (0..classes).map(|_| uniform().powi(3) + 1e-4).collect();
+            let total: f64 = raw.iter().sum();
+            raw.iter().map(|value| value / total).collect()
+        };
+        let (one_at, other_at) = (
+            RowAtShares::of(&one, &shares, classes),
+            RowAtShares::of(&other, &shares, classes),
+        );
+        for spread in [1e-3, 0.01, 0.5, 3.0, 200.0, 1e4] {
+            let weights: Vec<f64> = shares.iter().map(|share| spread * share).collect();
+            for (one_excess, other_excess) in [(0.0, 0.0), (0.3, 0.9), (0.98, 0.5), (1.0, 1.0)] {
+                let closed = pair_likelihood(
+                    &one,
+                    one_excess,
+                    &other,
+                    other_excess,
+                    &weights,
+                    spread,
+                    classes,
+                );
+                let [c0, c1, c2, c3] = pair_cubic(
+                    (&one, &one_at, one_excess),
+                    (&other, &other_at, other_excess),
+                    &shares,
+                    classes,
+                );
+                let cubic = (((c3 * spread + c2) * spread + c1) * spread + c0)
+                    / ((spread + 1.0) * (spread + 2.0) * (spread + 3.0));
+                assert!(
+                    (cubic - closed).abs() <= 1e-12 * closed.abs(),
+                    "spread {spread}, excesses {one_excess} {other_excess}: {cubic} against {closed}"
+                );
+            }
+        }
     }
 
     /// **The closed-form pair likelihood is the four nested sums over both samples' alleles**, to
