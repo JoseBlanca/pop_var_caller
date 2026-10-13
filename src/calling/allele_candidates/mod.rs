@@ -30,6 +30,9 @@
 //! many a locus may be called over at all. Which of the two dropped an allele is what decides
 //! whether a sample keeps its genotype (§5), so the two words are never interchangeable.
 
+/// Partial reads that single out one sequence count toward selection at STR segments and STR
+/// bundles (`candidate_alleles_ssr.md` §8.1).
+mod deciding_partial_reads;
 pub mod generic;
 pub mod ssr;
 /// The repeat-tract selector against production's, on a committed tomato fixture — spec §10's
@@ -287,7 +290,10 @@ pub struct UnmatchedSupport {
     /// **Of those reads, the ones on a sequence *this sample itself* showed convincingly —
     /// it cleared the support rule for this sample — which the cap then cut.** Non-zero
     /// means this sample cannot be genotyped here; see
-    /// [`genotype_must_be_missing`](Self::genotype_must_be_missing).
+    /// [`genotype_must_be_missing`](Self::genotype_must_be_missing). At an STR locus the
+    /// support rule is asked with the partial reads that single out one sequence counted
+    /// (`candidate_alleles_ssr.md` §8.1), so this count includes them where `num_reads` does
+    /// not: only whether it is zero is read.
     ///
     /// **It is the cap and only the cap**, which is why [`leftover_of`] is handed the list of what
     /// the cap removed rather than inferring it. The repeat-tract path drops alleles a third way —
@@ -831,7 +837,10 @@ impl AlleleSummary {
 ///
 /// It is the sum of that sample's rows, over alleles **and** over read groups, because the
 /// merge admits only complete observations onto alleles: a read that reached a row is a
-/// read that spanned the locus and was compared. **The reference's own rows are in it** —
+/// read that spanned the locus and was compared. At an STR locus selection reads a copy of
+/// the rows with each partial read that fits exactly one sequence added
+/// (`candidate_alleles_ssr.md` §8.1), and such a read is in this sum too — in the numerator
+/// and the denominator alike, which is what keeps a stutter sequence's share where it was. **The reference's own rows are in it** —
 /// the bar is a share of the sample's reads, not of its non-reference reads, which is what
 /// makes a heterozygote's alternative sit near a half rather than near one.
 ///
@@ -871,6 +880,15 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// evidence, neither of which carries a quality sum and neither of which was ever in the allele
 /// table; and the reference's own reads, since the reference is never dropped and so always has a
 /// candidate id.
+///
+/// **Two sets of one sample's rows, because at an STR locus selection asks its bar over more
+/// reads than the merge put on alleles.** `sample` is the merge's own rows, and the read count
+/// and error mass come from them alone: the record adds the sample's partial reads to its `DP`
+/// separately, so a partial read counted here as well would be counted twice. `selection_rows`
+/// is the rows selection read — the same rows on the generic path, and at an STR locus the rows
+/// with each partial read that singles out one sequence added (`deciding_partial_reads`,
+/// `candidate_alleles_ssr.md` §8.1) — and the cap's test below asks the bar over them, so a
+/// sample whose partial reads earned an allele the cap cut is set aside like any other.
 ///
 /// # The second count, and why it is not the first one narrowed
 ///
@@ -916,6 +934,7 @@ fn compared_reads_of(sample: &SampleSupport) -> u32 {
 /// nothing chosen and nothing failed.
 fn leftover_of(
     sample: &SampleSupport,
+    selection_rows: &SampleSupport,
     locus: GenomeRegion,
     remap: &AlleleRemap,
     min_allele_support: MinAltReads,
@@ -925,7 +944,10 @@ fn leftover_of(
         cut_by_the_cap.is_sorted(),
         "the cap's cut list is binary-searched, so it must be ascending"
     );
-    let compared_reads = compared_reads_of(sample);
+    debug_assert_eq!(
+        sample.sample, selection_rows.sample,
+        "the merge's rows and the rows selection read must be one sample's"
+    );
     let mut leftover = UnmatchedSupport::default();
     for rows in one_run_per_allele(sample, locus) {
         let allele = rows[0].allele;
@@ -947,8 +969,20 @@ fn leftover_of(
             sample.sample
         );
         leftover.q_sum += mass;
+    }
+    // The bar asked over the rows selection asked it over, so a sample whose counted partial
+    // reads earned an allele the cap cut is set aside exactly as one whose crossing reads did.
+    let compared_reads = compared_reads_of(selection_rows);
+    for rows in one_run_per_allele(selection_rows, locus) {
+        let allele = rows[0].allele;
+        if remap.candidate_for(allele).is_some() {
+            continue;
+        }
         let the_cap_cut_it =
             u32::try_from(allele).is_ok_and(|allele| cut_by_the_cap.binary_search(&allele).is_ok());
+        let pooled_reads = rows.iter().fold(0_u32, |total, row| {
+            total.saturating_add(row.support.num_reads)
+        });
         if the_cap_cut_it && min_allele_support.reached_by(pooled_reads, compared_reads) {
             leftover.earned_reads_cut_by_the_cap = leftover
                 .earned_reads_cut_by_the_cap
@@ -1077,9 +1111,10 @@ fn summarise_alleles(
         );
         previous_sample = Some(sample.sample);
         if sample.supported.is_empty() {
-            // A covering sample whose reads all stopped inside the locus: it has partials
-            // and nothing else, and partials count toward no bar (spec §5.1). Stepped over,
-            // and the samples after it are still folded.
+            // A covering sample with no support rows: its reads all stopped inside the locus,
+            // and none singled out one sequence (`candidate_alleles_ssr.md` §8.1; other partial
+            // reads count toward no bar, spec §5.1). Stepped over, and the samples after it are
+            // still folded.
             continue;
         }
         let compared_reads = compared_reads_of(sample);

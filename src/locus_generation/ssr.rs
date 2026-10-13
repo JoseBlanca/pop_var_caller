@@ -939,8 +939,9 @@ mod classify {
             /// spelled from its own alignment (`str_edge_deletion_alleles.md` §5.1); `NONE`
             /// otherwise.
             flank_deletion: FlankDeletion,
-            /// Which flank a partial read anchored, where its witness cannot say it: set only at
-            /// an STR bundle, on a witness covering the whole hull (`partial`); `None` otherwise.
+            /// Which flank a partial read anchored, where its witness cannot say it: set at an
+            /// STR segment or bundle, on a witness covering the whole locus (`partial`); `None`
+            /// otherwise.
             held_flank: Option<HeldFlank>,
             /// The read's base-quality error mass over the tract, `Σ ln(P_err)`, in log-error
             /// space (freebayes' `q_sum` convention). The **BQ** support moment the spec names

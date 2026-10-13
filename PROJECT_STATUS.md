@@ -1144,6 +1144,13 @@ comparisons one by one.
 
 ---
 
+#### Partial reads count toward STR candidate selection where they single out one sequence (`candidate_alleles_ssr.md` §8.1)
+- **Status:** fixes-applied (2026-10-13, uncommitted on branch `partial-candidates`) — adopted by the owner as the only behaviour, no switch.
+- **Code:** [src/calling/allele_candidates/deciding_partial_reads.rs](src/calling/allele_candidates/deciding_partial_reads.rs); `select_ssr` / `select_ssr_bundle` and `leftover_of`.
+- **Latest review:** [str_partial_read_nomination_2026-10-13.md](doc/devel/reports/reviews/str_partial_read_nomination_2026-10-13.md)
+- **Latest fixes-applied:** [fixes_applied_str_partial_read_nomination_2026-10-13.md](doc/devel/reports/reviews/fixes_applied_str_partial_read_nomination_2026-10-13.md)
+- **Open:** require a flank base for a counted read? (M2, open question 1); side-aware edge-deletion exclusion (Mi15); segment read model ignores the far flank (M3); `--explain-loci` rows (Mi1); no counter of counted reads (Mi6); mate overlap unverified (Mi14).
+
 #### The run's parameters as a file — the TOML artefact direct mode reads
 - **Status:** **fixes-applied, F1 committed — stop-and-ask before F2.** **All three of spec §7's
   sources now write the file the run used**, and the one the format exists for was the one that did

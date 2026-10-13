@@ -608,9 +608,10 @@ impl SsrSelectionConfig {
 /// library — 157 of 1,707 in a surveyed tomato archive (`doc/devel/ng/spec/read_groups.md` §1).
 /// Sharing the grouping with the ordinary path is what stops the two from coming to disagree.
 ///
-/// **Only spanning reads are counted, and that is what the merge's support rows already are**: a
-/// read that ran out inside the tract produced a partial, which names no length and is scored on
-/// its own axis (spec §1.3, §8). So the histogram's total is exactly
+/// **Only the support rows are counted**: the merge's crossing reads, and at an STR locus the
+/// partial reads that single out one sequence, which selection adds to those rows before it
+/// starts (spec §8.1). Any other partial read names no length and is scored on its own axis
+/// (spec §1.3, §8). So the histogram's total is exactly
 /// [`compared_reads_of`](super::compared_reads_of) — the denominator nomination divides by — and
 /// this function deliberately does not return it, because two spellings of one number is how two
 /// rules become different rules.
@@ -942,7 +943,8 @@ pub(super) fn promote_rungs_for_cohort_by(
 ///
 /// - **the bar**: [`MinAltReads::reached_by`], reads pooled across read groups by
 ///   [`one_run_per_allele`] against the denominator [`compared_reads_of`] — the sample's
-///   spanning reads, so a read that ran out inside the tract counts in neither half;
+///   support rows, so a read that ran out inside the STR segment counts in both halves if it
+///   singles out one sequence (spec §8.1) and in neither otherwise;
 /// - **whole repeats**: a sequence shorter than one copy of the unit
 ///   ([`repeat_count_of_bases`] of zero) is refused here, where the reason is — admitted, it
 ///   would reach the driver's conversion to the evidence's non-zero counts
@@ -1080,12 +1082,14 @@ pub(super) fn nominate_discovered_sequences(
 /// caller bugs whose symptom is a wrong candidate list rather than a crash (spec §8).
 pub(super) fn admit_promoted_sequences(
     observation: &CohortObservation,
+    merge_rows: &[SampleSupport],
     detail: &SsrDetail,
     config: &SsrSelectionConfig,
     scratch: &mut SelectionScratch,
 ) -> LocusSelection {
     admit_promoted_sequences_on(
         observation,
+        merge_rows,
         &SelectionGround::Segment(detail),
         config,
         scratch,
@@ -1147,8 +1151,14 @@ impl SelectionGround<'_> {
 }
 
 /// [`admit_promoted_sequences`] over either kind of repeat ground.
+///
+/// `observation` is what selection reads — the merge's locus with the deciding partial reads
+/// counted ([`count_deciding_partial_reads`](super::deciding_partial_reads::count_deciding_partial_reads))
+/// — and `merge_rows` is the merge's own per-sample rows, parallel to `observation.per_sample`,
+/// which the leftover's read count and error mass are taken from ([`leftover_of`](super::leftover_of)).
 pub(super) fn admit_promoted_sequences_on(
     observation: &CohortObservation,
+    merge_rows: &[SampleSupport],
     ground: &SelectionGround<'_>,
     config: &SsrSelectionConfig,
     scratch: &mut SelectionScratch,
@@ -1327,13 +1337,20 @@ pub(super) fn admit_promoted_sequences_on(
         remap.admit(table_index, candidate);
     }
 
+    assert_eq!(
+        merge_rows.len(),
+        observation.per_sample.len(),
+        "the merge's rows and the rows selection read cover different samples at {}",
+        observation.region
+    );
     let covering_samples = observation.per_sample.len();
-    let leftovers = observation
-        .per_sample
+    let leftovers = merge_rows
         .iter()
-        .map(|sample| {
+        .zip(&observation.per_sample)
+        .map(|(sample, selection_rows)| {
             super::leftover_of(
                 sample,
+                selection_rows,
                 observation.region,
                 &remap,
                 config.shared.min_allele_support,
@@ -1608,7 +1625,10 @@ fn is_an_edge_deletion_of(bases: &[u8], reference: &[u8]) -> bool {
 /// **Four passes over the locus, in this order**, because each needs the one before: fold the
 /// rows into per-allele summaries; build the ladder over them; nominate rungs per sample and union
 /// them; then admit the sequences on nominated rungs that cleared the bar, apply the cap and fill
-/// the leftover.
+/// the leftover. **Before them**, each partial read that fits exactly one sequence of the table is
+/// counted as a read of it, on a copy the four passes read (spec §8.1, the private
+/// `deciding_partial_reads` module); the leftover's read count and error mass are still the
+/// merge's own rows'.
 ///
 /// **With discovery on there is a fifth, between nomination and admission**: the discovery
 /// pre-pass ([`nominate_discovered_sequences`]) flags the sequences some single sample showed
@@ -1663,6 +1683,15 @@ pub fn select_ssr(
         };
     }
 
+    // Partial reads that single out one sequence count toward the bar (spec §8.1) — after the
+    // periodicity check, so that they change nothing about which STR segments are refused.
+    let merge_rows = &observation.per_sample;
+    let counted = super::deciding_partial_reads::count_deciding_partial_reads(
+        observation,
+        (&detail.left_flank, &detail.right_flank),
+    );
+    let observation = counted.as_ref().unwrap_or(observation);
+
     summarise_alleles(observation, config.shared.min_allele_support, scratch);
     build_ladder(observation, &detail.motif, scratch);
     promote_rungs_for_cohort(observation, config, scratch);
@@ -1674,7 +1703,7 @@ pub fn select_ssr(
             &mut scratch.discovery_nominated,
         );
     }
-    let selection = admit_promoted_sequences(observation, detail, config, scratch);
+    let selection = admit_promoted_sequences(observation, merge_rows, detail, config, scratch);
     let repeat_counts = selection
         .alleles()
         .iter()
@@ -1729,6 +1758,14 @@ pub fn select_ssr_bundle(
             observation.kind, observation.region
         );
     };
+    // Partial reads that single out one sequence count toward the bar (`candidate_alleles_ssr.md`
+    // §8.1), at bundles as at segments.
+    let merge_rows = &observation.per_sample;
+    let counted = super::deciding_partial_reads::count_deciding_partial_reads(
+        observation,
+        (&detail.left_flank, &detail.right_flank),
+    );
+    let observation = counted.as_ref().unwrap_or(observation);
     let hull = &observation.alleles[0];
     // No periodicity check (owner, 2026-10-12): the fixed sequence between runs carries real
     // indels of any length, so a change that is no whole number of run units is not a sign the
@@ -1762,6 +1799,7 @@ pub fn select_ssr_bundle(
     );
     let selection = admit_promoted_sequences_on(
         observation,
+        merge_rows,
         &SelectionGround::Bundle {
             detail,
             parses: &parses,
@@ -3029,7 +3067,13 @@ mod tests {
         summarise_alleles(observation, rule, &mut scratch);
         build_ladder(observation, &dinucleotide(), &mut scratch);
         promote_rungs_for_cohort(observation, &config, &mut scratch);
-        admit_promoted_sequences(observation, &detail_of(b"AT"), &config, &mut scratch)
+        admit_promoted_sequences(
+            observation,
+            &observation.per_sample,
+            &detail_of(b"AT"),
+            &config,
+            &mut scratch,
+        )
     }
 
     /// The surviving sequences, in candidate-id order.

@@ -417,15 +417,146 @@ not be added between two passes of the frequency loop
 overflow the cap is refused rather than allowed to evict
 ([`candidate_alleles.md`](candidate_alleles.md) §6.3).
 
-**Partial reads are not read here.** A read that ran out inside a tract gives a lower bound on the
-length, not a length, and the merge holds it on its own axis
-([`PartialObservation`, `build.rs:1130`](../../../../src/ng/run/cohort_merge/build.rs)). It does
-not nominate a rung and does not count toward any denominator, which is the same treatment
-`reads_compared_with_reference` already gives it upstream. **One consequence belongs to the merge,
+**Partial reads are read here only where they single out one sequence (§8.1, adopted
+2026-10-13).** A read that ran out inside a tract gives a lower bound on the length, not a length,
+and the merge holds it on its own axis
+([`PartialObservation`, `build.rs:1130`](../../../../src/ng/run/cohort_merge/build.rs)). Such a
+read nominates no rung and counts toward no denominator — the treatment
+`reads_compared_with_reference` gives it upstream — unless its bases fit exactly one sequence of
+the table, when §8.1 counts it as a read of that sequence. **One consequence belongs to the merge,
 not here, and is already booked there:** a sample carrying an allele too long for a read to span
 shows no complete observation, so the merge's variability filter reads it as *nothing varied*, and
 "one line of the rule has to change for that to mean what it says, and only on this path"
 ([`build.rs:1025-1034`](../../../../src/ng/run/cohort_merge/build.rs)).
+
+### 8.1 A partial read that singles out one sequence counts (adopted 2026-10-13)
+
+*Proposed 2026-10-12 and measured behind an environment switch; adopted by the owner on
+2026-10-13 from the measurement below, after a code review, as the only behaviour — there is no
+switch. Built in `src/calling/allele_candidates/deciding_partial_reads.rs`, for STR segments and STR
+bundles alike ([`str_bundle_loci.md`](str_bundle_loci.md) §7.6). Review:
+`doc/devel/reports/reviews/str_partial_read_nomination_2026-10-13.md`.*
+
+**Why.** At low depth a sample's second allele is often shown by fewer than two crossing reads,
+so it never clears the floor of two reads and is never offered. At one simulated sample, PCR, 5×,
+the bundle caller got 99 of 208 variant cells right against the generic path's 115, and this is
+the reason the implementation report gives. Partial reads are about half of the reads at a repeat,
+and before this rule they scored candidates but nominated none.
+
+**What a partial read can say.** It cannot spell an allele: it stops before one end. But it can
+rule alleles out. Read from the flank it held, its bases either are what a carrier of an allele
+would show — the allele, then the reference flank past it — or are not. A read that ended inside
+the repeat fits every allele long enough to hold what it showed, so it usually decides nothing. A
+read that ran past the repeat's far end into the flank fits only the alleles of exactly the length
+it crossed.
+
+**The rule reads the table, not every allele there could be.** A read that ended inside the
+repeat, longer than every sequence of the table but one, fits that one alone and counts for it,
+though a longer allele no crossing read spelled would fit it as well. That is the closed reading
+the precise rule below gives, kept deliberately (pinned by
+`a_read_ending_inside_the_repeat_past_every_shorter_allele_counts_for_the_longest`); its risk is
+a sample carrying an expansion too long to cross, whose partial reads would then count for the
+longest spelled sequence. Requiring a counted read to show at least one flank base would remove
+that, and would also stop bundle reads that end inside the hull from counting; it is unmeasured
+(open question 1 of the review).
+
+**The rule, in plain words.** *When a partial read fits exactly one of the sequences the locus's
+crossing reads spelled, it counts as one more read of that sequence for its sample: in that
+sequence's reads and in the sample's total, wherever the support rule is asked.* A partial read
+that fits two or more sequences, or none, counts nowhere. A sample whose reads all ended inside
+the locus can therefore reach the bar on two partial reads alone, provided a crossing read of some
+sample spelled the sequence they single out.
+
+**Precisely.** For a partial read of sample `s` showing bases `w`, held on flank `h`
+(`HeldFlank::of_witness`), and an allele `a` of the merge's table with flank deletion `(dl, dr)`:
+
+```text
+fits(w, a)  ⟺  h = Left  and  a ++ right_flank[dr..]        starts with w
+             or  h = Right and  left_flank[..len − dl] ++ a   ends with w
+the read counts for a  ⟺  a is the only allele of the table that w fits
+```
+
+The comparison is exact, so a read with a sequencing error fits nothing and counts for nothing.
+A read showing more flank bases than the stored flank holds (15 by default) fits nothing either;
+it would have anchored on them and been a crossing read. Each counted read is added to `s`'s
+support row for `(a, the read's group)`, on a copy of the locus, before the support rule, the
+ladder, the top-`ploidy` cut, the discovery pre-pass and admission run, and the cap's "this sample
+earned it" test asks the bar over the same copy.
+
+**What the counted reads do not reach.** The leftover's read count and error mass — the reads no
+written allele explains, which the record's `DP` adds — are taken from the merge's own rows, because
+the record adds every partial read to `DP` separately; as first built they came from the copy, and
+a partial read that counted for a refused stutter sequence was in `DP` twice. The read likelihood is
+handed the merge's own rows and partials; a partial read is never scored as complete.
+
+**Where selection and the read model compare a partial read differently.** At a bundle the read
+model walks a partial read through the allele and then the far flank, exactly as the rule above
+does. At a segment it does not read the flank: it stretches the candidate to the read's length and
+compares the read's flank bases with repeat letters. So a read that counted for a segment allele
+because it showed the flank past it is scored by the genotyper as a slightly longer repeat with a
+mismatch. The rule still offers the allele; how much the read then weighs in calling it is the
+segment read model's question, recorded as a separate change.
+
+**Why this lets alleles in without letting stutter in.** A stutter product's partial reads reach
+the flank as often as its crossing reads cross it, so the reads that single out a stutter
+sequence are in about the same proportion as its crossing reads. The counted partial reads enter
+the denominator as well as the numerator, so the share of a sample's reads a stutter sequence
+holds stays where it was, and at depth the share is what refuses it. What changes is the floor at
+low depth: one crossing read and one deciding partial read now make two.
+
+**Two limits.**
+
+- **The allele must have been spelled by a crossing read, in some sample.** An allele too long
+  for any read to cross gets nothing from this: no partial read can spell it, and a lower bound
+  longer than every candidate names no sequence to count for.
+- **No partial read counts at a locus where some allele is a deletion across the edge.** A partial
+  read records no flank deletion, so a carrier's partial read is spelled as if its flank were
+  whole, and it can fit exactly a crossing read the delimiter spelled the same wrong way. As first
+  built, without this limit, one `AGC` segment at 50 samples, PCR, 30× lost 18 right calls: the
+  edge deletion was carried by 18 samples, 85 of their partial reads singled out a misspelling
+  shown by a single crossing read, and admitting it turned every carrier's call wrong.
+
+**Measured, 2026-10-12.** The stuttering benchmark's simulated runs, true stutter, no fit, the
+same psps called with the rule off ("off", the selection before this section) and on. A cell is one sample at one segment or bundle;
+"right / wrong / missed" are over cells whose truth carries a variant, "false" over cells whose
+truth carries none. The 3× runs are the 30× runs' reads subsampled to one in ten.
+
+| run | segments: right / wrong / missed; false — off | on | bundles: off | on |
+|---|---|---|---|---|
+| 1 sample, PCR, 3× (1,237 / 208 variant cells) | 310 / 180 / 747; 5 | 317 / 179 / 741; 5 | 58 / 29 / 121; 0 | 62 / 28 / 118; 0 |
+| 1 sample, PCR, 5× | 607 / 204 / 426; 9 | 615 / 206 / 416; 9 | 99 / 29 / 80; 0 | 108 / 28 / 72; 0 |
+| 1 sample, PCR-free, 5× | 589 / 171 / 477; 4 | 598 / 171 / 468; 4 | 91 / 33 / 84; 0 | 94 / 34 / 80; 0 |
+| 1 sample, PCR, 30× | 1,223 / 9 / 5; 1 | 1,225 / 8 / 4; 0 | 207 / 1 / 0; 0 | 207 / 1 / 0; 0 |
+| 50 samples, PCR, 3× (about 63,700 / 10,760) | 32,289 / 12,838 / 18,585; 2,071 | 32,575 / 12,840 / 18,309; 2,080 | 5,911 / 1,874 / 2,972; 180 | 6,047 / 1,847 / 2,868; 189 |
+| 50 samples, PCR, 5× (61,913 / 10,495) | 43,416 / 9,128 / 9,369; 1,451 | 43,529 / 9,114 / 9,268; 1,458 | 7,929 / 1,181 / 1,385; 82 | 7,985 / 1,176 / 1,334; 84 |
+| 50 samples, PCR, 30× (61,670 / 10,435) | 61,066 / 293 / 311; 56 | 61,066 / 293 / 311; 57 | 10,407 / 11 / 17; 1 | unchanged |
+
+GIAB HG002, 30×, one sample, PCR-free, per benchmark region (a region with a truth variant is
+right, wrong or missed; one without is a false call when a non-reference genotype is written over
+it):
+
+| HG002 30× | off | on |
+|---|---|---|
+| bundles (1,131 with a variant, 1,342 without) | 862 / 151 / 118; 20 | 876 / 148 / 107; 21 |
+| segments (7,076 with a variant, 13,107 without) | 6,075 / 757 / 244; 92 | 6,088 / 753 / 235; 94 |
+
+**What it means.** At one sample and 5× the bundles gain 9 right cells in 208 under PCR (99 to
+108; the generic path's 115) and 3 under PCR-free; segments gain 8 and 9 in 1,237. At 50 samples
+and 3× it moves 286 segment cells and 136 bundle cells from missed or wrong to right, for 9 more
+false calls on each ground among about 86,000 and 14,000 cells without a variant. At 30× it
+changes almost nothing: no bundle cell at 50 samples, one more false call at segments, and on
+HG002 two flips each way between right and a wrong heterozygote — 1 more false call at bundles
+and 2 at segments, against 14 and 13 more right. So it does not let stutter in at depth; nor
+does it close the low-depth gap: 72 of the 208 bundle cells are still missed at one sample, PCR,
+5×. Not yet traced, and the likeliest reason: a second allele no crossing read of any sample
+spelled, which this rule cannot reach (the first limit above).
+
+*Adopted as the default, 2026-10-13, and checked against the measurement.* With the switch removed
+and the review's fixes in, the same runs called again reproduce the switch-on VCFs: at one
+sample, PCR, 5× byte for byte; at 50 samples, PCR, 5× every genotype, allele and `AD` is the same,
+and only `DP` moves — down, in 1,653 sample cells of 1,154 records, by 1,668 reads in all, which is
+the double count the review found (a partial read that counted for a refused sequence was in `DP`
+twice). The scoring above reads genotypes only, so its numbers stand.
 
 ---
 
