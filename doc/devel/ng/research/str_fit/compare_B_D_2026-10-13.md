@@ -402,8 +402,8 @@ when `--between-locus-share` replaced the truth's F, `D_tract_prior`, and the su
 - **The climb** was run at one sample and 10 samples × 3 reads, seed 1 only.
 - **`D_tract_prior`** at 500 samples is one seed; its prior's size is borrowed from B, not tuned.
 - **The budget** rests on the bench's cost a row, which disagrees with the real kimura run (§7.3).
-- **Times in the appendix's *Cost* table were taken with up to six runs sharing the machine**, and
-  other users' work; only §7.1's are quiet.
+- **The accuracy runs' own times** (in their rows files, not tabulated here) were taken with up to six
+  runs sharing the machine and other users' work; only §7.1's are quiet.
 - **One family of drawn truths.** How either method does where real classes depart from smooth curves
   (a kink such as HG002's 9-repeat homopolymers) is track 2 §3's measurement, not repeated here.
 
