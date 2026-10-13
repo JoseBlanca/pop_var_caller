@@ -1497,7 +1497,7 @@ pub struct PartialObservation {
     pub sequence_may_run_on_past: Option<LocusBorder>,
     /// **Which flank of an STR locus the reads anchored, where their witness cannot say it** —
     /// the mint's [`SequenceObservation::held_flank`], carried through unchanged: a partial at an
-    /// STR bundle whose witness covers the whole hull, and `None` everywhere else
+    /// STR segment or STR bundle whose witness covers the whole locus, and `None` everywhere else
     /// (`doc/devel/ng/spec/str_bundle_loci.md` §7.6).
     pub held_flank: Option<HeldFlank>,
 }

@@ -389,7 +389,9 @@ has no meaning with two periods.
 The STR segment's selection (`candidate_alleles_ssr.md`), with each single-motif rule generalised:
 
 - **The bar is unchanged**: a sequence is a candidate when at least two crossing reads of one sample
-  show it, and at least a tenth of that sample's crossing reads.
+  show it, and at least a tenth of that sample's crossing reads. *(Since 2026-10-13 a partial read
+  that fits exactly one sequence of the table counts as a crossing read of it, in both halves of
+  the bar, at bundles as at segments — §7.6 and `candidate_alleles_ssr.md` §8.1.)*
 - **A rung of the ladder is a run-count vector**: two alleles with the same run counts are two
   sequences on one rung, as two spellings of one repeat count are today.
 - **The periodicity check** asks whether an allele's length change from the reference is a sum of
@@ -749,13 +751,19 @@ carries its flank, and none falls back to the average: 184 such reads at one sam
 30×, 50,776 at 50 samples 30× — about one in eight of the bundles' partial reads, split evenly
 between the two flanks (§10, step 4c).
 
-**Candidate selection counts these reads nowhere, as at a segment.** A segment's partial reads
-nominate no rung and count toward no denominator (`candidate_alleles_ssr.md` §8: "a read that ran
-out inside a tract gives a lower bound on the length, not a length"); the merge holds them off the
-support rows that selection reads, at bundles exactly as at segments. So the candidates are still
-what two crossing reads of one sample, and a tenth of them, show, and a partial read only weighs
-between those candidates. At low depth that leaves a bundle whose other allele no two crossing
-reads show with no candidate for it, whatever its partial reads show.
+**Candidate selection counts these reads only where they single out one sequence (adopted
+2026-10-13).** *As first written, selection counted them nowhere, as at a segment: the merge holds
+partial reads off the support rows selection reads, so the candidates were what two crossing reads
+of one sample, and a tenth of them, showed, and at low depth a bundle whose other allele no two
+crossing reads showed had no candidate for it, whatever its partial reads showed.* Now a partial
+read whose bases, read from the flank it held, fit exactly one sequence of the table — the hull's
+allele, then the reference flank past it — counts as one more read of that sequence for its
+sample, in the sequence's reads and in the sample's total, at bundles and segments alike; one that
+fits two or more, or none, counts nowhere, and none counts at a locus where some allele is a
+deletion across the edge. Rule, limits and measurement in
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §8.1. At one sample, PCR, 5×, it takes the
+bundles from 99 to 108 right of 208; at 50 samples, 3×, from 5,911 to 6,047, for 9 more false
+calls. A partial read is still never scored as complete, and the record's `DP` counts it once.
 
 **One difference from a segment, since closed.** *(Closed 2026-10-12 by main's partial-read phase
 fix, `reports/implementations/str_partial_read_phase_2026-10-12.md`, and the merge that made
@@ -1032,7 +1040,9 @@ step.
 5. *Changed 2026-10-12 (owner): reads that end inside a bundle are scored, as a lower bound from
    the flank they held (§7.6).* The first decision left them out until the rest worked and
    bundles were measured at low depth; at 5× bundles lagged the generic path (§10, step 4), which
-   was the condition for adding them.
+   was the condition for adding them. *Changed 2026-10-13 (owner): such a read also counts toward
+   candidate selection where it fits exactly one sequence of the table (§7.6,
+   `candidate_alleles_ssr.md` §8.1); before, it only weighed between candidates.*
 6. **One name, *STR bundle*,** in the glossary, the specs and the code; the glossary's *cluster of
    repeats* is retired.
 7. **The simulator is extended to abutting, overlapping and impure bundles** once the caller works

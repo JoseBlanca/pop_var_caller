@@ -176,6 +176,7 @@ pub fn select_generic(
         .map(|sample| {
             leftover_of(
                 sample,
+                sample,
                 observation.region,
                 &remap,
                 config.min_allele_support,
