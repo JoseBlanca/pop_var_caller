@@ -46,6 +46,7 @@ def number(text):
 
 def read_rows(directories):
     rows = []
+    seen = set()
     paths = sorted(path for directory in directories for path in Path(directory).glob("*.tsv"))
     for path in paths:
         if path.name.endswith(".truth.tsv") or path.name.startswith("recovery_by_class"):
@@ -55,6 +56,15 @@ def read_rows(directories):
             if reader.fieldnames is None or "parameter" not in reader.fieldnames:
                 continue
             for row in reader:
+                # A method fitted twice on one seed (a run without the held-out score, then one
+                # with it) gives the same estimates: keep the first, so no seed counts twice.
+                # Cost rows differ between runs and are all kept.
+                key = (tuple(row[column] for column in CELL), row["seed"], row["method"],
+                       row["repeats"], row["parameter"])
+                if row["repeats"] != "all" or row["parameter"].startswith("heldout"):
+                    if key in seen:
+                        continue
+                    seen.add(key)
                 rows.append(row)
     return rows
 
