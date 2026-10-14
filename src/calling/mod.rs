@@ -3002,8 +3002,9 @@ impl SampleGenotypeCall {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RepeatTractProvenance {
     /// **Which rung of the tract ladder this tract's prior shape came from** — the stratum's own
-    /// fitted allele length variation, its motif period's pooled tracts, or a flat shape at a stated
-    /// concentration (`doc/devel/ng/spec/population_diversity.md` §4.4).
+    /// fitted allele length variation, its own shares at the stated concentration, its motif
+    /// period's pooled tracts, or a flat shape at the stated concentration
+    /// (`doc/devel/ng/spec/population_diversity.md` §4.4).
     ///
     /// Every rung answers, so this is never *no shape*; what it says is how well founded the
     /// shape was. The SNP/indel path has a ladder of its own with different rungs, resolved once

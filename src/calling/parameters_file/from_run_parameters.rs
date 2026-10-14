@@ -2810,6 +2810,124 @@ mod tests {
             "the fall-off",
         );
     }
+
+    // **This format's three refusals of the penalised fit's numbers.** Each stops a number from
+    // being written under an origin it does not have — a penalised point as the stratum's own fit,
+    // an absent concentration as some number — and each is lifted, and its test turned into a
+    // round trip, by the format that can record the number.
+
+    /// The point every penalised source in these tests carries.
+    fn a_penalised_point() -> crate::parameter_estimation::joint::slippage_curve::PenalisedPoint {
+        crate::parameter_estimation::joint::slippage_curve::PenalisedPoint {
+            strength: 20.0,
+            eased_here: false,
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "the level came off a penalised curve")]
+    fn a_level_off_a_penalised_curve_is_refused_by_this_format() {
+        level_origin_of(
+            LevelProvenance {
+                source: LevelSource::PenalisedCurve(a_penalised_point()),
+                curve: None,
+                reach: Some(FittedCurveReach::Inside),
+                slipped_reads: Some(400.0),
+            },
+            None,
+            Stratum {
+                period: 2,
+                reference_repeats: 6,
+            },
+            0,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the shorter share came off a penalised curve")]
+    fn a_share_off_a_penalised_curve_is_refused_by_this_format() {
+        share_smoothing_of(
+            ShareProvenance {
+                source: ShareSource::PenalisedCurve(a_penalised_point()),
+                curve: None,
+                reach: Some(FittedCurveReach::Inside),
+            },
+            Stratum {
+                period: 2,
+                reference_repeats: 6,
+            },
+            0,
+            "the shorter share",
+        );
+    }
+
+    /// **Through the whole writer**, because the refusal sits inside the row builder: a stratum
+    /// whose slippage is its own fit, so nothing before the allele-length rows refuses it, and
+    /// whose concentration is absent.
+    #[test]
+    #[should_panic(expected = "holds an allele length variation with no concentration")]
+    fn a_stratum_with_no_concentration_is_refused_by_this_format() {
+        let own = |source| ShareProvenance {
+            source,
+            curve: None,
+            reach: None,
+        };
+        let no_concentration = StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: None,
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 6,
+            },
+            slippage: vec![
+                Some(Slippage {
+                    level: 0.0421,
+                    shorter_share: 0.83,
+                    fall_off: 0.31,
+                }),
+                None,
+            ],
+            allele_length_variation: vec![0.1, 0.8, 0.1],
+            concentration: None,
+            climb: None,
+            samples_fitted_on: None,
+            tracts_of_its_own: 900,
+            reads_crossing: 19_000,
+            level_provenance: vec![
+                Some(LevelProvenance {
+                    source: LevelSource::Cell,
+                    curve: None,
+                    reach: None,
+                    slipped_reads: Some(8_000.5),
+                }),
+                None,
+            ],
+            shares_provenance: vec![
+                Some(SharesProvenance {
+                    slipped_reads: Some(8_000.5),
+                    shorter_share: own(ShareSource::Stratum),
+                    fall_off: own(ShareSource::Stratum),
+                }),
+                None,
+            ],
+        }));
+        let slippage = StratumFits::over(
+            &[no_concentration],
+            BTreeMap::from([
+                (ReadGroupId(0), 0),
+                (ReadGroupId(1), 0),
+                (ReadGroupId(2), 1),
+            ]),
+        );
+        let read_groups = a_runs_read_groups();
+        let run = a_run_with(
+            &read_groups,
+            &the_runs_contamination(),
+            a_declared_batching(&read_groups),
+            slippage,
+            the_runs_substitution_rates(),
+        );
+        let _ = projected(&run, &read_groups);
+    }
 }
 
 /// **Spec §7's one writer, reached from each of its three sources** — a file the user supplied,

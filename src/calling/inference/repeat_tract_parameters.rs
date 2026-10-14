@@ -2657,6 +2657,135 @@ mod tests {
         }
     }
 
+    /// One class as the penalised fit will return it at one sample (arch
+    /// `str_penalised_fit.md` §1.2–1.4): fitted, with one slippage group, shares and no
+    /// concentration, no climb record and no sample count; the level and both shares read off
+    /// the penalised curve inside the range it was fitted over; the concentration's error
+    /// `NotPlaced` because there is no concentration, every other error withheld for too few
+    /// loci.
+    fn as_the_penalised_fit_returns_it(repeat_count: u32) -> StratumOutcome {
+        use crate::parameter_estimation::joint::slippage_curve::{CurveReach, PenalisedPoint};
+        use crate::parameter_estimation::joint::ssr_fit::{
+            SlippageErrors, StratumError, StratumErrors, StratumFit,
+        };
+        let point = PenalisedPoint {
+            strength: 20.0,
+            eased_here: false,
+        };
+        let on_the_curve = ShareProvenance {
+            source: ShareSource::PenalisedCurve(point),
+            curve: None,
+            reach: Some(CurveReach::Inside),
+        };
+        StratumOutcome::Fitted(Box::new(StratumFit {
+            stratum: FitStratum {
+                period: MOTIF.len() as u8,
+                reference_repeats: u64::from(repeat_count),
+            },
+            slippage: vec![Some(slippage_at(0, repeat_count))],
+            allele_length_variation: vec![0.1, 0.8, 0.1],
+            concentration: None,
+            standard_errors: Some(StratumErrors {
+                slippage: vec![Some(SlippageErrors {
+                    level: StratumError::TooFewLoci,
+                    shorter_share: StratumError::TooFewLoci,
+                    fall_off: StratumError::TooFewLoci,
+                })],
+                allele_length_variation: vec![StratumError::TooFewLoci; 3],
+                concentration: StratumError::NotPlaced,
+            }),
+            climb: None,
+            samples_fitted_on: None,
+            tracts_of_its_own: 40,
+            reads_crossing: 400,
+            level_provenance: vec![Some(LevelProvenance {
+                source: LevelSource::PenalisedCurve(point),
+                curve: None,
+                reach: Some(CurveReach::Inside),
+                slipped_reads: Some(400.0),
+            })],
+            shares_provenance: vec![Some(SharesProvenance {
+                slipped_reads: Some(400.0),
+                shorter_share: on_the_curve,
+                fall_off: on_the_curve,
+            })],
+        }))
+    }
+
+    /// **The outcome the penalised fit will produce reaches every calling lookup in one piece**,
+    /// through [`StratumFits::over`] and not hand-built past it: a later `expect` on the climb's
+    /// record, a match that does not know the penalised sources, or a warrant or rung that
+    /// regresses fails here rather than when the fit is wired in.
+    ///
+    /// At one sample no class has a concentration, so each class keeps its own shares at the
+    /// stated concentration, which is the constant and says it was defaulted; the slippage is the
+    /// class's own and its warrant is `FittedHere`. The own-fit errors come back all absent,
+    /// because the errors beside a penalised source are not yet kept — the step that keeps them
+    /// flips that assertion.
+    #[test]
+    fn the_penalised_fits_outcome_at_one_sample_reaches_every_calling_lookup() {
+        use crate::parameter_estimation::joint::stratum_fits::{
+            AlleleLengthVariationRung, OwnFitStandardErrors, STATED_FLAT_CONCENTRATION,
+        };
+        let fits = StratumFits::over(
+            &[
+                as_the_penalised_fit_returns_it(CANDIDATE_REPEATS[0]),
+                as_the_penalised_fit_returns_it(CANDIDATE_REPEATS[1]),
+            ],
+            one_group_each(1),
+        );
+        assert_eq!(fits.stated_concentration(), STATED_FLAT_CONCENTRATION);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::Defaulted);
+
+        let period = MOTIF.len() as u8;
+        for repeat_count in CANDIDATE_REPEATS {
+            let spectrum = fits.allele_length_variation_at(period, u64::from(repeat_count));
+            assert_eq!(
+                spectrum.rung(),
+                AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+            );
+            assert_eq!(spectrum.fitted_weights(), Some(&[0.1, 0.8, 0.1][..]));
+            assert_eq!(spectrum.concentration(), STATED_FLAT_CONCENTRATION);
+
+            let cell = fits
+                .at(ReadGroupId(0), period, u64::from(repeat_count))
+                .expect("the class was fitted for its one slippage group");
+            assert_eq!(cell.slippage, slippage_at(0, repeat_count));
+            assert!(matches!(cell.level.source, LevelSource::PenalisedCurve(_)));
+            assert_eq!(
+                cell.own_fit_standard_errors,
+                OwnFitStandardErrors::default()
+            );
+            assert_eq!(warrant_of(&cell), Provenance::FittedHere);
+        }
+
+        // And through the driver's own path: the prior's lookup, the slippage table, the row.
+        let bases = candidate_bases();
+        let alleles = candidates(&bases);
+        let rates = all_substitution_rates();
+        let calibration = vec![ReadGroupCalibration::defaulted()];
+        let inbreeding = outbred(1);
+        let parameters = run(&calibration, &inbreeding, &fits, &rates);
+        let prior = tract_prior(reference_repeats(), &parameters);
+        assert_eq!(
+            prior.allele_length_variation.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_locus(motif(), &alleles, prior, &parameters);
+        let contexts = gathered.scoring_contexts(&alleles);
+        let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
+        for (candidate, repeat_count) in CANDIDATE_REPEATS.iter().copied().enumerate() {
+            let cell = locus.contexts.of(ReadGroupId(0), candidate);
+            assert_eq!(
+                *cell.stutter,
+                stutter_model_for(&slippage_at(0, repeat_count))
+            );
+        }
+        assert_eq!(gathered.cells_with_no_fitted_slippage(), 0);
+        assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
+    }
+
     /// **A substitution rate the fit did not measure here carries its own warrant through.**
     ///
     /// The pre-pass emits this rate as `FittedHere` or not at all today, so no run can reach

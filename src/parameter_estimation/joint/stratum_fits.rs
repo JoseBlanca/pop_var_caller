@@ -659,8 +659,8 @@ impl StratumFits {
     /// harvested from the fit's own outcomes.
     ///
     /// **Why not [`Self::over`].** That one takes [`StratumOutcome`]s — the fit's raw output,
-    /// which carries a refusal, an allele length variation, a log likelihood and a convergence flag
-    /// beside the numbers a lookup answers with. A parameters file carries the answers and not
+    /// which carries a refusal, an allele length variation and, from the climb, a log likelihood
+    /// and how its walks ended, beside the numbers a lookup answers with. A parameters file carries the answers and not
     /// the fitting: a refused stratum is simply a stratum with no rows, and the median that seeds
     /// the ladder's bottom rung was computed when the fit ran and is written down
     /// ([`Self::stated_concentration`]) rather than recomputed here. Recomputing it would make a
@@ -874,16 +874,22 @@ impl StratumFits {
         AlleleLengthVariation::stated_flat(self.stated_concentration)
     }
 
-    /// **The strength the tract ladder's bottom rung states**: the median of the concentrations
-    /// this run's strata fitted, or [`STATED_FLAT_CONCENTRATION`] where the run fitted none.
+    /// **The strength the tract ladder states where a stratum has no concentration of its own**:
+    /// read by the second rung (a stratum's own shares) and the bottom rung (a flat shape). It is
+    /// the median of the run's strata's between-locus shares `F = 1 / (1 + c)`, converted back to
+    /// a concentration `c`, or [`STATED_FLAT_CONCENTRATION`] where no stratum has a concentration
+    /// — which includes a one-sample run, where every stratum with reads is fitted but none
+    /// carries a concentration (`str_fit_to_calling.md` §3.5).
     ///
     /// **The run's own median rather than a constant wherever there is one**, because how
     /// monomorphic a species' tracts are is a fact about the species and the run has measured it
     /// at every stratum that could be fitted — where a stated constant is a fact about nothing
     /// (`population_diversity.md` §9, question 4 and its leaning).
     ///
-    /// **The median of an even count is the mean of the middle two**, which is the ordinary
-    /// definition and not a choice this file is making.
+    /// **Taken on `F`, not on the concentration** — a choice the spec makes, and one that matters
+    /// only at an even count. There the median is the mean of the two middle `F`s converted back,
+    /// so concentrations 4 and 6 give 29/6 ≈ 4.83, not 5. At an odd count it is the middle
+    /// stratum's own concentration, exactly as fitted.
     #[must_use]
     pub fn stated_concentration(&self) -> f64 {
         self.stated_concentration
@@ -1069,8 +1075,10 @@ impl StratumFits {
 
 /// The bottom rung's concentration, refused where it is not a Dirichlet total.
 ///
-/// **`over` cannot reach this** — its median is taken over concentrations each of which
-/// [`checked_allele_length_variation`] has already passed — but [`StratumFits::of_gathered_rows`] takes
+/// **`over` cannot reach this** — its median is either the middle stratum's own concentration,
+/// which [`checked_allele_length_variation`] has already passed, or, at an even count, a ratio of
+/// sums and products of two such concentrations that is positive whenever both are (see
+/// [`median_concentration`]) — but [`StratumFits::of_gathered_rows`] takes
 /// the number straight from a file, where it is one line a person can edit and where a run that
 /// fitted no stratum at all still has one. A zero has no mean to be the shape of, and every
 /// tract of every stratum that falls to the bottom rung would take it.
@@ -1198,7 +1206,8 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
 /// its allele length variation carries; its between-locus share `F = 1 / (1 + c)` is the same
 /// number on a scale from 0 to 1, and is the one the median is taken on
 /// (`str_fit_to_calling.md` §3.5). The median is converted back to a concentration once, by
-/// `c = (1 − F) / F`.
+/// `c = (1 − F) / F` — at an even count in a closed form that gives the same number without the
+/// round trip's cancellation (see the comment in the body).
 ///
 /// **Where the scale matters.** `F` falls as `c` rises, so the strata sort into the same middle
 /// either way:
@@ -1215,7 +1224,6 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
 /// [`checked_allele_length_variation`], so the sort is total and every share lies strictly between
 /// 0 and 1.
 fn median_concentration(fitted: &BTreeMap<Stratum, FittedAlleleLengthVariation>) -> f64 {
-    let between_locus_share = |concentration: f64| 1.0 / (1.0 + concentration);
     let mut concentrations: Vec<f64> = fitted
         .values()
         .filter_map(|fit| fit.concentration)
@@ -1228,10 +1236,13 @@ fn median_concentration(fitted: &BTreeMap<Stratum, FittedAlleleLengthVariation>)
     if concentrations.len() % 2 == 1 {
         concentrations[middle]
     } else {
-        let mean_share = (between_locus_share(concentrations[middle - 1])
-            + between_locus_share(concentrations[middle]))
-            / 2.0;
-        (1.0 - mean_share) / mean_share
+        // The mean of the two middle shares, `F̄ = (1/(1 + c1) + 1/(1 + c2)) / 2`, converted back
+        // by `(1 − F̄) / F̄`, is algebraically `(c1 + c2 + 2·c1·c2) / (2 + c1 + c2)`. The closed
+        // form is used because the round trip cancels: below about 1e-16 both shares round to
+        // 1.0 and `1 − F̄` is exactly zero, where the closed form stays positive for any two
+        // positive concentrations.
+        let (c1, c2) = (concentrations[middle - 1], concentrations[middle]);
+        (c1 + c2 + 2.0 * c1 * c2) / (2.0 + c1 + c2)
     }
 }
 
@@ -1902,15 +1913,18 @@ mod tests {
             &[
                 fitted(stratum(2, 8), 0.05, leaning_short(), 1.0),
                 fitted(stratum(2, 10), 0.05, leaning_short(), 30.0),
-                fitted(stratum(2, 12), 0.05, leaning_short(), 4.0),
+                fitted(stratum(2, 12), 0.05, leaning_short(), 6.0),
             ],
             one_group(),
         );
+        // 6 is chosen because it does not survive the round trip: `(1 − F) / F` with
+        // `F = 1 / (1 + 6)` is 6.000000000000001 in f64, so exact equality here fails if the
+        // odd arm converts the middle share back instead of returning the stored concentration.
         assert_eq!(
             three.stated_concentration(),
-            4.0,
-            "1, 4 and 30 have shares 1/2, 1/5 and 1/31, whose median is 1/5, which is 4 — not the \
-             mean, 11.67, and not the first inserted; the middle stratum's own 4 comes back \
+            6.0,
+            "1, 6 and 30 have shares 1/2, 1/7 and 1/31, whose median is 1/7, which is 6 — not the \
+             mean, 12.33, and not the first inserted; the middle stratum's own 6 comes back \
              exactly, not round-tripped through its share"
         );
         assert_eq!(three.stated_concentration_warrant(), Provenance::FittedHere);
@@ -1956,6 +1970,26 @@ mod tests {
             (two.stated_concentration() - expected).abs() < 1e-12,
             "shares 1/2 and 1/10 have a mean of 3/10, a concentration of 7/3; got {}",
             two.stated_concentration()
+        );
+    }
+
+    /// **Two tiny middle concentrations give a tiny median, not zero.** At 1e-17 both shares
+    /// round to exactly 1.0 in f64, so converting their mean back by `(1 − F) / F` returns 0.0,
+    /// which the ladder's lower rungs refuse at the first tract that reads it. The closed form
+    /// the median uses gives 1e-17.
+    #[test]
+    fn the_stated_concentration_is_positive_when_both_middle_concentrations_are_tiny() {
+        let two = StratumFits::over(
+            &[
+                fitted(stratum(2, 8), 0.05, leaning_short(), 1e-17),
+                fitted(stratum(2, 10), 0.05, leaning_short(), 1e-17),
+            ],
+            one_group(),
+        );
+        let stated = two.stated_concentration();
+        assert!(
+            stated > 0.0 && ((stated - 1e-17) / 1e-17).abs() < 1e-12,
+            "two concentrations of 1e-17 have a median of 1e-17; got {stated}"
         );
     }
 

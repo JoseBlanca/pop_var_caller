@@ -1069,12 +1069,13 @@ pub struct RepeatTracts {
     /// One row a `(stratum × slippage group)`. **A pair with no row is a slippage group that put
     /// no read in that stratum** — never a zero slip rate (spec §5).
     pub slippage_by_stratum_and_group: Vec<SlippageRow>,
-    /// One row a stratum — the tract ladder's **top** rung. **Only a stratum fitted on its own
-    /// tracts has one**: a stratum furnished from its period's slippage curves carries no length
-    /// spectrum at all, by construction, and that absence is what the middle rung exists to
-    /// answer. So absence here is data, not a hole.
+    /// One row a stratum — the tract ladder's **top** rung, or its second where the row has no
+    /// concentration. **Only a stratum fitted on its own tracts has one**: a stratum furnished
+    /// from its period's slippage curves carries no length spectrum at all, by construction, and
+    /// that absence is what the pooled rung exists to answer. So absence here is data, not a
+    /// hole.
     pub allele_length_variation_by_stratum: Vec<StratumAlleleLengthVariationRow>,
-    /// One row a motif period — the tract ladder's **middle** rung, present only where the run
+    /// One row a motif period — the tract ladder's **pooled** rung, present only where the run
     /// asked for it.
     pub allele_length_variation_by_period: Vec<PeriodAlleleLengthVariationRow>,
     /// How often a base reads wrong inside a tract, per `(read group × stratum × ploidy)`.
