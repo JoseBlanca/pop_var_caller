@@ -304,6 +304,38 @@ fitted_to_repeats = 19
 held_out_error = 0.3333333333333333
 cells = 8
 
+[[repeat_tracts.slippage_by_stratum_and_group]]
+period = 2
+reference_repeats = 14
+slippage_group = 0
+share_of_reads_that_slip = 0.0657
+shorter_share = 0.71
+fall_off = 0.35
+
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin]
+expected_slipped_reads = 5120.75
+own_fit_standard_error = 0.0034
+
+[repeat_tracts.slippage_by_stratum_and_group.share_of_reads_that_slip_origin.smoothing.penalised_curve]
+strength = 18.5
+eased_here = true
+reach = "inside_the_fitted_range"
+
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin]
+expected_slipped_reads = 5120.75
+shorter_share_own_fit_standard_error = 0.014
+fall_off_own_fit_standard_error = 0.027
+
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.shorter_share_smoothing.penalised_curve]
+strength = 6.25
+eased_here = false
+reach = "inside_the_fitted_range"
+
+[repeat_tracts.slippage_by_stratum_and_group.shorter_share_and_fall_off_origin.fall_off_smoothing.penalised_curve]
+strength = 9.75
+eased_here = false
+reach = "inside_the_fitted_range"
+
 [[repeat_tracts.allele_length_variation_by_stratum]]
 period = 2
 reference_repeats = 6

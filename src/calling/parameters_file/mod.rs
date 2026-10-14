@@ -1167,9 +1167,11 @@ pub struct LevelOrigin {
     /// How many of this stratum's own reads **its own fitted level** said slipped, and absent
     /// where the stratum has no level of its own because it borrowed. **Absent is not zero.**
     pub expected_slipped_reads: Option<f64>,
-    /// **The level's standard error, only where the level written is the stratum's own fit**
-    /// (`smoothing = "this_stratum"`). A level from its period's curve, or blended with it, has
-    /// none: the blend's own error is not computed (`fit_precision.md` §5.2).
+    /// **The level's standard error, only where the level written was fitted with this
+    /// stratum's reads**: its own fit (`smoothing = "this_stratum"`) or a point on a penalised
+    /// curve (`smoothing = { penalised_curve = … }`). A level from its period's parametric curve,
+    /// or blended with it, has none: the blend's own error is not computed (`fit_precision.md`
+    /// §5.2).
     pub own_fit_standard_error: Option<f64>,
 }
 
@@ -1192,9 +1194,10 @@ pub struct SharesOrigin {
     pub shorter_share_smoothing: ShareSmoothing,
     /// Where the fall-off came from.
     pub fall_off_smoothing: ShareSmoothing,
-    /// **The shorter share's standard error, only where that share is the stratum's own fit** —
-    /// one key a share rather than one for the block, because the two are smoothed separately and
-    /// either can come from a curve while the other is the stratum's own.
+    /// **The shorter share's standard error, only where that share was fitted with this
+    /// stratum's reads** — its own fit or a point on a penalised curve, as for the level. One key
+    /// a share rather than one for the block, because the two are smoothed separately and either
+    /// can come from a curve while the other is the stratum's own.
     pub shorter_share_own_fit_standard_error: Option<f64>,
     /// The fall-off's, on the same terms.
     pub fall_off_own_fit_standard_error: Option<f64>,
@@ -1245,10 +1248,26 @@ pub enum LevelSmoothing {
         /// Whether this stratum's repeat count sat inside the curve's fitted range.
         reach: CurveReach,
     },
+    /// A point on its period's **penalised curve**: one value per repeat count, fitted with the
+    /// reads of every stratum of the period at once and held close to its neighbours' values by
+    /// a stiffness penalty. **Neither this stratum's own fit nor a parametric curve**: its own
+    /// reads pulled it, and so did its neighbours'. Written by the penalised fit; files from the
+    /// older fit never carry it.
+    PenalisedCurve {
+        /// The curve's stiffness strength, finite and positive: the larger, the closer each
+        /// repeat count's value is held to its neighbours'.
+        strength: f64,
+        /// Whether a bend was eased at this repeat count: the reads insisted on a kink here, so
+        /// the stiffness penalty was relaxed for it.
+        eased_here: bool,
+        /// Whether this stratum's repeat count sat inside the range of strata with reads. The
+        /// penalised fit reports only strata with reads, so it writes `inside_the_fitted_range`.
+        reach: CurveReach,
+    },
 }
 
 /// How much of a period's curve went into one of a stratum's two slippage **shares**, and which
-/// curve. The share counterpart of [`LevelSmoothing`], and it holds the same three states —
+/// curve. The share counterpart of [`LevelSmoothing`], and it holds the same four states —
 /// including its `deny_unknown_fields`, and for the same reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -1270,6 +1289,16 @@ pub enum ShareSmoothing {
         /// The curve that was weighed in.
         curve: ShareCurve,
         /// Whether this stratum's repeat count sat inside the curve's fitted range.
+        reach: CurveReach,
+    },
+    /// A point on its period's penalised curve, as [`LevelSmoothing::PenalisedCurve`] is for the
+    /// level; the two shares have curves of their own, each with its own strength.
+    PenalisedCurve {
+        /// The curve's stiffness strength, finite and positive.
+        strength: f64,
+        /// Whether a bend was eased at this repeat count.
+        eased_here: bool,
+        /// Whether this stratum's repeat count sat inside the range of strata with reads.
         reach: CurveReach,
     },
 }
@@ -1490,13 +1519,13 @@ mod tests {
     /// narrowing one of them from `f64` to `f32` left the emitted file byte-identical.
     const FULL_PRECISION: f64 = 1.0 / 3.0;
 
-    /// **Where each of the fixture's three slippage rows sits.**
+    /// **Where each of the fixture's four slippage rows sits.**
     ///
     /// **Named because the order moved once**, and eight tests indexed it by number. The writer
     /// emits these rows in the stratum key's own order — period first, then reference repeat
     /// count — and the fixture listed them in another until 2026-08-30, when the round trip
     /// through memory found it. `the_named_slippage_rows_are_the_rows_they_name` is what keeps
-    /// these three honest, so a future reorder fails one test rather than eight.
+    /// these four honest, so a future reorder fails one test rather than eight.
     pub(super) const THE_ROW_WHOSE_SHARES_BLEND: usize = 0;
     /// Period 2 at 6 repeats: its slip share is a blend of its own fit and its period's curve,
     /// and its fall-off came whole off a curve.
@@ -1504,6 +1533,9 @@ mod tests {
     /// Period 2 at 11 repeats: everything came off a curve, so it records no shares origin and
     /// no expected slipped reads at all.
     pub(super) const THE_ROW_THAT_BORROWED_EVERYTHING: usize = 2;
+    /// Period 2 at 14 repeats: all three numbers are points on penalised curves, each with the
+    /// error the penalised fit gave it.
+    pub(super) const THE_ROW_ON_PENALISED_CURVES: usize = 3;
 
     /// **The reference every fixture in this module was fitted against.**
     ///
@@ -1885,6 +1917,41 @@ mod tests {
                         shorter_share_and_fall_off_origin: None,
                         samples_fitted_on: None,
                     },
+                    SlippageRow {
+                        period: 2,
+                        reference_repeats: 14,
+                        slippage_group: 0,
+                        share_of_reads_that_slip: 0.0657,
+                        shorter_share: 0.71,
+                        fall_off: 0.35,
+                        share_of_reads_that_slip_origin: LevelOrigin {
+                            smoothing: LevelSmoothing::PenalisedCurve {
+                                strength: 18.5,
+                                eased_here: true,
+                                reach: CurveReach::InsideTheFittedRange,
+                            },
+                            expected_slipped_reads: Some(5_120.75),
+                            // An error beside a penalised point is kept: the number was fitted
+                            // with this stratum's reads.
+                            own_fit_standard_error: Some(0.0034),
+                        },
+                        shorter_share_and_fall_off_origin: Some(SharesOrigin {
+                            expected_slipped_reads: Some(5_120.75),
+                            shorter_share_smoothing: ShareSmoothing::PenalisedCurve {
+                                strength: 6.25,
+                                eased_here: false,
+                                reach: CurveReach::InsideTheFittedRange,
+                            },
+                            fall_off_smoothing: ShareSmoothing::PenalisedCurve {
+                                strength: 9.75,
+                                eased_here: false,
+                                reach: CurveReach::InsideTheFittedRange,
+                            },
+                            shorter_share_own_fit_standard_error: Some(0.014),
+                            fall_off_own_fit_standard_error: Some(0.027),
+                        }),
+                        samples_fitted_on: None,
+                    },
                 ],
                 allele_length_variation_by_stratum: vec![StratumAlleleLengthVariationRow {
                     period: 2,
@@ -2025,7 +2092,7 @@ mod tests {
         let rows = a_file_using_every_shape()
             .repeat_tracts
             .slippage_by_stratum_and_group;
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
 
         let shares = &rows[THE_ROW_WHOSE_SHARES_BLEND];
         assert_eq!((shares.period, shares.reference_repeats), (1, 30));
@@ -2055,6 +2122,13 @@ mod tests {
                 .is_none(),
             "a row that borrowed everything counts no slipped reads of its own"
         );
+
+        let penalised = &rows[THE_ROW_ON_PENALISED_CURVES];
+        assert_eq!((penalised.period, penalised.reference_repeats), (2, 14));
+        assert!(matches!(
+            penalised.share_of_reads_that_slip_origin.smoothing,
+            LevelSmoothing::PenalisedCurve { .. }
+        ));
 
         // **And they are in the order the writer emits**, which is the stratum key's: period
         // first, then reference repeat count. The projection back out walks a map keyed by that
@@ -2513,8 +2587,8 @@ mod tests {
             );
         }
 
-        // 5. A slippage group that put no read in a stratum has no row for that pair. Three
-        //    strata crossed with two slippage groups is six pairs; three of them were fitted.
+        // 5. A slippage group that put no read in a stratum has no row for that pair. Four
+        //    strata crossed with two slippage groups is eight pairs; four of them were fitted.
         let slippage = table_of("slippage_by_stratum_and_group");
         let written: Vec<(i64, i64, i64)> = slippage
             .iter()
@@ -2531,7 +2605,7 @@ mod tests {
             .collect();
         assert_eq!(
             written.len(),
-            3,
+            4,
             "a row exists only where a group put reads"
         );
         assert!(
@@ -2846,7 +2920,8 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         for row in &file.repeat_tracts.slippage_by_stratum_and_group {
             let mut claims: Vec<(u64, u64, CurveReach)> = Vec::new();
             match &row.share_of_reads_that_slip_origin.smoothing {
-                LevelSmoothing::ThisStratum => {}
+                // A penalised point records no fitted range to check its reach against.
+                LevelSmoothing::ThisStratum | LevelSmoothing::PenalisedCurve { .. } => {}
                 LevelSmoothing::ThisPeriodsCurve { curve, reach }
                 | LevelSmoothing::Blend { curve, reach, .. } => {
                     claims.push((curve.fitted_from_repeats, curve.fitted_to_repeats, *reach))
@@ -2855,7 +2930,7 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
             if let Some(shares) = &row.shorter_share_and_fall_off_origin {
                 for smoothing in [&shares.shorter_share_smoothing, &shares.fall_off_smoothing] {
                     match smoothing {
-                        ShareSmoothing::ThisStratum => {}
+                        ShareSmoothing::ThisStratum | ShareSmoothing::PenalisedCurve { .. } => {}
                         ShareSmoothing::ThisPeriodsCurve { curve, reach }
                         | ShareSmoothing::Blend { curve, reach, .. } => claims.push((
                             curve.fitted_from_repeats,

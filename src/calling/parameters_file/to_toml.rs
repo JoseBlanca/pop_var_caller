@@ -338,9 +338,9 @@ impl ParametersFile {
                 "",
                 "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled. They are reads among the samples the stratum was fitted on: every sample, unless the row carries `samples_fitted_on` — then a large cohort's stratum was fitted on that many of its samples, taken in a fixed order that does not look at the data, and every count and error in the row is that subset's. A `samples_fitted_on` equal to the cohort's sample count means the subset grew to every sample.",
                 "",
-                "Where a number is this stratum's own fit — its smoothing is `this_stratum` — its origin carries an own-fit standard error: `own_fit_standard_error` for the first number, `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error` for the other two. It is how far that number would typically move if the stratum's tracts were drawn again. A number taken from a curve, or blended with one, has none: the blend's own error is not computed. **Where the row's `samples_fitted_on` is fewer than the cohort's samples, the error describes the subset's own fit, not how far that fit sits from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further from the fit on every sample than the two fits' errors allow for — more than two standard deviations of their difference — where about one would by chance.",
+                "Where a number was fitted with this stratum's own reads — its smoothing is `this_stratum`, or `penalised_curve` — its origin carries an own-fit standard error: `own_fit_standard_error` for the first number, `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error` for the other two. It is how far that number would typically move if the stratum's tracts were drawn again. A number taken from a parametric curve, or blended with one, has none: the blend's own error is not computed. **Where the row's `samples_fitted_on` is fewer than the cohort's samples, the error describes the subset's own fit, not how far that fit sits from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further from the fit on every sample than the two fits' errors allow for — more than two standard deviations of their difference — where about one would by chance.",
                 "",
-                "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own.",
+                "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement; or a point on its period's penalised curve (`penalised_curve`), one value per repeat count, fitted with the reads of every stratum of that period at once and held close to its neighbours' values, the more so the larger its `strength`. `eased_here = true` says the reads insisted on a bend at this repeat count, so the curve was let bend there. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a parametric curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own.",
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",
@@ -1301,7 +1301,24 @@ fn a_level_smoothing(smoothing: &LevelSmoothing) -> String {
                 ("reach", a_toml_string(the_word_for_reach(*reach))),
             ]),
         )]),
+        LevelSmoothing::PenalisedCurve {
+            strength,
+            eased_here,
+            reach,
+        } => a_penalised_point(*strength, *eased_here, *reach),
     }
+}
+
+/// A point on a penalised curve, the same one-key table for a level and for a share.
+fn a_penalised_point(strength: f64, eased_here: bool, reach: CurveReach) -> String {
+    an_inline_table(&[(
+        "penalised_curve",
+        an_inline_table(&[
+            ("strength", a_toml_float(strength)),
+            ("eased_here", eased_here.to_string()),
+            ("reach", a_toml_string(the_word_for_reach(reach))),
+        ]),
+    )])
 }
 
 fn a_share_smoothing(smoothing: &ShareSmoothing) -> String {
@@ -1326,6 +1343,11 @@ fn a_share_smoothing(smoothing: &ShareSmoothing) -> String {
                 ("reach", a_toml_string(the_word_for_reach(*reach))),
             ]),
         )]),
+        ShareSmoothing::PenalisedCurve {
+            strength,
+            eased_here,
+            reach,
+        } => a_penalised_point(*strength, *eased_here, *reach),
     }
 }
 

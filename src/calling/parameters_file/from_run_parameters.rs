@@ -892,9 +892,13 @@ fn level_origin_of(
                     .into(),
                 reach: the_recorded_reach(provenance.reach, stratum, slippage_group, "the level"),
             },
-            LevelSource::PenalisedCurve(_) => {
-                no_penalised_point_in_this_format(stratum, slippage_group, "the level")
-            }
+            // **The curve is not read on this arm either**: a penalised point is on no parametric
+            // curve, and its provenance records none. Its reach is required as a curve's is.
+            LevelSource::PenalisedCurve(point) => LevelSmoothing::PenalisedCurve {
+                strength: point.strength,
+                eased_here: point.eased_here,
+                reach: the_recorded_reach(provenance.reach, stratum, slippage_group, "the level"),
+            },
         },
         expected_slipped_reads: provenance.slipped_reads,
         own_fit_standard_error,
@@ -922,31 +926,12 @@ fn share_smoothing_of(
                 .into(),
             reach: the_recorded_reach(provenance.reach, stratum, slippage_group, which_number),
         },
-        ShareSource::PenalisedCurve(_) => {
-            no_penalised_point_in_this_format(stratum, slippage_group, which_number)
-        }
+        ShareSource::PenalisedCurve(point) => ShareSmoothing::PenalisedCurve {
+            strength: point.strength,
+            eased_here: point.eased_here,
+            reach: the_recorded_reach(provenance.reach, stratum, slippage_group, which_number),
+        },
     }
-}
-
-/// **Refuses to write a number that came off a penalised curve**, which this format of the file
-/// has no way to say.
-///
-/// Format 3 adds the smoothing that records it (`str_fit_to_calling.md` §2.3). Until then nothing
-/// that writes a file produces such a number: the penalised fit is not yet what
-/// `estimate-parameters` runs, and a file read back cannot carry one. Recording it as the
-/// stratum's own fit would put a wrong origin in the file, so a number that does arrive here is a
-/// programming error, and stops the run with the stratum it was found at.
-fn no_penalised_point_in_this_format(
-    stratum: Stratum,
-    slippage_group: u32,
-    which_number: &str,
-) -> ! {
-    panic!(
-        "at period {}, {} repeats, slippage group {slippage_group}, {which_number} came off a \
-         penalised curve, and this format of the parameters file has no smoothing that records \
-         one — the penalised fit's numbers can be written only once the file carries that origin",
-        stratum.period, stratum.reference_repeats
-    )
 }
 
 /// The curve a number came off, refusing a provenance that says a curve supplied it and does not
@@ -2870,28 +2855,187 @@ mod tests {
         );
     }
 
-    // **This format's two refusals of the penalised fit's numbers.** Each stops a number from
-    // being written under an origin it does not have — a penalised point as the stratum's own
-    // fit — and each is lifted, and its test turned into a round trip, by the format that can
-    // record the number. The third, an absent concentration, was lifted by format 3, which writes
-    // it as an absent between-locus share; its round trip follows.
-
-    /// The point every penalised source in these tests carries.
+    /// The point every penalised source in these tests carries: a strength that is not a round
+    /// number, and an eased bend, so neither field can pass by being a default.
     fn a_penalised_point() -> crate::parameter_estimation::joint::slippage_curve::PenalisedPoint {
         crate::parameter_estimation::joint::slippage_curve::PenalisedPoint {
-            strength: 20.0,
-            eased_here: false,
+            strength: 20.75,
+            eased_here: true,
         }
     }
 
+    /// One class as the penalised fit returns it: its level and both shares points on penalised
+    /// curves inside the range of classes with reads, with errors for the level and the shorter
+    /// share and none for the fall-off, which the fit withheld for too few loci.
+    fn a_class_on_penalised_curves() -> StratumOutcome {
+        use crate::parameter_estimation::joint::ssr_fit::{
+            SlippageErrors, StratumError, StratumErrors,
+        };
+        let on_the_curve = ShareProvenance {
+            source: ShareSource::PenalisedCurve(a_penalised_point()),
+            curve: None,
+            reach: Some(FittedCurveReach::Inside),
+        };
+        StratumOutcome::Fitted(Box::new(StratumFit {
+            standard_errors: Some(StratumErrors {
+                slippage: vec![
+                    Some(SlippageErrors {
+                        level: StratumError::Estimated(0.0037),
+                        shorter_share: StratumError::Estimated(0.019),
+                        fall_off: StratumError::TooFewLoci,
+                    }),
+                    None,
+                ],
+                allele_length_variation: vec![StratumError::TooFewLoci; 3],
+                concentration: StratumError::Estimated(0.9),
+            }),
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 6,
+            },
+            slippage: vec![
+                Some(Slippage {
+                    level: 0.0421,
+                    shorter_share: 0.83,
+                    fall_off: 0.31,
+                }),
+                None,
+            ],
+            allele_length_variation: vec![0.1, 0.8, 0.1],
+            concentration: Some(3.5),
+            climb: None,
+            samples_fitted_on: None,
+            tracts_of_its_own: 900,
+            reads_crossing: 19_000,
+            level_provenance: vec![
+                Some(LevelProvenance {
+                    source: LevelSource::PenalisedCurve(a_penalised_point()),
+                    curve: None,
+                    reach: Some(FittedCurveReach::Inside),
+                    slipped_reads: Some(8_000.5),
+                }),
+                None,
+            ],
+            shares_provenance: vec![
+                Some(SharesProvenance {
+                    slipped_reads: Some(8_000.5),
+                    shorter_share: on_the_curve,
+                    fall_off: on_the_curve,
+                }),
+                None,
+            ],
+        }))
+    }
+
+    /// **An error beside a number on a penalised curve reaches the file and reads back**
+    /// (`doc/devel/ng/spec/str_fit_to_calling.md` §2.3). Through the whole writer and back
+    /// through the reader into calling's tables: the class's level and shorter share keep the
+    /// errors the fit gave them, the fall-off's withheld error stays absent, and each number
+    /// reads back as the same point on its curve — strength, eased bend and reach — with no
+    /// parametric curve beside it.
     #[test]
-    #[should_panic(expected = "the level came off a penalised curve")]
-    fn a_level_off_a_penalised_curve_is_refused_by_this_format() {
-        level_origin_of(
+    fn an_error_beside_a_penalised_point_is_written_and_read_back() {
+        use crate::parameter_estimation::joint::stratum_fits::OwnFitStandardErrors;
+        let read_groups = a_runs_read_groups();
+        let run = a_run_with(
+            &read_groups,
+            &the_runs_contamination(),
+            a_declared_batching(&read_groups),
+            StratumFits::over(
+                &[a_class_on_penalised_curves()],
+                BTreeMap::from([
+                    (ReadGroupId(0), 0),
+                    (ReadGroupId(1), 0),
+                    (ReadGroupId(2), 1),
+                ]),
+            ),
+            the_runs_substitution_rates(),
+        );
+        let written = projected(&run, &read_groups);
+        let [row] = &written.repeat_tracts.slippage_by_stratum_and_group[..] else {
+            panic!("one class with one slippage group writes one row");
+        };
+        assert_eq!(
+            row.share_of_reads_that_slip_origin,
+            LevelOrigin {
+                smoothing: LevelSmoothing::PenalisedCurve {
+                    strength: 20.75,
+                    eased_here: true,
+                    reach: CurveReach::InsideTheFittedRange,
+                },
+                expected_slipped_reads: Some(8_000.5),
+                own_fit_standard_error: Some(0.0037),
+            }
+        );
+        let shares = row
+            .shorter_share_and_fall_off_origin
+            .as_ref()
+            .expect("the class fitted its two shares");
+        assert_eq!(shares.shorter_share_own_fit_standard_error, Some(0.019));
+        assert_eq!(
+            shares.fall_off_own_fit_standard_error, None,
+            "an error the fit withheld is not written"
+        );
+
+        let text = written.to_toml();
+        assert!(
+            text.contains(
+                "share_of_reads_that_slip_origin = { smoothing = { penalised_curve = { \
+                 strength = 20.75, eased_here = true, reach = \"inside_the_fitted_range\" } }"
+            ),
+            "the level's smoothing is written as a one-key table:\n{text}"
+        );
+        let read =
+            ParametersFile::from_toml(&text).unwrap_or_else(|error| panic!("{error}\n\n{text}"));
+        assert_eq!(read, written);
+
+        let back = read.to_run_parameters().expect("the file is usable");
+        let cell = back
+            .parameters
+            .ssr_slippage_fits()
+            .at(ReadGroupId(0), 2, 6)
+            .expect("the class reads back for its slippage group");
+        assert_eq!(
+            cell.level,
             LevelProvenance {
                 source: LevelSource::PenalisedCurve(a_penalised_point()),
                 curve: None,
                 reach: Some(FittedCurveReach::Inside),
+                slipped_reads: Some(8_000.5),
+            }
+        );
+        let shares = cell.shares.expect("the class's shares read back");
+        for share in [shares.shorter_share, shares.fall_off] {
+            assert_eq!(
+                share,
+                ShareProvenance {
+                    source: ShareSource::PenalisedCurve(a_penalised_point()),
+                    curve: None,
+                    reach: Some(FittedCurveReach::Inside),
+                }
+            );
+        }
+        assert_eq!(
+            cell.own_fit_standard_errors,
+            OwnFitStandardErrors {
+                level: Some(0.0037),
+                shorter_share: Some(0.019),
+                fall_off: None,
+            }
+        );
+    }
+
+    /// **A penalised point that does not say whether it sat inside the range of classes with
+    /// reads is refused**, as a curve's number is: the file has no other way to say a value was
+    /// held at an end.
+    #[test]
+    #[should_panic(expected = "the level came off its period's curve and nothing says whether")]
+    fn a_penalised_point_with_no_reach_is_refused() {
+        level_origin_of(
+            LevelProvenance {
+                source: LevelSource::PenalisedCurve(a_penalised_point()),
+                curve: None,
+                reach: None,
                 slipped_reads: Some(400.0),
             },
             None,
@@ -2903,14 +3047,17 @@ mod tests {
         );
     }
 
+    /// The same for a share.
     #[test]
-    #[should_panic(expected = "the shorter share came off a penalised curve")]
-    fn a_share_off_a_penalised_curve_is_refused_by_this_format() {
+    #[should_panic(
+        expected = "the shorter share came off its period's curve and nothing says whether"
+    )]
+    fn a_penalised_share_with_no_reach_is_refused() {
         share_smoothing_of(
             ShareProvenance {
                 source: ShareSource::PenalisedCurve(a_penalised_point()),
                 curve: None,
-                reach: Some(FittedCurveReach::Inside),
+                reach: None,
             },
             Stratum {
                 period: 2,

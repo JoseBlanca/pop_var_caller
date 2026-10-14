@@ -692,13 +692,17 @@ mod tests {
         assert_eq!(read.format_version, 3);
         read.validate()
             .expect("a version-1 file passes the checks a run applies");
-        assert_eq!(read, the_fixture_without_what_version_two_added());
+        assert_eq!(
+            read,
+            the_fixture_without_what_versions_two_and_three_added()
+        );
     }
 
-    /// Today's fixture with every key added since version 1 taken out — the keys version 2 added
-    /// and F's standard error, which version 3 added — as a file written before format 3 reads
-    /// back. It says version 3, which is what reading such a file stamps on it.
-    pub(super) fn the_fixture_without_what_version_two_added() -> ParametersFile {
+    /// Today's fixture with every key added since version 1 taken out — the keys version 2 added,
+    /// and F's standard error and the row on penalised curves, which version 3 added — as a file
+    /// written before format 3 reads back. It says version 3, which is what reading such a file
+    /// stamps on it.
+    pub(super) fn the_fixture_without_what_versions_two_and_three_added() -> ParametersFile {
         let mut file = a_file_using_every_shape();
         file.fitted_from.snp_indel_fit_starts = None;
         for row in &mut file.base_quality_calibration.by_read_group {
@@ -730,6 +734,11 @@ mod tests {
         if let Some(routing) = &mut file.repeat_routing {
             routing.max_str_bundle_len = None;
         }
+        // And the row on penalised curves: format 3 added that smoothing, so no older file
+        // carries the row.
+        file.repeat_tracts
+            .slippage_by_stratum_and_group
+            .remove(super::super::tests::THE_ROW_ON_PENALISED_CURVES);
         file
     }
 
@@ -1221,7 +1230,7 @@ mod files_written_before_format_3 {
     use super::super::{
         Warrant, between_locus_share_error_of, between_locus_share_of, concentration_of,
     };
-    use super::tests::the_fixture_without_what_version_two_added;
+    use super::tests::the_fixture_without_what_versions_two_and_three_added;
     use super::*;
 
     /// The fixture as the last version-1 build wrote it.
@@ -1331,7 +1340,7 @@ mod files_written_before_format_3 {
             );
             assert_eq!(
                 read,
-                the_fixture_without_what_version_two_added(),
+                the_fixture_without_what_versions_two_and_three_added(),
                 "{spelling}: every other number is the fixture's own"
             );
             read.validate()

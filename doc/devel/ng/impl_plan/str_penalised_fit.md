@@ -129,7 +129,7 @@ what goes with it (arch §4.1).
   text; `version_1_as_written.toml` restored to its old keys (from `aa42d629~1`); `from_toml.rs:367`
   expects version 3. Tests: a format-1 file and both format-2 spellings read back with F = 1/(1+c); an
   old file's error names its key path. *Depends:* B2. *Source:* arch §2.3; companion §2.2.
-- ☐ **B4** `LevelSmoothing::PenalisedCurve` and `ShareSmoothing::PenalisedCurve`, written, read and
+- ✅ **B4** `LevelSmoothing::PenalisedCurve` and `ShareSmoothing::PenalisedCurve`, written, read and
   validated (`strength` finite and positive); `of_the_numbers_emitted` (`stratum_fits.rs:107-126`)
   and `an_own_fit_error`'s callers (`validate.rs:810-817`, `:851-865`) made exhaustive matches that
   keep and accept an error beside `PenalisedCurve`. Test: an error from a `PenalisedCurve` outcome

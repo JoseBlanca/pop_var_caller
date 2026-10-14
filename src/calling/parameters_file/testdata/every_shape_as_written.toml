@@ -258,29 +258,33 @@ rung = "fitted_curve"
 # row is that subset's. A `samples_fitted_on` equal to the cohort's sample count
 # means the subset grew to every sample.
 #
-# Where a number is this stratum's own fit — its smoothing is `this_stratum` —
-# its origin carries an own-fit standard error: `own_fit_standard_error` for the
-# first number, `shorter_share_own_fit_standard_error` and
-# `fall_off_own_fit_standard_error` for the other two. It is how far that number
-# would typically move if the stratum's tracts were drawn again. A number taken
-# from a curve, or blended with one, has none: the blend's own error is not
-# computed. **Where the row's `samples_fitted_on` is fewer than the cohort's
-# samples, the error describes the subset's own fit, not how far that fit sits
-# from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers
-# compared sat further from the fit on every sample than the two fits' errors
-# allow for — more than two standard deviations of their difference — where
-# about one would by chance.
+# Where a number was fitted with this stratum's own reads — its smoothing is
+# `this_stratum`, or `penalised_curve` — its origin carries an own-fit standard
+# error: `own_fit_standard_error` for the first number,
+# `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error`
+# for the other two. It is how far that number would typically move if the
+# stratum's tracts were drawn again. A number taken from a parametric curve, or
+# blended with one, has none: the blend's own error is not computed. **Where the
+# row's `samples_fitted_on` is fewer than the cohort's samples, the error
+# describes the subset's own fit, not how far that fit sits from one on every
+# sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further
+# from the fit on every sample than the two fits' errors allow for — more than
+# two standard deviations of their difference — where about one would by chance.
 #
 # `share_of_reads_that_slip_origin` says where the first of the three came from
 # and `shorter_share_and_fall_off_origin` where the other two did: this
 # stratum's own fit, its period's curve, or a blend of the two, with the curve
-# itself written down so an interpolation can be told from a measurement. A row
-# whose two shares were not fitted here at all has no
-# `shorter_share_and_fall_off_origin` key. Each origin carries its own
-# `expected_slipped_reads` where this stratum fitted a slip share of its own,
-# and neither carries one where the number was taken whole from a curve — so a
-# row showing the same count twice is not a duplicate, and a row showing none
-# fitted nothing of its own.
+# itself written down so an interpolation can be told from a measurement; or a
+# point on its period's penalised curve (`penalised_curve`), one value per
+# repeat count, fitted with the reads of every stratum of that period at once
+# and held close to its neighbours' values, the more so the larger its
+# `strength`. `eased_here = true` says the reads insisted on a bend at this
+# repeat count, so the curve was let bend there. A row whose two shares were not
+# fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin
+# carries its own `expected_slipped_reads` where this stratum fitted a slip
+# share of its own, and neither carries one where the number was taken whole
+# from a parametric curve — so a row showing the same count twice is not a
+# duplicate, and a row showing none fitted nothing of its own.
 #
 # The curves under `shorter_share_and_fall_off_origin` also record
 # `curve_fitted_on`, which says what that curve itself was fitted on: this
@@ -316,6 +320,7 @@ slippage_by_stratum_and_group = [
     { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25, own_fit_standard_error = 0.0021 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 22.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 36, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum", fall_off_own_fit_standard_error = 0.018 }, samples_fitted_on = 1 },
     { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 15 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 3.0, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 3, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } }, shorter_share_own_fit_standard_error = 0.011 } },
     { period = 2, reference_repeats = 11, slippage_group = 1, share_of_reads_that_slip = 0.0913, shorter_share = 0.79, fall_off = 0.28, share_of_reads_that_slip_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 12, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 8 }, reach = "below_the_fitted_range" } } } },
+    { period = 2, reference_repeats = 14, slippage_group = 0, share_of_reads_that_slip = 0.0657, shorter_share = 0.71, fall_off = 0.35, share_of_reads_that_slip_origin = { smoothing = { penalised_curve = { strength = 18.5, eased_here = true, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 5120.75, own_fit_standard_error = 0.0034 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 5120.75, shorter_share_smoothing = { penalised_curve = { strength = 6.25, eased_here = false, reach = "inside_the_fitted_range" } }, fall_off_smoothing = { penalised_curve = { strength = 9.75, eased_here = false, reach = "inside_the_fitted_range" } }, shorter_share_own_fit_standard_error = 0.014, fall_off_own_fit_standard_error = 0.027 } },
 ]
 # `share_of_chromosomes_by_repeat_offset` runs from -span to +span in whole
 # repeat units from the **reference** tract length, so the middle entry is the

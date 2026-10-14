@@ -814,9 +814,8 @@ impl ParametersFile {
             an_own_fit_error(
                 &format!("{at}.share_of_reads_that_slip_origin.own_fit_standard_error"),
                 row.share_of_reads_that_slip_origin.own_fit_standard_error,
-                matches!(
-                    row.share_of_reads_that_slip_origin.smoothing,
-                    LevelSmoothing::ThisStratum
+                a_level_fitted_with_its_strata_reads(
+                    &row.share_of_reads_that_slip_origin.smoothing,
                 ),
             )?;
             if let Some(samples) = row.samples_fitted_on
@@ -858,14 +857,14 @@ impl ParametersFile {
                         "{at}.shorter_share_and_fall_off_origin.shorter_share_own_fit_standard_error"
                     ),
                     shares.shorter_share_own_fit_standard_error,
-                    matches!(shares.shorter_share_smoothing, ShareSmoothing::ThisStratum),
+                    a_share_fitted_with_its_strata_reads(&shares.shorter_share_smoothing),
                 )?;
                 an_own_fit_error(
                     &format!(
                         "{at}.shorter_share_and_fall_off_origin.fall_off_own_fit_standard_error"
                     ),
                     shares.fall_off_own_fit_standard_error,
-                    matches!(shares.fall_off_smoothing, ShareSmoothing::ThisStratum),
+                    a_share_fitted_with_its_strata_reads(&shares.fall_off_smoothing),
                 )?;
             }
         }
@@ -1198,25 +1197,45 @@ fn no_error_is_computed_for(at: &str, value: &WarrantedValue) -> Result<(), Para
     Ok(())
 }
 
-/// **A stratum's own-fit error, written only beside a number that is the stratum's own fit**: one
-/// beside a number taken from a curve or blended with one would describe a number the stratum
-/// does not emit (`fit_precision.md` §5.2).
+/// **A stratum's own-fit error, written only beside a number fitted with the stratum's own
+/// reads** — its own fit, or a point on a penalised curve. One beside a number taken from a
+/// parametric curve or blended with one would describe a number the stratum does not emit
+/// (`fit_precision.md` §5.2).
 fn an_own_fit_error(
     at: &str,
     error: Option<f64>,
-    the_number_is_the_stratums_own: bool,
+    fitted_with_the_stratums_reads: bool,
 ) -> Result<(), ParametersFileError> {
     let Some(error) = error else {
         return Ok(());
     };
-    if !the_number_is_the_stratums_own {
+    if !fitted_with_the_stratums_reads {
         return Err(refuse(
             at,
             "is written beside a number taken from its period's curve or blended with it, and \
-             only a number that is this stratum's own fit has an own-fit error; delete it",
+             only a number fitted with this stratum's own reads — its own fit, or a point on a \
+             penalised curve — has an own-fit error; delete it",
         ));
     }
     a_standard_error(at, error)
+}
+
+/// Whether a level with this smoothing was fitted with its stratum's own reads, and so may carry
+/// an own-fit error. **Every variant is named**, so a new smoothing has to say which side it is
+/// on.
+fn a_level_fitted_with_its_strata_reads(smoothing: &LevelSmoothing) -> bool {
+    match smoothing {
+        LevelSmoothing::ThisStratum | LevelSmoothing::PenalisedCurve { .. } => true,
+        LevelSmoothing::ThisPeriodsCurve { .. } | LevelSmoothing::Blend { .. } => false,
+    }
+}
+
+/// The same, for a share.
+fn a_share_fitted_with_its_strata_reads(smoothing: &ShareSmoothing) -> bool {
+    match smoothing {
+        ShareSmoothing::ThisStratum | ShareSmoothing::PenalisedCurve { .. } => true,
+        ShareSmoothing::ThisPeriodsCurve { .. } | ShareSmoothing::Blend { .. } => false,
+    }
 }
 
 /// A number that is a share of something: finite, and within `[0, 1]`.
@@ -1425,8 +1444,8 @@ fn an_allele_length_variation(at: &str, shares: &[f64]) -> Result<(), Parameters
     Ok(())
 }
 
-/// A level's smoothing: the weight a curve carried is a share, and the curve's own numbers are
-/// numbers.
+/// A level's smoothing: the weight a curve carried is a share, the curve's own numbers are
+/// numbers, and a penalised curve's strength is above zero.
 ///
 /// **The curve is provenance rather than a term in a score** — it is recorded so an interpolation
 /// can be told from a measurement — so a `NaN` in it changes no genotype. It is still refused,
@@ -1447,6 +1466,9 @@ fn a_level_smoothing(at: &str, smoothing: &LevelSmoothing) -> Result<(), Paramet
             a_share(&format!("{at}.blend.curve_weight"), *curve_weight)?;
             a_slippage_curve(&format!("{at}.blend.curve"), curve)
         }
+        LevelSmoothing::PenalisedCurve { strength, .. } => {
+            a_penalised_strength(&format!("{at}.penalised_curve.strength"), *strength)
+        }
     }
 }
 
@@ -1465,7 +1487,26 @@ fn a_share_smoothing(at: &str, smoothing: &ShareSmoothing) -> Result<(), Paramet
             a_share(&format!("{at}.blend.curve_weight"), *curve_weight)?;
             a_share_curve(&format!("{at}.blend.curve"), curve)
         }
+        ShareSmoothing::PenalisedCurve { strength, .. } => {
+            a_penalised_strength(&format!("{at}.penalised_curve.strength"), *strength)
+        }
     }
+}
+
+/// A penalised curve's stiffness strength: finite and above zero. At zero the curve does not hold
+/// a repeat count's value to its neighbours' at all, and the penalised fit never reports one.
+fn a_penalised_strength(at: &str, strength: f64) -> Result<(), ParametersFileError> {
+    finite(at, strength)?;
+    if strength > 0.0 {
+        return Ok(());
+    }
+    Err(refuse(
+        at,
+        format!(
+            "is {strength}, and a penalised curve's strength is above zero: it says how closely \
+             each repeat count's value is held to its neighbours'"
+        ),
+    ))
 }
 
 /// Every number a level curve records is a number.
@@ -1498,7 +1539,8 @@ fn a_share_curve(at: &str, curve: &ShareCurve) -> Result<(), ParametersFileError
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        THE_ROW_WHOSE_SHARES_BLEND, THE_ROW_WHOSE_SLIP_SHARE_BLENDS, a_file_using_every_shape,
+        THE_ROW_ON_PENALISED_CURVES, THE_ROW_WHOSE_SHARES_BLEND, THE_ROW_WHOSE_SLIP_SHARE_BLENDS,
+        a_file_using_every_shape,
     };
     use super::super::{
         ContaminationFittedFrom, ContaminationMeasurement, EvidenceCount, LevelSmoothing, SeedRung,
@@ -2280,6 +2322,69 @@ mod tests {
             refused(|file| file.repeat_tracts.slippage_by_stratum_and_group[0].fall_off = -0.1);
         assert!(field.ends_with("fall_off"), "{field}");
         assert!(problem.contains("not negative"), "{problem}");
+    }
+
+    /// **A penalised curve's strength is finite and above zero**, the level's and each share's.
+    /// The fixture's row on penalised curves carries an own-fit error beside all three of its
+    /// numbers, and the fixture is accepted (`the_file_a_run_writes_is_accepted`), so those errors
+    /// are too.
+    #[test]
+    fn a_penalised_strength_that_is_not_above_zero_is_refused() {
+        fn the_row(file: &mut ParametersFile) -> &mut super::super::SlippageRow {
+            &mut file.repeat_tracts.slippage_by_stratum_and_group[THE_ROW_ON_PENALISED_CURVES]
+        }
+        fn its_strength(smoothing: &mut ShareSmoothing) -> &mut f64 {
+            let ShareSmoothing::PenalisedCurve { strength, .. } = smoothing else {
+                panic!("that row's shares are on penalised curves");
+            };
+            strength
+        }
+        for strength in [0.0, -2.5, f64::NAN, f64::INFINITY] {
+            let (field, problem) = refused(|file| {
+                let LevelSmoothing::PenalisedCurve {
+                    strength: written, ..
+                } = &mut the_row(file).share_of_reads_that_slip_origin.smoothing
+                else {
+                    panic!("that row's level is on a penalised curve");
+                };
+                *written = strength;
+            });
+            assert!(
+                field.ends_with(
+                    "share_of_reads_that_slip_origin.smoothing.penalised_curve.strength"
+                ),
+                "{field}"
+            );
+            if strength.is_finite() {
+                assert!(problem.contains("above zero"), "{problem}");
+            }
+        }
+        let (field, _) = refused(|file| {
+            *its_strength(
+                &mut the_row(file)
+                    .shorter_share_and_fall_off_origin
+                    .as_mut()
+                    .expect("that row records its shares' origin")
+                    .shorter_share_smoothing,
+            ) = 0.0;
+        });
+        assert!(
+            field.ends_with("shorter_share_smoothing.penalised_curve.strength"),
+            "{field}"
+        );
+        let (field, _) = refused(|file| {
+            *its_strength(
+                &mut the_row(file)
+                    .shorter_share_and_fall_off_origin
+                    .as_mut()
+                    .expect("that row records its shares' origin")
+                    .fall_off_smoothing,
+            ) = -1.0;
+        });
+        assert!(
+            field.ends_with("fall_off_smoothing.penalised_curve.strength"),
+            "{field}"
+        );
     }
 
     /// **A number that is not a number is refused wherever the walk reaches one**, including in

@@ -71,7 +71,8 @@ use crate::parameter_estimation::joint::share_curve::{
     ShareCurve as FittedShareCurve, ShareCurveSource, ShareShape as FittedShape, ShareSource,
 };
 use crate::parameter_estimation::joint::slippage_curve::{
-    CurveReach as FittedCurveReach, LevelSource, RiseShape, SlippageCurve as FittedSlippageCurve,
+    CurveReach as FittedCurveReach, LevelSource, PenalisedPoint, RiseShape,
+    SlippageCurve as FittedSlippageCurve,
 };
 use crate::parameter_estimation::joint::ssr_fit::{
     LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
@@ -643,6 +644,20 @@ fn a_level_provenance(
             Some(a_slippage_curve(&at, curve)?),
             Some((*reach).into()),
         ),
+        // **No curve**: a penalised point is not on a parametric curve, and the reach is all
+        // the file records of the range it was fitted over.
+        LevelSmoothing::PenalisedCurve {
+            strength,
+            eased_here,
+            reach,
+        } => (
+            LevelSource::PenalisedCurve(PenalisedPoint {
+                strength: *strength,
+                eased_here: *eased_here,
+            }),
+            None,
+            Some((*reach).into()),
+        ),
     };
     Ok(LevelProvenance {
         source,
@@ -672,6 +687,18 @@ fn a_share_provenance(smoothing: &ShareSmoothing) -> ShareProvenance {
                 curve_weight: *curve_weight,
             },
             Some(a_share_curve(curve)),
+            Some((*reach).into()),
+        ),
+        ShareSmoothing::PenalisedCurve {
+            strength,
+            eased_here,
+            reach,
+        } => (
+            ShareSource::PenalisedCurve(PenalisedPoint {
+                strength: *strength,
+                eased_here: *eased_here,
+            }),
+            None,
             Some((*reach).into()),
         ),
     };
@@ -1030,7 +1057,7 @@ pub(super) mod tests {
         assert_eq!(fits.stated_concentration(), 3.5);
         assert_eq!(fits.strata_with_a_allele_length_variation(), 1);
         assert_eq!(fits.periods_with_a_pooled_allele_length_variation(), 1);
-        assert_eq!(fits.strata(), 3);
+        assert_eq!(fits.strata(), 4);
         assert_eq!(run.ssr_substitution_rate().count(), 1);
     }
 

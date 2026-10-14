@@ -2661,8 +2661,8 @@ mod tests {
     /// `str_penalised_fit.md` §1.2–1.4): fitted, with one slippage group, shares and no
     /// concentration, no climb record and no sample count; the level and both shares read off
     /// the penalised curve inside the range it was fitted over; the concentration's error
-    /// `NotPlaced` because there is no concentration, every other error withheld for too few
-    /// loci.
+    /// `NotPlaced` because there is no concentration; the level's and the shorter share's errors
+    /// estimated, every other error withheld for too few loci.
     fn as_the_penalised_fit_returns_it(repeat_count: u32) -> StratumOutcome {
         use crate::parameter_estimation::joint::slippage_curve::{CurveReach, PenalisedPoint};
         use crate::parameter_estimation::joint::ssr_fit::{
@@ -2687,8 +2687,8 @@ mod tests {
             concentration: None,
             standard_errors: Some(StratumErrors {
                 slippage: vec![Some(SlippageErrors {
-                    level: StratumError::TooFewLoci,
-                    shorter_share: StratumError::TooFewLoci,
+                    level: StratumError::Estimated(0.0043),
+                    shorter_share: StratumError::Estimated(0.021),
                     fall_off: StratumError::TooFewLoci,
                 })],
                 allele_length_variation: vec![StratumError::TooFewLoci; 3],
@@ -2719,9 +2719,8 @@ mod tests {
     ///
     /// At one sample no class has a concentration, so each class keeps its own shares at the
     /// stated concentration, which is the constant and says it was defaulted; the slippage is the
-    /// class's own and its warrant is `FittedHere`. The own-fit errors come back all absent,
-    /// because the errors beside a penalised source are not yet kept — the step that keeps them
-    /// flips that assertion.
+    /// class's own and its warrant is `FittedHere`. The errors the fit estimated beside the
+    /// penalised level and shorter share are kept, and the fall-off's, withheld, stays absent.
     #[test]
     fn the_penalised_fits_outcome_at_one_sample_reaches_every_calling_lookup() {
         use crate::parameter_estimation::joint::stratum_fits::{
@@ -2754,7 +2753,11 @@ mod tests {
             assert!(matches!(cell.level.source, LevelSource::PenalisedCurve(_)));
             assert_eq!(
                 cell.own_fit_standard_errors,
-                OwnFitStandardErrors::default()
+                OwnFitStandardErrors {
+                    level: Some(0.0043),
+                    shorter_share: Some(0.021),
+                    fall_off: None,
+                }
             );
             assert_eq!(warrant_of(&cell), Provenance::FittedHere);
         }
