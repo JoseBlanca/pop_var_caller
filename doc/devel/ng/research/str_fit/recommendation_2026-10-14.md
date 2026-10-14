@@ -36,7 +36,12 @@ smooth curves through the counts, repeat. How smooth each curve is, is estimated
 - **It is thousands of times faster than the fit in main** (`cost_2026-10-14.md`). tomato2 (59
   accessions, 32 Mb): 5.8 seconds at the ±9 window, against 6.7 hours for main's fit at ±6.
   Estimated at kimura's scale (2,169 samples) on this Mac: 7–23 minutes at 3 reads a sample, up to
-  28 at 30 reads, within the one-hour budget. Memory at kimura's scale: about 10 GiB.
+  28 at 30 reads, within the one-hour budget. Memory at kimura's scale: about 20–25 GiB, almost all
+  of it the arranged evidence, which kimura measured at 19.4 GiB for its 66.2 million
+  (tract, sample) pairs with reads (`kimura_shapes_span9_2026-10-14.md`; the cost study's 10 GiB
+  assumed tomato2's 139 bytes a row, where kimura's evidence takes about 315).
+  For comparison, the counting fit as it stood before the speed-ups took 53 minutes and 45.6 GiB
+  on kimura at ±9.
 
 - **Its uncertainties are honest for stutter, F and common allele lengths**: the truth falls
   within one reported error about 50–70 times in 100, as it should (`compare_D_prior_2026-10-14.md`).
@@ -86,5 +91,8 @@ calling keep a class's own allele length variation when its F is absent.** Next:
 - **Real data.** Held-out prediction on tomato2 and kimura, and calling on HG002 and the GIAB trio,
   with the chosen method. This is the first step after the decision.
 - **Calling accuracy** on simulated data with the fitted numbers.
-- **The kimura shape run** (`kimura_prompt_shapes_span9.md`), handed to the owner.
+- **The allele-length shape on kimura** (`kimura_shapes_span9_2026-10-14.md`): stopped by the owner
+  after 12 of 102 jobs, at 7–10 hours a class; only one-base runs of 8–15 repeats finished, and no
+  edged shape. Not needed for this decision: penalised EM keeps each allele length free.
+- **The new code on kimura's real data**, timed: the 7–28 minutes above are estimates.
 - **Reading kimura's 2,169 census files**, which the one-hour budget also has to cover.
