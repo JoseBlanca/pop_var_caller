@@ -11,8 +11,7 @@ that allow for samples sharing a locus) is §2.6 here. Architecture:
 
 **Amended 2026-10-14 after an adversarial review** of this spec, its companion, the architecture and
 the plan. Corrections of fact are made in place. **Changes that are the lead's decisions, not the
-owner's, are marked *(lead, 2026-10-14)* and listed in §7 for the owner to confirm**; one of them, the
-withheld errors of §2.6, is expressly awaiting that confirmation.
+owner's, are marked *(lead, 2026-10-14)* and listed in §7**; the owner confirmed the withheld errors of §2.6 on 2026-10-14.
 
 ---
 
@@ -215,8 +214,8 @@ the truth within one error only 0–2 times in 100 at 500 samples, where an hone
 
 Rare lengths get no error (§7).
 
-**Classes with fewer than 8 loci with reads get no error for any number** *(lead, 2026-10-14; awaiting
-the owner's confirmation)*. The fit now reports such classes (§2.2), and their errors were never
+**Classes with fewer than 8 loci with reads get no error for any number** *(lead, 2026-10-14; confirmed by
+the owner the same day)*. The fit now reports such classes (§2.2), and their errors were never
 measured: the bench drew 8 to 4,947 loci a class (`phase0_bench_2026-10-12.md:55`) and track 1 started at
 20. The sandwich's B has rank at most the number of loci. The errors are withheld until the plan's
 first check measures their coverage on thin classes; the owner may then lift the rule. On kimura, 107
@@ -374,7 +373,7 @@ withheld errors (§7). These replace the climb's summaries (`ssr_fit.rs:3165-333
 
 - **Errors withheld for every number of a class with fewer than 8 loci with reads** (§2.6), until
   measured; the plan's first check measures their coverage, and the owner may lift the rule.
-  **Awaiting the owner's confirmation.**
+  **Confirmed by the owner, 2026-10-14.**
 - **Classes visited one at a time within a motif length, motif lengths one at a time**, parallel
   inside a class (§2.2, §3). Thread scaling and wall time are measured again at full scale.
 - **A class with no reads stays refused**, as today; the new fit produces no `Derived` class (§2.2).

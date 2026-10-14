@@ -63,8 +63,8 @@ pub const PAIR_ALTERNATIONS: usize = 10;
 /// A share's error is withheld when the class's loci with reads times the share is below this
 /// (spec §7, owner 2026-10-14). Rests on two settings; soft.
 pub const LOCI_FOR_A_SHARE_ERROR: f64 = 3.0;
-/// **Every error of a class is withheld below this many loci with reads** (spec §2.6; lead,
-/// 2026-10-14, awaiting the owner). Errors on thinner classes were never measured; soft.
+/// **Every error of a class is withheld below this many loci with reads** (spec §2.6; confirmed
+/// by the owner, 2026-10-14). Errors on thinner classes were never measured; soft.
 pub const LOCI_FOR_AN_ERROR: usize = 8;
 ```
 
