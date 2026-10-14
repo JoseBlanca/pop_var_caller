@@ -275,6 +275,12 @@ fn migrate_to_format_3(file: &mut toml::Value) -> Result<(), ParametersFileError
 /// One allele-length-variation row of a format-1 or format-2 file rewritten into format 3: its
 /// `concentration` becomes `between_locus_share`, and its `shares_by_repeat_offset` is renamed.
 /// `at` is the row's path as the old file wrote it.
+///
+/// **F and F's error are refused in an old row; the shares under their format-3 name are not.**
+/// F and its error are on a different scale from the concentration the old row holds, so a row
+/// carrying both cannot say which is meant. The shares are the same numbers under either name,
+/// so a row that spells them the new way says nothing ambiguous; one that spells them both ways
+/// is refused by the rename.
 fn migrate_a_row(row: &mut toml::Table, at: &str) -> Result<(), ParametersFileError> {
     renamed(
         row,
@@ -282,13 +288,15 @@ fn migrate_a_row(row: &mut toml::Table, at: &str) -> Result<(), ParametersFileEr
         "share_of_chromosomes_by_repeat_offset",
         at,
     )?;
-    if row.contains_key("between_locus_share") {
-        return Err(refuse(
-            format!("{at}.between_locus_share"),
-            "is a format-3 key in a file whose `format_version` says it was written before \
-             format 3, so it is not clear which of this row's numbers is meant; set \
-             `format_version` to the format the row was written in",
-        ));
+    for format_3_key in ["between_locus_share", "between_locus_share_standard_error"] {
+        if row.contains_key(format_3_key) {
+            return Err(refuse(
+                format!("{at}.{format_3_key}"),
+                "is a format-3 key in a file whose `format_version` says it was written before \
+                 format 3, so it is not clear which of this row's numbers is meant; set \
+                 `format_version` to the format the row was written in",
+            ));
+        }
     }
     let concentration = a_concentration_with_a_share(
         row.remove("concentration").as_ref(),
@@ -1429,6 +1437,51 @@ mod files_written_before_format_3 {
         }
     }
 
+    /// **A file main's build wrote survives a calling run byte for byte**: read and migrated,
+    /// projected into a run's parameters, written back as the run writes the file it scored
+    /// with, and written back again from that.
+    ///
+    /// The first write is format 3 and is the migrated file itself, so the F the migration
+    /// picked for each concentration is the F a format-3 build writes for the concentration
+    /// calling then holds. The second write shows the run's parameters do not drift a second
+    /// time.
+    #[test]
+    fn a_file_mains_build_wrote_survives_a_calling_run_byte_for_byte() {
+        use super::super::tests::THE_REFERENCE_A_RUN_FITTED_AGAINST;
+        use super::super::to_run_parameters::tests::{
+            the_counts_the_projection_out_reads, the_files_read_groups,
+        };
+        use crate::repeat_catalog::StrRepeatCriteria;
+
+        let written_back = |file: &ParametersFile| {
+            let projected = file
+                .to_run_parameters()
+                .expect("a file main's build wrote is usable");
+            let mut written = ParametersFile::of_run(
+                &projected.parameters,
+                &the_files_read_groups(file),
+                &the_counts_the_projection_out_reads(&projected),
+                &projected.inbreeding_by_sample,
+                &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+                file.fitted_from.census.clone(),
+                &StrRepeatCriteria::default(),
+            )
+            .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
+            // **The routing is the run's own, not something the file projects**, as the
+            // identity block is; main's file predates `max_str_bundle_len`, so it is fed back.
+            written.repeat_routing.clone_from(&file.repeat_routing);
+            written
+        };
+
+        let read = ParametersFile::from_toml(&version_2_as_main_spelled_it())
+            .expect("a file main's build wrote reads");
+        let once = written_back(&read);
+        assert_eq!(once, read, "the run writes the migrated file");
+        assert_eq!(once.to_toml(), read.to_toml(), "byte for byte");
+        let twice = written_back(&once);
+        assert_eq!(twice.to_toml(), once.to_toml(), "and again");
+    }
+
     /// **A whole number is read as a concentration**, as the reader reads one wherever a number
     /// belongs, and the smallest concentrations that have an F are kept.
     #[test]
@@ -1572,6 +1625,15 @@ mod files_written_before_format_3 {
             "concentration = 3.5, between_locus_share = 0.2,",
         ));
         assert_eq!(field, format!("{row}.between_locus_share"));
+
+        // **F's error, too**: taken silently, it would be read as an error on a number the row
+        // does not hold until the migration writes it.
+        let (field, _) = refused_by_the_rewrite(&with(
+            &main,
+            "concentration = 3.5,",
+            "concentration = 3.5, between_locus_share_standard_error = 0.01,",
+        ));
+        assert_eq!(field, format!("{row}.between_locus_share_standard_error"));
     }
 
     /// **What the reader refuses in an old file is named by key path and not by line**: the file

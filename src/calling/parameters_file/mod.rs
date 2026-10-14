@@ -13,9 +13,10 @@
 //!   a `Vec` in the run's sample order. A file carrying only an order would be silently wrong
 //!   against a re-ordered sample list, so every row here names its sample or its read group as
 //!   well as numbering it (spec §3.5).
-//! - **`RunParameters` cannot say *absent*; the file must.** The five states of spec §5 are
-//!   distinctions a reader that collapses them will get wrong, and every one of them is a
-//!   **missing key** here rather than a value standing in for one:
+//! - **`RunParameters` cannot say *absent*; the file must.** The five states of spec §5, and the
+//!   sixth format 3 added (`doc/devel/ng/spec/str_fit_to_calling.md` §2.1), are distinctions a
+//!   reader that collapses them will get wrong, and every one of them is a **missing key** here
+//!   rather than a value standing in for one:
 //!
 //!   | what is true | how the file says it |
 //!   |---|---|
@@ -24,8 +25,9 @@
 //!   | a read group's error rate could not be fitted | a multiplier of 1.0 whose `warrant` is `defaulted` |
 //!   | a stratum was furnished from its period's curves | no row for it in `allele_length_variation_by_stratum` |
 //!   | a slippage group put no read in a stratum | no row for that pair in `slippage_by_stratum_and_group` |
+//!   | the fit could not place a stratum's between-locus share | no `between_locus_share` key, and no `between_locus_share_standard_error`, on its row of `allele_length_variation_by_stratum` |
 //!
-//!   The rule underneath all five: **`Option<T>` is absence and never a sentinel**, and a warrant
+//!   The rule underneath all six: **`Option<T>` is absence and never a sentinel**, and a warrant
 //!   is carried rather than inferred from the value.
 //!
 //! # Why it lives under `calling/`
@@ -206,6 +208,12 @@ use serde::{Deserialize, Serialize};
 /// `fallback_between_locus_share`. **A file written in version 1 or 2 is rewritten into version 3
 /// as it is read**, each concentration converted to its F, and reads back saying version 3
 /// ([`ParametersFile::from_toml`]).
+///
+/// **Version 3 also lets a slippage number's smoothing be `penalised_curve`** — a point on a
+/// penalised curve, with its `strength`, whether the curve was `eased_here`, and its `reach` —
+/// added without a version bump, before any build on main wrote version 3. A build made
+/// between the two changes reads and writes version 3 without it, and refuses a file that uses
+/// it with an unknown-variant error.
 pub const FORMAT_VERSION: u32 = 3;
 
 /// **Why a parameters file could not be used.**
@@ -1099,7 +1107,7 @@ pub struct RepeatTracts {
     pub slippage_by_stratum_and_group: Vec<SlippageRow>,
     /// One row a stratum — the tract ladder's **top** rung, or its second where the row has no
     /// between-locus share. **Only a stratum fitted on its own tracts has one**: a stratum
-    /// furnished from its period's slippage curves carries no length spectrum at all, by
+    /// furnished from its period's slippage curves carries no allele length variation at all, by
     /// construction, and that absence is what the pooled rung exists to answer. So absence here
     /// is data, not a hole.
     pub allele_length_variation_by_stratum: Vec<StratumAlleleLengthVariationRow>,

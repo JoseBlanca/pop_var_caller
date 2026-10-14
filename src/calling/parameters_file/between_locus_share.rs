@@ -37,9 +37,11 @@
 //!
 //! A run handed a file reads each F as a concentration, scores with it, and writes it back beside
 //! its VCF as F. **Plain arithmetic does not bring every F back**: `1 / (1 + (1 − F) / F)` is
-//! the neighbouring `f64` for about one F in five drawn uniformly from (0, 1), and for about one
-//! in twenty of the Fs converted from concentrations. So the two conversions *into* the file pick,
-//! among the few `f64`s next to the plain answer, one that the reverse conversion maps back
+//! the neighbouring `f64` for about one F in five drawn uniformly from (0, 1), and for fewer of
+//! the Fs converted from concentrations: about one in 37 for concentrations drawn log-uniform
+//! over 10⁻¹² to 10⁸, and one in 24 over 10⁻³ to 10⁴, the range the new fit clamps a
+//! concentration to (a million draws each, with numpy). So the two conversions *into* the file
+//! pick, among the few `f64`s next to the plain answer, one that the reverse conversion maps back
 //! exactly, and they pick it the same way every time (nearest the plain answer, the lower of two
 //! equally near). Measured by this module's tests:
 //!

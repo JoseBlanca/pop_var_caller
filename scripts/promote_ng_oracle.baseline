@@ -105,12 +105,15 @@
 # error on the 5 strata that had one, and the fallback as F (0.526009726176786 = 1/(1 + 0.9011055313907091)). Every other
 # line is identical, the shares included, and no VCF moved — the one called with the fitted file included. They were
 # a27bb944… / ef9ada5a….
+# Both parameters-file lines re-recorded 2026-10-15 (str_penalised_fit.md, plan step B4): the file's notes on the
+# repeat-tract rows were reworded for the penalised-curve smoothing; every line that is not a comment is identical, and no
+# VCF moved. They were 73d8d5c8… / 122b72df….
 slice: 20 regions, 4 alignments
 # records: 7508
 67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
 67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
-73d8d5c8c1370b339c58b121d9a22a96  from_alignments.parameters.toml
+3d1719c24f803d73546cc5770873857c  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
 0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-122b72dfb627fd9a54b779bd7ea49926  fitted.parameters.toml
+419869a022083b843604cbd4fb52e297  fitted.parameters.toml
 e4af91bd9bb86438c5b73a034e640091  from_fit.comparable

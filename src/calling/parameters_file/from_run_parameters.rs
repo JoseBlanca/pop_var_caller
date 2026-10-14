@@ -3097,6 +3097,272 @@ mod tests {
         );
     }
 
+    /// **A fit whose own-fit error is 0 beside a penalised number stops `estimate-parameters`
+    /// before it writes the file**, with the validator's message naming the class.
+    ///
+    /// The writer passes a penalised number's own-fit error through unchecked, and the penalised
+    /// fit can produce an exact 0 (it clamps a negative variance to 0). A calling run refuses an
+    /// error of 0, so without the check the run would write a file the next run cannot read. The
+    /// check is `estimate-parameters`'s own; it is tested here because the fixtures that build a
+    /// run from a fit's outcomes are here.
+    #[test]
+    fn a_fit_with_an_error_of_zero_beside_a_penalised_number_stops_before_writing() {
+        use crate::cli::EstimateParametersCliError;
+        use crate::cli::estimate_parameters::a_file_the_next_run_can_read;
+        use crate::parameter_estimation::joint::ssr_fit::StratumError;
+        let StratumOutcome::Fitted(mut class) = a_class_on_penalised_curves() else {
+            panic!("the fixture class is fitted");
+        };
+        class
+            .standard_errors
+            .as_mut()
+            .and_then(|errors| errors.slippage[0].as_mut())
+            .expect("the fixture class carries slippage errors for its first group")
+            .level = StratumError::Estimated(0.0);
+        let read_groups = a_runs_read_groups();
+        let run = a_run_with(
+            &read_groups,
+            &the_runs_contamination(),
+            a_declared_batching(&read_groups),
+            StratumFits::over(
+                &[StratumOutcome::Fitted(class)],
+                BTreeMap::from([
+                    (ReadGroupId(0), 0),
+                    (ReadGroupId(1), 0),
+                    (ReadGroupId(2), 1),
+                ]),
+            ),
+            the_runs_substitution_rates(),
+        );
+
+        let refused = a_file_the_next_run_can_read(projected(&run, &read_groups))
+            .expect_err("a file with an error of 0 is one a calling run refuses");
+        let EstimateParametersCliError::RefusedByItsOwnReader { source } = &refused else {
+            panic!("refused as a file its own reader refuses, not as {refused:?}");
+        };
+        assert_eq!(
+            source.to_string(),
+            "the parameters file cannot be used: \
+             repeat_tracts.slippage_by_stratum_and_group[period = 2, reference_repeats = 6, \
+             slippage_group = 0].share_of_reads_that_slip_origin.own_fit_standard_error is 0, \
+             and a standard error is above zero; leave the key out where there is none"
+        );
+    }
+
+    /// **A class as the penalised fit returns it**, at `reference_repeats` of period 2, with
+    /// `slippage_groups` groups that have numbers.
+    ///
+    /// Built from [`a_class_on_penalised_curves`]: level and both shares on penalised curves, the
+    /// level's and the shorter share's errors estimated and the fall-off's withheld. **With a
+    /// concentration** it keeps that fixture's F error; **without one** its concentration error
+    /// is `NotPlaced`, as the fit reports it at one sample (arch `str_penalised_fit.md` §1.4).
+    fn a_penalised_class(
+        reference_repeats: u64,
+        concentration: Option<f64>,
+        slippage_groups: usize,
+    ) -> StratumOutcome {
+        use crate::parameter_estimation::joint::ssr_fit::StratumError;
+        let StratumOutcome::Fitted(mut class) = a_class_on_penalised_curves() else {
+            panic!("the fixture class is fitted");
+        };
+        class.stratum.reference_repeats = reference_repeats;
+        class.concentration = concentration;
+        class.slippage.truncate(slippage_groups);
+        class.level_provenance.truncate(slippage_groups);
+        class.shares_provenance.truncate(slippage_groups);
+        let errors = class
+            .standard_errors
+            .as_mut()
+            .expect("the fixture class carries errors");
+        errors.slippage.truncate(slippage_groups);
+        if concentration.is_none() {
+            errors.concentration = StratumError::NotPlaced;
+        }
+        StratumOutcome::Fitted(class)
+    }
+
+    /// **The whole trip, and the file it wrote first.** Run → file → text → file → run → file:
+    /// the file validates, its text reads back as itself, the run it reads into writes it again,
+    /// and the second text is the first byte for byte.
+    ///
+    /// Writing the file a second time, from the parameters the file produced, is what catches a
+    /// projection that loses something on the way in and has it re-derived on the way out.
+    fn after_the_whole_trip(
+        run: &RunParameters,
+        read_groups: &ReadGroups,
+        rates: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        inbreeding: &[Estimate<InbreedingF>],
+    ) -> ParametersFile {
+        use super::super::to_run_parameters::tests::the_counts_the_projection_out_reads;
+        let first = ParametersFile::of_run(
+            run,
+            read_groups,
+            &the_counts_of(run, rates),
+            inbreeding,
+            &A_REFERENCE,
+            a_census(),
+            &StrRepeatCriteria::default(),
+        );
+        first
+            .validate()
+            .unwrap_or_else(|error| panic!("the run writes a file it can use: {error}"));
+        let text = first.to_toml();
+        let read =
+            ParametersFile::from_toml(&text).unwrap_or_else(|error| panic!("{error}\n\n{text}"));
+        assert_eq!(read, first, "the text is the file");
+        let back = read
+            .to_run_parameters()
+            .expect("and the file is a run's parameters");
+        let again = ParametersFile::of_run(
+            &back.parameters,
+            read_groups,
+            &the_counts_the_projection_out_reads(&back),
+            &back.inbreeding_by_sample,
+            &A_REFERENCE,
+            read.fitted_from.census.clone(),
+            &StrRepeatCriteria::default(),
+        );
+        assert_eq!(again, first, "and the parameters are the file again");
+        assert_eq!(again.to_toml(), text, "byte for byte");
+        first
+    }
+
+    /// **The penalised fit's outcome at one sample survives the whole trip**: one sample, one
+    /// library, two classes on penalised curves and no concentration anywhere.
+    ///
+    /// Neither class's row carries `between_locus_share` or its error, the fallback is the
+    /// built-in F of 0.5 marked `defaulted` — no class had an F to take a median of — and the
+    /// errors the fit kept and withheld are written and come back as they were.
+    #[test]
+    fn a_penalised_fits_outcome_at_one_sample_survives_the_whole_trip() {
+        let read_groups = ReadGroups::of_lanes(&[("HWI.3", "TS-1", "lib3")]);
+        let rates = BTreeMap::from([(
+            ReadGroupId(0),
+            a_fitted_rate(0.004, Provenance::FittedHere, 812_344),
+        )]);
+        let inbreeding = vec![an_inbreeding_estimate(
+            0.42,
+            Provenance::FittedHere,
+            180_600_412,
+        )];
+        let run = RunParameters::assemble(
+            &rates,
+            &BTreeMap::from([(ReadGroupId(0), a_read_groups_minted_totals(0.008, 1_000))]),
+            &BTreeMap::from([(ReadGroupId(0), identified(0.031, 4_211, 90_233))]),
+            DeclaredBatches::all_together(&read_groups),
+            inbreeding.iter().map(|estimate| estimate.value).collect(),
+            a_seed(),
+            StratumFits::over(
+                &[a_penalised_class(6, None, 1), a_penalised_class(9, None, 1)],
+                BTreeMap::from([(ReadGroupId(0), 0)]),
+            ),
+            BTreeMap::new(),
+            diploid(),
+        );
+
+        let file = after_the_whole_trip(&run, &read_groups, &rates, &inbreeding);
+        let tracts = &file.repeat_tracts;
+        assert_eq!(tracts.allele_length_variation_by_stratum.len(), 2);
+        for row in &tracts.allele_length_variation_by_stratum {
+            assert_eq!(
+                row.between_locus_share, None,
+                "{} repeats",
+                row.reference_repeats
+            );
+            assert_eq!(row.between_locus_share_standard_error, None);
+        }
+        assert!(
+            file.to_toml().contains(
+                "fallback_between_locus_share = { value = 0.5, warrant = \"defaulted\" }"
+            ),
+            "the fallback is the built-in F, defaulted"
+        );
+        assert_eq!(tracts.slippage_by_stratum_and_group.len(), 2);
+        for row in &tracts.slippage_by_stratum_and_group {
+            assert_eq!(
+                row.share_of_reads_that_slip_origin.own_fit_standard_error,
+                Some(0.0037)
+            );
+            let shares = row
+                .shorter_share_and_fall_off_origin
+                .as_ref()
+                .expect("each class fitted its two shares");
+            assert_eq!(shares.shorter_share_own_fit_standard_error, Some(0.019));
+            assert_eq!(shares.fall_off_own_fit_standard_error, None);
+        }
+    }
+
+    /// **The penalised fit's outcome over several samples survives the whole trip**: a class
+    /// with an F and an F error beside one the fit could not place, in one file.
+    ///
+    /// The class at 6 repeats has a concentration of 3.5 and its error; the class at 9 has none.
+    /// The run declares two slippage groups and each class has numbers for the first only, so the
+    /// second is a pair the file leaves out. The fallback is the median F of the classes that
+    /// have one, marked `fitted_here`.
+    #[test]
+    fn a_penalised_fits_outcome_with_some_fs_survives_the_whole_trip() {
+        let read_groups = a_runs_read_groups();
+        let run = a_run_with(
+            &read_groups,
+            &the_runs_contamination(),
+            a_declared_batching(&read_groups),
+            StratumFits::over(
+                &[
+                    a_penalised_class(6, Some(3.5), 2),
+                    a_penalised_class(9, None, 2),
+                ],
+                BTreeMap::from([
+                    (ReadGroupId(0), 0),
+                    (ReadGroupId(1), 0),
+                    (ReadGroupId(2), 1),
+                ]),
+            ),
+            the_runs_substitution_rates(),
+        );
+
+        let file = after_the_whole_trip(
+            &run,
+            &read_groups,
+            &the_runs_fitted_rates(),
+            &the_runs_inbreeding(),
+        );
+        let tracts = &file.repeat_tracts;
+        let [with_f, without_f] = &tracts.allele_length_variation_by_stratum[..] else {
+            panic!("two classes write two rows");
+        };
+        assert_eq!(with_f.reference_repeats, 6);
+        assert_eq!(with_f.between_locus_share, between_locus_share_of(3.5));
+        assert!(with_f.between_locus_share_standard_error.is_some());
+        assert_eq!(without_f.reference_repeats, 9);
+        assert_eq!(without_f.between_locus_share, None);
+        assert_eq!(without_f.between_locus_share_standard_error, None);
+        assert_eq!(
+            tracts.fallback_between_locus_share.warrant,
+            Warrant::FittedHere
+        );
+        assert_eq!(
+            tracts.slippage_by_stratum_and_group.len(),
+            2,
+            "one row a class for its first slippage group, which is the only one with numbers"
+        );
+        for row in &tracts.slippage_by_stratum_and_group {
+            assert!(matches!(
+                row.share_of_reads_that_slip_origin.smoothing,
+                LevelSmoothing::PenalisedCurve { .. }
+            ));
+            assert_eq!(
+                row.share_of_reads_that_slip_origin.own_fit_standard_error,
+                Some(0.0037)
+            );
+            let shares = row
+                .shorter_share_and_fall_off_origin
+                .as_ref()
+                .expect("each class fitted its two shares");
+            assert_eq!(shares.shorter_share_own_fit_standard_error, Some(0.019));
+            assert_eq!(shares.fall_off_own_fit_standard_error, None);
+        }
+    }
+
     /// **A stratum with shares and no concentration is written with no F, and reads back so.**
     ///
     /// Through the whole writer and back through the reader into calling's tables: the stratum's

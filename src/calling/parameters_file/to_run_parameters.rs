@@ -919,7 +919,7 @@ pub(super) mod tests {
     /// **⚑ The bottom rung's warrant survives the trip too, and until 2026-08-30 it could not.**
     ///
     /// `repeat_tracts.fallback_between_locus_share` is the tract ladder's bottom rung:
-    /// one concentration for the whole run, the median of what its strata fitted. **The
+    /// one between-locus share for the whole run, the median of its strata's shares. **The
     /// projection in read only the number and the writer worked the warrant out again** from
     /// whether any stratum was fitted — which is true of a run that took the median itself and
     /// equally true of a run handed one, so a file marked `supplied` came back out saying
@@ -1373,8 +1373,8 @@ mod the_north_star_round_trip {
     //! every accessor the run exposes is compared before against after.
     //!
     //! **What the second of those adds is the lookup**, which a file comparison cannot reach at
-    //! all: `StratumFits::at`'s four answers for a cell with no numbers, the three rungs of
-    //! `allele_length_variation_at` a format-2 file can carry, and the bottom rung's median.
+    //! all: `StratumFits::at`'s four answers for a cell with no numbers, the four rungs of
+    //! `allele_length_variation_at` a format-3 file can carry, and the bottom rung's median.
     //! None of that is written down anywhere in the file — the file carries the rows the lookup
     //! is built from, and the lookup is what a locus asks.
     //!
@@ -1382,8 +1382,11 @@ mod the_north_star_round_trip {
     //! the digest, the census, the sample list and the read-group table — is fed back into the
     //! second write rather than round-tripped, because `to_run_parameters` deliberately carries
     //! none of spec §6's four bindings; they are step D2's. And **the tract ladder's fallback
-    //! concentration carries a warrant the writer re-derives**, so a projection that lost it
-    //! would be invisible here; `validate` refuses the contradiction instead.
+    //! carries a warrant this fixture cannot test**: the warrant travels through the projection
+    //! (since 2026-08-30), but here it is `fitted_here` beside fitted strata, which is also what
+    //! re-deriving it would give, so a projection that lost it would be invisible.
+    //! `the_bottom_rungs_warrant_is_the_files_and_not_worked_out_from_its_strata` holds it
+    //! instead.
 
     use std::collections::BTreeMap;
 
@@ -1779,12 +1782,18 @@ mod the_north_star_round_trip {
                     for weight in &mut weights {
                         *weight /= total;
                     }
+                    // **No concentration where the period has no curves and the stratum is the
+                    // second of each three**, as a fit reports where nothing places one: its
+                    // shares are its own and calling holds them at the stated concentration,
+                    // the rung format 3 added.
+                    let concentration =
+                        (has_curves || which_repeats % 3 == 0).then(|| a_number(3.0, &keys));
                     outcomes.push(StratumOutcome::Fitted(Box::new(StratumFit {
                         standard_errors: None,
                         stratum,
                         slippage,
                         allele_length_variation: weights,
-                        concentration: Some(a_number(3.0, &keys)),
+                        concentration,
                         climb: Some(ClimbRecord {
                             log_likelihood_a_tract: -a_number(2.0, &keys),
                             tracts_fitted: 100 + which_repeats,
@@ -2073,14 +2082,21 @@ mod the_north_star_round_trip {
                     .or_default() += 1;
             }
         }
-        // **All three rungs a format-2 file can carry are walked**, which is what stops this
+        // **All four rungs a format-3 file can carry are walked**, which is what stops this
         // comparing one rung with itself thirty-six times. Measured rather than reasoned about:
-        // the 16 strata fitted on their own tracts take the top rung; the 16 of the two curved
-        // periods that were not — 8 derived and 8 refused — take their period's pool; and the 4
-        // refused strata of the period that has no curves, and so no pool, fall to the flat one.
+        // of the 16 strata fitted on their own tracts, the 12 with a concentration take the top
+        // rung and the 4 without — all in the period that has no curves — keep their own shares
+        // at the stated concentration; the 16 of the two curved periods that were not fitted —
+        // 8 derived and 8 refused — take their period's pool; and the 4 refused strata of the
+        // period that has no curves, and so no pool, fall to the flat one.
         assert_eq!(
             rungs,
-            BTreeMap::from([("its own", 16), ("its period's", 16), ("the flat one", 4)])
+            BTreeMap::from([
+                ("its own", 12),
+                ("its own shares at the stated spread", 4),
+                ("its period's", 16),
+                ("the flat one", 4)
+            ])
         );
         // **The counts are asserted so that a lookup answering *absent* everywhere cannot pass.**
         // Measured on this fixture rather than reasoned about: 6 read groups × 3 periods × 14

@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use thiserror::Error;
 
-use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
+use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile, ParametersFileError};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
@@ -310,6 +310,23 @@ pub enum EstimateParametersCliError {
         path: PathBuf,
     },
 
+    /// The fit finished, and the parameters file it built is one a calling run would refuse to
+    /// read, so no file was written.
+    ///
+    /// **A bug, not something the person typed.** The file is checked by the same validator a
+    /// calling run applies before it scores with one, and the validator's refusal, which names
+    /// the key and the class it sits on, is this error's source. Without the check the run would
+    /// write the file and only the next run would refuse it — after the whole fit had been spent.
+    #[error(
+        "the parameters file this fit built would be refused by the run that reads it, so none \
+         was written; this is a bug in this build, and the refusal that follows says where"
+    )]
+    RefusedByItsOwnReader {
+        /// What the validator said.
+        #[source]
+        source: Box<ParametersFileError>,
+    },
+
     /// The output could not be written.
     #[error("writing {}", path.display())]
     Output {
@@ -444,7 +461,28 @@ fn fit_and_assemble(
         &segmentation.inputs().repeat_tract_criteria,
         &fit.generic.starts,
     );
-    Ok((file, samples))
+    Ok((a_file_the_next_run_can_read(file)?, samples))
+}
+
+/// **The file a fit built, refused here if a calling run would refuse it** — so the run stops
+/// with the validator's message and writes nothing, rather than writing a file the next run
+/// cannot use.
+///
+/// The writer checks some of what the validator checks on its own (a concentration with no F,
+/// a concentration error with no F error), one assert at a time; this is the one call that
+/// covers every mismatch between the two, including one a future fit introduces.
+///
+/// # Errors
+///
+/// [`EstimateParametersCliError::RefusedByItsOwnReader`], carrying the validator's refusal.
+pub(crate) fn a_file_the_next_run_can_read(
+    file: ParametersFile,
+) -> Result<ParametersFile, EstimateParametersCliError> {
+    file.validate()
+        .map_err(|source| EstimateParametersCliError::RefusedByItsOwnReader {
+            source: Box::new(source),
+        })?;
+    Ok(file)
 }
 
 /// **A cohort's psps opened as a cohort, their censuses read, judged against this run's settings
