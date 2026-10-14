@@ -85,10 +85,10 @@ mod tests {
         AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SECOND_SAMPLES_SUBSTITUTION, TRACT,
         a_varying_cohort_on_disk,
     };
-    use crate::region_typing::DEFAULT_MAX_STR_LEN;
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
     };
+    use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
     use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 
     /// A VCF's whole contents, as the lines a comparison holds and a failure prints.
@@ -142,6 +142,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
@@ -186,6 +187,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
@@ -227,6 +229,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
@@ -527,6 +530,7 @@ mod tests {
                 min_period: DEFAULT_MIN_PERIOD,
                 max_period: DEFAULT_MAX_PERIOD,
                 max_str_len: DEFAULT_MAX_STR_LEN,
+                max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
             },
         };
@@ -802,6 +806,7 @@ mod tests {
                 min_period: DEFAULT_MIN_PERIOD,
                 max_period: DEFAULT_MAX_PERIOD,
                 max_str_len: DEFAULT_MAX_STR_LEN,
+                max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
                 max_reads_per_position:
                     crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
@@ -850,6 +855,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
@@ -912,6 +918,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,

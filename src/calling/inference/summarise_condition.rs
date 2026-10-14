@@ -27,8 +27,8 @@
 use crate::calling::GenotypeTableView;
 use crate::calling::genotype_prior::seed_generic::{VariantClass, fill_locus_concentration};
 use crate::calling::genotype_prior::{
-    CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow, SampleAlleleCopies,
-    fill_sample_concentration, fill_ssr_seed,
+    BundlePrior, CohortAlleleCopies, Concentration, GenotypePriorModel, PriorRow,
+    SampleAlleleCopies, fill_sample_concentration, fill_ssr_bundle_seed, fill_ssr_seed,
 };
 use crate::calling::likelihood::copy_shares;
 use crate::calling::likelihood::generic::{
@@ -38,25 +38,26 @@ use crate::calling::likelihood::ssr::genotype_log_likelihood_row;
 use crate::calling::likelihood::ssr_emission::SsrEmissionModel;
 use crate::calling::likelihood::{FrozenContamination, ReadGroupCalibrations};
 use crate::calling::quality::{
-    ArtifactTestCounts, score_best_genotype, score_uncorrected_site_quality,
+    ArtifactTestCounts, SiteQualityPrior, score_best_genotype, score_uncorrected_site_quality,
 };
 use crate::calling::{
     CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture, ErrorSpreadTable,
     ExpectedAlleleCopies, FrozenParameters, GenericLocusSample, GenericSampleEvidence,
     GenotypeTable, LocusEvidence, LocusInference, ReadGroupParameters, RepeatTractProvenance,
-    SampleGenotypeCall, SampleScoringBuffers, SsrSampleEvidence, fill_batch_allele_copies,
-    fill_contaminant_allele_frequencies, fill_error_spreads,
+    SampleGenotypeCall, SampleScoringBuffers, SsrLocusShape, SsrSampleEvidence,
+    fill_batch_allele_copies, fill_contaminant_allele_frequencies, fill_error_spreads,
 };
 use crate::float;
-use crate::locus_generation::SsrDetail;
+use crate::locus_generation::SsrBundleDetail;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::repeat_strata::RepeatCount;
 use crate::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
-use std::num::NonZeroU32;
 
-use super::repeat_tract_parameters::{TractPrior, TractScoringFits, tract_candidates};
+use super::repeat_tract_parameters::{
+    TractPrior, TractScoringFits, bundle_candidates, tract_candidates,
+};
 use super::slippage_refit::{PooledSlipCounts, RefitEmissionCache, largest_movement, refit_cells};
 use super::{LocusGenotyper, RunnableCallingLoopConfig};
 
@@ -1334,19 +1335,20 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
     // genotype likelihood table, which the loop built and this pass only reads
     // (`doc/devel/ng/spec/calling_quality.md` §3.2).
     //
-    // **⚠ At a repeat tract this is the one place an ordinary-site quantity is read**, and it
-    // is worth naming because everything else on the tract path was moved off one. The prior
-    // seed here is the run's *frequency* spectrum — how allele frequencies are spread across
-    // the population — and the tract's own *length* spectrum has no bearing on it. That is not
-    // a defect introduced by the tract branch: `calling_quality.md` §8 leaves a tract's site
-    // quality to a sibling document that is not written, so a tract shares the SNP/indel fold
-    // until that lands. It is stated here rather than left for a reader to discover, because
-    // `population_diversity.md` §1's fourth goal names exactly this shape of failure.
-    let site_quality = score_uncorrected_site_quality(
-        scratch.site_quality_buffers_mut(),
-        genotypes,
-        parameters.prior_seed(),
-    );
+    // **The prior is the one this locus's genotypes were called under** (`calling_quality.md`
+    // §8.1): the run's frequency spectrum at an ordinary locus, and at a repeat tract the seed
+    // concentration its own allele length variation gave — still in the scratch, which nothing after
+    // the per-locus fill writes. Until 2026-10-10 a tract read the run's spectrum here, about
+    // 1 variant position in 1,000, and at one sample a heterozygote called at genotype quality
+    // 20 came out of this fold at 0.6 and was not written.
+    let prior = match evidence {
+        LocusEvidence::Generic { .. } => SiteQualityPrior::from(parameters.prior_seed()),
+        LocusEvidence::Ssr { .. } => {
+            SiteQualityPrior::of_repeat_tract(scratch.seed_concentration())
+        }
+    };
+    let site_quality =
+        score_uncorrected_site_quality(scratch.site_quality_buffers_mut(), genotypes, prior);
 
     let cohort_expected_copies =
         ExpectedAlleleCopies::new(scratch.cohort_expected_copies().to_vec(), &candidates);
@@ -1573,10 +1575,8 @@ struct TractEvidence<'a> {
     /// One entry per sample of the run, in run order. **A tract rules no sample out**
     /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), so every sample has one.
     per_sample: &'a [SsrSampleEvidence<'a>],
-    /// The tract's repeat unit and its two flanks.
-    detail: &'a SsrDetail,
-    /// How many whole repeats each candidate carries, parallel to the locus's candidate table.
-    candidate_repeat_counts: &'a [NonZeroU32],
+    /// The repeat ground: a segment's motif and repeat counts, or a bundle's runs and parses.
+    shape: SsrLocusShape<'a>,
 }
 
 impl<'a> TractEvidence<'a> {
@@ -1591,13 +1591,48 @@ impl<'a> TractEvidence<'a> {
     /// of every candidate table and these counts run parallel to it. It is what the spectrum's
     /// offsets are measured from, and passing a candidate's instead would re-centre the shape on
     /// that candidate.
+    ///
+    /// # Panics
+    ///
+    /// At an STR bundle, whose prior is [`bundle_prior_of`]'s.
     fn prior(&self, parameters: &'a FrozenParameters<'a>) -> TractPrior<'a> {
-        let reference_repeats = RepeatCount(self.candidate_repeat_counts[0].get());
+        let SsrLocusShape::Segment {
+            detail,
+            candidate_repeat_counts,
+        } = self.shape
+        else {
+            unreachable!("an STR bundle's prior is read per run, by `bundle_prior_of`")
+        };
+        let reference_repeats = RepeatCount(candidate_repeat_counts[0].get());
         TractPrior {
             reference_repeats,
             allele_length_variation: parameters
-                .ssr_allele_length_variation_at(self.detail.motif.ssr_period(), reference_repeats),
+                .ssr_allele_length_variation_at(detail.motif.ssr_period(), reference_repeats),
         }
+    }
+}
+
+/// **What an STR bundle's prior is read from, looked up once per locus**: each reference run's
+/// own reference count and its stratum's allele length variation (`str_bundle_loci.md` §7.4). The
+/// reference counts are the reference allele's run parse, entry 0 of the candidates.
+fn bundle_prior_of<'a>(
+    detail: &SsrBundleDetail,
+    candidate_parses: &[crate::region_typing::run_parse::RunParse],
+    parameters: &'a FrozenParameters<'a>,
+) -> BundlePrior<'a> {
+    let reference_run_counts: Vec<u32> = candidate_parses[0].copies().collect();
+    let run_spectra = detail
+        .runs
+        .iter()
+        .zip(&reference_run_counts)
+        .map(|(run, &copies)| {
+            parameters.ssr_allele_length_variation_at(run.motif().ssr_period(), RepeatCount(copies))
+        })
+        .collect();
+    BundlePrior {
+        reference_run_counts,
+        run_spectra,
+        stated_concentration: parameters.ssr_slippage_fits().stated_concentration(),
     }
 }
 
@@ -1608,12 +1643,10 @@ fn tract_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> TractEvidence<'a> {
         LocusEvidence::Ssr {
             region: _,
             per_sample,
-            detail,
-            candidate_repeat_counts,
+            shape,
         } => TractEvidence {
             per_sample,
-            detail,
-            candidate_repeat_counts,
+            shape: *shape,
         },
         LocusEvidence::Generic { region, .. } => unreachable!(
             "the SNP/indel locus at {region} reached the repeat-tract path's evidence: its \
@@ -1818,13 +1851,34 @@ fn fill_tract_likelihood_table<Model: SsrEmissionModel>(
     mut refit: SlippageRoundBuild<'_>,
 ) {
     let tract = tract_evidence_of(evidence);
-    let scored_candidates = tract_candidates(candidates, tract.candidate_repeat_counts);
-    scratch.tract_fits_mut().gather_for_locus(
-        &tract.detail.motif,
-        &scored_candidates,
-        tract.prior(parameters),
-        parameters,
-    );
+    let scored_candidates = match tract.shape {
+        SsrLocusShape::Segment {
+            detail,
+            candidate_repeat_counts,
+        } => {
+            let scored = tract_candidates(candidates, candidate_repeat_counts);
+            scratch.tract_fits_mut().gather_for_locus(
+                &detail.motif,
+                &scored,
+                tract.prior(parameters),
+                parameters,
+            );
+            scored
+        }
+        SsrLocusShape::Bundle {
+            detail,
+            candidate_parses,
+        } => {
+            let scored = bundle_candidates(candidates, detail, candidate_parses);
+            scratch.tract_fits_mut().gather_for_bundle(
+                detail,
+                &scored,
+                &bundle_prior_of(detail, candidate_parses, parameters),
+                parameters,
+            );
+            scored
+        }
+    };
     // **The slippage round's numbers go over the frozen gather, not instead of it.** The
     // gather is re-run each round because everything *else* a cell carries is frozen and this
     // is its one builder; what a round adopted then replaces the stutter models it re-fitted,
@@ -1939,7 +1993,10 @@ fn attribute_reads_under_the_posteriors<SsrEmissionScratch>(
     candidates: &CandidateAlleles,
     emissions: &RefitEmissionCache,
 ) -> PooledSlipCounts {
-    let period = i64::from(tract.detail.motif.ssr_period().get());
+    let SsrLocusShape::Segment { detail, .. } = tract.shape else {
+        unreachable!("the slippage round runs at STR segments only")
+    };
+    let period = i64::from(detail.motif.ssr_period().get());
     let candidate_count = candidates.len();
     let candidate_byte_lengths: Vec<i64> = candidates.iter().map(|b| b.len() as i64).collect();
     // Copied out because the walk below borrows the whole scratch mutably to score each row,
@@ -2404,8 +2461,30 @@ where
                 None
             }
             LocusEvidence::Ssr {
-                detail,
-                candidate_repeat_counts,
+                shape:
+                    SsrLocusShape::Bundle {
+                        detail,
+                        candidate_parses,
+                    },
+                ..
+            } => {
+                // **The product of the runs' seeds** (`str_bundle_loci.md` §7.4): each run's
+                // shape read off its own stratum at its own offset, held with the most variable
+                // run's conviction — `fill_ssr_bundle_seed` says why.
+                let prior = bundle_prior_of(detail, candidate_parses, parameters);
+                let run_counts: Vec<u32> = candidate_parses
+                    .iter()
+                    .flat_map(|parse| parse.copies())
+                    .collect();
+                let _ = fill_ssr_bundle_seed(&run_counts, &prior, scratch.seed_concentration_mut());
+                Some(prior.rung())
+            }
+            LocusEvidence::Ssr {
+                shape:
+                    SsrLocusShape::Segment {
+                        detail,
+                        candidate_repeat_counts,
+                    },
                 ..
             } => {
                 // **The reference tract's own repeat count is entry 0**, and that is a
@@ -2454,8 +2533,16 @@ where
         // attributed. An ordinary site ignores the setting structurally, whatever a run asked
         // for: it has no slippage numbers to re-fit (§5.1's closing paragraph).
         let refit_config = &config.slippage_refit;
-        let refit_may_run =
-            !refit_config.is_frozen() && matches!(evidence, LocusEvidence::Ssr { .. });
+        // **An STR bundle runs no round**: its cells carry no frozen slippage to re-fit
+        // (`TractScoringFits::gather_for_bundle`).
+        let refit_may_run = !refit_config.is_frozen()
+            && matches!(
+                evidence,
+                LocusEvidence::Ssr {
+                    shape: SsrLocusShape::Segment { .. },
+                    ..
+                }
+            );
         // The round's working memory, allocated only where a round may run: the emissions the
         // build caches for the attribution, the numbers the last round adopted, and a buffer
         // for the next re-fit. The frozen path allocates none of it — the three empty
@@ -2628,6 +2715,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
     use crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung;
 
     /// The repeat unit every repeat tract in this file is built on — **a dinucleotide**, so that
@@ -2699,6 +2787,8 @@ mod tests {
     /// emission model touches it. Zeroing it here would change no number below.
     fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: tract_bases(repeats).into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -2723,6 +2813,8 @@ mod tests {
         let bases = tract_bases(repeats);
         let covered = u16::try_from(bases.len()).expect("a short fixture tract");
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             read_witness: ReadWitness::from_left(
                 covered,
                 crate::locus_generation::LocusLen::from_positions(u64::from(covered) + 4),
@@ -5861,6 +5953,7 @@ mod tests {
         let view = table.view();
         let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
         let partials = [PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
                 .expect("one witnessed position"),
             read_group: ReadGroupId(0),
@@ -6034,7 +6127,7 @@ mod tests {
         alleles.admit(Box::from(b"ATATAT".as_slice()));
         let table = GenotypeTable::build(diploid(), 2);
         let view = table.view();
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
 
@@ -6055,7 +6148,9 @@ mod tests {
         );
 
         // **The site quality is the only number this arm has to get right**, so it is
-        // compared against an independently prepared fold rather than merely being present.
+        // compared against an independently prepared fold rather than merely being present —
+        // and the fold runs under the tract's own seed (1.0 for the reference tract against
+        // 0.5 for the other), not the run's (`calling_quality.md` §8.1).
         let mut fold_only = CallingScratch::<()>::default();
         fold_only.prepare_for_locus(1, &alleles, &view);
         for (slot, &value) in fold_only
@@ -6068,9 +6163,21 @@ mod tests {
         let expected = score_uncorrected_site_quality(
             fold_only.site_quality_buffers_mut(),
             &view,
+            SiteQualityPrior::of_repeat_tract(&[1.0, 0.5]),
+        );
+        let under_the_run_seed = score_uncorrected_site_quality(
+            fold_only.site_quality_buffers_mut(),
+            &view,
             human_like_seed(),
         );
         assert!(expected.get() > 0.0, "the fixture's fold is above zero");
+        assert!(
+            expected.get() > under_the_run_seed.get() + 10.0,
+            "a tract seed expecting variation must ask for less evidence than a seed of 1 \
+             variant in 1,000: {} against {}",
+            expected.get(),
+            under_the_run_seed.get()
+        );
         assert_eq!(inference.uncorrected_site_quality(), expected);
     }
 
@@ -7794,7 +7901,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, repeat_counts);
         let inbreeding = vec![outbred(); per_sample.len()];
@@ -7870,7 +7977,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
@@ -7899,7 +8006,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
@@ -8173,6 +8280,94 @@ mod tests {
             },
             "a tract's table is built once and its two halves are charged together"
         );
+    }
+
+    /// **An STR bundle of one run spanning its hull is called exactly as the segment over the
+    /// same bases** — the same genotypes, genotype qualities, site quality, expected copies and
+    /// warrant — through the whole loop: candidates parsed against the run, stutter looked up
+    /// per run, the seed read per run, the row scored per slip set (`str_bundle_loci.md` §7).
+    #[test]
+    fn a_one_run_bundle_is_called_as_the_segment_over_its_bases() {
+        use crate::locus_generation::SsrBundleDetail;
+        use crate::region_typing::reference_runs::ReferenceRun;
+        use crate::region_typing::run_parse::parse_into_runs;
+
+        let carrier = [tract_reads(TRACT_CANDIDATE_REPEATS[1], 20)];
+        let heterozygote = [
+            tract_reads(TRACT_CANDIDATE_REPEATS[0], 10),
+            tract_reads(TRACT_CANDIDATE_REPEATS[1], 10),
+        ];
+        let reference_sample = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 20)];
+        let observations: [&[SequenceObservation]; 3] =
+            [&carrier, &heterozygote, &reference_sample];
+
+        let as_segment = call_tract(
+            &observations,
+            &tract_strata(),
+            &tract_substitution_rates(),
+            &tract_libraries(),
+            &mut worker_scratch(),
+        );
+
+        let hull = tract_bases(TRACT_CANDIDATE_REPEATS[0]);
+        let detail = SsrBundleDetail {
+            left_flank: tract_detail().left_flank,
+            right_flank: tract_detail().right_flank,
+            runs: vec![
+                ReferenceRun::new(
+                    0,
+                    hull.len() as u64,
+                    Motif::new(TRACT_MOTIF).expect("a dinucleotide motif"),
+                )
+                .expect("a run of whole copies"),
+            ]
+            .into_boxed_slice(),
+        };
+        let mut alleles = CandidateAlleles::new(
+            hull.clone().into_boxed_slice(),
+            LocusKind::SsrBundle(detail.clone()),
+        );
+        alleles.admit(tract_bases(TRACT_CANDIDATE_REPEATS[1]).into_boxed_slice());
+        let parses: Vec<_> = alleles
+            .iter()
+            .map(|allele| parse_into_runs(allele, &hull, &detail.runs))
+            .collect();
+        let per_sample: Vec<SsrSampleEvidence<'_>> = observations
+            .iter()
+            .map(|observations| {
+                SsrSampleEvidence::of_bundle(
+                    observations,
+                    crate::locus_generation::LocusLen::of_region(locus_region()),
+                )
+            })
+            .collect();
+        let evidence = LocusEvidence::ssr_bundle(locus_region(), &per_sample, &detail, &parses);
+        let strata = tract_strata();
+        let substitution = tract_substitution_rates();
+        let calibration = tract_libraries();
+        let inbreeding = vec![outbred(); per_sample.len()];
+        let parameters =
+            uncontaminated_run(&calibration, &inbreeding, &strata, &substitution, diploid());
+        let as_bundle = shipped_arm().call_locus(
+            &evidence,
+            &parameters,
+            alleles,
+            &RunnableCallingLoopConfig::default(),
+            &mut worker_scratch(),
+        );
+
+        assert_eq!(as_bundle.per_sample, as_segment.per_sample);
+        assert_eq!(
+            as_bundle.uncorrected_site_quality(),
+            as_segment.uncorrected_site_quality()
+        );
+        assert_eq!(
+            as_bundle.cohort_expected_copies().copies(),
+            as_segment.cohort_expected_copies().copies()
+        );
+        assert_eq!(as_bundle.weakest_provenance, as_segment.weakest_provenance);
+        assert_eq!(as_bundle.repeat_tract, as_segment.repeat_tract);
+        assert_eq!(called_alleles(&as_bundle, 1), vec![0, 1]);
     }
 
     /// **The tract's prior seed is its stratum's fitted allele length variation, restricted to the
@@ -9040,7 +9235,7 @@ mod tests {
         let detail = tract_detail();
         let per_sample: Vec<SsrSampleEvidence<'_>> = observations_of_each_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, &detail))
+            .map(|observations| SsrSampleEvidence::new(observations, &detail, TEST_TRACT_LEN))
             .collect();
         let samples = per_sample.len();
         let repeat_counts = tract_repeat_counts();
@@ -9180,14 +9375,23 @@ mod tests {
         let interrupted = b"ATATATATCTAT".to_vec();
         let scored = [
             SsrCandidate {
+                bundle: None,
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &clean,
                 repeat_count: NonZeroU32::new(6).expect("six repeats"),
             },
             SsrCandidate {
+                bundle: None,
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &interrupted,
                 repeat_count: NonZeroU32::new(4).expect("four whole repeats"),
             },
             SsrCandidate {
+                bundle: None,
+                reference_flanks: (&[], &[]),
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
                 bases: &seven,
                 repeat_count: NonZeroU32::new(7).expect("seven repeats"),
             },
@@ -9745,6 +9949,7 @@ mod tests {
         let (alleles, _) = generic_locus(1);
         let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
         let partials = [PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
                 .expect("one witnessed position"),
             read_group: ReadGroupId(0),
@@ -9905,7 +10110,7 @@ mod tests {
     #[should_panic(expected = "reached the SNP/indel path's evidence")]
     fn a_tract_handed_to_the_snp_paths_evidence_accessor_is_refused() {
         let detail = tract_detail();
-        let per_sample = [SsrSampleEvidence::new(&[], &detail)];
+        let per_sample = [SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN)];
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);
         let _ = generic_evidence_of(&evidence);
@@ -9935,8 +10140,8 @@ mod tests {
             right_flank: Box::from(b"TTTAAA".as_slice()),
         };
         let per_sample = [
-            SsrSampleEvidence::new(&[], &detail),
-            SsrSampleEvidence::new(&[], &detail),
+            SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
+            SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
         ];
         let repeat_counts = tract_repeat_counts();
         let evidence = LocusEvidence::ssr(locus_region(), &per_sample, &detail, &repeat_counts);

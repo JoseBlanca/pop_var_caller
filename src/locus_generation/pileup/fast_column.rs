@@ -515,6 +515,8 @@ pub(super) fn try_ordinary_column(
         .iter_mut()
         .map(|o| {
             SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![o.base].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: o.read_group,

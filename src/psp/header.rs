@@ -479,9 +479,35 @@ pub const HEADER_FRAMING_BYTES: usize = HEAD_MAGIC.len() + 8 + HEAD_SENTINEL.len
 /// written once and read once per file, so nothing on any hot path notices the room.
 pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES as u64;
 
-/// The format this writer produces and this reader understands. A file whose **major**
-/// differs is refused as [`PspReadError::UnsupportedVersion`], not read as damaged.
-pub const FORMAT_VERSION: (u16, u16) = (1, 1);
+/// The format this writer produces and the newest this reader understands. A file whose
+/// **major** is later is refused as [`PspReadError::UnsupportedVersion`], and one earlier than
+/// [`OLDEST_READABLE_MAJOR`] as [`PspReadError::OlderVersion`] — neither read as damaged.
+///
+/// **2.0 since 2026-10-11, when STR bundle records gained a payload** (their flanks and
+/// reference runs, `str_bundle_loci.md` §6.2). The payload is the body's last field, so a 1.x
+/// reader handed a later 1.x minor would skip it as an unknown final field — and so read every
+/// bundle as one with no runs, and ignore the header's `max-str-bundle-len-bp`, the bundle cap it
+/// cannot apply. A 1.x reader accepts any later 1.x minor; only a major bump makes it refuse
+/// these files, by name.
+///
+/// **2.1 since 2026-10-12, when observations gained the flank they held** where their witness
+/// cannot say it (`str_bundle_loci.md` §7.6), as the body's new last field. A minor bump: a 2.0
+/// reader walks past it as an unknown final field and scores such a read as 2.0 did, from both
+/// flanks one half each — a proper mixture over a side it does not know, not a misreading.
+pub const FORMAT_VERSION: (u16, u16) = (2, 1);
+
+/// The oldest major this reader reads: **2, so a 1.x psp is refused up front, by its version**
+/// (session lead, 2026-10-11, in building `str_bundle_loci.md` §7).
+///
+/// Before this, a 1.x header passed this check and was refused one step later all the same: the
+/// typing section refuses a psp that does not record `max-str-bundle-len-bp`
+/// (`segmentation_section.rs`), and no released build wrote that key — only builds of the
+/// `str-bundles` branch from 270da29f to format 2.0 did. Refusing by version says the true reason
+/// in the error a user reads ("written by an older pvc; write it again") rather than naming a key
+/// they never set. **Every psp written by main must be written again.** The record layouts of 1.x
+/// stay recognised from a manifest ([`RecordLayout`](crate::psp::record::RecordLayout)), for the
+/// record-level tests that read them.
+pub const OLDEST_READABLE_MAJOR: u16 = 2;
 
 /// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
 ///
@@ -690,7 +716,14 @@ impl Header {
             .map_err(|e| malformed_by("the header body is not valid TOML", Box::new(e)))?;
 
         let format_version = version_in(&table, path)?;
-        if format_version.0 != FORMAT_VERSION.0 {
+        if format_version.0 < OLDEST_READABLE_MAJOR {
+            return Err(PspReadError::OlderVersion {
+                path: path.to_path_buf(),
+                found: format_version,
+                oldest_major: OLDEST_READABLE_MAJOR,
+            });
+        }
+        if format_version.0 > FORMAT_VERSION.0 {
             return Err(PspReadError::UnsupportedVersion {
                 path: path.to_path_buf(),
                 found: format_version,
@@ -2019,7 +2052,7 @@ mod tests {
         assert_eq!(&bytes[..4], b"NGP\n");
         let body = body_of(&bytes);
         for expected in [
-            "format-version = \"1.1\"",
+            "format-version = \"2.1\"",
             "sample = \"SRR7279481\"",
             "genomic-block-size-bp = 100000",
             "look-back-window-log = 15",
@@ -2064,6 +2097,7 @@ mod tests {
             "bundle-threshold-bp = ",
             "min-flank-bp = ",
             "max-str-len-bp = ",
+            "max-str-bundle-len-bp = ",
             "reference-md5 = ",
             "match-reward = ",
             "mismatch-penalty = ",
@@ -2123,17 +2157,43 @@ mod tests {
     #[test]
     fn a_newer_major_version_is_refused_as_a_version_and_not_as_damage() {
         let bytes = framed(
-            "format-version = \"2.0\"\n\
-             whatever-version-two-added = { shape = \"nothing here knows\" }\n",
+            "format-version = \"3.0\"\n\
+             whatever-version-three-added = { shape = \"nothing here knows\" }\n",
         );
         match decoded(&bytes) {
             Err(PspReadError::UnsupportedVersion {
                 found, supported, ..
             }) => {
-                assert_eq!(found, (2, 0));
+                assert_eq!(found, (3, 0));
                 assert_eq!(supported, FORMAT_VERSION);
             }
             other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    /// **A 1.x header is refused as a version, and so is a major before it** — the oldest major
+    /// this reader reads is 2 ([`OLDEST_READABLE_MAJOR`]): a 1.x psp's typing has no bundle cap
+    /// and must be written again, and the error says that rather than naming a missing key.
+    #[test]
+    fn a_format_1_header_and_a_major_before_it_are_refused_as_versions() {
+        let written = a_written_header();
+        let bytes = written.encode().expect("a valid header encodes");
+        for (spelled, major, minor) in [("1.2", 1, 2), ("1.0", 1, 0), ("0.9", 0, 9)] {
+            let body = body_of(&bytes).replace(
+                "format-version = \"2.1\"",
+                &format!("format-version = \"{spelled}\""),
+            );
+            match decoded(&framed(&body)) {
+                Err(PspReadError::OlderVersion {
+                    found,
+                    oldest_major,
+                    ..
+                }) => {
+                    assert_eq!(found, (major, minor));
+                    assert_eq!(oldest_major, OLDEST_READABLE_MAJOR);
+                }
+                other => panic!("expected OlderVersion for {spelled}, got {other:?}"),
+            }
         }
     }
 
@@ -2148,10 +2208,10 @@ mod tests {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
-            .replace("format-version = \"1.1\"", "format-version = \"1.4\"")
+            .replace("format-version = \"2.1\"", "format-version = \"2.4\"")
             .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
-        written.format_version = (1, 4);
+        written.format_version = (2, 4);
         let (read_back, _) = decoded(&framed(&body)).expect("a later minor of this major reads");
         assert_eq!(
             read_back, written,
@@ -2166,9 +2226,9 @@ mod tests {
     fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
         let mut header = a_written_header();
         header.format_version = (1, 7);
-        let refused = header.encode().expect_err("this writer produces 1.1");
+        let refused = header.encode().expect_err("this writer produces 2.1");
         assert!(
-            refused.to_string().contains("produces 1.1"),
+            refused.to_string().contains("produces 2.1"),
             "got {refused}"
         );
     }
@@ -2977,13 +3037,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the twenty-nine are lists.** A count and
+    /// **The record's own fields, and which two of the thirty-two are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::psp::record::record_fields();
-        assert_eq!(fields.len(), 29);
+        assert_eq!(fields.len(), 32);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)

@@ -29,12 +29,14 @@
 //!
 //! # Where this run is short, and it says so rather than being wrong
 //!
-//! **Repeat tracts are called, and repeat *clusters* are not.** A tract goes down its own path
+//! **Repeat tracts and STR bundles are called.** A tract goes down its own path
 //! — `select_ssr`, the stutter emission, and the same frequency loop — and its record carries
 //! `STR`, `RU`, `PERIOD` and each called allele's `REPCN`
-//! (`doc/devel/ng/impl_plan/calling_loop_ssr.md` Milestone C). A repeat cluster with no clean
-//! flanks has no generator and no model: its ground is charged to *not built yet* and the
-//! summary says how much of the run's ground that was.
+//! (`doc/devel/ng/impl_plan/calling_loop_ssr.md` Milestone C). An STR bundle — repeats too close
+//! together for any to have clean flanks — is one locus over its hull, called with stutter in
+//! each of its runs (`str_bundle_loci.md` §7); its record carries per-run `RU` and `PERIOD` and
+//! each called allele's run counts in `REPCNB`, and the summary says how many bundles were
+//! called.
 //!
 //! **The decode is parallel; the rest is one thread (Milestone E1, 2026-09-01).** Decoding
 //! reads is 88% of a calling run at 63 samples, and the run sweeps every sample's reader
@@ -64,10 +66,10 @@ use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
     read_reference_verifying_or_creating_fai,
 };
-use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
@@ -103,7 +105,7 @@ pub struct CallFromAlignmentsArgs {
     pub reference: PathBuf,
 
     /// The tandem-repeat catalog, which says where the repeat tracts are. Build it first with
-    /// `pop_var_caller repeat-catalog --reference <reference>`; it is not optional.
+    /// `pvc repeat-catalog --reference <reference>`; it is not optional.
     ///
     /// Defaults to `<reference>.repeats.parquet`, which is where that command writes it. A
     /// catalog built on another reference is refused: its coordinates would put every tract in
@@ -320,6 +322,20 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub max_str_len: u64,
 
+    /// An STR bundle — two or more repeats within 15 bases of each other, typed as one region —
+    /// whose stretch, from its first repeat's start to the furthest end of any of them, is
+    /// longer than this many bases is a satellite instead. 0 makes every bundle a satellite.
+    ///
+    /// Its own limit rather than `--max-str-len`'s, so that widening what one repeat may be
+    /// does not also widen bundles. 100 for the reason `--max-str-len` is: with 150 bp reads a
+    /// read crosses a bundle and an anchor each side only up to about that length.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
+        help_heading = "What counts as a repeat"
+    )]
+    pub max_str_bundle_len: u64,
+
     /// How much of a tract must match a perfect tiling of its motif, from 0 to 1. Below this
     /// the tract is ordinary sequence.
     #[arg(
@@ -482,6 +498,7 @@ fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_
             min_period: args.min_period,
             max_period: args.max_period,
             max_str_len: args.max_str_len,
+            max_str_bundle_len: args.max_str_bundle_len,
             min_purity: args.min_purity,
         },
     }

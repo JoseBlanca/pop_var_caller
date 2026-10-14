@@ -1111,6 +1111,8 @@ impl OpenPileupRecord {
                     mapq_sum_sq,
                 } = observation.support;
                 SequenceObservation {
+                    flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                    held_flank: None,
                     bases: observation.key.bases.into_boxed_slice(),
                     read_witness: observation.key.read_witness,
                     read_group: observation.key.read_group,

@@ -194,13 +194,11 @@ fn report_body_depths(
                 );
             }
         }
-        // Nothing else reports this ground. `SsrBundle` regions emit no loci today
-        // (`locus_generation.md` §11), so no bundle record reaches this arm; it is grouped
-        // with the tract because a bundle is a repeat segment too — one record over ground
-        // that is partitioned to it — and the alternative, reporting a bundle at its anchor
-        // alone, would silently under-cover every window overlapping it if such records ever
-        // start arriving.
-        LocusKind::Ssr(_) | LocusKind::SsrBundle => {
+        // Nothing else reports this ground. An STR bundle has one record over its hull since
+        // 2026-10-11 (`str_bundle_loci.md` §6.1), the only record over ground partitioned to
+        // it, as a tract's is. A read ending inside the hull is kept as a partial there, as at a
+        // tract, and reports at the positions it witnessed.
+        LocusKind::Ssr(_) | LocusKind::SsrBundle(_) => {
             for (offset, &depth) in depth_along_the_locus.iter().enumerate() {
                 // The add cannot overflow: `offset` is below the region's length, so the
                 // largest position produced is the region's own last base.
@@ -246,6 +244,8 @@ mod tests {
     /// not read is fixed, so a fixture's numbers are only the ones under test.
     fn obs(read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(&b"A"[..]),
             read_witness,
             read_group: ReadGroupId(0),
@@ -617,12 +617,11 @@ mod tests {
         );
     }
 
-    /// A repeat cluster covers its ground the way a tract does. No such record is emitted
-    /// today, and this pins which arm it would take if one ever were.
+    /// An STR bundle's record covers its hull the way a tract's covers the tract.
     #[test]
     fn a_repeat_bundle_reports_every_position_of_its_span() {
         let record = SampleLocusObservations {
-            kind: LocusKind::SsrBundle,
+            kind: LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
             ..generic_record(region(20, 22), vec![obs(ReadWitness::Complete, 4)])
         };
         let reported = collect_reported(&Drawn::Built(record), summary_of(region(20, 22), 0));

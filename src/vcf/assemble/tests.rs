@@ -476,3 +476,77 @@ fn a_called_deletion_keeps_its_padding_base() {
     assert_eq!(record.alleles().len(), 2, "the uncalled SNP is dropped");
     assert_eq!(record.padding_base(), Some(PaddingBase::Left(b'C')));
 }
+
+/// **A record is widened over each allele's reach into the flanks as the generic path places
+/// it** (`str_edge_deletion_alleles.md` §5.8). `AG` ×3 between flanks `TTCG` and `CCAA`:
+/// allele 1, `AGAG`, is a plain contraction, but the generic path left-aligns the deletion one
+/// base into the flank — the flank's `G` and the repeat's `A` — so it reaches one base left;
+/// allele 2, `AGAG` missing the right flank's `C`, reaches one base right. The record takes one
+/// base each side, each allele spelled over it, and `REPCN` still counts the repeat.
+#[test]
+fn a_tract_record_is_widened_over_its_alleles_reach_into_the_flanks() {
+    use crate::locus_generation::{FlankDeletion, SsrDetail};
+    let detail = SsrDetail {
+        motif: Motif::new(b"AG").expect("a motif"),
+        left_flank: Box::from(&b"TTCG"[..]),
+        right_flank: Box::from(&b"CCAA"[..]),
+    };
+    let alleles: Vec<Box<[u8]>> = vec![
+        Box::from(&b"AGAGAG"[..]),
+        Box::from(&b"AGAG"[..]),
+        Box::from(&b"AGAG"[..]),
+    ];
+    let deletions = [
+        FlankDeletion::NONE,
+        FlankDeletion::NONE,
+        FlankDeletion { left: 0, right: 1 },
+    ];
+    let widened = WidenedTract::over(
+        &alleles,
+        &deletions,
+        (&detail.left_flank, &detail.right_flank),
+    )
+    .expect("a reach");
+    assert_eq!((widened.left, widened.right), (1, 1));
+    assert_eq!(
+        widened.alleles,
+        vec![
+            Box::from(&b"GAGAGAGC"[..]),
+            Box::from(&b"GAGAGC"[..]),
+            Box::from(&b"GAGAG"[..]),
+        ]
+    );
+    assert_eq!(widened.flank_bases_per_allele, vec![2, 2, 1]);
+    assert_eq!(widened.reach_per_allele, vec![(0, 0), (1, 0), (0, 1)]);
+    assert_eq!(widened.padding_base, Some(PaddingBase::Left(b'C')));
+    let annotation = TractAnnotation::new(detail.motif).widened(TractWidening {
+        left: 1,
+        right: 1,
+        flank_bases_per_allele: widened.flank_bases_per_allele.clone(),
+        reach_per_allele: widened.reach_per_allele.clone(),
+    });
+    assert_eq!(
+        annotation.repeat_copies_of_allele(0, &widened.alleles[0]),
+        3
+    );
+    assert_eq!(
+        annotation.repeat_copies_of_allele(2, &widened.alleles[2]),
+        2
+    );
+
+    // Nothing reaches a flank: the record stays over the tract.
+    let plain = [FlankDeletion::NONE; 3];
+    let expansion: Vec<Box<[u8]>> = vec![
+        Box::from(&b"AGAGAG"[..]),
+        Box::from(&b"AGAGAGAG"[..]),
+        Box::from(&b"AGAGAGAGAG"[..]),
+    ];
+    assert!(
+        WidenedTract::over(
+            &expansion,
+            &plain,
+            (&detail.left_flank, &detail.right_flank)
+        )
+        .is_none()
+    );
+}

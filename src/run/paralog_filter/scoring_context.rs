@@ -33,7 +33,7 @@ use crate::paralog::{
 use crate::types::InbreedingF;
 use crate::window_coverage::SampleHistogram;
 
-use super::{GenericLocusSample, RepeatTractSample, SpillEntry, SpilledSamples};
+use super::{SpillEntry, SpilledSample};
 
 /// **A record's sample count disagrees with the run's.**
 ///
@@ -219,49 +219,30 @@ impl ParalogScoringContext {
     ///
     /// Three ways to say nothing, and they are all ordinary rather than errors: the sample has
     /// no coverage model; it has no usable window at this locus, which arrives as the `NaN`
-    /// pair; or — **at a generic locus only** — no read reached it.
-    ///
-    /// **The zero-read skip is production's, and it must not reach a repeat tract** (spec §6
-    /// trap 1). Production drops a sample at zero total reads because a sample with no reads
-    /// says nothing about allele balance. A tract's rows carry no read counts at all — the
-    /// filter declines to read a split that slippage has smeared, which is an abstention and
-    /// not an observation of zero — so there is no total for the skip to test, and the type is
-    /// what says so rather than a condition someone has to remember.
+    /// pair; or no read reached it — production's skip, since a sample with no reads says
+    /// nothing about allele balance. Every record carries its read split, repeat tracts included
+    /// (spec §3.2), so the skip applies to every record alike.
     #[must_use]
     fn observation_of(&self, entry: &SpillEntry, sample: usize) -> Option<SampleObservation> {
         let model = self.coverage_models.get(sample)?.as_ref()?;
 
-        // **One match yields the window and the counts together**, and both row types are
-        // destructured exhaustively — the sibling codec does the same, for the same reason: a
-        // field added to either row is a field this, the only reader of them, would otherwise
-        // drop in silence. Spec §8's deferred tract-aware allele term is exactly such a field.
-        let (window, alt_reads, total_reads) = match &entry.samples {
-            SpilledSamples::GenericLocus(samples) => {
-                let GenericLocusSample {
-                    window,
-                    ref_reads,
-                    alt_reads,
-                } = samples.get(sample)?;
-                // A pair that cannot be summed is a corrupt spill row — two counts whose
-                // total overflows `u32`, which no run produces and no codec refuses. It is
-                // treated as an absence, which is what an unreadable row is: the sample says
-                // nothing about this record. **Nothing counts it**, and the only caller is
-                // `score`, which cannot tell it from a sample that was simply not covered.
-                let total = ref_reads.checked_add(*alt_reads)?;
-                if total == 0 {
-                    return None;
-                }
-                (*window, *alt_reads, total)
-            }
-            // No read counts to read, and no skip. The allele term is
-            // `alt·ln(vaf) + (total − alt)·ln(1 − vaf)`, which is zero at zero reads under every
-            // genotype and every carrier count, so it cancels and the ratio rests on coverage
-            // alone (spec §3.2).
-            SpilledSamples::RepeatTract(samples) => {
-                let RepeatTractSample { window } = samples.get(sample)?;
-                (*window, 0, 0)
-            }
-        };
+        // **Destructured exhaustively** — the sibling codec does the same, for the same reason:
+        // a field added to the row is a field this, the only reader of it, would otherwise drop in
+        // silence. Spec §8's deferred tract-aware allele term is exactly such a field.
+        let SpilledSample {
+            window,
+            ref_reads,
+            alt_reads,
+        } = *entry.samples.get(sample)?;
+        // A pair that cannot be summed is a corrupt spill row — two counts whose total overflows
+        // `u32`, which no run produces and no codec refuses. It is treated as an absence, which is
+        // what an unreadable row is: the sample says nothing about this record. **Nothing counts
+        // it**, and the only caller is `score`, which cannot tell it from a sample that was simply
+        // not covered.
+        let total_reads = ref_reads.checked_add(alt_reads)?;
+        if total_reads == 0 {
+            return None;
+        }
 
         // **Stricter than [`WindowCoverage::is_absent`], deliberately.** That predicate asks
         // whether either field is `NaN`; this rejects any non-finite value, and the difference is

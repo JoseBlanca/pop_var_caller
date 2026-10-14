@@ -334,6 +334,8 @@ mod tests {
 
     fn observation(read_group: u32, num_obs: u32, q_sum: f64) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: b"A"[..].into(),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(read_group),
@@ -530,7 +532,10 @@ mod tests {
         // repeat-tract locus arrives. With the empty one first, a build that emptied `out` only
         // *after* the kind gate — leaving the previous locus's totals standing — passed this and
         // every other test in both modules.
-        for kind in [LocusKind::Generic, LocusKind::SsrBundle] {
+        for kind in [
+            LocusKind::Generic,
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
+        ] {
             let generic = matches!(kind, LocusKind::Generic);
             let named = format!("{kind:?}");
             minted_error_by_read_group(&locus(kind, vec![observation(0, 4, -12.0)]), &mut out);

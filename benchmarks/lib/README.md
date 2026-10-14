@@ -13,7 +13,7 @@ benchmarks/
     common.sh             # sourced by the runners; config + helpers
     run_gatk.sh           # GATK             (single | cohort)
     run_freebayes.sh      # freebayes        (single | cohort)
-    run_ng.sh             # ng, the caller (pop_var_caller) (single | cohort)
+    run_ng.sh             # ng, the caller (pvc) (single | cohort)
     prepare_reference.sh  # build .fai (+ .dict for GATK) for a reference
     compare_to_truth.sh   # precision/recall/F1 vs a truth VCF (accuracy)
   <name>/
@@ -59,7 +59,7 @@ also overridable from the environment (`REFERENCE=… THREADS=8 …`).
 
 - GATK lives at `/opt/gatk/gatk` inside the dev container; override with
   `GATK_BIN=…`.
-- **ng** is `pop_var_caller call-from-alignments`. The binary is auto-detected as the newer runnable
+- **ng** is `pvc call-from-alignments`. The binary is auto-detected as the newer runnable
   build of `target-container/release` and `target/release` (override with `NG_BIN=`). The older
   caller's runner, `run_ours.sh`, was deleted with that caller on 2026-09-13; its results under
   `results/ours/` stay. GATK, freebayes and ng restrict via the BED. It needs a tandem-repeat catalog built from

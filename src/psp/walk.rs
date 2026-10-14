@@ -1406,8 +1406,8 @@ mod tests {
     /// writer's** file looks like to this reader, framed correctly and unreadable in its body.
     ///
     /// **The byte is located rather than hard-coded**: the same record is written twice, once
-    /// `Generic` and once `SsrBundle`, and the two decompressed payloads differ in exactly the
-    /// kind tag. The block is then recompressed and the footer's offsets moved with it, so the
+    /// `Generic` and once `SsrBundle`, and the two decompressed payloads end in the kind tag
+    /// and what follows it. The block is then recompressed and the footer's offsets moved with it, so the
     /// file still opens and only the record's body is beyond this build.
     fn a_psp_whose_record_this_build_cannot_read() -> (tempfile::TempDir, std::path::PathBuf) {
         use crate::locus_generation::LocusKind;
@@ -1442,16 +1442,25 @@ mod tests {
         }
 
         let (dir_a, path_a) = a_one_block_psp(LocusKind::Generic);
-        let (_dir_b, path_b) = a_one_block_psp(LocusKind::SsrBundle);
+        let (_dir_b, path_b) = a_one_block_psp(LocusKind::SsrBundle(
+            crate::locus_generation::SsrBundleDetail::default(),
+        ));
         let (block_at, mut generic) = the_only_block(&path_a);
         let (_, bundle) = the_only_block(&path_b);
-        assert_eq!(generic.len(), bundle.len(), "each kind tag is one byte");
-        let differ: Vec<usize> = (0..generic.len())
-            .filter(|&index| generic[index] != bundle[index])
-            .collect();
-        assert_eq!(differ.len(), 1, "exactly one byte differs");
-        let kind_at = differ[0];
-        assert_eq!((generic[kind_at], bundle[kind_at]), (0, 2), "the kind tags");
+        // A body ends with its kind tag, its flank deletions, its bundle payload (format 2.0)
+        // and its held flanks (format 2.1): `0, 0, 0, 0` for the generic record, and for the
+        // bundle `2, 0`, a three-byte payload of two empty flanks and no run, and `0`.
+        assert_eq!(
+            generic[generic.len() - 4..],
+            [0, 0, 0, 0],
+            "the generic record's end"
+        );
+        assert_eq!(
+            bundle[bundle.len() - 7..],
+            [2, 0, 3, 0, 0, 0, 0],
+            "the bundle record's end"
+        );
+        let kind_at = generic.len() - 4;
 
         // A tag no kind uses.
         generic[kind_at] = 7;

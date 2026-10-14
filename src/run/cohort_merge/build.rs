@@ -38,7 +38,8 @@ use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
 use super::observation_cache::WindowedCohort;
 use super::{MaxCohortLocusSpan, MinAltReads};
 use crate::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
+    FlankDeletion, HeldFlank, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    WitnessedLocusPositions,
 };
 use crate::run::explain::{DroppedLoci, MergeDrop};
 use crate::types::ChainId;
@@ -501,6 +502,9 @@ pub struct AlleleTable {
 #[derive(Debug, Default)]
 struct AlleleLookup {
     distinct: Vec<Box<[u8]>>,
+    /// Each distinct allele's flank deletion, at the same index — none but at an STR segment
+    /// whose reads carried a deletion into a flank (`str_edge_deletion_alleles.md` §5.4).
+    flank_deletions: Vec<FlankDeletion>,
     /// `distinct` keyed by its own bytes, so unification is a lookup rather than a scan.
     ///
     /// A scan would be faster at the two or three alleles most loci have, and slower where
@@ -516,18 +520,41 @@ struct AlleleLookup {
     /// §4), which would only hand the saving back at B3 if it converted. Left as it is
     /// until B3 has decided what it hands the caller, and measurable there: the cost is one
     /// extra copy of each *distinct* allele, not of each observation.
+    ///
+    /// **Only the alleles without a flank deletion**, which is all of them but at an STR
+    /// segment whose reads carried a deletion into a flank; those few are in
+    /// [`with_flank_deletion`](Self::with_flank_deletion) (`str_edge_deletion_alleles.md`
+    /// §5.4). Kept apart so this lookup still borrows the bytes it is asked about: the
+    /// callback that asks fires once per read on the generic path.
     by_bases: AHashMap<Box<[u8]>, usize>,
+    /// The alleles with a flank deletion, scanned: the same spelling of the repeat with and
+    /// without flank bases missing is two sequences, and a segment carries a handful.
+    with_flank_deletion: Vec<(usize, FlankDeletion)>,
 }
 
 impl AlleleLookup {
-    /// Add `bases` unless they are already here, and answer which allele they are.
-    fn intern(&mut self, bases: &[u8]) -> usize {
-        if let Some(&index) = self.by_bases.get(bases) {
+    /// Add `bases` with `flank_deletion` unless they are already here, and answer which allele
+    /// they are.
+    fn intern(&mut self, bases: &[u8], flank_deletion: FlankDeletion) -> usize {
+        if flank_deletion.is_none() {
+            if let Some(&index) = self.by_bases.get(bases) {
+                return index;
+            }
+        } else if let Some(&(index, _)) = self
+            .with_flank_deletion
+            .iter()
+            .find(|(index, deleted)| *deleted == flank_deletion && *self.distinct[*index] == *bases)
+        {
             return index;
         }
         let index = self.distinct.len();
         self.distinct.push(Box::from(bases));
-        self.by_bases.insert(Box::from(bases), index);
+        self.flank_deletions.push(flank_deletion);
+        if flank_deletion.is_none() {
+            self.by_bases.insert(Box::from(bases), index);
+        } else {
+            self.with_flank_deletion.push((index, flank_deletion));
+        }
         index
     }
 }
@@ -576,7 +603,7 @@ impl AlleleTable {
     fn assemble(locus: &ClosedLocus<'_>) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
-        let reference_allele = alleles.intern(reference.bases());
+        let reference_allele = alleles.intern(reference.bases(), FlankDeletion::NONE);
         assert_eq!(
             reference_allele, REFERENCE_ALLELE,
             "the reference must be the locus's first allele",
@@ -602,7 +629,13 @@ impl AlleleTable {
                 sample_members,
                 &mut scratch,
                 |bases, backing| {
-                    let allele = alleles.intern(bases);
+                    // A sequence's flank deletion travels with it; a read composed across
+                    // records is a generic locus's, which has none.
+                    let flank_deletion = match backing {
+                        AlleleBacking::OneSequence(sequence) => sequence.flank_deletion,
+                        AlleleBacking::OneRead { .. } => FlankDeletion::NONE,
+                    };
+                    let allele = alleles.intern(bases, flank_deletion);
                     let read_group = backing.read_group(sample);
                     // **A scan, not an index, and it is what the read-group axis costs.** The
                     // tally used to be indexed by allele and a pair cannot index a `Vec`. A
@@ -1152,9 +1185,23 @@ pub struct CohortObservation {
     /// `cohort_merge::fixtures::render` says so at the one place that decides what "the same
     /// answer" means for this module.
     pub window_coverage: Vec<WindowCoverage>,
+    /// **Each allele's flank deletion, at the same index as [`alleles`](Self::alleles)** —
+    /// the flank bases a deletion running out of an STR segment took (owner, 2026-10-10;
+    /// `str_edge_deletion_alleles.md` §5.4). **Empty means none for every allele**, which is
+    /// every generic locus and every hand-built fixture; read it through
+    /// [`flank_deletion_of`](Self::flank_deletion_of).
+    pub allele_flank_deletions: Vec<FlankDeletion>,
 }
 
 impl CohortObservation {
+    /// The flank deletion of allele `allele`: none where the table carries none.
+    pub fn flank_deletion_of(&self, allele: usize) -> FlankDeletion {
+        self.allele_flank_deletions
+            .get(allele)
+            .copied()
+            .unwrap_or(FlankDeletion::NONE)
+    }
+
     /// Assemble one cohort locus: unify the alleles, attribute every covering sample's reads to
     /// them, and read each of those samples' window at the locus's first base.
     ///
@@ -1191,12 +1238,19 @@ impl CohortObservation {
                     .unwrap_or_else(WindowCoverage::absent)
             })
             .collect();
+        // Kept only where some allele has one, so a generic locus carries an empty vector.
+        let allele_flank_deletions = if alleles.flank_deletions.iter().all(|d| d.is_none()) {
+            Vec::new()
+        } else {
+            alleles.flank_deletions
+        };
         Self {
             region: locus.region,
             alleles: alleles.distinct,
             per_sample,
             kind: locus.kind.clone(),
             window_coverage,
+            allele_flank_deletions,
         }
     }
 }
@@ -1441,6 +1495,11 @@ pub struct PartialObservation {
     /// with every allele whose carrier would show the same bases there
     /// (`doc/devel/ng/spec/read_likelihoods.md` §5.3).
     pub sequence_may_run_on_past: Option<LocusBorder>,
+    /// **Which flank of an STR locus the reads anchored, where their witness cannot say it** —
+    /// the mint's [`SequenceObservation::held_flank`], carried through unchanged: a partial at an
+    /// STR segment or STR bundle whose witness covers the whole locus, and `None` everywhere else
+    /// (`doc/devel/ng/spec/str_bundle_loci.md` §7.6).
+    pub held_flank: Option<HeldFlank>,
 }
 
 /// One of a locus's two borders — see
@@ -1864,8 +1923,8 @@ struct ReadSighting {
 /// derivation's two shapes — one record, several — differ in how reads are placed, and a
 /// partial is placed nowhere; the walk is the same either way.
 ///
-/// Sorted ascending by `(witnessed stretch, read group, bases)`. The stretch alone does not
-/// order two rows — a substitution witnessed partially is two rows over one stretch — and the
+/// Sorted ascending by `(witnessed stretch, read group, bases, held flank)`. The stretch alone does
+/// not order two rows — a substitution witnessed partially is two rows over one stretch — and the
 /// order has to be total, because the sum over observations must run in a fixed one
 /// (`doc/devel/ng/spec/read_likelihoods.md` §8).
 fn partials_of_sample(
@@ -1900,12 +1959,14 @@ fn partials_of_sample(
                 num_reads: sequence.num_obs,
                 q_sum: sequence.q_sum.nats(),
                 sequence_may_run_on_past: None,
+                held_flank: sequence.held_flank,
             });
         }
     }
     // Unstable is enough: the key is total, and no two rows share one. Within a record the
-    // mint has already keyed its observations on `(bases, witness, read group)`, two of which
-    // are key components here and the third of which the shift preserves; across records the
+    // mint has already keyed its observations on `(bases, witness, read group, held flank)`,
+    // three of which are key components here and the fourth of which the shift preserves (the
+    // flank deletion is a complete observation's, never a partial's); across records the
     // shifted stretches cannot meet, because `LocusReferenceBases::over` asserts a sample's
     // records are disjoint and ascending before any of this runs. **That second half rests on
     // the mint's clamping** — `ReadWitness::Partial` is a public variant with a public field,
@@ -1913,11 +1974,18 @@ fn partials_of_sample(
     // type invariant" — so a hand-built witness reaching past its own record can produce two
     // equal keys, and their order is then unspecified rather than wrong.
     partials.sort_unstable_by(|left, right| {
-        (&left.witnessed_in_locus, left.read_group, &left.bases).cmp(&(
-            &right.witnessed_in_locus,
-            right.read_group,
-            &right.bases,
-        ))
+        (
+            &left.witnessed_in_locus,
+            left.read_group,
+            &left.bases,
+            left.held_flank,
+        )
+            .cmp(&(
+                &right.witnessed_in_locus,
+                right.read_group,
+                &right.bases,
+                right.held_flank,
+            ))
     });
     partials
 }
@@ -2298,6 +2366,8 @@ mod tests {
     /// at a fixed value rather than varied.
     fn sequence(bases: &[u8]) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(bases),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
@@ -4953,6 +5023,8 @@ mod tests {
             // the fixture: with `q_sum` left at `0.0` a build writing a constant zero into
             // every row would satisfy it just as well.
             q_sum: crate::types::SummedLogError::from_nats(-18.5),
+            // Carried through untouched, whatever it is (`str_bundle_loci.md` §7.6).
+            held_flank: Some(HeldFlank::Left),
             ..sequence(b"A")
         });
         let members = [with_a_partial];
@@ -4977,6 +5049,7 @@ mod tests {
         assert_eq!(
             observed.per_sample[0].partials,
             vec![PartialObservation {
+                held_flank: Some(HeldFlank::Left),
                 witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(2, 1)
                     .expect("one position of the locus"),
                 read_group: ReadGroupId(0),
@@ -5040,6 +5113,7 @@ mod tests {
         assert_eq!(
             sample.partials,
             vec![PartialObservation {
+                held_flank: None,
                 witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(4, 1)
                     .expect("one position of the locus"),
                 read_group: ReadGroupId(0),

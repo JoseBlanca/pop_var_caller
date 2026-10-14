@@ -381,6 +381,10 @@ pub(crate) fn decode_header(
                     },
                     min_flank_bp: Bp(f[8].parse().map_err(|_| malformed("flank floor"))?),
                     max_str_len_bp: Bp(f[9].parse().map_err(|_| malformed("satellite cap"))?),
+                    // Not in the file: the header predates the bundle cap, and the builder
+                    // never applies it. Every catalog reads back with the default, so two
+                    // catalogs never differ on it (`StrRepeatCriteria::max_str_bundle_len_bp`).
+                    max_str_bundle_len_bp: Bp(crate::region_typing::DEFAULT_MAX_STR_BUNDLE_LEN),
                 });
             }
             "contig" => {
@@ -436,6 +440,131 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+/// The catalog's footer, parsed once per open: the file metadata **with the page index**,
+/// and which row groups hold each contig.
+///
+/// **Parsed once, not once per contig.** The footer of a catalog carries the statistics and
+/// page index of every row group in the file — one per contig — so re-parsing it for each
+/// contig read costs the whole file's metadata per contig: quadratic in the contig count,
+/// and on GRCh38's 2,580 contigs it was most of the typing time. Holding it here makes a
+/// contig read cost its own pages.
+///
+/// Building one is also where the file is checked to be a catalog this build can read by
+/// contig — its columns, its page index, its per-row-group statistics — so a wrong file is
+/// refused at open rather than part-way through a walk.
+#[derive(Clone)]
+pub(crate) struct CatalogIndex {
+    metadata: parquet::arrow::arrow_reader::ArrowReaderMetadata,
+    /// Row groups per contig id, in file order. A contig with no rows has no entry.
+    groups_by_contig: std::collections::HashMap<u32, Vec<usize>>,
+    /// Per row group, the smallest `detected_start` and largest `detected_end` it holds —
+    /// when its statistics say it holds one contig alone. A window that contains this
+    /// extent keeps every row of the group, so the read needs no row filter.
+    extent_of_group: Vec<Option<(u64, u64)>>,
+}
+
+impl std::fmt::Debug for CatalogIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The metadata itself is the whole file's page index; printing it is never useful.
+        f.debug_struct("CatalogIndex")
+            .field("row_groups", &self.metadata.metadata().num_row_groups())
+            .field("contigs_with_rows", &self.groups_by_contig.len())
+            .finish()
+    }
+}
+
+impl CatalogIndex {
+    /// Parse `path`'s footer and page index, and check it is a catalog readable by contig.
+    pub(crate) fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions};
+        use parquet::file::metadata::PageIndexPolicy;
+
+        let file = File::open(path)?;
+        // `Required`, not `Optional`: our own writer always emits the page index, so a file
+        // without one is not a catalog this build wrote, and silently falling back to a full
+        // scan would turn a wrong file into a slow answer.
+        let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
+        let metadata = ArrowReaderMetadata::load(&file, options)?;
+        // **The schema is checked before any column is addressed by position.** Every read
+        // addresses columns 0, 1 and 2 and downcasts them to fixed Arrow types; a parquet file
+        // that carries the catalog's header key but somebody else's columns would panic
+        // inside `ProjectionMask::roots` instead of coming back as an unreadable file.
+        let stored = metadata.schema();
+        let ours = catalog_schema();
+        if stored.fields().len() != ours.fields().len()
+            || stored
+                .fields()
+                .iter()
+                .zip(ours.fields())
+                .any(|(a, b)| a.name() != b.name() || a.data_type() != b.data_type())
+        {
+            return Err(format!(
+                "not a repeat catalog: its columns are {:?}, a catalog's are {:?}",
+                stored.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+                ours.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            )
+            .into());
+        }
+
+        // Each contig's row groups, found from the row-group statistics rather than by
+        // reading rows.
+        //
+        // **A row group with no usable statistics is a broken file, not an empty contig.** Our
+        // writer always emits them; without the distinction, a catalog written with statistics
+        // disabled reads back as "every contig is empty" and succeeds.
+        let mut groups_by_contig: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut extent_of_group = Vec::with_capacity(metadata.metadata().num_row_groups());
+        for group in 0..metadata.metadata().num_row_groups() {
+            let column = metadata.metadata().row_group(group).column(0);
+            let Some(stats) = column.statistics() else {
+                return Err(format!(
+                    "row group {group} carries no statistics for the contig column, so this file \
+                     cannot be read by contig"
+                )
+                .into());
+            };
+            let Some(min) = statistics_min_u32(stats) else {
+                return Err(format!(
+                    "row group {group}'s contig-column statistics are not a u32 minimum"
+                )
+                .into());
+            };
+            groups_by_contig.entry(min).or_default().push(group);
+
+            let row_group = metadata.metadata().row_group(group);
+            let one_contig = statistics_max_u64(stats) == Some(u64::from(min));
+            let start_min = row_group
+                .column(1)
+                .statistics()
+                .and_then(statistics_min_u64);
+            let end_max = row_group
+                .column(2)
+                .statistics()
+                .and_then(statistics_max_u64);
+            extent_of_group.push(match (one_contig, start_min, end_max) {
+                (true, Some(from), Some(to)) => Some((from, to)),
+                _ => None,
+            });
+        }
+        Ok(Self {
+            metadata,
+            groups_by_contig,
+            extent_of_group,
+        })
+    }
+
+    /// The footer's key-value entry under `key`, if any.
+    pub(crate) fn footer_value(&self, key: &str) -> Option<String> {
+        self.metadata
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| kv.iter().find(|entry| entry.key == key))
+            .and_then(|entry| entry.value.clone())
+    }
+}
+
 /// Every row of `contig` whose tract overlaps one of `windows`, in file order.
 ///
 /// **The file's own index does the skipping.** The page index — which the writer emits by
@@ -445,80 +574,60 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
 /// decompressing them. Asking for a megabase of a 90 Mb chromosome reads the pages that
 /// megabase touches, not the chromosome.
 ///
+/// `index` is the footer [`CatalogIndex::load`] parsed from this same `path`; the file is
+/// reopened here only to read pages.
+///
 /// `windows` are 1-based inclusive and already widened by the caller (see
 /// `RepeatCatalog::rows_for`) — this function does no widening of its own, because
 /// how far a row can reach is a question about classification, not about the file.
 pub(crate) fn rows_overlapping(
     path: &Path,
+    index: &CatalogIndex,
     contig: ContigId,
     windows: &[(u64, u64)],
 ) -> Result<Vec<FoundRepeat>, Box<dyn std::error::Error + Send + Sync>> {
     use arrow_array::{BooleanArray, UInt32Array, UInt64Array};
     use parquet::arrow::ProjectionMask;
-    use parquet::arrow::arrow_reader::{ArrowPredicateFn, ArrowReaderOptions, RowFilter};
-    use parquet::file::metadata::PageIndexPolicy;
+    use parquet::arrow::arrow_reader::{ArrowPredicateFn, RowFilter};
+
+    let Some(groups) = index.groups_by_contig.get(&contig.get()) else {
+        return Ok(Vec::new());
+    };
+    let groups = groups.clone();
+
+    // **No filter when it would keep every row** — the common case, a whole contig asked for
+    // as one region. The filter decodes the three coordinate columns once to evaluate and the
+    // output decodes them again, so a filter that drops nothing is pure overhead.
+    let keeps_everything = groups.iter().all(|&g| {
+        index.extent_of_group[g]
+            .is_some_and(|(lo, hi)| windows.iter().any(|(from, to)| *from <= lo && *to >= hi))
+    });
 
     let file = File::open(path)?;
-    // `Required`, not `Optional`: our own writer always emits the page index, so a file
-    // without one is not a catalog this build wrote, and silently falling back to a full
-    // scan would turn a wrong file into a slow answer.
-    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
-    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?;
-    // **The schema is checked before any column is addressed by position.** Everything below
-    // reads columns 0, 1 and 2 and downcasts them to fixed Arrow types; a parquet file that
-    // carries the catalog's header key but somebody else's columns would panic inside
-    // `ProjectionMask::roots` instead of coming back as an unreadable file.
-    let stored = builder.schema();
-    let ours = catalog_schema();
-    if stored.fields().len() != ours.fields().len()
-        || stored
-            .fields()
-            .iter()
-            .zip(ours.fields())
-            .any(|(a, b)| a.name() != b.name() || a.data_type() != b.data_type())
-    {
-        return Err(format!(
-            "not a repeat catalog: its columns are {:?}, a catalog's are {:?}",
-            stored.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
-            ours.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
-        )
-        .into());
-    }
-
-    // The contig's own row group, found from the row-group statistics rather than by
-    // reading rows.
-    //
-    // **A row group with no usable statistics is a broken file, not an empty contig.** Our
-    // writer always emits them; without the distinction, a catalog written with statistics
-    // disabled reads back as "every contig is empty" and succeeds.
-    let mut groups = Vec::new();
-    for group in 0..builder.metadata().num_row_groups() {
-        let column = builder.metadata().row_group(group).column(0);
-        let Some(stats) = column.statistics() else {
-            return Err(format!(
-                "row group {group} carries no statistics for the contig column, so this file \
-                 cannot be read by contig"
-            )
-            .into());
-        };
-        let Some(min) = statistics_min_u32(stats) else {
-            return Err(format!(
-                "row group {group}'s contig-column statistics are not a u32 minimum"
-            )
-            .into());
-        };
-        if min == contig.get() {
-            groups.push(group);
-        }
-    }
-    if groups.is_empty() {
-        return Ok(Vec::new());
-    }
+    let builder = ParquetRecordBatchReaderBuilder::new_with_metadata(file, index.metadata.clone());
 
     let schema = builder.parquet_schema();
     // Columns 1 and 2 are `detected_start` and `detected_end` (`catalog_schema`).
     let coordinate_columns = ProjectionMask::roots(schema, [0, 1, 2]);
     let windows = windows.to_vec();
+    // **With both edges ascending, one binary search answers "does any window overlap this
+    // row?"**: the windows that do not end before the row starts are a suffix, and the first
+    // of them starts earliest, so it is the only one whose start needs checking. Spans widened
+    // by one reach — what `rows_for` passes — keep both edges ascending; any other list is
+    // walked whole, as before. A walk per row over 50,000 GIAB spans was the predicate's cost.
+    let ascending = windows
+        .windows(2)
+        .all(|w| w[0].0 <= w[1].0 && w[0].1 <= w[1].1);
+    let overlaps_a_window = move |start: u64, end: u64| {
+        if ascending {
+            let first = windows.partition_point(|(_, to)| *to < start);
+            windows.get(first).is_some_and(|(from, _)| *from <= end)
+        } else {
+            windows
+                .iter()
+                .any(|(from, to)| start <= *to && end >= *from)
+        }
+    };
     let predicate = ArrowPredicateFn::new(coordinate_columns, move |batch| {
         let contig_column = batch
             .column(0)
@@ -538,25 +647,31 @@ pub(crate) fn rows_overlapping(
         Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|i| {
             let start = starts.value(i);
             let end = ends.value(i);
-            Some(
-                contig_column.value(i) == contig.get()
-                    && windows
-                        .iter()
-                        .any(|(from, to)| start <= *to && end >= *from),
-            )
+            Some(contig_column.value(i) == contig.get() && overlaps_a_window(start, end))
         })))
     });
 
-    let reader = builder
-        .with_row_groups(groups)
-        .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
-        .build()?;
+    let builder = builder.with_row_groups(groups);
+    let reader = if keeps_everything {
+        builder.build()?
+    } else {
+        builder
+            .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
+            .build()?
+    };
 
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch?;
+        let columns =
+            CatalogColumns::of(&batch).ok_or("a column does not match the catalog schema")?;
+        rows.reserve(batch.num_rows());
         for i in 0..batch.num_rows() {
-            rows.push(row_from_batch(&batch, i).ok_or("a row does not match the catalog schema")?);
+            rows.push(
+                columns
+                    .row(i)
+                    .ok_or("a row does not match the catalog schema")?,
+            );
         }
     }
     Ok(rows)
@@ -572,43 +687,92 @@ fn statistics_min_u32(stats: &parquet::file::statistics::Statistics) -> Option<u
     }
 }
 
+/// The minimum of an integer column chunk's statistics, widened to `u64`.
+fn statistics_min_u64(stats: &parquet::file::statistics::Statistics) -> Option<u64> {
+    use parquet::file::statistics::Statistics;
+    match stats {
+        Statistics::Int32(s) => s.min_opt().map(|v| *v as u32 as u64),
+        Statistics::Int64(s) => s.min_opt().map(|v| *v as u64),
+        _ => None,
+    }
+}
+
+/// The maximum of an integer column chunk's statistics, widened to `u64`.
+fn statistics_max_u64(stats: &parquet::file::statistics::Statistics) -> Option<u64> {
+    use parquet::file::statistics::Statistics;
+    match stats {
+        Statistics::Int32(s) => s.max_opt().map(|v| *v as u32 as u64),
+        Statistics::Int64(s) => s.max_opt().map(|v| *v as u64),
+        _ => None,
+    }
+}
+
 /// Rebuild one row from the column batch's `i`-th entry. Shared with the reader (B2).
+#[cfg(test)]
 fn row_from_batch(batch: &RecordBatch, i: usize) -> Option<FoundRepeat> {
-    use arrow_array::{
-        Float32Array, Int32Array, StringArray, UInt8Array, UInt32Array, UInt64Array,
-    };
+    CatalogColumns::of(batch)?.row(i)
+}
 
-    let contig = batch.column(0).as_any().downcast_ref::<UInt32Array>()?;
-    let detected_start = batch.column(1).as_any().downcast_ref::<UInt64Array>()?;
-    let detected_end = batch.column(2).as_any().downcast_ref::<UInt64Array>()?;
-    let trimmed_start = batch.column(3).as_any().downcast_ref::<UInt64Array>()?;
-    let trimmed_end = batch.column(4).as_any().downcast_ref::<UInt64Array>()?;
-    let period = batch.column(5).as_any().downcast_ref::<UInt8Array>()?;
-    let score = batch.column(6).as_any().downcast_ref::<Int32Array>()?;
-    let motif = batch.column(7).as_any().downcast_ref::<StringArray>()?;
-    let purity = batch.column(8).as_any().downcast_ref::<Float32Array>()?;
+/// A batch's nine columns, each downcast to its Arrow type **once per batch**.
+///
+/// Rebuilding a row needs all nine, and a downcast is a dynamic type check; doing them per
+/// row repeated nine checks for each of the 23.6 million rows of a GRCh38 catalog, when the
+/// answer can only change between batches.
+struct CatalogColumns<'a> {
+    contig: &'a arrow_array::UInt32Array,
+    detected_start: &'a arrow_array::UInt64Array,
+    detected_end: &'a arrow_array::UInt64Array,
+    trimmed_start: &'a arrow_array::UInt64Array,
+    trimmed_end: &'a arrow_array::UInt64Array,
+    period: &'a arrow_array::UInt8Array,
+    score: &'a arrow_array::Int32Array,
+    motif: &'a arrow_array::StringArray,
+    purity: &'a arrow_array::Float32Array,
+}
 
-    let trimmed = if trimmed_start.is_null(i) || trimmed_end.is_null(i) {
-        None
-    } else {
-        Some(TractSpan {
-            start: Position(trimmed_start.value(i)),
-            end: Position(trimmed_end.value(i)),
+impl<'a> CatalogColumns<'a> {
+    /// `None` when a column is not the catalog's type.
+    fn of(batch: &'a RecordBatch) -> Option<Self> {
+        fn column<T: 'static>(batch: &RecordBatch, i: usize) -> Option<&T> {
+            batch.column(i).as_any().downcast_ref::<T>()
+        }
+        Some(Self {
+            contig: column(batch, 0)?,
+            detected_start: column(batch, 1)?,
+            detected_end: column(batch, 2)?,
+            trimmed_start: column(batch, 3)?,
+            trimmed_end: column(batch, 4)?,
+            period: column(batch, 5)?,
+            score: column(batch, 6)?,
+            motif: column(batch, 7)?,
+            purity: column(batch, 8)?,
         })
-    };
+    }
 
-    Some(FoundRepeat {
-        contig: ContigId(contig.value(i)),
-        detected: TractSpan {
-            start: Position(detected_start.value(i)),
-            end: Position(detected_end.value(i)),
-        },
-        trimmed,
-        period: period.value(i),
-        score: score.value(i),
-        motif: Motif::new(motif.value(i).as_bytes()).ok()?,
-        purity: (!purity.is_null(i)).then(|| purity.value(i)),
-    })
+    /// The `i`-th row, or `None` when its motif is not a valid motif.
+    fn row(&self, i: usize) -> Option<FoundRepeat> {
+        let trimmed = if self.trimmed_start.is_null(i) || self.trimmed_end.is_null(i) {
+            None
+        } else {
+            Some(TractSpan {
+                start: Position(self.trimmed_start.value(i)),
+                end: Position(self.trimmed_end.value(i)),
+            })
+        };
+
+        Some(FoundRepeat {
+            contig: ContigId(self.contig.value(i)),
+            detected: TractSpan {
+                start: Position(self.detected_start.value(i)),
+                end: Position(self.detected_end.value(i)),
+            },
+            trimmed,
+            period: self.period.value(i),
+            score: self.score.value(i),
+            motif: Motif::new(self.motif.value(i).as_bytes()).ok()?,
+            purity: (!self.purity.is_null(i)).then(|| self.purity.value(i)),
+        })
+    }
 }
 
 #[cfg(test)]

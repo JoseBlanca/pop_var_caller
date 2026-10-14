@@ -111,6 +111,7 @@ pub fn select_generic(
         sample_reads_per_rung: _,
         promoted_rungs: _,
         rung_is_promoted: _,
+        rung_earned_by_reads: _,
         cap_cut_table_indices,
         // Discovery is defined on stutter attribution, so the ordinary path never runs the
         // pre-pass and never reads its flags (spec §5.1's closing paragraph names the same
@@ -174,6 +175,7 @@ pub fn select_generic(
         .iter()
         .map(|sample| {
             leftover_of(
+                sample,
                 sample,
                 observation.region,
                 &remap,

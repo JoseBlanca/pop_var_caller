@@ -241,6 +241,8 @@ fn a_record(position: u64, depth: u64, live: &mut Vec<ChainId>) -> SampleLocusOb
 fn an_observation(bases: &[u8], reads: &[ChainId], group: u32) -> SequenceObservation {
     let num_obs = reads.len() as u32;
     SequenceObservation {
+        flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
+        held_flank: None,
         bases: Box::from(bases),
         read_witness: ReadWitness::Complete,
         read_group: ReadGroupId(group),

@@ -1,4 +1,4 @@
-//! Top-level CLI for the `pop_var_caller` binary: the `Parser` and the
+//! Top-level CLI for the `pvc` binary: the `Parser` and the
 //! subcommand enum. Shape first copied from the deleted production binary's `cli` module.
 
 use clap::{Parser, Subcommand};
@@ -13,9 +13,9 @@ use super::regenerate_census::RegenerateCensusArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
-/// Top-level CLI for the `pop_var_caller` binary.
+/// Top-level CLI for the `pvc` binary.
 #[derive(Debug, Parser)]
-#[command(name = "pop_var_caller", version, about, long_about = None)]
+#[command(name = "pvc", version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: PopVarCallerCommand,
@@ -45,9 +45,12 @@ pub enum PopVarCallerCommand {
     /// on one thread, and says nothing while it works.
     ///
     /// Repeat tracts ARE called, through their own stutter model, and their
-    /// records carry STR, RU, PERIOD and each called allele's REPCN. What is
-    /// still set aside is a repeat cluster too tangled to have clean flanks;
-    /// its ground is charged to `not built yet` and reported at the end.
+    /// records carry STR, RU, PERIOD and each called allele's REPCN. An STR
+    /// bundle (repeats too close together for any to have clean flanks) is
+    /// called as one locus over its span, with stutter in each of its runs:
+    /// its record carries one RU and PERIOD value per run and, per sample,
+    /// each called allele's run counts in REPCNB (none of the four when the
+    /// bundle holds no run).
     CallFromAlignments(CallFromAlignmentsArgs),
 
     /// Walk each sample's alignment files once and store what they showed as a psp,

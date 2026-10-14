@@ -6,16 +6,15 @@
 //! checked here against MD5s this run computed from the FASTA. Nothing is trusted because
 //! it was written down.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
-
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::reference_info::{ContigInfo, ReferenceInfo};
 use crate::region_typing::segment_criteria::SsrSegment;
 use crate::region_typing::{RegionKind, TypedRegion};
 use crate::repeat_catalog::StrRepeatCriteria;
-use crate::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, rows_overlapping};
+use crate::repeat_catalog::parquet_file::{
+    CatalogIndex, HEADER_KEY, decode_header, rows_overlapping,
+};
 use crate::repeat_catalog::segments::{
     loci_of_contig, loci_of_contig_in, segments_of_contig, segments_of_contig_in,
 };
@@ -34,10 +33,17 @@ use crate::types::ContigId;
 /// Holding one is the evidence that the file describes the reference in hand — which is why
 /// [`open_checking_against_reference`](Self::open_checking_against_reference) is the only
 /// way to get one, and why no row-reading method re-checks.
+///
+/// **The file must not be replaced while a run holds it open** (owner, 2026-10-09). The file's
+/// index is read once, at open, and every later read of rows trusts it; a file swapped
+/// underneath would be read through the old file's index. Nothing in the pipeline replaces a
+/// catalog mid-run, so this is a rule for the user, not a check.
 #[derive(Debug)]
 pub struct RepeatCatalog {
     path: PathBuf,
     header: RepeatCatalogHeader,
+    /// The footer and page index, parsed once here and reused by every contig read.
+    index: CatalogIndex,
 }
 
 impl RepeatCatalog {
@@ -59,12 +65,32 @@ impl RepeatCatalog {
                 path: path.to_path_buf(),
             });
         }
-        let header = read_header(path)?;
+        let index = match CatalogIndex::load(path) {
+            Ok(index) => index,
+            Err(source) => {
+                // **The build is named before the layout is blamed.** `load` refuses a file
+                // whose columns, page index or statistics are not this build's — and a
+                // catalog written by another build is exactly such a file. Its header may
+                // still be readable, and *written by another version* is the refusal a
+                // person can act on (rebuild it), where *unreadable* sends them looking for
+                // corruption. This is the order the checks ran in before the footer was
+                // parsed once at open.
+                if let Some(text) = header_text_without_layout_checks(path) {
+                    check_written_by_this_build(&decode_header(&text, path)?)?;
+                }
+                return Err(RepeatCatalogError::Unreadable {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let header = read_header(path, &index)?;
         check_written_by_this_build(&header)?;
         check_against_reference(&header, reference)?;
         Ok(Self {
             path: path.to_path_buf(),
             header,
+            index,
         })
     }
 
@@ -106,19 +132,22 @@ impl RepeatCatalog {
     pub fn repeats(&self, scope: ReadScope<'_>) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
         self.check_scope(scope)?;
         let mut out = Vec::new();
+        let owned = scope.owned();
         for (contig, _, _) in self.contig_walk(scope) {
-            match scope.spans_on(contig) {
+            match owned.spans_on(contig) {
                 None => out.extend(rows_of_contig(self, contig)?),
-                Some(spans) if spans.is_empty() => {}
+                Some([]) => {}
                 Some(spans) => {
                     let windows: Vec<(u64, u64)> =
                         spans.iter().map(|s| (s.start.get(), s.end.get())).collect();
-                    out.extend(rows_overlapping(&self.path, contig, &windows).map_err(
-                        |source| RepeatCatalogError::Unreadable {
-                            path: self.path.clone(),
-                            source,
-                        },
-                    )?);
+                    out.extend(
+                        rows_overlapping(&self.path, &self.index, contig, &windows).map_err(
+                            |source| RepeatCatalogError::Unreadable {
+                                path: self.path.clone(),
+                                source,
+                            },
+                        )?,
+                    );
                 }
             }
         }
@@ -161,7 +190,9 @@ impl RepeatCatalog {
     /// **widened by how far a row outside a region can reach into it**: a tract within the
     /// bundle radius bundles with what is inside, and a long array overlapping it swallows a
     /// locus inside. The longest tract in the contig plus the reader's bundle radius bounds
-    /// both, and the header stores that length per contig.
+    /// both, and the header stores that length per contig; a chain of short tracts — an STR
+    /// bundle — is bounded by the reader's bundle cap instead
+    /// ([`RepeatCatalogHeader::reach_into_window`](crate::repeat_catalog::RepeatCatalogHeader::reach_into_window)).
     ///
     /// The widened windows become a filter over `detected_start` / `detected_end`, so with
     /// the page index loaded the reader skips whole pages outside them — the file's own
@@ -179,9 +210,11 @@ impl RepeatCatalog {
             return Ok(Vec::new());
         }
 
-        let reach = self
-            .header
-            .reach_into_window(contig, criteria.classification.bundle_threshold);
+        let reach = self.header.reach_into_window(
+            contig,
+            criteria.classification.bundle_threshold,
+            criteria.max_str_bundle_len_bp.get(),
+        );
         let windows: Vec<(u64, u64)> = spans
             .iter()
             .map(|s| {
@@ -192,7 +225,7 @@ impl RepeatCatalog {
             })
             .collect();
 
-        rows_overlapping(&self.path, contig, &windows).map_err(|source| {
+        rows_overlapping(&self.path, &self.index, contig, &windows).map_err(|source| {
             RepeatCatalogError::Unreadable {
                 path: self.path.clone(),
                 source,
@@ -203,12 +236,18 @@ impl RepeatCatalog {
     /// The contigs a scope reaches, with the names and lengths the header carries. A contig
     /// no region names is never opened.
     fn contig_walk(&self, scope: ReadScope<'_>) -> Vec<(ContigId, String, Bp)> {
+        // Which contigs the regions name, found in one pass over them rather than one pass
+        // per contig — 2,580 contigs times 481,622 GIAB spans was 1.2 billion comparisons.
+        let named: Option<std::collections::BTreeSet<ContigId>> = match scope {
+            ReadScope::WholeReference => None,
+            ReadScope::Regions(spans) => Some(spans.iter().map(|s| s.contig).collect()),
+        };
         self.header
             .contigs
             .iter()
             .enumerate()
             .map(|(i, info)| (ContigId(i as u32), info.name.clone(), Bp(info.length)))
-            .filter(|(id, _, _)| scope.touches(*id))
+            .filter(|(id, _, _)| named.as_ref().is_none_or(|named| named.contains(id)))
             .collect()
     }
 
@@ -279,7 +318,14 @@ impl RepeatCatalog {
     /// **The floors only.** The scoring weights are a separate question with a separate
     /// answer, because a reader that only reads has no weights to offer — it is not scanning
     /// anything. A caller that scans as well as reads asks [`check_scored_with`] itself.
+    ///
+    /// **And a bundle radius of at least one base**, the same floor the scan path's `classify`
+    /// asserts (owner, 2026-10-09): at 0 every locus fails its own flank test. Refused here, at
+    /// the call, as an error the user can act on — `type-regions --flank-bp 0` reaches it.
     fn check_serves(&self, criteria: &StrRepeatCriteria) -> Result<(), RepeatCatalogError> {
+        if criteria.classification.bundle_threshold == 0 {
+            return Err(RepeatCatalogError::NoBundleRadius);
+        }
         self.header.built_under.serves(criteria)?;
         Ok(())
     }
@@ -367,9 +413,10 @@ impl GenomeSegments<'_> {
                 // edge, and taking back its whole length would remove bases that were never
                 // counted. What is inside the request is a subset of the coverage charged
                 // for it, so this cannot underflow. Same rule as the walk's.
-                let inside = match self.scope.spans_on(region.region.contig) {
+                let inside = match self.scope.index_on(region.region.contig) {
                     None => bp,
-                    Some(spans) => spans
+                    Some(index) => index
+                        .candidates(region.region.start.get(), region.region.end.get())
                         .iter()
                         .map(|s| {
                             let from = region.region.start.get().max(s.start.get());
@@ -424,7 +471,7 @@ impl Iterator for GenomeSegments<'_> {
                 }
                 Some(spans) => {
                     self.counts.spans += spans.len() as u64;
-                    segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
+                    segments_of_contig_in(&name, contig, length, &rows, &self.criteria, spans)
                 }
             };
             self.counts.add_contig(&tally);
@@ -462,7 +509,7 @@ impl Iterator for StrLoci<'_> {
             self.buffered = match self.scope.spans_on(contig) {
                 None => loci_of_contig(&name, contig, length, &rows, &self.criteria),
                 Some(spans) => {
-                    loci_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
+                    loci_of_contig_in(&name, contig, length, &rows, &self.criteria, spans)
                 }
             }
             .into_iter();
@@ -476,7 +523,7 @@ fn rows_of_contig(
     contig: ContigId,
 ) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
     // One window covering the contig: the same windowed read, with nothing to skip.
-    rows_overlapping(&catalog.path, contig, &[(0, u64::MAX)]).map_err(|source| {
+    rows_overlapping(&catalog.path, &catalog.index, contig, &[(0, u64::MAX)]).map_err(|source| {
         RepeatCatalogError::Unreadable {
             path: catalog.path.clone(),
             source,
@@ -484,25 +531,32 @@ fn rows_of_contig(
     })
 }
 
-/// Read and decode the footer's header block.
-fn read_header(path: &Path) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
-    let unreadable =
-        |source: Box<dyn std::error::Error + Send + Sync>| RepeatCatalogError::Unreadable {
-            path: path.to_path_buf(),
-            source,
-        };
-
-    let file = File::open(path).map_err(|e| unreadable(Box::new(e)))?;
+/// The footer's header block, read with no page index and no check of the columns — only
+/// for naming the build of a file [`CatalogIndex::load`] refused. `None` when even that
+/// much cannot be read.
+fn header_text_without_layout_checks(path: &Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
     let builder =
-        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| unreadable(Box::new(e)))?;
-    let text = builder
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+    builder
         .metadata()
         .file_metadata()
         .key_value_metadata()
         .and_then(|kv| kv.iter().find(|entry| entry.key == HEADER_KEY))
         .and_then(|entry| entry.value.clone())
-        .ok_or_else(|| unreadable("not a repeat catalog: no header in the footer".into()))?;
+}
 
+/// Decode the footer's header block from the already-parsed footer.
+fn read_header(
+    path: &Path,
+    index: &CatalogIndex,
+) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
+    let text = index
+        .footer_value(HEADER_KEY)
+        .ok_or_else(|| RepeatCatalogError::Unreadable {
+            path: path.to_path_buf(),
+            source: "not a repeat catalog: no header in the footer".into(),
+        })?;
     decode_header(&text, path)
 }
 
@@ -605,6 +659,8 @@ fn hex(digest: &[u8; 16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+
     use crate::repeat_catalog::parquet_file::{RepeatCatalogWriter, temp_path_for};
     use crate::repeat_catalog::{StrRepeatCriteria, TractSpan};
     use crate::tandem_repeat::ScanParams;
@@ -686,6 +742,34 @@ mod tests {
 
         let rows: Vec<FoundRepeat> = catalog.repeats(ReadScope::WholeReference).expect("rows");
         assert_eq!(rows, vec![row(0, 100, 3), row(0, 400, 3), row(1, 50, 3)]);
+    }
+
+    /// **A bundle radius of 0 is refused before any row is read**, as the scan path refuses it:
+    /// at 0 every locus fails its own flank test and the typing would quietly hold no STR
+    /// segment. Every read that classifies goes through the same check.
+    #[test]
+    fn a_bundle_radius_of_zero_is_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+        let reference = reference();
+        write_catalog(&path, &reference);
+        let catalog =
+            RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
+        let mut criteria = StrRepeatCriteria::default();
+        criteria.classification.bundle_threshold = 0;
+
+        assert!(matches!(
+            catalog.genome_segments(&criteria, ReadScope::WholeReference),
+            Err(RepeatCatalogError::NoBundleRadius)
+        ));
+        assert!(matches!(
+            catalog.str_loci(&criteria, ReadScope::WholeReference),
+            Err(RepeatCatalogError::NoBundleRadius)
+        ));
+        assert!(matches!(
+            catalog.count_loci_per_stratum(&criteria, ReadScope::WholeReference),
+            Err(RepeatCatalogError::NoBundleRadius)
+        ));
     }
 
     /// **A catalog written by another build of the detector is refused.** The header records
@@ -785,6 +869,58 @@ mod tests {
             }]))
             .expect("rows");
         assert_eq!(rows, vec![row(1, 50, 3)]);
+    }
+
+    /// **Part of a contig reads back exactly the rows that overlap it, edges inclusive** —
+    /// the answer a scan of every row against every span gives. chr1 holds `100..=117` and
+    /// `400..=417`. The cases cover both ways the read can go: a window holding the contig's
+    /// whole extent `100..=417` reads with no row filter, and every other window reads through
+    /// the filter's binary search. `118..=1000` is the one that tells them apart — it holds
+    /// the extent's end but not its start, so taking the no-filter shortcut there would
+    /// return the row at 100. Spans out of order and overlapping each other are walked whole.
+    #[test]
+    fn part_of_a_contig_reads_back_the_rows_overlapping_it() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+        let reference = reference();
+        write_catalog(&path, &reference);
+        let catalog =
+            RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
+        let all = catalog.repeats(ReadScope::WholeReference).expect("rows");
+
+        let on_chr1 = |start: u64, end: u64| GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        };
+        let cases: Vec<Vec<GenomeRegion>> = vec![
+            vec![on_chr1(100, 417)],
+            vec![on_chr1(1, 1000)],
+            vec![on_chr1(118, 1000)],
+            vec![on_chr1(101, 417)],
+            vec![on_chr1(100, 416)],
+            vec![on_chr1(117, 117)],
+            vec![on_chr1(118, 399)],
+            vec![on_chr1(400, 400)],
+            vec![on_chr1(110, 120), on_chr1(500, 600)],
+            vec![on_chr1(400, 450), on_chr1(1, 100)],
+            vec![on_chr1(1, 300), on_chr1(200, 450)],
+        ];
+        for spans in cases {
+            let expected: Vec<FoundRepeat> = all
+                .iter()
+                .filter(|r| {
+                    spans.iter().any(|s| {
+                        r.contig == s.contig
+                            && r.detected.start.get() <= s.end.get()
+                            && r.detected.end.get() >= s.start.get()
+                    })
+                })
+                .cloned()
+                .collect();
+            let rows = catalog.repeats(ReadScope::Regions(&spans)).expect("rows");
+            assert_eq!(rows, expected, "spans {spans:?}");
+        }
     }
 
     /// **The whole reference is one span per non-empty contig**, which is what
@@ -952,5 +1088,77 @@ mod tests {
         let err = RepeatCatalog::open_checking_against_reference(&path, &reference())
             .expect_err("not a catalog");
         assert!(matches!(err, RepeatCatalogError::Unreadable { .. }));
+    }
+
+    /// A parquet file carrying a catalog header stamped `tool_version`, with columns that
+    /// are not a catalog's — the shape a catalog written by a build with another layout has.
+    fn catalog_header_over_foreign_columns(path: &Path, tool_version: &str) {
+        use arrow_array::{RecordBatch, UInt64Array};
+        use arrow_schema::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::metadata::KeyValue;
+        use parquet::file::properties::WriterProperties;
+        use std::sync::Arc;
+
+        let header = RepeatCatalogHeader {
+            tool_version: tool_version.to_string(),
+            ..header_for(&reference())
+        };
+        let properties = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![KeyValue::new(
+                HEADER_KEY.to_string(),
+                crate::repeat_catalog::parquet_file::encode_header(&header),
+            )]))
+            .build();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::UInt64, false)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(UInt64Array::from(vec![1u64, 2, 3]))],
+        )
+        .expect("batch");
+        let mut writer = ArrowWriter::try_new(
+            File::create(path).expect("create"),
+            schema,
+            Some(properties),
+        )
+        .expect("w");
+        writer.write(&batch).expect("write");
+        writer.close().expect("close");
+    }
+
+    /// **A catalog from another build is named as one even when its layout is not this
+    /// build's.** The layout checks run at open, and they would refuse such a file as
+    /// unreadable; the version refusal is the one that says what to do (rebuild the catalog),
+    /// so it comes first, as it did when the layout was only checked at the first read.
+    #[test]
+    fn a_catalog_from_another_build_with_another_layout_is_refused_by_version() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("old_layout.parquet");
+        catalog_header_over_foreign_columns(&path, "ancient-0.0.1");
+
+        let err = RepeatCatalog::open_checking_against_reference(&path, &reference())
+            .expect_err("another build");
+        match &err {
+            RepeatCatalogError::ToolVersionDiffers { built, .. } => {
+                assert_eq!(built, "ancient-0.0.1");
+            }
+            other => panic!("expected a tool-version refusal, got {other}"),
+        }
+    }
+
+    /// The same file stamped by this build is refused for its layout: the header is no
+    /// excuse for columns the reader cannot address.
+    #[test]
+    fn a_catalog_of_this_build_with_another_layout_is_unreadable() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("wrong_layout.parquet");
+        catalog_header_over_foreign_columns(&path, running_tool_version());
+
+        let err = RepeatCatalog::open_checking_against_reference(&path, &reference())
+            .expect_err("wrong layout");
+        assert!(
+            matches!(err, RepeatCatalogError::Unreadable { .. }),
+            "got {err}"
+        );
     }
 }

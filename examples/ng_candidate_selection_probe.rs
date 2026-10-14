@@ -272,6 +272,7 @@ fn restrict_to_first_samples(observation: &CohortObservation, samples: usize) ->
         .map(|(sample, window)| (sample.clone(), *window))
         .unzip();
     CohortObservation {
+        allele_flank_deletions: Vec::new(),
         region: observation.region,
         alleles: observation.alleles.clone(),
         per_sample,

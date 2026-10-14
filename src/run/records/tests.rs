@@ -403,6 +403,7 @@ fn covering(sample: usize, rows: Vec<SupportedAllele>) -> SampleSupport {
 /// A cohort locus over `alleles`, covered by `per_sample`.
 fn observed(alleles: &[&[u8]], per_sample: Vec<SampleSupport>) -> CohortObservation {
     CohortObservation {
+        allele_flank_deletions: Vec::new(),
         region: region(100, 100),
         alleles: alleles.iter().map(|bases| Box::from(*bases)).collect(),
         window_coverage: vec![WindowCoverage::absent(); per_sample.len()],
@@ -576,6 +577,7 @@ fn a_covering_samples_reads_land_on_the_run_sample_it_names() {
 fn a_read_that_stopped_inside_the_locus_is_in_dp_and_in_no_ad_slot() {
     let mut sample = covering(0, vec![row(0, 4, 240), row(1, 3, 180)]);
     sample.partials = vec![PartialObservation {
+        held_flank: None,
         witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(0, 1)
             .expect("a one-position witness"),
         read_group: ReadGroupId(0),
@@ -869,6 +871,7 @@ fn the_three_kinds_of_unexplained_read_are_added_together() {
     let mut sample = covering(0, vec![row(0, 4, 240), row(1, 3, 180), row(2, 1, 60)]);
     sample.reads_removed_as_evidence = 2;
     sample.partials = vec![PartialObservation {
+        held_flank: None,
         witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(0, 1)
             .expect("a one-position witness"),
         read_group: ReadGroupId(0),

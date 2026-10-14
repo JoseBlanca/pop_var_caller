@@ -119,6 +119,8 @@ fn showed(bases: &[u8], reads: u32) -> SequenceObservation {
 /// folded over the read groups whose reads reached it.
 fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObservation {
     SequenceObservation {
+        flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
+        held_flank: None,
         bases: bases.to_vec().into_boxed_slice(),
         read_witness: ReadWitness::Complete,
         read_group,
@@ -816,6 +818,8 @@ fn tract_repeat_counts() -> Vec<NonZeroU32> {
 /// emission's charge, and neither the repeat-tract row nor its emission model touches it.
 fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
     SequenceObservation {
+        flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
+        held_flank: None,
         bases: tract_bases(repeats).into_boxed_slice(),
         read_witness: ReadWitness::Complete,
         read_group: ReadGroupId(0),

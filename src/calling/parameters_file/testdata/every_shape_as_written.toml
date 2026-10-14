@@ -356,16 +356,18 @@ repeat_tract_outlier_weight = { value = 0.2, warrant = "defaulted" }
 # first entry is how many bases a homopolymer needs and the last how many
 # hexamer copies. `min_purity` is how much of a tract has to match a perfect
 # tiling of its unit. `max_str_len` is where a tract stops being callable and
-# becomes a satellite, which neither caller speaks for.
+# becomes a satellite, which neither caller speaks for; `max_str_bundle_len` is
+# the same limit for an STR bundle, a group of repeats too close together to be
+# called apart, measured from the start of its first repeat to the furthest end
+# of any of them.
 #
-# Five of the eight have flags on `call-from-alignments`, named as these keys
-# are. The other three do not, and are written because a record that left them
-# out would not say what the run actually asked the catalog for: `min_flank_bp`
-# is pinned at the catalog's own floor, since tracts nearer than that to a
-# contig's end were never written to the file; `min_score` gates a scanner's
-# output and so gates nothing in a run that reads a catalog; `bundle_threshold`
-# is how close two tracts have to be before they are one bundle rather than two
-# loci.
+# Six of the nine have flags on `call-from-alignments`, named as these keys are.
+# The other three do not, and are written because a record that left them out
+# would not say what the run actually asked the catalog for: `min_flank_bp` is
+# pinned at the catalog's own floor, since tracts nearer than that to a contig's
+# end were never written to the file; `min_score` gates a scanner's output and
+# so gates nothing in a run that reads a catalog; `bundle_threshold` is how
+# close two tracts have to be before they are one bundle rather than two loci.
 #
 # A run handed a parameters file whose numbers here differ from its own says so
 # and calls on. Nothing is refused and nothing is demoted: the numbers in this
@@ -378,6 +380,7 @@ min_copies = [5, 5, 4, 4, 4, 3]
 min_period = 1
 max_period = 6
 max_str_len = 500
+max_str_bundle_len = 100
 min_purity = 0.8
 min_flank_bp = 15
 min_score = 0

@@ -545,7 +545,7 @@ pub struct ParametersFile {
 /// the file or demotes it. A routing difference does neither: the numbers are as warranted as
 /// they ever were, and only the ground they are applied to has moved.
 ///
-/// **Five of the eight have flags on `call-from-alignments`**; the other three are written
+/// **Six of the nine have flags on `call-from-alignments`**; the other three are written
 /// anyway, because a record that omitted them would not say what the run actually asked the
 /// catalog for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -560,6 +560,15 @@ pub struct RepeatRouting {
     /// Longer than this and a tract is a satellite, which neither caller speaks for —
     /// `--max-str-len`.
     pub max_str_len: u64,
+    /// Longer than this, from its first repeat's start to the furthest end of any of them,
+    /// and an STR bundle is a satellite —
+    /// `--max-str-bundle-len` (`str_bundle_loci.md` §5.2).
+    ///
+    /// **`None` is a file written before the bundle cap existed**, which says nothing about
+    /// it — absence is not the default, as for the whole section. Every run this build makes
+    /// writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_str_bundle_len: Option<u64>,
     /// How much of a tract must match a perfect tiling of its motif, 0 to 1 — `--min-purity`.
     pub min_purity: f32,
     /// Sequence required each side of a tract. **No flag**: it is pinned at the catalog's own

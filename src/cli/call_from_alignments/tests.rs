@@ -38,7 +38,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// the defaults.
 fn a_defaults_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -70,7 +70,7 @@ fn the_subcommand_is_spelled_call_from_alignments() {
 #[test]
 fn a_run_that_names_neither_a_parameters_file_nor_the_defaults_is_refused() {
     let refusal = refusal_of(&[
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -106,7 +106,7 @@ fn a_run_that_names_both_a_parameters_file_and_the_defaults_is_refused() {
 #[test]
 fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     let args = args_of(&[
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -126,7 +126,7 @@ fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     );
     assert!(
         refusal_of(&[
-            "pop_var_caller",
+            "pvc",
             "call-from-alignments",
             "--reference",
             "ref.fa",
@@ -280,6 +280,7 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
@@ -357,6 +358,7 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
@@ -727,6 +729,7 @@ fn a_cohort_on_disk() -> (
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,

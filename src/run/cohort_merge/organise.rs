@@ -498,6 +498,7 @@ mod tests {
     /// which loci come out and in what order, and a fabricated one carries that in its region.
     fn locus_at(region: GenomeRegion) -> CohortObservation {
         CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region,
             alleles: Vec::new(),
             per_sample: Vec::new(),

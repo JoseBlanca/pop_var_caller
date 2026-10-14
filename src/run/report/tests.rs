@@ -798,14 +798,14 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
             .collect(),
         too_many_alleles: 3,
         without_whole_repeats: 1,
-        bundles_set_aside: 7,
+        bundles: 7,
     };
     let text = rendered(&some_built, &read_groups, &parameters, 1_000);
 
     // **The headline is the sum and the share of it that was called**, so a reader who stops
     // after one line still knows how much of the tract ground the run spoke for.
     assert!(
-        text.contains("repeat tracts: 58 built, of which 40 called"),
+        text.contains("repeat tracts: 51 built, of which 40 called"),
         "the five outcomes sum to the tracts built: {text}",
     );
     for (line, what) in [
@@ -822,8 +822,8 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
             "no rung on the stutter ladder",
         ),
         (
-            "no clean flanks, which nothing builds a caller for yet: 7",
-            "a bundle",
+            "called as one locus each): 7",
+            "how many of them were STR bundles",
         ),
     ] {
         assert!(
@@ -891,9 +891,9 @@ fn the_tract_outcomes_sum_to_the_tracts_built() {
         not_periodic: (1..=5).map(|i| a_tract(100 * i)).collect(),
         too_many_alleles: 3,
         without_whole_repeats: 1,
-        bundles_set_aside: 7,
+        bundles: 7,
     };
-    assert_eq!(outcomes.built(), 56);
+    assert_eq!(outcomes.built(), 49);
     assert_eq!(outcomes.refused_by_a_filter(), 8);
     assert_eq!(TractOutcomes::default().built(), 0);
 }

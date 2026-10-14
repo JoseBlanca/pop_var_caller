@@ -29,12 +29,15 @@ use std::sync::Arc;
 
 use crate::bam::index_preflight::AlignmentFileKind;
 use crate::calling::allele_candidates::generic::select_generic;
-use crate::calling::allele_candidates::ssr::{SsrLocusSelection, SsrSelectionConfig, select_ssr};
+use crate::calling::allele_candidates::ssr::{
+    SsrBundleSelection, SsrLocusSelection, SsrSelectionConfig, select_ssr, select_ssr_bundle,
+};
 use crate::calling::allele_candidates::{
     AlleleRemap, CandidateSelectionConfig, SelectionVerdict, UnmatchedSupport,
 };
 use crate::calling::evidence_shaping::{
-    GenericEvidenceScratch, SsrEvidenceScratch, shape_generic_locus, shape_ssr_locus,
+    GenericEvidenceScratch, SsrEvidenceScratch, shape_generic_locus, shape_ssr_bundle_locus,
+    shape_ssr_locus,
 };
 use crate::calling::inference::{LocusGenotyper, RunnableCallingLoopConfig};
 use crate::calling::run_parameters::RunParameters;
@@ -42,7 +45,7 @@ use crate::calling::{CallingScratch, FrozenParameters, LocusInference, Reference
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::{PileupGeneratorConfig, PileupGeneratorCounts};
 use crate::locus_generation::{
-    GeneratorCounts, LocusCounts, LocusKind, SequenceObservation, SsrDetail,
+    GeneratorCounts, LocusCounts, LocusKind, SequenceObservation, SsrBundleDetail, SsrDetail,
 };
 use crate::read::filtering::ReadFilterConfig;
 use crate::read::filtering::ReadFilterCounts;
@@ -716,7 +719,7 @@ impl AlignedFilesVariantCaller {
                     LocusOutcome::Called(called) => called_loci.push(called),
                     LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
                     // Both counted inside the dispatch, where the verdict that decided them is.
-                    LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
+                    LocusOutcome::TractWithoutWholeRepeats => {}
                 }
             },
             &mut loci_too_wide_to_assemble,
@@ -816,13 +819,31 @@ impl AlignedFilesVariantCaller {
             calling,
             sources,
             window_coverage_histograms,
-        } = call_cohort_from_sources_handing_each_record_over(
-            ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
-            inputs,
-            genotyper,
-            &|record, _| Ok(record),
-            &mut |record: VcfRecord, windows| hand_over(&record, windows),
-        )?;
+        } = {
+            // Every finished record passes the gathering of the calls before it is handed over
+            // (`str_edge_deletion_alleles.md` §6), as in psp mode.
+            let mut gathering =
+                crate::run::edge_deletion_gathering::EdgeDeletionGathering::default();
+            let outcome = call_cohort_from_sources_handing_each_record_over(
+                ObservationCache::over(walkers, Box::new(reference_for_the_merge)),
+                inputs,
+                genotyper,
+                &|record, _| Ok::<_, E>(record),
+                &mut |record: VcfRecord, windows| {
+                    for (record, windows) in gathering.accept(record, windows.to_vec()) {
+                        hand_over(&record, &windows)?;
+                    }
+                    Ok(())
+                },
+            )?;
+            for (record, windows) in gathering.finish() {
+                hand_over(&record, &windows).map_err(|source| RunError::RecordNotWritten {
+                    locus: record.region(),
+                    source: Box::new(source),
+                })?;
+            }
+            outcome
+        };
         Ok(WrittenCohort {
             calling,
             walk: CohortWalkTallies::of(sample_names, sources, assembly_check),
@@ -1119,7 +1140,7 @@ where
             match built {
                 LocusOutcome::NobodyToCall => loci_with_nobody_to_call.push(region),
                 // Both counted inside the dispatch, where the verdict that decided them is.
-                LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {}
+                LocusOutcome::TractWithoutWholeRepeats => {}
                 LocusOutcome::Called(Err(error)) => stopped = Some(error),
                 LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
                     loci_called_but_not_written += 1;
@@ -1224,9 +1245,10 @@ pub struct TractOutcomes {
     /// **Not scored: a candidate carrying no whole motif copy**, which the stutter ladder has no
     /// rung for. See [`repeat_counts_the_tract_model_can_take`] for how often this fires.
     pub without_whole_repeats: u64,
-    /// **Not scored: a repeat cluster with no clean flanks**, which nothing in the run builds a
-    /// caller for — the bundle generator is deferred and has no model.
-    pub bundles_set_aside: u64,
+    /// **Of the loci above, how many were STR bundles** (`str_bundle_loci.md` §7) — each also
+    /// counted in whichever of the outcomes above it reached, so this is not part of
+    /// [`Self::built`]'s sum.
+    pub bundles: u64,
 }
 
 impl TractOutcomes {
@@ -1237,7 +1259,6 @@ impl TractOutcomes {
             + self.not_periodic.len() as u64
             + self.too_many_alleles
             + self.without_whole_repeats
-            + self.bundles_set_aside
     }
 
     /// Those that were scored and then refused by a filter of their own.
@@ -1259,10 +1280,6 @@ enum LocusOutcome<R> {
     /// earned, so there are no rows to genotype. Counted, never fatal (owner's ruling,
     /// 2026-09-01).
     NobodyToCall,
-    /// **A repeat cluster with no clean flanks**, which nothing in the run builds a caller for
-    /// yet: the bundle generator is deferred (`candidate_alleles_ssr.md` §11) and the tract
-    /// model wants a single tract with two flanks. Set aside and counted.
-    BundleSetAside,
     /// **A repeat tract holding a candidate that is not a whole number of motif copies** —
     /// a sequence shorter than one copy of the unit, which the stutter model is not written
     /// on: its ladder is in whole repeats and this candidate sits below the bottom rung.
@@ -1356,15 +1373,24 @@ where
             explanation.as_mut(),
             finish,
         ),
-        LocusKind::SsrBundle => {
-            tracts.bundles_set_aside += 1;
-            LocusOutcome::BundleSetAside
-        }
+        LocusKind::SsrBundle(detail) => call_one_ssr_bundle_locus(
+            genotyper,
+            observation,
+            detail,
+            parameters,
+            tract_selection,
+            calling_loop_config,
+            run_sample_count,
+            tract_shaping,
+            tracts,
+            scratch,
+            explanation.as_mut(),
+            finish,
+        ),
     };
     if let Some(rows) = explanation.as_mut() {
         let end = match &outcome {
             LocusOutcome::NobodyToCall => Some(LocusEnd::NobodyToCall),
-            LocusOutcome::BundleSetAside => Some(LocusEnd::BundleSetAside),
             LocusOutcome::TractWithoutWholeRepeats => Some(LocusEnd::TractWithoutWholeRepeats),
             // The driver holding the record says how a called locus ended.
             LocusOutcome::Called(_) => None,
@@ -1399,9 +1425,7 @@ fn end_of_a_called_locus(
             Some(LocusEnd::BelowMinimumSiteQuality(*quality))
         }
         LocusOutcome::Called(Err(_)) => Some(LocusEnd::Failed),
-        LocusOutcome::NobodyToCall
-        | LocusOutcome::BundleSetAside
-        | LocusOutcome::TractWithoutWholeRepeats => None,
+        LocusOutcome::NobodyToCall | LocusOutcome::TractWithoutWholeRepeats => None,
     }
 }
 
@@ -1524,6 +1548,71 @@ where
         &repeat_counts,
         &mut views,
     );
+    let inference =
+        genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
+    if let Some(rows) = explanation {
+        calling_rows(rows, &inference, scratch, parameters.ploidy());
+    }
+    LocusOutcome::Called(finish(inference, &remap, &unmatched, verdict))
+}
+
+/// One STR bundle from evidence to genotypes — [`call_one_ssr_locus`] over a bundle
+/// (`str_bundle_loci.md` §7): narrowed by [`select_ssr_bundle`], whose candidates carry their run
+/// parses, shaped with them, and genotyped by the run's own genotyper exactly as a segment is. A
+/// bundle with no run is called the same way, with no stutter modelled in it.
+///
+/// **No candidate stops the locus**: every bundle allele can be scored — a run it holds no copy of
+/// simply cannot slip — so a bundle has no counterpart of `TractWithoutWholeRepeats`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the bundle path's spelling of `call_one_ssr_locus`'s twelve — see there"
+)]
+fn call_one_ssr_bundle_locus<S, G, R>(
+    genotyper: &G,
+    observation: &CohortObservation,
+    detail: &SsrBundleDetail,
+    parameters: &FrozenParameters<'_>,
+    tract_selection: &SsrSelectionConfig,
+    calling_loop_config: &RunnableCallingLoopConfig,
+    run_sample_count: usize,
+    tract_shaping: &mut SsrEvidenceScratch,
+    tracts: &mut TractOutcomes,
+    scratch: &mut CallingScratch<S>,
+    explanation: Option<&mut Vec<ExplainRow>>,
+    finish: impl FnOnce(LocusInference, &AlleleRemap, &[UnmatchedSupport], SelectionVerdict) -> R,
+) -> LocusOutcome<R>
+where
+    G: LocusGenotyper<S>,
+{
+    let SsrBundleSelection { selection, parses } = select_ssr_bundle(
+        observation,
+        tract_selection,
+        scratch.candidate_selection_mut(),
+    );
+    let mut explanation = explanation;
+    if let Some(rows) = explanation.as_deref_mut() {
+        selection_rows(
+            rows,
+            observation,
+            &selection,
+            &CandidateSelectionConfig::DEFAULT,
+            ReferenceBesideLocus::NONE,
+        );
+    }
+    let (alleles, verdict, unmatched, remap) = selection.into_parts();
+    tracts.bundles += 1;
+    count_this_tract(verdict, observation.region, tracts);
+
+    let observations_of_each_run_sample = tract_shaping.rebuild(observation, run_sample_count);
+    // **Every read, those that ended inside the hull included** (`str_bundle_loci.md` §7.6): the
+    // row scores a partial as a lower bound from the flank it held, as at a segment.
+    let per_sample: Vec<&[SequenceObservation]> = observations_of_each_run_sample
+        .iter()
+        .map(Vec::as_slice)
+        .collect();
+    let mut views = Vec::new();
+    let evidence =
+        shape_ssr_bundle_locus(observation.region, &per_sample, detail, &parses, &mut views);
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
     if let Some(rows) = explanation {
@@ -4617,14 +4706,12 @@ mod what_the_fixtures_above_could_not_distinguish {
         );
     }
 
-    /// **A repeat tract is refused as unbuilt, not as out of scope**, and the two are different
-    /// answers to *why did this ground emit nothing*.
-    ///
-    /// Out of scope is permanent — a satellite is never going to be called. Not implemented is
-    /// this caller's own gap, and the run report's job is to say which. Swapping them is
-    /// invisible to every other test here.
+    /// **A run's generator set measures an STR bundle**, one locus over its hull — the slot
+    /// that was refused as unbuilt until 2026-10-11 (`str_bundle_loci.md` §6.1). Before, this
+    /// test pinned that refusal as `NotImplemented` rather than `OutOfScope`; now the region is
+    /// handled and neither unhandled counter moves.
     #[test]
-    fn a_repeat_tract_is_refused_as_unbuilt_rather_than_as_out_of_scope() {
+    fn a_run_measures_an_str_bundle_as_one_locus_over_its_hull() {
         let (_reference_dir, reference) = fixture_reference_from_its_index();
         let walk_reference = WalkReference::of(&reference).expect("the fixture has bases");
         let default_criteria_segmentation = super::tests::segmentation();
@@ -4653,21 +4740,22 @@ mod what_the_fixtures_above_could_not_distinguish {
                 end: Position(20),
             },
             kind: RegionKind::SsrBundle {
-                tracts: Vec::new().into_boxed_slice(),
+                members: Vec::new().into_boxed_slice(),
             },
         });
-        while generators.next_locus(&reads).expect("no failure").is_some() {}
+        let mut loci = Vec::new();
+        while let Some(locus) = generators.next_locus(&reads).expect("no failure") {
+            loci.push(locus);
+        }
 
+        assert_eq!(loci.len(), 1, "one locus per bundle");
+        assert_eq!(loci[0].region.start, Position(10));
+        assert_eq!(loci[0].region.end, Position(20));
+        assert!(matches!(loci[0].kind, LocusKind::SsrBundle(_)));
         let counts = generators.counts();
-        assert_eq!(
-            counts.unhandled_not_implemented, 1,
-            "a repeat tract is this caller's own gap",
-        );
-        assert_eq!(
-            counts.unhandled_out_of_scope, 0,
-            "and not a permanent refusal — that is the satellite's answer, and saying it here \
-             would tell a run report the tract will never be called",
-        );
+        assert_eq!(counts.regions_handled, 1);
+        assert_eq!(counts.unhandled_not_implemented, 0);
+        assert_eq!(counts.unhandled_out_of_scope, 0);
     }
 }
 
@@ -6295,7 +6383,7 @@ mod records_handed_over_as_the_run_finishes_them {
                 md5: None,
             }],
             sample_names.clone(),
-            "pop_var_caller call-from-alignments".to_owned(),
+            "pvc call-from-alignments".to_owned(),
             "reference.fa".to_owned(),
             String::new(),
         )
@@ -6529,7 +6617,7 @@ mod records_handed_over_as_the_run_finishes_them {
                     md5: None,
                 }],
                 sample_names,
-                "pop_var_caller call-from-alignments".to_owned(),
+                "pvc call-from-alignments".to_owned(),
                 "reference.fa".to_owned(),
                 String::new(),
             )
@@ -6823,8 +6911,8 @@ mod records_handed_over_as_the_run_finishes_them {
         .expect("the fixture cohort calls");
 
         assert_eq!(
-            called.tracts.bundles_set_aside, 0,
-            "a repeat tract is dispatched to the tract path, and only a bundle is set aside",
+            called.tracts.bundles, 0,
+            "a repeat tract is dispatched to the tract path and is no STR bundle",
         );
         let over_the_tract: Vec<&LocusInference> = called
             .called_loci
@@ -7114,8 +7202,8 @@ mod records_handed_over_as_the_run_finishes_them {
                  — without this the comparisons below are of files holding none",
             );
             assert_eq!(
-                serial.calling.tracts.bundles_set_aside, 0,
-                "a tract is called rather than set aside; the count is bundles alone",
+                serial.calling.tracts.bundles, 0,
+                "the fixture holds a tract and no STR bundle",
             );
             for threads in [2, 4, 8, 16] {
                 for repetition in 0..3 {
@@ -7181,7 +7269,7 @@ impl<S> Drop for RoundCallScratch<'_, S> {
         total.not_periodic.append(&mut self.tracts.not_periodic);
         total.too_many_alleles += self.tracts.too_many_alleles;
         total.without_whole_repeats += self.tracts.without_whole_repeats;
-        total.bundles_set_aside += self.tracts.bundles_set_aside;
+        total.bundles += self.tracts.bundles;
     }
 }
 
@@ -7380,9 +7468,7 @@ where
             });
             let outcome = match built {
                 LocusOutcome::NobodyToCall => RoundLocusOutcome::NobodyToCall(region),
-                LocusOutcome::BundleSetAside | LocusOutcome::TractWithoutWholeRepeats => {
-                    RoundLocusOutcome::CountedInside(region)
-                }
+                LocusOutcome::TractWithoutWholeRepeats => RoundLocusOutcome::CountedInside(region),
                 LocusOutcome::Called(Err(error)) => RoundLocusOutcome::CalledFailed(error),
                 LocusOutcome::Called(Ok(CalledLocus::NoAlternative)) => {
                     RoundLocusOutcome::CalledNotWritten(region)

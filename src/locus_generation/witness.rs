@@ -321,8 +321,12 @@ impl LocusLen {
     /// Saturation rather than an error: a locus longer than 65,535 positions cannot be
     /// described by a run either, and the clamp keeps the derivation total. A tract that
     /// long is a satellite, which the caller does not handle.
-    pub fn from_positions(positions: u64) -> Self {
-        Self(positions.min(u16::MAX as u64) as u16)
+    pub const fn from_positions(positions: u64) -> Self {
+        Self(if positions > u16::MAX as u64 {
+            u16::MAX
+        } else {
+            positions as u16
+        })
     }
 
     /// The length of `region` — the canonical source once a locus exists, and what

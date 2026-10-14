@@ -1735,6 +1735,7 @@ mod tests {
             },
             reference_bases: vec![b'A'; footprint as usize].into_boxed_slice(),
             observations: vec![SequenceObservation {
+                held_flank: None,
                 bases: vec![b'A'; runs.iter().map(|(s, e)| usize::from(e - s)).sum()]
                     .into_boxed_slice(),
                 read_witness: ReadWitness::Partial {

@@ -39,7 +39,9 @@ use super::{
     SelectionVerdict,
 };
 use crate::calling::CandidateAlleles;
-use crate::locus_generation::{LocusKind, SsrDetail};
+use crate::calling::likelihood::ssr_emission::respelled_over;
+use crate::locus_generation::{FlankDeletion, LocusKind, SsrBundleDetail, SsrDetail};
+use crate::region_typing::run_parse::{RunParse, parse_into_runs};
 use crate::run::cohort_merge::build::{CohortObservation, SampleSupport};
 use crate::run::cohort_merge::{MinAltReadShare, MinAltReads};
 use crate::types::{AlleleId, GenomeRegion, Motif, Ploidy};
@@ -308,6 +310,22 @@ pub(super) fn build_ladder(
     motif: &Motif,
     scratch: &mut SelectionScratch,
 ) {
+    build_ladder_keyed(
+        observation,
+        |table_index| repeat_count_of_bases(&observation.alleles[table_index as usize], motif),
+        scratch,
+    );
+}
+
+/// [`build_ladder`] with each allele's rung chosen by `rung_key_of` rather than by its repeat
+/// count — the one change an STR bundle needs, whose rung is a vector of run counts
+/// (`str_bundle_loci.md` §7.2). The bundle path numbers its distinct vectors in ascending order
+/// and hands those numbers here; everything below is the segment's grouping, unchanged.
+pub(super) fn build_ladder_keyed(
+    observation: &CohortObservation,
+    rung_key_of: impl Fn(u32) -> u32,
+    scratch: &mut SelectionScratch,
+) {
     let table_len = observation.alleles.len();
     assert!(
         table_len > 0,
@@ -335,6 +353,7 @@ pub(super) fn build_ladder(
         sample_reads_per_rung: _,
         promoted_rungs: _,
         rung_is_promoted: _,
+        rung_earned_by_reads: _,
         cap_cut_table_indices: _,
         discovery_nominated: _,
     } = scratch;
@@ -357,12 +376,7 @@ pub(super) fn build_ladder(
         observation.region
     );
 
-    // The period is at least one base — `Motif::new` refuses an empty unit — so the division
-    // below cannot be by zero.
-    let period = motif.period();
-    let repeat_count_of =
-        |table_index: u32| repeat_count_of_bases(&observation.alleles[table_index as usize], motif);
-    debug_assert_eq!(period, motif.period());
+    let repeat_count_of = rung_key_of;
 
     ladder.table_indices_by_rung.extend(
         (0..table_len)
@@ -461,6 +475,22 @@ impl Default for MaxOffGridShare {
 /// the code depends on the value.
 pub const DEFAULT_MAX_OFF_GRID_SHARE: MaxOffGridShare = MaxOffGridShare(0.10);
 
+/// **The fewest off-grid reads that can make a sample non-periodic, whatever their share** —
+/// owner's decision of 2026-10-10 (spec §7).
+///
+/// [`DEFAULT_MAX_OFF_GRID_SHARE`] alone lets **one read** refuse a tract at low depth: one off-grid
+/// read in eight spanning reads is 12.5%, over the tenth, and at one sample a refused tract is a
+/// lost genotype. On the stuttering benchmark (one sample, 15×) that was a 4-base repeat whose
+/// sample carried a 14-copy allele on 7 reads, refused for an eighth read that the mapper had
+/// spelled with one flank base inside, and two more tracts like it on the PCR-free library. A
+/// single read off the grid is what a sequencing or mapping error produces at any tract; a tract
+/// the model does not describe shows the pattern again and again. So a sample is non-periodic only
+/// when **both** hold: more than the share, and at least this many reads.
+///
+/// **At high depth it changes nothing**: at 20 spanning reads or more the share already needs
+/// three.
+pub const MIN_OFF_GRID_READS_TO_REFUSE: u32 = 2;
+
 /// **32 tract sequences including the reference, where the ordinary path allows six**
 /// ([`DEFAULT_MAX_CANDIDATE_ALLELES`](super::DEFAULT_MAX_CANDIDATE_ALLELES)) — the owner's
 /// decision of 2026-08-24 on spec §12's Q2.
@@ -494,7 +524,8 @@ pub struct SsrSelectionConfig {
     /// place that departs from what the spec's text says.
     pub shared: CandidateSelectionConfig,
     /// How much of one sample's spanning reads may sit off the motif grid before that sample is
-    /// judged non-periodic (spec §7). Default [`DEFAULT_MAX_OFF_GRID_SHARE`].
+    /// judged non-periodic (spec §7). Default [`DEFAULT_MAX_OFF_GRID_SHARE`]. Read at STR segments
+    /// only: an STR bundle has no periodicity check (`str_bundle_loci.md` §7.2, since 2026-10-12).
     pub max_off_grid_share: MaxOffGridShare,
     /// Copies per genome — **how many rungs a sample promotes** (arch §3.1). From the run's
     /// parameters, never a constant in this module: production hard-asserts diploid at its own
@@ -577,9 +608,10 @@ impl SsrSelectionConfig {
 /// library — 157 of 1,707 in a surveyed tomato archive (`doc/devel/ng/spec/read_groups.md` §1).
 /// Sharing the grouping with the ordinary path is what stops the two from coming to disagree.
 ///
-/// **Only spanning reads are counted, and that is what the merge's support rows already are**: a
-/// read that ran out inside the tract produced a partial, which names no length and is scored on
-/// its own axis (spec §1.3, §8). So the histogram's total is exactly
+/// **Only the support rows are counted**: the merge's crossing reads, and at an STR locus the
+/// partial reads that single out one sequence, which selection adds to those rows before it
+/// starts (spec §8.1). Any other partial read names no length and is scored on its own axis
+/// (spec §1.3, §8). So the histogram's total is exactly
 /// [`compared_reads_of`](super::compared_reads_of) — the denominator nomination divides by — and
 /// this function deliberately does not return it, because two spellings of one number is how two
 /// rules become different rules.
@@ -728,16 +760,81 @@ pub(super) fn rescue_occupied_neighbours(
     ploidy: Ploidy,
     promoted: &mut Vec<u32>,
 ) {
+    rescue_occupied_neighbours_by(
+        ladder,
+        ploidy,
+        promoted,
+        &RungNeighbours::OneRepeatEitherSide,
+    );
+}
+
+/// **Which rung keys are one unit from a rung key** — the `±1` of the rescue
+/// ([`rescue_occupied_neighbours`]). On a segment a key is a repeat count and its neighbours are
+/// one repeat either side. On an STR bundle a key numbers a vector of run counts, and its
+/// neighbours are the vectors one copy more or one copy fewer **in each run separately**
+/// (`str_bundle_loci.md` §7.2).
+pub(super) enum RungNeighbours<'a> {
+    /// A segment's: the repeat count one less and one more.
+    OneRepeatEitherSide,
+    /// A bundle's: the distinct run-count vectors of the locus's alleles, ascending, whose
+    /// positions are the rung keys.
+    OneCopyEitherSideInEachRun(&'a [Box<[u32]>]),
+}
+
+impl RungNeighbours<'_> {
+    /// Every key one unit from `key`, written into `out` (cleared first). A key no allele of the
+    /// locus carries is not written: the ladder has no rung for it, so the rescue could not
+    /// offer it anyway.
+    fn fill(&self, key: u32, out: &mut Vec<u32>) {
+        out.clear();
+        match self {
+            Self::OneRepeatEitherSide => {
+                out.extend(
+                    [key.checked_sub(1), key.checked_add(1)]
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+            Self::OneCopyEitherSideInEachRun(vectors) => {
+                let Some(counts) = vectors.get(key as usize) else {
+                    return;
+                };
+                let mut neighbour = counts.to_vec();
+                for run in 0..counts.len() {
+                    for changed in [counts[run].checked_sub(1), counts[run].checked_add(1)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        neighbour[run] = changed;
+                        if let Ok(at) =
+                            vectors.binary_search_by(|vector| (**vector).cmp(&neighbour))
+                        {
+                            out.push(at as u32);
+                        }
+                    }
+                    neighbour[run] = counts[run];
+                }
+            }
+        }
+    }
+}
+
+/// [`rescue_occupied_neighbours`], with the neighbours of a rung given by `neighbours`.
+pub(super) fn rescue_occupied_neighbours_by(
+    ladder: &RepeatLadder,
+    ploidy: Ploidy,
+    promoted: &mut Vec<u32>,
+    neighbours: &RungNeighbours<'_>,
+) {
     if promoted.len() >= usize::from(ploidy.get()) {
         return;
     }
     let resolved = promoted.len();
+    let mut keys = Vec::new();
     for index in 0..resolved {
         let repeat_count = ladder.repeat_count_at(promoted[index] as usize);
-        for neighbour in [repeat_count.checked_sub(1), repeat_count.checked_add(1)]
-            .into_iter()
-            .flatten()
-        {
+        neighbours.fill(repeat_count, &mut keys);
+        for &neighbour in &keys {
             let Some(rung) = ladder.rung_of_repeat_count(neighbour) else {
                 continue;
             };
@@ -775,15 +872,33 @@ pub(super) fn promote_rungs_for_cohort(
     config: &SsrSelectionConfig,
     scratch: &mut SelectionScratch,
 ) {
+    promote_rungs_for_cohort_by(
+        observation,
+        config,
+        scratch,
+        &RungNeighbours::OneRepeatEitherSide,
+    );
+}
+
+/// [`promote_rungs_for_cohort`], with the rescue's neighbours given by `neighbours`.
+pub(super) fn promote_rungs_for_cohort_by(
+    observation: &CohortObservation,
+    config: &SsrSelectionConfig,
+    scratch: &mut SelectionScratch,
+    neighbours: &RungNeighbours<'_>,
+) {
     let SelectionScratch {
         ladder,
         sample_reads_per_rung,
         promoted_rungs,
         rung_is_promoted,
+        rung_earned_by_reads,
         ..
     } = scratch;
     rung_is_promoted.clear();
     rung_is_promoted.resize(ladder.rung_count(), false);
+    rung_earned_by_reads.clear();
+    rung_earned_by_reads.resize(ladder.rung_count(), false);
 
     for sample in &observation.per_sample {
         fill_sample_reads_per_rung(sample, observation.region, ladder, sample_reads_per_rung);
@@ -794,7 +909,13 @@ pub(super) fn promote_rungs_for_cohort(
             ladder,
             promoted_rungs,
         );
-        rescue_occupied_neighbours(ladder, config.ploidy, promoted_rungs);
+        // Before the rescue widens the list: these are the lengths this sample's own reads put
+        // forward, which admission may keep a spelling of even when no single spelling cleared
+        // the bar.
+        for &rung in promoted_rungs.iter() {
+            rung_earned_by_reads[rung as usize] = true;
+        }
+        rescue_occupied_neighbours_by(ladder, config.ploidy, promoted_rungs, neighbours);
         for &rung in promoted_rungs.iter() {
             rung_is_promoted[rung as usize] = true;
         }
@@ -822,7 +943,8 @@ pub(super) fn promote_rungs_for_cohort(
 ///
 /// - **the bar**: [`MinAltReads::reached_by`], reads pooled across read groups by
 ///   [`one_run_per_allele`] against the denominator [`compared_reads_of`] — the sample's
-///   spanning reads, so a read that ran out inside the tract counts in neither half;
+///   support rows, so a read that ran out inside the STR segment counts in both halves if it
+///   singles out one sequence (spec §8.1) and in neither otherwise;
 /// - **whole repeats**: a sequence shorter than one copy of the unit
 ///   ([`repeat_count_of_bases`] of zero) is refused here, where the reason is — admitted, it
 ///   would reach the driver's conversion to the evidence's non-zero counts
@@ -915,6 +1037,25 @@ pub(super) fn nominate_discovered_sequences(
 /// 296 of HG002's 695 heterozygous tracts — production offers both at 35.1% of them and this rule
 /// at 86.1%, against a ceiling of 93.6% set by what some read actually carried.
 ///
+/// # A length the reads earned keeps one spelling (owner, 2026-10-10)
+///
+/// **Where some sample's own reads earned a repeat length but sequencing errors split them across
+/// spellings so that none cleared the bar, the length's best-supported spelling is admitted** —
+/// the most cohort reads; among equals, the one closest to a pure run of the motif
+/// ([`bases_off_the_motif`]), because when the reads are split one apiece the spellings that
+/// differ from the pure run are most likely the ones carrying an error, and the admitted spelling
+/// is what the record writes; then the lexically smaller, for determinism. Without it the length is lost
+/// although the nomination said it was real: on the stuttering benchmark at one sample and 15×, a
+/// 5-base repeat whose sample had lost two copies showed it on three reads, two of them with one
+/// wrong base each, so three spellings of one read apiece and no candidate. The reads carrying an
+/// error still count for the admitted spelling, through the substitution term that scores every
+/// read against every candidate of its length (`read_likelihoods.md` §4.3).
+///
+/// Two limits keep it to that case: a length the `±1` rescue added — which no sample's reads
+/// earned — gets no such spelling; and a length the reference tract or an admitted spelling
+/// already stands for gets nothing more. A spelling with no whole repeat is never chosen, since
+/// the tract model cannot score it.
+///
 /// # The reference tract is admitted first and asked nothing
 ///
 /// It is exempt from the bar *and* from the promotion test (spec §5, §7), so a tract whose reads
@@ -941,7 +1082,84 @@ pub(super) fn nominate_discovered_sequences(
 /// caller bugs whose symptom is a wrong candidate list rather than a crash (spec §8).
 pub(super) fn admit_promoted_sequences(
     observation: &CohortObservation,
+    merge_rows: &[SampleSupport],
     detail: &SsrDetail,
+    config: &SsrSelectionConfig,
+    scratch: &mut SelectionScratch,
+) -> LocusSelection {
+    admit_promoted_sequences_on(
+        observation,
+        merge_rows,
+        &SelectionGround::Segment(detail),
+        config,
+        scratch,
+    )
+}
+
+/// **The repeat ground a selection is made over** — an STR segment, or an STR bundle with the
+/// run parse of every allele of the merge's table (`str_bundle_loci.md` §7.2). It answers the
+/// three questions admission asks of the ground, each of which a segment answers from its one
+/// motif and a bundle from its runs.
+pub(super) enum SelectionGround<'a> {
+    /// An STR segment.
+    Segment(&'a SsrDetail),
+    /// An STR bundle, and each merge allele's run parse, in the merge table's order.
+    Bundle {
+        detail: &'a SsrBundleDetail,
+        parses: &'a [RunParse],
+    },
+}
+
+impl SelectionGround<'_> {
+    /// Whether the read model can score this allele at all: a segment's must hold a whole copy
+    /// of the motif; any bundle allele can be scored, a run at no copies simply cannot slip.
+    fn can_score(&self, observation: &CohortObservation, table_index: usize) -> bool {
+        match self {
+            Self::Segment(detail) => {
+                repeat_count_of_bases(&observation.alleles[table_index], &detail.motif) > 0
+            }
+            Self::Bundle { .. } => true,
+        }
+    }
+
+    /// How far this allele is from pure repeat — bases off the motif on a segment, the run
+    /// parse's edited bases on a bundle — the tie-break among spellings of one rung.
+    fn bases_off_the_repeat(&self, observation: &CohortObservation, table_index: usize) -> usize {
+        match self {
+            Self::Segment(detail) => {
+                bases_off_the_motif(&observation.alleles[table_index], &detail.motif)
+            }
+            Self::Bundle { parses, .. } => parses[table_index].edited_bases() as usize,
+        }
+    }
+
+    /// The reference flanks either side of the ground.
+    fn flanks(&self) -> (&[u8], &[u8]) {
+        match self {
+            Self::Segment(detail) => (&detail.left_flank, &detail.right_flank),
+            Self::Bundle { detail, .. } => (&detail.left_flank, &detail.right_flank),
+        }
+    }
+
+    /// The kind the candidate table is stamped with.
+    fn locus_kind(&self) -> LocusKind {
+        match self {
+            Self::Segment(detail) => LocusKind::Ssr((*detail).clone()),
+            Self::Bundle { detail, .. } => LocusKind::SsrBundle((*detail).clone()),
+        }
+    }
+}
+
+/// [`admit_promoted_sequences`] over either kind of repeat ground.
+///
+/// `observation` is what selection reads — the merge's locus with the deciding partial reads
+/// counted ([`count_deciding_partial_reads`](super::deciding_partial_reads::count_deciding_partial_reads))
+/// — and `merge_rows` is the merge's own per-sample rows, parallel to `observation.per_sample`,
+/// which the leftover's read count and error mass are taken from ([`leftover_of`](super::leftover_of)).
+pub(super) fn admit_promoted_sequences_on(
+    observation: &CohortObservation,
+    merge_rows: &[SampleSupport],
+    ground: &SelectionGround<'_>,
     config: &SsrSelectionConfig,
     scratch: &mut SelectionScratch,
 ) -> LocusSelection {
@@ -956,6 +1174,7 @@ pub(super) fn admit_promoted_sequences(
         ranked_table_indices,
         ladder,
         rung_is_promoted,
+        rung_earned_by_reads,
         cap_cut_table_indices,
         discovery_nominated,
         ..
@@ -992,10 +1211,96 @@ pub(super) fn admit_promoted_sequences(
                     && per_allele[index].cleared_the_bar())
                     || (!discovery_nominated.is_empty() && discovery_nominated[index])
             })
+            // **A sequence with no whole repeat is left out here, not refused downstream**
+            // (owner, 2026-10-10): the tract model cannot score it, and admitted it reaches the
+            // driver's conversion to non-zero repeat counts and stops the whole locus —
+            // `repeat_counts_the_tract_model_can_take`, `src/run/callers.rs`. On the stuttering
+            // benchmark that dropped a segment three soft-clipped reads had spelled as empty,
+            // and with it the sample's real allele.
+            .filter(|&index| ground.can_score(observation, index))
             .map(|index| {
                 u32::try_from(index).expect("a merge table narrower than four billion alleles")
             }),
     );
+
+    // **A length some sample's reads earned, which no admitted spelling and not the reference
+    // stands for, keeps its best-supported spelling** — the doc's "a length the reads earned".
+    // Empty flags are a selection that never ran nomination (a test driving admission alone);
+    // anything else is one flag per rung.
+    assert!(
+        rung_earned_by_reads.is_empty() || rung_earned_by_reads.len() == ladder.rung_count(),
+        "the earned-length flags hold {} entries over a ladder of {} rungs at {}",
+        rung_earned_by_reads.len(),
+        ladder.rung_count(),
+        observation.region
+    );
+    let reference_rung = ladder.rung_of_table_index(0);
+    let mut kept_for_an_earned_length = false;
+    for rung in (0..rung_earned_by_reads.len()).filter(|&rung| rung_earned_by_reads[rung]) {
+        let stood_for = rung == reference_rung
+            || ranked_table_indices
+                .iter()
+                .any(|&index| ladder.rung_of_table_index(index as usize) == rung);
+        if stood_for {
+            continue;
+        }
+        let best = (1..observation.alleles.len())
+            .filter(|&index| ladder.rung_of_table_index(index) == rung)
+            .filter(|&index| ground.can_score(observation, index))
+            .max_by(|&left, &right| {
+                per_allele[left]
+                    .cohort_reads
+                    .cmp(&per_allele[right].cohort_reads)
+                    .then_with(|| {
+                        ground
+                            .bases_off_the_repeat(observation, right)
+                            .cmp(&ground.bases_off_the_repeat(observation, left))
+                    })
+                    .then_with(|| observation.alleles[right].cmp(&observation.alleles[left]))
+            });
+        if let Some(index) = best {
+            ranked_table_indices.push(
+                u32::try_from(index).expect("a merge table narrower than four billion alleles"),
+            );
+            kept_for_an_earned_length = true;
+        }
+    }
+    if kept_for_an_earned_length {
+        // Back to the merge table's order, which is the order admission and the cap expect.
+        ranked_table_indices.sort_unstable();
+    }
+
+    // **An allele over a flank extent one misread base away from an allele already standing is
+    // not a candidate of its own** (2026-10-11; `str_edge_deletion_alleles.md` §5.5). Respelled
+    // over the wider extent, such an allele differs from the reference or an admitted plain
+    // allele by a single substituted base — the shape a systematic read error beside a run
+    // takes: on HG002 at 30×, four reads in 36 showing the `G` after 25 `T`s misread, the same
+    // way, earned a candidate and a false heterozygote. Its reads still count for the allele
+    // they are one base from, at the substitution rate. **Only where, in every sample showing
+    // it, it is a small minority beside that allele** — under [`MISREAD_SHARE_CEILING`] of the
+    // two together: a misread base takes a share of the reads of the allele it came from, while
+    // a carrier of a real allele shows it at about half its reads or all of them. Folding every
+    // allele one base from another removed the commonest real edge deletion on the stuttering
+    // benchmark — one flank base, which once written out is one base from a plain contraction —
+    // and lost 36 to 77 carrier pairs a run at 50 samples.
+    let standing: Vec<usize> = std::iter::once(0)
+        .chain(ranked_table_indices.iter().map(|&index| index as usize))
+        .filter(|&index| observation.flank_deletion_of(index).is_none())
+        .collect();
+    ranked_table_indices.retain(|&index| {
+        let index = index as usize;
+        let extent = observation.flank_deletion_of(index);
+        extent.is_none()
+            || !standing.iter().any(|&other| {
+                one_base_apart(
+                    &observation.alleles[index],
+                    extent,
+                    &observation.alleles[other],
+                    observation.flank_deletion_of(other),
+                    ground.flanks(),
+                ) && a_minority_beside_it_everywhere(observation, index, other)
+            })
+    });
 
     let allowed_alternatives = usize::from(config.shared.max_candidate_alleles.alternatives());
     let verdict = if ranked_table_indices.len() <= allowed_alternatives {
@@ -1020,25 +1325,32 @@ pub(super) fn admit_promoted_sequences(
         }
     };
 
-    let mut alleles = CandidateAlleles::new(
-        observation.alleles[0].clone(),
-        LocusKind::Ssr(detail.clone()),
-    );
+    let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), ground.locus_kind());
     let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
     remap.admit(0, AlleleId::REFERENCE);
     for &table_index in ranked_table_indices.iter() {
         let table_index = table_index as usize;
-        let candidate = alleles.admit(observation.alleles[table_index].clone());
+        let candidate = alleles.admit_with_flank_deletion(
+            observation.alleles[table_index].clone(),
+            observation.flank_deletion_of(table_index),
+        );
         remap.admit(table_index, candidate);
     }
 
+    assert_eq!(
+        merge_rows.len(),
+        observation.per_sample.len(),
+        "the merge's rows and the rows selection read cover different samples at {}",
+        observation.region
+    );
     let covering_samples = observation.per_sample.len();
-    let leftovers = observation
-        .per_sample
+    let leftovers = merge_rows
         .iter()
-        .map(|sample| {
+        .zip(&observation.per_sample)
+        .map(|(sample, selection_rows)| {
             super::leftover_of(
                 sample,
+                selection_rows,
                 observation.region,
                 &remap,
                 config.shared.min_allele_support,
@@ -1047,6 +1359,27 @@ pub(super) fn admit_promoted_sequences(
         })
         .collect();
     LocusSelection::new(alleles, verdict, leftovers, remap, covering_samples)
+}
+
+/// **How many of a tract sequence's bases differ from a pure run of the motif**, at whichever
+/// rotation of the motif fits it best — the tie-break that picks, among spellings of one length
+/// with equal reads, the one least likely to carry a sequencing error
+/// ([`admit_promoted_sequences`]). Zero for a pure run; an interrupted reference tract scores its
+/// interruptions, which is fine, because it only ever ranks spellings of one length against each
+/// other.
+fn bases_off_the_motif(bases: &[u8], motif: &Motif) -> usize {
+    let unit = motif.as_bytes();
+    let period = unit.len();
+    (0..period)
+        .map(|rotation| {
+            bases
+                .iter()
+                .enumerate()
+                .filter(|&(at, &base)| base != unit[(at + rotation) % period])
+                .count()
+        })
+        .min()
+        .unwrap_or(0)
 }
 
 /// **How many whole motif copies a tract sequence carries** — `bases.len() / motif.period()`,
@@ -1114,7 +1447,10 @@ pub struct SsrLocusSelection {
 ///
 /// A read is **off the grid** when the difference between its tract length and the reference
 /// tract's is not a whole number of motif units. A sample is non-periodic when more than
-/// `max_off_grid_share` of its spanning reads are off the grid, and **the locus is judged
+/// `max_off_grid_share` of its spanning reads are off the grid **and** at least
+/// [`MIN_OFF_GRID_READS_TO_REFUSE`] of them are — a read spelling the reference tract with a block
+/// missing from one end, which is a deletion across the tract's edge, never counting as off the
+/// grid ([`is_an_edge_deletion_of`]) — and **the locus is judged
 /// non-periodic only when no sample is periodic** — the same "one sample suffices" shape as
 /// everything else on this path.
 ///
@@ -1169,14 +1505,15 @@ pub(super) fn locus_is_periodic(
     motif: &Motif,
     max_off_grid_share: MaxOffGridShare,
 ) -> bool {
+    let grid_step = motif.period();
     assert!(
         !observation.alleles.is_empty(),
         "a cohort locus always holds at least its reference allele, and the repeat tract at {} \
          holds none",
         observation.region
     );
-    let period = motif.period();
     let reference_len = observation.alleles[0].len();
+    let on_the_grid = |length_change: usize| length_change.is_multiple_of(grid_step);
     let mut any_sample_judged = false;
 
     for sample in &observation.per_sample {
@@ -1187,20 +1524,98 @@ pub(super) fn locus_is_periodic(
         any_sample_judged = true;
         let mut off_grid_reads = 0_u32;
         for rows in super::one_run_per_allele(sample, observation.region) {
-            let length = observation.alleles[rows[0].allele].len();
-            if !length.abs_diff(reference_len).is_multiple_of(period) {
+            let bases = &observation.alleles[rows[0].allele];
+            // A read with a flank deletion is an edge deletion known exactly, never off the grid
+            // (`str_edge_deletion_alleles.md` §5.5); the spelling test below is the guess the
+            // exception was first written with, for reads that record none.
+            if !on_the_grid(bases.len().abs_diff(reference_len))
+                && observation.flank_deletion_of(rows[0].allele).is_none()
+                && !is_an_edge_deletion_of(bases, &observation.alleles[0])
+            {
                 let pooled_reads = rows.iter().fold(0_u32, |total, row| {
                     total.saturating_add(row.support.num_reads)
                 });
                 off_grid_reads = off_grid_reads.saturating_add(pooled_reads);
             }
         }
-        if f64::from(off_grid_reads) <= max_off_grid_share.get() * f64::from(spanning_reads) {
+        if off_grid_reads < MIN_OFF_GRID_READS_TO_REFUSE
+            || f64::from(off_grid_reads) <= max_off_grid_share.get() * f64::from(spanning_reads)
+        {
             return true;
         }
     }
     // Nobody had a spanning read to judge, so there is no evidence the tract is not a tract.
     !any_sample_judged
+}
+
+/// **The largest share of a sample's reads, over a misread allele and the allele it is one base
+/// from, at which the first is still taken for a misreading of the second** (2026-10-11). A
+/// heterozygous carrier of a real allele shows it near a half; the systematic misreading this is
+/// for showed at 4 reads against 13 on HG002, under a quarter. A judgement between the two, not
+/// a fitted number.
+const MISREAD_SHARE_CEILING: f64 = 1.0 / 3.0;
+
+/// **Is allele `minor` a small minority beside allele `major` in every sample that shows it?**
+/// — under [`MISREAD_SHARE_CEILING`] of that sample's reads of the two together.
+fn a_minority_beside_it_everywhere(
+    observation: &CohortObservation,
+    minor: usize,
+    major: usize,
+) -> bool {
+    observation.per_sample.iter().all(|sample| {
+        let reads_of = |allele: usize| -> u32 {
+            sample
+                .supported
+                .iter()
+                .filter(|row| row.allele == allele)
+                .map(|row| row.support.num_reads)
+                .sum()
+        };
+        let (minor_reads, major_reads) = (reads_of(minor), reads_of(major));
+        minor_reads == 0
+            || f64::from(minor_reads) < MISREAD_SHARE_CEILING * f64::from(minor_reads + major_reads)
+    })
+}
+
+/// **Do two alleles, respelled over the wider of their flank extents, differ by exactly one
+/// substituted base?** — the test that keeps a systematic read error beside a run from standing
+/// as an allele of its own (`admit_promoted_sequences`).
+fn one_base_apart(
+    one: &[u8],
+    one_extent: FlankDeletion,
+    other: &[u8],
+    other_extent: FlankDeletion,
+    flanks: (&[u8], &[u8]),
+) -> bool {
+    let wider = FlankDeletion {
+        left: one_extent.left.max(other_extent.left),
+        right: one_extent.right.max(other_extent.right),
+    };
+    let (mut one_over, mut other_over) = (Vec::new(), Vec::new());
+    respelled_over(one, one_extent, wider, flanks, &mut one_over).is_some()
+        && respelled_over(other, other_extent, wider, flanks, &mut other_over).is_some()
+        && one_over.len() == other_over.len()
+        && one_over
+            .iter()
+            .zip(&other_over)
+            .filter(|(a, b)| a != b)
+            .count()
+            == 1
+}
+
+/// **Is `bases` the reference tract with a block missing from one end?** — what a deletion running
+/// from the tract into a flank leaves inside the tract, whatever its length (owner, 2026-10-10).
+///
+/// [`locus_is_periodic`] does not count such a spelling as off the grid. It is off the grid only
+/// because the deletion's part inside the tract need not be whole motif units — five bases of an
+/// `AAG` repeat, say — and that says nothing about whether the tract stutters in whole units. At
+/// one sample, every read of a heterozygous edge deletion was otherwise enough to refuse the
+/// tract, and with it the sample's other allele. Reads are spelled this way by their own alignment
+/// when a deletion crosses the tract's edge (`locus_generation_ssr.md` §3).
+fn is_an_edge_deletion_of(bases: &[u8], reference: &[u8]) -> bool {
+    !bases.is_empty()
+        && bases.len() < reference.len()
+        && (reference.ends_with(bases) || reference.starts_with(bases))
 }
 
 /// **Narrow one repeat tract's allele table to the tract sequences worth calling over**
@@ -1210,7 +1625,10 @@ pub(super) fn locus_is_periodic(
 /// **Four passes over the locus, in this order**, because each needs the one before: fold the
 /// rows into per-allele summaries; build the ladder over them; nominate rungs per sample and union
 /// them; then admit the sequences on nominated rungs that cleared the bar, apply the cap and fill
-/// the leftover.
+/// the leftover. **Before them**, each partial read that fits exactly one sequence of the table is
+/// counted as a read of it, on a copy the four passes read (spec §8.1, the private
+/// `deciding_partial_reads` module); the leftover's read count and error mass are still the
+/// merge's own rows'.
 ///
 /// **With discovery on there is a fifth, between nomination and admission**: the discovery
 /// pre-pass ([`nominate_discovered_sequences`]) flags the sequences some single sample showed
@@ -1265,6 +1683,15 @@ pub fn select_ssr(
         };
     }
 
+    // Partial reads that single out one sequence count toward the bar (spec §8.1) — after the
+    // periodicity check, so that they change nothing about which STR segments are refused.
+    let merge_rows = &observation.per_sample;
+    let counted = super::deciding_partial_reads::count_deciding_partial_reads(
+        observation,
+        (&detail.left_flank, &detail.right_flank),
+    );
+    let observation = counted.as_ref().unwrap_or(observation);
+
     summarise_alleles(observation, config.shared.min_allele_support, scratch);
     build_ladder(observation, &detail.motif, scratch);
     promote_rungs_for_cohort(observation, config, scratch);
@@ -1276,7 +1703,7 @@ pub fn select_ssr(
             &mut scratch.discovery_nominated,
         );
     }
-    let selection = admit_promoted_sequences(observation, detail, config, scratch);
+    let selection = admit_promoted_sequences(observation, merge_rows, detail, config, scratch);
     let repeat_counts = selection
         .alleles()
         .iter()
@@ -1288,6 +1715,106 @@ pub fn select_ssr(
     }
 }
 
+/// **What the STR bundle path returns: the shared selection, plus the run parse of every candidate
+/// it kept** (`str_bundle_loci.md` §7.1, §7.2) — the bundle's counterpart of
+/// [`SsrLocusSelection`], whose one repeat count per candidate becomes a run count per run.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SsrBundleSelection {
+    /// The narrowed table, the verdict, the per-sample leftover and the remapping.
+    pub selection: LocusSelection,
+    /// **Parallel to `selection.alleles()`**, the reference at index 0: each candidate read
+    /// against the bundle's reference runs — its run counts, and each run's place in it.
+    pub parses: Vec<RunParse>,
+}
+
+/// **Narrow one STR bundle's allele table to the sequences worth calling over** — [`select_ssr`]
+/// with each single-motif rule generalised to the bundle's runs (`str_bundle_loci.md` §7.2):
+///
+/// - **the bar is unchanged** — at least two crossing reads of one sample, and a tenth of them;
+/// - **a rung is a vector of run counts**: every allele of the merge's table is parsed against the
+///   reference runs once ([`parse_into_runs`]), and two alleles with the same run counts are two
+///   spellings on one rung;
+/// - **no periodicity check**: a length change that is no whole number of run units is an indel
+///   in the fixed sequence as often as anything (owner, 2026-10-12), so nothing is refused for it;
+/// - **the `±1` rescue** offers one copy more and one fewer in each run separately
+///   ([`RungNeighbours::OneCopyEitherSideInEachRun`]);
+/// - **the tie-break toward the purest spelling** counts the parse's edited bases.
+///
+/// **The discovery pre-pass is not run on bundles**, which is off by default for segments too; its
+/// bar is written in a segment's repeat counts and nothing has measured it on a bundle.
+///
+/// # Panics
+///
+/// On a cohort observation that is not an STR bundle, for the reason [`select_ssr`] gives.
+pub fn select_ssr_bundle(
+    observation: &CohortObservation,
+    config: &SsrSelectionConfig,
+    scratch: &mut SelectionScratch,
+) -> SsrBundleSelection {
+    let LocusKind::SsrBundle(detail) = &observation.kind else {
+        panic!(
+            "the STR bundle path was handed a {:?} locus at {}: which path a locus takes is \
+             decided by its kind at the dispatch",
+            observation.kind, observation.region
+        );
+    };
+    // Partial reads that single out one sequence count toward the bar (`candidate_alleles_ssr.md`
+    // §8.1), at bundles as at segments.
+    let merge_rows = &observation.per_sample;
+    let counted = super::deciding_partial_reads::count_deciding_partial_reads(
+        observation,
+        (&detail.left_flank, &detail.right_flank),
+    );
+    let observation = counted.as_ref().unwrap_or(observation);
+    let hull = &observation.alleles[0];
+    // No periodicity check (owner, 2026-10-12): the fixed sequence between runs carries real
+    // indels of any length, so a change that is no whole number of run units is not a sign the
+    // locus is not a repeat.
+    let parses: Vec<RunParse> = observation
+        .alleles
+        .iter()
+        .map(|allele| parse_into_runs(allele, hull, &detail.runs))
+        .collect();
+    // The rung keys: each distinct vector of run counts, numbered in ascending order.
+    let mut run_count_vectors: Vec<Box<[u32]>> = parses
+        .iter()
+        .map(|parse| parse.copies().collect())
+        .collect();
+    run_count_vectors.sort_unstable();
+    run_count_vectors.dedup();
+    let key_of = |table_index: u32| -> u32 {
+        let counts: Vec<u32> = parses[table_index as usize].copies().collect();
+        run_count_vectors
+            .binary_search_by(|vector| (**vector).cmp(&counts[..]))
+            .expect("every allele's run counts are among the vectors numbered") as u32
+    };
+
+    summarise_alleles(observation, config.shared.min_allele_support, scratch);
+    build_ladder_keyed(observation, key_of, scratch);
+    promote_rungs_for_cohort_by(
+        observation,
+        config,
+        scratch,
+        &RungNeighbours::OneCopyEitherSideInEachRun(&run_count_vectors),
+    );
+    let selection = admit_promoted_sequences_on(
+        observation,
+        merge_rows,
+        &SelectionGround::Bundle {
+            detail,
+            parses: &parses,
+        },
+        config,
+        scratch,
+    );
+    let parses = selection
+        .alleles()
+        .iter()
+        .map(|bases| parse_into_runs(bases, hull, &detail.runs))
+        .collect();
+    SsrBundleSelection { selection, parses }
+}
+
 /// A table holding the reference tract and nothing else, under `verdict` — what a tract this path
 /// declines to narrow still yields.
 fn reference_tract_alone(
@@ -1295,10 +1822,16 @@ fn reference_tract_alone(
     detail: &SsrDetail,
     verdict: SelectionVerdict,
 ) -> LocusSelection {
-    let alleles = CandidateAlleles::new(
-        observation.alleles[0].clone(),
-        LocusKind::Ssr(detail.clone()),
-    );
+    reference_alone(observation, LocusKind::Ssr(detail.clone()), verdict)
+}
+
+/// A table holding the reference allele and nothing else, stamped `kind`, under `verdict`.
+fn reference_alone(
+    observation: &CohortObservation,
+    kind: LocusKind,
+    verdict: SelectionVerdict,
+) -> LocusSelection {
+    let alleles = CandidateAlleles::new(observation.alleles[0].clone(), kind);
     let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
     remap.admit(0, AlleleId::REFERENCE);
     let covering_samples = observation.per_sample.len();
@@ -2534,7 +3067,13 @@ mod tests {
         summarise_alleles(observation, rule, &mut scratch);
         build_ladder(observation, &dinucleotide(), &mut scratch);
         promote_rungs_for_cohort(observation, &config, &mut scratch);
-        admit_promoted_sequences(observation, &detail_of(b"AT"), &config, &mut scratch)
+        admit_promoted_sequences(
+            observation,
+            &observation.per_sample,
+            &detail_of(b"AT"),
+            &config,
+            &mut scratch,
+        )
     }
 
     /// The surviving sequences, in candidate-id order.
@@ -2898,6 +3437,161 @@ mod tests {
         assert!(!locus_is_periodic(
             &above_it,
             &Motif::new(b"AT").expect("a two-base motif"),
+            MaxOffGridShare::DEFAULT
+        ));
+    }
+
+    /// **A length the reads earned, split across spellings by sequencing errors, keeps its purest
+    /// spelling** (owner, 2026-10-10). The stuttering benchmark's case: four reads at the
+    /// reference length and three a unit shorter, one pure and two with one wrong base each —
+    /// three spellings of one read apiece, none clearing the bar of two, while the length's three
+    /// reads do. The pure spelling is admitted; the two carrying an error are not.
+    #[test]
+    fn a_length_split_across_spellings_keeps_its_purest_spelling() {
+        let observation = tract_of(
+            &[b"ATATATATAT", b"ATACATAT", b"ATATATAT", b"ATATAGAT"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![
+                    row(0, 4, -4.0),
+                    row(1, 1, -1.0),
+                    row(2, 1, -1.0),
+                    row(3, 1, -1.0),
+                ],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"ATATATATAT".to_vec(), b"ATATATAT".to_vec()]
+        );
+    }
+
+    /// **The rule keeps one spelling for a length nothing else stands for, and no more.** Where a
+    /// spelling of the earned length cleared the bar on its own, the length is already stood for
+    /// and its one-read siblings stay out; and a length only the `±1` rescue reached — one read,
+    /// earned by nobody — gets no spelling from this rule.
+    #[test]
+    fn a_length_already_stood_for_or_only_rescued_gets_nothing_more() {
+        let stood_for = tract_of(
+            &[b"ATATATATAT", b"ATATATAT", b"ATACATAT"],
+            b"AT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 4, -4.0), row(1, 3, -3.0), row(2, 1, -1.0)],
+            )],
+        );
+        assert_eq!(
+            admitted_bases(&selected(&stood_for, 2)),
+            vec![b"ATATATATAT".to_vec(), b"ATATATAT".to_vec()]
+        );
+
+        // Twenty reads at the reference length and one a unit longer: the sample resolved one
+        // length, so the rescue promotes the occupied neighbour, but no sample's reads earned it.
+        let only_rescued = tract_of(
+            &[b"ATATATATAT", b"ATATATATATAT"],
+            b"AT",
+            vec![sample_showing(0, vec![row(0, 20, -20.0), row(1, 1, -1.0)])],
+        );
+        assert_eq!(
+            admitted_bases(&selected(&only_rescued, 2)),
+            vec![b"ATATATATAT".to_vec()]
+        );
+    }
+
+    /// The purity tie-break reads the motif at its best rotation: a pure run scores zero
+    /// whichever base of the unit it starts on, and each wrong base costs one.
+    #[test]
+    fn bases_off_the_motif_counts_wrong_bases_at_the_best_rotation() {
+        let motif = Motif::new(b"AAGAG").expect("a five-base motif");
+        assert_eq!(bases_off_the_motif(b"AAGAGAAGAG", &motif), 0);
+        assert_eq!(bases_off_the_motif(b"GAGAAGAGAA", &motif), 0);
+        assert_eq!(bases_off_the_motif(b"AAGAGAAAAG", &motif), 1);
+        assert_eq!(bases_off_the_motif(b"AATAGAAAAG", &motif), 2);
+    }
+
+    /// **A sequence with no whole repeat is never admitted, however many reads it has** (owner,
+    /// 2026-10-10): admitted, it would stop the whole locus downstream. Three reads spelled the
+    /// tract as empty at a 6-base repeat on the stuttering benchmark; the other lengths stay.
+    #[test]
+    fn a_sequence_with_no_whole_repeat_is_left_out_and_the_rest_stays() {
+        let observation = tract_of(
+            &[b"AACAATAACAATAACAAT", b"", b"AACAATAACAAT"],
+            b"AACAAT",
+            vec![sample_showing(
+                0,
+                vec![row(0, 5, -5.0), row(1, 3, -3.0), row(2, 5, -5.0)],
+            )],
+        );
+        let selection = selected(&observation, 2);
+        assert_eq!(
+            admitted_bases(&selection),
+            vec![b"AACAATAACAATAACAAT".to_vec(), b"AACAATAACAAT".to_vec()]
+        );
+    }
+
+    /// **Reads showing a deletion across the tract's edge never refuse it** (owner, 2026-10-10).
+    /// An `AAG` tract of 42 bases where eight reads show it five bases short from the left —
+    /// a 6-base deletion taking one flank base and five tract bases, the stuttering benchmark's
+    /// case — and eight show the reference: half the reads off the grid, and periodic. The same
+    /// count of reads five bases short from the *middle* of the tract is still refused.
+    #[test]
+    fn reads_showing_a_deletion_across_the_edge_do_not_refuse_a_tract() {
+        let reference = b"AAG".repeat(14);
+        let edge_deleted = reference[5..].to_vec();
+        let middle_deleted = [&reference[..20], &reference[25..]].concat();
+        let motif = Motif::new(b"AAG").expect("a three-base motif");
+        let edge = tract_of(
+            &[&reference, &edge_deleted],
+            b"AAG",
+            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 8, -8.0)])],
+        );
+        assert!(locus_is_periodic(&edge, &motif, MaxOffGridShare::DEFAULT));
+        let middle = tract_of(
+            &[&reference, &middle_deleted],
+            b"AAG",
+            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 8, -8.0)])],
+        );
+        assert!(!locus_is_periodic(
+            &middle,
+            &motif,
+            MaxOffGridShare::DEFAULT
+        ));
+    }
+
+    /// **One read off the grid never refuses a tract, whatever its share; two can** (owner,
+    /// 2026-10-10). The case from the stuttering benchmark: eight spanning reads, seven of them a
+    /// whole number of units from the reference and one a base longer — an eighth of the reads,
+    /// over the tenth, and still periodic. A second off-grid read in nine is over the tenth and
+    /// refused, as before.
+    #[test]
+    fn one_off_grid_read_never_refuses_a_tract_at_low_depth() {
+        let alleles: [&[u8]; 3] = [b"ATATATATAT", b"ATATATAT", b"GATATATAT"];
+        let motif = Motif::new(b"AT").expect("a two-base motif");
+        let one_off = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(1, 7, -7.0), row(2, 1, -1.0)])],
+        );
+        assert!(locus_is_periodic(
+            &one_off,
+            &motif,
+            MaxOffGridShare::DEFAULT
+        ));
+        assert_ne!(
+            selected(&one_off, 2).verdict(),
+            SelectionVerdict::NotPeriodic
+        );
+
+        let two_off = tract_of(
+            &alleles,
+            b"AT",
+            vec![sample_showing(0, vec![row(1, 7, -7.0), row(2, 2, -2.0)])],
+        );
+        assert!(!locus_is_periodic(
+            &two_off,
+            &motif,
             MaxOffGridShare::DEFAULT
         ));
     }
@@ -3470,5 +4164,180 @@ mod tests {
              here — a discovered allele is not exempt from the rule that makes truncation \
              defensible"
         );
+    }
+
+    // ── STR bundles (`str_bundle_loci.md` §7.2) ──
+
+    /// `GG (CA)8 GT (TTG)5 C`: two runs, of periods 2 and 3, fixed bases around and between.
+    fn bundle_hull(ca_copies: usize, ttg_copies: usize) -> Vec<u8> {
+        [
+            &b"GG"[..],
+            &b"CA".repeat(ca_copies),
+            b"GT",
+            &b"TTG".repeat(ttg_copies),
+            b"C",
+        ]
+        .concat()
+    }
+
+    fn bundle_detail() -> SsrBundleDetail {
+        use crate::region_typing::reference_runs::ReferenceRun;
+        SsrBundleDetail {
+            left_flank: Box::from(&b"ACGTACGTAC"[..]),
+            right_flank: Box::from(&b"GTCAGTCAGT"[..]),
+            runs: vec![
+                ReferenceRun::new(2, 16, Motif::new(b"CA").unwrap()).unwrap(),
+                ReferenceRun::new(20, 15, Motif::new(b"TTG").unwrap()).unwrap(),
+            ]
+            .into_boxed_slice(),
+        }
+    }
+
+    fn bundle_of(
+        alleles: &[&[u8]],
+        detail: SsrBundleDetail,
+        per_sample: Vec<SampleSupport>,
+    ) -> CohortObservation {
+        let mut observation = locus_of(alleles, per_sample);
+        observation.kind = LocusKind::SsrBundle(detail);
+        observation
+    }
+
+    fn bundle_selected(observation: &CohortObservation) -> SsrBundleSelection {
+        let config = SsrSelectionConfig {
+            shared: CandidateSelectionConfig {
+                min_allele_support: support_rule_of(2, 0.1),
+                ..SsrSelectionConfig::at_ploidy(diploid()).shared
+            },
+            ..SsrSelectionConfig::at_ploidy(diploid())
+        };
+        select_ssr_bundle(observation, &config, &mut SelectionScratch::new())
+    }
+
+    /// A heterozygote one `CA` copy longer than the reference is called over both, with the run
+    /// counts of each; a stutter spelling below a tenth of the sample's reads is not a candidate.
+    #[test]
+    fn a_bundle_heterozygote_keeps_both_alleles_and_their_run_counts() {
+        let reference = bundle_hull(8, 5);
+        let longer = bundle_hull(9, 5);
+        let stutter = bundle_hull(8, 4);
+        let observation = bundle_of(
+            &[&reference, &longer, &stutter],
+            bundle_detail(),
+            vec![sample_showing(
+                0,
+                vec![row(0, 12, -12.0), row(1, 11, -11.0), row(2, 2, -2.0)],
+            )],
+        );
+        let narrowed = bundle_selected(&observation);
+        assert_eq!(narrowed.selection.alleles().len(), 2);
+        assert_eq!(
+            narrowed.selection.alleles().iter().nth(1),
+            Some(&longer[..])
+        );
+        let counts: Vec<Vec<u32>> = narrowed
+            .parses
+            .iter()
+            .map(|parse| parse.copies().collect())
+            .collect();
+        assert_eq!(counts, vec![vec![8, 5], vec![9, 5]]);
+        assert!(matches!(
+            narrowed.selection.alleles().kind(),
+            LocusKind::SsrBundle(_)
+        ));
+    }
+
+    /// **The rescue's neighbours are one copy either side in each run separately** — never two
+    /// runs at once — and only vectors some allele of the locus carries.
+    #[test]
+    fn a_bundle_rungs_neighbours_differ_by_one_copy_in_one_run() {
+        let vectors: Vec<Box<[u32]>> = [[7, 5], [8, 4], [8, 5], [8, 6], [9, 5], [9, 6]]
+            .iter()
+            .map(|vector| Box::from(&vector[..]))
+            .collect();
+        let mut out = Vec::new();
+        RungNeighbours::OneCopyEitherSideInEachRun(&vectors).fill(2, &mut out);
+        out.sort_unstable();
+        assert_eq!(
+            out,
+            vec![0, 1, 3, 4],
+            "[7,5], [8,4], [8,6], [9,5] — not [9,6]"
+        );
+        RungNeighbours::OneRepeatEitherSide.fill(0, &mut out);
+        assert_eq!(out, vec![1]);
+    }
+
+    /// **A bundle is never refused for length changes that are not whole units of its runs**
+    /// (owner, 2026-10-12; `str_bundle_loci.md` §7.2): the fixed sequence between runs carries
+    /// real indels of any length. A one-base insertion carried by half the reads is a candidate
+    /// at a bundle whose runs are both of period 2, and at one with no run at all.
+    #[test]
+    fn a_bundle_keeps_a_length_change_that_is_no_whole_number_of_run_units() {
+        use crate::region_typing::reference_runs::ReferenceRun;
+        let samples = || {
+            vec![sample_showing(
+                0,
+                vec![row(0, 10, -10.0), row(1, 10, -10.0)],
+            )]
+        };
+        let period_two_hull =
+            [&b"GG"[..], &b"CA".repeat(8), b"GG", &b"AT".repeat(6), b"C"].concat();
+        let period_two = SsrBundleDetail {
+            runs: vec![
+                ReferenceRun::new(2, 16, Motif::new(b"CA").unwrap()).unwrap(),
+                ReferenceRun::new(20, 12, Motif::new(b"AT").unwrap()).unwrap(),
+            ]
+            .into_boxed_slice(),
+            ..bundle_detail()
+        };
+        let no_run = SsrBundleDetail {
+            runs: Box::new([]),
+            ..bundle_detail()
+        };
+        for (reference, detail) in [
+            (bundle_hull(8, 5), bundle_detail()),
+            (period_two_hull, period_two),
+            (bundle_hull(8, 5), no_run),
+        ] {
+            // A base inserted in the fixed sequence between the runs.
+            let one_base_longer = [&reference[..18], b"T", &reference[18..]].concat();
+            let runs = detail.runs.len();
+            let observation = bundle_of(&[&reference, &one_base_longer], detail, samples());
+            let narrowed = bundle_selected(&observation);
+            assert_eq!(
+                narrowed.selection.verdict(),
+                SelectionVerdict::Selected,
+                "{runs} runs"
+            );
+            assert_eq!(narrowed.selection.alleles().len(), 2, "{runs} runs");
+            assert_eq!(narrowed.parses.len(), 2, "{runs} runs");
+        }
+    }
+
+    /// **The purest spelling of a rung is the one with the fewest edited bases in its run parse**:
+    /// a run-count change is no edit, a substituted base is one.
+    #[test]
+    fn a_bundle_spellings_impurity_is_its_parses_edited_bases() {
+        let reference = bundle_hull(8, 5);
+        let mut substituted = bundle_hull(9, 5);
+        substituted[5] = b'T';
+        let observation = bundle_of(
+            &[&reference, &bundle_hull(9, 5), &substituted],
+            bundle_detail(),
+            Vec::new(),
+        );
+        let parses: Vec<RunParse> = observation
+            .alleles
+            .iter()
+            .map(|allele| parse_into_runs(allele, &reference, &bundle_detail().runs))
+            .collect();
+        let detail = bundle_detail();
+        let ground = SelectionGround::Bundle {
+            detail: &detail,
+            parses: &parses,
+        };
+        assert_eq!(ground.bases_off_the_repeat(&observation, 1), 0);
+        assert_eq!(ground.bases_off_the_repeat(&observation, 2), 1);
+        assert!(ground.can_score(&observation, 0));
     }
 }

@@ -87,7 +87,10 @@ pub mod seed_ssr;
 pub use dirichlet_multinomial::MarginalizedDirichletPrior;
 pub use hardy_weinberg::PlugInWrightPrior;
 pub use seed_generic::{VariantClass, fill_locus_concentration, seed_from_population_moments};
-pub use seed_ssr::{fill_seed_share_per_candidate, fill_ssr_seed};
+pub use seed_ssr::{
+    BundlePrior, fill_bundle_seed_share_per_candidate, fill_seed_share_per_candidate,
+    fill_ssr_bundle_seed, fill_ssr_seed,
+};
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
 use crate::types::InbreedingF;

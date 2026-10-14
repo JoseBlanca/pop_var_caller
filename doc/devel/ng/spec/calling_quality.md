@@ -630,6 +630,35 @@ and slippage is already inside the read likelihood.
 (it is a property of a posterior, not of a locus kind) and replacing §5 and §6. **Not before** the
 two blockers above close.
 
+### 8.1 A tract's site quality uses the tract's own prior (2026-10-10)
+
+*Owner's decision, 2026-10-10, on the stuttering benchmark's evidence. Both blockers above have
+since closed; this settles the one part of the sibling document that was costing calls, and leaves
+the rest of it unwritten.*
+
+**At a repeat tract, §5's fold runs under the prior the tract's genotypes were called under**: the
+seed concentration the tract's length spectrum gives each candidate
+([`calling_priors.md`](calling_priors.md) §5.1), collapsed to the reference tract's concentration
+against the sum of every other candidate's. Collapsing a Dirichlet to *one allele against the rest*
+gives exactly a Beta with those two numbers, so §5.4's Beta-Binomial needs no other change. An
+ordinary locus keeps the run's frequency-spectrum seed.
+
+**Why.** Until this change a tract took the run's seed, about 1 variant position in 1,000. §5.4's
+table says what that asks of one sample: some 28 Phred of read evidence before the quality leaves
+zero. Repeat tracts are far more variable than that — in the benchmark's simulated sample, 1,229
+of 3,000 STR segments carry a variant — and the tract's genotype prior already says so. The two
+priors made the numbers contradict each other: a sample called heterozygous at genotype quality 18,
+5 reads against 4 at a run of 23 A's, on a site of quality 0.4, which §11b's threshold of 1 then
+left out. On the PCR library at one sample and 15×, 57 of 1,125 variant genotypes were lost this
+way; writing every called tract instead recovered 55 of them, at the cost of 18 false calls among
+1,613 reference genotypes, the same number GATK makes there
+(`doc/devel/reports/implementations/str_accuracy_2026-10-10.md`).
+
+**What it does not change.** The artifact correction (§6) still does not apply at a tract; the
+genotype quality (§4) is unchanged; the threshold of `site_quality_threshold.md` is unchanged. In a
+cohort the fold pools every sample's reads, so the prior's share of the answer shrinks as the
+cohort grows, as it does at an ordinary locus.
+
 ---
 
 ## 9. Cost, memory, determinism

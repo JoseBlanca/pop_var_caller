@@ -24,6 +24,17 @@
 # standard error they lacked, so every rate now carries one; nothing else moves but notes; 4 of 6,706 calls with the fit move, all repeat tracts — QUAL by at most 0.4, AF by at most 0.00046
 # — with no genotype changed and no record appearing or vanishing. The defaults run's file moves in 8 note lines.
 # They were 70a98909… / 351f244e… / 9f5edd0e….
+# Re-recorded 2026-10-10 (Linux container, arm64) with the hidden-duplication filter scoring STR records from their read
+# split as well as coverage (hidden_paralog_filter.md §3.2, ported from branch tract-ceiling). Default-parameter VCFs
+# a81c458b → 770df4ce and from_fit 3bbd4d7e → 6a0890f9: 4,103 of 7,448 records change in PARALOG_LR / PARALOG_POST
+# alone — 381 STR records, whose score now reads the split, and 3,722 SNP/indel records, through the duplication rate the
+# run fits — and no record, genotype or filter verdict moves. Windows, histograms and fitted parameters unchanged.
+# Re-recorded 2026-10-10 (Linux container, arm64) with the compound-motif test made exact (segment_criteria.rs `is_compound`,
+# moved from branch tract-ceiling): AAAAAT-type hexanucleotides are STR segments again, and some homopolymers beside one join
+# it in a cluster of repeats, which nothing calls. Default-parameter VCFs 6257aa6c → a81c458b (7,451 → 7,448 records): three
+# records at chromosome 1's T homopolymers by 18800718 and 86065432 are gone, nothing else moves. A cluster gives no depth
+# to the windows, so 54 of 30,348 window rows move there (9b503d9d → 38ae39e2) and the histograms follow (4cda6ce3 → 9d949511);
+# fitted parameters 3338658c → d68e0540; from_fit b1b46ece → 3bbd4d7e. The segmenter speed fixes moved alongside change nothing.
 # Re-recorded 2026-10-03 (Linux container, arm64) with partial reads compared against the allele and the reference beyond it
 # (read_likelihoods.md §5.3). That moved the two default-parameter VCFs (b74f3edf → 28a750c9) and from_fit.comparable; the
 # window rows, histograms, fitted parameters and from_fit were already stale at 25bfe313 (bc6780ff, 6c5926ce, c590689d, 5cdeafd0).
@@ -74,6 +85,12 @@
 # 3.7), one record appears (a 1-repeat-short het at QUAL 6.8), one loses its +1 allele, and one sample genotype flips;
 # every genotype that changed was called at GQ 4 or less. Default-parameter lines unchanged.
 # They were 3338658c… / b1b46ece….
+# Re-recorded 2026-10-14 (macOS, arm64) on merging main (e4bd1e94) into str-penalised-fit. Main's own baseline was stale
+# against main's code: main measured here gives default-parameter VCFs 67bfe9a1 (7,508 records), windows 4acdda68 and
+# histograms 0d61963f, and the merge gives exactly those. The defaults run's parameters file moves only by this branch's
+# rename (`length_spectrum_by_*` -> `allele_length_variation_by_*` and five note paragraphs), 915d9f3f on main -> a27bb944.
+# The fit is this branch's (allele window at +-9): against main's fit (129492d3), 66 lines of the fitted file differ, 52 of
+# them repeat-tract slippage rows and the rest the rename; the fit's VCF holds 6,683 records on both (main 4c06e2f5).
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -84,11 +101,11 @@
 #   SRR5079878.p1.bench.cram
 #   SRR5079876.p1.bench.cram
 slice: 20 regions, 4 alignments
-# records: 7451
-6257aa6c7c55eb2d6c1313d872a2ab6f  from_alignments.comparable
-6257aa6c7c55eb2d6c1313d872a2ab6f  from_psps.comparable
-b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
-9b503d9dbb13aaca231afe5b476f429a  from_alignments.windows.sorted
-4cda6ce3dd2389e386acb69c1cc745d7  from_alignments.windows.histograms
-4e69d2ce39a7529da855d07ecb763187  fitted.parameters.toml
-f9c97b294ff1228884b427ad666ff942  from_fit.comparable
+# records: 7508
+67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
+67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
+a27bb944b54ba6dbfd6f21f9c6b7485f  from_alignments.parameters.toml
+4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
+0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
+ef9ada5a6cfbea08766fef10d656f9da  fitted.parameters.toml
+e4af91bd9bb86438c5b73a034e640091  from_fit.comparable

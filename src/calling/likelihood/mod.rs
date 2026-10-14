@@ -131,7 +131,7 @@ pub mod stutter_rates;
 
 use crate::calling::genotype_prior::{COUNT_PATH_DESYNC_THRESHOLD, SampleAlleleCopies};
 use crate::float;
-use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
+use crate::locus_generation::{LocusLen, ReadWitness, SequenceObservation, SsrDetail};
 use crate::parameter_estimation::calibration::MintedReadErrors;
 use crate::parameter_estimation::joint::contamination::{
     ContaminationEstimate, ContaminationSource,
@@ -1558,18 +1558,48 @@ pub struct SsrSampleEvidence<'a> {
     /// that scoring a partial as complete has to be written rather than fallen into, and
     /// that the split has one spelling instead of one per caller.
     pub observations: &'a [SequenceObservation],
-    /// The tract's motif and flanks — what the emission needs to know which repeat it is
-    /// scoring against.
-    pub detail: &'a SsrDetail,
+    /// The tract's motif and flanks — which repeat it is scored against. `None` at an STR
+    /// bundle, whose runs and flanks travel on the locus's evidence instead
+    /// ([`SsrLocusShape`](crate::calling::SsrLocusShape)). The row reads neither.
+    pub detail: Option<&'a SsrDetail>,
+    /// **The locus's reference length in positions** — a segment's tract or a bundle's hull: the
+    /// axis a partial witness is on, and what says which flank a partial read held
+    /// ([`HeldFlank::of_witness`]). The one source of that length for the row.
+    ///
+    /// [`HeldFlank::of_witness`]: crate::locus_generation::HeldFlank::of_witness
+    pub locus_len: LocusLen,
 }
 
+/// The tract length the tests' evidence is built over: longer than any fixture's partial reads
+/// reach, so a witness flush with the left border reads as a left-held read, as every fixture's
+/// partial is.
+#[cfg(test)]
+pub(crate) const TEST_TRACT_LEN: LocusLen = LocusLen::from_positions(1_000);
+
 impl<'a> SsrSampleEvidence<'a> {
-    /// A sample's observations at one tract, against that tract's repeat detail.
+    /// A sample's observations at one tract of `tract_len` reference positions, against that
+    /// tract's repeat detail.
     #[must_use]
-    pub fn new(observations: &'a [SequenceObservation], detail: &'a SsrDetail) -> Self {
+    pub fn new(
+        observations: &'a [SequenceObservation],
+        detail: &'a SsrDetail,
+        tract_len: LocusLen,
+    ) -> Self {
         Self {
             observations,
-            detail,
+            detail: Some(detail),
+            locus_len: tract_len,
+        }
+    }
+
+    /// A sample's observations at one STR bundle whose hull spans `hull_len` reference
+    /// positions.
+    #[must_use]
+    pub fn of_bundle(observations: &'a [SequenceObservation], hull_len: LocusLen) -> Self {
+        Self {
+            observations,
+            detail: None,
+            locus_len: hull_len,
         }
     }
 
@@ -1712,6 +1742,9 @@ pub struct SsrRowScratch<ModelScratch> {
     emissions: Vec<f64>,
     candidates: usize,
     model: ModelScratch,
+    /// A read and an allele respelled over a common flank extent, reused per pair
+    /// (`str_edge_deletion_alleles.md` §5.6).
+    pub(crate) respelled: (Vec<u8>, Vec<u8>),
 }
 
 impl<ModelScratch> SsrRowScratch<ModelScratch> {
@@ -2206,6 +2239,7 @@ mod tests {
     /// equality does not license indexing one with the other.
     fn partial_row(num_reads: u32, q_sum: f64) -> PartialObservation {
         PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::one_run_from_offset_and_length(2, 5)
                 .expect("a five-position run from offset two is a witness"),
             read_group: ReadGroupId(1),
@@ -2235,6 +2269,8 @@ mod tests {
 
     fn ssr_observation(bases: &[u8], witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.into(),
             read_witness: witness,
             read_group: ReadGroupId(2),
@@ -2483,7 +2519,7 @@ mod tests {
             ssr_observation(b"ACACAC", ReadWitness::Complete, 3),
         ];
         let detail = ssr_detail();
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
 
         let complete: Vec<(usize, u32)> = evidence
             .complete_observations()
@@ -2498,7 +2534,7 @@ mod tests {
         assert_eq!(partial, vec![(1, 5)]);
         // The tract's own detail is the whole of what the emission is told about which
         // repeat it is scoring against, and nothing else here reads it back.
-        assert_eq!(evidence.detail, &detail);
+        assert_eq!(evidence.detail, Some(&detail));
         assert_eq!(evidence.observations, &observations[..]);
     }
 
@@ -2514,7 +2550,7 @@ mod tests {
             ssr_observation(b"ACACAC", ran_out_after(6), 4),
         ];
         let detail = ssr_detail();
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
 
         assert_eq!(
             evidence
@@ -2545,7 +2581,7 @@ mod tests {
             ssr_observation(b"ACACAC", ReadWitness::Complete, 3),
         ];
         let detail = ssr_detail();
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
 
         let mut seen: Vec<usize> = evidence
             .complete_observations()
@@ -3112,7 +3148,11 @@ mod tests {
             out: &mut [f64],
             scratch: &mut SsrRowScratch<()>,
         ) {
-            scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &ssr_detail()), 0, f64::NAN);
+            scratch.prepare_emissions(
+                &SsrSampleEvidence::new(&[], &ssr_detail(), TEST_TRACT_LEN),
+                0,
+                f64::NAN,
+            );
             out[0] = f64::from(evidence.supported.len() as u32);
         }
 
@@ -3147,13 +3187,21 @@ mod tests {
         let detail = ssr_detail();
         let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
 
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&three, &detail), 2, f64::NAN);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&three, &detail, TEST_TRACT_LEN),
+            2,
+            f64::NAN,
+        );
         for (at, slot) in scratch.emissions_mut().iter_mut().enumerate() {
             *slot = at as f64 + 1.0;
         }
         assert_eq!(scratch.emission_count(), 6);
 
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&two, &detail), 3, -1.0);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&two, &detail, TEST_TRACT_LEN),
+            3,
+            -1.0,
+        );
 
         assert_eq!(scratch.emission_count(), 6);
         assert!(scratch.emissions_mut().iter().all(|&slot| slot == -1.0));
@@ -3175,7 +3223,7 @@ mod tests {
             ssr_observation(b"ACACAC", ReadWitness::Complete, 3),
         ];
         let detail = ssr_detail();
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
         let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
 
         scratch.prepare_emissions(&evidence, 4, f64::NAN);
@@ -3200,7 +3248,11 @@ mod tests {
         let observations = [ssr_observation(b"ACAC", ReadWitness::Complete, 4)];
         let detail = ssr_detail();
         let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&observations, &detail), 2, 0.0);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN),
+            2,
+            0.0,
+        );
 
         let _ = scratch.emission_at(0, 2);
     }
@@ -3217,7 +3269,7 @@ mod tests {
             ssr_observation(b"ACACAC", ReadWitness::Complete, 2),
         ];
         let detail = ssr_detail();
-        let evidence = SsrSampleEvidence::new(&observations, &detail);
+        let evidence = SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN);
         let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
 
         scratch.prepare_emissions(&evidence, 2, f64::NAN);
@@ -3235,13 +3287,25 @@ mod tests {
         let detail = ssr_detail();
         let mut scratch: SsrRowScratch<()> = SsrRowScratch::default();
 
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&observations, &detail), 4, 1.0);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN),
+            4,
+            1.0,
+        );
         assert_eq!(scratch.emission_count(), 4);
 
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &detail), 4, 1.0);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
+            4,
+            1.0,
+        );
         assert_eq!(scratch.emission_count(), 0);
 
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&observations, &detail), 0, 1.0);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&observations, &detail, TEST_TRACT_LEN),
+            0,
+            1.0,
+        );
         assert_eq!(scratch.emission_count(), 0);
     }
 
@@ -3254,7 +3318,11 @@ mod tests {
         let mut scratch: SsrRowScratch<Vec<u8>> = SsrRowScratch::default();
 
         scratch.model_scratch_mut().extend_from_slice(b"ACGT");
-        scratch.prepare_emissions(&SsrSampleEvidence::new(&[], &detail), 3, 0.0);
+        scratch.prepare_emissions(
+            &SsrSampleEvidence::new(&[], &detail, TEST_TRACT_LEN),
+            3,
+            0.0,
+        );
 
         assert_eq!(scratch.model_scratch_mut().as_slice(), b"ACGT");
     }

@@ -24,7 +24,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// The shortest walk a person can type.
 fn a_walk() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         "generate-psps",
         "--reference",
         "ref.fa",
@@ -47,7 +47,7 @@ fn the_subcommand_is_spelled_generate_psps() {
 #[test]
 fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
     let mut argv = vec![
-        "pop_var_caller",
+        "pvc",
         "generate-psps",
         "--reference",
         "ref.fa",
@@ -73,7 +73,7 @@ fn the_alignment_flag_repeats_and_keeps_the_order_it_was_given() {
 #[test]
 fn a_walk_with_no_alignment_is_refused() {
     let refused = refusal_of(&[
-        "pop_var_caller",
+        "pvc",
         "generate-psps",
         "--reference",
         "ref.fa",
@@ -117,7 +117,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
     );
 
     let direct = match Cli::parse_from([
-        "pop_var_caller",
+        "pvc",
         "call-from-alignments",
         "--reference",
         "ref.fa",
@@ -141,6 +141,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
         min_period: direct.min_period,
         max_period: direct.max_period,
         max_str_len: direct.max_str_len,
+        max_str_bundle_len: direct.max_str_bundle_len,
         min_purity: direct.min_purity,
     };
     assert_eq!(
@@ -157,7 +158,7 @@ fn the_routing_defaults_are_the_same_as_direct_modes() {
 #[test]
 fn the_recorded_subcommand_is_the_one_a_person_types() {
     let parsed = Cli::try_parse_from([
-        "pop_var_caller",
+        "pvc",
         SUBCOMMAND,
         "--reference",
         "ref.fa",
@@ -517,6 +518,7 @@ fn a_cohort_on_disk() -> (
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };

@@ -506,9 +506,12 @@ def edit_of(
 ) -> Edit | None:
     """The change one of a record's alleles makes, left-aligned against `reference`.
 
-    `None` for the reference allele, which changes nothing.
+    `None` for the reference allele, which changes nothing — and for `*`, which VCF defines as
+    "deleted by an overlapping record": the overlapping record carries the change on this copy,
+    and this one makes none (2026-10-11, `str_edge_deletion_alleles.md` §6; the stuttering
+    benchmark's scorer skips it the same way).
     """
-    if allele == 0:
+    if allele == 0 or record.allele_bases(allele) == "*":
         return None
     return left_aligned(
         minimal_edit(record.pos, record.ref.upper(), record.allele_bases(allele)),

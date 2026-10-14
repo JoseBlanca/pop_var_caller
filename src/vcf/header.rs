@@ -405,9 +405,9 @@ const INFO_DECLARATIONS: &[&str] = &[
     r#"##INFO=<ID=MQREF,Number=1,Type=Float,Description="Cohort-pooled mean mapping quality of reads supporting REF">"#,
     r#"##INFO=<ID=MQALT,Number=A,Type=Float,Description="Cohort-pooled mean mapping quality of reads supporting each ALT">"#,
     r#"##INFO=<ID=MQDIFF,Number=A,Type=Float,Description="MQALT minus MQREF per ALT; negative means ALT reads map worse (multi-mapper fingerprint)">"#,
-    r#"##INFO=<ID=STR,Number=0,Type=Flag,Description="This record is a repeat-tract locus">"#,
-    r#"##INFO=<ID=RU,Number=1,Type=String,Description="Repeat unit of the tract, reference strand">"#,
-    r#"##INFO=<ID=PERIOD,Number=1,Type=Integer,Description="Repeat unit length in bases">"#,
+    r#"##INFO=<ID=STR,Number=0,Type=Flag,Description="This record is a repeat-tract locus: an STR segment, or an STR bundle with at least one run">"#,
+    r#"##INFO=<ID=RU,Number=.,Type=String,Description="Repeat unit of the tract, reference strand; at an STR bundle, one per run in order">"#,
+    r#"##INFO=<ID=PERIOD,Number=.,Type=Integer,Description="Repeat unit length in bases; at an STR bundle, one per run in order">"#,
 ];
 
 /// **What the hidden-duplication filter adds to the header, and only when it ran.**
@@ -513,6 +513,7 @@ const FORMAT_DECLARATIONS: &[&str] = &[
     r#"##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Reads this sample observed at the locus, whether or not a written allele explains them">"#,
     r#"##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Reads whose sequence matched each allele exactly, REF first">"#,
     r#"##FORMAT=<ID=REPCN,Number=.,Type=Integer,Description="Repeat copy number of each called allele, GT order">"#,
+    r#"##FORMAT=<ID=REPCNB,Number=.,Type=String,Description="STR bundle records only: each called allele's copies in every run, joined by _, GT order">"#,
 ];
 
 /// **The whole header, as the file's text**, ending with a newline so the first record follows

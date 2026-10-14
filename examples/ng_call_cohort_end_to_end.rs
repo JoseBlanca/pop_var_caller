@@ -167,11 +167,11 @@ use pop_var_caller::read::input::reference::OpenReference;
 use pop_var_caller::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::region_typing::DEFAULT_MAX_STR_LEN;
 use pop_var_caller::region_typing::GenomeRegions;
 use pop_var_caller::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use pop_var_caller::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 use pop_var_caller::regions::ContigBounds;
 use pop_var_caller::run::cohort_merge::timing;
 use pop_var_caller::run::{
@@ -373,6 +373,7 @@ fn run(
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
     };

@@ -32,13 +32,17 @@
 //! When the stream lands, expect to rewrite the *construction* of these two structs and nothing
 //! below them.
 
+use super::TractWidening;
 use super::{
     FilterVerdict, MapqPool, PaddingBase, SampleCall, SampleColumn, SampleReadCounts,
     TractAnnotation, VcfRecord,
 };
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::calling::{LocusInference, SampleGenotypeCall};
+use crate::locus_generation::{FlankDeletion, LocusKind};
+use crate::region_typing::run_parse::parse_into_runs;
 use crate::types::{AlleleId, Genotype, Phred};
+use crate::types::{GenomeRegion, Position};
 use crate::window_coverage::WindowCoverage;
 
 /// **What one sample showed at a locus, once the locus itself is gone.**
@@ -170,23 +174,66 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
     let mut allele_mapq = evidence.allele_mapq;
     let mut alleles = alleles;
     let mut sample_columns = sample_columns;
+    let mut flank_deletions: Vec<FlankDeletion> = (0..alleles.len())
+        .map(|index| locus.alleles().flank_deletion(index))
+        .collect();
     drop_alternatives_no_sample_calls(
         &mut alleles,
         &mut expected_copies,
         &mut allele_mapq,
         &mut sample_columns,
+        &mut flank_deletions,
     );
+    let mut region = locus.region;
+    let mut repeat_tract = evidence.repeat_tract;
+    let mut padding_base = evidence.padding_base;
+    // **An STR bundle's run counts are read off the alleles the record keeps**, before any
+    // widening adds flank bases to them: each is parsed against the bundle's reference runs, the
+    // reference allele being the reference hull (`str_bundle_loci.md` §7.1, §7.5).
+    if let LocusKind::SsrBundle(detail) = locus.alleles().kind() {
+        let counts = alleles
+            .iter()
+            .map(|allele| {
+                parse_into_runs(allele, &alleles[0], &detail.runs)
+                    .copies()
+                    .collect()
+            })
+            .collect();
+        repeat_tract = repeat_tract.map(|tract| tract.with_run_counts_of_alleles(counts));
+    }
+    let flanks = match locus.alleles().kind() {
+        LocusKind::Ssr(detail) => Some((&*detail.left_flank, &*detail.right_flank)),
+        LocusKind::SsrBundle(detail) => Some((&*detail.left_flank, &*detail.right_flank)),
+        LocusKind::Generic => None,
+    };
+    if let Some(flanks) = flanks
+        && let Some(widened) = WidenedTract::over(&alleles, &flank_deletions, flanks)
+    {
+        region = GenomeRegion {
+            contig: region.contig,
+            start: Position(region.start.get() - widened.left as u64),
+            end: Position(region.end.get() + widened.right as u64),
+        };
+        repeat_tract = repeat_tract.map(|tract| {
+            tract.widened(TractWidening {
+                left: u8::try_from(widened.left).expect("a flank holds fewer than 256 bases"),
+                right: u8::try_from(widened.right).expect("a flank holds fewer than 256 bases"),
+                flank_bases_per_allele: widened.flank_bases_per_allele,
+                reach_per_allele: widened.reach_per_allele,
+            })
+        });
+        padding_base = widened.padding_base;
+        alleles = widened.alleles;
+    }
     // **The padding base was resolved over the whole candidate table, and the drop above can
     // take away the only empty allele** — a deletion that survived selection but that no sample
     // is called carrying. A record with no empty allele is written without padding (spec §5),
     // so the base goes with the allele that needed it. The drop removes alleles and never
     // shortens one, so it cannot make a padding base necessary where there was none.
-    let padding_base = evidence
-        .padding_base
-        .filter(|_| alleles.iter().any(|allele| allele.is_empty()));
+    let padding_base = padding_base.filter(|_| alleles.iter().any(|allele| allele.is_empty()));
 
     VcfRecord::new(
-        locus.region,
+        region,
         alleles,
         expected_copies,
         sample_columns,
@@ -195,8 +242,147 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         evidence.corrected_site_quality,
         evidence.artifact_penalties,
         evidence.filter,
-        evidence.repeat_tract,
+        repeat_tract,
     )
+}
+
+/// **An STR record's alleles respelled over a reference widened into its flanks**
+/// (`str_edge_deletion_alleles.md` §5.8) — `None` when no allele reaches into a flank, and the
+/// record is written over the tract as before.
+struct WidenedTract {
+    /// Flank bases added before the tract, and after it.
+    left: usize,
+    right: usize,
+    /// Every allele over the widened reference, the reference first.
+    alleles: Vec<Box<[u8]>>,
+    /// How many flank bases each allele was given around its spelling, for `REPCN`.
+    flank_bases_per_allele: Vec<u8>,
+    /// Each allele's reach into the left and the right flank, as the generic path places it.
+    reach_per_allele: Vec<(u8, u8)>,
+    /// The base before the widened record, for when an allele comes out empty.
+    padding_base: Option<PaddingBase>,
+}
+
+impl WidenedTract {
+    /// Widen over each allele's reach into the flanks as the generic path would place it.
+    ///
+    /// **Right**: an allele's flank deletion's right count — its smallest form already places
+    /// a deletion as far left as it goes on that side. **Left**: how many left-flank bases,
+    /// counted back from the tract, lie at or after the first base the generic path shows as
+    /// changed. The allele's sequence there is the left flank less its deleted bases, then its
+    /// spelling, against the reference's left flank and tract. The generic path left-aligns
+    /// every read, so a deletion starts as far left as its sequence allows: where the two
+    /// sequences' shared ending runs out, less the deletion's length — or, for an allele that
+    /// is not shorter, where they first differ. For a plain allele the reach is zero unless
+    /// its deletion slides into the flank, as `AG` from `…CG|AGAG…` does.
+    fn over(
+        alleles: &[Box<[u8]>],
+        flank_deletions: &[FlankDeletion],
+        (left_flank, right_flank): (&[u8], &[u8]),
+    ) -> Option<Self> {
+        let flank = left_flank.len();
+        let reference = &alleles[0];
+        let reach_left = |bases: &[u8], deleted: FlankDeletion| -> usize {
+            let kept = flank.saturating_sub(usize::from(deleted.left));
+            let ours: Vec<u8> = left_flank[..kept].iter().chain(bases).copied().collect();
+            // The reference over the same stretch: the allele also covers the right-flank bases
+            // its extent takes there.
+            let right_extent = usize::from(deleted.right).min(right_flank.len());
+            let theirs: Vec<u8> = left_flank
+                .iter()
+                .chain(reference.iter())
+                .chain(&right_flank[..right_extent])
+                .copied()
+                .collect();
+            let first_difference = ours.iter().zip(&theirs).take_while(|(a, b)| a == b).count();
+            let start = if ours.len() < theirs.len() {
+                let shared_ending = ours
+                    .iter()
+                    .rev()
+                    .zip(theirs.iter().rev())
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                first_difference.min(theirs.len() - shared_ending - (theirs.len() - ours.len()))
+            } else {
+                first_difference
+            };
+            flank.saturating_sub(start)
+        };
+        let reach_per_allele: Vec<(usize, usize)> = alleles
+            .iter()
+            .zip(flank_deletions)
+            .enumerate()
+            .map(|(index, (bases, deleted))| {
+                if index == 0 {
+                    (0, 0)
+                } else {
+                    (reach_left(bases, *deleted), usize::from(deleted.right))
+                }
+            })
+            .collect();
+        let left = reach_per_allele
+            .iter()
+            .map(|reach| reach.0)
+            .max()
+            .unwrap_or(0);
+        let right = reach_per_allele
+            .iter()
+            .map(|reach| reach.1)
+            .max()
+            .unwrap_or(0);
+        if left == 0 && right == 0 {
+            return None;
+        }
+        // A reach past the flank the locus holds cannot be written over it; read measurement
+        // records no such deletion, so this is a plain allele sliding the whole flank's length.
+        if left > flank || right > right_flank.len() {
+            return None;
+        }
+        let mut widened = Vec::with_capacity(alleles.len());
+        let mut flank_bases_per_allele = Vec::with_capacity(alleles.len());
+        for (bases, deleted) in alleles.iter().zip(flank_deletions) {
+            let (cut_left, cut_right) = (usize::from(deleted.left), usize::from(deleted.right));
+            let before = &left_flank[flank - left..flank - cut_left.min(left)];
+            let after = &right_flank[cut_right.min(right)..right];
+            let mut allele = Vec::with_capacity(before.len() + bases.len() + after.len());
+            allele.extend_from_slice(before);
+            allele.extend_from_slice(bases);
+            allele.extend_from_slice(after);
+            flank_bases_per_allele.push(
+                u8::try_from(before.len() + after.len())
+                    .expect("two flanks of a tract hold fewer than 256 bases"),
+            );
+            widened.push(allele.into_boxed_slice());
+        }
+        // An allele that comes out empty is padded with the base before the widened record,
+        // or the one after it where the flank is spent.
+        let padding_base = if left < flank {
+            Some(PaddingBase::Left(left_flank[flank - left - 1]))
+        } else if right < right_flank.len() {
+            Some(PaddingBase::Right(right_flank[right]))
+        } else {
+            None
+        };
+        if padding_base.is_none() && widened.iter().any(|allele| allele.is_empty()) {
+            return None;
+        }
+        Some(Self {
+            left,
+            right,
+            alleles: widened,
+            flank_bases_per_allele,
+            reach_per_allele: reach_per_allele
+                .into_iter()
+                .map(|(l, r)| {
+                    (
+                        u8::try_from(l).expect("a flank holds fewer than 256 bases"),
+                        u8::try_from(r).expect("a flank holds fewer than 256 bases"),
+                    )
+                })
+                .collect(),
+            padding_base,
+        })
+    }
 }
 
 /// **What the file says this sample is** — the no-call rule of spec §7.1, in one place.
@@ -249,11 +435,12 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
 /// candidate set and are **not** recomputed. That is the same choice `bcftools` makes, and the
 /// honest reading of the field: the quality is the evidence the site was judged on, not a
 /// property of the alleles that survived the judging.
-fn drop_alternatives_no_sample_calls(
+pub(crate) fn drop_alternatives_no_sample_calls(
     alleles: &mut Vec<Box<[u8]>>,
     expected_copies: &mut Vec<f64>,
     allele_mapq: &mut Vec<MapqPool>,
     sample_columns: &mut [SampleColumn],
+    flank_deletions: &mut Vec<FlankDeletion>,
 ) {
     // The reference allele is never dropped: it is the bases the record's span spells, and
     // `VcfRecord::new` refuses a record without one.
@@ -329,6 +516,12 @@ fn drop_alternatives_no_sample_calls(
     });
     let mut old = 0_usize;
     allele_mapq.retain(|_| {
+        let keep = kept[old];
+        old += 1;
+        keep
+    });
+    let mut old = 0_usize;
+    flank_deletions.retain(|_| {
         let keep = kept[old];
         old += 1;
         keep

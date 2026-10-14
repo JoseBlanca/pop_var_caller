@@ -52,10 +52,10 @@ mod tests {
         AVaryingCohort, a_larger_varying_cohort_with_sequencing_errors_on_disk,
         a_varying_cohort_on_disk, a_varying_cohort_with_sequencing_errors_on_disk,
     };
-    use crate::region_typing::DEFAULT_MAX_STR_LEN;
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
     };
+    use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
     use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 
     /// The width of the pool the pinned run uses; the other test checks other widths agree.
@@ -126,7 +126,18 @@ mod tests {
     /// moves but 8 lines of notes. Measured first on four tomato accessions: 52 of 188 rates move
     /// and nothing else in the file. Recorded in the Linux container (arm64, glibc), and the same on
     /// macOS (arm64); it was `a5e87936e968f9b855f91f88db828083`.
-    const FITTED_PARAMETERS_MD5: &str = "860c3c65f27a1700e401d102833215e1";
+    ///
+    /// **Re-recorded 2026-10-11** when the typing gained the STR bundle cap
+    /// (`str_bundle_loci.md` §5.2). No number moves. Three things in the file do: `[repeat_routing]`
+    /// gains a `max_str_bundle_len = 100` line, its note gains a clause on that key and now counts
+    /// six flags of nine, and the census digests of the STR routing criteria and of the repeat
+    /// catalog's build settings move, because each is taken over its criteria's printed form,
+    /// which now carries the cap. Reverting those three gives the old checksum byte for byte; the
+    /// calls do not move. Then again the same day, when the note's clause was reworded to say the
+    /// hull runs to the furthest end of any repeat: restoring the earlier wording in the written
+    /// file gives `4e643855f0dac8ee128f43a7a1a92095` exactly. Recorded in the Linux container (arm64, glibc) only; it was
+    /// `860c3c65f27a1700e401d102833215e1`.
+    const FITTED_PARAMETERS_MD5: &str = "a5b4997bc35e77425525e25e821cf40c";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -167,7 +178,27 @@ mod tests {
     /// 520.7), because this fixture's reads lean one way at both alleles and the prior pulls the
     /// expected share a little toward even. It was `a2d17168b04f33a8f62a0a6cd2511df4`. Recorded in
     /// the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "a44fc3523149780329f43fd951abdab7";
+    ///
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `a44fc3523149780329f43fd951abdab7`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-10, again,** when a repeat tract's site quality began to use the tract's own
+    /// prior rather than the run's (`calling_quality.md` §8.1): the repeat tract at chrV:201 moves,
+    /// QUAL 14.9 to 36.7; nothing else in the file does — the two SNPs keep the run's prior, the fit
+    /// is unchanged, and no genotype moves. Measured by putting the old prior back at tracts, which
+    /// reproduces the old checksum exactly. It was `2200dfaaa1148093cccf828021c5a281`. Recorded in
+    /// the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-11** when STR bundles began to be called (`str_bundle_loci.md` §7.5):
+    /// the header's `RU` and `PERIOD` became `Number=.`, `STR`'s description names bundles, and
+    /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
+    /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
+    /// was `bc75ec4d5a3c67dcaa776f56746b2bdd`. Recorded in the Linux container (arm64, glibc) only.
+    const CALLS_MD5: &str = "b1a1a907e4e7adf22fb62c56f3305258";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -187,14 +218,50 @@ mod tests {
     /// mismapped positions can be computed differently, even doubled, without moving a byte here, so
     /// a change confined to the cohort's own scores is not pinned by this pair. Recorded in the Linux container
     /// (arm64, glibc) and the same on macOS (arm64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "8c71a5a95f1196e3dd8c05abdccf7355";
+    ///
+    /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
+    /// Recorded in the Linux container (arm64, glibc) only; it was `8c71a5a95f1196e3dd8c05abdccf7355`, then `9265d0273c5400d8a2b2554b3f7ecf0a`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "4859eacd5645e607b6f99b667d184dc0";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same
     /// records and genotypes, the SNPs' `QUAL` about 29 lower. It was
     /// `943c7fa93e2a1f110e996c117e3b0808`. Recorded in the Linux container (arm64, glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "b82fed4ad01da17688bc4d695a9ed03d";
+    ///
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `b82fed4ad01da17688bc4d695a9ed03d`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
+    /// repeat tract's `QUAL` moves. It was `206e0f7bf9b5459b99b20477562642a1`. Recorded in the
+    /// Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-11** when STR bundles began to be called (`str_bundle_loci.md` §7.5):
+    /// the header's `RU` and `PERIOD` became `Number=.`, `STR`'s description names bundles, and
+    /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
+    /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
+    /// was `f037a347e52634175a3eb5b4353fb8d0`. Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-12** when a partial read that held the right flank of an STR segment
+    /// began to be compared with the candidate's end rather than its start (`read_likelihoods.md`
+    /// §5.2). Only the repeat tract's `AF` moves, in its sixth decimal (0.249923 to 0.249924).
+    /// Measured by scoring every partial from the left again, which restores the old checksum; the
+    /// benchmark measurement is `reports/implementations/str_partial_read_phase_2026-10-12.md`.
+    /// It was `f037a347e52634175a3eb5b4353fb8d0`. Recorded in the Linux container (arm64, glibc)
+    /// only.
+    ///
+    /// **Merged 2026-10-12** (main's partial-read phase fix into the STR-bundle branch): the two
+    /// notes above were each recorded from `f037a347e52634175a3eb5b4353fb8d0` on their own branch.
+    /// With both, the header is the bundle branch's and the repeat tract's record is main's to the
+    /// byte (`AF=0.249924`); segments now also record a whole-tract partial's held flank, and no
+    /// field of this fixture moves for it. It was `977f08d389bdba037ee350ab38164e1b` on str-bundles
+    /// and `e9e8aee5b6714aa33ce91bd04290984e` on main. Recorded in the Linux container (arm64,
+    /// glibc) only.
+    const WITH_ERRORS_CALLS_MD5: &str = "f65f586f58163d23d127d7f8c823e433";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -204,11 +271,42 @@ mod tests {
     /// libraries' multipliers run 0.35 to 7.97 with errors of 1.66 to 3.01; its inbreeding
     /// coefficients carry none; its calls are the 22 records designed into it, one site a sample and
     /// the tract. Recorded in the Linux container (arm64, glibc) and the same on macOS (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "5e3dacbf558adc6787276897935dbbf8";
+    ///
+    /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
+    /// Recorded in the Linux container (arm64, glibc) only; it was `5e3dacbf558adc6787276897935dbbf8`, then `0cda09cc72a2a7bd9c46a4fe85388eff`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "0573095bb8f1ed6608ed74d62051ade1";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "ec9aaa04a0d365fdaa468eb8eeda7c40";
+    ///
+    /// **Re-recorded 2026-10-10** when the hidden-duplication filter began scoring STR records from
+    /// their read split as well as coverage (`hidden_paralog_filter.md` §3.2), measured on 63 tomato
+    /// accessions first. The fit does not move. Only the STR record's `PARALOG_LR` moves (in the
+    /// two-sample cohort, -1.11 to -19.24: its heterozygote's reads split 8 to 7, as a real
+    /// heterozygote's do); no record, genotype or filter decision changes. It was `ec9aaa04a0d365fdaa468eb8eeda7c40`.
+    /// Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-10, again,** with the tract prior of [`CALLS_MD5`]'s last note: only the
+    /// repeat tract's `QUAL` moves. It was `102696ee67202548f35a28a698dbf244`. Recorded in the
+    /// Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-11** when STR bundles began to be called (`str_bundle_loci.md` §7.5):
+    /// the header's `RU` and `PERIOD` became `Number=.`, `STR`'s description names bundles, and
+    /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
+    /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
+    /// was `fcc1a04573dbbdb08ac80127c554dc94`. Recorded in the Linux container (arm64, glibc) only.
+    ///
+    /// **Re-recorded 2026-10-12** with the partial-read change of [`WITH_ERRORS_CALLS_MD5`]'s
+    /// last note: only the repeat tract's `QUAL` (37.2 to 37.3) and `AF` (0.023717 to 0.023718)
+    /// move, and scoring every partial from the left again restores the old checksum.
+    /// It was `fcc1a04573dbbdb08ac80127c554dc94`. Recorded in the Linux container (arm64,
+    /// glibc) only.
+    ///
+    /// **Merged 2026-10-12**, as [`WITH_ERRORS_CALLS_MD5`]'s last note: the header is the bundle
+    /// branch's and the repeat tract's record main's to the byte (`QUAL` 37.3, `AF=0.023718`). It
+    /// was `08a675fd6ba4bc8a627fa2bd2118b415` on str-bundles and `efa3947cb4eacd394de0425ce87c40ed`
+    /// on main. Recorded in the Linux container (arm64, glibc) only.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "5c2414e47ecc6748f12db076d7513de1";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -255,6 +353,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
@@ -303,6 +402,7 @@ mod tests {
             min_period: DEFAULT_MIN_PERIOD,
             max_period: DEFAULT_MAX_PERIOD,
             max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
             max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,

@@ -22,8 +22,7 @@ use crate::paralog::{
     calibrate_from_the_ratio_histogram,
 };
 use crate::run::paralog_filter::{
-    GenericLocusSample, LrHistogramShape, ParalogVerdicts, SpillEntry, SpillFile, SpilledSamples,
-    WindowCoverage,
+    LrHistogramShape, ParalogVerdicts, SpillEntry, SpillFile, SpilledSample, WindowCoverage,
 };
 use crate::types::{ContigId, Ploidy, Position};
 use crate::vcf::{HeaderContig, VcfHeaderMetadata, VcfWriter};
@@ -31,8 +30,8 @@ use crate::vcf::{HeaderContig, VcfHeaderMetadata, VcfWriter};
 // ---------------------------------------------------------------- the records
 
 /// One sample's row; the numbers never reach the scorer here, because pass three does not score.
-fn a_row() -> GenericLocusSample {
-    GenericLocusSample {
+fn a_row() -> SpilledSample {
+    SpilledSample {
         window: WindowCoverage {
             gc_fraction: 0.41,
             mean_depth: 6.25,
@@ -52,7 +51,7 @@ fn a_record(contig: u32, position: u64, filter: &str) -> SpillEntry {
             "chr{contig}\t{position}\t.\tA\tG\t42.5\t{filter}\tAN=2;DP=10\tGT:AD\t0/1:5,5"
         )
         .into_bytes(),
-        samples: SpilledSamples::GenericLocus(vec![a_row()]),
+        samples: vec![a_row()],
     }
 }
 

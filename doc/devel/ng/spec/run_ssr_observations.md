@@ -56,6 +56,15 @@ Three changes, in dependency order:
 - **It does not give bundles a caller.** A bundle — a cluster of repeats none of which has
   clean flanks — keeps its unfilled slot and stays counted as ground the caller cannot yet
   speak for (§8).
+
+  *Changed during implementation (2026-10-11).* The bundle slot is now filled
+  ([`str_bundle_loci.md`](str_bundle_loci.md) §6.1): a run measures each STR bundle of at most
+  `--max-str-bundle-len` bases as one locus over its hull, with the tract generator run over the
+  hull (`locus_generation/ssr_bundle.rs`). Calling still sets every bundle locus aside and counts
+  it, so a run's calls are unchanged; its walk report no longer lists bundle bases as ground not
+  stored, and the hidden-duplication filter's coverage now sees reads at bundle hulls (on the
+  stuttering benchmark, one sample, 30×: the `PARALOG_LR` of 67 of 2,396 records moved, no
+  record's genotype, QUAL or filter).
 - **It does not move the routing frontier.** Which repeats *ought* to go down the STR path —
   the period × length question [`typed_regions.md`](typed_regions.md) §5.2 leaves open, with
   a graft onto the generic path as a live third answer — stays open. This document makes the
@@ -307,7 +316,9 @@ lands, visible in the run report's counts.
   indels of the GIAB benchmark's 2,391 truth variants, so nothing here blocks on them —
   but they are the one kind with neither a generator nor a design. Home: their own spec,
   after this document and [`calling_loop_ssr.md`](calling_loop_ssr.md) land; the payload
-  `LocusKind::SsrBundle` deliberately carries nothing until then.
+  `LocusKind::SsrBundle` deliberately carries nothing until then. *(Since 2026-10-11 the
+  design is [`str_bundle_loci.md`](str_bundle_loci.md); the generator is built and the payload
+  carries the hull's flanks and reference runs.)*
 - **Where the routing frontier belongs** — the period × length measurement, including the
   DRAGstr-style graft option. Home: [`typed_regions.md`](typed_regions.md) §5.2's question,
   answerable cheaply once both paths run (call the same ground both ways, score both against

@@ -734,6 +734,61 @@ fn a_tract_record_carries_repeat_counts_as_a_fifth_field() {
     assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11:8,6");
 }
 
+/// `GG (CA)8 GT (TTG)5 C` against one `CA` copy more — an STR bundle record of two runs.
+fn a_bundle_record(annotation: TractAnnotation) -> VcfRecord {
+    let reference = [&b"GG"[..], &b"CA".repeat(8), b"GT", &b"TTG".repeat(5), b"C"].concat();
+    let longer = [&b"GG"[..], &b"CA".repeat(9), b"GT", &b"TTG".repeat(5), b"C"].concat();
+    VcfRecord::new(
+        region_on(0, 2_000, 2_035),
+        vec![allele(&reference), allele(&longer)],
+        vec![1.0, 1.0],
+        one_sample(vec![12, 11], 7, &[0, 1]),
+        pools(&[12, 11]),
+        None,
+        quality(150.0),
+        None,
+        FilterVerdict::Pass,
+        Some(annotation),
+    )
+}
+
+/// **An STR bundle record writes one `RU` and one `PERIOD` per run, in order, and each called
+/// allele's run counts as `REPCNB`** — not `REPCN`, which is one integer an allele
+/// (`str_bundle_loci.md` §7.5).
+#[test]
+fn a_bundle_record_writes_a_unit_per_run_and_its_run_counts_as_repcnb() {
+    let record = a_bundle_record(TractAnnotation::bundle(
+        vec![Motif::new(b"CA").unwrap(), Motif::new(b"TTG").unwrap()].into_boxed_slice(),
+        vec![Box::from(&[8_u32, 5][..]), Box::from(&[9_u32, 5][..])],
+    ));
+    let info = info_column(&record);
+    assert!(info.ends_with(";STR;RU=CA,TTG;PERIOD=2,3"), "got {info}");
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:REPCNB");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "0/1:40:30:12,11:8_5,9_5"
+    );
+    assert!(!sample_columns(&record, diploid()).contains("REPCN"));
+}
+
+/// **A bundle with no run writes no `STR`, `RU`, `PERIOD` or `REPCNB`**: the three INFO fields
+/// travel together (`vcf_output.md` §3), and there is no run to count.
+#[test]
+fn a_bundle_record_with_no_run_writes_no_repeat_annotation() {
+    let record = a_bundle_record(TractAnnotation::bundle(
+        Box::new([]),
+        vec![Box::from(&[][..]), Box::from(&[][..])],
+    ));
+    assert!(
+        record.is_repeat_tract(),
+        "still the repeat path's record, for the gathering"
+    );
+    assert!(!info_column(&record).contains("STR"));
+    assert!(!info_column(&record).contains("RU="));
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD");
+    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11");
+}
+
 #[test]
 fn the_repeat_counts_follow_the_genotype_allele_for_allele() {
     // **Production's own mismatch, made impossible.** Its repeat-tract writer sorts `GT` while

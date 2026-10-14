@@ -244,6 +244,7 @@ pub fn discover_tract_alleles<'s>(
 mod tests {
     use super::*;
     use crate::calling::inference::DEFAULT_DISCOVERY_BAR;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
     use crate::locus_generation::{
         ReadWitness, SequenceObservation, SsrDetail, WitnessedLocusPositions,
     };
@@ -294,6 +295,8 @@ mod tests {
 
     fn observation(bases: &[u8], witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: bases.into(),
             read_witness: witness,
             read_group: ReadGroupId(0),
@@ -330,7 +333,7 @@ mod tests {
     ) -> Vec<(Vec<u8>, u32, usize)> {
         let evidence: Vec<SsrSampleEvidence<'_>> = observations
             .iter()
-            .map(|rows| SsrSampleEvidence::new(rows, detail))
+            .map(|rows| SsrSampleEvidence::new(rows, detail, TEST_TRACT_LEN))
             .collect();
         discover_tract_alleles(&evidence, candidates, bar, room, scratch)
             .iter()

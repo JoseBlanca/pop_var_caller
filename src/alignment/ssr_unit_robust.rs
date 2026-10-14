@@ -803,9 +803,9 @@ struct MatrixGeometry {
 /// step really matched. Algorithm 4's walk never looks at the bases — its anchor test is purely
 /// positional — so this is the one input this algorithm adds.
 #[derive(Debug, Clone, Copy)]
-struct Aligned<'a> {
-    read: &'a [u8],
-    reference: &'a [u8],
+pub(super) struct Aligned<'a> {
+    pub(super) read: &'a [u8],
+    pub(super) reference: &'a [u8],
 }
 
 impl Aligned<'_> {
@@ -817,7 +817,7 @@ impl Aligned<'_> {
     /// evidence: it is the absence of a base call, and counting it would let a run of `N`s anchor
     /// a flank the read never read.
     #[inline]
-    fn bases_agree(&self, read_index: usize, reference_index: usize) -> bool {
+    pub(super) fn bases_agree(&self, read_index: usize, reference_index: usize) -> bool {
         let read = self.read[read_index].to_ascii_uppercase();
         let reference = self.reference[reference_index].to_ascii_uppercase();
         read == reference && read != b'N'
@@ -827,11 +827,11 @@ impl Aligned<'_> {
 /// What one flank's traceback showed: how many read bases landed on it at all, and how many of
 /// those, inside the junction window, actually agreed.
 #[derive(Debug, Clone, Copy, Default)]
-struct FlankEvidence {
+pub(super) struct FlankEvidence {
     /// Read bases aligned against any column of this flank — agreeing or not.
-    support: usize,
+    pub(super) support: usize,
     /// Read bases inside the junction window whose base agreed with the reference.
-    matches: usize,
+    pub(super) matches: usize,
 }
 
 impl FlankEvidence {
@@ -857,7 +857,7 @@ impl FlankEvidence {
 /// - Both sides crossed (algorithm 4 would say `Between`): each side must be firm. If neither is,
 ///   the span still keeps the better-evidenced side rather than collapsing to nothing.
 #[inline]
-fn resolve_anchors(
+pub(super) fn resolve_anchors(
     crossed: (bool, bool),
     evidence: (FlankEvidence, FlankEvidence),
     rule: AnchorRule,

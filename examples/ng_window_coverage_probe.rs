@@ -11,7 +11,7 @@
 //! cargo run --release --example ng_window_coverage_probe -- <a store.psp> [more stores...]
 //!
 //! # the first two — the run is asked to write down what it read, then the walk checks it
-//! NG_WINDOW_COVERAGE_FILE=windows.tsv pop_var_caller call-from-psps --psp <a store.psp> ...
+//! NG_WINDOW_COVERAGE_FILE=windows.tsv pvc call-from-psps --psp <a store.psp> ...
 //! cargo run --release --example ng_window_coverage_probe -- \
 //!     --reference <reference.fa> --windows-from-the-run windows.tsv \
 //!     <a store.psp> [more stores...]
@@ -378,7 +378,7 @@ impl RecordMeasurement for SingleBaseEquality {
                     self.found.wide_tract_records += 1;
                     self.found.bases_in_wide_tract_records += head.region.len();
                 }
-                LocusKind::SsrBundle => {
+                LocusKind::SsrBundle(_) => {
                     self.found.wide_bundle_records += 1;
                     self.found.bases_in_wide_tract_records += head.region.len();
                 }

@@ -16,6 +16,7 @@
 
 pub mod pileup;
 pub mod ssr;
+pub mod ssr_bundle;
 mod witness;
 
 /// The witness vocabulary, re-exported so no consumer's import path names the file it
@@ -25,8 +26,9 @@ pub use witness::{LocusLen, ReadWitness, WitnessedLocusPositions};
 use crate::read::filtering::ReadFilterCounts;
 use crate::read::input::{IngestError, SampleReads};
 use crate::ref_seq::RefSeqError;
+use crate::region_typing::reference_runs::ReferenceRun;
 use crate::region_typing::segment_criteria::{Motif, SsrSegment};
-use crate::region_typing::{RegionKind, TypedRegion};
+use crate::region_typing::{BundleMember, RegionKind, TypedRegion};
 use crate::types::ChainId;
 use crate::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId, SummedLogError};
 
@@ -277,8 +279,8 @@ impl SampleLocusObservations {
     }
 }
 
-/// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
-/// pooled support of every read that showed it.
+/// One distinct `(bases, witness, read group, flank deletion, held flank)` the reads showed at a
+/// locus, with the pooled support of every read that showed it.
 ///
 /// The fields between `num_obs` and `chain_ids` are the per-read moments the SNP
 /// filters read (strand bias, base-quality error, the MAPQ multi-mapper test); an STR
@@ -365,6 +367,101 @@ pub struct SequenceObservation {
     /// Empty on the STR path, which does not phase and does not need to: an STR locus is one
     /// record, so [`ReadWitness`] already says whether a read spanned it.
     pub chain_ids: Vec<ChainId>,
+    /// **The flank bases these reads' deletion took beside an STR segment** — part of the
+    /// identity, since the same spelling of the repeat with and without a flank base missing
+    /// is two sequences. [`FlankDeletion::NONE`] everywhere but on an STR segment's complete
+    /// observations whose own alignment carries a deletion across the segment's edge
+    /// (`str_edge_deletion_alleles.md` §4, §5.1).
+    pub flank_deletion: FlankDeletion,
+    /// **Which flank these reads anchored, where their witness cannot say it** — part of the
+    /// identity, since one sequence read from the left flank and from the right is two pieces of
+    /// evidence about the carrier's repeat (`str_bundle_loci.md` §7.6).
+    ///
+    /// A partial witness says its side itself when it touches one border of the locus only. One
+    /// that covers the whole locus does not: the classifier lays a read's reach down from the
+    /// border it anchored and clamps it to the locus (`ReadWitness::from_left`), so a read that
+    /// ran past the far border from either side covers every position. **Set only there**, at an
+    /// STR segment and an STR bundle alike, since both compare a partial read with the end of
+    /// the repeat its flank is on (`read_likelihoods.md` §5.2); `None` on every other observation
+    /// — complete ones, and partials whose witness says their side. A psp written before format
+    /// 2.1 carries none, and such a read is scored from both sides, one half each
+    /// ([`HeldFlank::of_witness`]).
+    pub held_flank: Option<HeldFlank>,
+}
+
+/// **Which flank of an STR locus a read anchored before it ran out inside the repeat** — the
+/// side its bases start from. A read that held the left flank shows the start of its carrier's
+/// repeat; one that held the right flank shows its end.
+///
+/// A partial witness says it when it touches one border of the locus only. One that covers the
+/// whole locus does not: the generator lays a read's reach down from the border it anchored and
+/// clamps it to the locus ([`ReadWitness::from_left`]), so a read that ran past the far border
+/// from either side covers every position. There the classifier writes the side down
+/// ([`SequenceObservation::held_flank`]); [`HeldFlank::of_witness`] reads both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HeldFlank {
+    /// The flank before the repeat's first base.
+    Left,
+    /// The flank after the repeat's last base.
+    Right,
+}
+
+impl HeldFlank {
+    /// **The flank a partial read held** — the one place this is decided, for a segment and a
+    /// bundle alike. The witness, on a locus of `locus_len` positions, says it first: `Left` when
+    /// it is flush with the left border only, `Right` when flush with the right border only.
+    /// Where it covers the whole locus it cannot, and `recorded` — the side the classifier wrote
+    /// down ([`SequenceObservation::held_flank`]) — answers. The generator records a side only
+    /// there, so the two never disagree on a psp it wrote; where they would, the witness wins,
+    /// since it is what the read's bases were laid on.
+    ///
+    /// `None` where neither says — a complete read, a whole-locus witness from a psp written
+    /// before format 2.1, or a witness touching neither border, which no generator mints.
+    #[must_use]
+    pub fn of_witness(
+        witness: &ReadWitness,
+        locus_len: LocusLen,
+        recorded: Option<HeldFlank>,
+    ) -> Option<Self> {
+        let ReadWitness::Partial { positions } = witness else {
+            return None;
+        };
+        match (
+            positions.is_flush_left(),
+            positions.is_flush_right(locus_len),
+        ) {
+            (true, false) => Some(Self::Left),
+            (false, true) => Some(Self::Right),
+            _ => recorded,
+        }
+    }
+}
+
+/// **How many flank bases a deletion running out of an STR segment removed, on each side.**
+///
+/// Beside a spelling of the repeat it says what a read's sequence is over a stretch wider than
+/// the segment: with `left` bases missing just before the segment and `right` just after it, the
+/// read's sequence over the reference from `left` bases before the segment to `right` bases after
+/// it is the spelling, nothing more. The deletion is placed as far left as the sequence allows
+/// — where the generic path, which left-aligns every read, puts it — so the flank bases counted
+/// here are exactly the ones the generic path sees deleted (`str_edge_deletion_alleles.md` §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct FlankDeletion {
+    /// Flank bases missing just before the segment's first base.
+    pub left: u8,
+    /// Flank bases missing just after the segment's last base.
+    pub right: u8,
+}
+
+impl FlankDeletion {
+    /// No flank base missing: every observation but an edge deletion's.
+    pub const NONE: Self = Self { left: 0, right: 0 };
+
+    /// Whether no flank base is missing.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        self == Self::NONE
+    }
 }
 
 impl SequenceObservation {
@@ -412,6 +509,10 @@ impl SequenceObservation {
     /// length. Naming the one-byte shape lets the compiler compare two bytes in place; every
     /// other length falls through to the same slice equality as before.
     pub fn matches_reference(&self, reference_bases: &[u8]) -> bool {
+        // A read missing flank bases is not the reference, whatever it spells over the repeat.
+        if !self.flank_deletion.is_none() {
+            return false;
+        }
         match (&*self.bases, reference_bases) {
             ([shown], [reference]) => shown == reference,
             (shown, reference) => *shown == *reference,
@@ -431,9 +532,9 @@ pub enum LocusKind {
     Generic,
     /// A microsatellite tract — carries the motif and the flanks the read model needs.
     Ssr(SsrDetail),
-    /// A repeat cluster with no clean flanks, coarser than a single tract. Its payload
-    /// is the bundle generator's to decide (deferred, spec §11).
-    SsrBundle,
+    /// An STR bundle, measured as one STR locus over its hull (`str_bundle_loci.md` §2,
+    /// §6) — carries the hull's flanks and its reference runs, where stutter is priced.
+    SsrBundle(SsrBundleDetail),
 }
 
 /// What an [`LocusKind::Ssr`] locus carries — grouped so a repeat's motif and flanks
@@ -452,6 +553,27 @@ pub struct SsrDetail {
     pub right_flank: Box<[u8]>,
 }
 
+/// What an [`LocusKind::SsrBundle`] locus carries: the hull's two flanks, as [`SsrDetail`]
+/// has them, and the hull's **reference runs** (`str_bundle_loci.md` §6.1, §6.2).
+///
+/// **The members are not here.** They serve only as the list of motifs the runs are looked
+/// for in, and once the runs are found nothing downstream reads them (§6.2). The locus's
+/// [`reference_bases`](SampleLocusObservations::reference_bases) are the hull's, so each run's
+/// offset is into them. The `Default` is the empty payload — no flanks, no runs — for tests
+/// and fixtures; a generator always fills all three.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SsrBundleDetail {
+    /// The reference flank left of the hull. Clamped at the contig end, so it may be
+    /// shorter than the right flank.
+    pub left_flank: Box<[u8]>,
+    /// The reference flank right of the hull (see `left_flank`).
+    pub right_flank: Box<[u8]>,
+    /// The hull's reference runs, in hull order and never overlapping. Empty for a bundle with
+    /// no stretch at the copy floor, which is still measured and called, with no stutter
+    /// modelled anywhere in it.
+    pub runs: Box<[ReferenceRun]>,
+}
+
 /// Generates a sample's loci from one segment of kind `S`, streaming **one locus at a
 /// time**.
 ///
@@ -460,7 +582,7 @@ pub struct SsrDetail {
 /// so two generators for the same kind stay interchangeable behind `Box<dyn
 /// LocusGenerator<S>>` (spec §4). A generator holds its own accessors (reference, aligner,
 /// scratch) as fields, so the only per-call context is the segment and the sample's reads.
-pub trait LocusGenerator<S> {
+pub trait LocusGenerator<S: ?Sized> {
     /// Start a new segment: reset progress. Does no gathering and cannot fail.
     fn begin_segment(&mut self, region: GenomeRegion);
 
@@ -573,7 +695,7 @@ pub enum UnhandledReason {
     NotImplemented,
 }
 
-impl<S> LocusGenerator<S> for NoLoci {
+impl<S: ?Sized> LocusGenerator<S> for NoLoci {
     fn begin_segment(&mut self, _region: GenomeRegion) {}
 
     fn next_locus(
@@ -795,14 +917,14 @@ impl LocusCounts {
 /// sweeps a calling run's walkers across threads, one thread at a time. A generator filled
 /// into a slot must therefore be `Send`; none holds thread-affine state, and the compiler
 /// checks it here rather than at whichever driver first crosses a thread.
-pub enum GeneratorSlot<S> {
+pub enum GeneratorSlot<S: ?Sized> {
     /// A generator supplied for this kind.
     Generator(Box<dyn LocusGenerator<S> + Send>),
     /// No generator; account every region of this kind to the reason.
     Unfilled(UnhandledReason),
 }
 
-impl<S> GeneratorSlot<S> {
+impl<S: ?Sized> GeneratorSlot<S> {
     /// Begin a region on this slot: reset a real generator, or account the region as
     /// unhandled. Returns whether a generator is filled, so the dispatcher knows whether
     /// there are loci to pull.
@@ -862,12 +984,14 @@ impl<S> GeneratorSlot<S> {
 ///
 /// `Satellite` has no slot: it is out of scope for the whole caller and always accounted
 /// `OutOfScope` (spec §5). The other three kinds each hold a [`GeneratorSlot`]. This is the
-/// `GeneratorSet` the arch left as an impl-time confirmation, pinned here; the payload types
-/// for `Generic` and `SsrBundle` are `()` for now and refine when those generators land.
+/// `GeneratorSet` the arch left as an impl-time confirmation, pinned here; the payload type
+/// for `Generic` is `()`, and `SsrBundle`'s is the bundle's members (2026-10-11).
 pub struct GeneratorSet {
     ssr: GeneratorSlot<SsrSegment>,
     generic: GeneratorSlot<()>,
-    ssr_bundle: GeneratorSlot<()>,
+    /// Handed each bundle's members — the motifs its reference runs are looked for in
+    /// (`str_bundle_loci.md` §6.1).
+    ssr_bundle: GeneratorSlot<[BundleMember]>,
     counts: LocusCounts,
     /// The region whose generator is mid-stream, if any. `None` between regions.
     current: Option<TypedRegion>,
@@ -886,7 +1010,7 @@ impl GeneratorSet {
     pub fn new(
         ssr: GeneratorSlot<SsrSegment>,
         generic: GeneratorSlot<()>,
-        ssr_bundle: GeneratorSlot<()>,
+        ssr_bundle: GeneratorSlot<[BundleMember]>,
     ) -> Self {
         Self {
             ssr,
@@ -929,10 +1053,8 @@ impl GeneratorSet {
         self.generic.counts()
     }
 
-    /// What the **`SsrBundle`** generator has counted, if one is filled and counts
-    /// anything. **Always `None`, and not because nobody got to it**: ng calls nothing in a
-    /// cluster of flankless repeats by decision, and a generator for that ground is deferred
-    /// sine die (`locus_generation.md` §5).
+    /// What the **STR bundle** generator has counted, if one is filled and counts anything
+    /// (`str_bundle_loci.md` §6.1).
     pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
         self.ssr_bundle.counts()
     }
@@ -944,8 +1066,7 @@ impl GeneratorSet {
     /// reader of its own over the same sample's files, so a read group's drops are spread
     /// across whichever generators walked its ground and no single slot holds the sample's
     /// answer. The three counts above are per-generator facts a reader compares; this is one
-    /// fact about the sample. Only one slot is filled today, which is what makes the sum look
-    /// like a forwarding.
+    /// fact about the sample.
     #[must_use]
     pub fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
         let mut total: std::collections::BTreeMap<Option<ReadGroupId>, ReadFilterCounts> =
@@ -1024,7 +1145,7 @@ impl GeneratorSet {
         let produced = match &region.kind {
             RegionKind::SsrSegment(segment) => self.ssr.next(segment, reads),
             RegionKind::Generic => self.generic.next(&(), reads),
-            RegionKind::SsrBundle { .. } => self.ssr_bundle.next(&(), reads),
+            RegionKind::SsrBundle { members } => self.ssr_bundle.next(members, reads),
             // Satellite is never made current — begin_region reports it unfilled.
             RegionKind::Satellite => Ok(None),
         }?;
@@ -1219,6 +1340,8 @@ mod tests {
     /// fields are irrelevant to the depth derivation, so they are fixed.
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(bases),
             read_witness,
             read_group: ReadGroupId(0),
@@ -1304,15 +1427,10 @@ mod tests {
     }
 
     fn a_bundle() -> RegionKind {
-        use crate::tandem_repeat::RepeatInterval;
+        use crate::region_typing::BundleMember;
         RegionKind::SsrBundle {
-            tracts: vec![RepeatInterval {
-                start: 99,
-                end: 160,
-                period: 2,
-                score: 10,
-            }]
-            .into_boxed_slice(),
+            members: vec![BundleMember::new(100, 160, Motif::new(b"AT").unwrap())]
+                .into_boxed_slice(),
         }
     }
 
@@ -1376,7 +1494,7 @@ mod tests {
         remaining: u32,
     }
 
-    impl<S> LocusGenerator<S> for FixedCountGenerator {
+    impl<S: ?Sized> LocusGenerator<S> for FixedCountGenerator {
         fn begin_segment(&mut self, _region: GenomeRegion) {
             self.remaining = self.per_segment;
         }
@@ -1394,7 +1512,7 @@ mod tests {
         }
     }
 
-    fn generator(per_segment: u32) -> GeneratorSlot<()> {
+    fn generator<S: ?Sized>(per_segment: u32) -> GeneratorSlot<S> {
         GeneratorSlot::Generator(Box::new(FixedCountGenerator {
             per_segment,
             remaining: 0,
@@ -1498,7 +1616,7 @@ mod tests {
         }
     }
 
-    impl<S> LocusGenerator<S> for EchoGenerator {
+    impl<S: ?Sized> LocusGenerator<S> for EchoGenerator {
         fn begin_segment(&mut self, region: GenomeRegion) {
             self.remaining = self.per_segment;
             self.region = Some(region);
@@ -1520,7 +1638,7 @@ mod tests {
         }
     }
 
-    fn echo_slot(per_segment: u32) -> GeneratorSlot<()> {
+    fn echo_slot<S: ?Sized>(per_segment: u32) -> GeneratorSlot<S> {
         GeneratorSlot::Generator(Box::new(EchoGenerator::new(per_segment)))
     }
 
@@ -1530,7 +1648,7 @@ mod tests {
         emitted: bool,
     }
 
-    impl<S> LocusGenerator<S> for FailAfterOneGenerator {
+    impl<S: ?Sized> LocusGenerator<S> for FailAfterOneGenerator {
         fn begin_segment(&mut self, _region: GenomeRegion) {
             self.emitted = false;
         }
@@ -1702,6 +1820,8 @@ mod tests {
             region: region(100, 100),
             reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: Box::from(&b"T"[..]),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
@@ -1742,9 +1862,12 @@ mod tests {
             observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
-            kind: LocusKind::SsrBundle,
+            kind: LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default()),
         };
-        assert_eq!(bundle.kind, LocusKind::SsrBundle);
+        assert_eq!(
+            bundle.kind,
+            LocusKind::SsrBundle(crate::locus_generation::SsrBundleDetail::default())
+        );
     }
 
     /// A complete and a partial observation of the *same* bases are distinct evidence,
@@ -1753,6 +1876,8 @@ mod tests {
     #[test]
     fn same_bases_differ_by_read_witness() {
         let complete = SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(&b"ATATAT"[..]),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

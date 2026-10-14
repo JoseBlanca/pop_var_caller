@@ -6,7 +6,7 @@ Skills and agents are instructed to leave it untouched.
 -->
 > **About this project.** A population variant caller: SNPs, indels and repeat tracts, from
 > aligned reads to one VCF, for one sample to thousands of samples and from a few reads a
-> position to several hundred. It is the `pop_var_caller` binary; its subcommands build a
+> position to several hundred. It is the `pvc` binary; its subcommands build a
 > reference's repeat catalog, call a cohort straight from alignment files, or store each sample's
 > evidence as a psp file, fit the run's parameters from those files and call from them. The design
 > is under [doc/devel/ng/](doc/devel/ng/) — start with
@@ -22,7 +22,31 @@ Skills and agents are instructed to leave it untouched.
 > **Current focus.** _Maintained by skills (last-completed) and the human
 > project manager (next-task)._
 >
-> - **Last completed task (2026-10-08):** **two coverage-window fixes, found at the tract_dual_path
+> - **Last completed task (2026-10-10):** **the hidden-duplication filter scores STR records from their
+> read split** (branch `str-filter-read-split`, from `segmenter-and-stutter-bench`; spec
+> `hidden_paralog_filter.md` §3.2). Ported alone from `tract-ceiling` (797bbbcc/0b098573): an STR
+> record is scored on coverage and `AD[0]` against the other alleles' reads, as SNP/indel records are.
+> Tomato, 63 accessions, `--defaults`, SNP genotypes inside STR segments against GATK on 50: agreeing
+> 3,928 → 4,121, GATK-only 960 → 767, ng-only 70 → 70; GATK-matched genotypes lost to STR records the
+> filter dropped 202 → 10 (the branch's same 10, chr1:15063839); STR records dropped over the segments
+> 88 → 53. That recovers the branch's improvement, so the depth-along-segments change is not ported
+> (owner). Identity baseline and the three cross-platform call digests re-recorded (scores only).
+>
+> - **Earlier (2026-10-10):** **from branch `tract-ceiling` to main's line: the
+> compound-motif fix, the segmenter speed fixes and the stuttering benchmark** (branch
+> `segmenter-and-stutter-bench`, from main 4b528afe). The owner decided not to merge `tract-ceiling`:
+> on the stuttering benchmark's STR segments with no variant beside or across their edge, calling each
+> segment both ways is behind main at 50 samples in all 8 runs (PCR 15×, fitted: 92.43% of variant
+> genotypes right against 93.64%) and ahead only at one sample and 5–15×
+> ([report](doc/devel/reports/implementations/str_stutter_benchmark_first_pass_2026-10-10.md)). Moved
+> here: the exact compound-motif test (AAAAAT-type hexanucleotides typed as STR segments again; GRCh38
+> +3,267 segments, 188 kb into clusters of repeats), the refusal of a bundle radius of 0, the segmenter
+> speed fixes with their two reviews (GRCh38 typing 39.7 s → 3.8 s a pass, output identical), the
+> benchmark's simulator, driver, scorer and grid tools, and minimap2 + HipSTR in the dev image. Identity
+> baseline re-recorded (3 of 7,451 records vanish into clusters). Next: the hidden-duplication filter
+> scoring STR records from their read split, ported alone and measured on tomato.
+>
+> - **Earlier (2026-10-08):** **two coverage-window fixes, found at the tract_dual_path
 > checkpoint B** (branch `window-fetch`, then `window-zero-depth`, fast-forwarded onto main).
 > (1) The merge fetched the reference for the coverage windows out to the furthest record any
 > sample held, so a read-less stretch was fetched again for every region inside it; it now fetches
@@ -1120,6 +1144,13 @@ comparisons one by one.
 
 ---
 
+#### Partial reads count toward STR candidate selection where they single out one sequence (`candidate_alleles_ssr.md` §8.1)
+- **Status:** fixes-applied (2026-10-13, uncommitted on branch `partial-candidates`) — adopted by the owner as the only behaviour, no switch.
+- **Code:** [src/calling/allele_candidates/deciding_partial_reads.rs](src/calling/allele_candidates/deciding_partial_reads.rs); `select_ssr` / `select_ssr_bundle` and `leftover_of`.
+- **Latest review:** [str_partial_read_nomination_2026-10-13.md](doc/devel/reports/reviews/str_partial_read_nomination_2026-10-13.md)
+- **Latest fixes-applied:** [fixes_applied_str_partial_read_nomination_2026-10-13.md](doc/devel/reports/reviews/fixes_applied_str_partial_read_nomination_2026-10-13.md)
+- **Open:** require a flank base for a counted read? (M2, open question 1); side-aware edge-deletion exclusion (Mi15); segment read model ignores the far flank (M3); `--explain-loci` rows (Mi1); no counter of counted reads (Mi6); mate overlap unverified (Mi14).
+
 #### The run's parameters as a file — the TOML artefact direct mode reads
 - **Status:** **fixes-applied, F1 committed — stop-and-ask before F2.** **All three of spec §7's
   sources now write the file the run used**, and the one the format exists for was the one that did
@@ -2060,7 +2091,25 @@ comparisons one by one.
   finalised and deliberately not folded, the hold-back transient is 262 kB and not 120, and the
   ready deque's entry is 24 bytes and not 12.
 
+#### STR segments — a partial read is compared with the end of the tract it held
+
+- **Status:** fixes-applied (branch `str-partial-phase`, uncommitted)
+- **Spec:** [read_likelihoods.md](doc/devel/ng/spec/read_likelihoods.md) §5.2 and
+  [locus_generation_ssr.md](doc/devel/ng/spec/locus_generation_ssr.md) §3, dated notes 2026-10-12.
+- **Impl report:** [str_partial_read_phase_2026-10-12.md](doc/devel/reports/implementations/str_partial_read_phase_2026-10-12.md)
+- **Latest review:** [str_partial_read_phase_2026-10-12.md](doc/devel/reports/reviews/str_partial_read_phase_2026-10-12.md)
+- **Latest fixes-applied:** [fixes_applied_str_partial_read_phase_2026-10-12.md](doc/devel/reports/reviews/fixes_applied_str_partial_read_phase_2026-10-12.md)
+- **Open:** Mi1–Mi6, Mi9, Mi10 of the review, most to settle on the str-bundles rebase (one
+  `HeldFlank`, one side function, one locus-length source). Merge this branch before str-bundles.
+
 ---
+
+#### STR bundles called as one STR locus (`str_bundle_loci.md`)
+- **Status:** fixes-applied (step 4c, branch `str-bundles`, uncommitted)
+- **Spec:** [str_bundle_loci.md](doc/devel/ng/spec/str_bundle_loci.md); **Impl report:** [step 4](doc/devel/reports/implementations/str_bundles_calling_2026-10-11.md)
+- **Latest review:** [str_bundles_partial_reads_followup_2026-10-12.md](doc/devel/reports/reviews/str_bundles_partial_reads_followup_2026-10-12.md)
+- **Latest fixes-applied:** [fixes_applied_str_bundles_partial_reads_followup_2026-10-12.md](doc/devel/reports/reviews/fixes_applied_str_bundles_partial_reads_followup_2026-10-12.md)
+- **Open:** step 4c follow-up review Mi2–Mi12 (deferred). Step 4b review M4 (segments compare right-flank partial reads out of phase — separate change); M7, Mi2–Mi5. From step 4: M4, M8–M12 (tests and a refactor).
 
 ## Standing project-wide items
 

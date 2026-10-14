@@ -264,9 +264,10 @@ proptest = "1"
 
 # The caller's binary. It was ng's experiment binary, `pop_var_caller_exp`,
 # until promotion step E2 gave it this name, which the deleted production
-# binary had; the subcommands kept theirs.
+# binary had; the subcommands kept theirs. Renamed `pvc` on 2026-10-10 — shorter to type; the
+# library crate keeps the package name, so `use pop_var_caller::…` is unchanged.
 [[bin]]
-name = "pop_var_caller"
+name = "pvc"
 path = "src/main.rs"
 
 [[bench]]
@@ -322,6 +323,14 @@ test = true
 # the whole step turns on.
 [[example]]
 name = "ng_psp_skip_value"
+test = true
+
+# The stuttering benchmark's simulator carries the tests that say its reads stutter at the rates
+# its specification tables (doc/devel/ng/spec/str_stutter_benchmark.md §3.2) and that its truth
+# VCF spells the sequences the reads were cut from. A benchmark scored against a wrong truth is
+# a wrong measurement with every gate green, so they run with a plain `cargo test`.
+[[example]]
+name = "ng_str_stutter_benchmark"
 test = true
 
 # The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists

@@ -49,9 +49,10 @@ use std::sync::Arc;
 
 use crate::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use crate::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
+use crate::locus_generation::ssr_bundle::SsrBundleGenerator;
 use crate::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusCounts, LocusGenerationError, SampleLocusObservations,
-    SampleLocusObservationsIterator, UnhandledReason,
+    SampleLocusObservationsIterator,
 };
 use crate::read::input::SampleReads;
 use crate::read::input::reference::OpenReference;
@@ -349,7 +350,7 @@ impl Iterator for RunSegments {
     /// [`Motif`](crate::types::Motif) is a six-byte buffer and a length, not a heap
     /// string — and two of the four kinds allocate. A repeat tract copies its contig name
     /// (`SsrSegment`'s `chrom`, a `Box<str>`), and a bundle copies its tract list
-    /// (`RegionKind::SsrBundle`'s `Box<[RepeatInterval]>`, two or more members). So at most two
+    /// (`RegionKind::SsrBundle`'s `Box<[BundleMember]>`, two or more members). So at most two
     /// allocations a segment, paid once per segment rather than once per locus.
     fn next(&mut self) -> Option<Self::Item> {
         let segment = self.segmentation.segments().get(self.next)?;
@@ -1618,16 +1619,13 @@ impl std::fmt::Debug for WalkReference {
     }
 }
 
-/// The generator set a run builds today: **the SNP/indel path and the repeat-tract path both
-/// filled, and the bundle slot refused as unbuilt**.
+/// The generator set a run builds today: **the SNP/indel path, the repeat-tract path and the
+/// STR bundle path, all three filled**.
 ///
-/// A segment routed to an unfilled slot emits no locus and is counted against
-/// `unhandled_not_implemented`, which is how a run says *this ground was analysed and this
-/// caller cannot yet speak for it* — as opposed to the satellite's permanent refusal. **So a run
-/// over ground with repeat bundles in it is not wrong, it is short**, and the tally says by how
-/// much. A bundle is a cluster of repeats none of which has a clean flank, and it has neither a
-/// generator nor a design (`run_ssr_observations.md` §8); this is where its slot is filled if
-/// one is ever written.
+/// **The bundle slot was refused as unbuilt until 2026-10-11** (`str_bundle_loci.md` §6.1): a
+/// bundle routed to it emitted no locus and was counted against `unhandled_not_implemented`.
+/// Filling it makes a run *produce* bundle observations, one locus per bundle over its hull;
+/// calling still sets each aside and counts it until step 4 of that design lands.
 ///
 /// **The tract slot was refused as unbuilt until 2026-09-02 and the generator was not** — it
 /// was built, tested and reachable only from the development tools. Filling it makes a run
@@ -1696,9 +1694,31 @@ pub(crate) fn generic_path_generators(
         bundle_threshold,
     )
     .map_err(|source| RunError::TractGeneratorSettings { source })?;
+    // **The STR bundle generator: the tract generator run over each bundle's hull**
+    // (`str_bundle_loci.md` §6.1), with accessors of its own for the same reason, and the copy
+    // floors the ground was typed with, which decide what is a reference run.
+    let make_bundle_reference = {
+        let reference = WalkReference {
+            fasta: reference.fasta.clone(),
+            contigs: Arc::clone(&reference.contigs),
+            index: Arc::clone(&reference.index),
+        };
+        move || reference.accessor()
+    };
+    let bundles = SsrBundleGenerator::new(
+        reference.accessor(),
+        make_bundle_reference,
+        SsrGeneratorConfig::default(),
+        bundle_threshold,
+        segmentation_inputs
+            .repeat_tract_criteria
+            .classification
+            .min_copies,
+    )
+    .map_err(|source| RunError::TractGeneratorSettings { source })?;
     Ok(GeneratorSet::new(
         GeneratorSlot::Generator(Box::new(tracts)),
         GeneratorSlot::Generator(Box::new(generator)),
-        GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        GeneratorSlot::Generator(Box::new(bundles)),
     ))
 }

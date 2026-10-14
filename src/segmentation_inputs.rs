@@ -160,6 +160,19 @@ mod tests {
         );
     }
 
+    /// Two psps typed with different bundle caps are two typings, and are refused together
+    /// as any two are (`str_bundle_loci.md` §5.2): a bundle one of them calls the other
+    /// typed as a satellite.
+    #[test]
+    fn a_different_bundle_cap_is_a_different_set_of_criteria() {
+        let mut capped_lower = inputs();
+        capped_lower.repeat_tract_criteria.max_str_bundle_len_bp = crate::types::Bp(60);
+        assert_eq!(
+            inputs().first_difference(&capped_lower),
+            Some("set of repeat-tract criteria"),
+        );
+    }
+
     /// **Through the constant, which is what a caller matches on.** A second spelling of the
     /// name here would let the two drift apart, and a cohort opener that routes the analysed
     /// regions to their own refusal would then route them to the general one instead — with

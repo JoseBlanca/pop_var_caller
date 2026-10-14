@@ -503,7 +503,7 @@ impl BlockBuilder {
             // reader of this field, and it refuses a layout this build cannot write.
             fields: _,
         } = manifest;
-        RecordLayout::from_manifest(manifest)
+        RecordLayout::check_this_build_writes(manifest)
             .map_err(|source| BlockCutRuleError::UnsupportedRecordLayout { source })?;
         Self::new(*genomic_block_size_bp, *block_byte_ceiling)
     }
@@ -2284,6 +2284,8 @@ mod tests {
             },
             reference_bases: bases.clone(),
             observations: vec![SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases,
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
@@ -3177,7 +3179,9 @@ mod tests {
     #[test]
     fn a_manifest_declaring_a_layout_this_writer_cannot_honour_is_refused() {
         let mut manifest = a_manifest();
-        manifest.fields.truncate(manifest.fields.len() - 1);
+        // Four fields short: one short is format 2.0, two short format 1.2 and three short
+        // format 1.1, which a reader reads.
+        manifest.fields.truncate(manifest.fields.len() - 4);
 
         let refused = BlockBuilder::from_manifest(&manifest)
             .expect_err("a manifest missing a field this build writes");
@@ -4086,6 +4090,8 @@ mod tests {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..4_000u32)
             .map(|read| SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 24].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
@@ -4189,7 +4195,9 @@ mod tests {
         ));
 
         let mut manifest = a_manifest();
-        manifest.fields.truncate(manifest.fields.len() - 1);
+        // Four fields short: one short is format 2.0, two short format 1.2 and three short
+        // format 1.1, which a reader reads.
+        manifest.fields.truncate(manifest.fields.len() - 4);
         assert!(matches!(
             BlockStream::new([].as_slice(), &manifest),
             Err(BlockReadError::UnsupportedRecordLayout { .. })
@@ -4562,6 +4570,8 @@ mod tests {
         let mut bulky = a_record(0, start, 1);
         bulky.observations = (0..4u32)
             .map(|read| SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: bases[read as usize * 12..(read as usize + 1) * 12]
                     .to_vec()
                     .into_boxed_slice(),
@@ -4917,6 +4927,8 @@ mod tests {
         let mut wide = a_record(0, start, 1);
         wide.observations = (0..observations)
             .map(|read| SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
@@ -5043,6 +5055,8 @@ mod tests {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..40_000u32)
             .map(|read| SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 16].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),
@@ -5675,6 +5689,8 @@ mod tests {
         let mut enormous = a_record(0, 500, 1);
         enormous.observations = (0..2_600u32)
             .map(|read| SequenceObservation {
+                flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                held_flank: None,
                 bases: vec![b"ACGT"[(read % 4) as usize]; 12].into_boxed_slice(),
                 read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(read % 7),

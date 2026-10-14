@@ -195,6 +195,7 @@ fn read_fixture(path: &Path) -> Vec<FixtureLocus> {
 /// anything about it either way.
 fn observation_of(locus: &FixtureLocus) -> CohortObservation {
     CohortObservation {
+        allele_flank_deletions: Vec::new(),
         region: locus.region,
         alleles: locus
             .alleles

@@ -8,10 +8,10 @@ use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
 use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk, a_varying_cohort_on_disk};
 use crate::psp::PspReader;
-use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> RegenerateCensusArgs {
@@ -25,7 +25,7 @@ fn args_of(argv: &[&str]) -> RegenerateCensusArgs {
 /// and the criteria come from the psps.
 fn a_shortest_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         SUBCOMMAND,
         "--reference",
         "ref.fa",
@@ -48,6 +48,7 @@ fn a_walk_into(psps: &Path, reference: &Path, catalog: &Path, alignments: &[Path
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
@@ -148,12 +149,8 @@ fn the_subcommand_is_spelled_regenerate_census() {
     // **`SUBCOMMAND` is *defined as* that constant, so comparing them is `X == X`.** What
     // carries the claim is the parse above, whose argument list is built from the constant the
     // library's refusals print: if clap did not answer to that word, `args_of` would not return.
-    let refused = Cli::try_parse_from([
-        "pop_var_caller",
-        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
-        "--help",
-    ])
-    .expect_err("--help exits rather than running");
+    let refused = Cli::try_parse_from(["pvc", THE_COMMAND_THAT_REBUILDS_A_CENSUS, "--help"])
+        .expect_err("--help exits rather than running");
     assert_eq!(
         refused.kind(),
         clap::error::ErrorKind::DisplayHelp,

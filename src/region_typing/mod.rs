@@ -34,13 +34,15 @@
 //! ng's. What sharing one function used to guarantee for free, a test now pins
 //! — see [`segment_criteria`]'s differential against production (spec §8.0).
 
+pub mod reference_runs;
+pub mod run_parse;
 pub mod segment_criteria;
 
 use std::path::Path;
 
 use crate::regions::{BedError, ContigBounds, Region, RegionSet};
 use crate::tandem_repeat::{RepeatInterval, ScanParams, find_tandem_repeats};
-use crate::types::{Bp, ContigId, GenomeRegion, Position};
+use crate::types::{Bp, ContigId, GenomeRegion, Motif, Position};
 use segment_criteria::{RejectionCounts, SsrSegment, SsrSegmentCriteria};
 use thiserror::Error;
 
@@ -282,25 +284,95 @@ pub enum RegionKind {
     /// wrapper: it is 1-based like the rest of ng (spec §4), and [`TypedRegion`]
     /// already carries the region.
     SsrSegment(SsrSegment),
-    /// A cluster of repeats none of which has clean flanks (spec §2.4). Carries
-    /// the tracts as coordinates — enough to see the structure (each interval has
-    /// its period) without this step pre-deciding what it is for. The hull is the
-    /// [`TypedRegion`]'s own region.
+    /// An STR bundle: two or more repeats within `bundle_threshold` of each other, so
+    /// none of them has clean flanks (spec §2.4). Carries each repeat as a
+    /// [`BundleMember`] — its span and its motif. The hull, from the earliest detected
+    /// start to the **furthest** detected end of any member, is the [`TypedRegion`]'s own
+    /// region.
     ///
-    /// `>= 2` members, coordinate-ordered. **This variant is why bundles exist as
-    /// a type at all**: production *deletes* these records, so their bases become
-    /// a hole nobody accounts for; carrying them lets the decision be taken later,
-    /// with the evidence in hand (spec §1, §10).
-    SsrBundle { tracts: Box<[RepeatInterval]> },
+    /// `>= 2` members, in the order the detector's intervals sort (start, then end). **The
+    /// order is by detected span, and the members are not disjoint**: one member can lie
+    /// inside another or overlap it, so the last-listed member need not end the hull, and
+    /// the members' own (cut) starts can be out of order. Measured on GIAB HG002's
+    /// tandem-repeat benchmark regions: of 2,410 bundles, 551 hold a member wholly inside
+    /// another, 734 have consecutive members that overlap, 520 end past the last-listed
+    /// member's end, and 6 list members whose cut starts are out of order.
+    ///
+    /// **This variant is why bundles exist as a type at all**: production *deletes*
+    /// these records, so their bases become a hole nobody accounts for; carrying them
+    /// lets the decision be taken later, with the evidence in hand (spec §1, §10).
+    SsrBundle { members: Box<[BundleMember]> },
     /// Nothing more specific can be said from the reference alone — **the
     /// default**, not a leftover. The other three are exceptions carved out of it
     /// (spec §2.2), and a repeat classification turns down for any reason other than
     /// bundling lands back here rather than becoming a hole.
     Generic,
-    /// A tandem array longer than `max_str_len` — an array, not a
-    /// microsatellite. A **typing** claim, and `max_str_len` is its parameter,
-    /// not a constant of nature (spec §2.1, §10).
+    /// A tandem array longer than `max_str_len`, or an STR bundle whose hull is longer
+    /// than `max_str_bundle_len` — an array, not a microsatellite. A **typing** claim,
+    /// and the two lengths are its parameters, not constants of nature (spec §2.1,
+    /// §10; `str_bundle_loci.md` §5.2).
     Satellite,
+}
+
+/// One repeat of an STR bundle: where it lies and what its repeat unit is
+/// (`str_bundle_loci.md` §5.1).
+///
+/// **Described the way an STR segment is, and admitted the way it is not.** The span is
+/// the detected repeat cut back to whole copies of its motif at both ends — the same
+/// end-trim a segment gets — and the motif is the detected repeat's first `period`
+/// bases, uppercased, which is the motif a segment carries. A member is *not* put
+/// through the copy floor, the purity gate or the flank test: which repeats are members
+/// is `typed_regions.md` §2.4's rule alone, and this only describes each one.
+///
+/// **When no whole-motif cut exists** (an imperfect repeat with no two clean copies near
+/// one of its ends) the span is the detected repeat itself, since that repeat is still a
+/// member. The motif is the same either way.
+///
+/// 1-based inclusive, like every other coordinate ng emits (spec §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundleMember {
+    start: u64,
+    end: u64,
+    motif: Motif,
+}
+
+impl BundleMember {
+    /// A member spanning `start..=end` (1-based inclusive) with repeat unit `motif`.
+    ///
+    /// # Panics
+    ///
+    /// When `start` is 0 or `end < start`. On a scan the span comes from a repeat the
+    /// detector found, so such a span means the arithmetic upstream is wrong. On the
+    /// catalog's route it comes from a stored row, and the catalog's decoder does not check
+    /// its spans, so a corrupt catalog file panics here (as it already underflows in
+    /// `detected_interval` on a stored start of 0) rather than being refused by name.
+    pub fn new(start: u64, end: u64, motif: Motif) -> Self {
+        assert!(
+            start >= 1 && end >= start,
+            "a bundle member is 1-based inclusive and non-empty; got [{start}, {end}]"
+        );
+        Self { start, end, motif }
+    }
+
+    /// The member's first base, 1-based.
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// The member's last base, 1-based inclusive.
+    pub fn end(&self) -> u64 {
+        self.end
+    }
+
+    /// The repeat unit, phase-faithful: the detected repeat's first `period` bases.
+    pub fn motif(&self) -> Motif {
+        self.motif
+    }
+
+    /// The motif's length in bases.
+    pub fn period(&self) -> usize {
+        self.motif.as_bytes().len()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -332,6 +404,13 @@ pub struct TypedRegionConfig {
     /// repeat that is not a satellite, so it is exactly the length at which a repeat
     /// becomes one.
     pub max_str_len: Bp,
+    /// The bundle cap: an STR bundle whose hull is longer than this is a `Satellite`
+    /// (`str_bundle_loci.md` §5.2). 0 makes every bundle a satellite.
+    ///
+    /// **Its own value, not [`Self::max_str_len`]**, although both answer one read-length
+    /// question today: a user who widens what a single repeat may be — for long reads, say
+    /// — need not also widen bundles, whose model is newer and less measured.
+    pub max_str_bundle_len: Bp,
     /// Admission's rules — all of them (spec §5).
     pub criteria: SsrSegmentCriteria,
 }
@@ -345,11 +424,18 @@ pub struct TypedRegionConfig {
 /// to sweep it (spec §10).
 pub const DEFAULT_MAX_STR_LEN: u64 = 100;
 
+/// The bundle cap: **100 bp** (`str_bundle_loci.md` §2, §5.2, owner 2026-10-11). The same
+/// read-length reasoning as [`DEFAULT_MAX_STR_LEN`]: a 150-base read crosses a hull and a
+/// usable anchor each side only up to about 100 bases. On GIAB HG002's tandem-repeat
+/// benchmark regions 2,410 of 2,473 bundles are this short or shorter.
+pub const DEFAULT_MAX_STR_BUNDLE_LEN: u64 = 100;
+
 impl Default for TypedRegionConfig {
     fn default() -> Self {
         Self {
             scan: ScanParams::default(),
             max_str_len: Bp(DEFAULT_MAX_STR_LEN),
+            max_str_bundle_len: Bp(DEFAULT_MAX_STR_BUNDLE_LEN),
             criteria: SsrSegmentCriteria::default(),
         }
     }
@@ -558,7 +644,27 @@ pub fn partition_resident_in(
 
     // 5. Partition — the whole contig as **one block** (below), then fill every gap
     //    with `Generic`.
-    let features = resolve_features(&runs, classified.loci, &classified.bundled, contig, config);
+    //    Each bundle member is described from the bases here, where the catalog reads the
+    //    same description off its rows; `classify` ran with `bases_start = 1` over the whole
+    //    contig, so a member's interval is already an offset into `bases`.
+    let (features, bundles_at_contig_ends) = resolve_features(
+        &runs,
+        classified.loci,
+        &classified.bundled,
+        |interval| segment_criteria::bundle_member_from_bases(interval, bases, Position(1)),
+        contig,
+        Bp(contig_len),
+        config,
+    );
+    // **A bundle dropped at a contig end is charged as a segment there is**
+    // (`str_bundle_loci.md` §5.3): to `FlankClamped`, its whole hull, where it starts.
+    for hull in &bundles_at_contig_ends {
+        if inside_requested(hull.start - 1, contig, &wanted) {
+            counts
+                .rejected_by_reason
+                .add(segment_criteria::RejectionReason::FlankClamped, hull.len());
+        }
+    }
 
     let mut out = Vec::new();
     let mut emitted_upto = 0;
@@ -691,6 +797,30 @@ fn charge_region(counts: &mut TypedRegionCounts, region: &TypedRegion, requested
 /// Generic is not this function's business: it is whatever is left over, and only the
 /// caller knows how far "left over" reaches.
 ///
+/// `describe_member` turns one bundled interval into its [`BundleMember`] — from the bases
+/// on a scan, from the stored row on the catalog's route. The two must describe a member
+/// identically, which the scan-against-catalog differential checks.
+///
+/// # A bundle becomes a satellite, or nothing, or stays a bundle
+///
+/// After clustering, each cluster's hull meets two rules (`str_bundle_loci.md` §5.2, §5.3):
+///
+/// 1. **Longer than `max_str_bundle_len`** → a `Satellite` over the hull. Nothing is
+///    re-absorbed: anything within `bundle_threshold` of a member would have joined the
+///    bundle, so nothing lies within the new satellite's reach that is not inside it.
+/// 2. **Otherwise, touching the contig's first or last base** → dropped, as an STR segment
+///    is (`RejectionReason::FlankClamped`): no read can be anchored on a flank of zero
+///    bases. Its bases become generic. The cap is asked first, because a satellite needs
+///    no flank. Its hull comes back in the second list, for the caller to charge as that
+///    rejection — a scan does; the catalog's tally has no contig-end counter
+///    (`repeat_catalog::tally`'s module doc).
+///
+/// Both routes apply both rules, with the contig's own length. The contig-end rule rarely
+/// fires on the catalog's route, because the builder keeps a row only when `min_flank_bp`
+/// bases (15 by default, as low as 1 if the catalog was built so) lie beside its **cut** span
+/// — but the hull is drawn over **detected** spans, which can reach further than the cut, so
+/// it is not unreachable there.
+///
 /// # How far a decision here can reach
 ///
 /// Every rule this function applies has a **radius**: runs merge only when they abut
@@ -743,12 +873,16 @@ pub(crate) fn resolve_features(
     runs: &[CoverageRun],
     loci: Vec<SsrSegment>,
     bundled: &[RepeatInterval],
+    describe_member: impl Fn(&RepeatInterval) -> BundleMember,
     contig: ContigId,
+    contig_len: Bp,
     config: &TypedRegionConfig,
-) -> Vec<TypedRegion> {
+) -> (Vec<TypedRegion>, Vec<CoverageRun>) {
     let max_str_len = config.max_str_len.get();
+    let max_str_bundle_len = config.max_str_bundle_len.get();
     let bundle_threshold = config.criteria.bundle_threshold;
     let mut features: Vec<TypedRegion> = Vec::new();
+    let mut bundles_at_contig_ends: Vec<CoverageRun> = Vec::new();
 
     // The satellites: over-cap coverage runs — as spans that can still GROW (below).
     let mut satellites: Vec<CoverageRun> = runs
@@ -800,22 +934,11 @@ pub(crate) fn resolve_features(
     //    clustering: it is over-cap, so it lies inside its own satellite run.
     //    (`bundle_clusters`' `debug_assert` is what caught this, exactly as D2 built it
     //    to.)
-    loop {
-        let mut absorbed = false;
-        members.retain(|iv| {
-            let span = CoverageRun {
-                start: iv.start + 1,
-                end: iv.end,
-            };
-            !absorb_into(&mut satellites, span, bundle_threshold, &mut absorbed)
-        });
-        loci.retain(|(span, _)| {
-            !absorb_into(&mut satellites, *span, bundle_threshold, &mut absorbed)
-        });
-        if !absorbed {
-            break;
-        }
-    }
+    //
+    // **Computed as one sweep, not as the iteration it is defined by**
+    // ([`absorb_by_sweep`] says why the two agree); the iteration survives as the tests'
+    // oracle ([`absorb_into`]).
+    absorb_by_sweep(&mut satellites, &mut members, &mut loci, bundle_threshold);
 
     // Bundles (D2). `classify` set these aside — repeats too close to each other for
     // any of them to have a clean flank (spec §2.4) — and handed them back rather
@@ -861,20 +984,226 @@ pub(crate) fn resolve_features(
         });
     }
     for (hull, cluster) in clusters {
+        let region = GenomeRegion {
+            contig,
+            start: Position(hull.start),
+            end: Position(hull.end),
+        };
+        // The two rules of this function's doc, in its order: the cap, then the contig ends.
+        if hull.len() > max_str_bundle_len {
+            features.push(TypedRegion {
+                region,
+                kind: RegionKind::Satellite,
+            });
+            continue;
+        }
+        if hull.start == 1 || hull.end == contig_len.get() {
+            bundles_at_contig_ends.push(hull);
+            continue;
+        }
         features.push(TypedRegion {
-            region: GenomeRegion {
-                contig,
-                start: Position(hull.start),
-                end: Position(hull.end),
-            },
+            region,
             kind: RegionKind::SsrBundle {
-                tracts: cluster.into_boxed_slice(),
+                members: cluster.iter().map(&describe_member).collect(),
             },
         });
     }
 
     features.sort_by_key(|f| f.region.start);
-    features
+    (features, bundles_at_contig_ends)
+}
+
+/// The absorption fixed point of [`resolve_features`], reached in one start-sorted sweep:
+/// every bundle member and locus a satellite absorbs is removed from its list, and
+/// `satellites` becomes the grown satellites, ascending.
+///
+/// # Why one sweep gives the iteration's answer
+///
+/// The iteration ([`absorb_into`], repeated until a pass absorbs nothing) depends only on
+/// which features end up joined to which satellites, never on the order it met them in.
+/// Join two spans when they are **close**: a feature and anything else with a gap of fewer
+/// than `bundle_threshold` bases (overlap counts as no gap), or two satellites that overlap
+/// or abut. Then:
+///
+/// - **A feature is absorbed exactly when its group of close spans holds a satellite.**
+///   Satellites only grow, so a feature absorbed once stays absorbed; and the iteration stops
+///   only when no feature left is close to a grown satellite. A grown satellite is the hull
+///   of what it absorbed, and a feature close to a hull is close to one of the spans that
+///   built it: every gap inside the hull is a gap between two close spans, so it is shorter
+///   than `bundle_threshold`, and one of those two spans is a feature.
+/// - **Each grown satellite is the hull of one such group.** Two spans of one group end up in
+///   one satellite whichever of them the iteration absorbed first: the later one is close to
+///   the container of the earlier.
+///
+/// For start-sorted spans, a feature is close to an earlier span of a group exactly when its
+/// start is within `bundle_threshold` of the group's furthest end; a satellite, when its
+/// start is within `bundle_threshold` of the group's furthest feature end or abuts its
+/// furthest satellite end. So one pass over the spans sorted by start finds the groups (the
+/// loop says why a few can be open at once), and a group that closes holding a satellite is
+/// one grown satellite. `O(n log n)` for the sort, where the iteration was
+/// `O(passes × features × satellites)` — 9.3 billion span comparisons on GRCh38.
+///
+/// `absorption_by_sweep_is_the_iterations_fixed_point` checks the two against each other.
+///
+/// The order the lists keep is the iteration's: `retain` keeps survivors in place.
+fn absorb_by_sweep<T>(
+    satellites: &mut Vec<CoverageRun>,
+    members: &mut Vec<RepeatInterval>,
+    loci: &mut Vec<(CoverageRun, T)>,
+    bundle_threshold: u64,
+) {
+    if satellites.is_empty() {
+        return;
+    }
+
+    // Which list a span came from, and its index there.
+    #[derive(Clone, Copy)]
+    enum From {
+        Satellite,
+        Member(usize),
+        Locus(usize),
+    }
+    let mut spans: Vec<(CoverageRun, From)> =
+        Vec::with_capacity(satellites.len() + members.len() + loci.len());
+    spans.extend(satellites.iter().map(|s| (*s, From::Satellite)));
+    spans.extend(members.iter().enumerate().map(|(i, iv)| {
+        (
+            CoverageRun {
+                start: iv.start + 1,
+                end: iv.end,
+            },
+            From::Member(i),
+        )
+    }));
+    spans.extend(
+        loci.iter()
+            .enumerate()
+            .map(|(i, (span, _))| (*span, From::Locus(i))),
+    );
+    spans.sort_unstable_by_key(|(span, _)| span.start);
+
+    /// A run of `spans[from..to]` already known to be one group.
+    #[derive(Clone, Copy)]
+    struct Group {
+        from: usize,
+        to: usize,
+        hull: CoverageRun,
+        /// The furthest end of a feature in it, and of a satellite.
+        feature_end: Option<u64>,
+        satellite_end: Option<u64>,
+    }
+    impl Group {
+        fn reach(&self) -> u64 {
+            self.hull.end
+        }
+    }
+
+    let mut member_absorbed = vec![false; members.len()];
+    let mut locus_absorbed = vec![false; loci.len()];
+    let mut grown: Vec<CoverageRun> = Vec::with_capacity(satellites.len());
+    let mut finish = |group: Group, member_absorbed: &mut [bool], locus_absorbed: &mut [bool]| {
+        if group.satellite_end.is_none() {
+            return;
+        }
+        for (_, origin) in &spans[group.from..group.to] {
+            match *origin {
+                From::Satellite => {}
+                From::Member(i) => member_absorbed[i] = true,
+                From::Locus(i) => locus_absorbed[i] = true,
+            }
+        }
+        grown.push(group.hull);
+    };
+
+    // **More than one group can be open at once**, because the two kinds of closeness have
+    // different radii. A satellite that starts 2 bases past another is not close to it (they
+    // neither overlap nor abut), so it opens a group of its own — yet a feature starting a
+    // base later can still be within `bundle_threshold` of the first, and then it joins both.
+    // A group stays open while a feature could still reach it (its furthest end plus
+    // `bundle_threshold` is not behind the current start). Open groups are in start order and
+    // their furthest ends ascend, so a feature that reaches one reaches every later one, and a
+    // satellite can only ever join the last.
+    let mut open: std::collections::VecDeque<Group> = std::collections::VecDeque::new();
+    for (k, &(span, origin)) in spans.iter().enumerate() {
+        // Groups no later span can reach are final.
+        while open
+            .front()
+            .is_some_and(|g| g.reach() + bundle_threshold < span.start)
+        {
+            let group = open.pop_front().expect("checked non-empty");
+            finish(group, &mut member_absorbed, &mut locus_absorbed);
+        }
+        let is_satellite = matches!(origin, From::Satellite);
+        // The earliest open group this span joins.
+        let joins_at = if is_satellite {
+            open.back()
+                .is_some_and(|g| {
+                    g.feature_end
+                        .is_some_and(|end| span.start <= end + bundle_threshold)
+                        || g.satellite_end.is_some_and(|end| span.start <= end + 1)
+                })
+                .then(|| open.len() - 1)
+        } else {
+            // Every open group survived the pop above, so this feature reaches all of them.
+            (!open.is_empty()).then_some(0)
+        };
+        let mut group = match joins_at {
+            Some(at) => {
+                let mut merged = open.pop_back().expect("joins an open group");
+                while open.len() > at {
+                    let earlier = open.pop_back().expect("still above `at`");
+                    merged = Group {
+                        from: earlier.from,
+                        to: merged.to,
+                        hull: CoverageRun {
+                            start: earlier.hull.start.min(merged.hull.start),
+                            end: earlier.hull.end.max(merged.hull.end),
+                        },
+                        feature_end: earlier.feature_end.max(merged.feature_end),
+                        satellite_end: earlier.satellite_end.max(merged.satellite_end),
+                    };
+                }
+                merged
+            }
+            None => Group {
+                from: k,
+                to: k,
+                hull: span,
+                feature_end: None,
+                satellite_end: None,
+            },
+        };
+        group.to = k + 1;
+        group.hull.start = group.hull.start.min(span.start);
+        group.hull.end = group.hull.end.max(span.end);
+        let end = if is_satellite {
+            &mut group.satellite_end
+        } else {
+            &mut group.feature_end
+        };
+        *end = Some(end.map_or(span.end, |e| e.max(span.end)));
+        open.push_back(group);
+    }
+    while let Some(group) = open.pop_front() {
+        finish(group, &mut member_absorbed, &mut locus_absorbed);
+    }
+
+    let mut flags = member_absorbed.iter();
+    members.retain(|_| !*flags.next().expect("one flag per member"));
+    let mut flags = locus_absorbed.iter();
+    loci.retain(|_| !*flags.next().expect("one flag per locus"));
+    // **Two grown satellites that abut are one**, as `absorb_into`'s `merge_runs` makes them.
+    // With `bundle_threshold >= 1` the sweep never leaves two abutting (a gap of 0 is within
+    // the radius, so their spans were one group), and this changes nothing. At 0 it does: a
+    // feature that overlaps one satellite and abuts another joins only the first, and the
+    // iteration's `merge_runs` then joins the two grown satellites. Merging abutting hulls
+    // adds no base, so no feature the sweep left out overlaps the result.
+    merge_runs(&mut grown);
+    debug_assert!(
+        grown.windows(2).all(|w| w[0].end + 1 < w[1].start),
+        "grown satellites are ascending, disjoint and not abutting"
+    );
+    *satellites = grown;
 }
 
 /// Absorb `span` into any satellite it overlaps or lies within `bundle_threshold` of: those
@@ -896,6 +1225,7 @@ pub(crate) fn resolve_features(
 /// The gaps swept in are deliberate: fewer than `bundle_threshold` bases between two repeats is
 /// sequence nothing can be anchored in — the same reasoning that puts a cluster's
 /// internal gaps inside its hull (spec §2.4).
+#[cfg(test)]
 fn absorb_into(
     satellites: &mut Vec<CoverageRun>,
     span: CoverageRun,
@@ -1107,6 +1437,110 @@ mod tests {
     use proptest::prelude::*;
     use segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
 
+    /// The absorption as it is defined: [`absorb_into`] over every member, then every
+    /// locus, repeated until a pass absorbs nothing — the oracle for [`absorb_by_sweep`].
+    fn absorb_by_iteration(
+        satellites: &mut Vec<CoverageRun>,
+        members: &mut Vec<RepeatInterval>,
+        loci: &mut Vec<(CoverageRun, usize)>,
+        bundle_threshold: u64,
+    ) {
+        loop {
+            let mut absorbed = false;
+            members.retain(|iv| {
+                let span = CoverageRun {
+                    start: iv.start + 1,
+                    end: iv.end,
+                };
+                !absorb_into(satellites, span, bundle_threshold, &mut absorbed)
+            });
+            loci.retain(|(span, _)| {
+                !absorb_into(satellites, *span, bundle_threshold, &mut absorbed)
+            });
+            if !absorbed {
+                break;
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
+        /// The sweep reaches the iteration's fixed point exactly: the same grown satellites,
+        /// and the same members and loci left over, in the same order — on dense random
+        /// layouts where chains of features bridge satellites, features nest in satellites,
+        /// and grown satellites come to abut. The radius starts at 0, which `classify`
+        /// refuses but the catalog path does not check, and where abutting satellites are
+        /// joined by `merge_runs` rather than by any feature's radius.
+        #[test]
+        fn absorption_by_sweep_is_the_iterations_fixed_point(
+            raw_satellites in proptest::collection::vec((1u64..600, 1u64..120), 0..6),
+            raw_members in proptest::collection::vec((0u64..700, 1u64..40), 0..14),
+            raw_loci in proptest::collection::vec((1u64..700, 1u64..40), 0..14),
+            bundle_threshold in 0u64..30,
+        ) {
+            // Satellites as `resolve_features` receives them: merged coverage runs.
+            let mut satellites: Vec<CoverageRun> = raw_satellites
+                .iter()
+                .map(|&(start, len)| CoverageRun { start, end: start + len - 1 })
+                .collect();
+            merge_runs(&mut satellites);
+            let members: Vec<RepeatInterval> = raw_members
+                .iter()
+                .map(|&(start, len)| RepeatInterval { start, end: start + len, period: 2, score: 10 })
+                .collect();
+            let loci: Vec<(CoverageRun, usize)> = raw_loci
+                .iter()
+                .enumerate()
+                .map(|(i, &(start, len))| (CoverageRun { start, end: start + len - 1 }, i))
+                .collect();
+
+            let (mut sat_a, mut mem_a, mut loc_a) = (satellites.clone(), members.clone(), loci.clone());
+            absorb_by_iteration(&mut sat_a, &mut mem_a, &mut loc_a, bundle_threshold);
+            let (mut sat_b, mut mem_b, mut loc_b) = (satellites, members, loci);
+            absorb_by_sweep(&mut sat_b, &mut mem_b, &mut loc_b, bundle_threshold);
+
+            prop_assert_eq!(sat_a, sat_b);
+            prop_assert_eq!(mem_a, mem_b);
+            prop_assert_eq!(loc_a, loc_b);
+        }
+    }
+
+    /// **At a radius of 0, a member overlapping one satellite and abutting another joins the
+    /// two**, because the iteration's `merge_runs` unites abutting satellites. Satellites
+    /// `22..=86` and `88..=88`, member covering `87..=88`: the member overlaps only the second,
+    /// the grown `87..=88` abuts the first, and the iteration's answer is one satellite
+    /// `22..=88`. The sweep without its closing merge left two. Found by widening the
+    /// property test's radius to 0.
+    #[test]
+    fn absorption_by_sweep_joins_satellites_that_abut_after_growing_at_radius_zero() {
+        let satellites = vec![
+            CoverageRun { start: 22, end: 86 },
+            CoverageRun { start: 88, end: 88 },
+        ];
+        let members = vec![RepeatInterval {
+            start: 86,
+            end: 88,
+            period: 2,
+            score: 10,
+        }];
+        let (mut sat_a, mut mem_a, mut loc_a) = (
+            satellites.clone(),
+            members.clone(),
+            Vec::<(CoverageRun, usize)>::new(),
+        );
+        absorb_by_iteration(&mut sat_a, &mut mem_a, &mut loc_a, 0);
+        assert_eq!(
+            sat_a,
+            vec![CoverageRun { start: 22, end: 88 }],
+            "the oracle's answer"
+        );
+        let (mut sat_b, mut mem_b, mut loc_b) =
+            (satellites, members, Vec::<(CoverageRun, usize)>::new());
+        absorb_by_sweep(&mut sat_b, &mut mem_b, &mut loc_b, 0);
+        assert_eq!(sat_b, sat_a);
+        assert_eq!(mem_b, mem_a);
+    }
+
     fn two_contigs() -> Vec<ContigBounds<'static>> {
         vec![
             ContigBounds {
@@ -1316,6 +1750,9 @@ mod tests {
         use segment_criteria::MinCopies;
         TypedRegionConfig {
             max_str_len: Bp(1000),
+            // No bundle cap: these fixtures predate it, and a 1.5 kb chain below is a bundle
+            // on purpose.
+            max_str_bundle_len: Bp(u64::MAX),
             criteria: SsrSegmentCriteria {
                 periods: PeriodRange::new(2, 6).expect("2..=6 is a valid period range"),
                 min_copies: MinCopies::new([10, 5, 4, 3, 3, 3], 3),
@@ -2048,7 +2485,7 @@ mod tests {
         let bundles: Vec<_> = regions
             .iter()
             .filter_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts)),
+                RegionKind::SsrBundle { members } => Some((r.region, members)),
                 _ => None,
             })
             .collect();
@@ -2059,20 +2496,268 @@ mod tests {
         // ±1–2 bp boundary/phase wobble is expected of it (`scanner_parity`
         // documents the same thing against trf-mod); pinning the exact edge would
         // be testing the detector's phase, not the bundle's hull.
-        let (hull, tracts) = (bundles[0].0, bundles[0].1);
+        let (hull, members) = (bundles[0].0, bundles[0].1);
         assert!(hull.start <= Position(61), "hull reaches the first tract");
         assert!(hull.end >= Position(110), "hull reaches the last tract");
-        assert_eq!(
-            hull.start.get(),
-            tracts.iter().map(|t| t.start).min().unwrap() + 1,
-            "the hull IS the tracts' span, 1-based"
+        // The hull is the detected repeats' span; each member is its repeat cut back to
+        // whole motif copies, so it lies inside the hull.
+        assert!(
+            members
+                .iter()
+                .all(|m| m.start() >= hull.start.get() && m.end() <= hull.end.get()),
+            "every member lies inside the hull: {members:?} in {hull:?}"
         );
-        assert_eq!(hull.end.get(), tracts.iter().map(|t| t.end).max().unwrap());
+        for member in members.iter() {
+            let motif = member.motif();
+            assert!(
+                motif.as_bytes() == b"AT" || motif.as_bytes() == b"TA",
+                "each member carries its own repeat unit: {member:?}"
+            );
+        }
         assert!(
             !regions
                 .iter()
                 .any(|r| matches!(r.kind, RegionKind::SsrSegment(_))),
             "neither tract has a clean flank, so neither is a locus"
+        );
+    }
+
+    /// The typed regions and tally of a contig with two `(AT)*10` tracts 10 bases apart —
+    /// one bundle at the default cap — typed with bundle cap `cap`.
+    fn two_close_tracts_capped_at(cap: u64) -> (Vec<TypedRegion>, TypedRegionCounts) {
+        let bases = contig_with_tracts_at(&[60, 90], 240);
+        let config = TypedRegionConfig {
+            max_str_bundle_len: Bp(cap),
+            ..TypedRegionConfig::default()
+        };
+        let whole = [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(bases.len() as u64),
+        }];
+        let typed = partition_resident_in("chr1", ContigId(0), &bases, &config, &whole);
+        assert_partitions(
+            &typed.0,
+            ContigId(0),
+            bases.len() as u64,
+            "two close tracts",
+        );
+        typed
+    }
+
+    /// **The bundle cap** (`str_bundle_loci.md` §5.2): a hull longer than
+    /// `max_str_bundle_len` is a `Satellite` over the same span; a hull exactly that long,
+    /// or shorter, stays a bundle; and 0 makes every bundle a satellite. The tally counts a
+    /// capped bundle as a satellite, with its bases (§5.4).
+    #[test]
+    fn a_bundle_longer_than_the_cap_is_a_satellite_and_is_counted_as_one() {
+        // The hull's length as the detector draws it, read from an uncapped run, so the
+        // test does not pin the detector's phase.
+        let (uncapped, _) = two_close_tracts_capped_at(u64::MAX);
+        let hull = uncapped
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::SsrBundle { .. }))
+            .expect("the two tracts are one bundle")
+            .region;
+        let hull_len = hull.len();
+
+        for (cap, is_satellite) in [
+            (hull_len - 1, true),
+            (hull_len, false),
+            (hull_len + 1, false),
+            (0, true),
+        ] {
+            let (regions, counts) = two_close_tracts_capped_at(cap);
+            let at_hull = regions
+                .iter()
+                .find(|r| r.region == hull)
+                .unwrap_or_else(|| panic!("cap {cap}: a region over the hull: {regions:#?}"));
+            assert_eq!(
+                matches!(at_hull.kind, RegionKind::Satellite),
+                is_satellite,
+                "cap {cap}, hull {hull_len}: {at_hull:?}"
+            );
+            if is_satellite {
+                assert_eq!(
+                    (counts.ssr_bundles, counts.ssr_bundle_bp),
+                    (0, 0),
+                    "cap {cap}: a capped bundle is not counted as a bundle"
+                );
+                assert_eq!(
+                    (counts.satellites, counts.satellite_bp),
+                    (1, hull_len),
+                    "cap {cap}: it is counted as a satellite, with its bases"
+                );
+            } else {
+                assert_eq!((counts.ssr_bundles, counts.ssr_bundle_bp), (1, hull_len));
+                assert_eq!((counts.satellites, counts.satellite_bp), (0, 0));
+            }
+        }
+    }
+
+    /// **A bundle touching a contig's end is dropped**, as an STR segment is
+    /// (`str_bundle_loci.md` §5.3): no read can be anchored on a flank of zero bases. Its
+    /// bases become generic. One base in from the end it is kept, and over the cap it is a
+    /// satellite, which needs no flank.
+    #[test]
+    fn a_bundle_at_a_contig_end_is_dropped_unless_capped() {
+        let kinds_of = |offsets: &[usize], cap: u64| -> Vec<&'static str> {
+            let bases = contig_with_tracts_at(offsets, 200);
+            let config = TypedRegionConfig {
+                max_str_bundle_len: Bp(cap),
+                ..TypedRegionConfig::default()
+            };
+            let regions = partition_resident("chr1", ContigId(0), &bases, &config);
+            assert_partitions(&regions, ContigId(0), 200, "a bundle near a contig end");
+            regions
+                .iter()
+                .map(|r| match r.kind {
+                    RegionKind::SsrSegment(_) => "locus",
+                    RegionKind::SsrBundle { .. } => "bundle",
+                    RegionKind::Generic => "generic",
+                    RegionKind::Satellite => "satellite",
+                })
+                .collect()
+        };
+
+        // The first tract starts on base 1, then the second ends on base 200.
+        assert_eq!(kinds_of(&[0, 30], 100), ["generic"], "the left end");
+        assert_eq!(kinds_of(&[150, 180], 100), ["generic"], "the right end");
+        // One base of flank is enough not to be dropped.
+        assert_eq!(
+            kinds_of(&[1, 31], 100),
+            ["generic", "bundle", "generic"],
+            "a base in from the end"
+        );
+        // Over the cap, the hull is a satellite even at the end.
+        assert_eq!(
+            kinds_of(&[0, 30], 10),
+            ["satellite", "generic"],
+            "capped at the end"
+        );
+
+        // One base of flank on the right is enough too. The last base is set to `C`, which
+        // continues neither `AT` nor `TA`, so the detector cannot stretch the second tract
+        // onto it.
+        let mut bases = contig_with_tracts_at(&[149, 179], 200);
+        bases[199] = b'C';
+        let regions =
+            partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+        assert_partitions(&regions, ContigId(0), 200, "a base in from the right end");
+        let bundle = regions
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::SsrBundle { .. }))
+            .unwrap_or_else(|| {
+                panic!("a base in from the right end, still a bundle: {regions:#?}")
+            });
+        assert_eq!(
+            bundle.region.end,
+            Position(199),
+            "the hull ends one base before the end"
+        );
+    }
+
+    /// **A bundle dropped at a contig end is charged to `FlankClamped`, its whole hull, as a
+    /// segment there is** (`str_bundle_loci.md` §5.3) — and only where the hull starts inside
+    /// the stretch asked about. A bundle one base in, or a capped one, is not charged.
+    #[test]
+    fn a_bundle_dropped_at_a_contig_end_is_charged_as_flank_clamped() {
+        let whole = |len: usize| {
+            [GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(len as u64),
+            }]
+        };
+        let flank_clamped = |bases: &[u8], config: &TypedRegionConfig, wanted: &[GenomeRegion]| {
+            partition_resident_in("chr1", ContigId(0), bases, config, wanted)
+                .1
+                .rejected_by_reason
+                .flank_clamped
+        };
+        let capped = TypedRegionConfig {
+            max_str_bundle_len: Bp(10),
+            ..TypedRegionConfig::default()
+        };
+        for (offsets, side) in [(&[0usize, 30][..], "left"), (&[150, 180][..], "right")] {
+            let bases = contig_with_tracts_at(offsets, 200);
+            // The capped run makes the hull a satellite, which is how long the hull is.
+            let hull_len = partition_resident("chr1", ContigId(0), &bases, &capped)
+                .iter()
+                .find(|region| matches!(region.kind, RegionKind::Satellite))
+                .map(|region| region.region.len())
+                .expect("over the cap, the hull is a satellite");
+            assert_eq!(
+                flank_clamped(&bases, &TypedRegionConfig::default(), &whole(200)),
+                hull_len,
+                "the {side} end"
+            );
+            assert_eq!(flank_clamped(&bases, &capped, &whole(200)), 0, "capped");
+        }
+        // Asked about a stretch that does not hold the hull's first base: not charged here.
+        let bases = contig_with_tracts_at(&[0, 30], 200);
+        let elsewhere = [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(100),
+            end: Position(200),
+        }];
+        assert_eq!(
+            flank_clamped(&bases, &TypedRegionConfig::default(), &elsewhere),
+            0
+        );
+        // One base in from the end: a bundle, nothing clamped.
+        let bases = contig_with_tracts_at(&[1, 31], 200);
+        assert_eq!(
+            flank_clamped(&bases, &TypedRegionConfig::default(), &whole(200)),
+            0
+        );
+    }
+
+    /// **The hull is drawn over the detected repeats, not over the members' cut spans**
+    /// (`str_bundle_loci.md` §5.1). The last member here is eight `CAG` and then `CA`, a
+    /// ragged end the cut removes: the member ends on the last whole `CAG`, and the hull
+    /// still ends past it, over the `CA`. Drawing the hull from the members would end it two
+    /// bases early and hand those bases to the generic region beside it.
+    #[test]
+    fn the_hull_ends_past_a_ragged_last_member() {
+        let bases: Vec<u8> = [
+            filler(200),
+            b"TCTC".repeat(8),
+            filler(9),
+            b"CAG".repeat(8),
+            b"CA".to_vec(),
+            filler(200),
+        ]
+        .concat();
+        let regions =
+            partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+        assert_partitions(
+            &regions,
+            ContigId(0),
+            bases.len() as u64,
+            "a ragged last member",
+        );
+        let (hull, members) = regions
+            .iter()
+            .find_map(|r| match &r.kind {
+                RegionKind::SsrBundle { members } => Some((r.region, members)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the two repeats are one bundle: {regions:#?}"));
+        let furthest_member_end = members
+            .iter()
+            .map(BundleMember::end)
+            .max()
+            .expect("members");
+        // The `CAG` run is bases 242..=265 and the `CA` is 266..=267.
+        assert_eq!(
+            furthest_member_end, 265,
+            "the cut ends on the last whole copy"
+        );
+        assert_eq!(
+            hull.end,
+            Position(267),
+            "the hull ends on the detected repeat's last base, past every member: {members:?}"
         );
     }
 
@@ -2093,7 +2778,7 @@ mod tests {
         let bundles: Vec<_> = regions
             .iter()
             .filter_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts)),
+                RegionKind::SsrBundle { members } => Some((r.region, members)),
                 _ => None,
             })
             .collect();
@@ -2395,7 +3080,7 @@ mod tests {
         let (truth_hull, truth_tracts) = whole
             .iter()
             .find_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts.clone())),
+                RegionKind::SsrBundle { members } => Some((r.region, members.clone())),
                 _ => None,
             })
             .expect("the chain is one bundle");
@@ -2415,7 +3100,7 @@ mod tests {
         let (hull, tracts) = got
             .iter()
             .find_map(|r| match &r.kind {
-                RegionKind::SsrBundle { tracts } => Some((r.region, tracts.clone())),
+                RegionKind::SsrBundle { members } => Some((r.region, members.clone())),
                 _ => None,
             })
             .expect("still a bundle");
@@ -2933,14 +3618,14 @@ mod tests {
              (the effective region grows to hold it)",
             bundle.region.start.get()
         );
-        let RegionKind::SsrBundle { tracts } = &bundle.kind else {
+        let RegionKind::SsrBundle { members } = &bundle.kind else {
             unreachable!()
         };
         assert!(
-            tracts
+            members
                 .iter()
-                .all(|t| t.start + 1 >= bundle.region.start.get()
-                    && t.end <= bundle.region.end.get()),
+                .all(|m| m.start() >= bundle.region.start.get()
+                    && m.end() <= bundle.region.end.get()),
             "every member tract is inside the hull — which is what clipping would break"
         );
     }

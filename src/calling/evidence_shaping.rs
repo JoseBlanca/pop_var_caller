@@ -72,7 +72,8 @@ use super::{
     GenericLocusSample, GenericObservation, GenericSampleEvidence, LocusEvidence,
     ReferenceBesideLocus,
 };
-use crate::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
+use crate::locus_generation::{ReadWitness, SequenceObservation, SsrBundleDetail, SsrDetail};
+use crate::region_typing::run_parse::RunParse;
 use crate::run::cohort_merge::build::CohortObservation;
 use crate::types::{AlleleId, GenomeRegion, SummedLogError};
 
@@ -460,12 +461,35 @@ pub fn shape_ssr_locus<'a>(
     // missing rather than a tract nobody covered — and that constructor refuses it by name.
     views.clear();
     views.reserve(observations_of_each_run_sample.len());
+    // The record's region is the tract, so its length is the axis the partial witnesses are on.
+    let tract_len = crate::locus_generation::LocusLen::of_region(region);
     views.extend(
         observations_of_each_run_sample
             .iter()
-            .map(|observations| SsrSampleEvidence::new(observations, detail)),
+            .map(|observations| SsrSampleEvidence::new(observations, detail, tract_len)),
     );
     LocusEvidence::ssr(region, views, detail, candidate_repeat_counts)
+}
+
+/// [`shape_ssr_locus`] for an STR bundle (`str_bundle_loci.md` §7): the samples' observations,
+/// unchanged, beside the bundle's runs and each candidate's run parse.
+#[must_use]
+pub fn shape_ssr_bundle_locus<'a>(
+    region: GenomeRegion,
+    observations_of_each_run_sample: &'a [&'a [SequenceObservation]],
+    detail: &'a SsrBundleDetail,
+    candidate_parses: &'a [RunParse],
+    views: &'a mut Vec<SsrSampleEvidence<'a>>,
+) -> LocusEvidence<'a> {
+    views.clear();
+    // The record's region is the hull, so its length is the axis the partial witnesses are on.
+    let hull_len = crate::locus_generation::LocusLen::of_region(region);
+    views.extend(
+        observations_of_each_run_sample
+            .iter()
+            .map(|observations| SsrSampleEvidence::of_bundle(observations, hull_len)),
+    );
+    LocusEvidence::ssr_bundle(region, views, detail, candidate_parses)
 }
 
 /// **A repeat tract's observations, rebuilt from the merge's rows** — reusable buffers, one
@@ -538,6 +562,8 @@ impl SsrEvidenceScratch {
             rows.reserve(sample.supported.len() + sample.partials.len());
             for row in &sample.supported {
                 rows.push(SequenceObservation {
+                    flank_deletion: observation.flank_deletion_of(row.allele),
+                    held_flank: None,
                     bases: observation.alleles[row.allele].clone(),
                     read_witness: ReadWitness::Complete,
                     read_group: row.read_group,
@@ -554,6 +580,8 @@ impl SsrEvidenceScratch {
             }
             for partial in &sample.partials {
                 rows.push(SequenceObservation {
+                    flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+                    held_flank: partial.held_flank,
                     bases: partial.bases.clone(),
                     read_witness: ReadWitness::Partial {
                         positions: partial.witnessed_in_locus.clone(),
@@ -577,6 +605,7 @@ impl SsrEvidenceScratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calling::likelihood::TEST_TRACT_LEN;
 
     use crate::calling::CandidateAlleles;
     use crate::calling::allele_candidates::{AlleleRemap, SelectionVerdict, UnmatchedSupport};
@@ -640,6 +669,7 @@ mod tests {
     fn merged_locus(alleles: usize, per_sample: Vec<SampleSupport>) -> CohortObservation {
         let sequences = [b"A".as_slice(), b"T", b"C", b"G"];
         CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
             window_coverage: vec![
@@ -690,6 +720,7 @@ mod tests {
     fn merged_tract(alleles: usize, per_sample: Vec<SampleSupport>) -> CohortObservation {
         let sequences = [b"ATAT".as_slice(), b"ATATAT", b"ATATATAT", b"AT"];
         CohortObservation {
+            allele_flank_deletions: Vec::new(),
             region: region(),
             alleles: sequences[..alleles].iter().map(|s| Box::from(*s)).collect(),
             window_coverage: vec![
@@ -766,6 +797,7 @@ mod tests {
             WitnessedLocusPositions::from_half_open_runs([(0_u16, 3_u16)]).expect("a witness");
         let mut sample = covering(0, vec![merge_row(0, 1, 5, -10.0)]);
         sample.partials.push(PartialObservation {
+            held_flank: Some(crate::locus_generation::HeldFlank::Right),
             witnessed_in_locus: witnessed.clone(),
             read_group: ReadGroupId(1),
             bases: Box::from(&b"ATA"[..]),
@@ -778,7 +810,7 @@ mod tests {
         let mut scratch = SsrEvidenceScratch::default();
         let rebuilt = scratch.rebuild(&observation, 1);
 
-        let evidence = SsrSampleEvidence::new(&rebuilt[0], &detail);
+        let evidence = SsrSampleEvidence::new(&rebuilt[0], &detail, TEST_TRACT_LEN);
         assert_eq!(
             evidence
                 .complete_observations()
@@ -799,6 +831,11 @@ mod tests {
                 positions: witnessed
             },
             "the positions the read did witness travel with it",
+        );
+        assert_eq!(
+            rebuilt[0][1].held_flank,
+            Some(crate::locus_generation::HeldFlank::Right),
+            "and so does the flank it held",
         );
     }
 
@@ -1083,6 +1120,7 @@ mod tests {
 
         let mut support = covering(0, vec![merge_row(0, 0, 4, -4.0)]);
         support.partials.push(PartialObservation {
+            held_flank: None,
             witnessed_in_locus: WitnessedLocusPositions::from_half_open_runs([(0_u16, 1_u16)])
                 .expect("one witnessed position"),
             read_group: ReadGroupId(0),
@@ -1265,6 +1303,8 @@ mod tests {
             right_flank: Box::from(b"TTTAAA".as_slice()),
         };
         let seen = [SequenceObservation {
+            flank_deletion: crate::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
             bases: Box::from(b"ATAT".as_slice()),
             read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),

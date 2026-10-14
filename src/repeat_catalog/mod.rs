@@ -80,58 +80,122 @@ pub enum ReadScope<'a> {
 }
 
 impl<'a> ReadScope<'a> {
-    /// The regions this scope names on `contig`, or `None` when it covers the contig whole.
-    fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
-        match self {
-            ReadScope::WholeReference => None,
-            ReadScope::Regions(spans) => Some(
-                spans
-                    .iter()
-                    .filter(|s| s.contig == contig)
-                    .copied()
-                    .collect(),
-            ),
-        }
-    }
-
-    /// Whether this scope reaches `contig` at all.
-    fn touches(&self, contig: ContigId) -> bool {
-        match self {
-            ReadScope::WholeReference => true,
-            ReadScope::Regions(spans) => spans.iter().any(|s| s.contig == contig),
-        }
-    }
-
     /// The same scope, owning its regions — what a streaming read holds, since the iterator
     /// outlives the call that made it.
     fn owned(&self) -> OwnedScope {
         match self {
             ReadScope::WholeReference => OwnedScope::WholeReference,
-            ReadScope::Regions(spans) => OwnedScope::Regions(spans.to_vec()),
+            ReadScope::Regions(spans) => {
+                let mut by_contig: std::collections::BTreeMap<ContigId, ContigSpans> =
+                    std::collections::BTreeMap::new();
+                for span in spans.iter() {
+                    by_contig
+                        .entry(span.contig)
+                        .or_insert_with(|| ContigSpans {
+                            spans: Vec::new(),
+                            ordered: true,
+                        })
+                        .spans
+                        .push(*span);
+                }
+                for (contig, c) in &mut by_contig {
+                    c.ordered = SpanIndex::new(&c.spans, *contig).ordered;
+                }
+                OwnedScope::Regions(by_contig)
+            }
         }
     }
 }
 
-/// [`ReadScope`] with its regions owned, for an iterator to carry.
+/// [`ReadScope`] with its regions owned, for an iterator to carry — **grouped by contig once**,
+/// so asking for one contig's spans is a lookup rather than a scan of every span.
+///
+/// A run's regions can be hundreds of thousands of spans (the GIAB confident regions are
+/// 481,622), and the reader asks for a contig's spans once per contig and once per locus it
+/// hands out; a scan per question made typing grow with the product of the two.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OwnedScope {
     WholeReference,
-    Regions(Vec<GenomeRegion>),
+    /// Each named contig's spans, in the order the caller gave them.
+    Regions(std::collections::BTreeMap<ContigId, ContigSpans>),
+}
+
+/// One contig's requested spans, and whether they are in the shape that lets a lookup
+/// binary-search them ([`SpanIndex`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContigSpans {
+    spans: Vec<GenomeRegion>,
+    ordered: bool,
 }
 
 impl OwnedScope {
     /// The regions on `contig`, or `None` when the contig is covered whole.
-    pub(crate) fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
+    pub(crate) fn spans_on(&self, contig: ContigId) -> Option<&[GenomeRegion]> {
+        self.index_on(contig).map(|index| index.spans)
+    }
+
+    /// [`Self::spans_on`] with its search index.
+    pub(crate) fn index_on(&self, contig: ContigId) -> Option<SpanIndex<'_>> {
         match self {
             OwnedScope::WholeReference => None,
-            OwnedScope::Regions(spans) => Some(
-                spans
-                    .iter()
-                    .filter(|s| s.contig == contig)
-                    .copied()
-                    .collect(),
-            ),
+            OwnedScope::Regions(by_contig) => Some(match by_contig.get(&contig) {
+                Some(c) => SpanIndex {
+                    spans: &c.spans,
+                    ordered: c.ordered,
+                },
+                None => SpanIndex {
+                    spans: &[],
+                    ordered: true,
+                },
+            }),
         }
+    }
+}
+
+/// A list of requested spans that can answer *which of you might overlap `from..=to`?*
+/// without walking all of them.
+///
+/// **An answer, never a filter**: [`Self::candidates`] returns a sub-slice that holds every
+/// span overlapping the query, and the caller still applies its own test to each. So the
+/// result is the same as walking the whole list — spans outside the sub-slice are ones the
+/// caller's test would have rejected — and when the list is not in the shape a binary search
+/// needs, the sub-slice is simply the whole list.
+///
+/// The shape is the one every [`GenomeRegions`](crate::region_typing::GenomeRegions) hands
+/// out: one contig, start-ordered, each span ending before the next begins.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpanIndex<'a> {
+    spans: &'a [GenomeRegion],
+    /// All on one contig, and each span ends before the next starts — so starts and ends
+    /// both ascend.
+    ordered: bool,
+}
+
+impl<'a> SpanIndex<'a> {
+    /// Index `spans` for questions about `contig`, checking the shape once.
+    pub(crate) fn new(spans: &'a [GenomeRegion], contig: ContigId) -> Self {
+        // **Each span's own `start <= end` is checked too**: `GenomeRegion` has public fields
+        // and no constructor to enforce it, and one inverted span between two ordered ones
+        // passes the pairwise test while leaving the starts out of order — so the search
+        // over starts below would skip spans the full walk finds.
+        let ordered = spans
+            .iter()
+            .all(|s| s.contig == contig && s.start.get() <= s.end.get())
+            && spans.windows(2).all(|w| w[0].end.get() < w[1].start.get());
+        Self { spans, ordered }
+    }
+
+    /// A contiguous run of the spans holding every one that overlaps `from..=to` (1-based
+    /// inclusive) — possibly with others, never without one.
+    pub(crate) fn candidates(&self, from: u64, to: u64) -> &'a [GenomeRegion] {
+        if !self.ordered {
+            return self.spans;
+        }
+        // Ends ascend: the first span that does not end before `from`…
+        let first = self.spans.partition_point(|s| s.end.get() < from);
+        // …and starts ascend: through the last span that starts by `to`.
+        let last = self.spans.partition_point(|s| s.start.get() <= to);
+        &self.spans[first..last.max(first)]
     }
 }
 
@@ -394,17 +458,36 @@ impl RepeatCatalogHeader {
     }
 
     /// How far outside a requested stretch a row can sit and still change the answer inside
-    /// it: the contig's longest tract, plus the bundle radius the reader is asking with.
+    /// it: the longer of the contig's longest tract and the reader's bundle cap, plus the
+    /// bundle radius the reader is asking with.
     ///
-    /// A read window padded by this holds every row that can affect the answer, and no
-    /// policy the file serves can need more — a wider bundle radius is the reader's to pass
-    /// in, and a longer tract than the longest one stored does not exist in that contig.
-    pub fn reach_into_window(&self, contig: ContigId, bundle_threshold: u64) -> u64 {
+    /// **The longest tract** bounds a single row: a longer one does not exist in that
+    /// contig. **The bundle cap** bounds a chain of short rows, which a single tract's length
+    /// does not: an STR bundle is a chain of repeats each within the bundle radius of the
+    /// next, so its hull can be far longer than any of its members. With the cap in the
+    /// reach, a bundle that stays a bundle (hull at most the cap) has every member inside the
+    /// padded window, and a chain longer than the cap is still seen longer than the cap, so
+    /// it is typed a satellite as the whole contig types it (`str_bundle_loci.md` §5.2).
+    /// Measured before the cap was in the reach: a chain of six repeats of 20 to 24 bases,
+    /// 180 bases from first to last, on a contig whose longest tract is 24, came back as a
+    /// 55-base bundle from a read over its first repeat and as a 181-base satellite from the
+    /// whole contig.
+    ///
+    /// **What it does not bound** is the extent of such a satellite: a chain reaching further
+    /// than this past the requested stretch comes back cut at the padded window. That was so
+    /// before the cap, for bundles and for coverage runs of abutting tracts alike.
+    pub fn reach_into_window(
+        &self,
+        contig: ContigId,
+        bundle_threshold: u64,
+        max_str_bundle_len: u64,
+    ) -> u64 {
         let longest = self
             .longest_tract_bp
             .get(contig.get() as usize)
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(max_str_bundle_len);
         // **Saturating, because both terms come from outside.** `longest_tract_bp` is read
         // from a file this build did not necessarily write, and `bundle_threshold` is an
         // axis a reader sets freely; a plain `+` panics in debug on a large value and, worse,
@@ -426,7 +509,7 @@ pub enum RepeatCatalogError {
     /// No catalog at that path. **The one error a caller can act on**, so it names the
     /// command that writes one — distinct from a catalog that is present but wrong.
     #[error(
-        "no repeat catalog at {path}; build one with `pop_var_caller repeat-catalog --reference <ref.fa>`"
+        "no repeat catalog at {path}; build one with `pvc repeat-catalog --reference <ref.fa>`"
     )]
     NotFound {
         /// Where a catalog was looked for.
@@ -460,6 +543,15 @@ pub enum RepeatCatalogError {
     /// one, a flank below it, or a period outside its range (spec §4.1).
     #[error("catalog is not permissive enough: {0}")]
     CriteriaTooPermissive(#[from] CriteriaRefusal),
+
+    /// The reader asked for a bundle radius of 0 (`--flank-bp 0`). Every locus would then fail
+    /// its own flank test and the typing would hold no STR segment, silently; the scan path
+    /// refuses the same value.
+    #[error(
+        "the flank around an STR segment (--flank-bp) must be at least 1 base: at 0 no repeat \
+         has a flank, and no STR segment would be typed"
+    )]
+    NoBundleRadius,
 
     /// The reader wants tracts scored with different weights. Not a filter over the file:
     /// the weights decide where each segment starts and stops, so a tract can grow, shrink
@@ -514,6 +606,51 @@ pub enum RepeatCatalogError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn requested(start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    /// **An inverted span makes the list unsearchable, so every span is a candidate.** Between
+    /// `[1,2]` and `[6,40]`, the inverted `[30,5]` passes the pairwise "each ends before the
+    /// next starts" test while putting the starts out of order (1, 30, 6); a binary search over
+    /// those starts for a query ending at 20 stops at 30 and never sees `[6,40]`, which overlaps
+    /// the query `10..=20` — a span the plain walk the index replaced does find.
+    #[test]
+    fn candidates_hold_every_overlapping_span_when_a_span_is_inverted() {
+        let spans = [requested(1, 2), requested(30, 5), requested(6, 40)];
+        let index = SpanIndex::new(&spans, ContigId(0));
+        let found = index.candidates(10, 20);
+        assert!(
+            found.contains(&requested(6, 40)),
+            "[6,40] overlaps 10..=20 but the candidates were {found:?}"
+        );
+    }
+
+    /// **On the shape it is built for, the index narrows to exactly the overlapping spans**,
+    /// edges included: a span ending at the query's first base and one starting at its last
+    /// both count (1-based inclusive), the ones a base further out do not.
+    #[test]
+    fn candidates_are_the_overlapping_spans_on_ordered_spans() {
+        let spans = [
+            requested(1, 9),
+            requested(11, 20),
+            requested(30, 40),
+            requested(42, 50),
+        ];
+        let index = SpanIndex::new(&spans, ContigId(0));
+        assert_eq!(
+            index.candidates(20, 30),
+            &[requested(11, 20), requested(30, 40)]
+        );
+        assert_eq!(index.candidates(10, 10), &[] as &[GenomeRegion]);
+        assert_eq!(index.candidates(21, 29), &[] as &[GenomeRegion]);
+        assert_eq!(index.candidates(1, 100), &spans);
+    }
 
     /// A header two catalogs of one reference would share, for the comparison tests below.
     fn a_header() -> RepeatCatalogHeader {

@@ -1179,6 +1179,40 @@ fn finish_locus(
     }
 }
 
+/// Describe one bundled repeat as a [`BundleMember`](crate::region_typing::BundleMember):
+/// the end-trim and the motif [`finish_locus`] would give it, and none of that function's
+/// gates (`str_bundle_loci.md` §5.1).
+///
+/// `interval` is an offset into `bases`, and `bases_start` is the 1-based contig coordinate
+/// of `bases[0]` — [`classify`]'s two conventions, so a member of [`Classified::bundled`]
+/// can be handed straight over with the slice `classify` was given.
+///
+/// **The catalog's rows hold the same two values** — the builder computes them with these
+/// same [`upper`] and [`minimal_trim`] — and the catalog route reads them off the row
+/// instead. When no whole-motif cut exists the member keeps its detected span.
+///
+/// # Panics
+///
+/// When the interval lies outside `bases`, is empty, or its period cannot form a motif.
+/// [`classify`] admits into `bundled` only intervals that pass all three (its slice bound,
+/// its `r.end > r.start` and its period gate, asserted `<= MAX_MOTIF_LEN`), so a panic here
+/// is a caller handing over intervals `classify` did not.
+pub(crate) fn bundle_member_from_bases(
+    interval: &RepeatInterval,
+    bases: &[u8],
+    bases_start: Position,
+) -> crate::region_typing::BundleMember {
+    let tract = upper(&bases[interval.start as usize..interval.end as usize]);
+    let motif_bytes = &tract[..usize::from(interval.period)];
+    let motif = Motif::new(motif_bytes).expect("a bundled repeat's period is a valid motif length");
+    let (start_offset, end_offset) = minimal_trim(&tract, motif_bytes).unwrap_or((0, tract.len()));
+    // `[s, e)` at offset `s` is `[bases_start + s, bases_start + e - 1]` — the one conversion
+    // `finish_locus` makes too.
+    let start = bases_start.get() + interval.start + start_offset as u64;
+    let end = bases_start.get() + interval.start + end_offset as u64 - 1;
+    crate::region_typing::BundleMember::new(start, end, motif)
+}
+
 /// ASCII upper-case copy of `bytes`.
 ///
 /// **Shared with the repeat catalog's builder** ([`crate::repeat_catalog`]), which
@@ -1189,37 +1223,26 @@ pub(crate) fn upper(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|b| b.to_ascii_uppercase()).collect()
 }
 
-/// Count non-overlapping greedy occurrences of `motif` in `repeat` (GangSTR
-/// `count_motif`): scan left-to-right, advancing by `motif.len()` on a match and
-/// by 1 otherwise.
-fn count_motif(repeat: &[u8], motif: &[u8]) -> usize {
-    let m = motif.len();
-    let mut c = 0;
-    let mut s = 0;
-    while s < repeat.len() {
-        if s + m <= repeat.len() && &repeat[s..s + m] == motif {
-            c += 1;
-            s += m;
-        } else {
-            s += 1;
-        }
-    }
-    c
-}
-
-/// `true` if `motif` is itself internally periodic — a non-fundamental period
-/// such as `ATAT = (AT)²` (GangSTR `is_compound`, threshold 0.8). A motif whose
-/// shorter prefix `sub` tiles more than 80% of it is compound.
+/// `true` if `motif` is itself a shorter unit repeated whole — a non-fundamental period such
+/// as `ATAT = (AT)²` or `AAAA = (A)⁴`, whose real period is the shorter one.
+///
+/// **The test is exact: the motif equals itself shifted by a length that divides it.** That is
+/// the definition of a repeated unit, so it does not depend on where in the repeat the motif
+/// was read from, or on which strand.
+///
+/// **It replaced GangSTR's `is_compound` on 2026-10-09**, which this was ported from. That one
+/// called a motif compound when some prefix of it, counted wherever it occurs without overlap,
+/// covered more than 80% of it. For `AAAAAC` the prefix `A` covers five bases in six, so every
+/// hexanucleotide repeat of `AAAAAC`, `AAAAAG` or `AAAAAT` was rejected — and typed as ordinary
+/// sequence, because nothing shorter survives to stand for it — while `ATTTTT`, the same repeat
+/// read from its `A`, passed. The stuttering benchmark's simulated genome found it: 262 of its
+/// 500 hexanucleotide segments (`doc/devel/ng/spec/str_stutter_benchmark.md`). The frozen copy
+/// of production's post-filter (`crate::production_post_filter`) keeps the old rule.
 pub(crate) fn is_compound(motif: &[u8]) -> bool {
-    let l = motif.len();
-    const THRESHOLD: f64 = 0.8;
-    for i in 1..=(l / 2) {
-        let sub = &motif[..i];
-        if (count_motif(motif, sub) * i) as f64 > l as f64 * THRESHOLD {
-            return true;
-        }
-    }
-    false
+    let len = motif.len();
+    (1..len)
+        .filter(|shift| len.is_multiple_of(*shift))
+        .any(|shift| motif[shift..] == motif[..len - shift])
 }
 
 /// End-trim a tract to clean whole-motif boundaries (GangSTR `minimal_trim`):
@@ -1465,6 +1488,30 @@ impl fmt::Display for SsrSegment {
 mod tests {
     use super::*;
 
+    /// **A bundle member gets a segment's end-trim and motif, in genomic coordinates.**
+    /// Eight `cag` then `CA`, read from a slice that starts at contig base 101: the motif is
+    /// the first three bases uppercased, and the span is cut back to the eight whole copies.
+    /// Without a clean cut the member keeps its detected span.
+    #[test]
+    fn a_bundle_member_is_trimmed_to_whole_copies_and_carries_its_motif() {
+        let bases = b"TTcagcagcagcagcagcagcagcagCATT";
+        let interval = iv(2, 28, 3, 50);
+        let member = bundle_member_from_bases(&interval, bases, Position(101));
+        assert_eq!(member.motif().as_bytes(), b"CAG");
+        assert_eq!(
+            (member.start(), member.end()),
+            (103, 126),
+            "slice offset 2 is contig base 103; the trailing `CA` is cut"
+        );
+        assert_eq!(member.period(), 3);
+
+        // `CAGTTT`: no two clean copies anywhere, so no cut — the detected span stands.
+        let impure = b"CAGTTTCAGAAA";
+        let member = bundle_member_from_bases(&iv(0, 12, 3, 5), impure, Position(1));
+        assert_eq!((member.start(), member.end()), (1, 12));
+        assert_eq!(member.motif().as_bytes(), b"CAG");
+    }
+
     /// The catalog's settings with a 5 bp flank, so the fixtures can be small.
     fn params() -> SsrSegmentCriteria {
         matched_params(0.8, 0, 5).0
@@ -1621,6 +1668,40 @@ mod tests {
         assert!(!is_compound(b"AT"), "fundamental AT is not compound");
         assert!(!is_compound(b"ATC"), "ATC is not internally periodic");
         assert!(!is_compound(b"ATCG"), "ATCG is not internally periodic");
+    }
+
+    /// A unit whose first base fills most of it is still a fundamental period — the case
+    /// GangSTR's prefix-coverage rule got wrong — and the verdict does not depend on which
+    /// rotation or strand the motif was read in.
+    #[test]
+    fn is_compound_spares_a_unit_dominated_by_one_base_in_every_rotation() {
+        for motif in [
+            &b"AAAAAC"[..],
+            b"AAAAAT",
+            b"AAAAAG",
+            b"ATTTTT",
+            b"CAAAAA",
+            b"AAAAC",
+        ] {
+            for shift in 0..motif.len() {
+                let rotated = [&motif[shift..], &motif[..shift]].concat();
+                assert!(
+                    !is_compound(&rotated),
+                    "{} is a fundamental period",
+                    String::from_utf8_lossy(&rotated)
+                );
+            }
+        }
+        for motif in [
+            &b"AA"[..],
+            b"AAAA",
+            b"ACAC",
+            b"AACAAC",
+            b"ATATAT",
+            b"TATATA",
+        ] {
+            assert!(is_compound(motif), "{}", String::from_utf8_lossy(motif));
+        }
     }
 
     #[test]

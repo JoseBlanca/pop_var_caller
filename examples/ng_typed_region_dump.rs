@@ -15,7 +15,7 @@
 //!
 //! The kinds come from the reference's repeat catalog, opened beside the FASTA — the same
 //! file the run reads, so this answers the run's question rather than a similar one. Build it
-//! first with `pop_var_caller repeat-catalog --reference <reference.fa>`.
+//! first with `pvc repeat-catalog --reference <reference.fa>`.
 //!
 //! **The third argument is which floors decide what an STR tract is**, and the two differ by
 //! a lot. `catalog` (the default) is what `call-from-alignments` uses today: the floors the
@@ -32,12 +32,16 @@
 //! run's "bases spoken for" can exceed the bases asked for.
 //!
 //! Output: a `#` comment header, a bare TSV column line, then one row per typed region —
-//! `chrom  start  end  kind  motif  period  copies  purity`, coordinates 1-based inclusive,
-//! with `.` wherever a kind carries no such detail.
+//! `chrom  start  end  kind  motif  period  copies  purity  members`, coordinates 1-based
+//! inclusive, with `.` wherever a kind carries no such detail. `members` is a bundle's repeats as
+//! `pvc type-regions` writes them: a JSON array of `{"start","end","period","motif"}`, each member's
+//! span cut back to whole copies of its motif, **zero-based half-open** — not the row's own
+//! coordinates.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use pop_var_caller::cli::typed_regions::members_json;
 use pop_var_caller::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
@@ -94,17 +98,18 @@ fn run(
         .map(|period| criteria.classification.min_copies.for_period(period))
         .collect();
     println!(
-        "## periods: {}..={}  min_copies: {:?}  max_str_len_bp: {}",
+        "## periods: {}..={}  min_copies: {:?}  max_str_len_bp: {}  max_str_bundle_len_bp: {}",
         criteria.classification.periods.min(),
         criteria.classification.periods.max(),
         floors_by_period,
         criteria.max_str_len_bp.get(),
+        criteria.max_str_bundle_len_bp.get(),
     );
     match bed {
         Some(path) => println!("## regions: {}", path.display()),
         None => println!("## regions: whole genome"),
     }
-    println!("#chrom\tstart\tend\tkind\tmotif\tperiod\tcopies\tpurity");
+    println!("#chrom\tstart\tend\tkind\tmotif\tperiod\tcopies\tpurity\tmembers");
 
     let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&ground))?;
     for region in walk.by_ref() {
@@ -125,11 +130,11 @@ fn run(
                 ".".to_string(),
                 ".".to_string(),
             ),
-            RegionKind::SsrBundle { tracts } => (
+            RegionKind::SsrBundle { members } => (
                 "ssr_bundle",
                 ".".to_string(),
                 ".".to_string(),
-                format!("{}", tracts.len()),
+                format!("{}", members.len()),
                 ".".to_string(),
             ),
             RegionKind::SsrSegment(segment) => (
@@ -144,8 +149,16 @@ fn run(
                 format!("{:.2}", segment.purity_fraction()),
             ),
         };
+        // A bundle's members, in the cell `pvc type-regions` writes — the same function, so
+        // the two files cannot spell it two ways.
+        let members = match &region.kind {
+            RegionKind::SsrBundle { members } => members_json(members),
+            RegionKind::Generic | RegionKind::Satellite | RegionKind::SsrSegment(_) => {
+                ".".to_string()
+            }
+        };
         println!(
-            "{name}\t{}\t{}\t{kind}\t{motif}\t{period}\t{copies}\t{purity}",
+            "{name}\t{}\t{}\t{kind}\t{motif}\t{period}\t{copies}\t{purity}\t{members}",
             region.region.start.get(),
             region.region.end.get(),
         );

@@ -159,7 +159,12 @@ impl RepeatCatalogBuilder {
                          would have nothing to be checked against"
                         .into(),
                 })?,
-            built_under: self.criteria.clone(),
+            // The file records no bundle cap (`StrRepeatCriteria::max_str_bundle_len_bp`), so
+            // the header this run holds says what the file will say when it is read back.
+            built_under: StrRepeatCriteria {
+                max_str_bundle_len_bp: Bp(crate::region_typing::DEFAULT_MAX_STR_BUNDLE_LEN),
+                ..self.criteria.clone()
+            },
             scan: self.scan,
             tool_version: crate::repeat_catalog::reader::running_tool_version().to_string(),
             // One number per contig, and it is what lets a reader ask for a stretch instead

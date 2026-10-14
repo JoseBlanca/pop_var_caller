@@ -24,7 +24,7 @@ fn refusal_of(argv: &[&str]) -> clap::Error {
 /// The shortest run a person can type.
 fn a_defaults_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         "call-from-psps",
         "--reference",
         "ref.fa",
@@ -43,7 +43,7 @@ fn the_subcommand_is_spelled_call_from_psps() {
     assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
     assert_eq!(args.output, PathBuf::from("calls.vcf"));
     assert!(
-        Cli::try_parse_from(["pop_var_caller", SUBCOMMAND, "--help"])
+        Cli::try_parse_from(["pvc", SUBCOMMAND, "--help"])
             .expect_err("--help exits")
             .to_string()
             .contains(SUBCOMMAND),
@@ -57,7 +57,7 @@ fn the_subcommand_is_spelled_call_from_psps() {
 #[test]
 fn a_run_that_names_neither_a_parameters_file_nor_the_defaults_is_refused() {
     let refused = refusal_of(&[
-        "pop_var_caller",
+        "pvc",
         "call-from-psps",
         "--reference",
         "ref.fa",
@@ -91,7 +91,7 @@ fn the_ground_cannot_be_narrowed_by_a_flag() {
 #[test]
 fn the_psp_flag_repeats_and_keeps_the_order_it_was_given() {
     let mut argv = vec![
-        "pop_var_caller",
+        "pvc",
         "call-from-psps",
         "--reference",
         "ref.fa",
@@ -198,6 +198,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
@@ -223,6 +224,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
@@ -309,6 +311,7 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: 0.99,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })

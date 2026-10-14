@@ -8,10 +8,10 @@ use std::path::Path;
 use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, run_generate_psps};
 use crate::cli::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
-use crate::region_typing::DEFAULT_MAX_STR_LEN;
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> EstimateParametersArgs {
@@ -24,7 +24,7 @@ fn args_of(argv: &[&str]) -> EstimateParametersArgs {
 /// The shortest run a person can type.
 fn a_shortest_run() -> Vec<&'static str> {
     vec![
-        "pop_var_caller",
+        "pvc",
         "estimate-parameters",
         "--reference",
         "ref.fa",
@@ -78,6 +78,7 @@ fn a_cohort_walked(min_copies: MinCopies, regions: Option<&str>) -> (AVaryingCoh
         min_period: DEFAULT_MIN_PERIOD,
         max_period: DEFAULT_MAX_PERIOD,
         max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
         max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };
@@ -106,7 +107,7 @@ fn the_subcommand_is_spelled_estimate_parameters() {
     assert_eq!(args.psps, vec![PathBuf::from("zeta.psp")]);
     assert_eq!(args.output, PathBuf::from("cohort.parameters.toml"));
     assert!(
-        Cli::try_parse_from(["pop_var_caller", SUBCOMMAND, "--help"])
+        Cli::try_parse_from(["pvc", SUBCOMMAND, "--help"])
             .expect_err("--help exits")
             .to_string()
             .contains(SUBCOMMAND),
@@ -761,7 +762,7 @@ fn the_report_names_the_command_that_rebuilds_a_psps_census() {
     // `regenerate_census::SUBCOMMAND` *is* this constant, so comparing the two is `X == X`;
     // what carries the claim is the parse below.
     let parsed = Cli::try_parse_from([
-        "pop_var_caller",
+        "pvc",
         THE_COMMAND_THAT_REBUILDS_A_CENSUS,
         "--reference",
         "ref.fa",

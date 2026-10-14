@@ -248,6 +248,30 @@ Algorithm notes:
 - `build_loci` must hand the members back rather than dropping them (§5); carrying an open cluster
   across a window boundary is §2.6.
 
+**Added 2026-10-11** ([`str_bundle_loci.md`](str_bundle_loci.md) §5), when bundles were given a path
+to calling. Membership is unchanged; three things are new:
+
+- **Each member carries its motif.** A member is a `BundleMember { start, end, motif }`: the
+  detected repeat cut back to whole copies of its motif at both ends, and the motif — the detected
+  repeat's first `period` bases, uppercased. That is the end-trim and the motif an STR segment gets,
+  and none of a segment's gates (copy floor, purity, flank). A member with no clean cut keeps its
+  detected span. The hull is still taken over the **detected** spans, from the earliest start to
+  the furthest end, so a member whose ragged end was cut lies strictly inside it: on GIAB HG002's
+  tandem-repeat benchmark regions, 385 of 2,410 bundles end past every member's cut end and 7 start
+  before every member's cut start. Members are listed by detected span and are **not disjoint**:
+  551 of those bundles hold a member wholly inside another and 734 have overlapping consecutive
+  members ([`str_bundle_loci.md`](str_bundle_loci.md) §5.1, open for step 3).
+  The scan and the catalog compute the same members: the catalog's rows already store each tract's
+  cut and motif, and the differential compares the two.
+- **A hull longer than `max_str_bundle_len` is a `Satellite`** (default 100 bases, user-settable; 0
+  makes every bundle one). A 150-base read crosses a longer hull and an anchor each side too rarely
+  to call it. Nothing is re-absorbed: anything within `bundle_threshold` of a member would already be
+  in the bundle. The tally counts such a hull as a satellite.
+- **A hull on a contig's first or last base is dropped**, as an STR segment is (`FlankClamped`); its
+  bases become generic. The cap is asked first, so an over-long hull at a contig end is still a
+  satellite. Both routes apply the rule; on the catalog's it rarely fires, since the builder keeps
+  a row only with `min_flank_bp` bases beside its cut span, but a detected span can reach further.
+
 ### 2.4a A satellite swallows what it touches
 
 **Added at D3, 2026-07-16 (owner's rule), because the walk had no answer here and was quietly giving
@@ -468,10 +492,10 @@ pub enum RegionKind {
     /// `read_preparation_ssr.md` §8 — which will need the tract's bases, and will fetch them from
     /// the reference it opens to gather reads.
     SsrSegment(SsrSegment),                               // SsrSegment = ng's, NOT ssr::types::Locus
-    /// A cluster of repeats none of which has clean flanks (§2.4). Carries the tracts as
-    /// coordinates — enough to see the structure (each interval has its period) without this step
-    /// pre-deciding what it is for. The hull is the `TypedRegion`'s own span.
-    SsrBundle { tracts: Box<[RepeatInterval]> },   // >= 2, coordinate-ordered
+    /// A cluster of repeats none of which has clean flanks (§2.4). Carries each member's span,
+    /// cut back to whole motif copies, and its motif (§2.4, added 2026-10-11). The hull is the
+    /// `TypedRegion`'s own span.
+    SsrBundle { members: Box<[BundleMember]> },   // >= 2, in detected-span order; may overlap or nest
     Generic,
     Satellite,
 }
@@ -534,6 +558,8 @@ pub struct TypedRegionConfig {
                                   //   classification's bundle_threshold, or a window cannot see a core tract's
                                   //   bundle neighbours — asserted in the walk (D3), because §10
                                   //   sweeps both knobs and sweeps run in release
+    pub max_str_bundle_len: Bp,   // the bundle cap: a hull longer than this is a satellite
+                                  //   (§2.4; default 100, 0 makes every bundle one)
     pub window_bp: Bp,            // the memory knob; default 100 kb. Must not change the output
     pub criteria: SsrSegmentCriteria,  // ng's own (§5) — ALL of classification's rules, including the
                                   //   period scope and copy floors the catalog hardcodes. `bundle_threshold`
@@ -550,7 +576,7 @@ pub struct TypedRegionCounts {
     pub ssr_bundle_bp: u64,                // THE number for §10's bundle question — never before
                                            //   seen, because the answer was deleted uncounted
     pub generic: u64,
-    pub satellites: u64,
+    pub satellites: u64,                   // capped bundles included (§2.4)
     pub satellite_bp: u64,
     pub repeat_bp_with_no_locus: u64,      // repeat coverage that yielded no locus (§2.2)
     pub rejected_by_reason: RejectionCounts,  // { copy_floor, purity, compound, no_clean_trim,

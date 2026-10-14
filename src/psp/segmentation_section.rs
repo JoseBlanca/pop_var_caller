@@ -103,6 +103,16 @@ struct WireRepeatCriteria {
     min_flank_bp: u64,
     /// A tract longer than this is a satellite, not a locus, in bases.
     max_str_len_bp: u64,
+    /// An STR bundle whose hull is longer than this is a satellite, in bases
+    /// (`str_bundle_loci.md` §5.2).
+    ///
+    /// **Optional on the wire only so that its absence can be refused by name.** A psp
+    /// written before the cap existed has no such key, and its bundles were typed with no
+    /// cap at all — a typing no value of this key describes. Reading it as the default
+    /// would let such a psp be called beside psps typed with a cap as though their ground
+    /// were the same, so [`WireRepeatCriteria::into_criteria`] refuses it and names the key.
+    #[serde(default)]
+    max_str_bundle_len_bp: Option<u64>,
 }
 
 /// A [`RepeatCatalogHeader`] in TOML's terms. Every field of it, because the operand of
@@ -211,6 +221,7 @@ impl WireRepeatCriteria {
             classification,
             min_flank_bp,
             max_str_len_bp,
+            max_str_bundle_len_bp,
         } = criteria;
         let SsrSegmentCriteria {
             periods,
@@ -231,6 +242,7 @@ impl WireRepeatCriteria {
             bundle_threshold_bp: *bundle_threshold,
             min_flank_bp: min_flank_bp.get(),
             max_str_len_bp: max_str_len_bp.get(),
+            max_str_bundle_len_bp: Some(max_str_bundle_len_bp.get()),
         }
     }
 }
@@ -379,6 +391,13 @@ impl WireRepeatCriteria {
                         ),
                     )
                 })?;
+        let max_str_bundle_len_bp = self.max_str_bundle_len_bp.ok_or_else(|| {
+            BrokenRule::new(
+                format!("{section}.max-str-bundle-len-bp"),
+                "is missing; this psp was typed before STR bundles had a length cap, so its \
+                 typing is not one this build can name — write it again with generate-psps",
+            )
+        })?;
         Ok(StrRepeatCriteria {
             classification: SsrSegmentCriteria {
                 periods,
@@ -392,6 +411,7 @@ impl WireRepeatCriteria {
             },
             min_flank_bp: Bp(self.min_flank_bp),
             max_str_len_bp: Bp(self.max_str_len_bp),
+            max_str_bundle_len_bp: Bp(max_str_bundle_len_bp),
         })
     }
 }
@@ -524,6 +544,10 @@ fn check_criteria(section: &str, criteria: &StrRepeatCriteria) -> Result<(), Bro
     check_toml_integer(
         &format!("{section}.max-str-len-bp"),
         criteria.max_str_len_bp.get(),
+    )?;
+    check_toml_integer(
+        &format!("{section}.max-str-bundle-len-bp"),
+        criteria.max_str_bundle_len_bp.get(),
     )
 }
 
@@ -603,7 +627,8 @@ fn check_toml_integer(field: &str, value: u64) -> Result<(), BrokenRule> {
 /// **Every value differs from its type's default wherever the type has one**, so a
 /// round trip that quietly substituted a default fails rather than passing by
 /// coincidence: the analysed regions are proper sub-spans on any contig four bases or
-/// longer, the routing purity floor is 0.93, the catalog's build criteria carry a
+/// longer, the routing purity floor is 0.93 and its bundle cap 77, the catalog's build
+/// criteria carry a
 /// non-default flank floor and score floor, its scan weights differ in all three
 /// fields, and its builder version is its own.
 #[cfg(test)]
@@ -630,6 +655,7 @@ pub(crate) fn segmentation_inputs_for_tests(contigs: &[ContigIdentity]) -> Segme
 
     let mut repeat_tract_criteria = StrRepeatCriteria::default();
     repeat_tract_criteria.classification.min_purity = 0.93;
+    repeat_tract_criteria.max_str_bundle_len_bp = Bp(77);
 
     let mut built_under = StrRepeatCriteria {
         min_flank_bp: Bp(11),
@@ -814,6 +840,38 @@ mod tests {
         assert!(refused.reason.contains("SL4.0ch03"), "{}", refused.reason);
     }
 
+    /// A psp written before the bundle cap existed has no `max-str-bundle-len-bp`, and is
+    /// refused naming that key rather than read as having the default: its bundles were
+    /// typed with no cap at all (`str_bundle_loci.md` §5.2).
+    #[test]
+    fn a_psp_typed_before_the_bundle_cap_is_refused_naming_the_key() {
+        let contigs = contigs();
+        let written = segmentation_inputs_for_tests(&contigs);
+        let wire = WireSegmentation::from_inputs(&written, &contigs);
+        let text = toml::to_string(&wire).expect("the section serialises");
+        assert!(
+            text.contains("max-str-bundle-len-bp = 77"),
+            "the cap is written under its key:\n{text}"
+        );
+
+        let older: String = text
+            .lines()
+            .filter(|line| !line.starts_with("max-str-bundle-len-bp"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: WireSegmentation = toml::from_str(&older).expect("an older section parses");
+        let refused = parsed
+            .into_inputs(&contigs)
+            .expect_err("a section with no bundle cap is refused");
+        // Both criteria sections lost the key; whichever is read first names it.
+        assert!(
+            refused.field.ends_with(".max-str-bundle-len-bp"),
+            "{}: {}",
+            refused.field,
+            refused.reason
+        );
+    }
+
     /// A copy-floor table of the wrong width is refused; believing it would silently
     /// shift every period's floor.
     #[test]
@@ -921,6 +979,15 @@ mod tests {
         assert_eq!(
             broken.field,
             "segmentation.catalog.built-under.max-str-len-bp"
+        );
+        // `--max-str-bundle-len 18446744073709551615` is a legal flag and an obvious way to
+        // write "no cap"; TOML cannot hold it, and the header says so rather than wrapping.
+        let broken = refused(&|inputs| {
+            inputs.repeat_tract_criteria.max_str_bundle_len_bp = Bp(u64::MAX);
+        });
+        assert_eq!(
+            broken.field,
+            "segmentation.repeat-tract-criteria.max-str-bundle-len-bp"
         );
 
         // The forged-line hole: a newline in a catalog contig name or the tool version

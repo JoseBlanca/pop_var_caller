@@ -103,6 +103,20 @@ this sample showed nothing"* and *"we never looked here"* are different facts, a
 destroys the difference. Zero coverage is a real observation; at low depth it is most of what a
 sample has to say.
 
+*Changed during implementation (2026-10-11): the same four steps measure an STR bundle's hull*
+([`str_bundle_loci.md`](str_bundle_loci.md) §6.1). `SsrLocus` no longer holds an `SsrSegment`; it
+holds a `MeasuredRepeat` — the repeat's span, the motif handed to the delimiter's geometry, the
+period of the reference run reaching each edge (`None` where fixed sequence reaches it), and
+whether a read that ends inside is kept as a partial or dropped. A segment converts into one with
+its own motif at both edges and partials kept, so every segment is measured exactly as before:
+the psps' non-bundle records were byte-identical on the stuttering benchmark (4,120,085 dump rows,
+one sample, 30×). The bundle generator (`locus_generation/ssr_bundle.rs`) is this generator with
+the flat-gap delimiter, run over the hull through the steps it exposes (`fetch_locus`,
+`measure_reads`); a read that ends inside the hull is kept as a partial observation, as at a
+segment (`str_bundle_loci.md` §6.1; the `ended_inside_a_bundle` no-observation count of step 3 is
+gone). Calling left it out until 2026-10-12 and scores it since, as a lower bound from the flank it
+held (`str_bundle_loci.md` §7.6).
+
 ---
 
 ## 3. The output — what the reads showed about the tract
@@ -139,6 +153,33 @@ place this generator's read-coverage bookkeeping differs from "reads that produc
 that anchors a flank and crosses **no** tract position is not a lower bound of zero; it is a read that
 never entered the repeat, and its bases are the SNP/indel path's to analyse. The STR path discards it
 and counts it, as `NoObservationReason::OutsideTract`.
+
+**Where the read's own alignment shows it never reached the tract, that is decided before the
+delimiter runs** (owner, 2026-10-10). A read whose aligned span ends at or before the tract's first
+base, or starts at or after its last, with no soft clip or edge insertion on the side facing the tract,
+is `OutsideTract` without being aligned. The delimiter cannot always tell such a read from one that
+crossed: where a flank's last bases repeat the other flank's first, it matches the read's tail to the
+far flank. On the stuttering benchmark a 6-base repeat had `CCACCA` on both sides, and reads stopping
+exactly at the tract were measured as complete observations of an **empty** tract — 122 reads at 34
+segments in one 50-sample run at 15× — and an empty candidate stopped the locus. Unaligned bases facing
+the tract keep a read on the delimiter's path, because a long allele's extra units can hide there.
+
+**A read whose own alignment carries a deletion across the tract's edge is complete** (owner,
+2026-10-10). The delimiter reports a complete observation only where both flanks match intact, and
+a deletion that takes the first bases of a flank breaks that match: every read carrying it came back
+a partial, so the deleted allele was never a candidate, and only the generic path's piece of the
+deletion was written — a shorter deletion than the sample's. Where the CIGAR has a deletion taking
+bases from both sides of the tract's first or last base, and at least five aligned bases on each
+side beyond the tract (`MIN_ALIGNED_FLANK_BASES`), the read is complete without the delimiter, and
+spelled from its own alignment as every indel-carrying read already is. The tract piece of the
+deletion becomes a candidate, the generic path writes the flank piece, and the two records spell the
+sample's sequence. Measured on the stuttering benchmark: at 50 samples, PCR, 15×, the carrier
+genotypes right at segments with such a deletion went from 397 to 738 of 1,085; over all runs,
++1,122 right genotypes at 50 samples for 16 more false calls among 321,116 reference genotypes, and
++76 at one sample for none. On HG002's tandem-repeat benchmark, +138 right genotypes over 30× and
+50×, with one tract a depth going from right to wrong. The allele-exact comparison there counts about
+75 more false positives a depth, most of them the two records of a deletion that is now right but
+written in two pieces where the truth writes one.
 
 It reaches the delimiter at all because the fetch queries the tract **plus its margin** (§2), so a
 read clipping only the flank is delimited too; the aligner then reports `FromLeft`/`FromRight` with an
@@ -183,6 +224,26 @@ the carrying of partial observations to this spec.
 > `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
 > Source: [locus_generation_pileup.md](locus_generation_pileup.md) §6,
 > [the prerequisites plan](../impl_plan/locus_generation_pileup_prerequisites.md) Milestone B.
+
+> **Changed (2026-10-12): the side a partial read held is now read, and the merged case is not one
+> constraint.** The generator stores a partial read's bases in read order — a left-held read's are
+> the start of its carrier's tract, a right-held read's its end — and the censored term now
+> compares each with the matching end of the candidate (`read_likelihoods.md` §5.2). Before, every
+> partial was compared with the candidate's start, and a right-held read out of phase with it fell
+> to the outlier term. The side comes from the witness: flush left only is left-held, flush right
+> only is right-held. **The merged case above is a prefix and a suffix of the same bases, not one
+> constraint** — they agree only when the read's length is a whole number of repeats from both
+> ends — so calling cannot know which a merged row holds and scores it from both sides, each
+> weighted one half. Keeping the side in the observation would close that, at the cost of a psp
+> format change; not done here.
+>
+> **Changed again (2026-10-12, when the STR-bundle branch was merged): the side is kept.** Psp
+> format 2.1 records it on every partial whose witness covers the whole locus
+> (`SequenceObservation::held_flank`, the body field `observation-held-flanks`;
+> `str_bundle_loci.md` §7.6), at segments as at bundles. Two such reads of the same bases from
+> opposite sides are now two observations, each scored from the side it held; the witness still
+> answers first wherever it touches one border only (`HeldFlank::of_witness`). Only a psp written
+> before format 2.1 still holds merged rows, and those are scored from both sides, one half each.
 
 **We store the observed sequence, not a repeat count.** Two alleles of the same length can differ by
 an interior substitution — an interrupted repeat — and a count cannot tell them apart.

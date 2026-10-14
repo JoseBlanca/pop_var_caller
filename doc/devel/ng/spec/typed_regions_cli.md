@@ -105,6 +105,7 @@ to — the consts still ship the catalog values until the CLI slice applies them
 |---|---|---|
 | `--min-period` / `--max-period` | 1 / 6 | `DEFAULT_MIN_PERIOD`, `DEFAULT_MAX_PERIOD` ([`segment_criteria.rs:355-358`](../../../../src/ng/region_typing/segment_criteria.rs)); the STR-detection period range — one flag, §2.2 |
 | `--max-str-len` | 100 | `DEFAULT_MAX_STR_LEN` ([`mod.rs:240`](../../../../src/ng/region_typing/mod.rs)); §2.3 |
+| `--max-str-bundle-len` | 100 | `DEFAULT_MAX_STR_BUNDLE_LEN` (`src/region_typing/mod.rs`); an STR bundle whose hull is longer is a satellite, 0 makes every bundle one ([`str_bundle_loci.md`](str_bundle_loci.md) §5.2; added 2026-10-11) |
 | `--window-bp` | 100 000 | `DEFAULT_WINDOW_BP` ([`mod.rs:244`](../../../../src/ng/region_typing/mod.rs)) |
 | `--flank-bp` | 30 | `DEFAULT_BUNDLE_THRESHOLD` ([`segment_criteria.rs:348`](../../../../src/ng/region_typing/segment_criteria.rs)); §2.3 |
 | `--min-purity` | 0.8 | `DEFAULT_MIN_PURITY` ([`segment_criteria.rs:339`](../../../../src/ng/region_typing/segment_criteria.rs)) |
@@ -226,7 +227,7 @@ the first three; the rest are filled only by the kinds that have them.
 chr1    0      999   generic     .      .       .       .       .
 chr1    999    1029  ssr_locus   CAG    3       10.0    1.0     .
 chr1    1029   1990  generic     .      .       .       .       .
-chr1    1990   2040  ssr_bundle  .      .       .       .       [{"start":1990,"end":2010,"period":2},{"start":2020,"end":2040,"period":5}]
+chr1    1990   2040  ssr_bundle  .      .       .       .       [{"start":1990,"end":2010,"period":2,"motif":"AT"},{"start":2020,"end":2040,"period":5,"motif":"AAAAG"}]
 chr1    2040   4240  satellite   .      .       .       .       .
 ```
 
@@ -295,6 +296,7 @@ files, and a file that cannot say what config made it is noise.
 ## min_period: 1
 ## max_period: 6
 ## max_str_len: 100
+## max_str_bundle_len: 100
 ## window_bp: 100000
 ## flank_bp: 30
 ## min_purity: 0.8
@@ -337,7 +339,7 @@ caller wanting the MD5 can `md5sum` the FASTA.
 | `Generic` | the region | all `.` — the region *is* the whole claim |
 | `Satellite` | the region | all `.` — likewise |
 | `SsrSegment(SsrSegment)` | the region, which **is** the tract ([`mod.rs:552-561`](../../../../src/ng/region_typing/mod.rs)) | `motif` = `SsrSegment::motif()` bytes, `period` = `motif.period()`, `copies` = derived (T5), `purity` = `SsrSegment::purity_fraction()` |
-| `SsrBundle { tracts }` | the hull | `members` = a JSON array, one object per tract: `{"start":…,"end":…,"period":…}` (T4 on the coordinates) |
+| `SsrBundle { members }` | the hull | `members` = a JSON array, one object per member: `{"start":…,"end":…,"period":…,"motif":…}` — the member's span cut back to whole motif copies, its motif's length, and the motif (T4 on the coordinates; the motif added 2026-10-11, [`str_bundle_loci.md`](str_bundle_loci.md) §5.1, §6.2) |
 
 `SsrSegment`'s accessors are [`segment_criteria.rs:284-330`](../../../../src/ng/region_typing/segment_criteria.rs);
 `RepeatInterval`'s fields are
@@ -390,6 +392,11 @@ checks its own equivalent pair in the CLI
 ([`ssr_catalog.rs:78-83`](../../../../src/pop_var_caller/ssr_catalog.rs)) and is **not** the precedent
 to copy here: a second check in the CLI is a second place for the rule to drift, and this one already
 carries both numbers in its message.
+
+**Changed 2026-10-11** ([`str_bundle_loci.md`](str_bundle_loci.md) §5.1): members are now
+`BundleMember`s, **1-based inclusive** like the hull, so both get the same `-1` on the way out and the
+two-directions trap below no longer exists. The paragraph is kept as the record of why the helper is
+shared.
 
 **T4 — one row, two coordinate systems, in opposite directions.** The hull is a `GenomeRegion`:
 **1-based inclusive** ([`types.rs:55-59`](../../../../src/ng/types.rs)). Its member tracts are

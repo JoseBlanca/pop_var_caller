@@ -72,6 +72,7 @@
 //! silently both end with a parity test failing for a reason nobody can find** (spec §4.2).
 
 use super::emission::Emission;
+use super::ssr_unit_robust::{Aligned, AnchorRule, FlankEvidence, resolve_anchors};
 use super::{BestPathAligner, ReadBases, RepeatContext, RepeatSpan};
 use crate::float;
 use std::sync::LazyLock;
@@ -433,14 +434,44 @@ fn band_width(
 pub struct SsrFlatGapAligner<E: Emission> {
     emission: E,
     costs: TransitionCosts,
+    /// When a crossed junction counts as an anchor. `None` — production's positional test, what
+    /// [`new`](Self::new) builds — calls a flank anchored whenever the path crossed into it;
+    /// `Some` adds the unit-robust aligner's evidence test on top (see
+    /// [`with_anchor_rule`](Self::with_anchor_rule)).
+    anchor: Option<AnchorRule>,
 }
 
 impl<E: Emission> SsrFlatGapAligner<E> {
+    /// Algorithm 3 as ported: a flank is anchored when the path crossed into it. The parity
+    /// oracle and every bake-off build this.
     #[must_use]
     pub fn new(emission: E) -> Self {
         Self {
             emission,
             costs: TransitionCosts::new(),
+            anchor: None,
+        }
+    }
+
+    /// Algorithm 3 with the **firm-anchor test** of the unit-robust delimiter
+    /// ([`super::ssr_unit_robust`], [`AnchorRule`]): a flank the path crossed counts as anchored
+    /// only when the read's bases **matched** it beside the junction. The scoring, the band and
+    /// the offsets are unchanged; only the anchoring is, and only ever downward — a `Between`
+    /// may become one-sided, nothing else changes.
+    ///
+    /// **What it is for: the STR bundle's hull** (`str_bundle_loci.md` §6.1). A read that ends
+    /// inside a hull, on a base that is also the right flank's first, can have the rest of the
+    /// hull deleted, that one base matched to the flank and the frame's end run off — and the
+    /// positional test then calls the flank anchored and reports the read complete, spelled over
+    /// part of the hull. On the stuttering benchmark (one sample, PCR, 30×) that was 7.4 crossing
+    /// reads in 1,000 at a bundle, against 0.0 at a segment, whose delimiter has this test; with
+    /// it, 0.2.
+    #[must_use]
+    pub fn with_anchor_rule(emission: E, anchor: AnchorRule) -> Self {
+        Self {
+            emission,
+            costs: TransitionCosts::new(),
+            anchor: Some(anchor),
         }
     }
 
@@ -676,6 +707,19 @@ impl<E: Emission> SsrFlatGapAligner<E> {
         let mut tract_start = 0usize; // default: no left flank consumed
         let mut tract_end = read_len; // default: no right flank — runs to the read's end
 
+        // The firm-anchor test's evidence (only gathered under `with_anchor_rule`): read bases
+        // aligned against each flank, and those that agree inside the window abutting the
+        // junction — exactly what the unit-robust traceback counts.
+        let aligned = Aligned {
+            read: bases,
+            reference,
+        };
+        let window = self.anchor.map_or(0, |rule| rule.window);
+        let left_window = left_junction.saturating_sub(window)..left_junction;
+        let right_window = right_junction..(right_junction + window).min(reference_len);
+        let mut left_evidence = FlankEvidence::default();
+        let mut right_evidence = FlankEvidence::default();
+
         let mut row_index = read_len;
         let mut column = reference_len;
         let mut state = final_state;
@@ -689,6 +733,23 @@ impl<E: Emission> SsrFlatGapAligner<E> {
                     }
                     if right_flank_len > 0 && consumed == right_junction {
                         tract_end = row_index - 1;
+                    }
+                    if self.anchor.is_some() {
+                        if consumed < left_junction {
+                            left_evidence.support += 1;
+                            if left_window.contains(&consumed)
+                                && aligned.bases_agree(row_index - 1, consumed)
+                            {
+                                left_evidence.matches += 1;
+                            }
+                        } else if consumed >= right_junction {
+                            right_evidence.support += 1;
+                            if right_window.contains(&consumed)
+                                && aligned.bases_agree(row_index - 1, consumed)
+                            {
+                                right_evidence.matches += 1;
+                            }
+                        }
                     }
                     row_index -= 1;
                     column -= 1;
@@ -736,6 +797,32 @@ impl<E: Emission> SsrFlatGapAligner<E> {
             tract_start <= tract_end,
             "inverted tract offsets: {tract_start} > {tract_end}"
         );
+        if let Some(rule) = self.anchor {
+            // The positional test, then the evidence test on top of it, which only demotes and
+            // never removes the last anchor (`resolve_anchors`). A demoted side falls back to the
+            // read's own edge, as the unit-robust traceback does, so a one-sided span still runs
+            // to the read's end and stays a lower bound.
+            let crossed = (
+                left_flank_len > 0 && tract_start != 0,
+                right_flank_len > 0 && tract_end != read_len,
+            );
+            let (left_anchored, right_anchored) = resolve_anchors(
+                crossed,
+                (left_evidence, right_evidence),
+                rule,
+                (left_flank_len, right_flank_len),
+            );
+            return Some(TractReadout {
+                tract_start: if left_anchored { tract_start as u64 } else { 0 },
+                tract_end: if right_anchored {
+                    tract_end as u64
+                } else {
+                    read_len as u64
+                },
+                left_anchored,
+                right_anchored,
+            });
+        }
         Some(TractReadout {
             tract_start: tract_start as u64,
             tract_end: tract_end as u64,
@@ -952,6 +1039,7 @@ mod tests {
                 ln_gap_open_tract: float::ln(GAP_OPEN_PROB),
                 ..TransitionCosts::new()
             },
+            anchor: None,
         };
         let stutter = StutterModel::hipstr_shipped();
         let context = RepeatContext {
@@ -1134,6 +1222,7 @@ mod tests {
         let aligner = SsrFlatGapAligner {
             emission: FlatEmission::try_new(0.75).expect("a valid test error rate"),
             costs: flat_costs,
+            anchor: None,
         };
         let stutter = StutterModel::hipstr_shipped();
         let context = RepeatContext {
@@ -1662,5 +1751,88 @@ mod tests {
             reused, fresh,
             "a stale band cell leaked across the size drop"
         );
+    }
+
+    // --- The opt-in firm-anchor test (`with_anchor_rule`, used for STR bundles) ---
+
+    fn delimit_anchored(
+        read: &[u8],
+        reference: &[u8],
+        geometry: &RepeatGeometry,
+    ) -> Option<TractReadout> {
+        let aligner = SsrFlatGapAligner::with_anchor_rule(
+            PerQualityEmission::new(),
+            crate::alignment::ssr_unit_robust::AnchorRule::default(),
+        );
+        let stutter = StutterModel::hipstr_shipped();
+        let context = RepeatContext {
+            geometry,
+            stutter: &stutter,
+        };
+        let quality = vec![35u8; read.len()];
+        let bases = ReadBases::try_new(read, &quality).expect("matched lengths");
+        let mut scratch = ViterbiScratch::new();
+        aligner.delimit(bases, reference, &context, &mut scratch)
+    }
+
+    /// **The read the anchor test exists for**, taken from the stuttering benchmark (one sample,
+    /// PCR, 30×; chr1:144,818, an STR bundle's hull `A10 CTACTC A8`). The read carries `A11` and
+    /// ends there, inside the hull. The positional test lets the path take ten `A`s, delete the
+    /// rest of the hull, put the eleventh `A` against the right flank's first base and run off the
+    /// frame's end — and calls the right flank anchored: a complete observation of `A10`, a hull
+    /// with fourteen bases missing. Under the anchor rule one mismatched flank base is no anchor,
+    /// and the read is a lower bound running to its own end.
+    #[test]
+    fn the_anchor_rule_turns_a_fabricated_complete_into_a_lower_bound() {
+        let left = b"TACGCGTCCTTCCGC";
+        let tract = b"AAAAAAAAAACTACTCAAAAAAAA";
+        let right = b"CGTGGAGTTGGTGCA";
+        let (reference, geometry) = frame(left, tract, right, b"A");
+        let read = [left.as_slice(), b"AAAAAAAAAAA"].concat();
+
+        let positional = delimit(&read, &reference, &geometry).expect("a real frame");
+        assert!(
+            positional.left_anchored && positional.right_anchored,
+            "the fixture must reach the fabricated complete: {positional:?}"
+        );
+        assert_eq!(
+            &read[positional.tract_start as usize..positional.tract_end as usize],
+            b"AAAAAAAAAA",
+            "spelled over part of the hull"
+        );
+        let anchored = delimit_anchored(&read, &reference, &geometry).expect("a real frame");
+        assert!(
+            anchored.left_anchored && !anchored.right_anchored,
+            "{anchored:?}"
+        );
+        assert_eq!(anchored.tract_start, positional.tract_start);
+        assert_eq!(
+            anchored.tract_end,
+            read.len() as u64,
+            "a lower bound runs to the read's end"
+        );
+    }
+
+    /// **On every read whose flanks the read really holds, the rule changes nothing**: the
+    /// clean, longer, shorter, interrupted and run-off reads of this module's tests come back
+    /// with the same offsets and anchors either way.
+    #[test]
+    fn the_anchor_rule_leaves_reads_that_hold_their_flanks_unchanged() {
+        let (reference, geometry) = frame(b"ACGTACGT", b"CAGCAGCAGCAG", b"TTGGTTGGAT", b"CAG");
+        for read in [
+            b"ACGTACGTCAGCAGCAGCAGTTGGTTGGAT".as_slice(),
+            b"ACGTACGTCAGCAGCAGCAGCAGCAGTTGGTTGGAT",
+            b"ACGTACGTCAGCAGCAGTTGGTTGGAT",
+            b"ACGTACGTCAGCAGCTGCAGTTGGTTGGAT",
+            b"ACGTACGTCAGCAGCAG",
+            b"CAGCAGTTGGTTGGAT",
+        ] {
+            assert_eq!(
+                delimit_anchored(read, &reference, &geometry),
+                delimit(read, &reference, &geometry),
+                "read {}",
+                String::from_utf8_lossy(read)
+            );
+        }
     }
 }

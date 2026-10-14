@@ -397,6 +397,10 @@ mod tests {
         file.stated_constants
             .repeat_tract_outlier_weight
             .standard_error = None;
+        // Younger still than version 2: the bundle cap, which a file this old cannot record.
+        if let Some(routing) = &mut file.repeat_routing {
+            routing.max_str_bundle_len = None;
+        }
         file
     }
 
