@@ -121,8 +121,8 @@ impl ParametersFile {
         // **Both a zero and a future version are refused**, which is the shape the project's other
         // TOML artefact already uses (`SampleSummaryError::UnsupportedVersion`). A version this
         // build knows passes. Versions 1 and 2 spell the repeat-tract keys differently from
-        // version 3, so whether such a file can be read at all is the reader's question, not
-        // this check's (`FORMAT_VERSION`).
+        // version 3, and the reader rewrites such a file into version 3 as it reads it, so a file
+        // read from text never reaches this check saying 1 or 2 (`FORMAT_VERSION`).
         if self.format_version == 0 || self.format_version > super::FORMAT_VERSION {
             return Err(refuse(
                 "format_version",

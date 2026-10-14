@@ -203,8 +203,9 @@ use serde::{Deserialize, Serialize};
 /// `allele_length_variation_by_period`; each row's `concentration` became `between_locus_share`,
 /// with `between_locus_share_standard_error` beside it, and its `shares_by_repeat_offset` became
 /// `share_of_chromosomes_by_repeat_offset`; and `fallback_length_spectrum_concentration` became
-/// `fallback_between_locus_share`. **This build reads only version 3**: a file written by an earlier build is refused until its keys are
-/// migrated on reading (the next step of `doc/devel/ng/impl_plan/str_penalised_fit.md`).
+/// `fallback_between_locus_share`. **A file written in version 1 or 2 is rewritten into version 3
+/// as it is read**, each concentration converted to its F, and reads back saying version 3
+/// ([`ParametersFile::from_toml`]).
 pub const FORMAT_VERSION: u32 = 3;
 
 /// **Why a parameters file could not be used.**
@@ -228,11 +229,14 @@ pub enum ParametersFileError {
     Malformed {
         /// The 1-based line the failure is on, where the failure has a position.
         ///
-        /// **`None` where the error carries no byte span.** Nothing measured on this reader has
-        /// produced one — every failure over a swept family of truncated files named a line
-        /// (`however_the_file_is_truncated_the_failure_still_names_a_line`) — but the crate's
-        /// span is an `Option` and some of its constructors take none, so this cannot be a bare
-        /// `usize` without inventing a line for a failure that has no place.
+        /// **`None` where the error carries no byte span.** For a file read from its text nothing
+        /// measured has produced one — every failure over a swept family of truncated files named
+        /// a line (`however_the_file_is_truncated_the_failure_still_names_a_line`) — but the
+        /// crate's span is an `Option` and some of its constructors take none, so this cannot be
+        /// a bare `usize` without inventing a line for a failure that has no place. **A file
+        /// written before format 3 always gives `None`**: it is rewritten into format 3 and read
+        /// from the parsed result, which has no lines. The parser's own message, this error's
+        /// source, names the key path instead ([`ParametersFile::from_toml`]).
         line: Option<usize>,
         /// What the parser said, kept as the source rather than folded into the message above.
         ///
@@ -262,7 +266,12 @@ pub enum ParametersFileError {
         /// nothing here can reproduce those; it stays as this error's `source`. What this adds is
         /// the one clause a geneticist can act on, at the head of the chain.
         ///
-        /// **It is `None` for every shape it does not recognise**, so a message this module has
+        /// **For a file written before format 3 it is never `None`.** It ends with one fixed
+        /// sentence listing each key format 3 renamed beside its old name, because the parser
+        /// read the rewritten file and names a key in format 3's spelling, which the person's own
+        /// file may not contain.
+        ///
+        /// **Otherwise it is `None` for every shape it does not recognise**, so a message this module has
         /// not met degrades to the parser's own rather than to a wrong translation. Both halves of
         /// the message it does recognise are `serde`'s rather than the `toml` crate's, so it is a
         /// `serde` upgrade that could reword them, and one that did would lose the clause instead

@@ -125,7 +125,7 @@ what goes with it (arch §4.1).
   of 100,000 draws; 7 million in the review); added helper `concentration_error_of`; a row's F is
   checked as the file is parsed; the writer stops, naming the class, on a concentration or error with
   no valid F. Oracle: only the two parameters files moved, re-recorded in the baseline.
-- ☐ **B3** `migrate_to_format_3` on the parsed TOML; a version-3 file still deserialised from its
+- ✅ **B3** `migrate_to_format_3` on the parsed TOML; a version-3 file still deserialised from its
   text; `version_1_as_written.toml` restored to its old keys (from `aa42d629~1`); `from_toml.rs:367`
   expects version 3. Tests: a format-1 file and both format-2 spellings read back with F = 1/(1+c); an
   old file's error names its key path. *Depends:* B2. *Source:* arch §2.3; companion §2.2.
