@@ -12,7 +12,7 @@
 //! **The file's F is converted here and nowhere else.** No other code writes F into the file or
 //! turns the file's F back into a concentration, so the two directions cannot drift apart. The
 //! fits compute `1 / (1 + c)` internally as a working quantity (`penalised_fit.rs`, which
-//! optimises on the logit of F, and `composite_fit.rs`); that is not the file's value. Three
+//! optimises on the logit of F, and `expected_counts.rs`); that is not the file's value. Three
 //! functions cross the file's edge:
 //!
 //! | function | what it converts |

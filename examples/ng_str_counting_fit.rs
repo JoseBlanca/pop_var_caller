@@ -1,4 +1,4 @@
-//! **Every repeat class of a cohort fitted by counting** (`ssr_fit::composite_fit`): stutter,
+//! **Every repeat class of a cohort fitted by counting** (`ssr_fit::expected_counts`): stutter,
 //! allele-length shares and spread by expectation maximisation, with no average over tract
 //! frequencies (the owner's routes 1 and 2, 2026-10-11). Writes one row a class in the columns
 //! `ng_str_class_spectra` writes for the usual fit, so the two can be compared class by class; the
@@ -16,7 +16,7 @@ use clap::Parser;
 use pop_var_caller::cli::estimate_parameters::{
     EstimateParametersArgs, OpenedCensuses, contig_id_of, open_the_censuses,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
     fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{

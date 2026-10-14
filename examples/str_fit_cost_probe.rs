@@ -40,10 +40,10 @@ use pop_var_caller::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
     CohortModel, LociPerClass, StutterRegime, draw_period,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::counting_fit_errors::sandwich_errors;
+use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
     expected_counts, fit_class_by_counting_with_pairs, fit_spread_by_pairs,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::counting_fit_errors::sandwich_errors;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, fit_period_by_penalised_counting,
 };

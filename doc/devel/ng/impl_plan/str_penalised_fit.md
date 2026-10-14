@@ -150,7 +150,7 @@ what goes with it (arch §4.1).
   `scripts/research/str_fit_fixture.py` (exact = bits; tolerance = counts equal, 1e-6 relative + 1e-12).
   The prototype fits every class of a motif length in one loop, so the rounds recorded are the loop's,
   not a class's. Found: its numbers move by up to 1.3e-8 relative with the thread count — C3's target.
-- ☐ **C1** `composite_fit.rs` renamed `expected_counts.rs`; no code change. *Depends:* C0.
+- ✅ **C1** `composite_fit.rs` renamed `expected_counts.rs`; no code change. *Depends:* C0.
   *Source:* arch, Module home.
 - ☐ **C2** `PenalisedFitConfig::production()`, `allele_span` and the named constants; the functions on
   the fit's path take the window from `PenalisedFitConfig`; the research-only fields removed, and with

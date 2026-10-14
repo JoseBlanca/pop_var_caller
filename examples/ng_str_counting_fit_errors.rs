@@ -1,5 +1,5 @@
 //! **Are the counting fit's standard errors honest?** Draws many repeat classes from a known truth,
-//! fits each by counting (`ssr_fit::composite_fit`), computes each number's error three ways
+//! fits each by counting (`ssr_fit::expected_counts`), computes each number's error three ways
 //! (`ssr_fit::counting_fit_errors`), and counts how often the truth lies within one and two
 //! reported errors of the estimate. An honest error holds the truth within one error about 68
 //! times in 100 and within two about 95 times in 100.
@@ -36,11 +36,11 @@ use clap::Parser;
 use rayon::prelude::*;
 
 use pop_var_caller::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
-use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
-    ConcentrationSource, CountedClass, fit_class_by_counting, fit_class_by_counting_with_pairs,
-};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::counting_fit_errors::{
     BootstrapSettings, CountedClassErrors, bootstrap_errors, sandwich_errors,
+};
+use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
+    ConcentrationSource, CountedClass, fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     Slippage, SsrFitConfig, StratumError, StratumEvidence, bench_fixtures,

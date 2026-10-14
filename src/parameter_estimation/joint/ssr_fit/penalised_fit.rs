@@ -2,7 +2,7 @@
 //! reference repeat count** — penalised expectation maximisation, a research prototype
 //! (`doc/devel/ng/research/str_fit_research_plan.md`, avenue D).
 //!
-//! The counting fit ([`composite_fit`](super::composite_fit)) fits each class — one motif length,
+//! The counting fit ([`expected_counts`](super::expected_counts)) fits each class — one motif length,
 //! one reference repeat count — on its own, and the curves across repeat count are drawn afterwards
 //! through its answers. Here each round gathers every class's expected counts exactly as the
 //! counting fit does ([`expected_counts`]), and then chooses all the classes' numbers together: each
@@ -23,7 +23,7 @@
 
 use std::time::Instant;
 
-use super::composite_fit::{ClassCounts, SamplePairs, expected_counts};
+use super::expected_counts::{ClassCounts, SamplePairs, expected_counts};
 use super::*;
 
 /// **How the penalised fit runs.**
@@ -317,7 +317,7 @@ pub struct PenalisedPeriodFit {
 /// (multipliers are not fitted here). The allele window is `config.allele_span`.
 ///
 /// With [`PenalisedFitConfig::pair_alternations`] above zero, the between-locus share is then read
-/// off pairs of samples at a locus, as [`fit_class_by_counting_with_pairs`](super::composite_fit::fit_class_by_counting_with_pairs)
+/// off pairs of samples at a locus, as [`fit_class_by_counting_with_pairs`](super::expected_counts::fit_class_by_counting_with_pairs)
 /// does, its curve penalised like every other: each round of pairs alternates with penalised
 /// counting at the shares held.
 ///
@@ -2023,7 +2023,7 @@ impl BandCholesky {
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
-    use crate::parameter_estimation::joint::ssr_fit::composite_fit::fit_class_by_counting_at_share_prior;
+    use crate::parameter_estimation::joint::ssr_fit::expected_counts::fit_class_by_counting_at_share_prior;
 
     /// **The banded Cholesky solves what a dense solve does**, on a random positive-definite
     /// matrix of bandwidth four.

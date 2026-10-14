@@ -17,6 +17,12 @@
 //! Each round shares every read between "read exactly" and "slipped this far, this way", given each
 //! sample's genotype probabilities, and every sample's alleles among the lengths; the slip rate, the
 //! shorter share, the fall-off and the shares then follow from the expected counts.
+//!
+//! **Why the file is named for the expected counts.** The penalised fit
+//! ([`penalised_fit`](super::penalised_fit)) becomes the production fit, and what it takes from here is
+//! that first step — [`expected_counts`] and [`ClassCounts`] — and the likelihood of pairs of
+//! samples ([`SamplePairs`]). The counting fit's own drivers (`fit_class_by_counting*`) stay here
+//! as the zero-penalty answer the penalised fit's tests compare against.
 
 use super::*;
 

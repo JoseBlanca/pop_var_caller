@@ -70,8 +70,8 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-pub mod composite_fit;
 pub mod counting_fit_errors;
+pub mod expected_counts;
 pub mod genotype_rows;
 pub mod library_stutter;
 pub mod neighbour_start;

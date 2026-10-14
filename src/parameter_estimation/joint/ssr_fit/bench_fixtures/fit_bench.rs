@@ -334,7 +334,7 @@ impl PeriodFit for TheClimb {
 }
 
 /// **Method B: the counting fit**, class by class
-/// ([`fit_class_by_counting_with_pairs`](super::super::composite_fit::fit_class_by_counting_with_pairs)
+/// ([`fit_class_by_counting_with_pairs`](super::super::expected_counts::fit_class_by_counting_with_pairs)
 /// with `pairs`, the within-sample version without), as `examples/ng_str_counting_fit.rs` runs it.
 /// A class with fewer loci carrying reads than the climb's refusal floor is left absent, as that
 /// example leaves it. Its concentration is absent where the fit cannot place it.
@@ -350,7 +350,7 @@ pub struct TheCountingFit {
     pub alternations: usize,
     pub errors: CountingFitErrorMethod,
     /// The shares' prior weight, in tracts
-    /// ([`SHARE_PRIOR_TRACTS`](super::super::composite_fit::SHARE_PRIOR_TRACTS) by default; zero is
+    /// ([`SHARE_PRIOR_TRACTS`](super::super::expected_counts::SHARE_PRIOR_TRACTS) by default; zero is
     /// the fit before the prior). Read only with `pairs`.
     pub share_prior_tracts: f64,
 }
@@ -373,7 +373,7 @@ impl Default for TheCountingFit {
             tolerance: 1e-7,
             alternations: 10,
             errors: CountingFitErrorMethod::Sandwich,
-            share_prior_tracts: super::super::composite_fit::SHARE_PRIOR_TRACTS,
+            share_prior_tracts: super::super::expected_counts::SHARE_PRIOR_TRACTS,
         }
     }
 }
@@ -422,7 +422,7 @@ impl PeriodFit for TheCountingFit {
                     return ClassEstimate::absent(evidence);
                 }
                 let fit = if self.pairs {
-                    super::super::composite_fit::fit_class_by_counting_with_pairs_at_share_prior(
+                    super::super::expected_counts::fit_class_by_counting_with_pairs_at_share_prior(
                         evidence,
                         start,
                         homozygote_excess,
@@ -433,7 +433,7 @@ impl PeriodFit for TheCountingFit {
                         self.share_prior_tracts,
                     )
                 } else {
-                    super::super::composite_fit::fit_class_by_counting(
+                    super::super::expected_counts::fit_class_by_counting(
                         evidence,
                         start,
                         homozygote_excess,

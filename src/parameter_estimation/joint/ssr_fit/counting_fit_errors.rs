@@ -1,4 +1,4 @@
-//! **Standard errors for the counting fit** ([`composite_fit`](super::composite_fit)), two ways:
+//! **Standard errors for the counting fit** ([`expected_counts`](super::expected_counts)), two ways:
 //! resampling the class's tracts, and the sandwich formula.
 //!
 //! **Why the plain curvature is not enough.** The counting fit scores each sample at a tract as if
@@ -30,7 +30,7 @@
 //! of the curvature is not symmetric, and the formula is `A⁻¹ B A⁻ᵀ` with `A` the slopes' change
 //! and `B` the tract-to-tract spread of the slopes.
 
-use super::composite_fit::{
+use super::expected_counts::{
     ConcentrationSource, CountedClass, Counts, PairCubic, SHARE_PRIOR_TRACTS,
     expected_counts_by_tract, pair_cubics_by_tract, refit_class_by_counting_from,
     scaled_ln_pairs_of_tract,
@@ -744,7 +744,7 @@ fn error_of_spread(spread: f64) -> StratumError {
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
-    use crate::parameter_estimation::joint::ssr_fit::composite_fit::fit_class_by_counting_with_pairs;
+    use crate::parameter_estimation::joint::ssr_fit::expected_counts::fit_class_by_counting_with_pairs;
 
     const TRUTH: Slippage = Slippage {
         level: 0.08,

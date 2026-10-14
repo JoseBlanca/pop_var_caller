@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use pop_var_caller::float;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::draw_stratum;
-use pop_var_caller::parameter_estimation::joint::ssr_fit::composite_fit::{
+use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
     fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
