@@ -130,8 +130,9 @@ pub struct PenalisedPoint {
 **`curve_weight()` returns `Option<f64>`, `None` for a penalised point** *(lead, 2026-10-14)*
 (`slippage_curve.rs:539-545`, `share_curve.rs:592-598`). **Calling's `warrant_of`**
 (`calling/inference/repeat_tract_parameters.rs:1154`) **tests the source by an exhaustive match**:
-`Cell`, `Stratum` and `PenalisedCurve` are `FittedHere`; `Curve` and `Blend` are `Borrowed` as today
-(companion §2.3).
+`Cell`, `Stratum` and `PenalisedCurve` are `FittedHere`; `Curve`, and `Blend` at any weight above 0,
+are `Borrowed`, as today — a `Blend` at weight 0 carries only the class's own fit and stays
+`FittedHere` (companion §2.3; owner, 2026-10-14).
 
 **Errors beside a penalised point are kept and accepted** (companion §2.3):
 `OwnFitStandardErrors::of_the_numbers_emitted` (`stratum_fits.rs:107-126`) and `an_own_fit_error`'s
