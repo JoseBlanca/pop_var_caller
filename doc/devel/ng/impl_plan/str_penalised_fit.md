@@ -143,9 +143,13 @@ what goes with it (arch §4.1).
 
 ### Milestone C — the fit
 
-- ☐ **C0** The prototype's reference numbers recorded as a fixture beside the bench: `D_tract_prior`
+- ✅ **C0** The prototype's reference numbers recorded as a fixture beside the bench: `D_tract_prior`
   at the cells of `compare_D_prior_2026-10-14.md` with the production settings (spec §2.7), every
   number and every class's rounds. *Depends:* —. *Source:* spec §4.2; arch §6.
+  *Done:* `bench_fixtures/d_tract_prior_reference.jsonl.gz`, 153 runs, compared by
+  `scripts/research/str_fit_fixture.py` (exact = bits; tolerance = counts equal, 1e-6 relative + 1e-12).
+  The prototype fits every class of a motif length in one loop, so the rounds recorded are the loop's,
+  not a class's. Found: its numbers move by up to 1.3e-8 relative with the thread count — C3's target.
 - ☐ **C1** `composite_fit.rs` renamed `expected_counts.rs`; no code change. *Depends:* C0.
   *Source:* arch, Module home.
 - ☐ **C2** `PenalisedFitConfig::production()`, `allele_span` and the named constants; the functions on

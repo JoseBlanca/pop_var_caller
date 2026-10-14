@@ -525,6 +525,32 @@ impl Default for ThePenalisedFit {
     }
 }
 
+impl ThePenalisedFit {
+    /// **The whole fit of one motif length**: every class's numbers and errors, the curves with
+    /// their strengths, and how many rounds each part of the loop ran. [`PeriodFit::fit_period`]
+    /// keeps only the classes' numbers of this same fit; the bench's reference fixture records all
+    /// of it, so a later change to the fit can be checked against every number and every round
+    /// count.
+    #[must_use]
+    pub fn fit_period_in_full(
+        &self,
+        classes: &[StratumEvidence],
+        homozygote_excess: &[f64],
+        allele_span: i32,
+    ) -> super::super::penalised_fit::PenalisedPeriodFit {
+        let config = SsrFitConfig {
+            allele_span,
+            ..SsrFitConfig::default()
+        };
+        super::super::penalised_fit::fit_period_by_penalised_counting(
+            classes,
+            homozygote_excess,
+            &config,
+            &self.config,
+        )
+    }
+}
+
 impl PeriodFit for ThePenalisedFit {
     fn name(&self) -> String {
         if let Some(label) = self.label {
@@ -544,16 +570,7 @@ impl PeriodFit for ThePenalisedFit {
         homozygote_excess: &[f64],
         allele_span: i32,
     ) -> Vec<ClassEstimate> {
-        let config = SsrFitConfig {
-            allele_span,
-            ..SsrFitConfig::default()
-        };
-        let fitted = super::super::penalised_fit::fit_period_by_penalised_counting(
-            classes,
-            homozygote_excess,
-            &config,
-            &self.config,
-        );
+        let fitted = self.fit_period_in_full(classes, homozygote_excess, allele_span);
         classes
             .iter()
             .zip(fitted.classes)

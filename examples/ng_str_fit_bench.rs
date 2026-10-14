@@ -35,6 +35,12 @@
 //! `fit_seconds` (the fit on every locus), `heldout_fit_seconds`, `heldout_score_seconds`,
 //! `draw_seconds` and `peak_rss_mib` (Linux only; elsewhere `NA`).
 //!
+//! `--fixture-out` writes none of that. It fits one penalised method on every locus and writes one
+//! line of JSON holding everything the fit returned at full precision — each class's numbers and
+//! standard errors, the curves and their strengths, and the round counts. That line is the unit of
+//! the reference fixture which `scripts/research/str_fit_fixture.py` records and compares
+//! against.
+//!
 //! **Peak memory is the process's**, so a run with several methods reports the largest of them. To
 //! measure each method, run one method a process, as `scripts/research/str_fit_grid.sh` does; it
 //! also records the process's peak through `/usr/bin/time`, which works on macOS too.
@@ -58,9 +64,13 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_be
     Sampler, ScoringFallback, TheClimb, TheCountingFit, ThePenalisedFit, numbers_for_scoring,
     score_locus, with_the_curves, without_fold,
 };
+use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
+    ParameterCurve as FittedCurve, PenalisedPeriodFit,
+};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence, TractReads,
 };
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(about = "Score repeat-tract fitting methods on a cohort drawn from a known model")]
@@ -122,8 +132,17 @@ struct Cli {
     #[arg(long)]
     climb_strata_at_once: Option<usize>,
     /// Where the rows go.
-    #[arg(long)]
-    out: PathBuf,
+    #[arg(long, required_unless_present = "fixture_out")]
+    out: Option<PathBuf>,
+    /// **Record the reference fixture instead of the rows**: fit the one penalised method named in
+    /// `--methods` on every locus, write everything the fit returns to this file as one line of
+    /// JSON — every number of every class at full precision, the curves, and the round counts —
+    /// and stop. No held-out score is computed. `scripts/research/str_fit_fixture.py` runs the
+    /// recorded cells this way and compares the result with the recorded fixture. **Not with
+    /// `--out`**: this mode writes no rows. `D_working_F` records the same line as `D`, because
+    /// the line holds both concentrations either way.
+    #[arg(long, conflicts_with = "out")]
+    fixture_out: Option<PathBuf>,
     /// Where the truth goes, one row a class.
     #[arg(long)]
     truth_out: Option<PathBuf>,
@@ -159,34 +178,19 @@ struct Cli {
     between_locus_share: Option<f64>,
 }
 
-/// The method a name on the command line stands for. **A new method adds a line here.**
-fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
-    match name {
-        "A" => {
-            let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-            Box::new(TheClimb {
-                config: SsrFitConfig {
-                    strata_at_once: NonZeroUsize::new(cli.climb_strata_at_once.unwrap_or(threads))
-                        .unwrap_or(NonZeroUsize::MIN),
-                    ..SsrFitConfig::default()
-                },
-            })
-        }
-        "B" => Box::new(TheCountingFit {
-            share_prior_tracts: cli
-                .share_prior_tracts
-                .unwrap_or(TheCountingFit::default().share_prior_tracts),
-            ..TheCountingFit::default()
-        }),
-        "D" => Box::new(ThePenalisedFit::default()),
-        "D_working_F" => Box::new(ThePenalisedFit {
+/// The penalised fit a name on the command line stands for, or `None` when the name is another
+/// method's.
+fn penalised_method_named(name: &str) -> Option<ThePenalisedFit> {
+    let fit = match name {
+        "D" => ThePenalisedFit::default(),
+        "D_working_F" => ThePenalisedFit {
             report_working_concentration: true,
             ..ThePenalisedFit::default()
-        }),
+        },
         "D_tract_prior" => {
             let mut fit = ThePenalisedFit::default();
             fit.config.allele_prior_tracts = 1.0;
-            Box::new(fit)
+            fit
         }
         // Reshaped priors on the shares, for measuring (shares_prior report).
         "D_prior_skip1" | "D_prior_skip2" | "D_prior_skip4" | "D_prior_skip6"
@@ -205,8 +209,36 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
             fit.config.allele_prior_fixed_draws = fixed;
             fit.config.allele_prior_skips_within = skip;
             fit.label = Some(label);
-            Box::new(fit)
+            fit
         }
+        _ => return None,
+    };
+    Some(fit)
+}
+
+/// The method a name on the command line stands for. **A new method adds a line here**, or in
+/// [`penalised_method_named`] for a variant of the penalised fit.
+fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
+    if let Some(fit) = penalised_method_named(name) {
+        return Box::new(fit);
+    }
+    match name {
+        "A" => {
+            let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+            Box::new(TheClimb {
+                config: SsrFitConfig {
+                    strata_at_once: NonZeroUsize::new(cli.climb_strata_at_once.unwrap_or(threads))
+                        .unwrap_or(NonZeroUsize::MIN),
+                    ..SsrFitConfig::default()
+                },
+            })
+        }
+        "B" => Box::new(TheCountingFit {
+            share_prior_tracts: cli
+                .share_prior_tracts
+                .unwrap_or(TheCountingFit::default().share_prior_tracts),
+            ..TheCountingFit::default()
+        }),
         "B_within" => Box::new(TheCountingFit {
             pairs: false,
             ..TheCountingFit::default()
@@ -492,6 +524,125 @@ fn peak_rss_mib() -> Option<f64> {
     })
 }
 
+/// A number for the fixture at full precision: JSON's shortest form that reads back to the same
+/// `f64`. JSON has no NaN or infinity, so those are written as the strings `"NaN"`, `"inf"` and
+/// `"-inf"`, which keeps them apart from an absent number (`null`).
+fn exact(value: f64) -> Value {
+    if value.is_finite() {
+        Value::from(value)
+    } else {
+        Value::String(format!("{value}"))
+    }
+}
+
+fn exact_or_null(value: Option<f64>) -> Value {
+    value.map_or(Value::Null, exact)
+}
+
+fn exact_all(values: &[f64]) -> Value {
+    Value::Array(values.iter().copied().map(exact).collect())
+}
+
+fn curve_json(curve: &FittedCurve) -> Value {
+    json!({
+        "first_repeats": curve.first_repeats,
+        "values": exact_all(&curve.values),
+        "smoothing": exact(curve.smoothing),
+        "eased_at": curve.eased_at,
+    })
+}
+
+/// **Everything one penalised fit of one motif length returned**, as the fixture's line for one
+/// cell and seed. Times are kept apart under `seconds`, which a comparison ignores; `settings` is
+/// the fit's configuration as Rust prints it, for the reader, and is not compared either.
+///
+/// **`input` records what the fit was given**: the sample-locus rows with reads over every class,
+/// and each class's loci with reads. A comparison checks these first, so a change in the draw
+/// (`cohort_draw.rs`, the `rand` crate) is reported as a moved input rather than as a moved fit.
+fn fixture_line(
+    cell_columns: Value,
+    method: &ThePenalisedFit,
+    classes: &[StratumEvidence],
+    fitted: &PenalisedPeriodFit,
+    draw_seconds: f64,
+    fit_seconds: f64,
+) -> Value {
+    let class_lines: Vec<Value> = classes
+        .iter()
+        .zip(&fitted.classes)
+        .map(|(evidence, class)| {
+            let repeats = evidence.stratum.reference_repeats;
+            match class {
+                None => json!({ "repeats": repeats, "fitted": false }),
+                Some(class) => json!({
+                    "repeats": repeats,
+                    "fitted": true,
+                    "level": exact(class.slippage.level),
+                    "shorter_share": exact(class.slippage.shorter_share),
+                    "fall_off": exact(class.slippage.fall_off),
+                    "allele_length_variation": exact_all(&class.allele_length_variation),
+                    "concentration": exact_or_null(class.concentration),
+                    "between_locus_share": exact_or_null(class.between_locus_share),
+                    "working_concentration": exact(class.working_concentration),
+                    "errors": class.errors.as_ref().map_or(Value::Null, |errors| json!({
+                        "level": exact_or_null(errors.level),
+                        "shorter_share": exact_or_null(errors.shorter_share),
+                        "fall_off": exact_or_null(errors.fall_off),
+                        "concentration": exact_or_null(errors.concentration),
+                        "between_locus_share": exact_or_null(errors.between_locus_share),
+                        "allele_length_variation": exact_all(&errors.allele_length_variation),
+                    })),
+                }),
+            }
+        })
+        .collect();
+    let curves = fitted.curves.as_ref().map_or(Value::Null, |curves| {
+        json!({
+            "level": curve_json(&curves.level),
+            "shorter_share": curve_json(&curves.shorter_share),
+            "fall_off": curve_json(&curves.fall_off),
+            "between_locus_share": curves.between_locus_share.as_ref().map_or(Value::Null, curve_json),
+            "allele_length_variation":
+                Value::Array(curves.allele_length_variation.iter().map(curve_json).collect()),
+        })
+    });
+    let input = json!({
+        "rows_with_reads": classes.iter().map(StratumEvidence::rows_with_reads).sum::<usize>(),
+        "classes": classes
+            .iter()
+            .map(|evidence| json!({
+                "repeats": evidence.stratum.reference_repeats,
+                "loci_with_reads":
+                    evidence.tracts.iter().filter(|tract| !tract.samples.is_empty()).count(),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    json!({
+        "run": cell_columns,
+        "input": input,
+        "method": method.name(),
+        "rounds": fitted.rounds,
+        "rounds_per_counting": fitted.rounds_per_counting,
+        "rounds_choosing_strength": fitted.rounds_choosing_strength,
+        "pair_alternations": fitted.pair_alternations,
+        "class_rounds_counted": fitted.class_rounds_counted,
+        "last_change": exact(fitted.last_change),
+        "composite_log_likelihood": exact(fitted.composite_log_likelihood),
+        "classes": class_lines,
+        "curves": curves,
+        "seconds": {
+            "draw": draw_seconds,
+            "fit": fit_seconds,
+            "expectation": fitted.expectation_seconds,
+            "maximisation": fitted.maximisation_seconds,
+            "strength_search": fitted.strength_search_seconds,
+            "pair": fitted.pair_seconds,
+            "errors": fitted.error_seconds,
+        },
+        "settings": format!("{:?}", method.config),
+    })
+}
+
 /// A locus's Monte Carlo seed, the same for every method so their scores share their draws.
 fn locus_seed(settings: &HeldOutSettings, repeats: u64, locus: usize) -> u64 {
     settings.seed ^ (repeats << 40) ^ (locus as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -538,6 +689,46 @@ fn main() {
         write_truth_tsv(&drawn.truth, ALLELE_SPAN, BufWriter::new(file))
             .expect("the truth file writes");
     }
+
+    if let Some(path) = &cli.fixture_out {
+        let [name] = cli.methods.as_slice() else {
+            panic!("--fixture-out records one method; name exactly one in --methods");
+        };
+        let method = penalised_method_named(name)
+            .unwrap_or_else(|| panic!("--fixture-out records a penalised fit; {name} is not one"));
+        let started = Instant::now();
+        let fitted =
+            method.fit_period_in_full(&drawn.strata, &drawn.homozygote_excess, ALLELE_SPAN);
+        let fit_seconds = started.elapsed().as_secs_f64();
+        eprintln!(
+            "{cell}: {} fitted every locus in {fit_seconds:.1} s, {} rounds",
+            method.name(),
+            fitted.rounds
+        );
+        let line = fixture_line(
+            json!({
+                "cell": cell,
+                "period": model.period,
+                "samples": model.samples,
+                "depth": exact(model.depth),
+                "truth_variant": truth_variant,
+                "seed": model.seed,
+            }),
+            &method,
+            &drawn.strata,
+            &fitted,
+            draw_seconds,
+            fit_seconds,
+        );
+        let partial = path.with_extension("partial");
+        std::fs::write(&partial, format!("{line}\n")).expect("the fixture file writes");
+        std::fs::rename(&partial, path).expect("the fixture file moves into place");
+        return;
+    }
+    let out_path = cli
+        .out
+        .clone()
+        .expect("--out is required without --fixture-out");
 
     let mut rows = Rows {
         cell_columns: format!(
@@ -865,7 +1056,7 @@ fn main() {
     }
     rows.push("process", "all", "peak_rss_mib", None, peak_rss_mib(), None);
 
-    let partial = cli.out.with_extension("partial");
+    let partial = out_path.with_extension("partial");
     {
         let mut out = BufWriter::new(File::create(&partial).expect("the rows file opens"));
         writeln!(
@@ -879,7 +1070,7 @@ fn main() {
         }
         out.flush().expect("the rows file writes");
     }
-    std::fs::rename(&partial, &cli.out).expect("the rows file moves into place");
+    std::fs::rename(&partial, &out_path).expect("the rows file moves into place");
 }
 
 /// **The read offset most of a locus's reads report**, summed over its samples, and the share the
