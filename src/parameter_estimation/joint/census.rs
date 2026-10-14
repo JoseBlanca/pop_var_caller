@@ -497,6 +497,51 @@ pub struct GuardObservation {
     pub reads: u16,
 }
 
+/// The two counts the guard's threshold compares at one tract: reads the guard caught, and reads
+/// that differ from the reference tract length by a whole number of repeats.
+///
+/// **The threshold is a test of the tract, so it is applied once, to these counts summed over
+/// every sample and read group with reads there** (spec `parameter_prepass_joint_records.md`
+/// §3.3). One read group's share of them is what a census section holds
+/// ([`SsrEvidence::section_guard_tally`]); testing that share on its own lets a single stray
+/// read in one sample of thousands remove the tract for the whole cohort, because at three reads
+/// a sample one non-whole read beside no other differing read is already one in one. Until
+/// 2026-10-14 the fit did exactly that.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct GuardTally {
+    /// Reads whose tract length differs from the reference's by something that is not a whole
+    /// number of repeat units.
+    pub non_whole_reads: u64,
+    /// Reads whose tract length differs from the reference's by one or more whole repeat units.
+    pub whole_repeat_differing_reads: u64,
+}
+
+impl GuardTally {
+    /// Add another read group's counts at the same tract.
+    pub fn add(&mut self, other: GuardTally) {
+        self.non_whole_reads += other.non_whole_reads;
+        self.whole_repeat_differing_reads += other.whole_repeat_differing_reads;
+    }
+
+    /// Of the reads that differ from the reference tract length, how many in each one the guard
+    /// caught; `None` when no read differs.
+    pub fn non_whole_share(self) -> Option<f64> {
+        let differing = self.non_whole_reads + self.whole_repeat_differing_reads;
+        (differing > 0).then(|| self.non_whole_reads as f64 / differing as f64)
+    }
+
+    /// Whether more than one read in ten of those that differ from the reference tract length is
+    /// one the guard caught.
+    ///
+    /// **Above that the tract is not something this noise model describes**, and the fit should
+    /// say so rather than fit it. It is not an error at write time: a tract over the threshold is
+    /// well-formed data, and encoding it as a write failure would make a property of the sample
+    /// look like a property of the file.
+    pub fn is_over_threshold(self) -> bool {
+        self.non_whole_reads * 10 > self.non_whole_reads + self.whole_repeat_differing_reads
+    }
+}
+
 /// One mismatching base on one read.
 ///
 /// **Offsets record length, and a substitution that does not change a tract's length is
@@ -771,25 +816,25 @@ impl SsrEvidence {
         &self.walked
     }
 
-    /// Whether the guard has caught more than one read in ten of those that differ from the
-    /// reference tract length.
+    /// This read group's share of the guard's counts at one tract.
     ///
-    /// **Above that the locus is not something this noise model describes**, and the fit
-    /// should say so rather than fit it. It is not an error at write time: a locus over the
-    /// threshold is well-formed data, and encoding it as a write failure would make a
-    /// property of the sample look like a property of the file.
-    pub fn guard_is_over_threshold(&self, locus: usize) -> bool {
-        let guarded: u32 = self
+    /// **Only a share**: the threshold is tested on these summed over every sample and read
+    /// group at the tract ([`GuardTally`]), never on one section's alone.
+    pub fn section_guard_tally(&self, locus: usize) -> GuardTally {
+        let non_whole_reads: u64 = self
             .guard
             .iter()
             .filter(|entry| entry.locus as usize == locus)
-            .map(|entry| u32::from(entry.reads))
+            .map(|entry| u64::from(entry.reads))
             .sum();
-        let differing: u32 = (-RECORDED_OFFSET_RANGE..=RECORDED_OFFSET_RANGE)
+        let whole_repeat_differing_reads: u64 = (-RECORDED_OFFSET_RANGE..=RECORDED_OFFSET_RANGE)
             .filter(|offset| *offset != 0)
-            .map(|offset| u32::from(self.offsets[locus].at(offset)))
+            .map(|offset| u64::from(self.offsets[locus].at(offset)))
             .sum();
-        guarded * 10 > differing + guarded
+        GuardTally {
+            non_whole_reads,
+            whole_repeat_differing_reads,
+        }
     }
 }
 
@@ -3251,14 +3296,40 @@ mod tests {
             length_difference: 1,
             reads: 1,
         });
-        assert!(!records.guard_is_over_threshold(0), "1 in 19 is under");
+        assert!(
+            !records.section_guard_tally(0).is_over_threshold(),
+            "1 in 19 is under"
+        );
 
         records.guard.push(GuardObservation {
             locus: 0,
             length_difference: 1,
             reads: 2,
         });
-        assert!(records.guard_is_over_threshold(0), "3 in 21 is over");
+        assert!(
+            records.section_guard_tally(0).is_over_threshold(),
+            "3 in 21 is over"
+        );
+    }
+
+    /// **Sections add before the test**: two read groups, each one in two on its own, are 2 in
+    /// 24 together once a third read group's twenty whole-repeat reads are counted with them.
+    #[test]
+    fn the_guard_counts_add_across_read_groups_before_the_threshold() {
+        let one_stray = GuardTally {
+            non_whole_reads: 1,
+            whole_repeat_differing_reads: 1,
+        };
+        assert!(one_stray.is_over_threshold());
+        let mut tract = one_stray;
+        tract.add(one_stray);
+        tract.add(GuardTally {
+            non_whole_reads: 0,
+            whole_repeat_differing_reads: 20,
+        });
+        assert_eq!(tract.non_whole_share(), Some(2.0 / 24.0));
+        assert!(!tract.is_over_threshold());
+        assert_eq!(GuardTally::default().non_whole_share(), None);
     }
 
     // ---- what a piece of the census is ---------------------------------------

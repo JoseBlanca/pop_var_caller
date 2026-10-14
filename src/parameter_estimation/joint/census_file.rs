@@ -930,7 +930,7 @@ pub(crate) mod tests_support {
 
     /// Terms whose kept-loci digest witnesses two real positions in two different megabases, so
     /// the block list is not empty and its round trip is asserted rather than assumed.
-    pub(super) fn terms() -> RecordingTerms {
+    pub(crate) fn terms() -> RecordingTerms {
         let mut digester = CensusLociDigester::new();
         for (index, position) in [7_u64, 4_000_003].into_iter().enumerate() {
             digester.observe(
