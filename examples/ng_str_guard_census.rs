@@ -17,7 +17,9 @@
 //!
 //! It then gathers the evidence as `estimate-parameters` does, which prints the run's own
 //! "repeat-tract evidence: arranged … left out by the guard" line: that number must equal this
-//! tool's count under the spec's test.
+//! tool's count under the spec's test. **On a large cohort that step holds the arranged evidence
+//! — 19.4 GiB on 2,169 tomato samples — so `SKIP_GATHER=1` stops before it**; the counts above
+//! are complete without it.
 //!
 //! ```text
 //! cargo run --release --example ng_str_guard_census -- \
@@ -257,6 +259,9 @@ fn main() {
     println!("kept before and left out now: {newly_dropped} (expected 0)");
 
     // The run's own gathering, which prints the evidence line this tool's counts must match.
+    if std::env::var("SKIP_GATHER").is_ok_and(|value| value == "1") {
+        return;
+    }
     let pooled = every_read_group_pooled(&evidence);
     let gathered: Vec<StratumEvidence> =
         gather_strata(&mut evidence, &kept, &pooled).unwrap_or_else(|error| panic!("{error}"));
