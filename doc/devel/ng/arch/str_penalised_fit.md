@@ -166,6 +166,7 @@ converted only at the file's edge (§2.3) *(lead, 2026-10-14)*. The prototype's 
 | F absent (its error, `concentration`) | `NotPlaced` |
 | class with fewer than `LOCI_FOR_AN_ERROR` loci with reads | `TooFewLoci` |
 | a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` | `TooFewLoci` |
+| an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — as the climb judges it (`ssr_fit.rs:2172`) | `NotPlaced` |
 | a positive, finite error | `Estimated` |
 | zero, absent or not finite | `NotPlaced` |
 
