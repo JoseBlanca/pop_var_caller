@@ -1237,10 +1237,17 @@ fn median_concentration(fitted: &BTreeMap<Stratum, FittedAlleleLengthVariation>)
         concentrations[middle]
     } else {
         // The mean of the two middle shares, `F̄ = (1/(1 + c1) + 1/(1 + c2)) / 2`, converted back
-        // by `(1 − F̄) / F̄`, is algebraically `(c1 + c2 + 2·c1·c2) / (2 + c1 + c2)`. The closed
-        // form is used because the round trip cancels: below about 1e-16 both shares round to
-        // 1.0 and `1 − F̄` is exactly zero, where the closed form stays positive for any two
-        // positive concentrations.
+        // by `(1 − F̄) / F̄`, is algebraically `(c1 + c2 + 2·c1·c2) / (2 + c1 + c2)`: the round
+        // trip through the file's conversions, `between_locus_share_of` and `concentration_of`
+        // (`calling/parameters_file/between_locus_share.rs`, whose test
+        // `the_mean_of_two_shares_converted_back_matches_the_closed_form` checks that round trip
+        // against its own copy of this closed form; it would not notice a change here). This
+        // file's `the_stated_concentration_is_the_median_of_the_runs_own_fitted_ones` pins this
+        // function to the same 29/6 that test expects.
+        // They are not called here, because `parameter_estimation` imports nothing from
+        // `calling`. The closed form is used because the round trip cancels: below about 1e-16
+        // both shares round to 1.0 and `1 − F̄` is exactly zero, where the closed form stays
+        // positive for any two positive concentrations.
         let (c1, c2) = (concentrations[middle - 1], concentrations[middle]);
         (c1 + c2 + 2.0 * c1 * c2) / (2.0 + c1 + c2)
     }

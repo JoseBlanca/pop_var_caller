@@ -164,6 +164,7 @@
 //!   hand-written writer that means to match serde's bytes has to do the same — or, better,
 //!   choose its own order and pin it with its own golden file.
 
+mod between_locus_share;
 mod bindings;
 mod defaults;
 mod from_run_parameters;
@@ -174,6 +175,9 @@ mod validate;
 mod what_was_fitted;
 mod written_beside_the_vcf;
 
+pub use between_locus_share::{
+    BetweenLocusShare, between_locus_share_error_of, between_locus_share_of, concentration_of,
+};
 pub use bindings::{CensusAgreement, ParametersForThisRun};
 pub use defaults::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
 pub use from_run_parameters::ReadsBehindEachCalibration;
