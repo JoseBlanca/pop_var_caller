@@ -1221,4 +1221,36 @@ mod tests {
         fill_bundle_seed_share_per_candidate(&[], &no_run, &mut shares);
         assert!(shares.iter().all(|share| close(*share, 0.25)));
     }
+
+    /// **A run whose class kept its own shares at the stated concentration ranks between a run on
+    /// its own fit and a run on its period's pool** (`str_fit_to_calling.md` §3.2), so a bundle
+    /// reports it as its weakest rung beside the first and not beside the second.
+    #[test]
+    fn a_bundle_ranks_the_own_shares_at_the_stated_spread_between_own_fit_and_pool() {
+        let (long, narrow) = (leaning_long(), narrow());
+        let own_shares_stated_spread =
+            AlleleLengthVariation::fitted(&narrow, 2.0, FittedFrom::ThisStratumsSharesStatedSpread);
+        let beside_own_fit = BundlePrior {
+            reference_run_counts: vec![11, 5],
+            run_spectra: vec![own_fit(&long, 7.5), own_shares_stated_spread],
+            stated_concentration: 2.0,
+        };
+        assert_eq!(
+            beside_own_fit.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+
+        let beside_pool = BundlePrior {
+            reference_run_counts: vec![11, 5],
+            run_spectra: vec![
+                AlleleLengthVariation::fitted(&long, 7.5, FittedFrom::ItsPeriodsPooledTracts),
+                own_shares_stated_spread,
+            ],
+            stated_concentration: 2.0,
+        };
+        assert_eq!(
+            beside_pool.rung(),
+            AlleleLengthVariationRung::PeriodsPooledTracts
+        );
+    }
 }

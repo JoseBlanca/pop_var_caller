@@ -1295,10 +1295,10 @@ impl<'a> FrozenParameters<'a> {
     /// the shape on that candidate and flatten the prior. The argument is named for the tract
     /// for the same reason the others are named for the candidate.
     ///
-    /// **It always answers**, at one of three rungs — the stratum's own fit, its motif period's
-    /// pooled tracts, or a flat shape at a stated concentration — so a repeat tract is never
-    /// left without a prior. Which rung it was is on the returned value and belongs in the
-    /// run's output.
+    /// **It always answers**, at one of four rungs — the stratum's own fit, the stratum's own
+    /// shares held at the stated concentration, its motif period's pooled tracts, or a flat
+    /// shape at the stated concentration — so a repeat tract is never left without a prior.
+    /// Which rung it was is on the returned value and belongs in the run's output.
     #[inline]
     #[must_use]
     pub fn ssr_allele_length_variation_at(

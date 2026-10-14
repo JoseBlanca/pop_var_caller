@@ -447,7 +447,9 @@ impl ParametersFile {
                     },
                     FittedAlleleLengthVariation {
                         weights: row.shares_by_repeat_offset.clone(),
-                        concentration: row.concentration,
+                        concentration: Some(row.concentration),
+                        // Format 2 carries no concentration error; format 3 adds it.
+                        concentration_standard_error: None,
                     },
                 )
             })
@@ -460,7 +462,9 @@ impl ParametersFile {
                     row.period,
                     FittedAlleleLengthVariation {
                         weights: row.shares_by_repeat_offset.clone(),
-                        concentration: row.concentration,
+                        concentration: Some(row.concentration),
+                        // Format 2 carries no concentration error; format 3 adds it.
+                        concentration_standard_error: None,
                     },
                 )
             })
@@ -1338,9 +1342,9 @@ mod the_north_star_round_trip {
     //!
     //! **What the second of those adds is the lookup**, which a file comparison cannot reach at
     //! all: `StratumFits::at`'s four answers for a cell with no numbers, the three rungs of
-    //! `allele_length_variation_at`, and the bottom rung's median. None of that is written down anywhere
-    //! in the file — the file carries the rows the lookup is built from, and the lookup is what
-    //! a locus asks.
+    //! `allele_length_variation_at` a format-2 file can carry, and the bottom rung's median.
+    //! None of that is written down anywhere in the file — the file carries the rows the lookup
+    //! is built from, and the lookup is what a locus asks.
     //!
     //! **Two things the trip does not cover, and neither is this step's.** The identity block —
     //! the digest, the census, the sample list and the read-group table — is fed back into the
@@ -2018,17 +2022,20 @@ mod the_north_star_round_trip {
                 *rungs
                     .entry(match was.rung() {
                         AlleleLengthVariationRung::StratumsOwnFit => "its own",
+                        AlleleLengthVariationRung::StratumsOwnSharesStatedSpread => {
+                            "its own shares at the stated spread"
+                        }
                         AlleleLengthVariationRung::PeriodsPooledTracts => "its period's",
                         AlleleLengthVariationRung::StatedFlat => "the flat one",
                     })
                     .or_default() += 1;
             }
         }
-        // **All three rungs of the ladder are walked**, which is what stops this comparing one
-        // rung with itself thirty-six times. Measured rather than reasoned about: the 16 strata
-        // fitted on their own tracts take the top rung; the 16 of the two curved periods that
-        // were not — 8 derived and 8 refused — take their period's pool; and the 4 refused strata
-        // of the period that has no curves, and so no pool, fall to the flat one.
+        // **All three rungs a format-2 file can carry are walked**, which is what stops this
+        // comparing one rung with itself thirty-six times. Measured rather than reasoned about:
+        // the 16 strata fitted on their own tracts take the top rung; the 16 of the two curved
+        // periods that were not — 8 derived and 8 refused — take their period's pool; and the 4
+        // refused strata of the period that has no curves, and so no pool, fall to the flat one.
         assert_eq!(
             rungs,
             BTreeMap::from([("its own", 16), ("its period's", 16), ("the flat one", 4)])

@@ -695,13 +695,22 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
             .collect(),
         allele_length_variation_by_stratum: fits
             .fitted_allele_length_variation_of_each_stratum()
-            .map(|(stratum, shares_by_repeat_offset, concentration)| {
-                StratumAlleleLengthVariationRow {
-                    period: stratum.period,
-                    reference_repeats: stratum.reference_repeats,
-                    concentration,
-                    shares_by_repeat_offset: shares_by_repeat_offset.to_vec(),
-                }
+            .map(|(stratum, fitted)| StratumAlleleLengthVariationRow {
+                period: stratum.period,
+                reference_repeats: stratum.reference_repeats,
+                // **Format 2 has no way to say a concentration is absent**, so a stratum without
+                // one cannot be written down until format 3 makes the row's key optional. Only the
+                // climb fits a run today, and it fills every concentration. The error has no key
+                // before format 3 either, and is not written.
+                concentration: fitted.concentration.unwrap_or_else(|| {
+                    panic!(
+                        "period {}, {} repeats holds an allele length variation with no \
+                         concentration, which a format-{FORMAT_VERSION} parameters file cannot \
+                         carry",
+                        stratum.period, stratum.reference_repeats
+                    )
+                }),
+                shares_by_repeat_offset: fitted.weights.clone(),
             })
             .collect(),
         allele_length_variation_by_period: fits

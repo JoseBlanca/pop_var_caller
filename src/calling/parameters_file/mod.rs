@@ -1041,8 +1041,8 @@ pub enum SeedRung {
 ///
 /// Its axes are what matter (spec §3.7). The slippage numbers are keyed by **slippage group**
 /// and not by read group, which is what stops the section growing with the number of libraries;
-/// the allele length variations are keyed by stratum and by motif period, the two fitted rungs of the
-/// tract ladder.
+/// the allele length variations are keyed by stratum and by motif period, the two tables the tract
+/// ladder's rungs that carry shares are read from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepeatTracts {

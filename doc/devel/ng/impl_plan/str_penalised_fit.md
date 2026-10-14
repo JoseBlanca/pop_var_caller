@@ -79,7 +79,7 @@ what goes with it (arch §4.1).
 - ✅ **A3** `LevelSource::PenalisedCurve`, `ShareSource::PenalisedCurve`, `PenalisedPoint`,
   `StratumError::TooFewLoci` — added, unused. `curve_weight()` returns `Option<f64>`; `warrant_of`
   matches the source exhaustively. *Depends:* —. *Source:* arch §1.3–1.4.
-- ☐ **A4** `FittedAlleleLengthVariation::concentration` becomes `Option<f64>`, with
+- ✅ **A4** `FittedAlleleLengthVariation::concentration` becomes `Option<f64>`, with
   `concentration_standard_error`; `AlleleLengthVariationRung::StratumsOwnSharesStatedSpread` and
   `FittedFrom::ThisStratumsSharesStatedSpread` added; `allele_length_variation_at`,
   `checked_allele_length_variation` and `fitted_allele_length_variation_of_each_stratum` handle

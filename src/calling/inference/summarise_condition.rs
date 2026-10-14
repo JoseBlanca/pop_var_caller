@@ -2448,8 +2448,9 @@ where
         // **Both have a fallback ladder and only one of them reports which rung it used.** The
         // ordinary-site ladder is `population_diversity.md` §3.4's, as amended by
         // `ordinary_site_seed.md` §4, and its rung is resolved when the run's seed is projected
-        // and is not carried onto a locus; the tract ladder's three rungs are §4.4's, and the
-        // rung comes back on the lookup and travels onto this locus's record.
+        // and is not carried onto a locus; the tract ladder's rungs are §4.4's three plus the
+        // one `str_fit_to_calling.md` §3.2 adds between the top two, and the rung comes back on
+        // the lookup and travels onto this locus's record.
         let allele_length_variation_rung = match evidence {
             LocusEvidence::Generic { .. } => {
                 let _ = fill_locus_concentration(

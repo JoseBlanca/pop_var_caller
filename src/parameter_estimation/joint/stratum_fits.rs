@@ -182,14 +182,18 @@ pub enum NoSlippage {
 mod checked_spectrum {
     use super::AlleleLengthVariationRung;
 
-    /// **Which of the two fitted rungs an allele length variation came from.**
+    /// **Which of the three rungs that carry shares an allele length variation came from.**
     ///
-    /// Two-valued where [`AlleleLengthVariationRung`] is three-valued, so that
-    /// [`AlleleLengthVariation::fitted`] has no unreachable arm for the rung that has no weights.
+    /// One value fewer than [`AlleleLengthVariationRung`], which also has the flat bottom rung,
+    /// so that [`AlleleLengthVariation::fitted`] has no unreachable arm for the rung that has no
+    /// weights.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FittedFrom {
-        /// The stratum's own tracts.
+        /// The stratum's own tracts: its shares and its concentration.
         ThisStratum,
+        /// **The stratum's own shares, held at the stated concentration**, because the fit
+        /// reported no concentration for it (`doc/devel/ng/spec/str_fit_to_calling.md` §3.2).
+        ThisStratumsSharesStatedSpread,
         /// Every tract of the stratum's motif period, pooled.
         ItsPeriodsPooledTracts,
     }
@@ -224,7 +228,7 @@ mod checked_spectrum {
     /// and this repository has shipped that shape of test before.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct AlleleLengthVariation<'a> {
-        /// **`None` on the bottom rung and `Some` on the other two**, which is the invariant the
+        /// **`None` on the bottom rung and `Some` on the other three**, which is the invariant the
         /// two constructors hold and the reason the field is private.
         weights: Option<&'a [f64]>,
         concentration: f64,
@@ -232,7 +236,8 @@ mod checked_spectrum {
     }
 
     impl<'a> AlleleLengthVariation<'a> {
-        /// Wrap a fitted shape and the strength it is held with, at one of the two fitted rungs.
+        /// Wrap a fitted shape and the strength it is held with, at one of the three rungs that
+        /// carry shares.
         ///
         /// `weights` sums to one; `concentration` is the Dirichlet total those shares are the
         /// mean of.
@@ -271,6 +276,9 @@ mod checked_spectrum {
                 concentration,
                 rung: match from {
                     FittedFrom::ThisStratum => AlleleLengthVariationRung::StratumsOwnFit,
+                    FittedFrom::ThisStratumsSharesStatedSpread => {
+                        AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+                    }
                     FittedFrom::ItsPeriodsPooledTracts => {
                         AlleleLengthVariationRung::PeriodsPooledTracts
                     }
@@ -302,8 +310,9 @@ mod checked_spectrum {
         /// The fitted shares, or nothing on the bottom rung — where the shape is flat over the
         /// locus's own candidate lengths and there is no vector to hand out.
         ///
-        /// **The two fitted rungs are deliberately one answer here.** A consumer builds the same
-        /// seed from either; what differs is the provenance, which [`Self::rung`] carries.
+        /// **The three rungs that carry shares are deliberately one answer here.** A consumer
+        /// builds the same seed from any of them; what differs is the provenance, which
+        /// [`Self::rung`] carries.
         #[inline]
         #[must_use]
         pub fn fitted_weights(&self) -> Option<&'a [f64]> {
@@ -355,10 +364,23 @@ pub use checked_spectrum::{AlleleLengthVariation, FittedFrom};
 ///
 /// **Separate from [`AlleleLengthVariation`] because it outlives it.** The spectrum borrows the run's
 /// frozen parameters and dies with the locus; the rung is what an output carries.
+///
+/// **The order the variants are declared in is their rank, strongest first.** The enum derives
+/// `Ord`, and a repeat-tract bundle reports the largest rung among its runs as the weakest thing
+/// its prior rests on ([`BundlePrior::rung`](crate::calling::genotype_prior::seed_ssr::BundlePrior::rung)).
+/// A new rung goes where it falls in the ladder, not at the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlleleLengthVariationRung {
     /// Fitted here, from this stratum's own tracts.
     StratumsOwnFit,
+    /// **This stratum's own shares, held at the stated concentration**, because the fit placed
+    /// no concentration for it — at one sample, nothing in the data can
+    /// (`doc/devel/ng/spec/str_fit_to_calling.md` §3.2, decided by the owner 2026-10-14).
+    ///
+    /// **Ranked above the period's pool** because the class's own shares were measured to predict
+    /// held-out tracts better than a flat shape, and the pool is no longer produced, so its order
+    /// against this rung was never measured (same section).
+    StratumsOwnSharesStatedSpread,
     /// Borrowed from the stratum's motif period, pooled over every tract of it.
     PeriodsPooledTracts,
     /// Defaulted: no fit for this period at all.
@@ -367,8 +389,14 @@ pub enum AlleleLengthVariationRung {
 
 /// One fitted allele length variation and the strength it is held with, owned.
 ///
-/// Both a stratum's own fit and a period's pool produce exactly this, which is why the two
-/// rungs are one type here and two variants at the lookup.
+/// Both a stratum's own fit and a period's pool produce exactly this, which is why they are one
+/// type here. The lookup tells them apart, and tells a stratum with a concentration from one
+/// without.
+///
+/// **A period's pool always carries a concentration**: both doors onto the pooled table refuse
+/// one without ([`StratumFits::of_gathered_rows`] and
+/// [`StratumFits::with_period_allele_length_variations`]), because the ladder has no rung for a
+/// pooled shape at a stated strength.
 ///
 /// **Public, and its fields with it, so that [`StratumFits::of_gathered_rows`] has a named pair
 /// to take** — the alternative was a bare `(Vec<f64>, f64)` in that signature, where the two
@@ -380,8 +408,14 @@ pub struct FittedAlleleLengthVariation {
     /// The share of this stratum's chromosomes at each whole-repeat offset from the reference
     /// length, running from `-span` to `+span` — an odd count, summing to one.
     pub weights: Vec<f64>,
-    /// How many chromosomes' worth of belief the shares are held with.
-    pub concentration: f64,
+    /// How many chromosomes' worth of belief the shares are held with — **`None` where the fit
+    /// reported none**, as it does at one sample (`doc/devel/ng/spec/str_fit_to_calling.md`
+    /// §3.2). Such a stratum is seeded from its own shares at the stated concentration.
+    pub concentration: Option<f64>,
+    /// The concentration's standard error, on the concentration's own scale; `None` where the
+    /// fit gave it none, and always where the concentration itself is `None`
+    /// (`str_fit_to_calling.md` §2.1).
+    pub concentration_standard_error: Option<f64>,
 }
 
 /// **The concentration the tract ladder's bottom rung states where the run fitted no stratum
@@ -441,19 +475,21 @@ pub struct StratumFits {
     slippage_group_of: BTreeMap<ReadGroupId, u32>,
     by_stratum: BTreeMap<Stratum, StratumRow>,
     /// **Per stratum, the allele length variation and concentration its own fit produced** — the tract
-    /// ladder's top rung, harvested from the same outcomes the slippage numbers come from.
+    /// ladder's top rung, and its second rung where the fit placed no concentration; harvested
+    /// from the same outcomes the slippage numbers come from.
     ///
     /// **Only a stratum fitted on its own tracts has an entry.** One furnished from its
     /// period's slippage curves ([`DerivedStratum`](super::ssr_fit::DerivedStratum)) carries no
     /// allele length variation at all, by construction — nothing about it was estimated — and that
-    /// absence is exactly what the middle rung exists to answer.
+    /// absence is exactly what the pooled rung exists to answer.
     allele_length_variation_by_stratum: BTreeMap<Stratum, FittedAlleleLengthVariation>,
     /// **Per motif period, one allele length variation and concentration fitted over every tract of
-    /// that period pooled** — the tract ladder's middle rung. Empty unless the run asked for
+    /// that period pooled** — the tract ladder's pooled rung. Empty unless the run asked for
     /// it, which is what [`Self::with_period_allele_length_variations`] is.
     allele_length_variation_by_period: BTreeMap<u8, FittedAlleleLengthVariation>,
-    /// The strength the bottom rung states: the run's own median fitted concentration where any
-    /// stratum was fitted, and [`STATED_FLAT_CONCENTRATION`] where none was.
+    /// The strength the second rung and the bottom rung state: the run's own median fitted
+    /// concentration where any stratum has a concentration, and [`STATED_FLAT_CONCENTRATION`]
+    /// where none has.
     stated_concentration: f64,
     /// **Where that strength came from, carried rather than re-derived.**
     ///
@@ -574,16 +610,18 @@ impl StratumFits {
             );
             // **The stratum's own allele length variation, harvested from the same outcome**, and only
             // where the fit produced one: a stratum furnished from its period's slippage curves
-            // carries none, which is the absence the middle rung answers.
+            // carries none, which is the absence the pooled rung answers. **A fitted stratum with
+            // no concentration keeps its shares** (`str_fit_to_calling.md` §3.2); the lookup holds
+            // them at the stated concentration.
             if let StratumOutcome::Fitted(fit) = outcome {
                 allele_length_variation_by_stratum.insert(
                     stratum,
                     checked_allele_length_variation(
                         &fit.allele_length_variation,
-                        // Until calling's table holds an absent concentration (plan step A4), only
-                        // the climb reaches here, and it always fills one.
-                        fit.concentration
-                            .expect("the climb always fills the concentration"),
+                        fit.concentration,
+                        fit.standard_errors
+                            .as_ref()
+                            .and_then(|errors| errors.concentration.value()),
                         &format_args!(
                             "the fit of period {}, {} repeats",
                             stratum.period, stratum.reference_repeats
@@ -636,7 +674,8 @@ impl StratumFits {
     /// writes no row for such a pair rather than an empty one. On an allele length variation that is not
     /// a distribution, and on a concentration that is not finite and positive: the same checks
     /// [`Self::over`] runs, for the same reason, and here they also stand behind
-    /// `ParametersFile::validate`, which refuses the same shapes earlier and naming the key.
+    /// `ParametersFile::validate`, which refuses the same shapes earlier and naming the key. On a
+    /// period's pool with no concentration, which no rung of the ladder can hold.
     #[must_use]
     pub fn of_gathered_rows(
         slippage_group_of: BTreeMap<ReadGroupId, u32>,
@@ -690,11 +729,24 @@ impl StratumFits {
                     let checked = checked_allele_length_variation(
                         &spectrum.weights,
                         spectrum.concentration,
+                        spectrum.concentration_standard_error,
                         &format_args!("the {what} allele length variation filed under {key:?}"),
                     );
                     (key, checked)
                 })
                 .collect()
+        }
+        // **A pool without a concentration is refused**: the ladder has a rung for a stratum's
+        // own shares at the stated strength and none for a pool's (`str_fit_to_calling.md` §3.2
+        // names only the first).
+        if let Some(period) = allele_length_variation_by_period
+            .iter()
+            .find_map(|(period, pool)| pool.concentration.is_none().then_some(period))
+        {
+            panic!(
+                "the period's pooled allele length variation filed under period {period} holds no \
+                 concentration; only a stratum's own shares may be held at the stated one"
+            );
         }
         Self {
             slippage_group_of,
@@ -712,7 +764,7 @@ impl StratumFits {
         }
     }
 
-    /// **Set the tract ladder's middle rung**: one pooled allele length variation and concentration a
+    /// **Set the tract ladder's pooled rung**: one pooled allele length variation and concentration a
     /// motif period, for the strata whose own fit does not exist.
     ///
     /// **It replaces rather than merges**, as a `with_` builder does: a second call keeps only
@@ -756,7 +808,8 @@ impl StratumFits {
                 );
                 let checked = checked_allele_length_variation(
                     &pool.allele_length_variation,
-                    pool.concentration,
+                    Some(pool.concentration),
+                    None,
                     &format_args!("the pooled fit of motif period {period}"),
                 );
                 (period, checked)
@@ -777,9 +830,10 @@ impl StratumFits {
     /// what the offsets are measured from. Looking it up from a candidate would re-centre every
     /// candidate's own shape on itself and flatten the prior.
     ///
-    /// **It always answers.** The three rungs are the stratum's own fit, its motif period's
-    /// pooled tracts, and a flat shape at [`Self::stated_concentration`]; a tract can land on
-    /// the last one, never on nothing.
+    /// **It always answers.** The four rungs are the stratum's own fit; the stratum's own shares
+    /// at [`Self::stated_concentration`], where the fit reported no concentration for it; its
+    /// motif period's pooled tracts; and a flat shape at the stated concentration. A tract can
+    /// land on the last one, never on nothing.
     #[must_use]
     pub fn allele_length_variation_at(
         &self,
@@ -791,16 +845,21 @@ impl StratumFits {
             reference_repeats,
         };
         if let Some(fitted) = self.allele_length_variation_by_stratum.get(&stratum) {
-            return AlleleLengthVariation::fitted(
-                &fitted.weights,
-                fitted.concentration,
-                FittedFrom::ThisStratum,
-            );
+            let (concentration, from) = match fitted.concentration {
+                Some(own) => (own, FittedFrom::ThisStratum),
+                None => (
+                    self.stated_concentration,
+                    FittedFrom::ThisStratumsSharesStatedSpread,
+                ),
+            };
+            return AlleleLengthVariation::fitted(&fitted.weights, concentration, from);
         }
         if let Some(pooled) = self.allele_length_variation_by_period.get(&period) {
             return AlleleLengthVariation::fitted(
                 &pooled.weights,
-                pooled.concentration,
+                pooled
+                    .concentration
+                    .expect("both doors onto the pooled table refuse a pool with no concentration"),
                 FittedFrom::ItsPeriodsPooledTracts,
             );
         }
@@ -944,34 +1003,48 @@ impl StratumFits {
         })
     }
 
-    /// **Every stratum that was fitted on its own tracts: its shares by whole-repeat offset, and
-    /// the strength they are held with** — the tract ladder's top rung.
+    /// **Every stratum that was fitted on its own tracts: its shares by whole-repeat offset, the
+    /// concentration they are held with, and that concentration's error**, as the fit reported
+    /// them. The concentration and its error are `None` where the fit placed none; such a stratum
+    /// is still here, because its shares are its own.
     ///
     /// **A stratum absent here is data and not a hole**: one furnished from its period's
-    /// slippage curves was never estimated, which is what the middle rung exists to answer. The
+    /// slippage curves was never estimated, which is what the pooled rung exists to answer. The
     /// name says *fitted* for that reason — this is not one item a stratum.
     ///
-    /// **The shares are handed out borrowed rather than wrapped in a [`AlleleLengthVariation`]**, whose
-    /// `fitted_weights` is an `Option` this iterator can never leave empty — so a consumer would
-    /// carry an unwrap that cannot fire. A consumer that wants the wrapper builds one.
+    /// **The record is handed out as stored rather than wrapped in an [`AlleleLengthVariation`]**,
+    /// which holds an absent concentration already replaced by the stated one: a writer handed
+    /// the wrapper would write the stated number as though the stratum had fitted it.
     pub fn fitted_allele_length_variation_of_each_stratum(
         &self,
-    ) -> impl Iterator<Item = (Stratum, &[f64], f64)> {
+    ) -> impl Iterator<Item = (Stratum, &FittedAlleleLengthVariation)> {
         self.allele_length_variation_by_stratum
             .iter()
-            .map(|(stratum, fitted)| (*stratum, fitted.weights.as_slice(), fitted.concentration))
+            .map(|(stratum, fitted)| (*stratum, fitted))
     }
 
-    /// **Every motif period the run pooled an allele length variation over** — the tract ladder's middle
-    /// rung, and empty unless the run called [`Self::with_period_allele_length_variations`].
+    /// **Every motif period the run pooled an allele length variation over** — the tract ladder's
+    /// pooled rung, and empty unless the run called [`Self::with_period_allele_length_variations`]
+    /// or read a file that carries pools. Each yields its shares and the concentration they are
+    /// held with, which a pool always has.
     ///
-    /// Same shape and same reason as [`Self::fitted_allele_length_variation_of_each_stratum`].
+    /// The shares are handed out borrowed rather than wrapped in an [`AlleleLengthVariation`],
+    /// whose `fitted_weights` is an `Option` this iterator can never leave empty, so a consumer
+    /// would carry an unwrap that cannot fire.
     pub fn pooled_allele_length_variation_of_each_period(
         &self,
     ) -> impl Iterator<Item = (u8, &[f64], f64)> {
         self.allele_length_variation_by_period
             .iter()
-            .map(|(period, pool)| (*period, pool.weights.as_slice(), pool.concentration))
+            .map(|(period, pool)| {
+                (
+                    *period,
+                    pool.weights.as_slice(),
+                    pool.concentration.expect(
+                        "both doors onto the pooled table refuse a pool with no concentration",
+                    ),
+                )
+            })
     }
 
     /// How many strata carry an answer — what a run summary reports.
@@ -1020,11 +1093,17 @@ fn checked_stated_concentration(concentration: f64) -> f64 {
 ///
 /// On a class count that is not `2 · span + 1` for some span of at least one; on a share that is
 /// negative or not finite; on shares that do not sum to one within
-/// [`LENGTH_SPECTRUM_NORMALISATION_TOLERANCE`]; and on a concentration that is not finite and
-/// strictly positive — a Dirichlet with a total of zero has no mean.
+/// [`LENGTH_SPECTRUM_NORMALISATION_TOLERANCE`]; on a present concentration that is not finite or
+/// not strictly positive — a Dirichlet with a total of zero has no mean; and on a concentration
+/// error with no concentration beside it.
+///
+/// **An absent concentration passes**: the fit reports none where nothing in the data can place
+/// it, and the lookup then holds the stratum's shares at the stated concentration
+/// (`doc/devel/ng/spec/str_fit_to_calling.md` §3.2). Only a present one is checked.
 fn checked_allele_length_variation(
     weights: &[f64],
-    concentration: f64,
+    concentration: Option<f64>,
+    concentration_standard_error: Option<f64>,
     what: &std::fmt::Arguments<'_>,
 ) -> FittedAlleleLengthVariation {
     assert!(
@@ -1051,14 +1130,23 @@ fn checked_allele_length_variation(
          {LENGTH_SPECTRUM_NORMALISATION_TOLERANCE:e} — raw counts here would scale the tract \
          prior by the count itself"
     );
-    assert!(
-        concentration.is_finite() && concentration > 0.0,
-        "{what} was held with {concentration} chromosomes' worth of belief; a Dirichlet total is \
-         finite and strictly positive, and a zero has no mean to be the shape of"
-    );
+    match concentration {
+        Some(concentration) => assert!(
+            concentration.is_finite() && concentration > 0.0,
+            "{what} was held with {concentration} chromosomes' worth of belief; a Dirichlet total \
+             is finite and strictly positive, and a zero has no mean to be the shape of"
+        ),
+        None => assert!(
+            concentration_standard_error.is_none(),
+            "{what} carries a concentration error of {} and no concentration; an error is the \
+             error of a number, and there is none here",
+            concentration_standard_error.unwrap_or_default()
+        ),
+    }
     FittedAlleleLengthVariation {
         weights: weights.to_vec(),
         concentration,
+        concentration_standard_error,
     }
 }
 
@@ -1098,13 +1186,19 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
 /// The median of the concentrations the run's strata fitted, or [`STATED_FLAT_CONCENTRATION`]
 /// where it fitted none.
 ///
+/// **A stratum with no concentration does not count**: it has nothing to contribute, and its
+/// shares are held at this very median.
+///
 /// **The mean of the middle two at an even count**, which is the ordinary definition. The values
 /// are finite and positive by [`checked_allele_length_variation`], so the sort is total.
 fn median_concentration(fitted: &BTreeMap<Stratum, FittedAlleleLengthVariation>) -> f64 {
-    if fitted.is_empty() {
+    let mut totals: Vec<f64> = fitted
+        .values()
+        .filter_map(|fit| fit.concentration)
+        .collect();
+    if totals.is_empty() {
         return STATED_FLAT_CONCENTRATION;
     }
-    let mut totals: Vec<f64> = fitted.values().map(|fit| fit.concentration).collect();
     totals.sort_by(f64::total_cmp);
     let middle = totals.len() / 2;
     if totals.len() % 2 == 1 {
@@ -1672,7 +1766,7 @@ mod tests {
         assert_eq!(fits.strata_with_a_allele_length_variation(), 1);
     }
 
-    /// **The middle rung.** A stratum furnished from its period's slippage curves carries
+    /// **The pooled rung.** A stratum furnished from its period's slippage curves carries
     /// slippage numbers and no spectrum of its own, so it falls to the period's pooled tracts —
     /// and the two are told apart by their numbers, not only by the variant.
     #[test]
@@ -1803,6 +1897,204 @@ mod tests {
             four.stated_concentration(),
             5.0,
             "1, 4, 6 and 30 have a median of (4 + 6) / 2"
+        );
+    }
+
+    /// A stratum fitted on its own tracts whose fit reported **its shares and no concentration**,
+    /// as the fit does at one sample.
+    fn fitted_without_a_concentration(
+        at: Stratum,
+        allele_length_variation: Vec<f64>,
+    ) -> StratumOutcome {
+        let StratumOutcome::Fitted(mut fit) = fitted(at, 0.05, allele_length_variation, 1.0) else {
+            unreachable!("`fitted` builds a fitted outcome")
+        };
+        fit.concentration = None;
+        StratumOutcome::Fitted(fit)
+    }
+
+    /// **The second rung, from the fit's outcomes.** A stratum with its own shares and no
+    /// concentration keeps its shares and is held at the stated concentration, the median of the
+    /// strata that have one; it does not fall to its period's pool, which ranks below it
+    /// (`str_fit_to_calling.md` §3.2).
+    #[test]
+    fn a_stratum_with_shares_and_no_concentration_keeps_its_shares_at_the_stated_one() {
+        let own_shares = vec![0.1, 0.2, 0.7];
+        let fits = StratumFits::over(
+            &[
+                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
+                fitted_without_a_concentration(stratum(2, 12), own_shares.clone()),
+            ],
+            one_group(),
+        )
+        .with_period_allele_length_variations(BTreeMap::from([(
+            2,
+            pool(2, vec![0.2, 0.5, 0.3], 9.0),
+        )]));
+
+        let spectrum = fits.allele_length_variation_at(2, 12);
+        assert_eq!(
+            spectrum.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+        assert_eq!(spectrum.fitted_weights(), Some(&own_shares[..]));
+        assert_eq!(
+            spectrum.concentration(),
+            4.0,
+            "the stated concentration is the median of the one stratum that has one, 4; not the \
+             pool's 9"
+        );
+        assert_eq!(fits.stated_concentration(), 4.0);
+        assert_eq!(fits.strata_with_a_allele_length_variation(), 2);
+        assert_eq!(
+            fits.allele_length_variation_at(2, 10).rung(),
+            AlleleLengthVariationRung::StratumsOwnFit
+        );
+        // The writer is handed the absence, not the stated number in its place.
+        assert_eq!(
+            fits.fitted_allele_length_variation_of_each_stratum()
+                .map(|(at, fitted)| (at, fitted.concentration))
+                .collect::<Vec<_>>(),
+            vec![(stratum(2, 10), Some(4.0)), (stratum(2, 12), None)]
+        );
+    }
+
+    /// **The second rung, from a hand-built table**: the same answer when the rows come from a
+    /// parameters file instead of the fit, held at the stated concentration the file gives.
+    #[test]
+    fn a_hand_built_row_with_no_concentration_is_held_at_the_files_stated_one() {
+        let own_shares = vec![0.25, 0.5, 0.25];
+        let fits = StratumFits::of_gathered_rows(
+            one_group(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                stratum(3, 7),
+                FittedAlleleLengthVariation {
+                    weights: own_shares.clone(),
+                    concentration: None,
+                    concentration_standard_error: None,
+                },
+            )]),
+            BTreeMap::from([(
+                3,
+                FittedAlleleLengthVariation {
+                    weights: vec![0.2, 0.5, 0.3],
+                    concentration: Some(9.0),
+                    concentration_standard_error: None,
+                },
+            )]),
+            2.5,
+            Provenance::Supplied,
+        );
+
+        let spectrum = fits.allele_length_variation_at(3, 7);
+        assert_eq!(
+            spectrum.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+        assert_eq!(spectrum.fitted_weights(), Some(&own_shares[..]));
+        assert_eq!(spectrum.concentration(), 2.5);
+        assert_eq!(spectrum.allele_span(), Some(1));
+        // A stratum of the same period with no row of its own still reads the pool.
+        assert_eq!(
+            fits.allele_length_variation_at(3, 8).rung(),
+            AlleleLengthVariationRung::PeriodsPooledTracts
+        );
+    }
+
+    /// **The rungs rank in ladder order**, strongest first, because a bundle reports the largest
+    /// rung among its runs as the weakest thing its prior rests on.
+    #[test]
+    fn the_rungs_rank_in_ladder_order() {
+        use AlleleLengthVariationRung::{
+            PeriodsPooledTracts, StatedFlat, StratumsOwnFit, StratumsOwnSharesStatedSpread,
+        };
+        let mut rungs = [
+            StatedFlat,
+            PeriodsPooledTracts,
+            StratumsOwnSharesStatedSpread,
+            StratumsOwnFit,
+        ];
+        rungs.sort();
+        assert_eq!(
+            rungs,
+            [
+                StratumsOwnFit,
+                StratumsOwnSharesStatedSpread,
+                PeriodsPooledTracts,
+                StatedFlat
+            ]
+        );
+    }
+
+    /// **The concentration's error travels from the fit to the table**, and only the estimated
+    /// kind: a reason for having none is not a number.
+    #[test]
+    fn the_concentrations_error_is_taken_from_the_fit() {
+        use crate::parameter_estimation::joint::ssr_fit::{StratumError, StratumErrors};
+        let with_error = |concentration_error| {
+            let StratumOutcome::Fitted(mut fit) =
+                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)
+            else {
+                unreachable!("`fitted` builds a fitted outcome")
+            };
+            fit.standard_errors = Some(StratumErrors {
+                slippage: vec![None],
+                allele_length_variation: vec![StratumError::NotPlaced; 3],
+                concentration: concentration_error,
+            });
+            let fits = StratumFits::over(&[StratumOutcome::Fitted(fit)], one_group());
+            let (_, fitted) = fits
+                .fitted_allele_length_variation_of_each_stratum()
+                .next()
+                .expect("one stratum was fitted");
+            fitted.concentration_standard_error
+        };
+        assert_eq!(with_error(StratumError::Estimated(0.4)), Some(0.4));
+        assert_eq!(with_error(StratumError::NotPlaced), None);
+    }
+
+    /// An error with no concentration beside it is refused: there is no number for it to be the
+    /// error of.
+    #[test]
+    #[should_panic(expected = "carries a concentration error of 0.3 and no concentration")]
+    fn a_concentration_error_without_a_concentration_is_refused() {
+        let _ = StratumFits::of_gathered_rows(
+            one_group(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                stratum(2, 10),
+                FittedAlleleLengthVariation {
+                    weights: leaning_short(),
+                    concentration: None,
+                    concentration_standard_error: Some(0.3),
+                },
+            )]),
+            BTreeMap::new(),
+            1.0,
+            Provenance::Supplied,
+        );
+    }
+
+    /// **A period's pool with no concentration is refused**: the ladder holds a stratum's own
+    /// shares at the stated strength, and has no such rung for a pool.
+    #[test]
+    #[should_panic(expected = "filed under period 2 holds no concentration")]
+    fn a_pool_with_no_concentration_is_refused() {
+        let _ = StratumFits::of_gathered_rows(
+            one_group(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([(
+                2,
+                FittedAlleleLengthVariation {
+                    weights: leaning_short(),
+                    concentration: None,
+                    concentration_standard_error: None,
+                },
+            )]),
+            1.0,
+            Provenance::Supplied,
         );
     }
 
@@ -2054,9 +2346,16 @@ mod tests {
 
         assert_eq!(
             fits.fitted_allele_length_variation_of_each_stratum()
-                .map(|(at, shares, concentration)| (at, shares.to_vec(), concentration))
+                .map(|(at, fitted)| (at, fitted.clone()))
                 .collect::<Vec<_>>(),
-            vec![(stratum(2, 10), leaning_short(), 4.0)],
+            vec![(
+                stratum(2, 10),
+                FittedAlleleLengthVariation {
+                    weights: leaning_short(),
+                    concentration: Some(4.0),
+                    concentration_standard_error: None,
+                }
+            )],
             "only the stratum fitted on its own tracts has a spectrum; the derived one carries \
              none by construction"
         );

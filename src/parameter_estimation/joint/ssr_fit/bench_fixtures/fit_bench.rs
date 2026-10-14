@@ -129,20 +129,29 @@ impl ClassEstimate {
 pub struct ScoredNumbers {
     pub numbers: ClassNumbers,
     /// **The class had no allele-length shares or no concentration of its own**, so it is scored
-    /// at a flat shape and the stated concentration, as calling would seed its prior.
+    /// at the stated concentration — at a flat shape by default, or at its own shares under
+    /// [`ScoringFallback::keep_own_shares`].
     pub on_the_fallback: bool,
 }
 
-/// **The numbers each class is scored at, with calling's fallback where a class lacks its own.**
+/// **The numbers each class is scored at, with a fallback where a class lacks its own.**
 ///
 /// Calling seeds a tract's genotype prior from the tract ladder
 /// ([`StratumFits::allele_length_variation_at`](crate::parameter_estimation::joint::stratum_fits::StratumFits::allele_length_variation_at)):
-/// the class's own shares and concentration where it has both, and otherwise a flat shape at the
-/// stated concentration — the median of the concentrations the run's classes fitted, or
+/// the class's own shares and concentration where it has both; the class's own shares at the
+/// stated concentration where it has shares and no concentration; and otherwise a flat shape at
+/// the stated concentration. The stated concentration is the median of the concentrations the
+/// run's classes fitted, or
 /// [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)
-/// where none fitted one. (The ladder's middle rung, a period's pooled tracts, is reached only when
-/// a run asks for it, and the bench does not.) So a class with shares but no concentration — the
-/// counting fit at one sample — is scored at the bottom rung, not skipped, and marked.
+/// where none fitted one. (The ladder's pooled rung, a period's pooled tracts, is reached only when
+/// a run asks for it, and the bench does not.)
+///
+/// **The default scoring still models the ladder as it was before the second rung was added**
+/// (`doc/devel/ng/spec/str_fit_to_calling.md` §3.2): a class with shares but no concentration —
+/// the counting fit at one sample — is scored at a flat shape and the stated concentration, not
+/// skipped, and marked. That keeps the bench's numbers comparable with the research results
+/// already recorded. [`ScoringFallback::keep_own_shares`] scores such a class the way calling now
+/// seeds it.
 ///
 /// The median is over `estimates`, the classes of one motif length fitted together: the bench's
 /// stand-in for a run. A class with no stutter (no answer and no curve) is still not scored.
@@ -207,12 +216,13 @@ pub fn numbers_for_scoring(
 }
 
 /// **How [`numbers_for_scoring`] fills a class that lacks its own numbers.** The default is what
-/// calling does; the two departures exist to measure what calling's choice costs, and calling is
-/// not changed by them.
+/// calling did before its ladder gained the rung that keeps a class's own shares; the two
+/// departures exist to measure what a fallback choice costs, and calling is not changed by them.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ScoringFallback {
     /// For a class with its own shares but no concentration, keep its shares and take only the
-    /// stated concentration, where calling's ladder replaces both by the bottom rung's flat shape.
+    /// stated concentration. This is what calling now does; the default replaces both by a flat
+    /// shape, which is what calling did when the recorded research results were measured.
     pub keep_own_shares: bool,
     /// The stated concentration in place of the period's median (or
     /// [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION)).
