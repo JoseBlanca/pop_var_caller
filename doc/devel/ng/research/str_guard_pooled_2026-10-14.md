@@ -138,9 +138,8 @@ defaults). Slippage level is the share of reads that slip; ± is the fit's stand
 | 2 : 15 | 26 → 30 | 0.2815 ± 0.0143 | 0.2931 ± 0.0135 | 0.840 → 0.772 | 0.262 → 0.325 |
 | 2 : 18 | 26 → 30 | 0.3143 ± 0.0219 | **0.3951 ± 0.0197** | 0.811 → 0.829 | 0.343 → 0.515 |
 
-- **The level rises in all six classes.** In the other four it moves by about one standard error or
-  less. In 2:12 it rises by 0.021, about 3.5 standard errors, and in 2:18 by 0.081,
-  about 4.
+- **The level rises in all six classes.** In 2:12 it rises by 0.021, about 3.5 standard errors, and in
+  2:18 by 0.081, about 4. In the other four it moves by about one standard error or less.
 - Adding 4 to 6 tracts to a class of 26 to 154 moves its level that far only if the added tracts
   slip much more than the rest, which matches the previous paragraph: **the old test biased the
   slippage levels of thin classes downwards**, by removing the slippiest tracts.
