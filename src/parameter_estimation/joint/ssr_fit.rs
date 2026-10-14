@@ -77,7 +77,8 @@ pub mod neighbour_start;
 
 use crate::float;
 use crate::parameter_estimation::joint::census::{
-    CensusError, CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
+    CensusError, CohortCensusEvidence, GuardTally, RECORDED_OFFSET_RANGE, SsrEvidence,
+    SsrLocusState,
 };
 use crate::parameter_estimation::joint::fit::SETTLED_FRACTION;
 use crate::parameter_estimation::joint::loci::CensusLoci;
@@ -280,10 +281,10 @@ pub struct StratumEvidence {
     /// every stratum, so no stratum can be left scoring at an old multiplier. Every library's
     /// slippage group is below [`groups`](Self::groups) ([`check_libraries`](Self::check_libraries)).
     pub libraries: Arc<[Library]>,
-    /// Tracts left out because more than one read in ten of those differing from the reference
-    /// length differed by a **non-whole** number of repeat units — the guard's threshold. Such
-    /// a tract is not something this noise model describes, and the fit says so rather than
-    /// fitting it (`parameter_prepass_joint_records.md` §3.3).
+    /// Tracts left out because, over every sample and read group, more than one read in ten of
+    /// those differing from the reference length differed by a **non-whole** number of repeat
+    /// units — the guard's threshold. Such a tract is not something this noise model describes,
+    /// and the fit says so rather than fitting it (`parameter_prepass_joint_records.md` §3.3).
     pub tracts_over_guard_threshold: u64,
     /// Reads that reached a tract and crossed no whole copy of it, so reported no length.
     /// **Not evidence about slippage and not dropped silently**: a tract longer than a read is
@@ -292,7 +293,8 @@ pub struct StratumEvidence {
     /// merely unlucky with coverage.
     pub reads_reaching_not_crossing: u64,
     /// Reads whose tract differed from the reference by a non-whole number of repeat units, at
-    /// tracts that stayed in. A diagnostic; nothing about slippage is estimated from them.
+    /// every tract of the stratum, those the guard left out included. A diagnostic; nothing
+    /// about slippage is estimated from them.
     pub guard_reads: u64,
     /// Bases of tract sequence a read was compared against, over every tract and sample — the
     /// denominator of this stratum's substitution rate.
@@ -4932,19 +4934,14 @@ pub fn gather_strata(
 
                 for locus in 0..*tracts {
                     let mut reads = TractReads::default();
-                    let mut over_guard = false;
+                    // **Summed over every sample and read group, then tested once**: the guard
+                    // is a test of the tract (spec §3.3). Tested a section at a time, one stray
+                    // read in one sample of thousands removed the tract for the whole cohort.
+                    let mut guard = GuardTally::default();
                     for (sample_index, sample) in by_sample.iter().enumerate() {
                         let mut by_library: BTreeMap<LibraryIndex, Vec<u32>> = BTreeMap::new();
                         for (read_group, records) in sample.get(stratum).into_iter().flatten() {
-                            if records.guard_is_over_threshold(locus) {
-                                over_guard = true;
-                            }
-                            evidence.guard_reads += records
-                                .guard()
-                                .iter()
-                                .filter(|entry| entry.locus as usize == locus)
-                                .map(|entry| u64::from(entry.reads))
-                                .sum::<u64>();
+                            guard.add(records.section_guard_tally(locus));
                             if records.state(locus) != SsrLocusState::Crossed {
                                 continue;
                             }
@@ -4967,7 +4964,8 @@ pub fn gather_strata(
                             });
                         }
                     }
-                    if over_guard {
+                    evidence.guard_reads += guard.non_whole_reads;
+                    if guard.is_over_threshold() {
                         evidence.tracts_over_guard_threshold += 1;
                         continue;
                     }
@@ -5192,6 +5190,91 @@ pub mod bench_fixtures {
 mod tests {
     use super::*;
     use bench_fixtures::{draw_stratum, spectrum_of};
+
+    // -----------------------------------------------------------------
+    // The guard: one test over the whole locus
+    // -----------------------------------------------------------------
+
+    /// A cohort of `samples` samples, one read group each, holding one dinucleotide tract.
+    /// Every sample has two reads at the reference length and one a repeat short; the sample
+    /// `stray` also has one read that differs by a non-whole number of repeats.
+    fn cohort_with_one_stray_read(samples: u32, stray: u32) -> CohortCensusEvidence {
+        use crate::parameter_estimation::joint::census::{
+            GuardObservation, NamedReadGroup, OffsetCounts, SampleCensusEvidence, Section,
+            SectionKey, WalkedBits,
+        };
+        use crate::parameter_estimation::joint::census_file::tests_support::terms;
+
+        let stratum = Stratum {
+            period: 2,
+            reference_repeats: 6,
+        };
+        let censuses = (0..samples)
+            .map(|sample| {
+                let group = ReadGroupId(sample);
+                let mut offsets = OffsetCounts::default();
+                offsets.add(0, 2);
+                offsets.add(-1, 1);
+                let mut walked = WalkedBits::none_of(1);
+                walked.set(0);
+                let guard = if sample == stray {
+                    vec![GuardObservation {
+                        locus: 0,
+                        length_difference: 1,
+                        reads: 1,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let records =
+                    SsrEvidence::from_parts(vec![offsets], 0, walked, 0, guard, Vec::new());
+                let name = format!("s{sample:04}");
+                SampleCensusEvidence::resident(
+                    name.clone(),
+                    terms(),
+                    NamedReadGroup::drawn_for(&name, [group]),
+                    BTreeMap::new(),
+                    BTreeMap::from([(SectionKey::Ssr(group, stratum), Section::Ssr(records))]),
+                )
+            })
+            .collect();
+        CohortCensusEvidence::new(censuses).expect("every sample recorded one way")
+    }
+
+    /// **The guard is a test of the locus, not of one sample's reads at it** (spec
+    /// `parameter_prepass_joint_records.md` §3.3). Here one sample in forty has a single read
+    /// that is not a whole number of repeats off. Pooled over the cohort that is 1 such read
+    /// among 41 that differ from the reference length — under one in ten — so the tract is
+    /// kept. Tested sample by sample, that one sample's reads are 1 in 2 and the whole
+    /// cohort would lose the tract.
+    #[test]
+    fn one_stray_read_in_one_sample_does_not_remove_the_tract_for_the_cohort() {
+        let stratum = Stratum {
+            period: 2,
+            reference_repeats: 6,
+        };
+        let mut cohort = cohort_with_one_stray_read(40, 17);
+        let groups: BTreeMap<ReadGroupId, u32> = (0..40).map(|g| (ReadGroupId(g), 0)).collect();
+        let gathered = gather_strata(&mut cohort, &[stratum], &groups).expect("resident");
+        assert_eq!(gathered[0].tracts_over_guard_threshold, 0);
+        assert_eq!(gathered[0].tracts.len(), 1, "the tract is kept");
+        assert_eq!(gathered[0].guard_reads, 1);
+    }
+
+    /// And the pooled test still removes a tract whose cohort-wide share is over one in ten: a
+    /// cohort of the one sample with the stray read is 1 non-whole read in 2 that differ.
+    #[test]
+    fn a_tract_over_one_in_ten_across_the_cohort_is_still_removed() {
+        let stratum = Stratum {
+            period: 2,
+            reference_repeats: 6,
+        };
+        let mut cohort = cohort_with_one_stray_read(1, 0);
+        let groups = BTreeMap::from([(ReadGroupId(0), 0)]);
+        let gathered = gather_strata(&mut cohort, &[stratum], &groups).expect("resident");
+        assert_eq!(gathered[0].tracts_over_guard_threshold, 1);
+        assert!(gathered[0].tracts.is_empty());
+    }
 
     // -----------------------------------------------------------------
     // What outlives the evidence
