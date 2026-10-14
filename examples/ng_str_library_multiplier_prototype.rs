@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use clap::Parser;
 
-use pop_var_caller::calling::parameters_file::ParametersFile;
+use pop_var_caller::calling::parameters_file::{ParametersFile, concentration_of};
 use pop_var_caller::cli::estimate_parameters::{
     EstimateParametersArgs, OpenedCensuses, contig_id_of, open_the_censuses,
 };
@@ -143,14 +143,19 @@ fn main() {
         let (Some(slippage), Some(spectrum)) = (slippage, spectrum) else {
             continue;
         };
+        // A class whose fit placed no between-locus share has no spread to hold, and is left out
+        // as one with no row is.
+        let Some(share) = spectrum.between_locus_share else {
+            continue;
+        };
         held.push(HeldClass {
             slippage: vec![Slippage {
                 level: slippage.share_of_reads_that_slip,
                 shorter_share: slippage.shorter_share,
                 fall_off: slippage.fall_off,
             }],
-            allele_length_variation: spectrum.shares_by_repeat_offset.clone(),
-            concentration: spectrum.concentration,
+            allele_length_variation: spectrum.share_of_chromosomes_by_repeat_offset.clone(),
+            concentration: concentration_of(share),
         });
         kept.push(stratum);
     }

@@ -54,7 +54,7 @@
 //! actually emits:
 //!
 //! ```toml
-//! format_version = 2
+//! format_version = 3
 //! ploidy = 2
 //!
 //! [fitted_from]                    # §3.1 — and what a mismatch refuses
@@ -92,7 +92,7 @@
 //! rung = "fitted_curve"
 //!
 //! [repeat_tracts]                  # §3.7
-//! fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
+//! fallback_between_locus_share = { value = 0.5, warrant = "defaulted" }
 //! slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 //! slippage_by_stratum_and_group = [ … one row a (stratum × slippage group) … ]
 //! allele_length_variation_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
@@ -176,7 +176,8 @@ mod what_was_fitted;
 mod written_beside_the_vcf;
 
 pub use between_locus_share::{
-    BetweenLocusShare, between_locus_share_error_of, between_locus_share_of, concentration_of,
+    BetweenLocusShare, NotABetweenLocusShare, between_locus_share_error_of, between_locus_share_of,
+    concentration_error_of, concentration_of,
 };
 pub use bindings::{CensusAgreement, ParametersForThisRun};
 pub use defaults::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
@@ -191,9 +192,20 @@ use serde::{Deserialize, Serialize};
 /// Carried from the start so that a reader has something to branch on. **Version 2** added each
 /// number's standard error, each stratum's own-fit errors and how many samples it was fitted on,
 /// and how each start of the SNP/indel fit ended (`doc/devel/ng/spec/fit_precision.md` §5.2). Every
-/// key it added is optional, so this build reads a version-1 file as it reads a version-2 file
-/// with those keys absent; a version-1 build refuses a version-2 file as written by a newer build.
-pub const FORMAT_VERSION: u32 = 2;
+/// key it added is optional, so a version-2 build read a version-1 file as a version-2 file with
+/// those keys absent.
+///
+/// **Version 3** reports how widely a repeat-tract class's loci differ as the **between-locus
+/// share** F = 1 / (1 + concentration) rather than as the concentration itself, under new keys,
+/// and lets a row leave F out where the fit could not place it
+/// (`doc/devel/ng/spec/str_fit_to_calling.md` §2.1). The two tables `length_spectrum_by_stratum`
+/// and `length_spectrum_by_period` became `allele_length_variation_by_stratum` and
+/// `allele_length_variation_by_period`; each row's `concentration` became `between_locus_share`,
+/// with `between_locus_share_standard_error` beside it, and its `shares_by_repeat_offset` became
+/// `share_of_chromosomes_by_repeat_offset`; and `fallback_length_spectrum_concentration` became
+/// `fallback_between_locus_share`. **This build reads only version 3**: a file written by an earlier build is refused until its keys are
+/// migrated on reading (the next step of `doc/devel/ng/impl_plan/str_penalised_fit.md`).
+pub const FORMAT_VERSION: u32 = 3;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -1050,14 +1062,17 @@ pub enum SeedRung {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepeatTracts {
-    /// The strength the tract ladder's **bottom** rung states — a flat shape over whatever
-    /// lengths the locus offers, held with this many chromosomes' worth of belief.
+    /// The between-locus share the tract ladder states where a class has none of its own — the
+    /// **bottom** rung's flat shape over whatever lengths the locus offers is held at it, and so
+    /// is a class's own shape where the fit could not place the class's F. Checked as a
+    /// [`BetweenLocusShare`] by validation: strictly between 0 and 1, and above about 5.6×10⁻³⁰⁹,
+    /// below which its concentration is infinite.
     ///
     /// **Its warrant is what tells the run's own median from the stated constant**, and without
-    /// it the two are the same line: the median over the strata a run fitted can land on exactly
-    /// 1.0, which is also `STATED_FLAT_CONCENTRATION`, and spec §8 counts this among the three
-    /// numbers with an honest default that must be marked `defaulted` when it is one. It is the
-    /// same reason the calibration multiplier carries a warrant beside a value of one. Its
+    /// it the two are the same line: the median of the Fs a run fitted can land on exactly 0.5,
+    /// which is also the F of `STATED_FLAT_CONCENTRATION`, and spec §8 counts this among the
+    /// three numbers with an honest default that must be marked `defaulted` when it is one. It is
+    /// the same reason the calibration multiplier carries a warrant beside a value of one. Its
     /// observation count is absent: a median over strata is not an estimate with a sample size.
     ///
     /// **The warrant is about this number, not about the locus that ends up using it**, which is
@@ -1066,7 +1081,7 @@ pub struct RepeatTracts {
     /// [`AlleleLengthVariationRung`](crate::parameter_estimation::joint::stratum_fits::AlleleLengthVariationRung),
     /// carried per locus; this warrant answers the different question of whether the number in
     /// the file came out of this run's data or out of the binary.
-    pub fallback_length_spectrum_concentration: WarrantedValue,
+    pub fallback_between_locus_share: WarrantedValue,
     /// Which set of slippage numbers each read group's reads are drawn under. **The run's own
     /// declaration, not something inferred.**
     pub slippage_group_by_read_group: Vec<SlippageGroupRow>,
@@ -1074,10 +1089,10 @@ pub struct RepeatTracts {
     /// no read in that stratum** — never a zero slip rate (spec §5).
     pub slippage_by_stratum_and_group: Vec<SlippageRow>,
     /// One row a stratum — the tract ladder's **top** rung, or its second where the row has no
-    /// concentration. **Only a stratum fitted on its own tracts has one**: a stratum furnished
-    /// from its period's slippage curves carries no length spectrum at all, by construction, and
-    /// that absence is what the pooled rung exists to answer. So absence here is data, not a
-    /// hole.
+    /// between-locus share. **Only a stratum fitted on its own tracts has one**: a stratum
+    /// furnished from its period's slippage curves carries no length spectrum at all, by
+    /// construction, and that absence is what the pooled rung exists to answer. So absence here
+    /// is data, not a hole.
     pub allele_length_variation_by_stratum: Vec<StratumAlleleLengthVariationRow>,
     /// One row a motif period — the tract ladder's **pooled** rung, present only where the run
     /// asked for it.
@@ -1361,12 +1376,18 @@ pub struct StratumAlleleLengthVariationRow {
     pub period: u8,
     /// How many copies of it the reference carries.
     pub reference_repeats: u64,
-    /// How monomorphic the stratum's tracts are. Small means most tracts carry one length.
-    pub concentration: f64,
+    /// **How much of the stratum's variation in allele length lies between its loci** rather
+    /// than within one: near 0, every locus carries the stratum's whole spread of lengths; near
+    /// 1, each locus is fixed at one length. **Absent where the fit could not place it**, as at
+    /// one sample; calling then holds this stratum's shares at the fallback.
+    pub between_locus_share: Option<BetweenLocusShare>,
+    /// How far `between_locus_share` would typically move if the stratum's tracts were drawn
+    /// again, on F's own scale. Absent where F is, and where the fit gave none.
+    pub between_locus_share_standard_error: Option<f64>,
     /// One share a whole-repeat offset from the **reference** tract length, running
     /// `-span ..= +span` — so the middle entry is the reference length itself, the count is odd
     /// and at least three, and the shares sum to one.
-    pub shares_by_repeat_offset: Vec<f64>,
+    pub share_of_chromosomes_by_repeat_offset: Vec<f64>,
 }
 
 /// **One motif period's pooled allele length variation** — the tract ladder's middle rung.
@@ -1379,11 +1400,14 @@ pub struct StratumAlleleLengthVariationRow {
 pub struct PeriodAlleleLengthVariationRow {
     /// The motif length these tracts share.
     pub period: u8,
-    /// How monomorphic the period's tracts are.
-    pub concentration: f64,
+    /// How much of the period's variation in allele length lies between its loci, as a stratum
+    /// row's. **Required, though the key is optional in the shape**: validation refuses a row
+    /// without it, because calling has no rung for a pooled shape held at the fallback
+    /// (`doc/devel/ng/spec/str_fit_to_calling.md` §3.4).
+    pub between_locus_share: Option<BetweenLocusShare>,
     /// One share a whole-repeat offset from each tract's own reference length, on the same
     /// `-span ..= +span` convention as a stratum's own.
-    pub shares_by_repeat_offset: Vec<f64>,
+    pub share_of_chromosomes_by_repeat_offset: Vec<f64>,
 }
 
 /// **How often a base reads wrong inside a tract**, for one read group at one stratum.
@@ -1737,15 +1761,22 @@ mod tests {
             },
             repeat_tracts: RepeatTracts {
                 // **`fitted_here`, and the value is the median it says it is.** This fixture
-                // has one stratum with an allele length variation of its own, at a concentration of 3.5,
-                // and the bottom rung states the median of the run's fitted concentrations
+                // has one stratum with an allele length variation of its own, at a between-locus
+                // share of 1/4.5 (concentration 3.5), and the bottom rung states the median of the run's fitted shares
                 // wherever there is one to take — so a `defaulted` warrant here is a state the
                 // writer cannot produce beside `allele_length_variation_by_stratum`. It said
                 // `1.25, defaulted` until 2026-08-30, which is what the round trip through
                 // memory found: the projection out re-derives this warrant from whether any
                 // stratum was fitted, and re-derived it as `fitted_here` every time.
-                fallback_length_spectrum_concentration: WarrantedValue {
-                    value: 3.5,
+                //
+                // **The shares are those of concentrations 3.5 and 2.75, the stratum's error on F
+                // 0.03**, values a fit could produce and not ones chosen to convert cleanly: a run
+                // reads each back as a concentration and writes it out again, and the shares are
+                // written so that this returns the same file (`between_locus_share.rs`).
+                fallback_between_locus_share: WarrantedValue {
+                    value: between_locus_share_of(3.5)
+                        .expect("a concentration of 3.5 has an F")
+                        .get(),
                     warrant: Warrant::FittedHere,
                     observations: None,
                     standard_error: None,
@@ -1849,13 +1880,14 @@ mod tests {
                 allele_length_variation_by_stratum: vec![StratumAlleleLengthVariationRow {
                     period: 2,
                     reference_repeats: 6,
-                    concentration: 3.5,
-                    shares_by_repeat_offset: vec![0.1, 0.8, 0.1],
+                    between_locus_share: between_locus_share_of(3.5),
+                    between_locus_share_standard_error: Some(0.03),
+                    share_of_chromosomes_by_repeat_offset: vec![0.1, 0.8, 0.1],
                 }],
                 allele_length_variation_by_period: vec![PeriodAlleleLengthVariationRow {
                     period: 2,
-                    concentration: 2.75,
-                    shares_by_repeat_offset: vec![0.15, 0.7, 0.15],
+                    between_locus_share: between_locus_share_of(2.75),
+                    share_of_chromosomes_by_repeat_offset: vec![0.15, 0.7, 0.15],
                 }],
                 substitution_rate_by_stratum: vec![SubstitutionRateRow {
                     read_group: 0,
@@ -2281,7 +2313,7 @@ mod tests {
             [
                 ".base_quality_calibration.by_read_group.error_probability_multiplier",
                 ".inbreeding.by_sample.inbreeding_coefficient",
-                ".repeat_tracts.fallback_length_spectrum_concentration",
+                ".repeat_tracts.fallback_between_locus_share",
                 ".repeat_tracts.substitution_rate_by_stratum.rate",
                 ".stated_constants.repeat_tract_outlier_weight",
             ],
@@ -2351,7 +2383,7 @@ mod tests {
         );
 
         // Absent, not zero: neither of these came from a fit with a sample size.
-        assert_eq!(unit_of("fallback_length_spectrum_concentration"), None);
+        assert_eq!(unit_of("fallback_between_locus_share"), None);
         assert_eq!(unit_of("repeat_tract_outlier_weight"), None);
     }
 
@@ -2601,20 +2633,20 @@ mod tests {
         assert_eq!(read, empty);
     }
 
-    /// **A stated concentration of one reads back saying whether it was fitted.**
+    /// **A stated between-locus share of one half reads back saying whether it was fitted.**
     ///
-    /// The run's own median over the strata it fitted can land on exactly 1.0, which is also the
+    /// The run's own median over the strata it fitted can land on exactly 0.5, which is also the
     /// constant reached where it fitted none, and spec §8 names this among the three numbers that
     /// must be marked `defaulted` when they are. **The assertion is on what a reader recovers**,
     /// not on the two documents differing: since `warrant` is a required field of
     /// [`WarrantedValue`], two files whose warrants differ differ by construction, and a test
     /// asserting only that would pass for any shape at all.
     #[test]
-    fn a_stated_concentration_of_one_reads_back_saying_whether_it_was_fitted() {
+    fn a_stated_share_of_one_half_reads_back_saying_whether_it_was_fitted() {
         for warrant in [Warrant::FittedHere, Warrant::Defaulted] {
             let mut file = a_file_using_every_shape();
-            file.repeat_tracts.fallback_length_spectrum_concentration = WarrantedValue {
-                value: 1.0,
+            file.repeat_tracts.fallback_between_locus_share = WarrantedValue {
+                value: 0.5,
                 warrant,
                 observations: None,
                 standard_error: None,
@@ -2622,11 +2654,8 @@ mod tests {
             let text = toml::to_string(&file).expect("serialises");
             let read: ParametersFile = toml::from_str(&text).expect("parses");
             assert_eq!(
-                read.repeat_tracts
-                    .fallback_length_spectrum_concentration
-                    .warrant,
-                warrant,
-                "a concentration of exactly 1.0 must not lose which of the two it was"
+                read.repeat_tracts.fallback_between_locus_share.warrant, warrant,
+                "a share of exactly 0.5 must not lose which of the two it was"
             );
         }
     }
@@ -2703,7 +2732,7 @@ mod tests {
     #[test]
     fn the_documented_inline_form_parses() {
         let text = r#"
-format_version = 1
+format_version = 3
 ploidy = 2
 
 [fitted_from]
@@ -2732,7 +2761,7 @@ alternative_concentration_total = 0.0006
 rung = "fitted_curve"
 
 [repeat_tracts]
-fallback_length_spectrum_concentration = { value = 1.0, warrant = "defaulted" }
+fallback_between_locus_share = { value = 0.5, warrant = "defaulted" }
 slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.04, shorter_share = 0.8, fall_off = 0.3, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside_the_fitted_range", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, expected_slipped_reads = 8000.5 } } ]
 allele_length_variation_by_stratum = []
@@ -2774,9 +2803,9 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_two() {
-        assert_eq!(FORMAT_VERSION, 2);
-        assert_eq!(a_file_using_every_shape().format_version, 2);
+    fn the_format_version_this_build_writes_is_three() {
+        assert_eq!(FORMAT_VERSION, 3);
+        assert_eq!(a_file_using_every_shape().format_version, 3);
     }
 
     /// **Every `reach` in the fixture is true of the repeat count printed beside it.**

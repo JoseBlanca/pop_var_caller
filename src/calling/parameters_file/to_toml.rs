@@ -105,7 +105,7 @@ impl ParametersFile {
                 "",
                 "A number the fit measured also carries a `standard_error` where it could compute one: how far the number would typically move if the same kind of data were drawn again, on the number's own scale. It comes from how sharply the fit's likelihood falls away from the number, or for a rate counted directly from the spread of the count, and near either end of the number's range it is not the spread of a bell curve. **No `standard_error` is not an error of zero**: it means nothing determined the number — no reads, a stated default — or no error is computed for it. A `supplied` number's `standard_error`, like its `observations`, is that of the fit that first produced it. If you edit a number, delete its `standard_error` with its `observations`.",
                 "",
-                "**Two keys do not take every warrant.** `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only where this file holds a fitted stratum spectrum for it to be the median of, and `defaulted` only at the built-in constant; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
+                "**Two keys do not take every warrant.** `repeat_tracts.fallback_between_locus_share` is `fitted_here` only where a stratum row of this file carries a `between_locus_share` for it to be the median of, and `defaulted` only at the built-in 0.5; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the built-in constant. Both take `supplied` freely, which is what you write when you change one. Anything else is refused, and says so.",
                 "",
                 "**What that checking reaches, and what it cannot.** It reaches those two keys and nowhere else. It cannot catch a number you changed that still says `fitted_here` or `borrowed`: nothing in this file can tell your value from a fitted one, so the run will report it as measured, with the old `observations` count still beside it. And on every other key a `defaulted` warrant is checked against nothing — including the inbreeding coefficient, whose built-in number is 0.0. The base-quality multiplier is not one of them: a `defaulted` multiplier is **not** fixed at 1.0, and the note beside `base_quality_calibration` says what it is instead. A `defaulted` substitution rate is the one to avoid writing by hand, and the reason is worth stating because a note further down looks like it contradicts this: the caller **does** default that number, at the tract and for the cells that need it, but it never writes one as a row here — so a `defaulted` warrant on a row of `substitution_rate_by_stratum` is a claim no build makes.",
                 "",
@@ -334,7 +334,7 @@ impl ParametersFile {
             &[
                 "Everything about repeat tracts. A **stratum** is a class of tract, and every row keyed by one spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries. A **slippage group** is a set of read groups whose reads are taken to slip alike; the run declares it, and `slippage_group_by_read_group` below is that declaration.",
                 "",
-                "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `allele_length_variation_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below. Neither absence is a zero.",
+                "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `allele_length_variation_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below; a stratum whose row has no `between_locus_share` keeps its own shares, held at the fallback below. Neither absence is a zero.",
                 "",
                 "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled. They are reads among the samples the stratum was fitted on: every sample, unless the row carries `samples_fitted_on` — then a large cohort's stratum was fitted on that many of its samples, taken in a fixed order that does not look at the data, and every count and error in the row is that subset's. A `samples_fitted_on` equal to the cohort's sample count means the subset grew to every sample.",
                 "",
@@ -344,16 +344,16 @@ impl ParametersFile {
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",
-                "`fallback_length_spectrum_concentration` is what a tract falls back to where neither its own stratum nor its period was fitted: this many chromosomes' worth of belief, spread flat over whatever lengths the tract offers, so a larger number makes the prior harder for the reads to move. A run that fitted any stratum states the median of the concentrations those fits produced and marks it `fitted_here`; a run that fitted none states a built-in constant and marks it `defaulted`. A run handed this file writes back the warrant it found there, because a file's warrants survive being read — demoting them on every read would have the same cohort report different warrants depending on which way it was called. Mark it `supplied` yourself if you change the number. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size.",
+                "`fallback_between_locus_share` is the between-locus share a tract is held at where its stratum has none of its own. A between-locus share says how much of a stratum's variation in allele length lies between its loci rather than within one: near 0, every locus carries the stratum's whole spread of lengths; near 1, each locus is fixed at one length. A stratum row with shares and no `between_locus_share` keeps its shares, held at this one; a tract whose stratum and period have no row gets a flat shape over whatever lengths it offers, held at this one. A smaller share makes the prior harder for the reads to move. A run in which any stratum has a between-locus share states the median of those shares and marks it `fitted_here`; a run in which none has one states the built-in 0.5 and marks it `defaulted`. A run handed this file writes back the warrant it found there, because a file's warrants survive being read — demoting them on every read would have the same cohort report different warrants depending on which way it was called. Mark it `supplied` yourself if you change the number. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size.",
             ],
         );
         scalar_with_note(
             &mut out,
-            "fallback_length_spectrum_concentration",
-            &a_warranted_value(&tracts.fallback_length_spectrum_concentration),
+            "fallback_between_locus_share",
+            &a_warranted_value(&tracts.fallback_between_locus_share),
             where_it_came_from(
-                &tracts.fallback_length_spectrum_concentration,
-                origins::FLAT_CONCENTRATION,
+                &tracts.fallback_between_locus_share,
+                origins::FALLBACK_SHARE,
             ),
         );
         one_a_line(
@@ -396,7 +396,7 @@ impl ParametersFile {
         note(
             &mut out,
             &[
-                "`shares_by_repeat_offset` runs from -span to +span in whole repeat units from the **reference** tract length, so the middle entry is the reference length itself, the count is odd, and the shares sum to one. An array read as starting at zero shifts every length this stratum expects by one repeat.",
+                "`share_of_chromosomes_by_repeat_offset` runs from -span to +span in whole repeat units from the **reference** tract length, so the middle entry is the reference length itself, the count is odd, and the shares sum to one. An array read as starting at zero shifts every length this stratum expects by one repeat.",
             ],
         );
         one_a_line(
@@ -922,10 +922,11 @@ mod origins {
         "charged the stated rate — see the note above this table"
     );
 
-    /// The tract ladder's bottom rung — what a run falls back to where nothing was fitted.
-    pub const FLAT_CONCENTRATION: &str = concat!(
-        "this run fitted no stratum on its own tracts, so there was no median to take and ",
-        "this is the caller's own constant"
+    /// The between-locus share a tract is held at where its stratum has none — what a run
+    /// falls back to where no stratum has one.
+    pub const FALLBACK_SHARE: &str = concat!(
+        "no stratum of this run has a between-locus share of its own, so there was no median to ",
+        "take and this is the caller's own constant"
     );
 
     /// The repeat-tract outlier weight, where a run took the stated constant rather than being
@@ -1367,27 +1368,38 @@ fn a_share_curve(curve: &ShareCurve) -> String {
     ])
 }
 
+/// A stratum's row. **An absent F and an absent error are absent keys**, never a number standing
+/// in for one.
 fn a_stratum_allele_length_variation_row(row: &StratumAlleleLengthVariationRow) -> String {
-    an_inline_table(&[
+    let mut fields = vec![
         ("period", row.period.to_string()),
         ("reference_repeats", a_toml_integer(row.reference_repeats)),
-        ("concentration", a_toml_float(row.concentration)),
-        (
-            "shares_by_repeat_offset",
-            a_float_array(&row.shares_by_repeat_offset),
-        ),
-    ])
+    ];
+    if let Some(share) = row.between_locus_share {
+        fields.push(("between_locus_share", a_toml_float(share.get())));
+    }
+    if let Some(error) = row.between_locus_share_standard_error {
+        fields.push(("between_locus_share_standard_error", a_toml_float(error)));
+    }
+    fields.push((
+        "share_of_chromosomes_by_repeat_offset",
+        a_float_array(&row.share_of_chromosomes_by_repeat_offset),
+    ));
+    an_inline_table(&fields)
 }
 
+/// A period's row. Its F is absent only in a file validation refuses; the writer still writes
+/// what the row holds rather than inventing one.
 fn a_period_allele_length_variation_row(row: &PeriodAlleleLengthVariationRow) -> String {
-    an_inline_table(&[
-        ("period", row.period.to_string()),
-        ("concentration", a_toml_float(row.concentration)),
-        (
-            "shares_by_repeat_offset",
-            a_float_array(&row.shares_by_repeat_offset),
-        ),
-    ])
+    let mut fields = vec![("period", row.period.to_string())];
+    if let Some(share) = row.between_locus_share {
+        fields.push(("between_locus_share", a_toml_float(share.get())));
+    }
+    fields.push((
+        "share_of_chromosomes_by_repeat_offset",
+        a_float_array(&row.share_of_chromosomes_by_repeat_offset),
+    ));
+    an_inline_table(&fields)
 }
 
 fn a_substitution_rate_row(row: &SubstitutionRateRow) -> String {
@@ -1939,12 +1951,13 @@ mod tests {
         file.repeat_tracts.allele_length_variation_by_period.clear();
         file.repeat_tracts.substitution_rate_by_stratum.clear();
         for row in &mut file.repeat_tracts.allele_length_variation_by_stratum {
-            row.shares_by_repeat_offset.clear();
+            row.share_of_chromosomes_by_repeat_offset.clear();
         }
 
         let text = file.to_toml();
         assert!(
-            text.contains("read_groups = []") && text.contains("shares_by_repeat_offset = []"),
+            text.contains("read_groups = []")
+                && text.contains("share_of_chromosomes_by_repeat_offset = []"),
             "an empty table is written as an empty table:\n{text}"
         );
         let read: ParametersFile =
@@ -2009,19 +2022,17 @@ mod tests {
         // scalars sit six lines apart, and swapping the two origins at their call sites leaves
         // both texts present and both wrong.
         //
-        // **The fallback concentration is defaulted in a file of its own here**, because it
-        // cannot be in this fixture: that one fits a stratum, and the ladder's bottom rung then
-        // states the median of the run's own concentrations rather than the compiled-in flat
-        // one. A run that fitted nothing is the run that writes it defaulted.
+        // **The fallback share is defaulted in a file of its own here**, because it cannot be in
+        // this fixture: that one fits a stratum's F, and the fallback then states the median of
+        // the run's own Fs rather than the compiled-in one. A run in which no stratum has an F
+        // is the run that writes it defaulted.
         let mut nothing_to_fit = a_file_using_every_shape();
         nothing_to_fit
             .repeat_tracts
             .allele_length_variation_by_stratum
             .clear();
-        nothing_to_fit
-            .repeat_tracts
-            .fallback_length_spectrum_concentration = WarrantedValue {
-            value: 1.0,
+        nothing_to_fit.repeat_tracts.fallback_between_locus_share = WarrantedValue {
+            value: 0.5,
             warrant: Warrant::Defaulted,
             observations: None,
             standard_error: None,
@@ -2029,8 +2040,8 @@ mod tests {
         let flat = nothing_to_fit.to_toml();
         for (key, note, in_this_text) in [
             (
-                "fallback_length_spectrum_concentration",
-                "this run fitted no stratum on its own tracts",
+                "fallback_between_locus_share",
+                "no stratum of this run has a between-locus share of its own",
                 &flat,
             ),
             (
@@ -2105,16 +2116,14 @@ mod tests {
         for row in &mut file.repeat_tracts.substitution_rate_by_stratum {
             row.rate.warrant = Warrant::FittedHere;
         }
-        file.repeat_tracts
-            .fallback_length_spectrum_concentration
-            .warrant = Warrant::FittedHere;
+        file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::FittedHere;
         file.stated_constants.repeat_tract_outlier_weight.warrant = Warrant::Supplied;
 
         let text = file.to_toml();
         for note in [
             "no calibration:",
             "inherited from the existing",
-            "this run fitted no stratum on its own tracts",
+            "no stratum of this run has a between-locus share of its own",
             "nothing was fitted for this read group",
             "inbreeding has no default",
         ] {
@@ -2289,9 +2298,9 @@ mod tests {
             "a read group that identified nothing writes no measurement key: {unmeasured}"
         );
 
-        // **The outlier weight rather than the fallback concentration**, which this fixture
-        // cannot carry as `defaulted`: it fits a stratum, and the bottom rung then states the
-        // median of the run's own concentrations. The one number in the file that is defaulted
+        // **The outlier weight rather than the fallback share**, which this fixture cannot
+        // carry as `defaulted`: it fits a stratum's F, and the fallback then states the median
+        // of the run's own Fs. The one number in the file that is defaulted
         // in every run this build can assemble is this one.
         let defaulted = with_rows
             .lines()
@@ -2302,7 +2311,7 @@ mod tests {
             "a defaulted number carries its warrant and no count: {defaulted}"
         );
 
-        // **And a run that fitted no stratum at all does write a defaulted fallback**, with the
+        // **And a run in which no stratum has an F does write a defaulted fallback**, with the
         // note saying where the constant came from — the state this fixture cannot show beside
         // its own fitted stratum.
         let mut nothing_fitted = a_file_using_every_shape();
@@ -2310,17 +2319,15 @@ mod tests {
             .repeat_tracts
             .allele_length_variation_by_stratum
             .clear();
-        nothing_fitted
-            .repeat_tracts
-            .fallback_length_spectrum_concentration = WarrantedValue {
-            value: 1.0,
+        nothing_fitted.repeat_tracts.fallback_between_locus_share = WarrantedValue {
+            value: 0.5,
             warrant: Warrant::Defaulted,
             observations: None,
             standard_error: None,
         };
         let text = nothing_fitted.to_toml();
         assert!(
-            text.contains("this run fitted no stratum on its own tracts"),
+            text.contains("no stratum of this run has a between-locus share of its own"),
             "a defaulted fallback says where the constant came from:\n{text}"
         );
     }
@@ -2531,11 +2538,13 @@ mod every_float_comes_back_bit_identical {
             let mut file = a_file_using_every_shape();
             // A bare scalar under a section header.
             file.ordinary_site_prior.reference_concentration = *value;
-            // A field of a one-line inline table.
-            file.repeat_tracts.allele_length_variation_by_stratum[0].concentration = *value;
+            // A field of a one-line inline table. F's error rather than F itself, because F is
+            // checked as it is read and most of these values are not between 0 and 1.
+            file.repeat_tracts.allele_length_variation_by_stratum[0]
+                .between_locus_share_standard_error = Some(*value);
             // An entry of an array of floats.
-            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset[1] =
-                *value;
+            file.repeat_tracts.allele_length_variation_by_stratum[0]
+                .share_of_chromosomes_by_repeat_offset[1] = *value;
             // A field of a table three deep inside a row.
             file.repeat_tracts.slippage_by_stratum_and_group[1]
                 .share_of_reads_that_slip_origin
@@ -2556,13 +2565,15 @@ mod every_float_comes_back_bit_identical {
                         read.ordinary_site_prior.reference_concentration,
                     ),
                     (
-                        "allele_length_variation_by_stratum[0].concentration",
-                        read.repeat_tracts.allele_length_variation_by_stratum[0].concentration,
+                        "allele_length_variation_by_stratum[0].between_locus_share_standard_error",
+                        read.repeat_tracts.allele_length_variation_by_stratum[0]
+                            .between_locus_share_standard_error
+                            .expect("it was written"),
                     ),
                     (
-                        "allele_length_variation_by_stratum[0].shares_by_repeat_offset[1]",
+                        "allele_length_variation_by_stratum[0].share_of_chromosomes_by_repeat_offset[1]",
                         read.repeat_tracts.allele_length_variation_by_stratum[0]
-                            .shares_by_repeat_offset[1],
+                            .share_of_chromosomes_by_repeat_offset[1],
                     ),
                     (
                         "slippage_by_stratum_and_group[1]…expected_slipped_reads",
@@ -2591,11 +2602,9 @@ mod every_float_comes_back_bit_identical {
         // a warranted value, a spectrum's entries, a curve's coefficients and a slippage number.
         file.ordinary_site_prior.reference_concentration = 1.0 / 3.0;
         file.ordinary_site_prior.alternative_concentration_total = 5e-324;
-        file.repeat_tracts
-            .fallback_length_spectrum_concentration
-            .value = f64::MIN_POSITIVE;
-        file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
-            vec![0.1 + 0.2, -0.0, 1.000_000_000_000_000_2];
+        file.repeat_tracts.fallback_between_locus_share.value = f64::MIN_POSITIVE;
+        file.repeat_tracts.allele_length_variation_by_stratum[0]
+            .share_of_chromosomes_by_repeat_offset = vec![0.1 + 0.2, -0.0, 1.000_000_000_000_000_2];
         file.repeat_tracts.slippage_by_stratum_and_group[1].share_of_reads_that_slip = f64::MAX;
         file.stated_constants.repeat_tract_outlier_weight.value = 1e-5;
 
@@ -2612,7 +2621,8 @@ mod every_float_comes_back_bit_identical {
             // **And bit-identically**, which `PartialEq` on the shape cannot say: it compares
             // `f64`s with `==`, so a sign lost off a zero would pass the line above.
             assert_eq!(
-                read.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset[1]
+                read.repeat_tracts.allele_length_variation_by_stratum[0]
+                    .share_of_chromosomes_by_repeat_offset[1]
                     .to_bits(),
                 (-0.0_f64).to_bits(),
                 "a negative zero keeps its sign through {writer}, which `==` cannot see"

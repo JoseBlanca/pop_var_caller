@@ -1,4 +1,4 @@
-format_version = 2
+format_version = 3
 ploidy = 2
 
 [fitted_from]
@@ -189,8 +189,8 @@ reference_concentration = 1.0
 alternative_concentration_total = 0.0006
 rung = "fitted_curve"
 
-[repeat_tracts.fallback_length_spectrum_concentration]
-value = 3.5
+[repeat_tracts.fallback_between_locus_share]
+value = 0.22222222222222224
 warrant = "fitted_here"
 
 [[repeat_tracts.slippage_group_by_read_group]]
@@ -307,13 +307,14 @@ cells = 8
 [[repeat_tracts.allele_length_variation_by_stratum]]
 period = 2
 reference_repeats = 6
-concentration = 3.5
-shares_by_repeat_offset = [0.1, 0.8, 0.1]
+between_locus_share = 0.22222222222222224
+between_locus_share_standard_error = 0.03
+share_of_chromosomes_by_repeat_offset = [0.1, 0.8, 0.1]
 
 [[repeat_tracts.allele_length_variation_by_period]]
 period = 2
-concentration = 2.75
-shares_by_repeat_offset = [0.15, 0.7, 0.15]
+between_locus_share = 0.26666666666666666
+share_of_chromosomes_by_repeat_offset = [0.15, 0.7, 0.15]
 
 [[repeat_tracts.substitution_rate_by_stratum]]
 read_group = 0

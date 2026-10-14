@@ -14,14 +14,15 @@ use std::collections::BTreeMap;
 
 use super::bindings::hex_digest;
 use super::{
-    BaseQualityCalibration, BaseQualityCalibrationRow, CensusIdentity, Contamination,
-    ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach, EvidenceCount,
-    FORMAT_VERSION, Inbreeding, InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing,
-    OrdinarySitePrior, ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow,
-    ReadGroupRow, RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches,
-    ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve,
-    SlippageGroupRow, SlippageRow, SnpIndelFitStart, StatedConstants,
+    BaseQualityCalibration, BaseQualityCalibrationRow, BetweenLocusShare, CensusIdentity,
+    Contamination, ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach,
+    EvidenceCount, FORMAT_VERSION, Inbreeding, InbreedingRow, InputsFittedFrom, LevelOrigin,
+    LevelSmoothing, OrdinarySitePrior, ParametersFile, PeriodAlleleLengthVariationRow,
+    ReadGroupBatchRow, ReadGroupRow, RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung,
+    SequencingBatches, ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin,
+    SlippageCurve, SlippageGroupRow, SlippageRow, SnpIndelFitStart, StatedConstants,
     StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant, WarrantedValue,
+    between_locus_share_error_of, between_locus_share_of, concentration_error_of,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -618,6 +619,50 @@ fn inbreeding_of(
     }
 }
 
+/// **The between-locus share of a concentration calling holds**, refusing one the file cannot
+/// carry.
+///
+/// Calling checks every concentration it holds is finite and above zero, and
+/// [`between_locus_share_of`] refuses only those beyond that: at or below about 1.1×10⁻¹⁶,
+/// where F rounds to 1, or so large that F's own concentration overflows. **No fit produces
+/// either**, and writing such a number as an absent F would tell a reader the fit could not
+/// place it, which is a different claim; so it is a bug, and stops the writer.
+fn the_share_of(concentration: f64, what: &std::fmt::Arguments<'_>) -> BetweenLocusShare {
+    between_locus_share_of(concentration).unwrap_or_else(|| {
+        panic!(
+            "{what} is {concentration:e}, and a parameters file carries it as the between-locus \
+             share 1 / (1 + concentration), which no f64 strictly between 0 and 1 holds for it"
+        )
+    })
+}
+
+/// **F's standard error, from a concentration calling holds and its error**, refusing one the
+/// file's own reader would refuse.
+///
+/// The reader takes an F error only where it is finite and above zero and where the
+/// concentration error it stands for, `error / F²`, is finite. **A concentration error of 0 or
+/// below breaks that**, and nothing upstream refuses one today; so does a concentration above
+/// about 1.9×10³⁰⁷, where `error · F · F` underflows to 0, which no fit reaches. Writing it would
+/// give a run a file it cannot read back, and the failure would surface one step late, at the
+/// reading. So it is a bug, and stops the writer where the number is produced, as
+/// [`the_share_of`] does for F.
+fn the_share_error_of(
+    concentration: f64,
+    concentration_error: f64,
+    share: BetweenLocusShare,
+    what: &std::fmt::Arguments<'_>,
+) -> f64 {
+    let error = between_locus_share_error_of(concentration, concentration_error);
+    assert!(
+        error.is_finite() && error > 0.0 && concentration_error_of(share, error).is_finite(),
+        "{what} is {concentration:e} with a standard error of {concentration_error:e}, which a \
+         parameters file carries as an error of {error:e} on the between-locus share; the file's \
+         reader refuses an error that is not finite and above zero, so the run could not read \
+         back the file it wrote"
+    );
+    error
+}
+
 /// The whole repeat-tract section: the slippage numbers, both fitted rungs of the length-spectrum
 /// ladder, and the substitution rate.
 fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
@@ -634,8 +679,16 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
         // **The value and the warrant can disagree about how interesting they are**: a median
         // over fitted strata can land on exactly the stated 1.0, which is why the warrant
         // travels at all.
-        fallback_length_spectrum_concentration: WarrantedValue {
-            value: fits.stated_concentration(),
+        //
+        // **Written as F**, converted at the file's edge (`between_locus_share.rs`). The stated
+        // concentration is the median of fitted shares converted back, or one, so it always has
+        // an F; the refusal below would be a bug in how it was taken.
+        fallback_between_locus_share: WarrantedValue {
+            value: the_share_of(
+                fits.stated_concentration(),
+                &format_args!("the stated concentration of the tract ladder's fallback"),
+            )
+            .get(),
             warrant: fits.stated_concentration_warrant().into(),
             observations: None,
             standard_error: None,
@@ -695,33 +748,44 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
             .collect(),
         allele_length_variation_by_stratum: fits
             .fitted_allele_length_variation_of_each_stratum()
-            .map(|(stratum, fitted)| StratumAlleleLengthVariationRow {
-                period: stratum.period,
-                reference_repeats: stratum.reference_repeats,
-                // **Format 2 has no way to say a concentration is absent**, so a stratum without
-                // one cannot be written down until format 3 makes the row's key optional. Only the
-                // climb fits a run today, and it fills every concentration. The error has no key
-                // before format 3 either, and is not written.
-                concentration: fitted.concentration.unwrap_or_else(|| {
-                    panic!(
-                        "period {}, {} repeats holds an allele length variation with no \
-                         concentration, which a format-{FORMAT_VERSION} parameters file cannot \
-                         carry",
-                        stratum.period, stratum.reference_repeats
-                    )
-                }),
-                shares_by_repeat_offset: fitted.weights.clone(),
+            .map(|(stratum, fitted)| {
+                let what = format_args!(
+                    "the concentration of period {}, {} repeats",
+                    stratum.period, stratum.reference_repeats
+                );
+                // **An absent concentration is written as an absent F**, and so is its error:
+                // the fit reports none where nothing in the data places it.
+                let between_locus_share = fitted
+                    .concentration
+                    .map(|concentration| the_share_of(concentration, &what));
+                StratumAlleleLengthVariationRow {
+                    period: stratum.period,
+                    reference_repeats: stratum.reference_repeats,
+                    between_locus_share,
+                    between_locus_share_standard_error: fitted
+                        .concentration
+                        .zip(between_locus_share)
+                        .and_then(|(concentration, share)| {
+                            fitted
+                                .concentration_standard_error
+                                .map(|error| the_share_error_of(concentration, error, share, &what))
+                        }),
+                    share_of_chromosomes_by_repeat_offset: fitted.weights.clone(),
+                }
             })
             .collect(),
         allele_length_variation_by_period: fits
             .pooled_allele_length_variation_of_each_period()
-            .map(|(period, shares_by_repeat_offset, concentration)| {
-                PeriodAlleleLengthVariationRow {
+            .map(
+                |(period, shares, concentration)| PeriodAlleleLengthVariationRow {
                     period,
-                    concentration,
-                    shares_by_repeat_offset: shares_by_repeat_offset.to_vec(),
-                }
-            })
+                    between_locus_share: Some(the_share_of(
+                        concentration,
+                        &format_args!("the pooled concentration of period {period}"),
+                    )),
+                    share_of_chromosomes_by_repeat_offset: shares.to_vec(),
+                },
+            )
             .collect(),
         substitution_rate_by_stratum: run
             .ssr_substitution_rate()
@@ -1046,6 +1110,9 @@ mod tests {
     use crate::parameter_estimation::joint::ssr_fit::{
         ClimbEnding, ClimbRecord, DerivedStratum, PeriodAlleleLengthVariation, SharesProvenance,
         Slippage, StratumFit, StratumOutcome, StratumRefusal,
+    };
+    use crate::parameter_estimation::joint::stratum_fits::{
+        AlleleLengthVariationRung, FittedAlleleLengthVariation,
     };
     use crate::parameter_estimation::repeat_strata::{
         RepeatCount, Stratum as SsrStratum, StratumKey,
@@ -1912,24 +1979,25 @@ mod tests {
              none by construction, and that absence is what the middle rung answers"
         );
         assert_eq!(
-            tracts.allele_length_variation_by_stratum[0].concentration,
-            3.5
+            tracts.allele_length_variation_by_stratum[0].between_locus_share,
+            between_locus_share_of(3.5),
+            "the stratum's concentration of 3.5 is written as its F, 1 / 4.5"
         );
         assert_eq!(
-            tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset,
+            tracts.allele_length_variation_by_stratum[0].share_of_chromosomes_by_repeat_offset,
             vec![0.1, 0.8, 0.1]
         );
         assert_eq!(
             tracts
                 .allele_length_variation_by_period
                 .iter()
-                .map(|row| (row.period, row.concentration))
+                .map(|row| (row.period, row.between_locus_share))
                 .collect::<Vec<_>>(),
-            vec![(2, 2.75)],
+            vec![(2, between_locus_share_of(2.75))],
             "the middle rung is present only where the run asked for it"
         );
         assert_eq!(
-            tracts.allele_length_variation_by_period[0].shares_by_repeat_offset,
+            tracts.allele_length_variation_by_period[0].share_of_chromosomes_by_repeat_offset,
             vec![0.15, 0.7, 0.15]
         );
         assert_eq!(
@@ -2114,23 +2182,17 @@ mod tests {
     fn the_stated_concentration_says_whether_the_run_fitted_it() {
         let file = the_projected_file();
         assert_eq!(
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .value,
-            3.5,
-            "one stratum was fitted, so the run's median is that stratum's own concentration"
+            file.repeat_tracts.fallback_between_locus_share.value,
+            between_locus_share_of(3.5).expect("3.5 has an F").get(),
+            "one stratum was fitted, so the run's median is that stratum's own concentration, \
+             3.5, written as its F"
         );
         assert_eq!(
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant,
+            file.repeat_tracts.fallback_between_locus_share.warrant,
             Warrant::FittedHere
         );
         assert_eq!(
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .observations,
-            None,
+            file.repeat_tracts.fallback_between_locus_share.observations, None,
             "a median over strata is not an estimate with a sample size, so no count stands \
              behind it whether the run had strata to take a median over or not"
         );
@@ -2144,18 +2206,17 @@ mod tests {
             BTreeMap::new(),
         );
         let nothing_fitted = projected(&with_no_strata, &read_groups);
-        let stated = &nothing_fitted
-            .repeat_tracts
-            .fallback_length_spectrum_concentration;
+        let stated = &nothing_fitted.repeat_tracts.fallback_between_locus_share;
         assert_eq!(
             stated.warrant,
             Warrant::Defaulted,
             "a run that fitted no stratum states the compiled-in concentration"
         );
         assert_eq!(
-            stated.value, 1.0,
-            "and the median of a run that fitted strata can land on exactly this number, which \
-             is why the warrant is what separates them"
+            stated.value, 0.5,
+            "the F of the compiled-in concentration of one; the median of a run that fitted \
+             strata can land on exactly this number, which is why the warrant is what separates \
+             them"
         );
         assert_eq!(stated.observations, None);
         assert!(
@@ -2409,9 +2470,7 @@ mod tests {
         );
         assert!(!file.sequencing_batches.batching_was_declared);
         assert_eq!(
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant,
+            file.repeat_tracts.fallback_between_locus_share.warrant,
             Warrant::Defaulted,
             "a run with no repeat tract fitted states the compiled-in concentration"
         );
@@ -2811,10 +2870,11 @@ mod tests {
         );
     }
 
-    // **This format's three refusals of the penalised fit's numbers.** Each stops a number from
-    // being written under an origin it does not have — a penalised point as the stratum's own fit,
-    // an absent concentration as some number — and each is lifted, and its test turned into a
-    // round trip, by the format that can record the number.
+    // **This format's two refusals of the penalised fit's numbers.** Each stops a number from
+    // being written under an origin it does not have — a penalised point as the stratum's own
+    // fit — and each is lifted, and its test turned into a round trip, by the format that can
+    // record the number. The third, an absent concentration, was lifted by format 3, which writes
+    // it as an absent between-locus share; its round trip follows.
 
     /// The point every penalised source in these tests carries.
     fn a_penalised_point() -> crate::parameter_estimation::joint::slippage_curve::PenalisedPoint {
@@ -2861,12 +2921,45 @@ mod tests {
         );
     }
 
-    /// **Through the whole writer**, because the refusal sits inside the row builder: a stratum
-    /// whose slippage is its own fit, so nothing before the allele-length rows refuses it, and
-    /// whose concentration is absent.
+    /// **A concentration the file cannot hold as an F stops the writer, naming the class and the
+    /// number.** No fit produces one (the new fit clamps its concentrations to 10⁻³ to 10⁴), so
+    /// reaching this is a bug, and the message is what finds it.
     #[test]
-    #[should_panic(expected = "holds an allele length variation with no concentration")]
-    fn a_stratum_with_no_concentration_is_refused_by_this_format() {
+    #[should_panic(expected = "the concentration of period 2, 6 repeats is 1e-17")]
+    fn a_concentration_with_no_f_stops_the_writer_naming_its_class() {
+        let _ = the_share_of(
+            1e-17,
+            &format_args!("the concentration of period {}, {} repeats", 2, 6),
+        );
+    }
+
+    /// **A concentration error the file's reader would refuse stops the writer, naming the class
+    /// and the number.** Nothing upstream refuses an error of 0, and the reader refuses an F error
+    /// of 0, so without this a run would write a file it cannot read back.
+    #[test]
+    #[should_panic(
+        expected = "the concentration of period 2, 6 repeats is 3e0 with a standard error of 0e0"
+    )]
+    fn a_concentration_error_with_no_f_error_stops_the_writer_naming_its_class() {
+        let share = between_locus_share_of(3.0).expect("a concentration of 3 has an F");
+        let _ = the_share_error_of(
+            3.0,
+            0.0,
+            share,
+            &format_args!("the concentration of period {}, {} repeats", 2, 6),
+        );
+    }
+
+    /// **A stratum with shares and no concentration is written with no F, and reads back so.**
+    ///
+    /// Through the whole writer and back through the reader into calling's tables: the stratum's
+    /// slippage is its own fit and its concentration is absent, as the new fit reports at one
+    /// sample. The row carries its shares and neither `between_locus_share` nor its error; read
+    /// back, calling holds the stratum's own shares at the stated concentration, which is the
+    /// rung for exactly that (`doc/devel/ng/spec/str_fit_to_calling.md` §3.2). **The fallback is
+    /// `defaulted`**: no stratum has an F, so there was no median to take.
+    #[test]
+    fn a_stratum_with_no_concentration_writes_and_reads_back_with_no_f() {
         let own = |source| ShareProvenance {
             source,
             curve: None,
@@ -2926,7 +3019,101 @@ mod tests {
             slippage,
             the_runs_substitution_rates(),
         );
-        let _ = projected(&run, &read_groups);
+        let written = projected(&run, &read_groups);
+        let row = &written.repeat_tracts.allele_length_variation_by_stratum[0];
+        assert_eq!(row.between_locus_share, None);
+        assert_eq!(row.between_locus_share_standard_error, None);
+        assert_eq!(
+            row.share_of_chromosomes_by_repeat_offset,
+            vec![0.1, 0.8, 0.1]
+        );
+        assert_eq!(
+            written.repeat_tracts.fallback_between_locus_share.warrant,
+            Warrant::Defaulted
+        );
+
+        let text = written.to_toml();
+        let row_line = text
+            .lines()
+            .find(|line| line.contains("share_of_chromosomes_by_repeat_offset = [0.1, 0.8, 0.1]"))
+            .unwrap_or_else(|| panic!("the stratum's row is written:\n{text}"));
+        assert!(
+            !row_line.contains("between_locus_share"),
+            "an absent F is an absent key, not a number standing in for one: {row_line}"
+        );
+        let read =
+            ParametersFile::from_toml(&text).unwrap_or_else(|error| panic!("{error}\n\n{text}"));
+        assert_eq!(read, written);
+
+        let back = read.to_run_parameters().expect("the file is usable");
+        let fits = back.parameters.ssr_slippage_fits();
+        let variation = fits.allele_length_variation_at(2, 6);
+        assert_eq!(
+            variation.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+        assert_eq!(variation.fitted_weights(), Some(&[0.1, 0.8, 0.1][..]));
+        assert_eq!(variation.concentration(), fits.stated_concentration());
+    }
+
+    /// **A stratum's concentration error is written as F's, and reads back as the
+    /// concentration's.** The fixture's stratum, concentration 3.5, given an error of 0.9: the
+    /// file carries `0.9 / 4.5²` beside F, and the run that reads it holds the concentration's
+    /// error again, within rounding.
+    #[test]
+    fn a_concentration_error_is_written_on_fs_scale_and_read_back_on_its_own() {
+        let read_groups = a_runs_read_groups();
+        let run = a_run_with(
+            &read_groups,
+            &the_runs_contamination(),
+            a_declared_batching(&read_groups),
+            StratumFits::of_gathered_rows(
+                BTreeMap::from([
+                    (ReadGroupId(0), 0),
+                    (ReadGroupId(1), 0),
+                    (ReadGroupId(2), 1),
+                ]),
+                BTreeMap::new(),
+                BTreeMap::from([(
+                    Stratum {
+                        period: 2,
+                        reference_repeats: 6,
+                    },
+                    FittedAlleleLengthVariation {
+                        weights: vec![0.1, 0.8, 0.1],
+                        concentration: Some(3.5),
+                        concentration_standard_error: Some(0.9),
+                    },
+                )]),
+                BTreeMap::new(),
+                3.5,
+                Provenance::FittedHere,
+            ),
+            the_runs_substitution_rates(),
+        );
+        let written = projected(&run, &read_groups);
+        let row = &written.repeat_tracts.allele_length_variation_by_stratum[0];
+        assert_eq!(row.between_locus_share, between_locus_share_of(3.5));
+        assert_eq!(
+            row.between_locus_share_standard_error,
+            Some(between_locus_share_error_of(3.5, 0.9))
+        );
+
+        let read = ParametersFile::from_toml(&written.to_toml()).expect("reads back");
+        let back = read.to_run_parameters().expect("the file is usable");
+        let fitted = back
+            .parameters
+            .ssr_slippage_fits()
+            .fitted_allele_length_variation_of_each_stratum()
+            .map(|(_, fitted)| fitted.clone())
+            .next()
+            .expect("the stratum's row");
+        let concentration = fitted.concentration.expect("an F was written");
+        assert!((concentration - 3.5).abs() < 1e-14, "{concentration}");
+        let error = fitted
+            .concentration_standard_error
+            .expect("an error was written");
+        assert!((error - 0.9).abs() < 1e-14, "{error}");
     }
 }
 

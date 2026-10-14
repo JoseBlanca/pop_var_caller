@@ -100,12 +100,17 @@
 #   SRR5079864.p1.bench.cram
 #   SRR5079878.p1.bench.cram
 #   SRR5079876.p1.bench.cram
+# Both parameters-file lines re-recorded 2026-10-14 (str_penalised_fit.md, plan step B2): format version 3 renames the
+# allele-length keys and stores the between-locus share F = 1/(1+c) in place of each concentration, with F's standard
+# error on the 5 strata that had one, and the fallback as F (0.526009726176786 = 1/(1 + 0.9011055313907091)). Every other
+# line is identical, the shares included, and no VCF moved — the one called with the fitted file included. They were
+# a27bb944… / ef9ada5a….
 slice: 20 regions, 4 alignments
 # records: 7508
 67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
 67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
-a27bb944b54ba6dbfd6f21f9c6b7485f  from_alignments.parameters.toml
+73d8d5c8c1370b339c58b121d9a22a96  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
 0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-ef9ada5a6cfbea08766fef10d656f9da  fitted.parameters.toml
+122b72dfb627fd9a54b779bd7ea49926  fitted.parameters.toml
 e4af91bd9bb86438c5b73a034e640091  from_fit.comparable

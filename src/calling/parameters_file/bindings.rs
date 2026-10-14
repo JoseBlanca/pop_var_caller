@@ -729,15 +729,15 @@ impl ParametersFile {
                 no_better_than_supplied(inbreeding_coefficient.warrant);
         }
         let RepeatTracts {
-            fallback_length_spectrum_concentration,
+            fallback_between_locus_share,
             slippage_group_by_read_group: _,
             slippage_by_stratum_and_group: _,
             allele_length_variation_by_stratum: _,
             allele_length_variation_by_period: _,
             substitution_rate_by_stratum,
         } = repeat_tracts;
-        fallback_length_spectrum_concentration.warrant =
-            no_better_than_supplied(fallback_length_spectrum_concentration.warrant);
+        fallback_between_locus_share.warrant =
+            no_better_than_supplied(fallback_between_locus_share.warrant);
         for SubstitutionRateRow {
             read_group: _,
             period: _,
@@ -2280,9 +2280,7 @@ mod the_fourth_binding_demotes {
         }
         warrants.push((
             "the bottom rung",
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant,
+            file.repeat_tracts.fallback_between_locus_share.warrant,
         ));
         for row in &file.repeat_tracts.substitution_rate_by_stratum {
             warrants.push(("a substitution rate", row.rate.warrant));

@@ -62,8 +62,9 @@
 //! reading it as evidence would put a number the writer knows it lost into a run's report.
 
 use super::{
-    ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError,
-    ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome, Warrant, WarrantedValue,
+    BetweenLocusShare, ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile,
+    ParametersFileError, ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome, Warrant,
+    WarrantedValue, between_locus_share_of, concentration_error_of,
 };
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
@@ -119,8 +120,9 @@ impl ParametersFile {
     fn the_version_is_one_this_build_reads(&self) -> Result<(), ParametersFileError> {
         // **Both a zero and a future version are refused**, which is the shape the project's other
         // TOML artefact already uses (`SampleSummaryError::UnsupportedVersion`). A version this
-        // build knows is read: version 1 is version 2 with every key version 2 added absent, which
-        // is how the shape reads it (`FORMAT_VERSION`).
+        // build knows passes. Versions 1 and 2 spell the repeat-tract keys differently from
+        // version 3, so whether such a file can be read at all is the reader's question, not
+        // this check's (`FORMAT_VERSION`).
         if self.format_version == 0 || self.format_version > super::FORMAT_VERSION {
             return Err(refuse(
                 "format_version",
@@ -723,22 +725,28 @@ impl ParametersFile {
 
     fn the_repeat_tract_numbers_are_what_they_claim(&self) -> Result<(), ParametersFileError> {
         let tracts = &self.repeat_tracts;
-        let at = "repeat_tracts.fallback_length_spectrum_concentration";
+        let at = "repeat_tracts.fallback_between_locus_share";
         // **A median over strata has no count of its own**, so any unit here is wrong; the
         // `defaulted` rule above already refuses one on the flat rung, and `reads` is named only
         // because the check needs a word and this key should carry no `observations` at all.
         a_warranted_value(
             at,
-            &tracts.fallback_length_spectrum_concentration,
+            &tracts.fallback_between_locus_share,
             EvidenceCount::Reads(0),
         )?;
-        no_error_is_computed_for(at, &tracts.fallback_length_spectrum_concentration)?;
+        no_error_is_computed_for(at, &tracts.fallback_between_locus_share)?;
+        // **Whether the number is an F at all comes before what its warrant claims**: a
+        // `defaulted` 0 refused for its warrant tells the reader to change the warrant, and doing
+        // so only exposes this refusal.
+        a_between_locus_share(at, tracts.fallback_between_locus_share.value)?;
         // **Two of the four warrants are claims this file's own rows can refute** — and the
         // other two are not, which is the whole of what changed on 2026-08-30 when the warrant
         // began travelling through `StratumFits` instead of being re-derived by the writer.
         //
-        // `fitted_here` says the number is the median of the concentrations this file's strata
-        // fitted, so a file that names no fitted stratum spectrum has no median to have taken.
+        // `fitted_here` says the number is the median of the between-locus shares this file's
+        // strata fitted, so a file in which no stratum row carries one has no median to have
+        // taken. **A row with shares and no F does not count**: a single-sample run fits every
+        // class's shares and no F, and its fallback is the built-in one, `defaulted`.
         // `defaulted` says it is the caller's own constant, so any other number contradicts it —
         // the same rule the outlier weight carries, for the same reason.
         //
@@ -747,32 +755,28 @@ impl ParametersFile {
         // beside it can say whether the number was handed over. An earlier version of this check
         // required `fitted_here` exactly where any stratum was fitted, which refused every
         // demoted file — recorded here because the check looked complete and was not.
-        let warrant = tracts.fallback_length_spectrum_concentration.warrant;
-        let value = tracts.fallback_length_spectrum_concentration.value;
-        if warrant == Warrant::FittedHere && tracts.allele_length_variation_by_stratum.is_empty() {
+        let warrant = tracts.fallback_between_locus_share.warrant;
+        let value = tracts.fallback_between_locus_share.value;
+        let no_stratum_has_an_f = tracts
+            .allele_length_variation_by_stratum
+            .iter()
+            .all(|row| row.between_locus_share.is_none());
+        if warrant == Warrant::FittedHere && no_stratum_has_an_f {
             return Err(refuse(
                 at,
-                "is `fitted_here`, and no stratum in this file was fitted on its own tracts, so \
-                 there is no median for it to be the median of",
+                "is `fitted_here`, and no stratum in this file has a between-locus share of its \
+                 own, so there is no median for it to be the median of",
             ));
         }
-        if warrant == Warrant::Defaulted && value != STATED_FLAT_CONCENTRATION {
+        let built_in = the_built_in_fallback_share();
+        if warrant == Warrant::Defaulted && value != built_in {
             return Err(refuse(
                 at,
                 format!(
-                    "is {value:?}, and its warrant is `defaulted`, which says this run fitted no \
-                     stratum and fell back to the built-in {STATED_FLAT_CONCENTRATION:?}; a \
-                     number you changed is one the run was handed, so change the warrant beside \
-                     it to `supplied`"
-                ),
-            ));
-        }
-        if tracts.fallback_length_spectrum_concentration.value <= 0.0 {
-            return Err(refuse(
-                at,
-                format!(
-                    "is {:?}, and a concentration is above zero",
-                    tracts.fallback_length_spectrum_concentration.value
+                    "is {value:?}, and its warrant is `defaulted`, which says no stratum of this \
+                     run has a between-locus share and the run fell back to the built-in \
+                     {built_in:?}; a number you changed is one the run was handed, so change the \
+                     warrant beside it to `supplied`"
                 ),
             ));
         }
@@ -871,14 +875,30 @@ impl ParametersFile {
                 "repeat_tracts.allele_length_variation_by_stratum[period = {}, reference_repeats = {}]",
                 row.period, row.reference_repeats
             );
-            an_allele_length_variation(&at, row.concentration, &row.shares_by_repeat_offset)?;
+            an_allele_length_variation(&at, &row.share_of_chromosomes_by_repeat_offset)?;
+            a_between_locus_share_error(
+                &at,
+                row.between_locus_share,
+                row.between_locus_share_standard_error,
+            )?;
         }
         for row in &tracts.allele_length_variation_by_period {
             let at = format!(
                 "repeat_tracts.allele_length_variation_by_period[period = {}]",
                 row.period
             );
-            an_allele_length_variation(&at, row.concentration, &row.shares_by_repeat_offset)?;
+            an_allele_length_variation(&at, &row.share_of_chromosomes_by_repeat_offset)?;
+            // **A period's pool must carry its F.** Nothing writes a pool without one, and
+            // calling's ladder has a rung for a stratum's own shares held at the fallback but none
+            // for a pooled shape held there (`str_fit_to_calling.md` §3.4); reading one would
+            // stop the run where the pool is loaded rather than here, naming the key.
+            if row.between_locus_share.is_none() {
+                return Err(refuse(
+                    format!("{at}.between_locus_share"),
+                    "is missing, and a period's pooled allele length variation is used only \
+                     together with its own between-locus share; write one, or delete the row",
+                ));
+            }
         }
 
         for row in &tracts.substitution_rate_by_stratum {
@@ -1309,27 +1329,75 @@ fn no_count_is_a_saturation(
     Ok(())
 }
 
-/// An allele length variation: a positive concentration, and shares that are a distribution over an odd
-/// number of offsets with a middle.
-fn an_allele_length_variation(
+/// **The fallback's F when no stratum has one**: the F of the built-in concentration, one
+/// chromosome's worth of belief, which is one half.
+pub(super) fn the_built_in_fallback_share() -> f64 {
+    between_locus_share_of(STATED_FLAT_CONCENTRATION)
+        .expect("the built-in concentration, one, has an F of one half")
+        .get()
+}
+
+/// **A between-locus share written as a bare number** — the fallback's, which is a warranted
+/// value rather than a row's checked [`BetweenLocusShare`]: strictly between 0 and 1, and not so
+/// close to 0 that the concentration calling holds it as overflows.
+fn a_between_locus_share(at: &str, share: f64) -> Result<(), ParametersFileError> {
+    if BetweenLocusShare::new(share).is_some() {
+        return Ok(());
+    }
+    Err(refuse(
+        at,
+        format!(
+            "is {share:?}, and a between-locus share lies strictly between 0 and 1 — 0 would say \
+             every locus carries the class's whole variation, 1 that each locus is fixed at one \
+             length — and above about 5.6e-309, below which the concentration it stands for is \
+             too large to hold"
+        ),
+    ))
+}
+
+/// **A row's error on F**: only beside an F, a standard error (finite and above zero), and not
+/// so large against a small F that the concentration's error calling holds,
+/// `se(F) / F²`, stops being a number.
+fn a_between_locus_share_error(
     at: &str,
-    concentration: f64,
-    shares: &[f64],
+    share: Option<BetweenLocusShare>,
+    error: Option<f64>,
 ) -> Result<(), ParametersFileError> {
-    finite(format!("{at}.concentration"), concentration)?;
-    if concentration <= 0.0 {
+    let Some(error) = error else {
+        return Ok(());
+    };
+    let at = format!("{at}.between_locus_share_standard_error");
+    let Some(share) = share else {
         return Err(refuse(
-            format!("{at}.concentration"),
-            format!("is {concentration}, and a concentration is above zero"),
+            at,
+            "is written on a row with no `between_locus_share`, and an error is the error of a \
+             number; delete it, or write the share it belongs to",
+        ));
+    };
+    a_standard_error(&at, error)?;
+    let on_the_concentration = concentration_error_of(share, error);
+    if !on_the_concentration.is_finite() {
+        return Err(refuse(
+            at,
+            format!(
+                "is {error:?} beside a share of {:?}, which puts the error of the concentration \
+                 the run holds, error / share², past the largest number a score can hold",
+                share.get()
+            ),
         ));
     }
+    Ok(())
+}
 
+/// An allele length variation's shares: a distribution over an odd number of offsets with a
+/// middle. Its between-locus share is checked as the row is read.
+fn an_allele_length_variation(at: &str, shares: &[f64]) -> Result<(), ParametersFileError> {
     // **Odd, and at least three.** The array runs from `-span` to `+span` in whole repeat units
     // from the reference length, so the middle entry *is* the reference length; an even count has
     // no middle, and a count below three cannot express a slip in both directions.
     if shares.len() < 3 || shares.len().is_multiple_of(2) {
         return Err(refuse(
-            format!("{at}.shares_by_repeat_offset"),
+            format!("{at}.share_of_chromosomes_by_repeat_offset"),
             format!(
                 "holds {} shares; it runs from -span to +span in whole repeats, so the count is \
                  odd and at least three — the middle entry is the reference length itself",
@@ -1339,12 +1407,15 @@ fn an_allele_length_variation(
     }
     let mut total = 0.0;
     for (offset, share) in shares.iter().enumerate() {
-        a_share(&format!("{at}.shares_by_repeat_offset[{offset}]"), *share)?;
+        a_share(
+            &format!("{at}.share_of_chromosomes_by_repeat_offset[{offset}]"),
+            *share,
+        )?;
         total += *share;
     }
     if (total - 1.0).abs() > SHARES_MAY_MISS_ONE_BY {
         return Err(refuse(
-            format!("{at}.shares_by_repeat_offset"),
+            format!("{at}.share_of_chromosomes_by_repeat_offset"),
             format!(
                 "sums to {total}, and an allele length variation is a distribution over the lengths a \
                  tract can take; if you edited one share, the others have to give up what it took"
@@ -1498,11 +1569,11 @@ mod tests {
             .allele_length_variation_by_period
             .clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
-        // **A run that fitted no stratum takes the compiled-in flat concentration**, which is
-        // what `defaulted` says; the fixture's `fitted_here` is a claim about a median over
+        // **A run in which no stratum has an F takes the compiled-in share of one half**, which
+        // is what `defaulted` says; the fixture's `fitted_here` is a claim about a median over
         // strata this file has none of.
-        small.repeat_tracts.fallback_length_spectrum_concentration = WarrantedValue {
-            value: 1.0,
+        small.repeat_tracts.fallback_between_locus_share = WarrantedValue {
+            value: 0.5,
             warrant: Warrant::Defaulted,
             observations: None,
             standard_error: None,
@@ -1663,28 +1734,35 @@ mod tests {
                 .allele_length_variation_by_stratum
                 .clear();
         });
-        assert_eq!(
-            field,
-            "repeat_tracts.fallback_length_spectrum_concentration"
-        );
+        assert_eq!(field, "repeat_tracts.fallback_between_locus_share");
         assert!(
             problem.contains("no median for it to be the median of"),
+            "{problem}"
+        );
+
+        // **Nor does a file whose strata have shares and no F**, which is what a one-sample run
+        // writes: every class with reads gets its own shares and none gets an F. Counting rows
+        // rather than Fs, as this check did before format 3, let that file claim a median.
+        let (field, problem) = refused(|file| {
+            for row in &mut file.repeat_tracts.allele_length_variation_by_stratum {
+                row.between_locus_share = None;
+                row.between_locus_share_standard_error = None;
+            }
+        });
+        assert_eq!(field, "repeat_tracts.fallback_between_locus_share");
+        assert!(
+            problem.contains("no stratum in this file has a between-locus share"),
             "{problem}"
         );
 
         // **`defaulted` says the number is the caller's own constant**, so any other number
         // contradicts it — the rule the outlier weight carries, for the same reason.
         let (field, problem) = refused(|file| {
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant = Warrant::Defaulted;
+            file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Defaulted;
         });
-        assert_eq!(
-            field,
-            "repeat_tracts.fallback_length_spectrum_concentration"
-        );
+        assert_eq!(field, "repeat_tracts.fallback_between_locus_share");
         assert!(
-            problem.contains("is 3.5, and its warrant is `defaulted`"),
+            problem.contains("is 0.22222222222222224, and its warrant is `defaulted`"),
             "{problem}"
         );
         // **The same closing clause the other two `defaulted` keys carry**, so a reader who has
@@ -1712,9 +1790,7 @@ mod tests {
     fn the_warrant_a_demoted_file_carries_on_the_bottom_rung_is_accepted() {
         for warrant in [Warrant::Supplied, Warrant::Borrowed] {
             accepted(|file| {
-                file.repeat_tracts
-                    .fallback_length_spectrum_concentration
-                    .warrant = warrant;
+                file.repeat_tracts.fallback_between_locus_share.warrant = warrant;
             });
             // And with no fitted stratum beside it either, which is the other half of the
             // shape the old rule keyed on.
@@ -1722,9 +1798,7 @@ mod tests {
                 file.repeat_tracts
                     .allele_length_variation_by_stratum
                     .clear();
-                file.repeat_tracts
-                    .fallback_length_spectrum_concentration
-                    .warrant = warrant;
+                file.repeat_tracts.fallback_between_locus_share.warrant = warrant;
             });
         }
     }
@@ -1734,7 +1808,8 @@ mod tests {
         let (field, problem) = refused(|file| file.format_version = 0);
         assert_eq!(field, "format_version");
         assert!(problem.contains("written by a newer build"), "{problem}");
-        let (field, _) = refused(|file| file.format_version = 3);
+        accepted(|file| file.format_version = 3);
+        let (field, _) = refused(|file| file.format_version = 4);
         assert_eq!(field, "format_version");
     }
 
@@ -1885,12 +1960,12 @@ mod tests {
         );
         let (field, _) = refused(|file| {
             file.repeat_tracts
-                .fallback_length_spectrum_concentration
+                .fallback_between_locus_share
                 .standard_error = Some(0.1);
         });
         assert_eq!(
             field,
-            "repeat_tracts.fallback_length_spectrum_concentration.standard_error"
+            "repeat_tracts.fallback_between_locus_share.standard_error"
         );
     }
 
@@ -2314,47 +2389,143 @@ mod tests {
         // deleting it changes nothing. Measured: with `[0.5, 0.5]` here, removing the parity
         // clause left all 100 tests green.
         let (field, problem) = refused(|file| {
-            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
-                vec![0.25, 0.25, 0.25, 0.25];
+            file.repeat_tracts.allele_length_variation_by_stratum[0]
+                .share_of_chromosomes_by_repeat_offset = vec![0.25, 0.25, 0.25, 0.25];
         });
-        assert!(field.ends_with("shares_by_repeat_offset"), "{field}");
+        assert!(
+            field.ends_with("share_of_chromosomes_by_repeat_offset"),
+            "{field}"
+        );
         assert!(problem.contains("odd and at least three"), "{problem}");
 
         // And the short case, which is the other half of the same rule.
         let (_, problem) = refused(|file| {
-            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
-                vec![0.5, 0.5];
+            file.repeat_tracts.allele_length_variation_by_stratum[0]
+                .share_of_chromosomes_by_repeat_offset = vec![0.5, 0.5];
         });
         assert!(problem.contains("odd and at least three"), "{problem}");
 
         let (_, problem) = refused(|file| {
-            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
-                vec![1.0];
+            file.repeat_tracts.allele_length_variation_by_stratum[0]
+                .share_of_chromosomes_by_repeat_offset = vec![1.0];
         });
         assert!(problem.contains("odd and at least three"), "{problem}");
 
         let (_, problem) = refused(|file| {
-            file.repeat_tracts.allele_length_variation_by_stratum[0].shares_by_repeat_offset =
-                vec![0.1, 0.9, 0.1];
+            file.repeat_tracts.allele_length_variation_by_stratum[0]
+                .share_of_chromosomes_by_repeat_offset = vec![0.1, 0.9, 0.1];
         });
         assert!(problem.contains("sums to"), "{problem}");
 
         let (field, _) = refused(|file| {
-            file.repeat_tracts.allele_length_variation_by_period[0].shares_by_repeat_offset =
-                vec![0.2, 0.2, 0.2];
+            file.repeat_tracts.allele_length_variation_by_period[0]
+                .share_of_chromosomes_by_repeat_offset = vec![0.2, 0.2, 0.2];
         });
         assert!(
             field.starts_with("repeat_tracts.allele_length_variation_by_period"),
             "{field}"
         );
+    }
 
+    /// **The fallback is a between-locus share**: strictly between 0 and 1, and not so close to
+    /// 0 that the concentration calling holds it as overflows. A row's F is checked as the file
+    /// is read (`between_locus_share.rs`), so only the fallback, a bare number, is checked here.
+    #[test]
+    fn a_fallback_that_is_not_a_between_locus_share_is_refused() {
+        for value in [0.0, 1.0, 1.5, -0.2, 1e-320] {
+            let (field, problem) = refused(|file| {
+                file.repeat_tracts.fallback_between_locus_share.value = value;
+            });
+            assert_eq!(field, "repeat_tracts.fallback_between_locus_share");
+            assert!(
+                problem.contains("strictly between 0 and 1"),
+                "at {value}: {problem}"
+            );
+        }
+        accepted(|file| file.repeat_tracts.fallback_between_locus_share.value = 0.999);
+    }
+
+    /// **A fallback that is not an F is refused for that, whatever its warrant says.** A
+    /// `defaulted` 0 was once refused with "change the warrant to `supplied`", and following
+    /// that advice only exposed the second refusal. A NaN is refused before either, as not a
+    /// number.
+    #[test]
+    fn a_defaulted_fallback_that_is_not_an_f_is_refused_as_not_an_f() {
+        for (value, expected) in [
+            (0.0, "strictly between 0 and 1"),
+            (f64::NAN, "is not a number"),
+        ] {
+            let (field, problem) = refused(|file| {
+                file.repeat_tracts.fallback_between_locus_share = WarrantedValue {
+                    value,
+                    warrant: Warrant::Defaulted,
+                    observations: None,
+                    standard_error: None,
+                };
+            });
+            assert_eq!(field, "repeat_tracts.fallback_between_locus_share");
+            assert!(problem.contains(expected), "at {value}: {problem}");
+            assert!(!problem.contains("`supplied`"), "at {value}: {problem}");
+        }
+    }
+
+    /// **A row's F error is a standard error of the F beside it**: not on a row with no F, not
+    /// zero or negative, and not so large against a small F that the concentration's error the
+    /// run holds, `error / F²`, is infinite.
+    #[test]
+    fn a_between_locus_share_error_that_is_not_an_error_of_the_share_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.allele_length_variation_by_stratum[0].between_locus_share = None;
+            // With no F in any stratum the fallback cannot be a median of them.
+            file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Supplied;
+        });
         assert!(
-            refused(
-                |file| file.repeat_tracts.allele_length_variation_by_stratum[0].concentration = 0.0
-            )
-            .0
-            .ends_with("concentration")
+            field.ends_with("between_locus_share_standard_error"),
+            "{field}"
         );
+        assert!(problem.contains("no `between_locus_share`"), "{problem}");
+
+        for error in [0.0, -0.01, f64::NAN] {
+            let (field, _) = refused(|file| {
+                file.repeat_tracts.allele_length_variation_by_stratum[0]
+                    .between_locus_share_standard_error = Some(error);
+            });
+            assert!(
+                field.ends_with("between_locus_share_standard_error"),
+                "at {error}: {field}"
+            );
+        }
+
+        let (_, problem) = refused(|file| {
+            let row = &mut file.repeat_tracts.allele_length_variation_by_stratum[0];
+            row.between_locus_share = BetweenLocusShare::new(1e-200);
+            row.between_locus_share_standard_error = Some(0.1);
+        });
+        assert!(problem.contains("past the largest number"), "{problem}");
+
+        // **A row with no F and no error is accepted**: it is what a one-sample run writes.
+        accepted(|file| {
+            let row = &mut file.repeat_tracts.allele_length_variation_by_stratum[0];
+            row.between_locus_share = None;
+            row.between_locus_share_standard_error = None;
+            // With no F in any stratum the fallback cannot be a median of them.
+            file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Supplied;
+        });
+    }
+
+    /// **A period's pool with no F is refused**: nothing writes one, and calling has a rung for a
+    /// stratum's own shares held at the fallback but none for a pooled shape held there
+    /// (`doc/devel/ng/spec/str_fit_to_calling.md` §3.4).
+    #[test]
+    fn a_periods_pool_with_no_between_locus_share_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.allele_length_variation_by_period[0].between_locus_share = None;
+        });
+        assert_eq!(
+            field,
+            "repeat_tracts.allele_length_variation_by_period[period = 2].between_locus_share"
+        );
+        assert!(problem.contains("is missing"), "{problem}");
     }
 
     /// **A normalised spectrum sits inside the tolerance and a hand edit outside it, with six
@@ -2481,12 +2652,9 @@ mod tests {
             };
         });
         assert!(
-            refused(|file| file
-                .repeat_tracts
-                .fallback_length_spectrum_concentration
-                .value = 0.0)
-            .0
-            .ends_with("fallback_length_spectrum_concentration")
+            refused(|file| file.repeat_tracts.fallback_between_locus_share.value = 0.0)
+                .0
+                .ends_with("fallback_between_locus_share")
         );
     }
 
@@ -2579,11 +2747,7 @@ mod tests {
             refused(|file| file.fitted_from.read_groups.clear()),
             refused(|file| file.inbreeding.by_sample.clear()),
             refused(|file| file.ordinary_site_prior.reference_concentration = 0.0),
-            refused(|file| {
-                file.repeat_tracts
-                    .fallback_length_spectrum_concentration
-                    .value = 0.0
-            }),
+            refused(|file| file.repeat_tracts.fallback_between_locus_share.value = 0.0),
             refused(|file| file.stated_constants.repeat_tract_outlier_weight.value = 2.0),
             refused(|file| file.format_version = 9),
             // **The nested paths, which are what an earlier version of this test could not

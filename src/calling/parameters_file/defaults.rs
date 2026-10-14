@@ -21,7 +21,7 @@
 //! |---|---|---|
 //! | the base-quality multiplier, per read group | [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER), one | the value at which the model does nothing |
 //! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.20 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
-//! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), one | a stated uninformative prior |
+//! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), one — written in the file as the between-locus share one half | a stated uninformative prior |
 //! | contamination, per read group | **absence** — no `[contamination]` section | a model state, not a guess |
 //! | the repeat-tract substitution rate, per (read group × stratum) | [`DEFAULT_SSR_SUBSTITUTION_RATE`](crate::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE), 0.001 | a default taken at the tract, not written in the file |
 //! | the slippage numbers, per (stratum × slippage group) | **no row**, and the tract falls back to another caller's shipped model | a default that is owed a measurement |
@@ -486,6 +486,7 @@ mod tests {
     use crate::calling::parameters_file::tests::{
         THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape, unwrapped_comments,
     };
+    use crate::calling::parameters_file::validate::the_built_in_fallback_share;
     use crate::calling::run_parameters::RunParameters;
     use crate::float;
     use crate::parameter_estimation::Estimate;
@@ -645,15 +646,9 @@ mod tests {
         file.repeat_tracts.allele_length_variation_by_period.clear();
         // The bottom rung is then the only thing left saying anything about a tract, and its
         // warrant has to be the one a run that fitted nothing carries.
-        file.repeat_tracts
-            .fallback_length_spectrum_concentration
-            .warrant = Warrant::Defaulted;
-        file.repeat_tracts
-            .fallback_length_spectrum_concentration
-            .value = STATED_FLAT_CONCENTRATION;
-        file.repeat_tracts
-            .fallback_length_spectrum_concentration
-            .observations = None;
+        file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Defaulted;
+        file.repeat_tracts.fallback_between_locus_share.value = the_built_in_fallback_share();
+        file.repeat_tracts.fallback_between_locus_share.observations = None;
 
         let projected = file
             .to_run_parameters()
@@ -681,12 +676,12 @@ mod tests {
     /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER).
     /// The test below is the one that pins it accepted.
     ///
-    /// **The concentration's edited value is a whole number on purpose.** `Display` and `Debug`
-    /// agree on 3.5 and differ on 3.0, so a fixture at 3.5 leaves the `{:?}` this message is
-    /// written with unpinned — E1's review measured the revert to `{}` surviving its whole
-    /// mutation suite. The outlier weight has no whole number to use, since a legal weight is
-    /// strictly inside zero and one, so its `{:?}` is convention rather than something a test
-    /// can hold.
+    /// **The fallback share's edited value is 1e-7 on purpose.** `Display` and `Debug` agree on
+    /// 0.25 and differ on 1e-7, which `Display` writes as 0.0000001, so a fixture at 0.25 would
+    /// leave the `{:?}` this message is written with unpinned — E1's review measured the revert to
+    /// `{}` surviving its whole mutation suite when the key held a concentration and the fixture
+    /// stood at 3.5. The outlier weight's `{:?}` is convention rather than something this test
+    /// holds.
     #[test]
     fn a_defaulted_value_that_is_not_the_binarys_own_number_is_refused() {
         let weight_edited = {
@@ -698,14 +693,15 @@ mod tests {
                 .observations = None;
             file
         };
-        let concentration_edited = {
+        let share_edited = {
             let mut file = a_file_using_every_shape();
-            let rung = &mut file.repeat_tracts.fallback_length_spectrum_concentration;
+            let rung = &mut file.repeat_tracts.fallback_between_locus_share;
             rung.warrant = Warrant::Defaulted;
-            rung.value = STATED_FLAT_CONCENTRATION + 2.0;
+            rung.value = 1e-7;
             rung.observations = None;
             file
         };
+        assert_ne!(format!("{}", 1e-7), format!("{:?}", 1e-7));
 
         for (edited, key, constant, edited_to) in [
             (
@@ -715,10 +711,10 @@ mod tests {
                 DEFAULT_OUTLIER_WEIGHT * 2.0,
             ),
             (
-                concentration_edited,
-                "repeat_tracts.fallback_length_spectrum_concentration",
-                STATED_FLAT_CONCENTRATION,
-                STATED_FLAT_CONCENTRATION + 2.0,
+                share_edited,
+                "repeat_tracts.fallback_between_locus_share",
+                the_built_in_fallback_share(),
+                1e-7,
             ),
         ] {
             let refusal = edited
@@ -777,9 +773,9 @@ mod tests {
             .repeat_tract_outlier_weight
             .observations = None;
 
-        let rung = &mut file.repeat_tracts.fallback_length_spectrum_concentration;
+        let rung = &mut file.repeat_tracts.fallback_between_locus_share;
         rung.warrant = Warrant::Defaulted;
-        rung.value = STATED_FLAT_CONCENTRATION;
+        rung.value = the_built_in_fallback_share();
         rung.observations = None;
 
         file.validate()
