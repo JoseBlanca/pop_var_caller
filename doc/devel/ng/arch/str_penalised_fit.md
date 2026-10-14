@@ -300,8 +300,9 @@ is no longer needed. The CLI's `repeat_tract_config` (`cli/estimate_parameters.r
 ### 2.3 The file's edge
 
 ```rust
-/// F = 1 / (1 + concentration); `None` for a concentration that is not finite and positive, or so
-/// small that F rounds to 1. Only here does the formula appear (companion §2.1).
+/// F = 1 / (1 + concentration); `None` for a concentration that is not finite and positive, so
+/// small that F rounds to 1, or so large (about 1.8×10³⁰⁸ and above) that F's own concentration
+/// overflows to infinity (owner, 2026-10-14). Only here does the formula appear (companion §2.1).
 pub fn between_locus_share_of(concentration: f64) -> Option<BetweenLocusShare>;
 /// concentration = (1 − F) / F; finite by the newtype's invariant.
 pub fn concentration_of(share: BetweenLocusShare) -> f64;
