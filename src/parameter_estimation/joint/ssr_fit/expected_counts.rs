@@ -331,7 +331,7 @@ fn count_class(
             slippage,
             &shares,
             concentration,
-            config,
+            config.allele_span,
         );
         log_likelihood = counts.log_likelihood;
         // Each length's prior weight: one tract's worth of draws, spread evenly.
@@ -545,11 +545,11 @@ impl RoundModel {
         slippage: Slippage,
         shares: &[f64],
         concentration: f64,
-        config: &SsrFitConfig,
+        allele_span: i32,
     ) -> Self {
-        let classes = allele_classes_of(config);
+        let classes = allele_classes_in(allele_span);
         let genotypes = genotype_pairs(classes);
-        let span = config.allele_span;
+        let span = allele_span;
         let read_span = evidence.read_span;
         let libraries = one_stutter_for_every_library(evidence);
         let mut distributions =
@@ -717,9 +717,9 @@ pub(super) fn expected_counts_by_distinct_rows(
     slippage: Slippage,
     shares: &[f64],
     concentration: f64,
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> Counts {
-    let model = RoundModel::of(evidence, slippage, shares, concentration, config);
+    let model = RoundModel::of(evidence, slippage, shares, concentration, allele_span);
     let scored: Vec<ScoredRow> = distinct
         .reads
         .par_iter()
@@ -789,7 +789,13 @@ pub(super) fn expected_counts_by_tract(
     config: &SsrFitConfig,
 ) -> Vec<Counts> {
     let distinct = DistinctRows::of(evidence, homozygote_excess);
-    let model = RoundModel::of(evidence, slippage, shares, concentration, config);
+    let model = RoundModel::of(
+        evidence,
+        slippage,
+        shares,
+        concentration,
+        config.allele_span,
+    );
     let scored: Vec<ScoredRow> = distinct
         .reads
         .par_iter()
@@ -971,6 +977,8 @@ fn expected_counts_by_tract_row_by_row(
 ///
 /// `slippage`, `shares` (one per allele class, `-allele_span ..= +allele_span`) and
 /// `concentration` are the class's numbers this round; `homozygote_excess` is indexed by sample.
+/// `allele_span` is the allele window: how far from the reference length, in repeats, an allele
+/// may sit.
 /// Every library is scored at `slippage` (multipliers are not fitted here).
 #[must_use]
 pub fn expected_counts(
@@ -979,7 +987,7 @@ pub fn expected_counts(
     shares: &[f64],
     concentration: f64,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> ClassCounts {
     expected_counts_by_distinct_rows(
         evidence,
@@ -987,7 +995,7 @@ pub fn expected_counts(
         slippage,
         shares,
         concentration,
-        config,
+        allele_span,
     )
 }
 
@@ -1219,7 +1227,13 @@ pub fn fit_spread_by_pairs(
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
 ) -> f64 {
-    let per_tract = pair_cubics_by_tract(evidence, slippage, shares, homozygote_excess, config);
+    let per_tract = pair_cubics_by_tract(
+        evidence,
+        slippage,
+        shares,
+        homozygote_excess,
+        config.allele_span,
+    );
     let objective = |ln_spread: f64| -> f64 {
         let spread = float::exp(ln_spread);
         per_tract
@@ -1461,17 +1475,13 @@ pub(super) fn pair_cubics_by_tract(
     slippage: Slippage,
     shares: &[f64],
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> Vec<Vec<PairCubic>> {
-    let classes = allele_classes_of(config);
+    let classes = allele_classes_in(allele_span);
     let genotypes = genotype_pairs(classes);
     let libraries = one_stutter_for_every_library(evidence);
-    let distributions = ReadDistributionsByLevel::of(
-        &[slippage],
-        &libraries,
-        config.allele_span,
-        evidence.read_span,
-    );
+    let distributions =
+        ReadDistributionsByLevel::of(&[slippage], &libraries, allele_span, evidence.read_span);
     let per_allele = &distributions.read_distribution_by_allele[0];
     let distinct = DistinctRows::of(evidence, homozygote_excess);
     let ordered: Vec<Vec<f64>> = distinct
@@ -1557,12 +1567,13 @@ impl SamplePairs {
         slippage: Slippage,
         shares: &[f64],
         homozygote_excess: &[f64],
-        config: &SsrFitConfig,
+        allele_span: i32,
     ) -> Self {
-        let per_tract = pair_cubics_by_tract(evidence, slippage, shares, homozygote_excess, config)
-            .into_iter()
-            .filter(|pairs| !pairs.is_empty())
-            .collect();
+        let per_tract =
+            pair_cubics_by_tract(evidence, slippage, shares, homozygote_excess, allele_span)
+                .into_iter()
+                .filter(|pairs| !pairs.is_empty())
+                .collect();
         Self { per_tract }
     }
 
@@ -1796,8 +1807,14 @@ mod tests {
         }
         let distinct = DistinctRows::of(&evidence, &excess);
         assert!(distinct.reads.len() < evidence.rows_with_reads());
-        let class =
-            expected_counts_by_distinct_rows(&evidence, &distinct, at, &shares, 0.7, &config);
+        let class = expected_counts_by_distinct_rows(
+            &evidence,
+            &distinct,
+            at,
+            &shares,
+            0.7,
+            config.allele_span,
+        );
         assert!(same(&class, &summed), "{class:?} against {summed:?}");
     }
 

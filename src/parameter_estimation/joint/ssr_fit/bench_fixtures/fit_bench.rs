@@ -57,6 +57,9 @@
 
 use super::cohort_draw::ClassTruth;
 use super::*;
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
+    PenalisedFitConfig, PenalisedPeriodFit, fit_period_by_penalised_counting,
+};
 
 // ---------------------------------------------------------------------
 // What a method returns
@@ -486,9 +489,7 @@ impl PeriodFit for TheCountingFit {
 }
 
 /// **Method D: penalised counting**, every class of the motif length at once, each number a
-/// penalised curve across repeat count
-/// ([`fit_period_by_penalised_counting`](super::super::penalised_fit::fit_period_by_penalised_counting)),
-/// the spread read off pairs of samples as method B reads it. It draws its own curves, fits every
+/// penalised curve across repeat count ([`fit_period_by_penalised_counting`]), the spread read off pairs of samples as method B reads it. It draws its own curves, fits every
 /// class with reads (no refusal floor: a thin class takes what its counts and its neighbours say),
 /// and gives standard errors for every number it reports (`PenalisedClassErrors`).
 ///
@@ -498,34 +499,36 @@ impl PeriodFit for TheCountingFit {
 /// at one sample; that variant is `D_working_F` and its concentration is not an estimate.
 #[derive(Debug, Clone)]
 pub struct ThePenalisedFit {
-    pub config: super::super::penalised_fit::PenalisedFitConfig,
+    pub config: PenalisedFitConfig,
     pub report_working_concentration: bool,
-    /// The method's name in the rows, in place of the one derived from the settings.
-    pub label: Option<&'static str>,
 }
 
+/// **Method `D`: production's settings without the second floor under the allele lengths**
+/// (`allele_prior_tracts` zero), as the fit was first measured. [`ThePenalisedFit::production`] is
+/// `D_tract_prior`.
 impl Default for ThePenalisedFit {
     fn default() -> Self {
         Self {
-            config: super::super::penalised_fit::PenalisedFitConfig {
-                start: Slippage {
-                    level: 0.05,
-                    shorter_share: 0.5,
-                    fall_off: 0.3,
-                },
-                max_rounds: 2000,
-                tolerance: 1e-7,
-                pair_alternations: 10,
-                standard_errors: true,
-                ..super::super::penalised_fit::PenalisedFitConfig::default()
+            config: PenalisedFitConfig {
+                allele_prior_tracts: 0.0,
+                ..PenalisedFitConfig::production()
             },
             report_working_concentration: false,
-            label: None,
         }
     }
 }
 
 impl ThePenalisedFit {
+    /// **Method `D_tract_prior`: the fit as `estimate-parameters` runs it**
+    /// ([`PenalisedFitConfig::production`]).
+    #[must_use]
+    pub fn production() -> Self {
+        Self {
+            config: PenalisedFitConfig::production(),
+            report_working_concentration: false,
+        }
+    }
+
     /// **The whole fit of one motif length**: every class's numbers and errors, the curves with
     /// their strengths, and how many rounds each part of the loop ran. [`PeriodFit::fit_period`]
     /// keeps only the classes' numbers of this same fit; the bench's reference fixture records all
@@ -537,25 +540,17 @@ impl ThePenalisedFit {
         classes: &[StratumEvidence],
         homozygote_excess: &[f64],
         allele_span: i32,
-    ) -> super::super::penalised_fit::PenalisedPeriodFit {
-        let config = SsrFitConfig {
-            allele_span,
-            ..SsrFitConfig::default()
-        };
-        super::super::penalised_fit::fit_period_by_penalised_counting(
-            classes,
-            homozygote_excess,
-            &config,
-            &self.config,
-        )
+    ) -> PenalisedPeriodFit {
+        // The bench chooses the window for every method alike, with the floor that goes with it;
+        // the rest is this method's own.
+        let config = self.config.clone().with_allele_span(allele_span);
+        fit_period_by_penalised_counting(classes, homozygote_excess, &config)
     }
 }
 
 impl PeriodFit for ThePenalisedFit {
     fn name(&self) -> String {
-        if let Some(label) = self.label {
-            label.to_owned()
-        } else if self.report_working_concentration {
+        if self.report_working_concentration {
             "D_working_F".to_owned()
         } else if self.config.allele_prior_tracts > 0.0 {
             "D_tract_prior".to_owned()

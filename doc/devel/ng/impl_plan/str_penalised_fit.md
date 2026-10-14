@@ -152,7 +152,7 @@ what goes with it (arch §4.1).
   not a class's. Found: its numbers move by up to 1.3e-8 relative with the thread count — C3's target.
 - ✅ **C1** `composite_fit.rs` renamed `expected_counts.rs`; no code change. *Depends:* C0.
   *Source:* arch, Module home.
-- ☐ **C2** `PenalisedFitConfig::production()`, `allele_span` and the named constants; the functions on
+- ✅ **C2** `PenalisedFitConfig::production()`, `allele_span` and the named constants; the functions on
   the fit's path take the window from `PenalisedFitConfig`; the research-only fields removed, and with
   them the bench's `D_prior_*` methods and the clustering argument of `str_fit_penalised_em`; the
   bench's `D_tract_prior` built from `production()`. *Oracle:* C0's fixture reproduced. *Depends:* C1.

@@ -237,7 +237,7 @@ fn slopes_by_tract(
             point.slippage,
             &point.shares,
             homozygote_excess,
-            config,
+            config.allele_span,
         );
         let at = layout.concentration_index();
         for (slope, pairwise) in slopes

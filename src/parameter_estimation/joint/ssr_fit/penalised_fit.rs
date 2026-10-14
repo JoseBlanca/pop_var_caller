@@ -26,9 +26,20 @@ use std::time::Instant;
 use super::expected_counts::{ClassCounts, SamplePairs, expected_counts};
 use super::*;
 
-/// **How the penalised fit runs.**
+/// **How the penalised fit runs.** [`production`](Self::production) is what `estimate-parameters`
+/// runs (spec `str_penalised_fit.md` §2.7); [`prototype`](Self::prototype) keeps the research
+/// prototype's own settings, which the research examples start from and which differ from
+/// production's. There is deliberately no `Default`, so that no caller gets either by accident.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PenalisedFitConfig {
+    /// **How far from the reference length, in repeats, a class's alleles may sit**: the fit
+    /// places every class's chromosomes over `-allele_span ..= +allele_span`, the outermost two
+    /// meaning "this far or further". Production's is [`ALLELE_SPAN`], 9.
+    ///
+    /// **Coupled to [`allele_pseudo_draws`](Self::allele_pseudo_draws)**, which holds one draw a
+    /// class spread over this window's lengths. Change the two together, through
+    /// [`with_allele_span`](Self::with_allele_span).
+    pub allele_span: i32,
     /// Where every class's stutter starts. The allele length variation starts flat and the
     /// concentration at one, as in the counting fit.
     pub start: Slippage,
@@ -51,45 +62,29 @@ pub struct PenalisedFitConfig {
     /// and they keep it, and where no bend passes the knee the two give the same answer.
     pub kink_tail: f64,
     /// **Allele draws added to every allele length of every class before its shares are chosen:
-    /// one draw a class, spread evenly over the lengths** (1/19 of a draw each at ±9), after the
-    /// draws are weighed as clustered by locus. Without it a length the reads stop supporting in one
-    /// round gets a share near zero, so the next round's E-step gives it no draws and it can never
-    /// return: EM has an absorbing boundary at zero, which costs a held-out locus carrying that
-    /// length hundreds of log-likelihood units.
+    /// one draw a class, spread evenly over the lengths** (1/19 of a draw each at ±9). Without it
+    /// a length the reads stop supporting in one round gets a share near zero, so the next round's
+    /// E-step gives it no draws and it can never return: EM has an absorbing boundary at zero,
+    /// which costs a held-out locus carrying that length hundreds of log-likelihood units.
+    ///
+    /// **The value is per length, so it is coupled to [`allele_span`](Self::allele_span)**: the
+    /// fit adds it to each of the window's lengths and does not rescale it. Setting the window
+    /// alone changes the floor a class gets (at ±4, 1/19 a length is 9/19 of a draw a class).
+    /// Change the two together, through [`with_allele_span`](Self::with_allele_span).
     ///
     /// **Why not half a draw a length (the Jeffreys prior).** At one sample and 100 loci a class
     /// holds about 120 draws once clustering is allowed for, and 19 half-draws spread evenly moved
     /// enough mass into the tails to bias the reference length's share by −0.13 (one-base runs) and
     /// −0.20 (two-base runs) on the fitting bench's tomato-like truth.
     pub allele_pseudo_draws: f64,
-    /// **A further prior on the allele draws, sized as the counting fit sizes its own: this many
-    /// tracts' worth of a class's allele draws, spread evenly over the lengths** (the counting fit's
-    /// `SHARE_PRIOR_TRACTS` is one). **Zero by default**, which is penalised counting as track 2
-    /// built it. For measuring only: the floor of [`allele_pseudo_draws`](Self::allele_pseudo_draws)
-    /// is one draw a class whatever the cohort, so from tens of samples up it no longer holds a
-    /// length that no training locus carries off zero, where this prior grows with the cohort.
+    /// **A second floor under the allele draws, sized as the counting fit sizes its own: this many
+    /// loci's worth of a class's allele draws, spread evenly over the lengths** (the counting fit's
+    /// `SHARE_PRIOR_TRACTS` is one). Production's is [`ALLELE_PRIOR_LOCI`], one. The floor of
+    /// [`allele_pseudo_draws`](Self::allele_pseudo_draws) is one draw a class whatever the cohort,
+    /// so from tens of samples up it no longer holds off zero a length that no locus of the class
+    /// carries; this one grows with the cohort and does (spec §2.4). Zero, the prototype's default,
+    /// leaves only the first floor.
     pub allele_prior_tracts: f64,
-    /// **A prior of this many allele draws a class in all, whatever the cohort**, in place of
-    /// [`allele_prior_tracts`](Self::allele_prior_tracts)' locus's worth (which grows with the
-    /// samples). Zero by default. For measuring only.
-    pub allele_prior_fixed_draws: f64,
-    /// **Lengths within this many repeats of the reference length get none of the prior** above;
-    /// its whole weight is spread evenly over the lengths further out. Negative (the default)
-    /// spreads it over every length. For measuring only: the prior on the lengths next to the
-    /// reference, where most of a class's alleles sit, is where slipped reads can be explained as
-    /// alleles, which biases the slip rate low (track 1, §12.1).
-    pub allele_prior_skips_within: i32,
-    /// **Whether each class's allele draws are divided by the design effect of draws clustered by
-    /// locus** before its allele-length curve is fitted (`Period::allele_draw_inflation`). **Off by
-    /// default**, because measured both ways on drawn motif lengths (track 2's report, §3.5) it helps
-    /// the allele length variation and can wreck the stutter: at 50 samples × 30 reads it halved
-    /// the thin classes' allele-length error (0.090 to 0.050) with the slip rate unchanged, but at
-    /// 2,000 samples × 3 reads the honest information left a straight allele-length curve, slightly
-    /// wrong at rich classes (0.018 against 0.009), and with millions of reads the stutter absorbed
-    /// the misfit: the slip rate at rich classes came out 12% wrong against 1.7% without it. The
-    /// strength is chosen from the allele counts alone, which cannot see what the reads say about
-    /// the spread through the stutter.
-    pub weigh_allele_draws_by_locus: bool,
     /// **How many times the between-locus share is read off pairs of samples at a locus**, each time
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
     /// copies, which says almost nothing in an inbred cohort.
@@ -127,9 +122,55 @@ pub struct PenalisedFitConfig {
     pub standard_errors: bool,
 }
 
-impl Default for PenalisedFitConfig {
-    fn default() -> Self {
+impl PenalisedFitConfig {
+    /// **What `estimate-parameters` runs** (spec `str_penalised_fit.md` §2.7): the settings the
+    /// fitting bench measured as the lead candidate.
+    ///
+    /// | setting | value |
+    /// |---|---|
+    /// | allele window | ±[`ALLELE_SPAN`], 9 |
+    /// | start | [`STARTING_STUTTER`]: slip rate 0.05, shorter share 0.5, fall-off 0.3 |
+    /// | rounds at most / stop when no number moves more than | [`MAX_ROUNDS`] 2,000 / [`TOLERANCE`] 10⁻⁷ |
+    /// | floor under the allele lengths | [`ALLELE_PRIOR_LOCI`], one locus's worth, plus [`ALLELE_PSEUDO_DRAWS_A_CLASS`], one draw a class |
+    /// | F read off pairs of samples, at most | [`PAIR_ALTERNATIONS`], 10 times |
+    /// | kink knee / tail | [`KINK_KNEE`] 2.5 / [`KINK_TAIL`] 2 |
+    /// | a curve's strength held once it moves less than | [`STRENGTH_STEADY_WITHIN`], 0.1 natural-log units |
+    /// | a class whose numbers stopped moving reuses its counts | on |
+    /// | standard errors | on |
+    ///
+    /// Two settings §2.7 does not list keep the prototype's values: strengths are chosen for at
+    /// most 200 rounds, or until no number moves by more than 10⁻⁵. The rule that withholds errors
+    /// on thin classes ([`LOCI_FOR_AN_ERROR`], [`LOCI_FOR_A_SHARE_ERROR`]) is not a setting of the
+    /// fit: it is applied when the fit's numbers are handed to the rest of the caller.
+    #[must_use]
+    pub fn production() -> Self {
         Self {
+            allele_span: ALLELE_SPAN,
+            start: STARTING_STUTTER,
+            max_rounds: MAX_ROUNDS,
+            tolerance: TOLERANCE,
+            smoothing: Smoothing::MarginalLikelihood,
+            kink_knee: KINK_KNEE,
+            kink_tail: KINK_TAIL,
+            allele_pseudo_draws: pseudo_draws_a_length(ALLELE_SPAN),
+            allele_prior_tracts: ALLELE_PRIOR_LOCI,
+            pair_alternations: PAIR_ALTERNATIONS,
+            rounds_choosing_strength: 200,
+            settled_change_for_strength: 1e-5,
+            strength_steady_within: STRENGTH_STEADY_WITHIN,
+            reuse_settled_counts: true,
+            standard_errors: true,
+        }
+    }
+
+    /// **The research prototype's own settings, not production's** (production's are
+    /// [`production`](Self::production)), kept for the research examples and a few tests: a looser
+    /// start, at most 500 rounds, stop below 10⁻⁶, no second floor under the allele lengths, F not
+    /// read off pairs, and no standard errors.
+    #[must_use]
+    pub fn prototype() -> Self {
+        Self {
+            allele_span: ALLELE_SPAN,
             start: Slippage {
                 level: 0.2,
                 shorter_share: 0.5,
@@ -138,22 +179,75 @@ impl Default for PenalisedFitConfig {
             max_rounds: 500,
             tolerance: 1e-6,
             smoothing: Smoothing::MarginalLikelihood,
-            kink_knee: 2.5,
-            kink_tail: 2.0,
-            allele_pseudo_draws: 1.0 / 19.0,
+            kink_knee: KINK_KNEE,
+            kink_tail: KINK_TAIL,
+            allele_pseudo_draws: pseudo_draws_a_length(ALLELE_SPAN),
             allele_prior_tracts: 0.0,
-            allele_prior_fixed_draws: 0.0,
-            allele_prior_skips_within: -1,
-            weigh_allele_draws_by_locus: false,
             pair_alternations: 0,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
-            strength_steady_within: 0.1,
+            strength_steady_within: STRENGTH_STEADY_WITHIN,
             reuse_settled_counts: true,
             standard_errors: false,
         }
     }
+
+    /// **These settings with the allele window set to `allele_span` and the first floor rescaled to
+    /// match**: [`allele_pseudo_draws`](Self::allele_pseudo_draws) becomes
+    /// [`ALLELE_PSEUDO_DRAWS_A_CLASS`] spread over the new window's lengths, whatever it held
+    /// before. At ±9 that is 1/19, the value [`production`](Self::production) holds, to the bit.
+    #[must_use]
+    pub fn with_allele_span(self, allele_span: i32) -> Self {
+        Self {
+            allele_span,
+            allele_pseudo_draws: pseudo_draws_a_length(allele_span),
+            ..self
+        }
+    }
 }
+
+/// **The first floor's draws a length in a window of `allele_span`**: one draw a class
+/// ([`ALLELE_PSEUDO_DRAWS_A_CLASS`]) divided by the number of lengths, `2 × allele_span + 1`.
+fn pseudo_draws_a_length(allele_span: i32) -> f64 {
+    ALLELE_PSEUDO_DRAWS_A_CLASS / allele_classes_in(allele_span) as f64
+}
+
+/// **Where every class's stutter starts in production**: slip rate 0.05, shorter share 0.5,
+/// fall-off 0.3 (spec §2.7). The bench's values; soft.
+pub const STARTING_STUTTER: Slippage = Slippage {
+    level: 0.05,
+    shorter_share: 0.5,
+    fall_off: 0.3,
+};
+/// **At most this many rounds of the loop**, over every run of penalised counting together
+/// (spec §2.7). The bench's value; soft.
+pub const MAX_ROUNDS: usize = 2000;
+/// **The loop stops once no number moves by more than this in a round** (spec §2.7). The bench's
+/// value; soft.
+pub const TOLERANCE: f64 = 1e-7;
+/// **One draw a class, spread evenly over the allele lengths**: the first floor under the allele
+/// draws ([`PenalisedFitConfig::allele_pseudo_draws`] holds it per length). Spec §2.4, measured.
+pub const ALLELE_PSEUDO_DRAWS_A_CLASS: f64 = 1.0;
+/// **One locus's worth of allele draws a class, spread evenly over the lengths**: the second
+/// floor ([`PenalisedFitConfig::allele_prior_tracts`]). Spec §2.4, measured.
+pub const ALLELE_PRIOR_LOCI: f64 = 1.0;
+/// Readings of F off pairs of samples, at most (spec §2.5). The bench's value; soft.
+pub const PAIR_ALTERNATIONS: usize = 10;
+/// **How many standard deviations a bend may reach before its penalty stops growing as its
+/// square** (spec §2.3): the knee of the slippage curve's blend.
+pub const KINK_KNEE: f64 = 2.5;
+/// **What a bend beyond the knee costs per natural-log unit of its size** (spec §2.3); see
+/// [`PenalisedFitConfig::kink_tail`] for how it was measured.
+pub const KINK_TAIL: f64 = 2.0;
+/// **A curve whose strength moved by less than this many natural-log units keeps it** (spec
+/// §2.7). Measured.
+pub const STRENGTH_STEADY_WITHIN: f64 = 0.1;
+/// A share's error is withheld when the class's loci with reads times the share is below this
+/// (spec §7, owner 2026-10-14). Rests on two settings; soft.
+pub const LOCI_FOR_A_SHARE_ERROR: f64 = 3.0;
+/// **Every error of a class is withheld below this many loci with reads** (spec §2.6; confirmed
+/// by the owner, 2026-10-14). Errors on thinner classes were never measured; soft.
+pub const LOCI_FOR_AN_ERROR: usize = 8;
 
 /// **How a curve's penalty strength is set.**
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -314,7 +408,7 @@ pub struct PenalisedPeriodFit {
 ///
 /// `classes` are the classes of one motif length, any order, each repeat count at most once.
 /// `homozygote_excess` is indexed by sample. Every library is scored at its class's stutter
-/// (multipliers are not fitted here). The allele window is `config.allele_span`.
+/// (multipliers are not fitted here). The allele window is `fit.allele_span`.
 ///
 /// With [`PenalisedFitConfig::pair_alternations`] above zero, the between-locus share is then read
 /// off pairs of samples at a locus, as [`fit_class_by_counting_with_pairs`](super::expected_counts::fit_class_by_counting_with_pairs)
@@ -328,7 +422,6 @@ pub struct PenalisedPeriodFit {
 pub fn fit_period_by_penalised_counting(
     classes: &[StratumEvidence],
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
     fit: &PenalisedFitConfig,
 ) -> PenalisedPeriodFit {
     if let Some(first) = classes.first() {
@@ -339,7 +432,7 @@ pub fn fit_period_by_penalised_counting(
             "one motif length at a time"
         );
     }
-    let Some(mut period) = Period::new(classes, config, fit) else {
+    let Some(mut period) = Period::new(classes, fit) else {
         return PenalisedPeriodFit {
             classes: vec![None; classes.len()],
             curves: None,
@@ -357,10 +450,10 @@ pub fn fit_period_by_penalised_counting(
             error_seconds: 0.0,
         };
     };
-    period.count(classes, homozygote_excess, config, fit, false);
+    period.count(classes, homozygote_excess, fit, false);
     for alternation in 0..fit.pair_alternations {
         let started = Instant::now();
-        let Some(tables) = period.pair_tables(classes, homozygote_excess, config) else {
+        let Some(tables) = period.pair_tables(classes, homozygote_excess, fit.allele_span) else {
             break;
         };
         let spreads = period.between_curve.refit(
@@ -383,14 +476,14 @@ pub fn fit_period_by_penalised_counting(
             }
         }
         period.pair_seconds += started.elapsed().as_secs_f64();
-        period.count(classes, homozygote_excess, config, fit, true);
+        period.count(classes, homozygote_excess, fit, true);
         if moved < 0.01 {
             break;
         }
     }
     let started = Instant::now();
     let errors = if fit.standard_errors {
-        period.standard_errors(classes, homozygote_excess, config)
+        period.standard_errors(classes, homozygote_excess, fit.allele_span)
     } else {
         vec![None; period.points()]
     };
@@ -412,9 +505,6 @@ fn between_share_grid() -> Vec<f64> {
 struct Period {
     /// Per grid point (consecutive repeat counts from `lowest`), the class there, if any.
     class_at_point: Vec<Option<usize>>,
-    /// Per grid point, the allele draws a locus of its class holds on average: two per sample with
-    /// reads there. Zero where there is no class.
-    allele_draws_per_locus: Vec<f64>,
     /// Whether any locus of the motif length has two samples with reads, without which the
     /// between-locus share is not reported.
     between_locus_share_measurable: bool,
@@ -452,11 +542,7 @@ struct Period {
 impl Period {
     /// The grid over the classes with reads, every number at its start; `None` when no class has
     /// reads.
-    fn new(
-        classes: &[StratumEvidence],
-        config: &SsrFitConfig,
-        fit: &PenalisedFitConfig,
-    ) -> Option<Self> {
+    fn new(classes: &[StratumEvidence], fit: &PenalisedFitConfig) -> Option<Self> {
         let with_reads: Vec<usize> = (0..classes.len())
             .filter(|&index| classes[index].rows_with_reads() > 0)
             .collect();
@@ -473,7 +559,7 @@ impl Period {
                 "two classes at one repeat count"
             );
         }
-        let alleles = allele_classes_of(config);
+        let alleles = allele_classes_in(fit.allele_span);
         Some(Self {
             between_locus_share_measurable: with_reads.iter().any(|&index| {
                 classes[index]
@@ -481,20 +567,10 @@ impl Period {
                     .iter()
                     .any(|tract| tract.samples.len() >= 2)
             }),
-            allele_draws_per_locus: class_at_point
-                .iter()
-                .map(|class| {
-                    class.map_or(0.0, |index| {
-                        let evidence = &classes[index];
-                        2.0 * evidence.rows_with_reads() as f64
-                            / evidence.tracts_with_reads().max(1) as f64
-                    })
-                })
-                .collect(),
             class_at_point,
             lowest,
             alleles,
-            reference_allele: config.allele_span as usize,
+            reference_allele: fit.allele_span as usize,
             slippage: vec![fit.start; points],
             shares: vec![vec![1.0 / alleles as f64; alleles]; points],
             concentration: vec![1.0; points],
@@ -525,30 +601,12 @@ impl Period {
         self.class_at_point.len()
     }
 
-    /// **How much more the allele draws of one locus vary than independent draws would**:
-    /// `1 + (m − 1) · F`, with `m` the draws a locus holds and `F` the class's between-locus
-    /// share. It is the variance of a Dirichlet-multinomial count over a multinomial one, the
-    /// design effect of draws clustered by locus.
-    ///
-    /// **Why the allele counts are divided by it.** The E-step counts every sample's alleles as
-    /// independent draws from the class, which is what the counting fit's objective assumes; but
-    /// samples at one locus share its frequencies. At 2,000 samples a 5-locus class then holds
-    /// 20,000 draws and looks measured to the curve fit, which chose almost no smoothing for the
-    /// allele length variation and left its thin classes no better than the counting fit's
-    /// (track 2's report, §3). Dividing every count of a class by the same number leaves the
-    /// class's own shares where they were and gives its curve the information it actually has.
-    fn allele_draw_inflation(&self, point: usize) -> f64 {
-        let between_locus_share = 1.0 / (1.0 + self.concentration[point]);
-        1.0 + (self.allele_draws_per_locus[point] - 1.0).max(0.0) * between_locus_share
-    }
-
     /// **Rounds of penalised counting** until no number moves by more than the tolerance or the
     /// rounds run out. With `spread_held`, the concentration stays where it is.
     fn count(
         &mut self,
         classes: &[StratumEvidence],
         homozygote_excess: &[f64],
-        config: &SsrFitConfig,
         fit: &PenalisedFitConfig,
         spread_held: bool,
     ) {
@@ -598,7 +656,7 @@ impl Period {
                             &self.shares[point],
                             self.concentration[point],
                             homozygote_excess,
-                            config,
+                            fit.allele_span,
                         )
                     })
                 })
@@ -647,46 +705,27 @@ impl Period {
                     search,
                 ))
             };
-            // Samples at one locus share its frequencies, so a class's allele draws carry less than
-            // independent draws would: divide them by the clustering's variance inflation.
+            // Each class's allele draws with the two floors under them (spec §2.4): one draw a
+            // class, and `allele_prior_tracts` loci's worth of its draws, each spread evenly over
+            // the lengths.
             let draws: Vec<Vec<f64>> = counts
                 .iter()
                 .enumerate()
                 .map(|(point, count)| {
                     count.as_ref().map_or_else(Vec::new, |c| {
-                        let inflation = if fit.weigh_allele_draws_by_locus {
-                            self.allele_draw_inflation(point)
-                        } else {
-                            1.0
-                        };
-                        // The counting fit's prior, when asked for: tracts' worth of the class's
-                        // draws (or a fixed number of draws), spread evenly over the lengths it
-                        // reaches.
-                        let prior_total = if fit.allele_prior_fixed_draws > 0.0 {
-                            fit.allele_prior_fixed_draws
-                        } else if fit.allele_prior_tracts > 0.0 {
+                        let prior_total = if fit.allele_prior_tracts > 0.0 {
                             let tracts = self.class_at_point[point]
                                 .map_or(1, |index| classes[index].tracts_with_reads().max(1))
                                 as f64;
-                            let total: f64 = c.draws.iter().map(|d| d / inflation).sum();
+                            let total: f64 = c.draws.iter().sum();
                             fit.allele_prior_tracts * total / tracts
                         } else {
                             0.0
                         };
-                        let span = (c.draws.len() as i32 - 1) / 2;
-                        let reached = |index: usize| {
-                            (index as i32 - span).abs() > fit.allele_prior_skips_within
-                        };
-                        let lengths_reached = (0..c.draws.len()).filter(|i| reached(*i)).count();
-                        let prior = prior_total / lengths_reached.max(1) as f64;
+                        let prior = prior_total / c.draws.len().max(1) as f64;
                         c.draws
                             .iter()
-                            .enumerate()
-                            .map(|(index, d)| {
-                                d / inflation
-                                    + fit.allele_pseudo_draws
-                                    + if reached(index) { prior } else { 0.0 }
-                            })
+                            .map(|d| d + fit.allele_pseudo_draws + prior)
                             .collect()
                     })
                 })
@@ -774,7 +813,7 @@ impl Period {
         &self,
         classes: &[StratumEvidence],
         homozygote_excess: &[f64],
-        config: &SsrFitConfig,
+        allele_span: i32,
     ) -> Vec<Option<PenalisedClassErrors>> {
         let points = self.points();
         let shares_block = self.alleles - 1;
@@ -841,7 +880,7 @@ impl Period {
                 &shares,
                 concentration,
                 homozygote_excess,
-                config,
+                allele_span,
             );
             slope_of(&counts, theta)
         };
@@ -961,7 +1000,7 @@ impl Period {
                         self.slippage[point],
                         &self.shares[point],
                         homozygote_excess,
-                        config,
+                        allele_span,
                     );
                     if pairs.is_empty() {
                         continue;
@@ -1056,7 +1095,7 @@ impl Period {
         &self,
         classes: &[StratumEvidence],
         homozygote_excess: &[f64],
-        config: &SsrFitConfig,
+        allele_span: i32,
     ) -> Option<CurveData> {
         let grid = between_share_grid();
         let values: Vec<Vec<f64>> = self
@@ -1072,7 +1111,7 @@ impl Period {
                     self.slippage[point],
                     &self.shares[point],
                     homozygote_excess,
-                    config,
+                    allele_span,
                 );
                 if pairs.is_empty() {
                     return Vec::new();
@@ -2118,7 +2157,7 @@ mod tests {
                 successes,
                 trials: trials.clone(),
             };
-            let config = PenalisedFitConfig::default();
+            let config = PenalisedFitConfig::prototype();
             let mut state = CurveState::new(repeats.len(), 1);
             let fitted = state.refit(&data, &config, StrengthSearch::Wide);
             let at_nine = logistic(fitted[1]);
@@ -2167,14 +2206,15 @@ mod tests {
             .collect();
         let excess = [0.4; 10];
         let fit = PenalisedFitConfig {
+            allele_span: config.allele_span,
             smoothing: Smoothing::Fixed(1e-8),
             allele_pseudo_draws: 0.0,
             kink_knee: f64::INFINITY,
             tolerance: 1e-10,
             max_rounds: 2000,
-            ..PenalisedFitConfig::default()
+            ..PenalisedFitConfig::prototype()
         };
-        let together = fit_period_by_penalised_counting(&classes, &excess, &config, &fit);
+        let together = fit_period_by_penalised_counting(&classes, &excess, &fit);
         for (evidence, fitted) in classes.iter().zip(&together.classes) {
             let fitted = fitted.as_ref().expect("every class has reads");
             // The counting fit without its shares' prior: with no floor here either, the two fits
@@ -2209,5 +2249,54 @@ mod tests {
                 "{fitted:?} against {alone:?}"
             );
         }
+    }
+
+    /// **Production runs the settings of spec §2.7**, each from its named constant, and the
+    /// prototype's two settings §2.7 does not list.
+    #[test]
+    fn production_runs_the_settings_of_the_spec() {
+        let production = PenalisedFitConfig::production();
+        let spec = PenalisedFitConfig {
+            allele_span: 9,
+            start: Slippage {
+                level: 0.05,
+                shorter_share: 0.5,
+                fall_off: 0.3,
+            },
+            max_rounds: 2000,
+            tolerance: 1e-7,
+            smoothing: Smoothing::MarginalLikelihood,
+            kink_knee: 2.5,
+            kink_tail: 2.0,
+            allele_pseudo_draws: 1.0 / 19.0,
+            allele_prior_tracts: 1.0,
+            pair_alternations: 10,
+            rounds_choosing_strength: 200,
+            settled_change_for_strength: 1e-5,
+            strength_steady_within: 0.1,
+            reuse_settled_counts: true,
+            standard_errors: true,
+        };
+        assert_eq!(production, spec);
+    }
+
+    /// **Setting the window rescales the first floor to one draw a class**, and at production's
+    /// own window it changes nothing, to the bit.
+    #[test]
+    fn a_new_window_keeps_one_draw_a_class() {
+        let production = PenalisedFitConfig::production();
+        assert_eq!(production.clone().with_allele_span(ALLELE_SPAN), production);
+        let narrow = PenalisedFitConfig::production().with_allele_span(4);
+        assert_eq!(narrow.allele_span, 4);
+        assert_eq!(narrow.allele_pseudo_draws, 1.0 / 9.0);
+        assert_eq!(
+            PenalisedFitConfig {
+                allele_pseudo_draws: 0.0,
+                ..PenalisedFitConfig::prototype()
+            }
+            .with_allele_span(9)
+            .allele_pseudo_draws,
+            1.0 / 19.0
+        );
     }
 }

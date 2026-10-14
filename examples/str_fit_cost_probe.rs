@@ -60,6 +60,8 @@ struct Cli {
     #[command(subcommand)]
     source: Source,
     /// How far either side of the reference length alleles may sit (the shipped ±9 by default).
+    /// The penalised methods keep one draw a class as the first floor under the allele lengths at
+    /// any window; before plan step C2 they held 1/19 of a draw a length whatever the window.
     #[arg(long, global = true)]
     allele_span: Option<i32>,
     /// Also time the sandwich errors the bench adds to B.
@@ -209,8 +211,9 @@ fn main() {
             let (estep_cpu, estep_wall, pairs_cpu, pairs_wall) = if cli.no_units {
                 (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
             } else {
-                let (_, estep_cpu, estep_wall) =
-                    timed(|| expected_counts(evidence, start, &flat, 1.0, &excess, &config));
+                let (_, estep_cpu, estep_wall) = timed(|| {
+                    expected_counts(evidence, start, &flat, 1.0, &excess, config.allele_span)
+                });
                 let (_, pairs_cpu, pairs_wall) =
                     timed(|| fit_spread_by_pairs(evidence, start, &flat, &excess, &config));
                 (estep_cpu, estep_wall, pairs_cpu, pairs_wall)
@@ -317,8 +320,9 @@ fn main() {
             pair_alternations: 10,
             standard_errors: true,
             allele_prior_tracts: if *method == "D_tract_prior" { 1.0 } else { 0.0 },
-            ..PenalisedFitConfig::default()
-        };
+            ..PenalisedFitConfig::prototype()
+        }
+        .with_allele_span(config.allele_span);
         let mut periods: Vec<u8> = strata.iter().map(|e| e.stratum.period).collect();
         periods.sort_unstable();
         periods.dedup();
@@ -333,7 +337,7 @@ fn main() {
                 .collect();
             let rows: usize = classes.iter().map(StratumEvidence::rows_with_reads).sum();
             let (fit, cpu, wall) =
-                timed(|| fit_period_by_penalised_counting(&classes, &excess, &config, &fit_config));
+                timed(|| fit_period_by_penalised_counting(&classes, &excess, &fit_config));
             for (evidence, class) in classes.iter().zip(&fit.classes) {
                 let Some(class) = class else { continue };
                 numbers.push(method, evidence, "level", Some(class.slippage.level));

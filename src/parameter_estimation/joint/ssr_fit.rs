@@ -2710,7 +2710,13 @@ fn fit_on_growing_subsets(
 
 /// The allele classes the climb fits, `2 × span + 1`.
 fn allele_classes_of(config: &SsrFitConfig) -> usize {
-    (2 * config.allele_span + 1) as usize
+    allele_classes_in(config.allele_span)
+}
+
+/// **How many allele classes a window of `allele_span` repeats either side holds**: `2 × span + 1`,
+/// from `-allele_span` to `+allele_span`.
+fn allele_classes_in(allele_span: i32) -> usize {
+    (2 * allele_span + 1) as usize
 }
 
 /// **Which of `climbs` scored highest**, the earlier winning a tie and a score that is not a number

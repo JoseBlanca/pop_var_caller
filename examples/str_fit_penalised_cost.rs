@@ -85,7 +85,7 @@ fn main() {
                     vec![1.0 / f64::from(2 * ALLELE_SPAN + 1); (2 * ALLELE_SPAN + 1) as usize];
                 let started = Instant::now();
                 for evidence in classes {
-                    let _ = expected_counts(evidence, start, &shares, 1.0, excess, &config);
+                    let _ = expected_counts(evidence, start, &shares, 1.0, excess, ALLELE_SPAN);
                 }
                 println!(
                     "{cell}\tpass\t{:.3}\t1\t\t\t\t\t\t\t\t",
@@ -119,6 +119,7 @@ fn main() {
             }
             arm @ ("D_every" | "D_steady" | "D_reuse" | "D_errors") => {
                 let fit = PenalisedFitConfig {
+                    allele_span: ALLELE_SPAN,
                     start,
                     max_rounds: 2000,
                     tolerance: 1e-7,
@@ -126,10 +127,10 @@ fn main() {
                     strength_steady_within: if arm == "D_every" { 0.0 } else { 0.1 },
                     reuse_settled_counts: arm == "D_reuse" || arm == "D_errors",
                     standard_errors: arm == "D_errors",
-                    ..PenalisedFitConfig::default()
+                    ..PenalisedFitConfig::prototype()
                 };
                 let started = Instant::now();
-                let fitted = fit_period_by_penalised_counting(classes, excess, &config, &fit);
+                let fitted = fit_period_by_penalised_counting(classes, excess, &fit);
                 println!(
                     "{cell}\t{arm}\t{:.3}\t{}\t{}\t{:.3}\t{:.3}\t{:.3}\t{}\t{:.3}\t{}\t{:.3}\t{}",
                     started.elapsed().as_secs_f64(),

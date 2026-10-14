@@ -23,7 +23,7 @@
 //!     [homozygote excess, default 0.3] [pair alternations, default 0] \
 //!     [slip rate at 9 repeats as a share of its curve, default 0.53] \
 //!     [cost of a bend beyond the knee per log unit, default 2] \
-//!     [1 to weigh allele draws as clustered by locus, default 0] \
+//!     [removed: once switched on a clustering weight; 0 if a strength follows] \
 //!     [a penalty strength to hold every curve at, default: chosen]
 //! ```
 //!
@@ -223,17 +223,30 @@ fn main() {
     let kink_tail: f64 = arguments
         .get(7)
         .map_or(2.0, |a| a.parse().expect("a tail coefficient"));
-    let weigh_allele_draws_by_locus = arguments.get(8).is_some_and(|a| a == "1");
+    // The eighth argument once switched on the clustering weight, removed at plan step C2. It
+    // fails loudly rather than shifting the strength into its place, so that an old command line
+    // passing 1 there does not run at a fixed strength of 1 instead.
+    if let Some(removed) = arguments.get(8) {
+        assert!(
+            removed == "0",
+            "the eighth argument, the clustering weight, was removed at plan step C2; pass 0 in \
+             its place if a penalty strength follows"
+        );
+    }
     // A strength held for every curve instead of chosen; for measuring what the choice gives.
     let smoothing = arguments.get(9).map_or(Smoothing::MarginalLikelihood, |a| {
         Smoothing::Fixed(a.parse().expect("a penalty strength"))
     });
+    // The window is set without `with_allele_span` on purpose: this example has always held the
+    // first floor at 1/19 of a draw a length whatever the window, which is 9/19 of a draw a class
+    // at its default ±4, and its recorded outputs (track 2's report) were made that way.
     let fit = PenalisedFitConfig {
+        allele_span: span,
+        allele_pseudo_draws: 1.0 / 19.0,
         pair_alternations,
         kink_tail,
-        weigh_allele_draws_by_locus,
         smoothing,
-        ..PenalisedFitConfig::default()
+        ..PenalisedFitConfig::prototype()
     };
     println!("row\tsetting\tdraw\tmethod\trepeats\tloci\tnumber\testimate\ttruth");
     println!(
@@ -319,7 +332,7 @@ fn main() {
 
             // Every class at once.
             let started = Instant::now();
-            let together = fit_period_by_penalised_counting(&classes, &excess, &config, &fit);
+            let together = fit_period_by_penalised_counting(&classes, &excess, &fit);
             let penalised_seconds = started.elapsed().as_secs_f64();
             println!(
                 "cost\t{setting}\t{seed}\tpenalised\t{penalised_seconds:.3}\t{}\t{:.3}\t{:.3}\t{:.1e}",
