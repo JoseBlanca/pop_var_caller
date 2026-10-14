@@ -143,7 +143,12 @@ fn draw_and_fit(
             continue;
         };
         fits.push(Fitted {
-            converged: fit.ending.settled(),
+            converged: fit
+                .climb
+                .as_ref()
+                .expect("the climb fills its own record")
+                .ending
+                .settled(),
             level: slippage.level,
             shorter_share: slippage.shorter_share,
             fall_off: slippage.fall_off,

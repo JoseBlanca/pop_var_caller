@@ -210,16 +210,20 @@ fn stratum(tracts: usize, samples: usize, reference_repeats: u64, seed: u64) -> 
 fn check_the_stratum_was_fitted(evidence: &StratumEvidence, excess: &[f64], config: &SsrFitConfig) {
     let fitted = fit_stratum(evidence, excess, config)
         .expect("a drawn stratum has reads in its one slippage group");
+    let climb = fitted
+        .climb
+        .as_ref()
+        .expect("the climb fills its own record");
     assert_eq!(
-        fitted.tracts_fitted,
+        climb.tracts_fitted,
         evidence.tracts.len(),
         "the fit must read every drawn tract, not a prefix of them"
     );
     assert!(
-        fitted.log_likelihood_a_tract.is_finite(),
+        climb.log_likelihood_a_tract.is_finite(),
         "the mean log-likelihood a tract came back as {}, so the timed body is not doing the \
          arithmetic this bench claims",
-        fitted.log_likelihood_a_tract
+        climb.log_likelihood_a_tract
     );
     assert!(
         fitted.slippage[0].is_some(),
@@ -376,15 +380,16 @@ fn check_the_strata_took_the_route_they_were_named_for(
     for outcome in &outcomes {
         match outcome {
             StratumOutcome::Fitted(fit) => {
+                let climb = fit.climb.as_ref().expect("the climb fills its own record");
                 assert!(
-                    fit.borrowed.is_empty(),
+                    climb.borrowed.is_empty(),
                     "nothing pools tracts any more, so no stratum may report borrowing from {:?}",
-                    fit.borrowed
+                    climb.borrowed
                 );
                 assert_eq!(
-                    fit.tracts_fitted, tracts_each,
+                    climb.tracts_fitted, tracts_each,
                     "the answer was fitted from {} tracts, not the {tracts_each} this case names",
-                    fit.tracts_fitted
+                    climb.tracts_fitted
                 );
             }
             StratumOutcome::Refused { reason, .. } => {

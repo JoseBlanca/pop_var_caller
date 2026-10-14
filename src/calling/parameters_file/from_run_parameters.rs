@@ -1008,8 +1008,8 @@ mod tests {
     };
     use crate::parameter_estimation::joint::slippage_curve::RiseShape;
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, DerivedStratum, PeriodAlleleLengthVariation, SharesProvenance, Slippage,
-        StratumFit, StratumOutcome, StratumRefusal,
+        ClimbEnding, ClimbRecord, DerivedStratum, PeriodAlleleLengthVariation, SharesProvenance,
+        Slippage, StratumFit, StratumOutcome, StratumRefusal,
     };
     use crate::parameter_estimation::repeat_strata::{
         RepeatCount, Stratum as SsrStratum, StratumKey,
@@ -1233,11 +1233,13 @@ mod tests {
             ],
             allele_length_variation: vec![0.1, 0.8, 0.1],
             concentration: Some(3.5),
-            log_likelihood_a_tract: -1.25,
-            tracts_fitted: 900,
-            borrowed: Vec::new(),
-            ending: ClimbEnding::Settled,
-            walks: Vec::new(),
+            climb: Some(ClimbRecord {
+                log_likelihood_a_tract: -1.25,
+                tracts_fitted: 900,
+                borrowed: Vec::new(),
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+            }),
             samples_fitted_on: None,
             tracts_of_its_own: 900,
             reads_crossing: 19_000,

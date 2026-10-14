@@ -1122,8 +1122,8 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, DerivedStratum, PeriodAlleleLengthVariation, ShareProvenance, StratumFit,
-        StratumRefusal,
+        ClimbEnding, ClimbRecord, DerivedStratum, PeriodAlleleLengthVariation, ShareProvenance,
+        StratumFit, StratumRefusal,
     };
 
     fn stratum(period: u8, reference_repeats: u64) -> Stratum {
@@ -1256,11 +1256,13 @@ mod tests {
             slippage: vec![Some(slippage(0.1)), Some(slippage(0.2))],
             allele_length_variation: leaning_short(),
             concentration: Some(2.0),
-            log_likelihood_a_tract: -1.5,
-            tracts_fitted: 40,
-            borrowed: Vec::new(),
-            ending: ClimbEnding::Settled,
-            walks: Vec::new(),
+            climb: Some(ClimbRecord {
+                log_likelihood_a_tract: -1.5,
+                tracts_fitted: 40,
+                borrowed: Vec::new(),
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+            }),
             samples_fitted_on: Some(300),
             tracts_of_its_own: 40,
             reads_crossing: 400,
@@ -1616,11 +1618,13 @@ mod tests {
             slippage: vec![Some(slippage(level))],
             allele_length_variation,
             concentration: Some(concentration),
-            log_likelihood_a_tract: -1.5,
-            tracts_fitted: 40,
-            borrowed: Vec::new(),
-            ending: ClimbEnding::Settled,
-            walks: Vec::new(),
+            climb: Some(ClimbRecord {
+                log_likelihood_a_tract: -1.5,
+                tracts_fitted: 40,
+                borrowed: Vec::new(),
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+            }),
             samples_fitted_on: None,
             tracts_of_its_own: 40,
             reads_crossing: 400,

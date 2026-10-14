@@ -554,26 +554,15 @@ pub struct StratumFit {
     ///
     /// An absent concentration is not a fitted zero. The climb always fills it.
     pub concentration: Option<f64>,
-    /// The mean log-likelihood a tract, at the returned parameters.
-    pub log_likelihood_a_tract: f64,
-    /// Tracts the fit actually read — its own if it stood alone, its own plus its neighbours'
-    /// if it borrowed.
-    pub tracts_fitted: usize,
-    /// The neighbouring repeat counts this stratum borrowed tracts from, empty when it stood
-    /// on its own. Same period throughout: slippage is not comparable across motif lengths.
-    pub borrowed: Vec<u64>,
-    /// **How the walk that won ended** ([`ClimbEnding`]): settled, stopped at a round that lost,
-    /// or out of rounds. **Neither of the last two is reported as convergence.**
-    pub ending: ClimbEnding,
-    /// **Every walk over the stratum**, one per starting point in [`SsrFitConfig::starting_points`]'s
-    /// order: how it ended and how many rounds it took — what the climb cost. Empty on the fixtures
-    /// tests build by hand.
-    pub walks: Vec<WalkRecord>,
+    /// **What the climb records about its own run**: its score, the tracts it read, the
+    /// neighbours it borrowed from, and how its walks ended ([`ClimbRecord`]). `None` from a fit
+    /// that is not the climb; the record goes when the climb does.
+    pub climb: Option<ClimbRecord>,
     /// **How many samples the stratum was fitted on**, when a large cohort's stratum was fitted on
     /// a subset of them ([`fit_strata_on_sample_subsets`]) — the whole cohort's count when the
     /// subset grew to every sample. `None` when every sample was read without a subset being drawn:
     /// a cohort of at most [`SampleSubsets::first`] samples, or any call to [`fit_strata`]. The
-    /// evidence counts the fit carries ([`tracts_fitted`](Self::tracts_fitted),
+    /// evidence counts the fit carries ([`tracts_fitted`](ClimbRecord::tracts_fitted),
     /// [`tracts_of_its_own`](Self::tracts_of_its_own), [`reads_crossing`](Self::reads_crossing))
     /// are the subset's.
     pub samples_fitted_on: Option<usize>,
@@ -581,7 +570,7 @@ pub struct StratumFit {
     /// was fitted on** — every sample unless a large cohort's stratum was fitted on a subset
     /// ([`samples_fitted_on`](Self::samples_fitted_on)) — whatever it read to produce its answer.
     ///
-    /// **Distinct from [`StratumFit::tracts_fitted`], and the difference is the whole point.** A
+    /// **Distinct from [`ClimbRecord::tracts_fitted`], and the difference is the whole point.** A
     /// stratum with eight tracts of its own that borrowed its way to a thousand has an answer
     /// resting on its neighbours, and a consumer told only the second number cannot see that
     /// (`str_slippage_level_curve.md` §8).
@@ -608,6 +597,39 @@ pub struct StratumFit {
     ///
     /// `None` where no error was computed: on the fixtures tests build by hand.
     pub standard_errors: Option<StratumErrors>,
+}
+
+/// **What the climb records about its own run over one stratum**, beside the numbers it returns
+/// in [`StratumFit`]: the score it reached, which tracts it read, and how each of its walks ended.
+///
+/// These describe the climb's search, not the stratum, so a fit that does not climb has none of
+/// them ([`StratumFit::climb`] is `None`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClimbRecord {
+    /// The mean log-likelihood a tract, at the returned parameters.
+    pub log_likelihood_a_tract: f64,
+    /// Tracts the fit actually read — its own if it stood alone, its own plus its neighbours'
+    /// if it borrowed.
+    pub tracts_fitted: usize,
+    /// The neighbouring repeat counts this stratum borrowed tracts from, empty when it stood
+    /// on its own. Same period throughout: slippage is not comparable across motif lengths.
+    pub borrowed: Vec<u64>,
+    /// **How the walk that won ended** ([`ClimbEnding`]): settled, stopped at a round that lost,
+    /// or out of rounds. **Neither of the last two is reported as convergence.**
+    pub ending: ClimbEnding,
+    /// **Every walk over the stratum**, one per starting point in [`SsrFitConfig::starting_points`]'s
+    /// order: how it ended and how many rounds it took — what the climb cost. Empty on the fixtures
+    /// tests build by hand.
+    pub walks: Vec<WalkRecord>,
+}
+
+/// **Whether `fit` read tracts from neighbouring strata.** Only the climb pools tracts, so a fit
+/// with no climb record borrowed nothing. The curve code reads this rather than the record
+/// itself, so that a fit other than the climb can be smoothed by the same code.
+fn borrowed_from_neighbours(fit: &StratumFit) -> bool {
+    fit.climb
+        .as_ref()
+        .is_some_and(|climb| !climb.borrowed.is_empty())
 }
 
 /// **The standard errors of one stratum's own fit**, each on its number's own scale, from the
@@ -1653,11 +1675,13 @@ fn the_fit_of(
             .collect(),
         allele_length_variation: parameters.allele_length_variation,
         concentration: Some(parameters.concentration),
-        log_likelihood_a_tract: score,
-        tracts_fitted: evidence.tracts_with_reads(),
-        borrowed: borrowed.to_vec(),
-        ending,
-        walks,
+        climb: Some(ClimbRecord {
+            log_likelihood_a_tract: score,
+            tracts_fitted: evidence.tracts_with_reads(),
+            borrowed: borrowed.to_vec(),
+            ending,
+            walks,
+        }),
         samples_fitted_on: None,
         // **What the stratum holds on its own is not knowable here.** `evidence` may already be
         // the pooled set, so these two are placeholders that `fit_strata` replaces with the
@@ -3199,12 +3223,15 @@ fn subsets_summary(outcomes: &[StratumOutcome], cohort: usize) -> Option<String>
 /// fitted on their own tracts, how many walks settled — and how many of those at a point where no
 /// number had an error — stopped at a round that lost, or ran out of rounds, the rounds they took
 /// between them, and in how many strata the winning walk settled.
-/// `None` when no fitted stratum records its walks.
+/// `None` when no fitted stratum records its walks; a stratum fitted by anything but the climb
+/// records none.
 fn climb_endings_summary(outcomes: &[StratumOutcome], max_rounds: u32) -> Option<String> {
-    let fits: Vec<&StratumFit> = outcomes
+    let fits: Vec<&ClimbRecord> = outcomes
         .iter()
         .filter_map(|outcome| match outcome {
-            StratumOutcome::Fitted(fit) if !fit.walks.is_empty() => Some(fit.as_ref()),
+            StratumOutcome::Fitted(fit) => {
+                fit.climb.as_ref().filter(|climb| !climb.walks.is_empty())
+            }
             _ => None,
         })
         .collect();
@@ -3359,7 +3386,7 @@ pub struct PeriodAlleleLengthVariation {
     /// How many of the period's strata contributed tracts to it.
     pub strata_pooled: usize,
     /// Whether the climb settled. **Running out of rounds, or stopping at a round that lost, is
-    /// never reported as convergence**, exactly as [`StratumFit::ending`].
+    /// never reported as convergence**, exactly as [`ClimbRecord::ending`].
     pub converged: bool,
 }
 
@@ -3443,6 +3470,7 @@ pub fn fit_period_allele_length_variations(
             continue;
         };
         let fit = the_fit_of(&pooled, &[], &live_groups, best, walks, None);
+        let climb = fit.climb.expect("the climb fills its own record");
         fitted.insert(
             period,
             PeriodAlleleLengthVariation {
@@ -3451,7 +3479,7 @@ pub fn fit_period_allele_length_variations(
                 concentration: fit
                     .concentration
                     .expect("the climb always fills the concentration"),
-                tracts_fitted: fit.tracts_fitted,
+                tracts_fitted: climb.tracts_fitted,
                 // **Strata that put a tract in, not strata of the period.** A stratum whose
                 // every tract went unread contributed nothing, and counting it would say the
                 // pool rested on more evidence than it did.
@@ -3459,7 +3487,7 @@ pub fn fit_period_allele_length_variations(
                     .iter()
                     .filter(|evidence| evidence.tracts_with_reads() > 0)
                     .count(),
-                converged: fit.ending.settled(),
+                converged: climb.ending.settled(),
             },
         );
     }
@@ -3677,7 +3705,7 @@ fn draw_a_curve_a_period(
         let StratumOutcome::Fitted(fit) = outcome else {
             continue;
         };
-        if !fit.borrowed.is_empty() {
+        if borrowed_from_neighbours(fit) {
             continue;
         }
         let cells = by_period
@@ -3731,7 +3759,7 @@ fn smooth_levels_across_repeat_count(
         // is its neighbours' — the thing the curve replaces — so the curve supplies the level
         // outright and the pooled fit keeps only the two shares. That is the whole of
         // `str_slippage_level_curve.md` §5: the level stops borrowing and nothing else does.
-        let borrowed_from_neighbours = !fit.borrowed.is_empty();
+        let borrowed_from_neighbours = borrowed_from_neighbours(fit);
         for group in 0..fit.slippage.len() {
             let Some(own) = fit.slippage[group] else {
                 continue;
@@ -3797,7 +3825,7 @@ fn draw_share_curves_a_period(
         // **A stratum that read another's tracts carries another's shares**, so it consumes a
         // curve and does not feed one. Nothing pools tracts today; the guard keeps the rule true
         // by construction rather than by the absence of pooling.
-        if !fit.borrowed.is_empty() {
+        if borrowed_from_neighbours(fit) {
             continue;
         }
         for (group, slippage) in fit.slippage.iter().enumerate() {
@@ -3900,7 +3928,7 @@ fn smooth_shares_across_repeat_count(
             };
             // **A stratum that read another's tracts brings no shares of its own to weigh**, so
             // the curve supplies them outright — the same rule the level follows.
-            let own_slipped_reads = (fit.borrowed.is_empty())
+            let own_slipped_reads = (!borrowed_from_neighbours(fit))
                 .then(|| {
                     fit.shares_provenance[group].and_then(|provenance| provenance.slipped_reads)
                 })
@@ -5268,6 +5296,14 @@ mod tests {
     use super::*;
     use bench_fixtures::{draw_stratum, spectrum_of};
 
+    /// **The climb's record of `fit`**, for tests that read how the climb ran.
+    ///
+    /// # Panics
+    /// When `fit` carries no climb record: such a fit did not come from the climb.
+    fn climb_record_of(fit: &StratumFit) -> &ClimbRecord {
+        fit.climb.as_ref().expect("the climb fills its own record")
+    }
+
     // -----------------------------------------------------------------
     // The guard: one test over the whole locus
     // -----------------------------------------------------------------
@@ -5492,7 +5528,7 @@ mod tests {
                         fit.concentration
                             .expect("the climb fills the concentration"),
                     );
-                    flat.push(fit.log_likelihood_a_tract);
+                    flat.push(climb_record_of(fit).log_likelihood_a_tract);
                     flat.extend(fit.allele_length_variation.iter().copied());
                     flat.extend(every_error(fit));
                     // How the winner ended, and every walk's ending, rounds and judgements.
@@ -5501,8 +5537,8 @@ mod tests {
                         ClimbEnding::LostARound => 2.0,
                         ClimbEnding::OutOfRounds => 3.0,
                     };
-                    flat.push(code(fit.ending));
-                    for walk in &fit.walks {
+                    flat.push(code(climb_record_of(fit).ending));
+                    for walk in &climb_record_of(fit).walks {
                         flat.extend([
                             code(walk.ending),
                             f64::from(walk.rounds),
@@ -6814,7 +6850,7 @@ mod tests {
                 skipped += 1;
                 continue;
             };
-            converged += usize::from(fitted.ending.settled());
+            converged += usize::from(climb_record_of(&fitted).ending.settled());
             let errors = fitted
                 .standard_errors
                 .as_ref()
@@ -7259,8 +7295,16 @@ mod tests {
         };
         let (serial, several) = (fits_of(1), fits_of(2));
         for ((one, two), evidence) in serial.iter().zip(&several).zip(&strata) {
-            assert_eq!(one.ending, ClimbEnding::Settled, "{:?}", one.walks);
-            assert_eq!((&one.walks, one.ending), (&two.walks, two.ending));
+            assert_eq!(
+                climb_record_of(one).ending,
+                ClimbEnding::Settled,
+                "{:?}",
+                climb_record_of(one).walks
+            );
+            assert_eq!(
+                (&climb_record_of(one).walks, climb_record_of(one).ending),
+                (&climb_record_of(two).walks, climb_record_of(two).ending)
+            );
             let at = parameters_of(one);
             for (fit, threads) in [
                 (one, WhereTheThreadsGo::AcrossTheTractsOfOneStratum),
@@ -7487,15 +7531,21 @@ mod tests {
         };
         let strict = fit(1e-7);
         assert!(
-            strict.walks.iter().all(|walk| !walk.ending.settled()),
+            climb_record_of(&strict)
+                .walks
+                .iter()
+                .all(|walk| !walk.ending.settled()),
             "{:?}",
-            strict.walks
+            climb_record_of(&strict).walks
         );
         let default = fit(SETTLED_FRACTION);
         assert!(
-            default.walks.iter().all(|walk| walk.ending.settled()),
+            climb_record_of(&default)
+                .walks
+                .iter()
+                .all(|walk| walk.ending.settled()),
             "{:?}",
-            default.walks
+            climb_record_of(&default).walks
         );
     }
 
@@ -7700,8 +7750,11 @@ mod tests {
             .extend(std::iter::repeat_n(TractReads::default(), 300));
         let plain = fit_stratum(&evidence, &[0.4; 20], &config).expect("reads were drawn");
         let with_empty = fit_stratum(&padded, &[0.4; 20], &config).expect("reads were drawn");
-        assert_eq!(plain.walks, with_empty.walks);
-        assert_eq!(plain.walks.len(), 3);
+        assert_eq!(
+            climb_record_of(&plain).walks,
+            climb_record_of(&with_empty).walks
+        );
+        assert_eq!(climb_record_of(&plain).walks.len(), 3);
         let close = |a: f64, b: f64| assert!((a - b).abs() <= 1e-9 * a.abs(), "{a} against {b}");
         let (a, b) = (
             plain.slippage[0].expect("fitted"),
@@ -7973,7 +8026,7 @@ mod tests {
                         .concentration
                         .expect("the climb fills the concentration"),
                 };
-                let settled = fitted.ending.settled();
+                let settled = climb_record_of(&fitted).ending.settled();
                 winners_settled += usize::from(settled);
                 let worst_now = tally_distances(&mut now, &answer, &reference.0, &errors);
                 if settled {
@@ -7989,9 +8042,10 @@ mod tests {
                     tally_distances(&mut before_settled, &before_rule.0, &reference.0, &errors);
                 }
                 let total = evidence.tracts.len() as f64;
-                short_now = short_now.max((reference.1 - fitted.log_likelihood_a_tract) * total);
+                short_now = short_now
+                    .max((reference.1 - climb_record_of(&fitted).log_likelihood_a_tract) * total);
                 short_before = short_before.max((reference.1 - before_rule.1) * total);
-                for walk in &fitted.walks {
+                for walk in &climb_record_of(&fitted).walks {
                     *endings.entry(format!("{:?}", walk.ending)).or_default() += 1;
                     rounds_now += u64::from(walk.rounds);
                     judgements_now += u64::from(walk.judgements);
@@ -8000,27 +8054,27 @@ mod tests {
                     .iter()
                     .map(|path| where_the_rule_before_stopped(path) as u64)
                     .sum::<u64>();
-                walks += fitted.walks.len() as u64;
+                walks += climb_record_of(&fitted).walks.len() as u64;
                 eprintln!(
                     "CLIMB STOP {regime}, draw {draw}: {:?} with (ending, rounds, judgements) {:?}; furthest \
                      number {:.3} errors from the reference climb (the rule before: {:.3}); total \
                      log-likelihood short by {:.4} (before: {:.4})",
-                    fitted.ending,
-                    fitted
+                    climb_record_of(&fitted).ending,
+                    climb_record_of(&fitted)
                         .walks
                         .iter()
                         .map(|walk| (walk.ending, walk.rounds, walk.judgements))
                         .collect::<Vec<_>>(),
                     worst_now,
                     worst_before,
-                    (reference.1 - fitted.log_likelihood_a_tract) * total,
+                    (reference.1 - climb_record_of(&fitted).log_likelihood_a_tract) * total,
                     (reference.1 - before_rule.1) * total,
                 );
                 if settled {
                     settled_draws.push((
                         draw,
                         worst_now,
-                        (reference.1 - fitted.log_likelihood_a_tract) * total,
+                        (reference.1 - climb_record_of(&fitted).log_likelihood_a_tract) * total,
                     ));
                 }
             }
@@ -8425,11 +8479,13 @@ mod tests {
             })],
             allele_length_variation: vec![1.0],
             concentration: Some(0.6),
-            log_likelihood_a_tract: -1.0,
-            tracts_fitted: 500,
-            borrowed: Vec::new(),
-            ending: ClimbEnding::Settled,
-            walks: Vec::new(),
+            climb: Some(ClimbRecord {
+                log_likelihood_a_tract: -1.0,
+                tracts_fitted: 500,
+                borrowed: Vec::new(),
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+            }),
             samples_fitted_on: None,
             tracts_of_its_own: 500,
             reads_crossing: reads,
@@ -8457,8 +8513,9 @@ mod tests {
         let with = |ending, walks: Vec<WalkRecord>| {
             let mut outcome = fitted_at(2, 10, 0.1, 1_000);
             if let StratumOutcome::Fitted(fit) = &mut outcome {
-                fit.ending = ending;
-                fit.walks = walks;
+                let climb = fit.climb.as_mut().expect("the climb fills its own record");
+                climb.ending = ending;
+                climb.walks = walks;
             }
             outcome
         };
@@ -8654,7 +8711,10 @@ mod tests {
         // One more stratum, wildly off the line, marked as having borrowed.
         let mut borrower = fitted_at(1, 21, 0.9, 200_000);
         if let StratumOutcome::Fitted(fit) = &mut borrower {
-            fit.borrowed = vec![20];
+            fit.climb
+                .as_mut()
+                .expect("the climb fills its own record")
+                .borrowed = vec![20];
         }
         cells.push(borrower);
 
@@ -8689,7 +8749,10 @@ mod tests {
         // A borrower at 21 repeats, carrying a pooled level far off the line and pooled shares.
         let mut borrower = fitted_at(1, 21, 0.9, 200_000);
         if let StratumOutcome::Fitted(fit) = &mut borrower {
-            fit.borrowed = vec![20];
+            fit.climb
+                .as_mut()
+                .expect("the climb fills its own record")
+                .borrowed = vec![20];
             let slippage = fit.slippage[0].as_mut().expect("a fitted group");
             slippage.shorter_share = 0.81;
             slippage.fall_off = 0.42;
@@ -8792,8 +8855,8 @@ mod tests {
             let StratumOutcome::Fitted(fit) = outcome else {
                 panic!("a hundred and twenty tracts clears the floor");
             };
-            assert!(fit.borrowed.is_empty());
-            assert_eq!(fit.tracts_fitted, fit.tracts_of_its_own);
+            assert!(climb_record_of(fit).borrowed.is_empty());
+            assert_eq!(climb_record_of(fit).tracts_fitted, fit.tracts_of_its_own);
         }
 
         // **Eight tracts is far below the refusal floor, so nothing was fitted from them — and
@@ -8961,7 +9024,10 @@ mod tests {
 
         let mut pooled = fitted_at(2, 13, 0.16, 40_000);
         if let StratumOutcome::Fitted(fit) = &mut pooled {
-            fit.borrowed = vec![12];
+            fit.climb
+                .as_mut()
+                .expect("the climb fills its own record")
+                .borrowed = vec![12];
             if let Some(slippage) = fit.slippage[0].as_mut() {
                 slippage.shorter_share = 0.05;
                 slippage.fall_off = 0.95;
@@ -9372,17 +9438,28 @@ mod tests {
             fit_strata_on_sample_subsets(&strata, &excess, &order, &subset_config(8, 1e-9));
         let every = fitted(&unreachable[0]);
         assert_eq!(every.samples_fitted_on, Some(64));
-        assert_eq!(every.walks.len(), 4, "{:?}", every.walks);
+        assert_eq!(
+            climb_record_of(every).walks.len(),
+            4,
+            "{:?}",
+            climb_record_of(every).walks
+        );
         let whole = fit_stratum(&strata[0], &excess, &subset_config(8, 1e-9)).expect("reads");
         assert_eq!(every.reads_crossing, whole.reads_crossing);
-        assert!(every.log_likelihood_a_tract >= whole.log_likelihood_a_tract);
+        assert!(
+            climb_record_of(every).log_likelihood_a_tract
+                >= climb_record_of(&whole).log_likelihood_a_tract
+        );
 
         let met = fit_strata_on_sample_subsets(&strata, &excess, &order, &subset_config(8, 10.0));
         let first = fitted(&met[0]);
         assert_eq!(first.samples_fitted_on, Some(8));
-        assert_eq!(first.walks.len(), 3);
+        assert_eq!(climb_record_of(first).walks.len(), 3);
         assert!(first.reads_crossing < whole.reads_crossing);
-        assert_eq!(first.tracts_fitted, first.tracts_of_its_own);
+        assert_eq!(
+            climb_record_of(first).tracts_fitted,
+            first.tracts_of_its_own
+        );
     }
 
     /// **A subset doubles, and takes every sample once doubling would pass three quarters of them.**
@@ -9442,7 +9519,7 @@ mod tests {
             fit_strata_on_sample_subsets(&[read_by_one(40)], &[0.4; 40], &order, &config);
         let fit = fitted(&outcomes[0]);
         assert_eq!(fit.samples_fitted_on, Some(8));
-        assert_eq!(fit.tracts_fitted, 8);
+        assert_eq!(climb_record_of(fit).tracts_fitted, 8);
         let thin = fit_strata_on_sample_subsets(&[read_by_one(6)], &[0.4; 40], &order, &config);
         assert!(
             matches!(

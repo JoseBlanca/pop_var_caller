@@ -379,7 +379,10 @@ fn main() {
                     Some(fit) => println!(
                         "    (ln L a tract {:?}, concentration {:?}, slippage {:?}, \
                          spectrum[6] {:?})",
-                        fit.log_likelihood_a_tract,
+                        fit.climb
+                            .as_ref()
+                            .expect("the climb fills its own record")
+                            .log_likelihood_a_tract,
                         fit.concentration
                             .expect("the climb fills the concentration"),
                         fit.slippage[0],

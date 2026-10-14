@@ -637,12 +637,8 @@ pub fn with_the_curves(
                     .clone()
                     .unwrap_or_default(),
                 concentration: estimate.concentration,
-                log_likelihood_a_tract: f64::NAN,
-                tracts_fitted: tracts,
-                borrowed: Vec::new(),
-                // Not read by the curves; a method that does not climb has no walk to report.
-                ending: ClimbEnding::Settled,
-                walks: Vec::new(),
+                // A method that does not climb has no climb record, and so borrowed nothing.
+                climb: None,
                 samples_fitted_on: None,
                 tracts_of_its_own: tracts,
                 reads_crossing: estimate.reads_crossing,

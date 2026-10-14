@@ -70,8 +70,8 @@ use pop_var_caller::parameter_estimation::joint::sequencing_batches::SequencingB
 use pop_var_caller::parameter_estimation::joint::share_curve::ShareSource;
 use pop_var_caller::parameter_estimation::joint::slippage_curve::LevelSource;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    ClimbEnding, LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
-    StratumOutcome,
+    ClimbEnding, ClimbRecord, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
+    StratumFit, StratumOutcome,
 };
 use pop_var_caller::parameter_estimation::joint::stratum_fits::{
     AlleleLengthVariationRung, StratumFits,
@@ -894,11 +894,13 @@ fn tract_strata_describing(
             ],
             allele_length_variation,
             concentration: Some(concentration),
-            log_likelihood_a_tract: -1.5,
-            tracts_fitted: 40,
-            borrowed: Vec::new(),
-            ending: ClimbEnding::Settled,
-            walks: Vec::new(),
+            climb: Some(ClimbRecord {
+                log_likelihood_a_tract: -1.5,
+                tracts_fitted: 40,
+                borrowed: Vec::new(),
+                ending: ClimbEnding::Settled,
+                walks: Vec::new(),
+            }),
             samples_fitted_on: None,
             tracts_of_its_own: 40,
             reads_crossing: 400,

@@ -930,6 +930,10 @@ fn fit_the_tracts(
         match outcome {
             ssr_fit::StratumOutcome::Fitted(fitted) => {
                 let own = held[&fitted.stratum];
+                let climb = fitted
+                    .climb
+                    .as_ref()
+                    .expect("the climb fills its own record");
                 // One set of slippage numbers a group; with the groups pooled there is one,
                 // and with them apart the first fitted group stands for the row.
                 let slippage = fitted
@@ -948,13 +952,13 @@ fn fit_the_tracts(
                     slippage.shorter_share,
                     slippage.fall_off,
                     fitted.concentration.unwrap_or(f64::NAN),
-                    if fitted.borrowed.is_empty() {
+                    if climb.borrowed.is_empty() {
                         "on its own".to_string()
                     } else {
                         format!(
                             "{} strata, {} tracts",
-                            fitted.borrowed.len(),
-                            fitted.tracts_fitted
+                            climb.borrowed.len(),
+                            climb.tracts_fitted
                         )
                     }
                 );
@@ -1828,6 +1832,10 @@ fn write_cell_table(
             .map_or(String::new(), |rate| format!("{rate:.8}"));
         let fit = match outcome {
             ssr_fit::StratumOutcome::Fitted(fitted) => {
+                let climb = fitted
+                    .climb
+                    .as_ref()
+                    .expect("the climb fills its own record");
                 let slippage = fitted
                     .slippage
                     .iter()
@@ -1840,10 +1848,10 @@ fn write_cell_table(
                     slippage.shorter_share,
                     slippage.fall_off,
                     fitted.concentration.unwrap_or(f64::NAN),
-                    fitted.log_likelihood_a_tract,
-                    u8::from(fitted.ending.settled()),
-                    fitted.tracts_fitted,
-                    fitted
+                    climb.log_likelihood_a_tract,
+                    u8::from(climb.ending.settled()),
+                    climb.tracts_fitted,
+                    climb
                         .borrowed
                         .iter()
                         .map(u64::to_string)

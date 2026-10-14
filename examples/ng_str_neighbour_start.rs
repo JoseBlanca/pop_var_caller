@@ -130,10 +130,11 @@ fn main() {
         let Some(walk) = walk else { continue };
         let evidence = &strata[*index];
         let tracts = evidence.tracts.len() as f64;
-        let rounds: u32 = own.walks.iter().map(|record| record.rounds).sum();
+        let own_climb = own.climb.as_ref().expect("the climb fills its own record");
+        let rounds: u32 = own_climb.walks.iter().map(|record| record.rounds).sum();
         usual_rounds += rounds;
         neighbour_rounds += walk.record.rounds;
-        let loss = (own.log_likelihood_a_tract - walk.log_likelihood_a_tract) * tracts;
+        let loss = (own_climb.log_likelihood_a_tract - walk.log_likelihood_a_tract) * tracts;
         losses.push(loss);
         // Both answers scored again with the precise average, every slippage group the usual fit
         // left without numbers taking the neighbour walk's.

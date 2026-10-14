@@ -66,7 +66,7 @@ what goes with it (arch §4.1).
 
 - ✅ **A1** `StratumFit::concentration` becomes `Option<f64>`; the climb always fills `Some`. Every
   reader updated. *Depends:* —. *Source:* arch §1.2.
-- ☐ **A2** The climb's own fields move into `climb: Option<ClimbRecord>`; its log summaries read
+- ✅ **A2** The climb's own fields move into `climb: Option<ClimbRecord>`; its log summaries read
   them there. Updates the four examples that read those fields
   (`examples/ng_joint_records_walk.rs:951-957, 1843-1847`, `examples/dhat_ng_joint_fit.rs:382`,
   `examples/ng_str_neighbour_start.rs:133-136, 185`, `examples/ng_ssr_thin_stratum_gate.rs:146`), the
@@ -74,7 +74,8 @@ what goes with it (arch §4.1).
   `bench_fixtures/fit_bench.rs`, `calling/mod.rs`, `calling/inference/summarise_condition.rs`,
   `calling/parameters_file/{from,to}_run_parameters.rs`, `tests/ng_calling_loop_calls_genotypes.rs`,
   `examples/shared/stutter_table.rs`) and `benches/ng_joint_fit_perf.rs`; `cargo clippy
-  --all-targets` passes. *Depends:* A1. *Source:* arch §1.2.
+  --all-targets` passes. *Depends:* A1. *Source:* arch §1.2. *Done:* 10 literals in 8 files —
+  `examples/shared/stutter_table.rs` defines its own `StratumFit`, so it was not touched.
 - ☐ **A3** `LevelSource::PenalisedCurve`, `ShareSource::PenalisedCurve`, `PenalisedPoint`,
   `StratumError::TooFewLoci` — added, unused. `curve_weight()` returns `Option<f64>`; `warrant_of`
   matches the source exhaustively. *Depends:* —. *Source:* arch §1.3–1.4.
