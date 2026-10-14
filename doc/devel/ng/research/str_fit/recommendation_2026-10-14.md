@@ -71,6 +71,9 @@ smooth curves through the counts, repeat. How smooth each curve is, is estimated
 
 ## Decisions for the owner
 
+**Both taken by the owner on 2026-10-14: adopt penalised EM with the one-locus floor, and have
+calling keep a class's own allele length variation when its F is absent.** Next: the spec.
+
 1. **Adopt penalised EM with the one-locus floor as the repeat-tract fit**, and have its spec
    written. *Recommended.*
 2. **Calling: keep a class's own allele length variation when its F is absent**, held at a stated
