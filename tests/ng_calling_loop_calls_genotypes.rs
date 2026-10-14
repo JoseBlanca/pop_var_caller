@@ -893,7 +893,7 @@ fn tract_strata_describing(
                 }),
             ],
             allele_length_variation,
-            concentration,
+            concentration: Some(concentration),
             log_likelihood_a_tract: -1.5,
             tracts_fitted: 40,
             borrowed: Vec::new(),

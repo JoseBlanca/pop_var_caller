@@ -64,7 +64,7 @@ what goes with it (arch §4.1).
 
 ### Milestone A — shapes only
 
-- ☐ **A1** `StratumFit::concentration` becomes `Option<f64>`; the climb always fills `Some`. Every
+- ✅ **A1** `StratumFit::concentration` becomes `Option<f64>`; the climb always fills `Some`. Every
   reader updated. *Depends:* —. *Source:* arch §1.2.
 - ☐ **A2** The climb's own fields move into `climb: Option<ClimbRecord>`; its log summaries read
   them there. Updates the four examples that read those fields

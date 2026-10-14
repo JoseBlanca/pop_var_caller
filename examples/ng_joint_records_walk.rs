@@ -947,7 +947,7 @@ fn fit_the_tracts(
                     slippage.level,
                     slippage.shorter_share,
                     slippage.fall_off,
-                    fitted.concentration,
+                    fitted.concentration.unwrap_or(f64::NAN),
                     if fitted.borrowed.is_empty() {
                         "on its own".to_string()
                     } else {
@@ -1839,7 +1839,7 @@ fn write_cell_table(
                     slippage.level,
                     slippage.shorter_share,
                     slippage.fall_off,
-                    fitted.concentration,
+                    fitted.concentration.unwrap_or(f64::NAN),
                     fitted.log_likelihood_a_tract,
                     u8::from(fitted.ending.settled()),
                     fitted.tracts_fitted,

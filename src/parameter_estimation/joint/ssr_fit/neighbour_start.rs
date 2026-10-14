@@ -20,7 +20,8 @@ pub struct NeighbourWalk {
 
 /// **Climbs `evidence` once, from `neighbour`'s answer**: its slippage numbers, its allele-length
 /// frequencies and their spread. A group the neighbour has no numbers for starts at the first
-/// usual starting point's level. `None` when no group put a read in `evidence`.
+/// usual starting point's level; if the neighbour has no concentration, the walk starts at that
+/// point's concentration. `None` when no group put a read in `evidence`.
 #[must_use]
 pub fn walk_from_a_neighbour(
     evidence: &StratumEvidence,
@@ -50,7 +51,7 @@ pub fn walk_from_a_neighbour(
             })
             .collect(),
         allele_length_variation: neighbour.allele_length_variation.clone(),
-        concentration: neighbour.concentration,
+        concentration: neighbour.concentration.unwrap_or(fallback.concentration),
     };
     let climb = climb_from_parameters(
         evidence,

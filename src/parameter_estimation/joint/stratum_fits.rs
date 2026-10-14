@@ -580,7 +580,10 @@ impl StratumFits {
                     stratum,
                     checked_allele_length_variation(
                         &fit.allele_length_variation,
-                        fit.concentration,
+                        // Until calling's table holds an absent concentration (plan step A4), only
+                        // the climb reaches here, and it always fills one.
+                        fit.concentration
+                            .expect("the climb always fills the concentration"),
                         &format_args!(
                             "the fit of period {}, {} repeats",
                             stratum.period, stratum.reference_repeats
@@ -1252,7 +1255,7 @@ mod tests {
             stratum: stratum(2, 10),
             slippage: vec![Some(slippage(0.1)), Some(slippage(0.2))],
             allele_length_variation: leaning_short(),
-            concentration: 2.0,
+            concentration: Some(2.0),
             log_likelihood_a_tract: -1.5,
             tracts_fitted: 40,
             borrowed: Vec::new(),
@@ -1612,7 +1615,7 @@ mod tests {
             stratum: at,
             slippage: vec![Some(slippage(level))],
             allele_length_variation,
-            concentration,
+            concentration: Some(concentration),
             log_likelihood_a_tract: -1.5,
             tracts_fitted: 40,
             borrowed: Vec::new(),

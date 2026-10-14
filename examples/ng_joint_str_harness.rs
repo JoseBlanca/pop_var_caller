@@ -1463,7 +1463,9 @@ fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
         (
             "concentration",
             here.kappa,
-            there.concentration,
+            there
+                .concentration
+                .expect("the climb fills the concentration"),
             truth.kappa,
         ),
     ];

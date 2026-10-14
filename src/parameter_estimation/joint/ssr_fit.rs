@@ -544,7 +544,16 @@ pub struct StratumFit {
     /// `-allele_span` to `+allele_span` in whole repeat units.
     pub allele_length_variation: Vec<f64>,
     /// How monomorphic the stratum's tracts are. Small means most tracts carry one length.
-    pub concentration: f64,
+    ///
+    /// **`None` where the fit could not measure it** (`str_penalised_fit.md` §2.5). The penalised
+    /// fit reads the concentration from pairs of samples at one locus, so it is absent in two
+    /// cases:
+    /// - the class has no locus holding two samples with reads;
+    /// - the estimate stopped within 1% of an end of its search range, so the data did not place
+    ///   it.
+    ///
+    /// An absent concentration is not a fitted zero. The climb always fills it.
+    pub concentration: Option<f64>,
     /// The mean log-likelihood a tract, at the returned parameters.
     pub log_likelihood_a_tract: f64,
     /// Tracts the fit actually read — its own if it stood alone, its own plus its neighbours'
@@ -1643,7 +1652,7 @@ fn the_fit_of(
             .map(|(group, live)| live.then_some(parameters.slippage[group]))
             .collect(),
         allele_length_variation: parameters.allele_length_variation,
-        concentration: parameters.concentration,
+        concentration: Some(parameters.concentration),
         log_likelihood_a_tract: score,
         tracts_fitted: evidence.tracts_with_reads(),
         borrowed: borrowed.to_vec(),
@@ -3262,11 +3271,10 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
             count(group.shorter_share, &mut shorter, 1.0);
             count(group.fall_off, &mut fall_off, 1.0);
         }
-        count(
-            stratum.concentration,
-            &mut concentration,
-            fit.concentration / 100.0,
-        );
+        // A stratum with no concentration has no number whose error could be counted.
+        if let Some(value) = fit.concentration {
+            count(stratum.concentration, &mut concentration, value / 100.0);
+        }
         for share in &stratum.allele_length_variation {
             count(*share, &mut shares, 1.0);
         }
@@ -3440,7 +3448,9 @@ pub fn fit_period_allele_length_variations(
             PeriodAlleleLengthVariation {
                 period,
                 allele_length_variation: fit.allele_length_variation,
-                concentration: fit.concentration,
+                concentration: fit
+                    .concentration
+                    .expect("the climb always fills the concentration"),
                 tracts_fitted: fit.tracts_fitted,
                 // **Strata that put a tract in, not strata of the period.** A stratum whose
                 // every tract went unread contributed nothing, and counting it would say the
@@ -5478,7 +5488,10 @@ mod tests {
             match outcome {
                 StratumOutcome::Fitted(fit) => {
                     flat.push(1.0);
-                    flat.push(fit.concentration);
+                    flat.push(
+                        fit.concentration
+                            .expect("the climb fills the concentration"),
+                    );
                     flat.push(fit.log_likelihood_a_tract);
                     flat.extend(fit.allele_length_variation.iter().copied());
                     flat.extend(every_error(fit));
@@ -6208,10 +6221,13 @@ mod tests {
             slippage.shorter_share,
             truth.shorter_share
         );
+        let concentration = fitted
+            .concentration
+            .expect("the climb fills the concentration");
         assert!(
-            (fitted.concentration - 0.5).abs() / 0.5 < 0.25,
+            (concentration - 0.5).abs() / 0.5 < 0.25,
             "concentration {} against a truth of 0.5",
-            fitted.concentration
+            concentration
         );
     }
 
@@ -6443,7 +6459,9 @@ mod tests {
         let parameters = Parameters {
             slippage: vec![fitted.slippage[0].expect("fitted")],
             allele_length_variation: fitted.allele_length_variation.clone(),
-            concentration: fitted.concentration,
+            concentration: fitted
+                .concentration
+                .expect("the climb fills the concentration"),
         };
         let at = |step: f64| {
             standard_errors_with_step(
@@ -6518,7 +6536,11 @@ mod tests {
                 fit_stratum(&evidence, &vec![0.4; samples], &config).expect("reads were drawn");
             eprintln!(
                 "{tracts} x {samples} x {depth}: {:?}, concentration {}; {:?}",
-                fitted.slippage[0], fitted.concentration, fitted.standard_errors
+                fitted.slippage[0],
+                fitted
+                    .concentration
+                    .expect("the climb fills the concentration"),
+                fitted.standard_errors
             );
             fitted
         };
@@ -6541,7 +6563,12 @@ mod tests {
         assert_eq!(group.shorter_share, StratumError::NotPlaced);
 
         let concentration_run_off = fit(200, 4, 3, 8, 50.0);
-        assert!(concentration_run_off.concentration > 1e4);
+        assert!(
+            concentration_run_off
+                .concentration
+                .expect("the climb fills the concentration")
+                > 1e4
+        );
         let errors = errors_of(&concentration_run_off);
         assert_eq!(errors.concentration, StratumError::NotPlaced);
         assert!(
@@ -6569,7 +6596,9 @@ mod tests {
         let parameters = Parameters {
             slippage: vec![fitted.slippage[0].expect("fitted")],
             allele_length_variation: fitted.allele_length_variation.clone(),
-            concentration: fitted.concentration,
+            concentration: fitted
+                .concentration
+                .expect("the climb fills the concentration"),
         };
         let mut padded = evidence.clone();
         padded
@@ -6810,7 +6839,9 @@ mod tests {
                 ),
                 (
                     "concentration",
-                    fitted.concentration,
+                    fitted
+                        .concentration
+                        .expect("the climb fills the concentration"),
                     concentration,
                     errors.concentration,
                 ),
@@ -7179,7 +7210,9 @@ mod tests {
                 .map(|group| group.expect("every group live"))
                 .collect(),
             allele_length_variation: fit.allele_length_variation.clone(),
-            concentration: fit.concentration,
+            concentration: fit
+                .concentration
+                .expect("the climb fills the concentration"),
         }
     }
 
@@ -7677,7 +7710,14 @@ mod tests {
         close(a.level, b.level);
         close(a.shorter_share, b.shorter_share);
         close(a.fall_off, b.fall_off);
-        close(plain.concentration, with_empty.concentration);
+        close(
+            plain
+                .concentration
+                .expect("the climb fills the concentration"),
+            with_empty
+                .concentration
+                .expect("the climb fills the concentration"),
+        );
         for (a, b) in plain
             .allele_length_variation
             .iter()
@@ -7929,7 +7969,9 @@ mod tests {
                 let answer = Parameters {
                     slippage: vec![fitted.slippage[0].expect("the one group has reads")],
                     allele_length_variation: fitted.allele_length_variation.clone(),
-                    concentration: fitted.concentration,
+                    concentration: fitted
+                        .concentration
+                        .expect("the climb fills the concentration"),
                 };
                 let settled = fitted.ending.settled();
                 winners_settled += usize::from(settled);
@@ -8382,7 +8424,7 @@ mod tests {
                 fall_off: 0.3,
             })],
             allele_length_variation: vec![1.0],
-            concentration: 0.6,
+            concentration: Some(0.6),
             log_likelihood_a_tract: -1.0,
             tracts_fitted: 500,
             borrowed: Vec::new(),

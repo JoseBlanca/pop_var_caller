@@ -109,7 +109,11 @@ fn numbers_of(fit: &StratumFit) -> Vec<(&'static str, f64, Option<f64>)> {
         ("fall-off", with_error(slippage.fall_off, fall_off)),
         (
             "concentration",
-            with_error(fit.concentration, concentration),
+            with_error(
+                fit.concentration
+                    .expect("the climb fills the concentration"),
+                concentration,
+            ),
         ),
     ];
     rows.into_iter()

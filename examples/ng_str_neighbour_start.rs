@@ -157,7 +157,8 @@ fn main() {
         let precise_loss = (precise(
             &own_slippage,
             &own.allele_length_variation,
-            own.concentration,
+            own.concentration
+                .expect("the climb fills the concentration"),
         ) - precise(
             &walk.slippage,
             &walk.allele_length_variation,

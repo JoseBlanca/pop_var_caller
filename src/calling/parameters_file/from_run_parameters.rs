@@ -1232,7 +1232,7 @@ mod tests {
                 None,
             ],
             allele_length_variation: vec![0.1, 0.8, 0.1],
-            concentration: 3.5,
+            concentration: Some(3.5),
             log_likelihood_a_tract: -1.25,
             tracts_fitted: 900,
             borrowed: Vec::new(),

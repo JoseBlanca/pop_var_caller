@@ -1749,7 +1749,7 @@ mod the_north_star_round_trip {
                         stratum,
                         slippage,
                         allele_length_variation: weights,
-                        concentration: a_number(3.0, &keys),
+                        concentration: Some(a_number(3.0, &keys)),
                         log_likelihood_a_tract: -a_number(2.0, &keys),
                         tracts_fitted: 100 + which_repeats,
                         // **Empty, which is what a stratum that stood on its own tracts has** —

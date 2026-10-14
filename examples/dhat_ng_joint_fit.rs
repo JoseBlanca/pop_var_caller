@@ -380,7 +380,8 @@ fn main() {
                         "    (ln L a tract {:?}, concentration {:?}, slippage {:?}, \
                          spectrum[6] {:?})",
                         fit.log_likelihood_a_tract,
-                        fit.concentration,
+                        fit.concentration
+                            .expect("the climb fills the concentration"),
                         fit.slippage[0],
                         fit.allele_length_variation[6],
                     ),

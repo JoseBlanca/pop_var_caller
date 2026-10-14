@@ -182,7 +182,9 @@ fn main() {
             format!("{:.6}", slippage.level),
             format!("{:.6}", slippage.shorter_share),
             format!("{:.6}", slippage.fall_off),
-            format!("{:.6}", fit.concentration),
+            fit.concentration.map_or("NA".to_owned(), |concentration| {
+                format!("{concentration:.6}")
+            }),
             errors.map_or("NA".to_owned(), |errors| error_of(&errors.concentration)),
         ];
         row.extend(

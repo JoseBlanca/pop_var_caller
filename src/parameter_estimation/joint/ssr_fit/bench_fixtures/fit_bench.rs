@@ -310,7 +310,7 @@ impl PeriodFit for TheClimb {
                         stratum: evidence.stratum,
                         slippage: fit.slippage.first().copied().flatten(),
                         allele_length_variation: Some(fit.allele_length_variation.clone()),
-                        concentration: Some(fit.concentration),
+                        concentration: fit.concentration,
                         errors,
                         reads_crossing: fit.reads_crossing,
                     }
@@ -636,7 +636,7 @@ pub fn with_the_curves(
                     .allele_length_variation
                     .clone()
                     .unwrap_or_default(),
-                concentration: estimate.concentration.unwrap_or(f64::NAN),
+                concentration: estimate.concentration,
                 log_likelihood_a_tract: f64::NAN,
                 tracts_fitted: tracts,
                 borrowed: Vec::new(),

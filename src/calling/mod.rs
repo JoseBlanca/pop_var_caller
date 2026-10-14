@@ -4469,7 +4469,7 @@ mod tests {
                         fall_off: 0.25,
                     })],
                     allele_length_variation,
-                    concentration,
+                    concentration: Some(concentration),
                     log_likelihood_a_tract: -1.5,
                     tracts_fitted: 40,
                     borrowed: Vec::new(),
