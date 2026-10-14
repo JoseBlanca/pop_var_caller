@@ -28,7 +28,7 @@ allele length variation but no F keeps its own variation; a file written by an e
 reads.
 
 **Non-goals.** It does not change how calling scores reads, which candidates it considers, or the
-SNP/indel sections of the file. It does not compute the period-pooled rung (§3.3).
+SNP/indel sections of the file. It does not compute the period-pooled rung (§3.4).
 
 ---
 
@@ -66,7 +66,7 @@ which the kimura session had to work around by hand (`research/str_fit/kimura_sh
 ### 2.3 Where a stutter number came from
 
 Each stratum's slip rate, shorter share and fall-off carry their origin (`LevelOrigin`,
-`parameters_file/mod.rs:1125`): main's fit writes the stratum's own fit, its period's parametric curve
+`parameters_file/mod.rs:1134`): main's fit writes the stratum's own fit, its period's parametric curve
 (`SlippageCurve`), or a blend of the two (`LevelSmoothing`, `:1190`; `LevelSource`,
 `slippage_curve.rs:519-531`). The new fit produces none of these: every number is a point on a
 penalised curve, fitted with the class's own reads.
@@ -116,20 +116,29 @@ measured:* a small cohort where F is absent because its estimate failed, which t
 report as absent; and an outbred single sample.
 
 **Placed above the pooled step** because a class's own shares were measured better than flat, and the
-pooled step is not produced in production (§3.3), so its order against the new step is untested.
+pooled step is not produced in production (§3.4), so its order against the new step is untested.
 
 **What changes in code:** the class's concentration in calling's tables becomes optional; the step is
 a new `AlleleLengthVariationRung` value (`stratum_fits.rs:359-366`), recorded per locus as the rung
-is today (`summarise_condition.rs:2396-2447`). The rung is not written to the VCF today
-(`vcf/assemble.rs:103`), so no output format changes.
+is today (`summarise_condition.rs:2453-2526`). The rung is not written to the VCF today
+(`vcf/assemble.rs:107`), so no output format changes.
 
-### 3.3 The pooled step stays as it is
+### 3.3 Repeat-tract bundles follow the same rule
+
+A bundle (several runs called as one locus, `calling/genotype_prior/seed_ssr.rs`, merged from main
+on 2026-10-14) is seeded run by run from each run's class. A run whose length falls past the fit's
+window reads its edge class, shared among the distinct lengths that run takes there, exactly as a
+single segment does (`run_lengths_at_edge`). Main gave such a run a weight of 0; the merge changed it
+so that a one-run bundle is still seeded exactly as its segment, which main's own test requires. The
+new step of §3.2 applies to each run's class the same way.
+
+### 3.4 The pooled step stays as it is
 
 It is filled only from a parameters file that carries `allele_length_variation_by_period`; no
-production run computes it (`fit_period_allele_length_variations`, `ssr_fit.rs:3390`, has only test
+production run computes it (`fit_period_allele_length_variations`, `ssr_fit.rs:3392`, has only test
 callers). Unchanged here.
 
-### 3.4 The stated F
+### 3.5 The stated F
 
 The median of the fitted classes' F, converted from the median concentration (the conversion is
 monotone, so the median carries over), or F = 0.5 (concentration 1) where no class has one. At one

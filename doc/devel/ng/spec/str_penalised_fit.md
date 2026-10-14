@@ -71,14 +71,14 @@ On simulated cohorts with known truth, 1 to 2,000 samples, 3 to 300 reads a samp
 
 - **One stutter for all read groups.** It does not fit stutter per slippage group or library
   multipliers. Production declares one slippage group today (`every_read_group_pooled`,
-  `run/census_fit.rs:282-288`), so nothing is lost now; the climb's support for several groups goes
+  `run/census_fit.rs:288`), so nothing is lost now; the climb's support for several groups goes
   with it. **Deferred to the library-multiplier work** (`spec/str_library_stutter.md`), which must
   bring them back on top of this fit.
 - **No parametric allele-length shape.** Each of the 19 lengths keeps its own curve along the repeat
   count. A few-number shape across lengths (research avenue C) was measured and is not needed for this
   decision (`research/str_fit/trackC_tomato2_span9_2026-10-12.md`, `kimura_shapes_span9_2026-10-14.md`).
 - **No sample subsets.** Main's fit grows a subset of samples per class to bound its cost
-  (`SampleSubsets`, `ssr_fit.rs:1149-1157`); this fit uses every sample, within budget.
+  (`SampleSubsets`, `ssr_fit.rs:1151-1159`); this fit uses every sample, within budget.
 - **It does not change** the census, how loci are selected or guarded, the substitution rate inside
   tracts, or the SNP/indel half of the fit.
 - **It does not correct** the bias against long alleles from reads that must cross the whole tract
@@ -90,9 +90,9 @@ On simulated cohorts with known truth, 1 to 2,000 samples, 3 to 300 reads a samp
 
 ### 2.1 Where it sits
 
-`fit_a_cohort` (`run/census_fit.rs:206`) calls today `ssr_fit::fit_strata_on_sample_subsets`
+`fit_a_cohort` (`run/census_fit.rs:220`) calls today `ssr_fit::fit_strata_on_sample_subsets`
 (`:262`) with every stratum's evidence, then `draw_and_apply_curves` runs inside it
-(`ssr_fit.rs:3127-3130`). **The new fit takes that call's place**: same evidence
+(`ssr_fit.rs:3129-3132`). **The new fit takes that call's place**: same evidence
 (`the_tract_strata_of_a_cohort`, `census_fit.rs:180-196`), same homozygote excess vector, one call per
 motif length, its output turned into the `StratumOutcome`s that `StratumFits::over`
 (`stratum_fits.rs:504-607`) already reads. Nothing downstream of `StratumFits` changes except what
@@ -112,7 +112,7 @@ and their loci in parallel; steps 2–3 are cheap (1–9% of the time on the ben
 numbers come mostly from the curve, which is the point. A class with no reads at any locus has no
 numbers of its own; calling reads its values off the curves inside their fitted range and holds them
 flat beyond, as today (`str_slippage_level_curve.md` §6). *Main's floor of 8 loci
-(`DEFAULT_REFUSAL_FLOOR`, `ssr_fit.rs:1199`) existed to stop a per-class climb on too little; it has
+(`DEFAULT_REFUSAL_FLOOR`, `ssr_fit.rs:1201`) existed to stop a per-class climb on too little; it has
 no job here.*
 
 ### 2.3 The curves and how stiff they are
@@ -199,7 +199,7 @@ Both change no number beyond about 10⁻⁶ (`cost_2026-10-14.md`). **Their gain
 
 Per motif length: rounds, the five stiffness strengths and where bends were eased, the time in each
 step, peak memory. Per class: rows with reads, distinct rows, and whether F was absent. These replace
-the climb's summaries (`ssr_fit.rs:3163-3330`).
+the climb's summaries (`ssr_fit.rs:3165-3332`).
 
 ---
 
@@ -222,16 +222,19 @@ the climb's summaries (`ssr_fit.rs:3163-3330`).
   4.8 GB at 2,000 samples × 30 reads against 1.1 GB for the counting fit, which would not fit 64 GiB at
   kimura's scale. **Hold one class's rows at a time** (or bound the classes in flight).
 - **The evidence is already the largest memory**: `gather_strata` holds every stratum at once
-  (`ssr_fit.rs:4861-4885`), 19.4 GiB on kimura for 66.2 million pairs with reads, about 315 bytes a
+  (`ssr_fit.rs:4863-4887`), 19.4 GiB on kimura for 66.2 million pairs with reads, about 315 bytes a
   pair against tomato2's 139. Not changed here (§6).
 - **The provenance written beside each stutter number assumes main's curves** (`LevelSmoothing`,
-  `parameters_file/mod.rs:1190`, carries a fitted `SlippageCurve`; `LevelSource` is cell / curve /
+  `parameters_file/mod.rs:1199`, carries a fitted `SlippageCurve`; `LevelSource` is cell / curve /
   blend, `slippage_curve.rs:519-531`). A penalised curve is neither; the companion spec settles what
   is written.
 - **`--str-param-estimates-at-once`** (`cli/estimate_parameters.rs:144-145`) sizes the climb's
   likelihood tables; it means nothing to this fit. Decided in §7.
+- **Three cross-platform digest tests fail on this branch already** (`cli::cross_platform_digests`):
+  they pin the parameters file's checksum, which the ±9 window and the rename moved without
+  re-recording. Re-record them with the oracle (§4.6), not before.
 - **A stale comment** in `fit_strata_with` says thin strata get "two shares copied from a neighbour"
-  (`ssr_fit.rs:3008-3013`); nothing copies a neighbour any more (`:2955`). Do not build on it.
+  (`ssr_fit.rs:3010-3015`); nothing copies a neighbour any more (`:2955`). Do not build on it.
 
 ---
 
@@ -266,7 +269,7 @@ the climb's summaries (`ssr_fit.rs:3163-3330`).
   this fit.
 - **Gathering evidence one motif length at a time**, to bound the evidence's memory → the census-read
   step (`gather_strata`), once kimura's 19.4 GiB matters; the reason for reading the whole band
-  (neighbour borrowing, `census.rs:2194-2200`) no longer holds.
+  (neighbour borrowing, `census.rs:2239-2245`) no longer holds.
 - **The read guard dropping 45,432 of kimura's 86,688 loci** (`kimura_shapes_span9_2026-10-14.md`) →
   its own question; not this fit's.
 - **A parametric allele-length shape** → research avenue C, if thin classes need more than the
