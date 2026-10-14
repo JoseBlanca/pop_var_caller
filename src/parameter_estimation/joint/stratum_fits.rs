@@ -438,7 +438,7 @@ pub struct FittedAlleleLengthVariation {
 ///
 /// **It is soft, and naming it is what makes it movable**
 /// (`doc/devel/ng/spec/population_diversity.md` §4.4). It is reached only where the run fitted
-/// no stratum whatever: a run that fitted any takes its own median instead
+/// no stratum with a concentration: a run that has any takes its own median instead
 /// ([`StratumFits::stated_concentration`]), which is §9's question 4 and its leaning.
 pub const STATED_FLAT_CONCENTRATION: f64 = 1.0;
 
@@ -488,15 +488,15 @@ pub struct StratumFits {
     /// it, which is what [`Self::with_period_allele_length_variations`] is.
     allele_length_variation_by_period: BTreeMap<u8, FittedAlleleLengthVariation>,
     /// The strength the second rung and the bottom rung state: the run's own median fitted
-    /// concentration where any stratum has a concentration, and [`STATED_FLAT_CONCENTRATION`]
-    /// where none has.
+    /// concentration, taken on the between-locus share (see `median_concentration`), where any
+    /// stratum has a concentration, and [`STATED_FLAT_CONCENTRATION`] where none has.
     stated_concentration: f64,
     /// **Where that strength came from, carried rather than re-derived.**
     ///
-    /// [`Provenance::FittedHere`] where the run took the median of its own strata's fits and
-    /// [`Provenance::Defaulted`] where it fitted none — and [`Provenance::Supplied`] where a
-    /// parameters file handed the number over, which is the state that cannot be worked out
-    /// from the numbers beside it.
+    /// [`Provenance::FittedHere`] where the run took the median of its own strata's
+    /// concentrations and [`Provenance::Defaulted`] where no stratum has one — and
+    /// [`Provenance::Supplied`] where a parameters file handed the number over, which is the state
+    /// that cannot be worked out from the numbers beside it.
     ///
     /// **It is a field because it is not a function of anything else this type holds.** Until
     /// 2026-08-30 the one caller that needed it — the parameters file's writer — re-derived it
@@ -635,10 +635,18 @@ impl StratumFits {
             slippage_group_of,
             // **The fit's own warrant for it**: a median over this run's strata is a number the
             // run measured, and the flat constant where it measured none is a stated guess.
-            stated_concentration_warrant: if allele_length_variation_by_stratum.is_empty() {
-                Provenance::Defaulted
-            } else {
+            // **It asks whether any stratum has a concentration, not whether any has shares**
+            // (`str_fit_to_calling.md` §3.5): at one sample every stratum with reads has shares
+            // and none has a concentration, and the constant would otherwise be written as
+            // fitted, where the file's validator checks a `defaulted` value against the constant
+            // and cannot catch a `fitted_here` one.
+            stated_concentration_warrant: if allele_length_variation_by_stratum
+                .values()
+                .any(|fit| fit.concentration.is_some())
+            {
                 Provenance::FittedHere
+            } else {
+                Provenance::Defaulted
             },
             by_stratum,
             allele_length_variation_by_stratum,
@@ -1183,28 +1191,47 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
     })
 }
 
-/// The median of the concentrations the run's strata fitted, or [`STATED_FLAT_CONCENTRATION`]
-/// where it fitted none.
+/// The median of the run's strata's between-locus shares, converted back to a concentration, or
+/// [`STATED_FLAT_CONCENTRATION`] where no stratum has a concentration.
+///
+/// **What is averaged.** A stratum's concentration `c` says how many chromosomes' worth of belief
+/// its allele length variation carries; its between-locus share `F = 1 / (1 + c)` is the same
+/// number on a scale from 0 to 1, and is the one the median is taken on
+/// (`str_fit_to_calling.md` §3.5). The median is converted back to a concentration once, by
+/// `c = (1 − F) / F`.
+///
+/// **Where the scale matters.** `F` falls as `c` rises, so the strata sort into the same middle
+/// either way:
+///
+/// - **At an odd count** the median is the middle stratum's own `F`, and converting it back gives
+///   that stratum's own concentration. That concentration is returned as it was fitted rather
+///   than round-tripped through `F`, which would change its last digits and nothing else.
+/// - **At an even count** the median is the mean of the middle two `F`s, which is not `F` of the
+///   mean of the middle two concentrations. Concentrations 4 and 6 have shares 1/5 and 1/7; their
+///   mean, 6/35, converts back to 29/6 ≈ 4.83, where the mean of the concentrations is 5.
 ///
 /// **A stratum with no concentration does not count**: it has nothing to contribute, and its
-/// shares are held at this very median.
-///
-/// **The mean of the middle two at an even count**, which is the ordinary definition. The values
-/// are finite and positive by [`checked_allele_length_variation`], so the sort is total.
+/// shares are held at this very median. The values are finite and positive by
+/// [`checked_allele_length_variation`], so the sort is total and every share lies strictly between
+/// 0 and 1.
 fn median_concentration(fitted: &BTreeMap<Stratum, FittedAlleleLengthVariation>) -> f64 {
-    let mut totals: Vec<f64> = fitted
+    let between_locus_share = |concentration: f64| 1.0 / (1.0 + concentration);
+    let mut concentrations: Vec<f64> = fitted
         .values()
         .filter_map(|fit| fit.concentration)
         .collect();
-    if totals.is_empty() {
+    if concentrations.is_empty() {
         return STATED_FLAT_CONCENTRATION;
     }
-    totals.sort_by(f64::total_cmp);
-    let middle = totals.len() / 2;
-    if totals.len() % 2 == 1 {
-        totals[middle]
+    concentrations.sort_by(f64::total_cmp);
+    let middle = concentrations.len() / 2;
+    if concentrations.len() % 2 == 1 {
+        concentrations[middle]
     } else {
-        (totals[middle - 1] + totals[middle]) / 2.0
+        let mean_share = (between_locus_share(concentrations[middle - 1])
+            + between_locus_share(concentrations[middle]))
+            / 2.0;
+        (1.0 - mean_share) / mean_share
     }
 }
 
@@ -1865,9 +1892,10 @@ mod tests {
         assert_eq!(fits.stated_concentration(), STATED_FLAT_CONCENTRATION);
     }
 
-    /// **The stated concentration is the run's own median**, at an odd count and at an even
-    /// one — and the two arms are checked apart, because a mid-point taken with the wrong
-    /// rounding is right at one of them and wrong at the other.
+    /// **The stated concentration is the run's own median, taken on the between-locus share
+    /// `F = 1 / (1 + c)`**, at an odd count and at an even one — and the two arms are checked
+    /// apart, because a mid-point taken with the wrong rounding is right at one of them and wrong
+    /// at the other, and because only the even arm differs from a median taken on `c`.
     #[test]
     fn the_stated_concentration_is_the_median_of_the_runs_own_fitted_ones() {
         let three = StratumFits::over(
@@ -1881,8 +1909,11 @@ mod tests {
         assert_eq!(
             three.stated_concentration(),
             4.0,
-            "1, 4 and 30 have a median of 4 — not the mean, 11.67, and not the first inserted"
+            "1, 4 and 30 have shares 1/2, 1/5 and 1/31, whose median is 1/5, which is 4 — not the \
+             mean, 11.67, and not the first inserted; the middle stratum's own 4 comes back \
+             exactly, not round-tripped through its share"
         );
+        assert_eq!(three.stated_concentration_warrant(), Provenance::FittedHere);
 
         let four = StratumFits::over(
             &[
@@ -1893,11 +1924,83 @@ mod tests {
             ],
             one_group(),
         );
-        assert_eq!(
-            four.stated_concentration(),
-            5.0,
-            "1, 4, 6 and 30 have a median of (4 + 6) / 2"
+        // Shares 1/2, 1/5, 1/7 and 1/31; the middle two are 1/5 and 1/7, whose mean is
+        // (7 + 5) / 70 = 6/35, and (1 − 6/35) / (6/35) = 29/6. The median taken on the
+        // concentrations themselves, (4 + 6) / 2 = 5, is the number this replaced.
+        let expected = 29.0 / 6.0;
+        assert!(
+            (four.stated_concentration() - expected).abs() < 1e-12,
+            "1, 4, 6 and 30 have a median share of 6/35, which is a concentration of 29/6 ≈ 4.833, \
+             not (4 + 6) / 2 = 5; got {}",
+            four.stated_concentration()
         );
+        assert_eq!(four.stated_concentration_warrant(), Provenance::FittedHere);
+    }
+
+    /// **The even arm moves the median in the direction the share's curvature says**: at
+    /// concentrations 1 and 9, shares 1/2 and 1/10, the mean share is 3/10 and the concentration
+    /// (1 − 3/10) / (3/10) = 7/3 ≈ 2.33 — well below the mean of the concentrations, 5. Every
+    /// high concentration has a share close to 0, so on the share's scale a stratum with little
+    /// between-locus variation pulls the median less than it does on the concentration's.
+    #[test]
+    fn at_an_even_count_the_median_is_the_mean_of_the_middle_two_shares() {
+        let two = StratumFits::over(
+            &[
+                fitted(stratum(2, 8), 0.05, leaning_short(), 9.0),
+                fitted(stratum(2, 10), 0.05, leaning_short(), 1.0),
+            ],
+            one_group(),
+        );
+        let expected = 7.0 / 3.0;
+        assert!(
+            (two.stated_concentration() - expected).abs() < 1e-12,
+            "shares 1/2 and 1/10 have a mean of 3/10, a concentration of 7/3; got {}",
+            two.stated_concentration()
+        );
+    }
+
+    /// **At one sample the stated concentration is the constant, and says so.** The penalised fit
+    /// reports shares and no concentration for every class with reads at one sample
+    /// (`str_fit_to_calling.md` §3.5; arch `str_penalised_fit.md` §1.2), built here by hand as
+    /// fitted outcomes with `concentration: None`: the classes keep their shares, the median has
+    /// nothing to be taken over, and the warrant is `Defaulted`, not `FittedHere` — which it was
+    /// while the warrant asked whether any class had shares.
+    #[test]
+    fn at_one_sample_no_class_has_a_concentration_and_the_stated_one_is_defaulted() {
+        let fits = StratumFits::over(
+            &[
+                fitted_without_a_concentration(stratum(2, 10), leaning_short()),
+                fitted_without_a_concentration(stratum(3, 8), vec![0.2, 0.5, 0.3]),
+            ],
+            one_group(),
+        );
+        assert_eq!(fits.strata_with_a_allele_length_variation(), 2);
+        assert_eq!(fits.stated_concentration(), STATED_FLAT_CONCENTRATION);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::Defaulted);
+        assert_eq!(
+            fits.allele_length_variation_at(2, 10).rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+        assert_eq!(
+            fits.allele_length_variation_at(3, 8).rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+    }
+
+    /// **One class with a concentration is enough to make the stated one fitted**, however many
+    /// beside it have none: the median is over that one, and it was measured.
+    #[test]
+    fn one_class_with_a_concentration_makes_the_stated_one_fitted() {
+        let fits = StratumFits::over(
+            &[
+                fitted_without_a_concentration(stratum(2, 10), leaning_short()),
+                fitted_without_a_concentration(stratum(2, 12), leaning_short()),
+                fitted(stratum(3, 8), 0.05, leaning_short(), 6.0),
+            ],
+            one_group(),
+        );
+        assert_eq!(fits.stated_concentration(), 6.0);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::FittedHere);
     }
 
     /// A stratum fitted on its own tracts whose fit reported **its shares and no concentration**,

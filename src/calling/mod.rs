@@ -4548,10 +4548,15 @@ mod tests {
             RepeatCount(11),
         );
         assert_eq!(elsewhere.rung(), AlleleLengthVariationRung::StatedFlat);
-        assert_eq!(
-            elsewhere.concentration(),
-            14.5,
-            "the run fitted 4.0 and 25.0, whose median is their mean"
+        // The median is taken on the between-locus share 1 / (1 + c): 4 and 25 have shares 1/5
+        // and 1/26, whose mean is 31/260, a concentration of (1 − 31/260) / (31/260) = 229/31 —
+        // not the mean of the two concentrations, 14.5.
+        let expected = 229.0 / 31.0;
+        assert!(
+            (elsewhere.concentration() - expected).abs() < 1e-12,
+            "the run fitted 4.0 and 25.0, whose median share converts back to 229/31 ≈ 7.39; \
+             got {}",
+            elsewhere.concentration()
         );
     }
 

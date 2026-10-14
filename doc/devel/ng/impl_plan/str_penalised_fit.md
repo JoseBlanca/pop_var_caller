@@ -86,7 +86,7 @@ what goes with it (arch §4.1).
   `None`; the rung match at `to_run_parameters.rs:2016-2020` updated. Tests for the new rung with a
   hand-built table, and for its rank under `BundlePrior::rung`. *Depends:* A1. *Source:* arch §1.5;
   companion §3.2.
-- ☐ **A5** **Own commit, do not bundle.** The stated concentration is the median taken in F; its
+- ✅ **A5** **Own commit, do not bundle.** The stated concentration is the median taken in F; its
   warrant is `Defaulted` when no class has an F. *Oracle:* the oracle script before and after; with
   the climb every fitted class has a concentration, so a move can come only from an even count of
   fitted classes, and is explained. A test at one sample pins the warrant. *Depends:* A4. *Source:*
