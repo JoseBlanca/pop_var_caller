@@ -1,6 +1,6 @@
 # The repeat-tract fit by penalised EM
 
-**Status:** draft for the owner's approval, 2026-10-14. The method is chosen
+**Status:** approved by the owner, 2026-10-14. The method is chosen
 (`doc/devel/ng/research/str_fit/recommendation_2026-10-14.md`, adopted by the owner the same day); this
 settles what is built. A research prototype exists and is measured; nothing is wired into production.
 Companion spec: [`str_fit_to_calling.md`](str_fit_to_calling.md), what the fit hands to calling. It
@@ -165,7 +165,7 @@ the truth within one error only 0–2 times in 100 at 500 samples, where an hone
 68 times (`track1_counting_fit_errors_2026-10-12.md`).
 Measured honest for stutter, F and allele lengths of 5% or more. **Not honest** for lengths under 1%
 from 60 samples up (the truth inside one error 27–42 times in 100) nor for the homopolymer shorter
-share at 3 reads (29–55): see §5.
+share at 3 reads (29–55); rare lengths get no error (§7).
 
 ### 2.7 The settings, as named constants
 
@@ -259,13 +259,6 @@ the climb's summaries (`ssr_fit.rs:3163-3330`).
 1. **Does a slip rate 0.5% low change any call?** Measure at 500 and 2,000 simulated samples × 3 reads
    with calling. If it does, revisit the floor (§2.4). *Leaning:* it does not; settled by that
    measurement.
-2. **Flag errors on rare allele lengths.** Lengths under about 3 loci's worth are reported with errors
-   too small. *Leaning:* report such an error as absent and say why in the log; confirm before code.
-3. **The overshoot at the ends of the repeat range at 1 sample × 3 reads** (+49% to +127% at the
-   extreme class, `track2_penalised_em_2026-10-12.md` §10.3). Accept and state, or try a stiffness that
-   varies along the curve. *Leaning:* accept for now.
-4. **The climb's code.** *Leaning:* keep it until §4.4 and §4.7 pass, then delete it with its tests and
-   examples in one commit; it is about 10,000 lines and nothing else will use it.
 
 ## 6. Deferred, with a recommended home
 
@@ -282,8 +275,18 @@ the climb's summaries (`ssr_fit.rs:3163-3330`).
 ## 7. Decisions
 
 - **2026-10-14, owner:** adopt penalised EM with the one-locus floor.
-- **The CLI flag `--str-param-estimates-at-once` is removed**, with an error naming why, rather than
-  accepted and ignored. *Leaning; confirm before code.*
+- **2026-10-14, owner:** the CLI flag `--str-param-estimates-at-once` is removed, with an error
+  naming why, rather than accepted and ignored.
+- **2026-10-14, owner: errors on rare allele lengths are reported as absent.** A share under 3 loci's
+  worth (share × loci with reads < 3) gets no error, and the log says how many were withheld; such
+  errors were measured too small (§2.6). The 3 rests on two settings measured by track 1; soft.
+- **2026-10-14, owner: the overshoot at the ends of the repeat range at 1 sample × 3 reads is
+  accepted** (+49% to +127% at the extreme class, `track2_penalised_em_2026-10-12.md` §10.3), and
+  stated as a known limit of the fit.
+- **2026-10-14, owner: the climb's code is deleted** once §4.4 and §4.7 pass, with its tests and
+  examples, in one commit.
+- **2026-10-14, owner:** stutter per slippage group and library multipliers go to the
+  library-multiplier work (§6).
 
 ## 8. Reuse map
 

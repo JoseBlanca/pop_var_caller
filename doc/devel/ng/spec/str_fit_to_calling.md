@@ -1,6 +1,6 @@
 # What the repeat-tract fit hands to calling
 
-**Status:** draft for the owner's approval, 2026-10-14. Companion of
+**Status:** approved by the owner, 2026-10-14. Companion of
 [`str_penalised_fit.md`](str_penalised_fit.md), which settles the fit; this settles what reaches
 calling from it: the parameters file's repeat-tract section, and the fallback calling uses when a
 class has no between-locus share. Build the two together.
@@ -159,9 +159,8 @@ sample no class has one, so every class uses 0.5.
 5. On the bench at one sample, calling's rung for every class with reads is the new step, and the
    held-out score matches the measurement of §3.2.
 
-## 6. Open
+## 6. Decided
 
-1. **Should the file carry errors for the allele length variation and F**, as it does for the stutter
-   numbers? The fit computes them (`str_penalised_fit.md` §2.6). *Leaning:* F's error yes, the shares'
-   not yet, because those for rare lengths are not honest (`str_penalised_fit.md` §5.2). Confirm
-   before code.
+- **2026-10-14, owner: the file carries F's standard error** (`between_locus_share_standard_error`,
+  absent where F is), **and not yet the allele lengths' errors**, because those for rare lengths are
+  not honest (`str_penalised_fit.md` §7).
