@@ -143,10 +143,28 @@ fn spread(tracts: &[&TractGuard]) -> String {
 }
 
 fn slippage_of(fit: &StratumFit) -> String {
+    let errors = fit
+        .standard_errors
+        .as_ref()
+        .and_then(|errors| errors.slippage.first().copied().flatten());
+    let error = |pick: fn(
+        &pop_var_caller::parameter_estimation::joint::ssr_fit::SlippageErrors,
+    )
+        -> pop_var_caller::parameter_estimation::joint::ssr_fit::StratumError| {
+        errors
+            .as_ref()
+            .and_then(|errors| pick(errors).value())
+            .map_or("none".to_owned(), |value| format!("{value:.4}"))
+    };
     match fit.slippage.first().copied().flatten() {
         Some(slippage) => format!(
-            "level {:.5}, shorter share {:.4}, fall-off {:.4}",
-            slippage.level, slippage.shorter_share, slippage.fall_off
+            "level {:.5} ± {}, shorter share {:.4} ± {}, fall-off {:.4} ± {}",
+            slippage.level,
+            error(|errors| errors.level),
+            slippage.shorter_share,
+            error(|errors| errors.shorter_share),
+            slippage.fall_off,
+            error(|errors| errors.fall_off),
         ),
         None => "no slippage numbers".to_owned(),
     }
