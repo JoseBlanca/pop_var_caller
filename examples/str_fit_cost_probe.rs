@@ -68,6 +68,9 @@ struct Cli {
     /// Skip the whole fit (only the unit costs).
     #[arg(long, global = true)]
     units_only: bool,
+    /// Skip the unit costs (one round, one reading of F): only the whole fit and its errors.
+    #[arg(long, global = true)]
+    no_units: bool,
     /// Comma-separated: B (default), D, D_tract_prior.
     #[arg(long, global = true, default_value = "B")]
     methods: String,
@@ -196,16 +199,22 @@ fn main() {
             "source\tspan\tperiod\trepeats\ttracts\trows\treads_per_row\tbuckets_per_row\testep_cpu\testep_wall\tpairs_cpu\tpairs_wall\tfit_cpu\tfit_wall\trounds_in_all\treadings\terrors_cpu\tlevel\tconcentration\tdistinct_rows_in_class\tdistinct_rows_by_tract"
         );
         let mut totals = (0_usize, 0.0, 0.0, 0_usize, 0_usize);
+        let mut error_totals = (0.0, 0.0);
         for evidence in strata.iter().filter(|e| wanted(e)) {
             if evidence.tracts_with_reads() < DEFAULT_REFUSAL_FLOOR {
                 continue;
             }
             let rows = evidence.rows_with_reads();
             let (reads, buckets, in_class, by_tract) = read_shape(evidence);
-            let (_, estep_cpu, estep_wall) =
-                timed(|| expected_counts(evidence, start, &flat, 1.0, &excess, &config));
-            let (_, pairs_cpu, pairs_wall) =
-                timed(|| fit_spread_by_pairs(evidence, start, &flat, &excess, &config));
+            let (estep_cpu, estep_wall, pairs_cpu, pairs_wall) = if cli.no_units {
+                (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+            } else {
+                let (_, estep_cpu, estep_wall) =
+                    timed(|| expected_counts(evidence, start, &flat, 1.0, &excess, &config));
+                let (_, pairs_cpu, pairs_wall) =
+                    timed(|| fit_spread_by_pairs(evidence, start, &flat, &excess, &config));
+                (estep_cpu, estep_wall, pairs_cpu, pairs_wall)
+            };
             let (fit, fit_cpu, fit_wall) = if cli.units_only {
                 (None, f64::NAN, f64::NAN)
             } else {
@@ -224,8 +233,10 @@ fn main() {
             };
             let errors_cpu = match (&fit, cli.errors) {
                 (Some(fit), true) => {
-                    let (errors, cpu, _) =
+                    let (errors, cpu, wall) =
                         timed(|| sandwich_errors(evidence, fit, &excess, &config));
+                    error_totals.0 += cpu;
+                    error_totals.1 += wall;
                     let errors = errors.sandwich;
                     numbers.push("B", evidence, "error_level", errors.level.value());
                     numbers.push("B", evidence, "error_shorter", errors.shorter_share.value());
@@ -286,8 +297,15 @@ fn main() {
             );
         }
         eprintln!(
-            "B over {} rows: {:.1} s CPU, {:.1} s wall; {:.0} row-rounds, {:.0} row-readings",
-            totals.0, totals.1, totals.2, totals.3 as f64, totals.4 as f64
+            "B over {} rows: {:.1} s CPU, {:.1} s wall; {:.0} row-rounds, {:.0} row-readings; \
+             errors {:.1} s CPU, {:.1} s wall",
+            totals.0,
+            totals.1,
+            totals.2,
+            totals.3 as f64,
+            totals.4 as f64,
+            error_totals.0,
+            error_totals.1
         );
     }
 
