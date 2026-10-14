@@ -31,8 +31,8 @@
 //! and `B` the tract-to-tract spread of the slopes.
 
 use super::composite_fit::{
-    ConcentrationSource, CountedClass, Counts, PairRow, SHARE_PRIOR_TRACTS,
-    expected_counts_by_tract, pair_rows_by_tract, refit_class_by_counting_from,
+    ConcentrationSource, CountedClass, Counts, PairCubic, SHARE_PRIOR_TRACTS,
+    expected_counts_by_tract, pair_cubics_by_tract, refit_class_by_counting_from,
     scaled_ln_pairs_of_tract,
 };
 use super::*;
@@ -194,14 +194,15 @@ fn counting_slope(
     slope
 }
 
-/// **Each tract's pairwise slope in the log concentration**, by a central difference.
-fn pairwise_slope_by_tract(rows: &[Vec<PairRow>], point: &Point, classes: usize) -> Vec<f64> {
+/// **Each tract's pairwise slope in the log concentration**, by a central difference, from the
+/// tract's pairs built at `point`'s stutter and shares.
+fn pairwise_slope_by_tract(cubics: &[Vec<PairCubic>], point: &Point) -> Vec<f64> {
     let up = point.concentration * float::exp(LN_CONCENTRATION_STEP);
     let down = point.concentration * float::exp(-LN_CONCENTRATION_STEP);
-    rows.par_iter()
-        .map(|samples| {
-            (scaled_ln_pairs_of_tract(samples, &point.shares, up, classes)
-                - scaled_ln_pairs_of_tract(samples, &point.shares, down, classes))
+    cubics
+        .par_iter()
+        .map(|pairs| {
+            (scaled_ln_pairs_of_tract(pairs, up) - scaled_ln_pairs_of_tract(pairs, down))
                 / (2.0 * LN_CONCENTRATION_STEP)
         })
         .collect()
@@ -215,7 +216,6 @@ fn slopes_by_tract(
     source: ConcentrationSource,
     homozygote_excess: &[f64],
     config: &SsrFitConfig,
-    rows: Option<&[Vec<PairRow>]>,
 ) -> Vec<Vec<f64>> {
     let counts = expected_counts_by_tract(
         evidence,
@@ -230,12 +230,19 @@ fn slopes_by_tract(
         .map(|tract| counting_slope(tract, point, layout, source))
         .collect();
     if layout.with_concentration && source == ConcentrationSource::PairsOfSamples {
-        let rows = rows.expect("the pairs' rows are built when the concentration comes from pairs");
+        // The pairs depend on the stutter and the shares, so they are built at every point; a
+        // tract's rows of allele-pair likelihoods are held only while its pairs are reduced.
+        let cubics = pair_cubics_by_tract(
+            evidence,
+            point.slippage,
+            &point.shares,
+            homozygote_excess,
+            config,
+        );
         let at = layout.concentration_index();
-        for (slope, pairwise) in
-            slopes
-                .iter_mut()
-                .zip(pairwise_slope_by_tract(rows, point, layout.classes))
+        for (slope, pairwise) in slopes
+            .iter_mut()
+            .zip(pairwise_slope_by_tract(&cubics, point))
         {
             slope[at] = pairwise;
         }
@@ -423,7 +430,7 @@ fn errors_from_covariance(
 /// either side of the answer. The other numbers' errors are those with it held.
 ///
 /// Costs two passes over the reads for each number fitted, plus one, in the counting fit's own
-/// per-round work; with the concentration from pairs, also the pairs' rows at seven stutters.
+/// per-round work; with the concentration from pairs, also the pairs built at each of those points.
 #[must_use]
 pub fn sandwich_errors(
     evidence: &StratumEvidence,
@@ -464,19 +471,7 @@ pub fn sandwich_errors(
         concentration: fitted.concentration_counted_at,
     };
     let from_pairs = layout.with_concentration && source == ConcentrationSource::PairsOfSamples;
-    let rows_at = |slippage: Slippage| {
-        from_pairs.then(|| pair_rows_by_tract(evidence, slippage, homozygote_excess, config))
-    };
-    let rows = rows_at(at.slippage);
-    let by_tract = slopes_by_tract(
-        evidence,
-        &at,
-        &layout,
-        source,
-        homozygote_excess,
-        config,
-        rows.as_deref(),
-    );
+    let by_tract = slopes_by_tract(evidence, &at, &layout, source, homozygote_excess, config);
 
     // The slopes' change, column by column: minus the derivative of the summed slope.
     let mut change = vec![0.0; size * size];
@@ -490,23 +485,8 @@ pub fn sandwich_errors(
         let mut sides = [0.0, 0.0].map(|_| Vec::new());
         for (side, sign) in [1.0, -1.0].into_iter().enumerate() {
             let moved = at.moved(&layout, column, sign * step);
-            // The pairs' rows depend on the stutter alone.
-            let moved_rows = if column < 3 {
-                rows_at(moved.slippage)
-            } else {
-                None
-            };
-            let rows_here = moved_rows.as_deref().or(rows.as_deref());
             sides[side] = summed(
-                &slopes_by_tract(
-                    evidence,
-                    &moved,
-                    &layout,
-                    source,
-                    homozygote_excess,
-                    config,
-                    rows_here,
-                ),
+                &slopes_by_tract(evidence, &moved, &layout, source, homozygote_excess, config),
                 size,
             );
         }
@@ -812,7 +792,7 @@ mod tests {
             .map(|counts| counts.log_likelihood)
             .sum()
         };
-        let slopes = slopes_by_tract(&evidence, &at, &layout, source, &excess, &config, None);
+        let slopes = slopes_by_tract(&evidence, &at, &layout, source, &excess, &config);
         let analytic = summed(&slopes, layout.width());
         for (which, value) in analytic.iter().enumerate() {
             let step = 1e-5;

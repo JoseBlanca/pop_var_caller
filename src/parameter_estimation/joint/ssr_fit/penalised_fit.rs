@@ -933,6 +933,7 @@ impl Period {
                     let pairs = SamplePairs::of(
                         &classes[*index],
                         self.slippage[point],
+                        &self.shares[point],
                         homozygote_excess,
                         config,
                     );
@@ -940,8 +941,7 @@ impl Period {
                         continue;
                     }
                     let theta = self.between_curve.values[point];
-                    let at =
-                        |value: f64| pairs.log_likelihood_by_tract(&self.shares[point], -value);
+                    let at = |value: f64| pairs.log_likelihood_by_tract(-value);
                     let (above, middle, below) = (at(theta + step), at(theta), at(theta - step));
                     let mut bend = 0.0;
                     let mut slopes = 0.0;
@@ -1044,6 +1044,7 @@ impl Period {
                 let pairs = SamplePairs::of(
                     &classes[*index],
                     self.slippage[point],
+                    &self.shares[point],
                     homozygote_excess,
                     config,
                 );
@@ -1051,7 +1052,7 @@ impl Period {
                     return Vec::new();
                 }
                 grid.iter()
-                    .map(|logit| pairs.log_likelihood(&self.shares[point], -logit))
+                    .map(|logit| pairs.log_likelihood(-logit))
                     .collect()
             })
             .collect();
