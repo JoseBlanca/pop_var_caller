@@ -490,6 +490,8 @@ impl PeriodFit for TheCountingFit {
 pub struct ThePenalisedFit {
     pub config: super::super::penalised_fit::PenalisedFitConfig,
     pub report_working_concentration: bool,
+    /// The method's name in the rows, in place of the one derived from the settings.
+    pub label: Option<&'static str>,
 }
 
 impl Default for ThePenalisedFit {
@@ -508,13 +510,16 @@ impl Default for ThePenalisedFit {
                 ..super::super::penalised_fit::PenalisedFitConfig::default()
             },
             report_working_concentration: false,
+            label: None,
         }
     }
 }
 
 impl PeriodFit for ThePenalisedFit {
     fn name(&self) -> String {
-        if self.report_working_concentration {
+        if let Some(label) = self.label {
+            label.to_owned()
+        } else if self.report_working_concentration {
             "D_working_F".to_owned()
         } else if self.config.allele_prior_tracts > 0.0 {
             "D_tract_prior".to_owned()

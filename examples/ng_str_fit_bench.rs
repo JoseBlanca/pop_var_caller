@@ -188,6 +188,25 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
             fit.config.allele_prior_tracts = 1.0;
             Box::new(fit)
         }
+        // Reshaped priors on the shares, for measuring (shares_prior report).
+        "D_prior_skip1" | "D_prior_skip2" | "D_prior_skip4" | "D_prior_skip6"
+        | "D_prior_fixed100" | "D_prior_fixed30" | "D_prior_half" => {
+            let mut fit = ThePenalisedFit::default();
+            let (label, tracts, fixed, skip): (&'static str, f64, f64, i32) = match name {
+                "D_prior_skip1" => ("D_prior_skip1", 1.0, 0.0, 1),
+                "D_prior_skip2" => ("D_prior_skip2", 1.0, 0.0, 2),
+                "D_prior_skip4" => ("D_prior_skip4", 1.0, 0.0, 4),
+                "D_prior_skip6" => ("D_prior_skip6", 1.0, 0.0, 6),
+                "D_prior_fixed100" => ("D_prior_fixed100", 0.0, 100.0, -1),
+                "D_prior_fixed30" => ("D_prior_fixed30", 0.0, 30.0, -1),
+                _ => ("D_prior_half", 0.5, 0.0, -1),
+            };
+            fit.config.allele_prior_tracts = tracts;
+            fit.config.allele_prior_fixed_draws = fixed;
+            fit.config.allele_prior_skips_within = skip;
+            fit.label = Some(label);
+            Box::new(fit)
+        }
         "B_within" => Box::new(TheCountingFit {
             pairs: false,
             ..TheCountingFit::default()
