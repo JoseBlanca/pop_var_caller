@@ -1780,11 +1780,17 @@ fn per_read_group(records: &mut SampleCensusEvidence) -> BTreeMap<String, usize>
 /// One share's five columns: where it came from, how much of that was the curve, and what the
 /// curve was.
 fn one_share(provenance: &ssr_fit::ShareProvenance) -> String {
-    let (source, weight) = match provenance.source {
-        ssr_fit::ShareSource::Stratum => ("stratum".to_string(), 0.0),
-        ssr_fit::ShareSource::Curve => ("curve".to_string(), 1.0),
-        ssr_fit::ShareSource::Blend { curve_weight } => ("blend".to_string(), curve_weight),
+    let source = match provenance.source {
+        ssr_fit::ShareSource::Stratum => "stratum",
+        ssr_fit::ShareSource::Curve => "curve",
+        ssr_fit::ShareSource::Blend { .. } => "blend",
+        ssr_fit::ShareSource::PenalisedCurve(_) => "penalised",
     };
+    // A penalised point was never weighed against a parametric curve: its weight column is empty.
+    let weight = provenance
+        .source
+        .curve_weight()
+        .map_or_else(String::new, |weight| format!("{weight:.6}"));
     match provenance.curve {
         Some(curve) => {
             let shape = match curve.shape {
@@ -1801,11 +1807,11 @@ fn one_share(provenance: &ssr_fit::ShareProvenance) -> String {
                 ssr_fit::ShareCurveSource::BuiltInDefault => "default",
             };
             format!(
-                "{source},{weight:.6},{shape},{from},{:.6}",
+                "{source},{weight},{shape},{from},{:.6}",
                 curve.held_out_error
             )
         }
-        None => format!("{source},{weight:.6},,,"),
+        None => format!("{source},{weight},,,"),
     }
 }
 
@@ -1887,13 +1893,17 @@ fn write_cell_table(
                 .flatten()
                 .next()
                 .map(|provenance| {
-                    let (source, weight) = match provenance.source {
-                        ssr_fit::LevelSource::Cell => ("cell".to_string(), 0.0),
-                        ssr_fit::LevelSource::Curve => ("curve".to_string(), 1.0),
-                        ssr_fit::LevelSource::Blend { curve_weight } => {
-                            ("blend".to_string(), curve_weight)
-                        }
+                    let source = match provenance.source {
+                        ssr_fit::LevelSource::Cell => "cell",
+                        ssr_fit::LevelSource::Curve => "curve",
+                        ssr_fit::LevelSource::Blend { .. } => "blend",
+                        ssr_fit::LevelSource::PenalisedCurve(_) => "penalised",
                     };
+                    // A penalised point has no curve weight: its column is empty.
+                    let weight = provenance
+                        .source
+                        .curve_weight()
+                        .map_or_else(String::new, |weight| format!("{weight:.6}"));
                     let reach = match provenance.reach {
                         Some(ssr_fit::CurveReach::Inside) => "inside",
                         Some(ssr_fit::CurveReach::BelowFitted) => "below",
@@ -1902,12 +1912,12 @@ fn write_cell_table(
                     };
                     match provenance.curve {
                         Some(curve) => format!(
-                            "{source},{weight:.6},{reach},{:.2},{:.6},{}",
+                            "{source},{weight},{reach},{:.2},{:.6},{}",
                             curve.rise_shape.get(),
                             curve.held_out_error,
                             curve.cells
                         ),
-                        None => format!("{source},{weight:.6},{reach},,,"),
+                        None => format!("{source},{weight},{reach},,,"),
                     }
                 })
                 .unwrap_or_else(|| ",,,,,".to_string()),

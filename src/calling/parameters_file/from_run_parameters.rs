@@ -819,6 +819,9 @@ fn level_origin_of(
                     .into(),
                 reach: the_recorded_reach(provenance.reach, stratum, slippage_group, "the level"),
             },
+            LevelSource::PenalisedCurve(_) => {
+                no_penalised_point_in_this_format(stratum, slippage_group, "the level")
+            }
         },
         expected_slipped_reads: provenance.slipped_reads,
         own_fit_standard_error,
@@ -846,7 +849,31 @@ fn share_smoothing_of(
                 .into(),
             reach: the_recorded_reach(provenance.reach, stratum, slippage_group, which_number),
         },
+        ShareSource::PenalisedCurve(_) => {
+            no_penalised_point_in_this_format(stratum, slippage_group, which_number)
+        }
     }
+}
+
+/// **Refuses to write a number that came off a penalised curve**, which this format of the file
+/// has no way to say.
+///
+/// Format 3 adds the smoothing that records it (`str_fit_to_calling.md` §2.3). Until then nothing
+/// that writes a file produces such a number: the penalised fit is not yet what
+/// `estimate-parameters` runs, and a file read back cannot carry one. Recording it as the
+/// stratum's own fit would put a wrong origin in the file, so a number that does arrive here is a
+/// programming error, and stops the run with the stratum it was found at.
+fn no_penalised_point_in_this_format(
+    stratum: Stratum,
+    slippage_group: u32,
+    which_number: &str,
+) -> ! {
+    panic!(
+        "at period {}, {} repeats, slippage group {slippage_group}, {which_number} came off a \
+         penalised curve, and this format of the parameters file has no smoothing that records \
+         one — the penalised fit's numbers can be written only once the file carries that origin",
+        stratum.period, stratum.reference_repeats
+    )
 }
 
 /// The curve a number came off, refusing a provenance that says a curve supplied it and does not

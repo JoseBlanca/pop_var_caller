@@ -96,6 +96,8 @@ use crate::calling::likelihood::stutter_rates::stutter_model_for;
 use crate::calling::{CandidateAlleles, ContaminationView, FrozenParameters};
 use crate::locus_generation::{LocusKind, SsrBundleDetail};
 use crate::parameter_estimation::Provenance;
+use crate::parameter_estimation::joint::share_curve::ShareSource;
+use crate::parameter_estimation::joint::slippage_curve::LevelSource;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::joint::stratum_fits::{
     AlleleLengthVariation, FittedSlippage, NoSlippage,
@@ -1129,13 +1131,19 @@ pub struct TractPrior<'a> {
 /// **What one cell's slippage numbers are entitled to claim**, from where the fit says they
 /// came.
 ///
-/// The fit reports three sources per number — the cell's own fit, its period's curve, or a
+/// The climb reports three sources per number — the cell's own fit, its period's curve, or a
 /// blend of the two — and each carries the share the curve took
 /// ([`LevelSource::curve_weight`](crate::parameter_estimation::joint::slippage_curve::LevelSource::curve_weight)).
 /// **A number the curve entered at all is [`Provenance::Borrowed`]**: the curve is drawn
 /// through other strata, so a cell reading off it is reading a neighbouring grain's
 /// measurement, which is exactly what that rung means. Only a cell whose level and both shares
 /// are wholly its own is [`Provenance::FittedHere`].
+///
+/// **A point on a penalised curve counts as the cell's own** (`str_fit_to_calling.md` §2.3). The
+/// penalised fit pulls each repeat count toward its neighbours, but it reports only classes with
+/// reads of their own, so none of its numbers is read across a stretch of repeat counts without
+/// reads. It has no curve weight, so the
+/// source is matched variant by variant: a source added later must say which side it is on.
 ///
 /// **The threshold is zero rather than a share**, deliberately: any cut-off between "mostly its
 /// own" and "mostly the curve's" would be a number invented here, and the share itself is not
@@ -1152,10 +1160,18 @@ pub struct TractPrior<'a> {
 /// are still the fit's, so `Defaulted` would be wrong, and the cell cannot claim its shares
 /// were fitted here.
 fn warrant_of(fitted: &FittedSlippage) -> Provenance {
-    let level_is_its_own = fitted.level.source.curve_weight() == 0.0;
+    let level_is_its_own = match fitted.level.source {
+        LevelSource::Cell | LevelSource::PenalisedCurve(_) => true,
+        LevelSource::Curve => false,
+        LevelSource::Blend { curve_weight } => curve_weight == 0.0,
+    };
+    let share_is_its_own = |source: ShareSource| match source {
+        ShareSource::Stratum | ShareSource::PenalisedCurve(_) => true,
+        ShareSource::Curve => false,
+        ShareSource::Blend { curve_weight } => curve_weight == 0.0,
+    };
     let shares_are_its_own = fitted.shares.is_some_and(|shares| {
-        shares.shorter_share.source.curve_weight() == 0.0
-            && shares.fall_off.source.curve_weight() == 0.0
+        share_is_its_own(shares.shorter_share.source) && share_is_its_own(shares.fall_off.source)
     });
     if level_is_its_own && shares_are_its_own {
         Provenance::FittedHere
@@ -2588,6 +2604,57 @@ mod tests {
             ..fitted_shares
         };
         assert_eq!(warrant_of(&no_shares), Provenance::Borrowed);
+    }
+
+    /// **A number on a penalised curve is the cell's own**, because the penalised fit reports
+    /// only classes with reads of their own (`str_fit_to_calling.md` §2.3). It has no curve
+    /// weight, so this pins the variant-by-variant match: each of the level and the two shares
+    /// on a penalised curve is fitted here, and one of them read off a parametric curve still
+    /// borrows the cell's warrant, whichever it is.
+    #[test]
+    fn a_cell_on_a_penalised_curve_is_fitted_here() {
+        use crate::parameter_estimation::joint::slippage_curve::{CurveReach, PenalisedPoint};
+        let penalised_share = ShareSource::PenalisedCurve(PenalisedPoint {
+            strength: 5.0,
+            eased_here: true,
+        });
+        let on_the_curve = FittedSlippage {
+            slippage: slippage_at(0, CANDIDATE_REPEATS[0]),
+            level: LevelProvenance {
+                source: LevelSource::PenalisedCurve(PenalisedPoint {
+                    strength: 20.0,
+                    eased_here: false,
+                }),
+                curve: None,
+                reach: Some(CurveReach::Inside),
+                slipped_reads: Some(400.0),
+            },
+            shares: Some(shares_from(penalised_share, penalised_share)),
+            own_fit_standard_errors:
+                crate::parameter_estimation::joint::stratum_fits::OwnFitStandardErrors::default(),
+            samples_fitted_on: None,
+        };
+        assert_eq!(warrant_of(&on_the_curve), Provenance::FittedHere);
+
+        let level_off_a_curve = FittedSlippage {
+            level: level_off_the_curve(),
+            ..on_the_curve
+        };
+        assert_eq!(warrant_of(&level_off_a_curve), Provenance::Borrowed);
+        for (shorter, fall_off) in [
+            (ShareSource::Curve, penalised_share),
+            (penalised_share, ShareSource::Blend { curve_weight: 0.3 }),
+        ] {
+            let a_share_off_a_curve = FittedSlippage {
+                shares: Some(shares_from(shorter, fall_off)),
+                ..on_the_curve
+            };
+            assert_eq!(
+                warrant_of(&a_share_off_a_curve),
+                Provenance::Borrowed,
+                "shorter {shorter:?}, fall-off {fall_off:?}"
+            );
+        }
     }
 
     /// **A substitution rate the fit did not measure here carries its own warrant through.**

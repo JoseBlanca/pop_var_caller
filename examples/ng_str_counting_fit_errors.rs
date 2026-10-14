@@ -389,6 +389,7 @@ fn error_text(error: StratumError) -> String {
         StratumError::NotIdentified => "not_identified".into(),
         StratumError::NotPlaced => "not_placed".into(),
         StratumError::NoShare => "no_share".into(),
+        StratumError::TooFewLoci => "too_few_loci".into(),
     }
 }
 

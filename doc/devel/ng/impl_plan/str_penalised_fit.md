@@ -76,7 +76,7 @@ what goes with it (arch §4.1).
   `examples/shared/stutter_table.rs`) and `benches/ng_joint_fit_perf.rs`; `cargo clippy
   --all-targets` passes. *Depends:* A1. *Source:* arch §1.2. *Done:* 10 literals in 8 files —
   `examples/shared/stutter_table.rs` defines its own `StratumFit`, so it was not touched.
-- ☐ **A3** `LevelSource::PenalisedCurve`, `ShareSource::PenalisedCurve`, `PenalisedPoint`,
+- ✅ **A3** `LevelSource::PenalisedCurve`, `ShareSource::PenalisedCurve`, `PenalisedPoint`,
   `StratumError::TooFewLoci` — added, unused. `curve_weight()` returns `Option<f64>`; `warrant_of`
   matches the source exhaustively. *Depends:* —. *Source:* arch §1.3–1.4.
 - ☐ **A4** `FittedAlleleLengthVariation::concentration` becomes `Option<f64>`, with

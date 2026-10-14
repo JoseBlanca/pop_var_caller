@@ -36,7 +36,7 @@
 //! Design: `doc/devel/ng/spec/str_slippage_level_curve.md` §5.1. Build order:
 //! `doc/devel/ng/impl_plan/str_slippage_level_curve.md`, Milestone E.
 
-use super::slippage_curve::CurveReach;
+use super::slippage_curve::{CurveReach, PenalisedPoint};
 use crate::float;
 
 // ---------------------------------------------------------------------
@@ -584,16 +584,22 @@ pub enum ShareSource {
     Curve,
     /// Both, weighted by how precisely each determines the share.
     Blend { curve_weight: f64 },
+    /// **A point on its motif length's penalised curve, fitted with this stratum's own reads** —
+    /// neither the stratum's fit alone nor a borrowed curve, as for
+    /// [`LevelSource::PenalisedCurve`](super::slippage_curve::LevelSource::PenalisedCurve).
+    PenalisedCurve(PenalisedPoint),
 }
 
 impl ShareSource {
-    /// The share the curve carried, whichever variant this is — 1 for [`ShareSource::Curve`] and
-    /// 0 for [`ShareSource::Stratum`].
-    pub fn curve_weight(self) -> f64 {
+    /// The share the parametric curve carried — 1 for [`ShareSource::Curve`], 0 for
+    /// [`ShareSource::Stratum`], the weight for a blend — and `None` for
+    /// [`ShareSource::PenalisedCurve`], which no parametric curve was weighed against.
+    pub fn curve_weight(self) -> Option<f64> {
         match self {
-            Self::Stratum => 0.0,
-            Self::Curve => 1.0,
-            Self::Blend { curve_weight } => curve_weight,
+            Self::Stratum => Some(0.0),
+            Self::Curve => Some(1.0),
+            Self::Blend { curve_weight } => Some(curve_weight),
+            Self::PenalisedCurve(_) => None,
         }
     }
 }
@@ -785,6 +791,23 @@ impl Default for ShareCurveConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three parametric variants report the weight the curve carried; a point on a penalised
+    /// curve, never weighed against one, reports none.
+    #[test]
+    fn every_share_source_reports_the_curve_weight_or_none_for_a_penalised_point() {
+        assert_eq!(ShareSource::Stratum.curve_weight(), Some(0.0));
+        assert_eq!(ShareSource::Curve.curve_weight(), Some(1.0));
+        assert_eq!(
+            ShareSource::Blend { curve_weight: 0.6 }.curve_weight(),
+            Some(0.6)
+        );
+        let point = PenalisedPoint {
+            strength: 3.0,
+            eased_here: false,
+        };
+        assert_eq!(ShareSource::PenalisedCurve(point).curve_weight(), None);
+    }
 
     /// A stratum at `repeats` whose share is `share`, measured on `slipped` slipped reads.
     fn stratum(repeats: u64, share: f64, slipped: f64) -> FittedShare {
@@ -1337,6 +1360,7 @@ mod tests {
             .expect("a stratum and a curve")
             .source
             .curve_weight()
+            .expect("a blend has a curve weight")
         };
         assert!((weight_at(40.0) - 0.80).abs() < 0.02, "{}", weight_at(40.0));
         assert!(
@@ -1364,11 +1388,11 @@ mod tests {
             &ShareCurveConfig::default(),
         )
         .expect("a stratum and a curve");
-        assert!(
-            blended.source.curve_weight() < 0.05,
-            "the curve carried {}",
-            blended.source.curve_weight()
-        );
+        let curve_weight = blended
+            .source
+            .curve_weight()
+            .expect("a blend has a curve weight");
+        assert!(curve_weight < 0.05, "the curve carried {curve_weight}");
         assert!(
             (blended.share - 0.50).abs() < 0.01,
             "the emitted share is {}",
@@ -1416,11 +1440,17 @@ mod tests {
             },
         )
         .expect("a stratum and a curve");
+        let weight_of = |blended: BlendedShare| {
+            blended
+                .source
+                .curve_weight()
+                .expect("a blend has a curve weight")
+        };
         assert!(
-            with_knee.source.curve_weight() < no_knee.source.curve_weight(),
+            weight_of(with_knee) < weight_of(no_knee),
             "the knee should stand the curve down: {} against {}",
-            with_knee.source.curve_weight(),
-            no_knee.source.curve_weight()
+            weight_of(with_knee),
+            weight_of(no_knee)
         );
         assert!(with_knee.share < no_knee.share);
         assert!((with_knee.share - far.share).abs() < (no_knee.share - far.share).abs());

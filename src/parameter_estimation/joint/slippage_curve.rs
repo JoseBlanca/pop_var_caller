@@ -528,21 +528,49 @@ pub enum LevelSource {
     /// held-out error is 7.7% — HG002's homopolymers at the corrected ±8 recording window
     /// (spec §7, whose own figures are the ±4 ones).
     Blend { curve_weight: f64 },
+    /// **A point on its motif length's penalised curve, fitted with this cell's own reads.**
+    ///
+    /// The penalised fit fits every repeat count of a motif length together, pulling each
+    /// count's level toward its neighbours'. The value is neither the cell's fit alone nor a curve
+    /// borrowed over a gap — the fit only reports cells with reads — so it is a variant of its own
+    /// rather than [`LevelSource::Cell`] (`str_fit_to_calling.md` §2.3).
+    PenalisedCurve(PenalisedPoint),
 }
 
 impl LevelSource {
-    /// The share the curve carried, whichever variant this is — 1 for [`LevelSource::Curve`] and
-    /// 0 for [`LevelSource::Cell`].
+    /// The share the parametric curve carried — 1 for [`LevelSource::Curve`], 0 for
+    /// [`LevelSource::Cell`], the weight for a blend — and `None` for
+    /// [`LevelSource::PenalisedCurve`], which no parametric curve was weighed against.
     ///
-    /// **The three variants are one formula with the weight at its two ends and in between**, so
-    /// a consumer that only wants the number should not have to match on which end it is.
-    pub fn curve_weight(self) -> f64 {
+    /// **The first three variants are one formula with the weight at its two ends and in
+    /// between**, so a consumer that only wants that number should not have to match on which end
+    /// it is. A penalised point is not on that scale: it is neither borrowed nor the cell's fit
+    /// alone, so it has no weight to report, and a consumer deciding whether a number is the
+    /// cell's own must say what it does with one.
+    pub fn curve_weight(self) -> Option<f64> {
         match self {
-            Self::Cell => 0.0,
-            Self::Curve => 1.0,
-            Self::Blend { curve_weight } => curve_weight,
+            Self::Cell => Some(0.0),
+            Self::Curve => Some(1.0),
+            Self::Blend { curve_weight } => Some(curve_weight),
+            Self::PenalisedCurve(_) => None,
         }
     }
+}
+
+/// **What the parameters file records about one point on a penalised curve.**
+///
+/// The penalised fit draws one curve per motif length through every repeat count with reads; how
+/// stiff the curve is was chosen from the data, and at some repeat counts the fit let the curve
+/// bend more sharply because the reads insisted on a kink. Both facts travel with each number so
+/// that a reader of the file can tell a value held close to its neighbours from one the reads set
+/// on their own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PenalisedPoint {
+    /// The curve's stiffness strength: larger holds each repeat count's value closer to its
+    /// neighbours'.
+    pub strength: f64,
+    /// Whether a bend was eased at this repeat count: the reads insisted on a kink here.
+    pub eased_here: bool,
 }
 
 /// What one cell's emitted slippage level is, once its own fit and its period's curve have both
@@ -808,12 +836,23 @@ mod tests {
     /// The three variants are one weight, so a consumer never matches on which end it is.
     #[test]
     fn every_level_source_reports_the_share_the_curve_carried() {
-        assert_eq!(LevelSource::Cell.curve_weight(), 0.0);
-        assert_eq!(LevelSource::Curve.curve_weight(), 1.0);
+        assert_eq!(LevelSource::Cell.curve_weight(), Some(0.0));
+        assert_eq!(LevelSource::Curve.curve_weight(), Some(1.0));
         assert_eq!(
             LevelSource::Blend { curve_weight: 0.93 }.curve_weight(),
-            0.93
+            Some(0.93)
         );
+    }
+
+    /// A point on a penalised curve was never weighed against a parametric curve, so it reports
+    /// no weight rather than one of the two ends.
+    #[test]
+    fn a_penalised_point_reports_no_curve_weight() {
+        let point = PenalisedPoint {
+            strength: 12.5,
+            eased_here: true,
+        };
+        assert_eq!(LevelSource::PenalisedCurve(point).curve_weight(), None);
     }
 
     /// A curve built at the adding end is a straight line in the level itself, and reading it
@@ -1332,6 +1371,7 @@ mod tests {
             .expect("a cell and a curve")
             .source
             .curve_weight()
+            .expect("a blend has a curve weight")
         };
         let thin = at(40.0);
         let full = at(8_000.0);
@@ -1507,7 +1547,12 @@ mod tests {
                         "level {level} at {repeats} repeats with {slipped} slipped reads gave {}",
                         blended.level
                     );
-                    assert!((0.0..=1.0).contains(&blended.source.curve_weight()));
+                    assert!(
+                        blended
+                            .source
+                            .curve_weight()
+                            .is_some_and(|weight| (0.0..=1.0).contains(&weight))
+                    );
                 }
             }
         }

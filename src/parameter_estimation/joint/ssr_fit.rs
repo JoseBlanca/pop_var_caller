@@ -677,6 +677,16 @@ pub enum StratumError {
     NotPlaced,
     /// **A length class with no share at all**, held at zero and never fitted.
     NoShare,
+    /// **Withheld: too few loci for the error to be trusted.** Two rules, for two different
+    /// reasons (`str_penalised_fit.md` §2.6, §7):
+    ///
+    /// - **Every number of a class with fewer than 8 loci with reads.** These errors were never
+    ///   checked against the truth: the bench's thinnest class had 8 loci, and the between-locus
+    ///   term of the error has at most one dimension a locus, so on a handful of loci it cannot
+    ///   cover every number. The rule is a precaution until that coverage is measured.
+    /// - **A share whose expected count of loci — the share times the class's loci with reads —
+    ///   is below 3.** These errors were measured, and they were too small.
+    TooFewLoci,
 }
 
 impl StratumErrors {
@@ -701,7 +711,7 @@ impl StratumError {
     pub fn value(self) -> Option<f64> {
         match self {
             Self::Estimated(error) => Some(error),
-            Self::NotIdentified | Self::NotPlaced | Self::NoShare => None,
+            Self::NotIdentified | Self::NotPlaced | Self::NoShare | Self::TooFewLoci => None,
         }
     }
 }
@@ -762,14 +772,17 @@ pub struct WalkRecord {
 /// (`str_slippage_level_curve.md` §8).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LevelProvenance {
-    /// The cell's own fit, the curve, or a blend — and for a blend, the share the curve carried.
+    /// The cell's own fit, the curve, a blend — and for a blend, the share the curve carried —
+    /// or a point on a penalised curve.
     pub source: LevelSource,
-    /// The curve that supplied it, absent when this stratum's period had none. It carries the
-    /// curve's own held-out error and how many cells stood behind it, so a consumer can tell a
-    /// curve through twenty-three cells from one through four.
+    /// The curve that supplied it, absent when this stratum's period had none, and absent for a
+    /// point on a penalised curve, which is not a parametric curve. It carries the curve's own
+    /// held-out error and how many cells stood behind it, so a consumer can tell a curve through
+    /// twenty-three cells from one through four.
     pub curve: Option<SlippageCurve>,
     /// Whether this stratum's repeat count sat inside the curve's fitted range. `None` where
-    /// there is no curve. **A level held at a fitted end is under-stated in a known direction**
+    /// there is no curve; always inside for a point on a penalised curve, whose range is the
+    /// classes with reads. **A level held at a fitted end is under-stated in a known direction**
     /// (`str_slippage_level_curve.md` §6).
     pub reach: Option<CurveReach>,
     /// How many of this stratum's own reads **its own fitted level** said slipped, and `None`
@@ -816,9 +829,11 @@ pub struct SharesProvenance {
 /// Where one of the two shares came from: the stratum's own fit, its period's curve, or a blend.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShareProvenance {
-    /// Which of the three, and for a blend the share the curve carried.
+    /// The stratum's own fit, the curve, a blend — and for a blend the share the curve carried —
+    /// or a point on a penalised curve.
     pub source: ShareSource,
-    /// The curve that supplied it, absent where this stratum's period had none. It carries its
+    /// The curve that supplied it, absent where this stratum's period had none or the share is a
+    /// point on a penalised curve. It carries its
     /// own held-out error, how many strata stood behind it, and which rung of the fallback
     /// ladder produced it.
     pub curve: Option<ShareCurve>,
@@ -3280,6 +3295,7 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
     let mut concentration = Vec::new();
     let mut shares = Vec::new();
     let (mut numbers, mut not_identified, mut not_placed, mut no_share) = (0, 0, 0, 0);
+    let mut too_few_loci = 0;
     let mut count = |error: StratumError, into: &mut Vec<f64>, scale: f64| {
         numbers += 1;
         match error {
@@ -3287,6 +3303,7 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
             StratumError::NotIdentified => not_identified += 1,
             StratumError::NotPlaced => not_placed += 1,
             StratumError::NoShare => no_share += 1,
+            StratumError::TooFewLoci => too_few_loci += 1,
         }
     };
     for (fit, stratum) in &errors {
@@ -3318,13 +3335,19 @@ fn standard_errors_summary(outcomes: &[StratumOutcome]) -> Option<String> {
             format!("{what} ± median {median:.3} (largest {largest:.3})")
         }
     };
+    // Only the penalised fit withholds an error for too few loci, so the climb's line is unchanged.
+    let withheld = if too_few_loci > 0 {
+        format!(", and {too_few_loci} are withheld because their class has too few loci with reads")
+    } else {
+        String::new()
+    };
     Some(format!(
         "standard errors of the {} strata fitted on their own tracts, before any curve: {}; {}; {}; \
          {}; {}; of their {numbers} numbers, {not_placed} have no error because the tracts do not \
          place them (an error of more than {NOT_PLACED} on the climb's logit or log scale, or \
          wider than a share's whole range), \
          {not_identified} because the tracts cannot tell them apart from the others, and {no_share} \
-         are length classes with no share",
+         are length classes with no share{withheld}",
         errors.len(),
         described(level, "slippage level", true),
         described(shorter, "shorter share", false),
@@ -5296,6 +5319,24 @@ mod tests {
     use super::*;
     use bench_fixtures::{draw_stratum, spectrum_of};
 
+    /// **An error withheld for too few loci is no error**: it carries no value, and a stratum
+    /// whose every number was withheld has none to report.
+    #[test]
+    fn an_error_withheld_for_too_few_loci_has_no_value() {
+        assert_eq!(StratumError::TooFewLoci.value(), None);
+        let withheld = SlippageErrors {
+            level: StratumError::TooFewLoci,
+            shorter_share: StratumError::TooFewLoci,
+            fall_off: StratumError::TooFewLoci,
+        };
+        let errors = StratumErrors {
+            slippage: vec![Some(withheld)],
+            allele_length_variation: vec![StratumError::TooFewLoci; 3],
+            concentration: StratumError::TooFewLoci,
+        };
+        assert!(!errors.any());
+    }
+
     /// **The climb's record of `fit`**, for tests that read how the climb ran.
     ///
     /// # Panics
@@ -5504,6 +5545,7 @@ mod tests {
             StratumError::NotIdentified => -1.0,
             StratumError::NotPlaced => -2.0,
             StratumError::NoShare => -3.0,
+            StratumError::TooFewLoci => -4.0,
         };
         let mut flat: Vec<f64> = errors.allele_length_variation.iter().map(code).collect();
         flat.push(code(&errors.concentration));
@@ -6779,7 +6821,9 @@ mod tests {
                 StratumError::Estimated(error) => self.distances.push((estimate - truth) / error),
                 StratumError::NotIdentified => self.not_identified += 1,
                 StratumError::NotPlaced => self.not_placed += 1,
-                StratumError::NoShare => {}
+                // The climb never withholds an error for too few loci; a withheld one, like a
+                // class with no share, says nothing about whether errors cover the truth.
+                StratumError::NoShare | StratumError::TooFewLoci => {}
             }
         }
 
@@ -9004,8 +9048,14 @@ mod tests {
 
         // **The thin one takes more of the curve than the fat ones**, because it holds its own
         // answer less precisely — and that is the whole of the rule that replaced the gate.
-        let fat = shares_of(0).shorter_share.source.curve_weight();
-        let thin = shares_of(4).shorter_share.source.curve_weight();
+        let curve_weight_of = |stratum: usize| {
+            shares_of(stratum)
+                .shorter_share
+                .source
+                .curve_weight()
+                .expect("a blend has a curve weight")
+        };
+        let (fat, thin) = (curve_weight_of(0), curve_weight_of(4));
         assert!(
             thin > fat,
             "the thin stratum took {thin:.3} of its curve and the fat one {fat:.3}"
