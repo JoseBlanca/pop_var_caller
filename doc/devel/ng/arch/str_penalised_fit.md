@@ -7,6 +7,9 @@
 [`module_layout.md`](module_layout.md). Line numbers are on branch `str-penalised-fit` after merging
 main (`e0b41ad4`). **Amended 2026-10-14 after an adversarial review**; records that carry the lead's
 decisions say so and point to the spec's §7 or the companion's §6, where the owner confirms them.
+**Amended 2026-10-15, approved by the owner the same day:** the stutter prior of spec §2.10, in §1.1a
+and one row of §1.4; and the stated F's median over classes with at least 8 loci with reads
+(companion §3.5), in §1.5.
 
 ---
 
@@ -67,6 +70,65 @@ pub const LOCI_FOR_A_SHARE_ERROR: f64 = 3.0;
 /// by the owner, 2026-10-14). Errors on thinner classes were never measured; soft.
 pub const LOCI_FOR_AN_ERROR: usize = 8;
 ```
+
+### 1.1a The stutter prior — approved by the owner 2026-10-15
+
+Spec §2.10; the owner's answers are in spec §2.10.9 (weight one read, centre calling's default, no new
+file key, the `NotPlaced` rule below, `RIDGE` kept). Built in plan step C8. Line numbers at commit
+`47e21b8c` (step C7).
+
+```rust
+pub struct PenalisedFitConfig {
+    // … unchanged …
+    /// **Pseudo-reads added to each class's three stutter binomials before the curves are drawn**
+    /// (spec §2.10): `stutter_prior_reads × centre` successes in `stutter_prior_reads` trials, at
+    /// every repeat count with a class. Zero turns it off, which is the fit before step C8.
+    pub stutter_prior_reads: f64,
+    /// Where the prior sits: calling's default stutter in the fit's three numbers.
+    pub stutter_prior_centre: Slippage,
+}
+
+/// One read's worth a class, each curve (spec §2.10.2; owner, 2026-10-15). Soft: C8's sweep of
+/// 0, 1 and 5 on held-out loci checks it, and a different winner goes back to the owner.
+pub const STUTTER_PRIOR_READS: f64 = 1.0;
+/// `StutterModel::hipstr_shipped`'s whole-repeat numbers in the fit's terms: 0.05 + 0.05 of reads
+/// slip, half of them shorter, one-step share 0.95 (spec §2.10.2). Not a measurement.
+pub const STUTTER_PRIOR_CENTRE: Slippage = Slippage {
+    level: 0.10,
+    shorter_share: 0.5,
+    fall_off: 0.05,
+};
+```
+
+- `production()` sets `STUTTER_PRIOR_READS` and `STUTTER_PRIOR_CENTRE`; `prototype()` sets weight 0,
+  so the research examples keep their numbers.
+- **The centre is a copy, pinned by a test.** `parameter_estimation` imports nothing from `calling`
+  (`calling/parameters_file/mod.rs:37-38`), so the constant is written out here. A test on the
+  calling side checks that `stutter_rates_for(&STUTTER_PRIOR_CENTRE)` (`stutter_rates.rs:86`) gives
+  `hipstr_shipped`'s whole-repeat shorter, longer and one-step shares (`alignment/stutter.rs:310-319`).
+- **Where it enters the loop:** the `binomial` closure in the M-step (`penalised_fit.rs:1071-1084`)
+  takes the prior for the curve it builds and adds it to `successes` and `trials` at points whose
+  counts are `Some`; the three calls at `:1086-1102` pass the centre's slip rate, shorter share and
+  fall-off. F's call (`:1106`) passes none. Points with no class get nothing, so the curve still
+  interpolates them.
+- **`refit`'s "two points or fewer" test** (`:1921`, `:1931`) counts points with trials, which the
+  prior makes every class. Spec §2.10.3 says this is intended; `bends()` (classes minus two) is
+  unchanged.
+- **Where it enters the errors:** in `standard_errors`, after the bend penalties (`:1384-1408`), add
+  `a·p(1 − p)` at each class's diagonal entry of `penalty` for components 0, 1 and 2, with `p` that
+  class's slip rate, shorter share and fall-off and `a` the weight. `penalised_sandwich` (`:2301`)
+  then carries it into both H and the middle term.
+- **`PenalisedClass::expected_slipped_reads`** (`:319-328`) stays the reads' own count, without the
+  prior. Two siblings beside it carry the trials of the direction numbers, for the error rule:
+  `expected_slips_with_a_direction` (`shorter + longer`) and `expected_repeats_slipped` (`steps`),
+  both from the class's last counts.
+- **The error mapping** (§1.4) gains one row, after the `TooFewLoci` rows: a shorter share whose
+  `expected_slips_with_a_direction`, or a fall-off whose `expected_repeats_slipped`, is below
+  `stutter_prior_reads` → `NotPlaced`.
+- **The run log** (`penalised_fit/run_log.rs`): `opening_line` (`:67`) states the weight and centre;
+  `how_the_fit_ran` (`:156`) counts the motif length's classes whose direction numbers rest on the
+  prior. **The file:** no new key (owner, 2026-10-15); one sentence in the stutter-provenance note
+  (`to_toml.rs:343`), which is the lead's reading of that answer and which the owner may drop.
 
 ### 1.2 What the fit returns per class: the existing `StratumOutcome`
 
@@ -167,6 +229,7 @@ converted only at the file's edge (§2.3) *(lead, 2026-10-14)*. The prototype's 
 | F absent (its error, `concentration`) | `NotPlaced` |
 | class with fewer than `LOCI_FOR_AN_ERROR` loci with reads | `TooFewLoci` |
 | a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` | `TooFewLoci` |
+| *(owner, 2026-10-15, §1.1a)* a shorter share or fall-off whose class's trials are below `stutter_prior_reads` | `NotPlaced` |
 | an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — as the climb judges it (`ssr_fit.rs:2172`) | `NotPlaced` |
 | a positive, finite error | `Estimated` |
 | zero, absent or not finite | `NotPlaced` |
@@ -206,6 +269,26 @@ pub enum AlleleLengthVariationRung {          // stratum_fits.rs:359
   its error to the writer (`from_run_parameters.rs:696-713`).
 - `median_concentration` (`:1100-1112`) becomes the median taken in F, converted once; its warrant
   (`:597-601`) is `Defaulted` when no class has an F (companion §3.5).
+- **The median counts only classes with at least `LOCI_FOR_AN_ERROR` loci with reads** (owner,
+  2026-10-15; companion §3.5; plan step C9). Line numbers here are at the working tree of
+  2026-10-15. The median is computed by `median_concentration` (`stratum_fits.rs:1250`), called once
+  from `StratumFits::over` (`:657`). Today it reads only the map of `FittedAlleleLengthVariation`s
+  (`:431-443`), which holds no locus count, so it cannot apply the rule by itself.
+  - **The count is `StratumFit::tracts_of_its_own`** (`ssr_fit.rs:577`): the class's loci with at
+    least one spanning read. The penalised fit sets it from `evidence.tracts_with_reads()`
+    (`penalised_fit.rs:796`, stored at `:810`; the method at `ssr_fit.rs:405-407`), the same count
+    the error rule compares with `LOCI_FOR_AN_ERROR` (`run_log.rs:473`). It is not in the fit's
+    errors or in `FittedAlleleLengthVariation`.
+  - **Where to read it:** `over` already matches `StratumOutcome::Fitted(fit)` to harvest each
+    class's allele length variation (`:639-655`); it collects `fit.tracts_of_its_own` beside each
+    concentration there and hands both to `median_concentration`, which takes the classes with an
+    F and at least `LOCI_FOR_AN_ERROR` loci, or every class with an F if there are none. The
+    constant is `pub` in `ssr_fit/penalised_fit.rs:260`, reached as
+    `super::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR` (`pub mod penalised_fit`, `ssr_fit.rs:78`).
+    `FittedAlleleLengthVariation` does not gain the count: the path that reads a file
+    (`StratumFits::of_gathered_rows`) takes the median as written and never recomputes it.
+  - **The warrant code does not change** (`:664-674`): `FittedHere` when any class has an F, which
+    is exactly when the median is taken from some class's F under the new rule.
 
 ### 1.6 The parameters file, format 3
 
@@ -386,7 +469,9 @@ None of design. Impl-time confirmation: how a row's `BetweenLocusShare` is deser
 - Unit tests next to the code, carried from the prototype (spec §4.1), plus: determinism (1 and 18
   threads); the `StratumOutcome` conversion (with and without reads, F at a search end); the error
   mapping of §1.4; migration (format 1, both format-2 spellings); the new rung and its rank; the
-  stated F's warrant at one sample; a fitted file round-tripping with its errors present.
+  stated F's warrant at one sample; the stated F's median skipping classes under 8 loci with reads,
+  and falling back to every class with an F when none has 8 (plan C9); a fitted file round-tripping
+  with its errors present.
 - Fixtures and matches that change are listed in the plan's steps (A2, A4, B2, B3).
 - The bench (`bench_fixtures`, `examples/ng_str_fit_bench.rs`) is the accuracy oracle: production
   settings reproduce `D_tract_prior` on the cells of `compare_D_prior_2026-10-14.md`, against a

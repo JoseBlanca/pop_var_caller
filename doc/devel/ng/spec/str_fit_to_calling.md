@@ -8,6 +8,9 @@ class has no between-locus share. Build the two together.
 **Amended 2026-10-14 after an adversarial review.** Corrections of fact are made in place; **the
 lead's decisions are marked *(lead, 2026-10-14)* and listed in §6 for the owner to confirm.**
 
+**Amended 2026-10-15 by the owner:** the stated F's median counts only classes with at least 8 loci
+with reads (§3.5).
+
 ---
 
 ## 1. What this is
@@ -189,15 +192,40 @@ the middle two F values, not F of the mean of the middle two concentrations, whi
 (concentration 1, `STATED_FLAT_CONCENTRATION`) where no class has an F. Calling holds it as its
 concentration.
 
-**Its warrant says whether it was measured** *(lead, 2026-10-14)*: `fitted_here` only when it is the
-median of fitted Fs; `defaulted` when no class has an F. Today the warrant is set by whether any class
-has an allele length variation (`stratum_fits.rs:597-601`), so at one sample, where every class with
-reads has shares and none has F, the compiled-in 0.5 would be written as `fitted_here`, and the
-validator, which checks a `defaulted` value only against the constant (`validate.rs:750-768`), cannot
-catch it.
+**Which classes the median counts** *(owner, 2026-10-15)*: **only classes with an F and at least
+`LOCI_FOR_AN_ERROR` (8) loci with reads.** If no class has both, the median is taken over every class
+with an F, as before 2026-10-15. Where no class has an F, F = 0.5 as above.
+
+Why: on the tomato2 oracle (4 accessions, 20 regions, about 5 reads a sample), the milestone C review
+(`doc/devel/reports/reviews/str_penalised_fit_milestone_C_2026-10-15.md`) found that the median
+moved from 0.526 under the climb to 0.723 under the penalised fit, and that about half of that move
+came from which classes were counted, not from the F values themselves. The climb, which refused
+classes below 8 loci, wrote F for 15 classes. The penalised fit, which fits every class with reads,
+writes it for 46, and 31 of those have fewer than 8 loci. A thin class's F is mostly its motif
+length's curve, and for some (three bases at 30 repeats: one locus, one sample) it is the curve
+extended past the last class with a pair of samples; yet each such class got one vote, the same as
+the one-base class at 8 repeats with 1,214 loci. Over the 15 classes with 8 or more loci the median
+is 0.615.
+
+The threshold is the same constant that withholds every error of a class (`str_penalised_fit.md`
+§2.6), so if the plan's step D1 leads the owner to change `LOCI_FOR_AN_ERROR`, this threshold moves
+with it.
+
+**Its warrant says whether it was measured** *(lead, 2026-10-14; restated 2026-10-15 for the owner's
+rule above)*: `fitted_here` whenever the median is taken from any class's F, whether over the classes
+with 8 or more loci or, failing those, over every class with an F; `defaulted` only when no class has
+an F and the stated 0.5 is used. So the test is still "does any class have an F", and the 2026-10-15
+rule changes the value, not the warrant. A median taken only from thin classes is written as
+`fitted_here` like any other; the file does not say how many loci stood behind it.
+
+Before step A5 of the plan the warrant was set by whether any class had an allele length variation,
+so at one sample, where every class with reads has shares and none has F, the compiled-in 0.5 would
+have been written as `fitted_here`, and the validator, which checks a `defaulted` value only against
+the constant (`validate.rs:750-768`), could not catch it. It now asks whether any class has an F
+(`StratumFits::over`, `stratum_fits.rs:657-674`).
 
 **One value for every motif length.** This is today's rule (one median over every stratum,
-`median_concentration`, `stratum_fits.rs:1100`), inherited and not measured against a median per motif
+`median_concentration`, `stratum_fits.rs:1250`), inherited and not measured against a median per motif
 length; soft.
 
 ---
@@ -237,6 +265,10 @@ length; soft.
 5. A `StratumFits` built from the new fit's outcomes at one sample puts every class with reads on the
    new step, and its stated F is `defaulted` (§3.5).
 6. A fitted file round-trips with its stutter numbers' errors and F's error present (§2.3).
+7. The stated F's median skips classes with fewer than 8 loci with reads when any class has 8 or
+   more: a cohort whose thin classes would move the median gives the median of the thick classes
+   alone, `fitted_here`; a cohort with no class of 8 loci gives the median of every class with an F,
+   `fitted_here` (§3.5).
 
 ## 6. Decided
 
@@ -252,3 +284,9 @@ length; soft.
 - A `PenalisedCurve` number keeps its error and is `fitted_here` in calling (§2.3).
 - The pooled step stays readable and loses its producer with the climb (§3.4).
 - The stated F is the median taken in F, and its warrant is `defaulted` where no class has an F (§3.5).
+
+### Decided by the owner, 2026-10-15
+
+- **The stated F's median counts only classes with at least `LOCI_FOR_AN_ERROR` (8) loci with
+  reads**; if none has 8, every class with an F, as before (§3.5). Its warrant stays `fitted_here`
+  whenever any class has an F *(lead's reading of the rule)*. Built in the plan's step C9.

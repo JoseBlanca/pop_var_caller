@@ -1,6 +1,8 @@
 # The repeat-tract fit by penalised EM — implementation plan
 
-**Draft, 2026-10-14; amended the same day after an adversarial review.** Turns the settled design —
+**Draft, 2026-10-14; amended the same day after an adversarial review. Amended 2026-10-15: step
+C8, the stutter prior, and step C9, the stated F's median over classes with 8 or more loci, both
+approved by the owner 2026-10-15.** Turns the settled design —
 specs [`../spec/str_penalised_fit.md`](../spec/str_penalised_fit.md) and
 [`../spec/str_fit_to_calling.md`](../spec/str_fit_to_calling.md), architecture
 [`../arch/str_penalised_fit.md`](../arch/str_penalised_fit.md) — into build order. **It invents no
@@ -29,10 +31,11 @@ what goes with it (arch §4.1).
 - **The prototype is the oracle, recorded before it moves.** The research bench's `D_tract_prior`
   gives the numbers the production fit must reproduce; C0 writes them down before C1 renames
   anything and C2 removes the bench methods that measured alternatives.
-- **Isolate the silent steps.** Five steps can change numbers without failing anything: the stated
+- **Isolate the silent steps.** Seven steps can change numbers without failing anything: the stated
   F's median (A5), F's newtype and conversions (B1), the keys holding F (B2), making the fit
-  deterministic (C3) and switching `estimate-parameters` to it (C7). Each is its own commit, with its
-  oracle run before and after.
+  deterministic (C3), switching `estimate-parameters` to it (C7), the stutter prior (C8) and the
+  classes the stated F's median counts (C9). Each is its own commit, with its oracle run before and
+  after.
 - **Delete last.** The climb goes only after the new fit has passed on real data (D2) and in calling
   (D5).
 
@@ -194,6 +197,83 @@ what goes with it (arch §4.1).
 > **Checkpoint C:** `estimate-parameters` runs the new fit end to end on tomato2; the oracle's move
 > is written down. Pause for review.
 
+**Before C8: the milestone C review's two defects in the errors are fixed in a follow-up commit**
+(approved by the owner 2026-10-15): standard errors far too small at motif lengths with stiff
+curves, yet written as estimated (finding B1, the review's blocker), and a failed factorisation in
+`newton` that returns the starting values silently, which the choice of strength then scores
+(finding M2). They land before C8 so that C8's oracle move is the prior's alone. The review is
+`doc/devel/reports/reviews/str_penalised_fit_milestone_C_2026-10-15.md` on this branch, not committed.
+
+- ☐ **C8** *(approved by the owner 2026-10-15, spec §2.10 and its answers in §2.10.9.)* **Own commit,
+  do not bundle.** The stutter prior: `stutter_prior_reads` and `stutter_prior_centre` in
+  `PenalisedFitConfig`, `STUTTER_PRIOR_READS` and `STUTTER_PRIOR_CENTRE`; the prior added in the
+  M-step's three stutter binomials at points with a class; its curvature in the errors' penalty; the
+  two direction-trial fields on `PenalisedClass` and the new `NotPlaced` row; the run log's lines;
+  the sentence in the file's note.
+  *Depends:* C7, and the follow-up commit fixing the milestone C review's findings B1 and M2 (above). *Source:* spec §2.10; arch §1.1a, §1.4.
+  *Tests (spec §4.1):*
+  - a one-class motif length with no slipped read returns 0.1/(n + 1), 0.5 and 0.05, its shorter
+    share and fall-off errors `NotPlaced` (today the ridge gives about 10⁻⁶);
+  - one slipped read, one repeat shorter, in a one-class motif length: shorter share 0.75, fall-off
+    0.025;
+  - the calling-side test that `STUTTER_PRIOR_CENTRE` converts to `hipstr_shipped`'s whole-repeat
+    shares;
+  - weight 0 reproduces the fit before this step bit for bit.
+  *Simulator checks* (the bench's drawn cohorts, `bench_fixtures/cohort_draw.rs`):
+  - **genuinely low stutter on many reads keeps its rate**: the `pcr_free` truth (every slip rate a
+    tenth of tomato's, 5×10⁻⁴ at one-base 8 repeats) at 2,000 samples × 30 reads; every class with at
+    least 8 loci holds the truth within two of its errors, and its rate moves from the weight-0 fit by
+    less than one part in a thousand;
+  - **a thin class no longer drifts to zero**: a drawn motif length with a tail of classes of 1 to 3
+    loci, at 1 sample × 3 reads and 4 samples × 5 reads (the oracle's shape); no stutter logit within
+    one unit of ±40, and, since every true rate there is above 0.005, no class's slip rate below a tenth of `0.1/(n + 1)` for its n reads.
+  - **the weight (spec §2.10.9, question 1)**: held-out prediction with `fit_bench.rs`'s scorer at
+    weights 0, 1 and 5 on the cells 1 × 3, 10 × 3, 60 × 3 and 500 × 30 reads, one seed each. The
+    owner chose one read; this sweep checks it. If 0 or 5 predicts better, the result goes back to
+    the owner and the constant is not changed in this step.
+  *Oracle:*
+  - **C0's fixture is re-recorded at this step**, because every stutter number moves: alone, a class
+    moves by `a·(p₀ − p)/(n + a)` (spec §2.10.2), and the allele lengths and F follow through step 1.
+    Before re-recording, compare the old fixture to the new one cell by cell and write the largest
+    relative move of each number. Expected: below 10⁻³ at cells of 60 samples or more; largest at
+    1 sample × 3 reads, and largest in the thin classes there. A move against that pattern is
+    investigated, not re-recorded.
+  - **The oracle script (`scripts/promote_ng_oracle.sh`), run before and after.** Expected: the
+    fitted file's stutter rows move; no slip rate is below 10⁻⁴ unless its class has thousands of
+    reads; the three-base slip rate no longer runs to logit −40; the shorter share and fall-off at
+    three bases × 6 repeats and four bases × 7 come off 0.99998 / 3.5×10⁻⁵ to about 0.75 / 0.025; the
+    one-base classes with 8 or more loci move by under 1%, while the thin tails of the one- and two-base curves rise (the review found them resting on classes with 0.002 to 1.5 expected slipped reads); the VCF called with the fitted file changes QUAL in
+    three- to six-base records, and a genotype only where a homozygote has 4 to 6 reads with one read
+    a repeat off (spec §2.10.7). Write the before-and-after table of the near-zero rows that the
+    milestone C review listed.
+
+  **What C8 changes in milestone D.** D1 compares with `compare_D_prior_2026-10-14.md`, measured
+  without the prior: the comparison is against C8's re-recorded fixture, and a cell that differs from
+  the report beyond run-to-run noise is explained by the prior or investigated. D2, D4, D5 and D6 run
+  after C8, so they measure the fit with the prior; D4 re-records the oracle from C8's state. D6's
+  answer is not expected to move: at 500 and 2,000 samples × 3 reads the prior shifts a rich class's
+  slip rate by about one part in 100,000. D3 (cost) is unaffected.
+
+- ☐ **C9** *(owner, 2026-10-15.)* **Own commit, do not bundle; oracle before and after.** The stated
+  F's median counts only classes with an F and at least `LOCI_FOR_AN_ERROR` (8) loci with reads; if
+  no class has 8, every class with an F, as before. `StratumFits::over` collects each fitted class's
+  `StratumFit::tracts_of_its_own` beside its concentration and hands both to `median_concentration`
+  (`stratum_fits.rs:1250`); the warrant stays `FittedHere` whenever any class has an F and
+  `Defaulted` otherwise, its code unchanged. *Depends:* C7. *Source:* companion §3.5; arch §1.5.
+  *Tests* (in `stratum_fits.rs`, beside `the_stated_concentration_is_the_median_of_the_runs_own_fitted_ones`):
+  - a cohort where thin classes would move the median: three classes of 8 or more loci and four
+    classes of fewer than 8 with higher F; the median is the three thick classes' alone, and the
+    warrant `FittedHere`;
+  - no class with 8 loci: the median is taken over every class with an F, `FittedHere`;
+  - one sample (no class has an F): 0.5, `Defaulted`, as before.
+  The existing median tests build their classes with the `fitted` helper, 40 loci each
+  (`stratum_fits.rs:1833`, `:1853`), and should hold unchanged.
+  *Oracle:* the oracle script, run before and after. Expected: only the parameters file's
+  `fallback_between_locus_share` moves (on tomato2's oracle the milestone C review computed 0.615
+  over the 15 classes of 8 or more loci, against 0.723 over all 46; C8 may move both, so the exact
+  figure is the one after C8), and with it calls at classes without an F and at tracts with no row,
+  which take the fallback. Any other move is investigated before re-recording.
+
 ### Milestone D — checks (spec §4)
 
 - ☐ **D1** The bench reproduces `compare_D_prior_2026-10-14.md`'s `D_tract_prior` rows with the
@@ -252,7 +332,7 @@ what goes with it (arch §4.1).
 |---|---|
 | A | oracle checksums unchanged (A5's move explained); new-rung and warrant tests |
 | B | conversion, round-trip and migration tests; golden-file diffs; oracle as checkpoint B states |
-| C | C0's fixture reproduced (C2, C3, C4); determinism test; peak memory; oracle move explained (C7) |
+| C | C0's fixture reproduced (C2, C3, C4); determinism test; peak memory; oracle move explained (C7, C8, C9) |
 | D | the bench, tomato2 held-out, simulated full scale, HG002 and GIAB calling, the D6 proxy |
 | E | full suite and code review |
 
