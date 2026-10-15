@@ -287,11 +287,11 @@ rung = "fitted_curve"
 # duplicate, and a row showing none fitted nothing of its own. A stratum on a
 # penalised curve was fitted with one extra read's worth of evidence added to
 # its own, evidence that behaves as calling's default stutter does
-# (`share_of_reads_that_slip` 0.10, `shorter_share` 0.5, `fall_off` 0.05). So a
-# row with `expected_slipped_reads` below one has its `shorter_share` and
-# `fall_off` from that default and from its neighbours on the curve, not from
-# its own reads, and no error on any of its three numbers: too few of its reads
-# slipped to say how far off its `share_of_reads_that_slip` may be.
+# (`share_of_reads_that_slip` 0.1, `shorter_share` 0.5, `fall_off` 0.05). So a
+# row with `expected_slipped_reads` below one carries no error on any of its
+# three numbers: too few of its reads slipped to say how far off they may be.
+# Its `shorter_share` and `fall_off` lean on that default, and on its neighbours
+# on the curve where it has any, as much as on its own reads.
 #
 # The curves under `shorter_share_and_fall_off_origin` also record
 # `curve_fitted_on`, which says what that curve itself was fitted on: this

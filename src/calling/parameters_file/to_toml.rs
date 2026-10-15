@@ -61,7 +61,9 @@ use std::fmt::Write as _;
 
 use crate::alignment::StutterModel;
 use crate::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE;
-use crate::parameter_estimation::joint::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR;
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
+    LOCI_FOR_AN_ERROR, STUTTER_PRIOR_CENTRE, STUTTER_PRIOR_READS,
+};
 
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
@@ -334,6 +336,22 @@ impl ParametersFile {
         let fallback_share_paragraph = format!(
             "`fallback_between_locus_share` is the between-locus share a tract is held at where its stratum has none of its own. A between-locus share says how much of a stratum's variation in allele length lies between its loci rather than within one: near 0, every locus carries the stratum's whole spread of lengths; near 1, each locus is fixed at one length. A stratum row with shares and no `between_locus_share` keeps its shares, held at this one; a tract whose stratum and period have no row gets a flat shape over whatever lengths it offers, held at this one. A smaller share makes the prior harder for the reads to move. A run in which any stratum has a between-locus share states the median of those shares and marks it `fitted_here`. The median counts only the strata whose fit had at least {LOCI_FOR_AN_ERROR} loci with reads, the same count below which a stratum carries no own-fit standard errors; where no stratum with a share has that many, it counts every stratum with a share. This file does not carry the counts, so the median cannot be recomputed from the rows below. A run in which no stratum has a between-locus share states the built-in 0.5 and marks it `defaulted`. A run handed this file writes back the warrant it found there, because a file's warrants survive being read — demoting them on every read would have the same cohort report different warrants depending on which way it was called. Mark it `supplied` yourself if you change the number. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size."
         );
+        // Built rather than written out so the stutter prior's weight and centre it states are
+        // the ones the fit uses.
+        let (prior_worth, prior_count) = if STUTTER_PRIOR_READS == 1.0 {
+            ("one extra read's worth".to_owned(), "one".to_owned())
+        } else {
+            (
+                format!("{STUTTER_PRIOR_READS} extra reads' worth"),
+                STUTTER_PRIOR_READS.to_string(),
+            )
+        };
+        let centre_level = STUTTER_PRIOR_CENTRE.level;
+        let centre_shorter_share = STUTTER_PRIOR_CENTRE.shorter_share;
+        let centre_fall_off = STUTTER_PRIOR_CENTRE.fall_off;
+        let origin_paragraph = format!(
+            "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement; or a point on its period's penalised curve (`penalised_curve`), one value per repeat count, fitted with the reads of every stratum of that period at once and held close to its neighbours' values, the more so the larger its `strength`. `eased_here = true` says the reads insisted on a bend at this repeat count, so the curve was let bend there. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a parametric curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own. A stratum on a penalised curve was fitted with {prior_worth} of evidence added to its own, evidence that behaves as calling's default stutter does (`share_of_reads_that_slip` {centre_level}, `shorter_share` {centre_shorter_share}, `fall_off` {centre_fall_off}). So a row with `expected_slipped_reads` below {prior_count} carries no error on any of its three numbers: too few of its reads slipped to say how far off they may be. Its `shorter_share` and `fall_off` lean on that default, and on its neighbours on the curve where it has any, as much as on its own reads."
+        );
         note(
             &mut out,
             &[
@@ -345,7 +363,7 @@ impl ParametersFile {
                 "",
                 "Where a number was fitted with this stratum's own reads — its smoothing is `this_stratum`, or `penalised_curve` — its origin carries an own-fit standard error: `own_fit_standard_error` for the first number, `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error` for the other two. It is how far that number would typically move if the stratum's tracts were drawn again. A number taken from a parametric curve, or blended with one, has none: the blend's own error is not computed. **Where the row's `samples_fitted_on` is fewer than the cohort's samples, the error describes the subset's own fit, not how far that fit sits from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further from the fit on every sample than the two fits' errors allow for — more than two standard deviations of their difference — where about one would by chance.",
                 "",
-                "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement; or a point on its period's penalised curve (`penalised_curve`), one value per repeat count, fitted with the reads of every stratum of that period at once and held close to its neighbours' values, the more so the larger its `strength`. `eased_here = true` says the reads insisted on a bend at this repeat count, so the curve was let bend there. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a parametric curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own. A stratum on a penalised curve was fitted with one extra read's worth of evidence added to its own, evidence that behaves as calling's default stutter does (`share_of_reads_that_slip` 0.10, `shorter_share` 0.5, `fall_off` 0.05). So a row with `expected_slipped_reads` below one has its `shorter_share` and `fall_off` from that default and from its neighbours on the curve, not from its own reads, and no error on any of its three numbers: too few of its reads slipped to say how far off its `share_of_reads_that_slip` may be.",
+                &origin_paragraph,
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",

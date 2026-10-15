@@ -406,7 +406,8 @@ pub struct PenalisedClass {
     ///
     /// **Without the stutter prior** ([`PenalisedFitConfig::stutter_prior_reads`]): a class whose
     /// reads showed no slip says 0 here, not the prior's tenth of a read. Below the prior's
-    /// weight, the slip rate carries no error: too few reads slipped to say how wide it is.
+    /// weight, the slip rate and the fall-off carry no error: too few reads slipped to say how
+    /// wide they are.
     pub expected_slipped_reads: Option<f64>,
     /// **How many of the class's slipped reads had their direction placed, shorter or longer**,
     /// by the same last expected counts and without the prior: what the shorter share was fitted
@@ -414,8 +415,9 @@ pub struct PenalisedClass {
     /// error. `None` only when no round ran.
     pub expected_slips_with_a_direction: Option<f64>,
     /// **How many repeats the class's slipped reads slipped, summed**, by the same last expected
-    /// counts and without the prior: what the fall-off was fitted to. Below the prior's weight,
-    /// the fall-off is mostly the prior's and carries no error. `None` only when no round ran.
+    /// counts and without the prior: what the fall-off was fitted to. The fall-off's error is not
+    /// judged on this count but on [`Self::expected_slipped_reads`] (spec §7). `None` only when
+    /// no round ran.
     pub expected_repeats_slipped: Option<f64>,
     /// **How many distinct rows of read counts the class's (locus, sample) pairs with reads hold**:
     /// the rows a round scores, each once however many samples share it (spec §2.8). The run's log
@@ -543,9 +545,18 @@ pub struct PenalisedPeriodFit {
 /// A standard error is read off the inverse of `H`, the curvature of the fit's objective plus the
 /// curves' bend penalties ([`PenalisedClassErrors`]). The inversion fails for one of two reasons:
 ///
-/// - **some combination of numbers has next to no reads behind it**: the slope of a stiff curve
-///   through a single repeat count's slipped reads, say, or a share pushed to nearly 0 or 1;
 /// - **the fit's curvature is not positive in some direction** at the values the fit reached.
+///   This is the only cause measured so far (diagnosis report
+///   `str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`: all 56 runs of step D1's coverage
+///   grid at 500 samples or fewer that lost their errors, and the test cohort
+///   `a_three_base_cohort_whose_curvature_cannot_be_inverted`). `H` leaves out the curvature of
+///   the allele-length prior (spec §2.4), which the fit does maximise. At a thin class the reads'
+///   likelihood alone can curve upward along a trade between two rare allele lengths, typically
+///   the two outermost lengths on one side of the window, and only that prior's curvature would
+///   make the total curve downward there. The stutter numbers alone had positive curvature in
+///   every such run;
+/// - **some combination of numbers has next to no reads behind it**: a share pushed to nearly 0
+///   or 1, say. Possible, but not seen in the cases measured.
 ///
 /// A stiff curve does not cause it alone. Its penalty, up to 10¹⁰ a number, adds rounding of
 /// about 10⁻⁵ to the inversion, so the inversion fails only along a straight line of the curve
@@ -729,8 +740,8 @@ fn fit_one_period(
 /// (`parameter_estimation::progress`): first, the classes and the stutter prior the curves carry;
 /// while a motif length is fitted, at most once a minute the round it has reached; after each
 /// motif length, its rounds, in how many classes fewer reads slipped than the stutter prior
-/// weighs (one, in production; their shorter share and fall-off come from their neighbours and
-/// the prior), the time in each step, how stiff each of the five kinds of curve came out and
+/// weighs (one, in production; too few to place their shorter share and fall-off, which carry no
+/// error), the time in each step, how stiff each of the five kinds of curve came out and
 /// where bends were eased, then one line a class with its (locus, sample) pairs with reads, their
 /// distinct rows and whether F is absent; at the end, how many standard errors were withheld. The
 /// motif length's first line carries the process's memory now and its peak so far, on Linux
@@ -953,7 +964,7 @@ fn outcome_of_a_class(
 /// | the concentration, where `concentration` is `None` | [`StratumError::NotPlaced`] |
 /// | any number of a class with fewer than [`LOCI_FOR_AN_ERROR`] loci with reads | [`StratumError::TooFewLoci`] |
 /// | a share whose expected count of loci, share × loci with reads, is below [`LOCI_FOR_A_SHARE_ERROR`] | [`StratumError::TooFewLoci`] |
-/// | the slip rate, where the class's slipped reads ([`PenalisedClass::expected_slipped_reads`]) are fewer than `stutter_prior_reads`; the shorter share, where its slipped reads with a direction ([`PenalisedClass::expected_slips_with_a_direction`]) are; the fall-off, where the repeats slipped ([`PenalisedClass::expected_repeats_slipped`]) are | [`StratumError::NotPlaced`] |
+/// | the slip rate and the fall-off, where the class's slipped reads ([`PenalisedClass::expected_slipped_reads`]) are fewer than `stutter_prior_reads`; the shorter share, where its slipped reads with a direction ([`PenalisedClass::expected_slips_with_a_direction`]) are | [`StratumError::NotPlaced`] |
 /// | the fit gave no error, or one that is zero or not finite | [`StratumError::NotPlaced`] |
 /// | an error above [`NOT_PLACED`] on the scale the number is fitted on | [`StratumError::NotPlaced`] |
 /// | otherwise | [`StratumError::Estimated`] |
@@ -968,10 +979,15 @@ fn outcome_of_a_class(
 /// no errors from the fit (the motif length's covariance could not be inverted) gets every number
 /// `NotPlaced`, the withheld ones aside.
 ///
-/// **A direction number with fewer trials than the stutter prior's weight** (`stutter_prior_reads`,
-/// spec §2.10.4) is the prior's more than the reads': its value is close to the prior's centre and
-/// its error would be the prior's own width, 2 logit units for the shorter share at one read, not
-/// a measurement. A class with no counts (no round ran) counts as none.
+/// **A direction number of a class with fewer slipped reads than the stutter prior's weight**
+/// (`stutter_prior_reads`, spec §2.10.4) leans on the prior as much as on the reads: its error
+/// would be close to the prior's own width, 2 logit units for the shorter share at one read, not a
+/// measurement. The shorter share is judged on its slipped reads with a direction, which are
+/// never more than the slipped reads. **The fall-off is judged on the slipped reads too, not on
+/// the repeats slipped it is fitted to** (the owner's rule, spec §7): a read that slipped two
+/// repeats or more brings the repeats slipped to one while the slipped reads are still below it,
+/// and the rule withholds the error of every row the parameters file shows with fewer expected
+/// slipped reads than the weight. A class with no counts (no round ran) counts as none.
 ///
 /// **The slip rate is judged on its slipped reads, not on its reads.** With no slipped read the
 /// error's middle term, the spread of each locus's pull on the rate, all but vanishes, so the
@@ -995,8 +1011,8 @@ fn errors_of_a_class(
             an_error_of(error, value * (1.0 - value))
         }
     };
-    // `events` is what the number was fitted to: slipped reads for the slip rate, slipped reads
-    // with a direction for the shorter share, repeats slipped for the fall-off.
+    // `events` is what the number is judged on: slipped reads for the slip rate and the fall-off
+    // (the owner's rule, spec §7), slipped reads with a direction for the shorter share.
     let of_a_stutter_number = |error: Option<f64>, value: f64, events: Option<f64>| {
         if !too_few_loci && events.unwrap_or(0.0) < stutter_prior_reads {
             StratumError::NotPlaced
@@ -1016,7 +1032,7 @@ fn errors_of_a_class(
             fall_off: of_a_stutter_number(
                 errors.fall_off,
                 slippage.fall_off,
-                fitted.expected_repeats_slipped,
+                fitted.expected_slipped_reads,
             ),
         })],
         allele_length_variation: fitted
@@ -3764,14 +3780,18 @@ mod tests {
         );
     }
 
-    /// **A stiff three-base cohort whose curvature cannot be inverted**: six classes at 6 to 11
+    /// **A three-base cohort whose curvature cannot be inverted**: six classes at 6 to 11
     /// repeats, 10 loci each, 4 samples at 5 reads, drawn at a slip rate of 0.003, so the whole
-    /// motif length holds a handful of slipped reads. Its stutter curves come out near the top
-    /// of the strengths searched, about 10¹⁰, so each is close to a straight line, and with so
-    /// few slipped reads some such line has next to no reads behind it: `A + P` cannot be
-    /// inverted (measured before the fix: the inversion needed a ridge of 39 a number to
-    /// succeed, against a mean curvature of the reads of 1.5).
-    pub(super) fn a_stiff_three_base_cohort() -> Vec<StratumEvidence> {
+    /// motif length holds a handful of slipped reads. `A + P` is not positive definite: it has
+    /// one negative direction (eigenvalue −0.14), the trade between the shares one and two
+    /// repeats longer than the reference at the classes of 11, 6 and 10 repeats, and its
+    /// factorisation fails at the last row, the share two repeats longer at 11 repeats. **The
+    /// cause is the allele lengths, not the stutter curves**: the 18 stutter numbers alone have
+    /// positive curvature (smallest eigenvalue 0.044), and with the allele-length prior's
+    /// curvature added, which `H` leaves out, the matrix inverts (measured by the review of
+    /// commits `0b12941d..53a3e4f9`; see [`UndeterminedErrors`]). The stutter curves do come out
+    /// stiff here, near 10¹⁰, but that is not why the inversion fails.
+    pub(super) fn a_three_base_cohort_whose_curvature_cannot_be_inverted() -> Vec<StratumEvidence> {
         (6..=11)
             .map(|repeats| {
                 let mut evidence = draw_stratum(
@@ -3823,10 +3843,14 @@ mod tests {
     /// logit error came out about 300 times smaller than one slipped read supports. Its numbers
     /// are still fitted. **F's errors are kept**: F is read off pairs of samples, and its own
     /// curvature is inverted on its own.
+    ///
+    /// **This pins today's `H`, not a property of the cohort.** The cohort fails only because `H`
+    /// leaves out the allele-length prior's curvature (see its doc); with that curvature in `H`,
+    /// its matrix inverts, and this path would need a matrix built to fail instead.
     #[test]
     fn errors_that_need_a_ridge_are_left_undetermined() {
         let fit = fit_period_by_penalised_counting(
-            &a_stiff_three_base_cohort(),
+            &a_three_base_cohort_whose_curvature_cannot_be_inverted(),
             &[0.3; 4],
             &a_narrow_production_fit(),
         );
@@ -3837,7 +3861,7 @@ mod tests {
         // With F fitted inside the counting, not off pairs, its error comes from the same `H`
         // and is lost with the rest.
         let counting_only = fit_period_by_penalised_counting(
-            &a_stiff_three_base_cohort(),
+            &a_three_base_cohort_whose_curvature_cannot_be_inverted(),
             &[0.3; 4],
             &PenalisedFitConfig {
                 pair_alternations: 0,
@@ -4321,22 +4345,33 @@ mod tests {
         let _ = fit_repeat_tracts(&[evidence], &[0.0], &config);
     }
 
-    /// **The error rule of spec §2.10.4**: a shorter share whose class has fewer slipped reads with
-    /// a direction than the prior's weight, or a fall-off whose class has fewer repeats slipped, is
-    /// not placed, whatever error the fit gave it; at the weight or above, the rest of the table
-    /// decides; a class with fewer than 8 loci is withheld first; and at weight 0 the rule never
-    /// fires.
+    /// **The error rule of spec §2.10.4 and §7**: a shorter share whose class has fewer slipped
+    /// reads with a direction than the prior's weight, or a fall-off whose class has fewer slipped
+    /// reads, is not placed, whatever error the fit gave it; at the weight or above, the rest of
+    /// the table decides; a class with fewer than 8 loci is withheld first; and at weight 0 the
+    /// rule never fires.
     #[test]
     fn a_direction_number_resting_on_the_prior_is_not_placed() {
         use StratumError::{Estimated, NotPlaced, TooFewLoci};
         let mut class = a_fitted_class(Some(2.0));
         class.expected_slips_with_a_direction = Some(0.6);
-        class.expected_repeats_slipped = Some(0.7);
         let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
         assert_eq!(
             errors.slippage,
             vec![Some(SlippageErrors {
                 level: Estimated(0.01),
+                shorter_share: NotPlaced,
+                fall_off: Estimated(0.03),
+            })]
+        );
+        // The fall-off follows the slipped reads, whatever the repeats slipped.
+        class.expected_slipped_reads = Some(0.7);
+        class.expected_repeats_slipped = Some(60.0);
+        let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: NotPlaced,
                 shorter_share: NotPlaced,
                 fall_off: NotPlaced,
             })]
@@ -4353,7 +4388,17 @@ mod tests {
         let errors = errors_of_a_class(&class, Some(2.0), 7, 1.0);
         assert!(every_error_of(&errors).iter().all(|e| *e == TooFewLoci));
 
-        // One trial is enough; the two numbers are judged on their own trials.
+        // One slipped read is enough; the shorter share is judged on its own count.
+        class.expected_slipped_reads = Some(1.0);
+        let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: Estimated(0.01),
+                shorter_share: NotPlaced,
+                fall_off: Estimated(0.03),
+            })]
+        );
         class.expected_slips_with_a_direction = Some(1.0);
         let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
         assert_eq!(
@@ -4361,10 +4406,11 @@ mod tests {
             vec![Some(SlippageErrors {
                 level: Estimated(0.01),
                 shorter_share: Estimated(0.05),
-                fall_off: NotPlaced,
+                fall_off: Estimated(0.03),
             })]
         );
-        // No round ran: no trials.
+        // No round ran: no counts.
+        class.expected_slipped_reads = None;
         class.expected_slips_with_a_direction = None;
         class.expected_repeats_slipped = None;
         let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
@@ -4372,6 +4418,58 @@ mod tests {
         assert_eq!(
             (group.shorter_share, group.fall_off),
             (NotPlaced, NotPlaced)
+        );
+    }
+
+    /// **A fall-off is judged on its class's slipped reads, not on its repeats slipped** (spec §7,
+    /// the owner's rule: no error on a fall-off whose class has fewer than one expected slipped
+    /// read). A slipped read slips one repeat or more, so the repeats slipped can reach the
+    /// prior's weight while the slipped reads stay below it. The lone class of 10 loci × 3 reads
+    /// with one read two repeats short, at a homozygote excess of 0.9: just under one expected
+    /// slipped read (the short read might be a second allele), about three repeats slipped (the
+    /// read sits in the outermost bucket, "two or further"). All three stutter errors are not
+    /// placed; the fall-off's used to be `Estimated`.
+    #[test]
+    fn a_fall_off_is_not_placed_below_one_slipped_read_even_when_its_repeats_slipped_reach_one() {
+        let evidence = a_lone_class_of_reads(10, &[(4, -2)]);
+        let class = fit_period_by_penalised_counting(
+            std::slice::from_ref(&evidence),
+            &[0.9],
+            &a_narrow_production_fit(),
+        )
+        .classes[0]
+            .clone()
+            .expect("the class has reads");
+        let slipped = class.expected_slipped_reads.expect("a round ran");
+        let repeats_slipped = class.expected_repeats_slipped.expect("a round ran");
+        assert!(slipped < STUTTER_PRIOR_READS, "{slipped} slipped");
+        assert!(
+            repeats_slipped >= STUTTER_PRIOR_READS,
+            "{repeats_slipped} repeats slipped"
+        );
+
+        let outcomes = fit_repeat_tracts(
+            std::slice::from_ref(&evidence),
+            &[0.9],
+            &a_narrow_production_fit(),
+        );
+        let StratumOutcome::Fitted(fit) = &outcomes[0] else {
+            panic!("the class has reads: {:?}", outcomes[0]);
+        };
+        let group = fit
+            .standard_errors
+            .as_ref()
+            .expect("production asks for errors")
+            .slippage[0]
+            .expect("group 0 has numbers");
+        assert_eq!(
+            (group.level, group.shorter_share, group.fall_off),
+            (
+                StratumError::NotPlaced,
+                StratumError::NotPlaced,
+                StratumError::NotPlaced
+            ),
+            "{slipped} slipped, {repeats_slipped} repeats slipped"
         );
     }
 

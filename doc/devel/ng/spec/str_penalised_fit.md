@@ -301,7 +301,8 @@ withheld errors (§7). These replace the climb's summaries (`ssr_fit.rs:3165-333
 **Status.** The direction is the owner's (2026-10-15): a weak prior on the stutter curves, as §2.4
 gives the allele lengths. **The form, the weight and the centre below were proposed by the lead and
 approved by the owner on 2026-10-15**; the owner's answer to each open question is recorded in
-§2.10.9. Line numbers in this section are at commit `47e21b8c` (step C7).
+§2.10.9. Line numbers in this section are at commit `47e21b8c` (step C7), except §2.10.4's, which
+point at the code as built (re-pointed after the review of commits `0b12941d..53a3e4f9`).
 
 #### 2.10.1 The problem it fixes
 
@@ -469,15 +470,22 @@ At one read's worth that matters only where a class has a handful of reads.
 
 - **The prior enters the errors as the bend penalty does: in H and in the middle term.** Its
   curvature at a class is `a·p(1 − p)` for the slip rate (and the same form for the other two),
-  added at that class's position in P (`penalised_fit.rs:1384-1408`), which `penalised_sandwich`
-  adds to both H and B (`:2301-2334`). Leaving it out of the middle term would give a number with no
+  added at that class's position in P (`penalised_fit.rs:1643-1656`), which `penalised_sandwich`
+  adds to both H and B (`:2699-2713`). Leaving it out of the middle term would give a number with no
   reads behind it an error near zero from B alone, which the review's first finding shows is the
   dangerous direction.
-- **A shorter share or fall-off whose class has fewer trials than the prior's weight gets no error**
-  (`NotPlaced`) *(owner, 2026-10-15)*. That means a class with fewer than one expected slipped read
-  (its slipped reads are the shorter share's trials, and its repeats slipped, never fewer, the
-  fall-off's): its value comes from the centre and from its neighbours on the curve, and its error
-  would be the prior's own width (2 logit units for the shorter share), not a measurement.
+- **A shorter share or fall-off whose class has fewer than one expected slipped read (the prior's
+  weight) gets no error** (`NotPlaced`) *(owner, 2026-10-15)*: its value leans on the centre and on
+  its neighbours on the curve as much as on its reads, and its error would be close to the prior's
+  own width (2 logit units for the shorter share), not a measurement. The shorter share is judged
+  on its trials, the slipped reads with a direction, which are never more than the slipped reads
+  and equal them unless a slipped read could not be given a direction. **The fall-off is judged on
+  the slipped reads, not on its trials, the repeats slipped**, which a read that slipped two
+  repeats or more brings to one while the slipped reads are still below it. *Corrected 2026-10-15
+  after the review of commits `0b12941d..53a3e4f9`: this bullet and the code first judged the
+  fall-off on its repeats slipped, against the owner's words; a lone class of 10 loci × 3 reads
+  with one read two repeats short (0.99997 expected slipped reads, 3.1 repeats slipped) was written
+  with a fall-off error.*
 - **So does a slip rate whose class has fewer expected slipped reads than the prior's weight**
   (`NotPlaced`) *(owner, 2026-10-15, after C8's review)*. The rule counts the slip rate's successes,
   not its trials. *Corrected: this section first said that the slip rate needed no rule, because
@@ -494,30 +502,39 @@ At one read's worth that matters only where a class has a handful of reads.
 - Classes with fewer than 8 loci still withhold every error (§2.6); these rules matter for thicker
   classes with genuinely no slips, such as a long-motif class at a large cohort.
 - **The prior adds a positive diagonal at every class**, which removes the exactly flat directions
-  the review blamed for failed factorisations (`newton`, `penalised_fit.rs:2180`, `:2211-2213`). It is too small to
-  fix the review's first finding (about 0.01 a class against strengths of 10¹⁰), which needs its own
-  fix.
+  the review blamed for failed factorisations (`newton`, `penalised_fit.rs:2514`, `:2575-2583`). It
+  is too small to fix the review's first finding (about 0.01 a class against strengths of 10¹⁰),
+  which needs its own fix. *Note, 2026-10-15: the joint inversions measured to fail since then
+  (`doc/devel/reports/implementations/str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`) fail
+  not along a stiff stutter curve but along a trade between two rare allele lengths at a thin
+  class, because H leaves out the curvature of the allele-length prior of §2.4; the stutter numbers
+  alone had positive curvature in every such run.*
 
 #### 2.10.5 What the run log and the parameters file say
 
 - **The run log states the prior once**, in the stage's opening line: "stutter: a prior of one read's
   worth a class, centred on calling's default (slip rate 0.10, shorter share 0.5, fall-off 0.05)".
   Per motif length, it counts the classes with fewer expected slipped reads than the prior's weight:
-  "in N of the M classes fitted, fewer than one read slipped, so their shorter share and fall-off come
-  from their neighbours on the curve and the stutter prior, not from their own reads" (`how_the_fit_ran`,
-  `penalised_fit/run_log.rs`). *Corrected 2026-10-15 after C8's review: this section said such numbers
-  "rest on the stutter prior", which is true of a class fitted alone; a thin class on a curve with
-  well-read neighbours takes most of its value from them.*
+  "in N of the M classes fitted, fewer than one read slipped, too few to place their shorter share
+  and fall-off, which carry no error and lean on the stutter prior and on any neighbouring repeat
+  counts on the curve" (`how_the_fit_ran`, `penalised_fit/run_log.rs`). *Corrected 2026-10-15 after
+  C8's review: this section said such numbers "rest on the stutter prior", which is true of a class
+  fitted alone; a thin class on a curve with well-read neighbours takes most of its value from them.
+  Corrected again after the review of commits `0b12941d..53a3e4f9`: the line said those numbers come
+  "from their neighbours on the curve and the stutter prior, not from their own reads", which a
+  class with no neighbours contradicts; one read two repeats short moved such a class's fall-off
+  from the prior's 0.05 to 0.525.*
 - **The parameters file gets no new key** *(owner, 2026-10-15; §2.10.9, question 3)*. §2.4's
   floor is not written either. A reader can tell a prior-led number from its row: it carries
   `expected_slipped_reads` below one and, by §2.10.4, no error on any of its three stutter numbers.
   The file's own note on stutter provenance (the `repeat_tracts` note in `to_toml.rs`) gains one
   sentence: a stratum on a penalised curve was fitted with one extra read's worth of evidence that
-  behaves as calling's default stutter does, so a row with `expected_slipped_reads` below one has its
-  shorter share and fall-off from that default and from its neighbours on the curve, not from its own
-  reads, and no error on them. With §2.10.4's slip-rate rule the sentence should also say the slip
-  rate there carries no error. *That sentence is the lead's reading of "no key" (2026-10-15); the
-  owner may still drop it.*
+  behaves as calling's default stutter does, so a row with `expected_slipped_reads` below one
+  carries no error on any of its three numbers, and its shorter share and fall-off lean on that
+  default and on its neighbours on the curve, where it has any, as much as on its own reads. The
+  weight and the centre in that sentence are built from `STUTTER_PRIOR_READS` and
+  `STUTTER_PRIOR_CENTRE`, so the note cannot state other numbers than the fit uses. *That sentence
+  is the lead's reading of "no key" (2026-10-15); the owner may still drop it.*
 
 #### 2.10.6 Worked cases
 

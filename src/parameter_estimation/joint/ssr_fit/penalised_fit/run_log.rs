@@ -12,9 +12,9 @@
 //! After each motif length is fitted:
 //!
 //! - **one line on how the fit ran**: how many rounds, whether it settled or used them all, how F
-//!   was read, in how many classes fewer reads slipped than the stutter prior weighs (so their
-//!   shorter share and fall-off come from their neighbours on the curve and the prior, not from
-//!   their own reads), and the time in each step: weighing genotypes and counting (steps 1 and 2
+//!   was read, in how many classes fewer reads slipped than the stutter prior weighs (too few to
+//!   place their shorter share and fall-off, which carry no error and lean on the prior and on
+//!   any neighbouring repeat counts on the curve), and the time in each step: weighing genotypes and counting (steps 1 and 2
 //!   of each round), drawing the curves (step 3, with the part of it spent in the rounds that
 //!   also chose how stiff the curves are), reading F off pairs of samples, and the standard
 //!   errors. It is
@@ -210,12 +210,14 @@ pub(super) fn lines_of_a_motif_length(
 }
 
 /// **How many fitted classes had fewer reads slip than the stutter prior weighs**: a class whose
-/// slipped reads, or whose repeats slipped, are fewer than the prior's weight (spec §2.10.4). The
-/// repeats slipped are never fewer than the slipped reads, since each slipped read slips at least
-/// one repeat, so this is the count of classes with fewer slipped reads than the weight. Such a
-/// class's shorter share and fall-off come from its neighbours on the curve and the prior's
-/// centre, not from its own reads, and carry no error; where its slipped reads are fewer than
-/// the weight, its slip rate carries none either. Zero when the fit has no prior.
+/// slipped reads, or whose slipped reads with a direction, are fewer than the prior's weight
+/// (spec §2.10.4, §7), the counts the error rule judges the direction numbers on. The slips with
+/// a direction are never more than the slipped reads, and fall short of them only where a
+/// slipped read could not be given a direction, so this is almost always the count of classes
+/// with fewer slipped reads than the weight. Too few of such a class's own reads slipped
+/// to place its shorter share and fall-off, which carry no error (unless too few loci withheld
+/// them first) and lean on the prior's centre and on any neighbours on the curve. Zero when the
+/// fit has no prior.
 pub(super) fn classes_whose_directions_rest_on_the_prior(
     fitted: &[Option<PenalisedClass>],
     config: &PenalisedFitConfig,
@@ -225,7 +227,7 @@ pub(super) fn classes_whose_directions_rest_on_the_prior(
         .iter()
         .flatten()
         .filter(|class| {
-            below(class.expected_slips_with_a_direction) || below(class.expected_repeats_slipped)
+            below(class.expected_slipped_reads) || below(class.expected_slips_with_a_direction)
         })
         .count()
 }
@@ -274,9 +276,9 @@ fn how_the_fit_ran(
             format!("fewer than {} reads slipped", config.stutter_prior_reads)
         };
         format!(
-            "; in {directions_on_the_prior} of the {fitted} classes fitted, {fewer_than}, so their \
-             shorter share and fall-off come from their neighbours on the curve and the stutter \
-             prior, not from their own reads"
+            "; in {directions_on_the_prior} of the {fitted} classes fitted, {fewer_than}, too few \
+             to place their shorter share and fall-off, which carry no error and lean on the \
+             stutter prior and on any neighbouring repeat counts on the curve"
         )
     } else {
         String::new()
@@ -425,7 +427,9 @@ fn unscored_strengths_line(period: u8, curves: &SmoothCurves) -> Option<String> 
 
 /// **Why some of a motif length's standard errors are absent**: the curvature they are read off
 /// could not be inverted ([`UndeterminedErrors`]). Every error so left out, and not already
-/// withheld for too few loci, is written as not placed.
+/// withheld for too few loci, is written as not placed. **The line names no cause**: the run
+/// does not measure why the inversion failed, and the cause measured so far
+/// ([`UndeterminedErrors`]) is not the only one possible.
 fn undetermined_errors_line(period: u8, undetermined: UndeterminedErrors) -> String {
     let (which, curvature) = match undetermined {
         UndeterminedErrors::EveryNumber => (
@@ -443,11 +447,9 @@ fn undetermined_errors_line(period: u8, undetermined: UndeterminedErrors) -> Str
         ),
     };
     format!(
-        "motif length {period}, standard errors: {which}: {curvature}, could not be inverted, \
-         either because some combination of numbers has next to no reads behind it (the slope of \
-         a stiff curve through a single repeat count's slipped reads, for one) or because the \
-         curvature is not positive in some direction at the values the fit reached; those errors \
-         are written as not placed, except where too few loci already withheld them"
+        "motif length {period}, standard errors: {which}: {curvature}, could not be inverted at \
+         the values the fit reached; those errors are written as not placed, except where too \
+         few loci already withheld them"
     )
 }
 
@@ -609,7 +611,10 @@ pub(super) fn withheld_errors_line(outcomes: &[StratumOutcome]) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{a_drawn_class, a_narrow_production_fit, a_stiff_three_base_cohort};
+    use super::super::tests::{
+        a_drawn_class, a_narrow_production_fit,
+        a_three_base_cohort_whose_curvature_cannot_be_inverted,
+    };
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
     use crate::parameter_estimation::joint::ssr_fit::expected_counts::DistinctRows;
@@ -693,9 +698,9 @@ mod tests {
             "that also chose how stiff they are",
             "reading F off pairs ",
             "standard errors ",
-            " classes fitted, fewer than one read slipped, so their shorter share and fall-off \
-             come from their neighbours on the curve and the stutter prior, not from their own \
-             reads",
+            " classes fitted, fewer than one read slipped, too few to place their shorter share \
+             and fall-off, which carry no error and lean on the stutter prior and on any \
+             neighbouring repeat counts on the curve",
         ] {
             assert!(ran.contains(item), "{item:?} missing from {ran}");
         }
@@ -840,26 +845,27 @@ mod tests {
     }
 
     /// **The classes with fewer slipped reads than the prior weighs are counted** (spec §2.10.5):
-    /// a class counts when its slipped reads, or its repeats slipped, are fewer than the prior's
-    /// weight, or were never counted; at weight 0 none counts, and the line on how the fit ran
-    /// leaves the clause out; at a weight other than one, the clause gives it in reads.
+    /// a class counts when its slipped reads, or its slipped reads with a direction, are fewer
+    /// than the prior's weight, or were never counted; at weight 0 none counts, and the line on
+    /// how the fit ran leaves the clause out; at a weight other than one, the clause gives it in
+    /// reads.
     #[test]
     fn classes_resting_on_the_prior_are_counted() {
         let strata = vec![a_drawn_class(1, 8, 10, 3, 5, 61)];
         let config = a_narrow_production_fit();
         let fitted = fit_period_by_penalised_counting(&strata, &[0.3; 3], &config).classes;
         let class = fitted[0].clone().expect("the class has reads");
-        let with = |directions: Option<f64>, repeats: Option<f64>| {
+        let with = |slipped: Option<f64>, directions: Option<f64>| {
             Some(PenalisedClass {
+                expected_slipped_reads: slipped,
                 expected_slips_with_a_direction: directions,
-                expected_repeats_slipped: repeats,
                 ..class.clone()
             })
         };
         let classes = vec![
-            with(Some(5.0), Some(6.0)),
-            with(Some(0.5), Some(6.0)),
-            with(Some(5.0), Some(0.9)),
+            with(Some(6.0), Some(5.0)),
+            with(Some(6.0), Some(0.5)),
+            with(Some(0.9), Some(0.9)),
             with(None, None),
             None,
         ];
@@ -902,9 +908,9 @@ mod tests {
         let ran = the_line(&lines, "motif length 1: ").text();
         assert!(
             ran.contains(
-                " of the 1 classes fitted, fewer than 5 reads slipped, so their shorter share and \
-                 fall-off come from their neighbours on the curve and the stutter prior, not from \
-                 their own reads"
+                " of the 1 classes fitted, fewer than 5 reads slipped, too few to place their \
+                 shorter share and fall-off, which carry no error and lean on the stutter prior \
+                 and on any neighbouring repeat counts on the curve"
             ),
             "{ran}"
         );
@@ -1130,21 +1136,23 @@ mod tests {
     }
 
     /// **A motif length whose errors could not be determined says so, and writes every error as
-    /// not placed** (or withheld for too few loci, which comes first); the stiff three-base cohort
-    /// of the fit's own test, 10 loci a class.
+    /// not placed** (or withheld for too few loci, which comes first); the three-base cohort of
+    /// the fit's own test, 10 loci a class, whose `H` fails along a trade between two allele
+    /// lengths because it leaves out the allele-length prior's curvature (see the cohort's doc).
     #[test]
     fn undetermined_errors_are_logged_and_written_as_not_placed() {
-        let (outcomes, lines) = fit_and_log(&a_stiff_three_base_cohort(), &[0.3; 4]);
+        let (outcomes, lines) = fit_and_log(
+            &a_three_base_cohort_whose_curvature_cannot_be_inverted(),
+            &[0.3; 4],
+        );
         let line = the_line(&lines, "motif length 3, standard errors:");
         assert_eq!(
             line.text(),
             "motif length 3, standard errors: none determined for any of its numbers except F, \
              which is read off pairs of samples with a curvature of its own: the fit's \
-             curvature, with the curves' bend penalties added, could not be inverted, either \
-             because some combination of numbers has next to no reads behind it (the slope of a \
-             stiff curve through a single repeat count's slipped reads, for one) or because the \
-             curvature is not positive in some direction at the values the fit reached; those \
-             errors are written as not placed, except where too few loci already withheld them"
+             curvature, with the curves' bend penalties added, could not be inverted at the \
+             values the fit reached; those errors are written as not placed, except where too \
+             few loci already withheld them"
         );
         let mut errors = 0;
         for outcome in &outcomes {
@@ -1232,21 +1240,17 @@ mod tests {
         assert_eq!(
             undetermined_errors_line(2, UndeterminedErrors::BetweenLocusShare),
             "motif length 2, standard errors: none determined for F: the curvature of F read off \
-             pairs of samples, with its curve's bend penalty added, could not be inverted, either \
-             because some combination of numbers has next to no reads behind it (the slope of a \
-             stiff curve through a single repeat count's slipped reads, for one) or because the \
-             curvature is not positive in some direction at the values the fit reached; those \
-             errors are written as not placed, except where too few loci already withheld them"
+             pairs of samples, with its curve's bend penalty added, could not be inverted at the \
+             values the fit reached; those errors are written as not placed, except where too \
+             few loci already withheld them"
         );
         assert_eq!(
             undetermined_errors_line(2, UndeterminedErrors::EveryNumberButBetweenLocusShare),
             "motif length 2, standard errors: none determined for any of its numbers except F, \
              which is read off pairs of samples with a curvature of its own: the fit's curvature, \
-             with the curves' bend penalties added, could not be inverted, either because some \
-             combination of numbers has next to no reads behind it (the slope of a stiff curve \
-             through a single repeat count's slipped reads, for one) or because the curvature is \
-             not positive in some direction at the values the fit reached; those errors are \
-             written as not placed, except where too few loci already withheld them"
+             with the curves' bend penalties added, could not be inverted at the values the fit \
+             reached; those errors are written as not placed, except where too few loci already \
+             withheld them"
         );
     }
 }

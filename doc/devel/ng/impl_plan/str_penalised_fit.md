@@ -36,8 +36,8 @@ what goes with it (arch §4.1).
 - **Isolate the silent steps.** Eight steps can change numbers without failing anything: the stated
   F's median (A5), F's newtype and conversions (B1), the keys holding F (B2), making the fit
   deterministic (C3), switching `estimate-parameters` to it (C7), the stutter prior (C8), the
-  classes the stated F's median counts (C9) and the cohort's fixed order (C10). Each is its own commit, with its oracle run before and
-  after.
+  classes the stated F's median counts (C9) and the cohort's fixed order (C10). Each is its own
+  commit, with its oracle run before and after.
 - **Delete last.** The climb goes only after the new fit has passed on real data (D2) and in calling
   (D5).
 
@@ -317,7 +317,6 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
 ### Milestone D — checks (spec §4)
 
 Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as it will merge.
-
 
 - ☐ **D1** The bench reproduces `compare_D_prior_2026-10-14.md`'s `D_tract_prior` rows with the
   production fit, within run-to-run noise, and adds the cells spec §1.2 names as not run: 500 × 30,

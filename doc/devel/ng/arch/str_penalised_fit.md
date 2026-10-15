@@ -121,20 +121,25 @@ pub const STUTTER_PRIOR_CENTRE: Slippage = Slippage {
   class's slip rate, shorter share and fall-off and `a` the weight. `penalised_sandwich` (`:2301`)
   then carries it into both H and the middle term.
 - **`PenalisedClass::expected_slipped_reads`** (`:319-328`) stays the reads' own count, without the
-  prior. Two siblings beside it carry the trials of the direction numbers, for the error rule:
-  `expected_slips_with_a_direction` (`shorter + longer`) and `expected_repeats_slipped` (`steps`),
-  both from the class's last counts.
-- **The error mapping** (§1.4) gains one row, after the `TooFewLoci` rows: a slip rate whose
-  `expected_slipped_reads`, a shorter share whose `expected_slips_with_a_direction`, or a fall-off
-  whose `expected_repeats_slipped`, is below `stutter_prior_reads` → `NotPlaced`. The slip rate's
+  prior. Two siblings beside it carry the trials of the direction numbers:
+  `expected_slips_with_a_direction` (`shorter + longer`), which the error rule reads for the
+  shorter share, and `expected_repeats_slipped` (`steps`), which it does not read; both from the
+  class's last counts.
+- **The error mapping** (§1.4) gains one row, after the `TooFewLoci` rows: a slip rate or a
+  fall-off whose `expected_slipped_reads`, or a shorter share whose
+  `expected_slips_with_a_direction`, is below `stutter_prior_reads` → `NotPlaced`. The slip rate's
   part is the owner's, 2026-10-15, after C8's review (spec §2.10.4): with no slipped read the
-  sandwich gave a logit error of 0.65, which the `NOT_PLACED` test does not withhold. In
-  `errors_of_a_class` (`penalised_fit.rs`) the slip rate goes through the same check as
-  `of_a_direction`, with `fitted.expected_slipped_reads` as its count.
-- **The run log** (`penalised_fit/run_log.rs`): `opening_line` (`:67`) states the weight and centre;
-  `how_the_fit_ran` (`:156`) counts the motif length's classes whose direction numbers rest on the
-  prior. **The file:** no new key (owner, 2026-10-15); one sentence in the stutter-provenance note
-  (`to_toml.rs:343`), which is the lead's reading of that answer and which the owner may drop.
+  sandwich gave a logit error of 0.65, which the `NOT_PLACED` test does not withhold. The
+  fall-off is judged on the slipped reads, as the owner's rule says (spec §7), not on its repeats
+  slipped (corrected after the review of commits `0b12941d..53a3e4f9`). In `errors_of_a_class`
+  (`penalised_fit.rs`) all three go through one closure, `of_a_stutter_number`, each with its
+  count.
+- **The run log** (`penalised_fit/run_log.rs`; these two line numbers are at the code as built):
+  `opening_line` (`:79`) states the weight and centre; `how_the_fit_ran` (`:237`) counts the motif
+  length's classes whose direction numbers carry no error for too few slipped reads. **The
+  file:** no new key (owner, 2026-10-15); one sentence in the stutter-provenance note, built from
+  `STUTTER_PRIOR_READS` and `STUTTER_PRIOR_CENTRE` (`origin_paragraph`, `to_toml.rs:352`), which
+  is the lead's reading of that answer and which the owner may drop.
 
 ### 1.2 What the fit returns per class: the existing `StratumOutcome`
 
@@ -235,7 +240,7 @@ converted only at the file's edge (§2.3) *(lead, 2026-10-14)*. The prototype's 
 | F absent (its error, `concentration`) | `NotPlaced` |
 | class with fewer than `LOCI_FOR_AN_ERROR` loci with reads | `TooFewLoci` |
 | a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` | `TooFewLoci` |
-| *(owner, 2026-10-15, §1.1a)* a slip rate whose class's expected slipped reads, a shorter share whose slipped reads with a direction, or a fall-off whose repeats slipped, are below `stutter_prior_reads` | `NotPlaced` |
+| *(owner, 2026-10-15, §1.1a)* a slip rate or a fall-off whose class's expected slipped reads, or a shorter share whose slipped reads with a direction, are below `stutter_prior_reads` | `NotPlaced` |
 | an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — as the climb judges it (`ssr_fit.rs:2172`) | `NotPlaced` |
 | a positive, finite error | `Estimated` |
 | zero, absent or not finite | `NotPlaced` |
