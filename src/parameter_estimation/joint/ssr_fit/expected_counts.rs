@@ -556,8 +556,8 @@ impl DistinctRows {
 ///
 /// **Taken once for a round, not once for each row of reads.** The log depends on the genotype and
 /// the bucket alone, yet scoring every distinct row took it afresh, and `ln` was a quarter of the
-/// research bench's CPU samples at 2,000 samples of 30 reads. [`ln_reads`] reads the table and adds the same
-/// terms in the same order, so a row's log-likelihood is the same to the bit.
+/// research bench's CPU samples at 2,000 samples of 30 reads. [`ln_reads`] reads the table and adds
+/// the same terms in the same order, so a row's log-likelihood is the same to the bit.
 fn ln_read_chances(per_allele: &[Vec<f64>], genotypes: &[(usize, usize)]) -> Vec<Vec<f64>> {
     genotypes
         .iter()
@@ -743,9 +743,10 @@ impl ReadModel {
     }
 }
 
-/// **Each genotype's prior at a round's allele-length shares and spread**, given a sample's
-/// homozygote excess, split into the part where the sample's two copies are one draw (identical
-/// by descent, or drawn alike from the tract) and the part where they are two.
+/// **Each genotype's prior at a round's allele-length shares and spread**, split into the part
+/// where a sample's two copies are one draw (identical by descent, or drawn alike from the tract)
+/// and the part where they are two. A sample's homozygote excess, which weighs the two parts,
+/// comes in with the sample ([`Self::add_sample`]).
 struct GenotypePrior {
     /// The allele's share for a homozygote, zero for a heterozygote; in `genotypes` order.
     one_draw: Vec<f64>,
@@ -832,7 +833,7 @@ impl GenotypePrior {
 pub(super) struct ScoredDistinctRows<'a> {
     distinct: &'a DistinctRows,
     model: ReadModel,
-    rows: Vec<ScoredRow>,
+    scored: Vec<ScoredRow>,
 }
 
 impl<'a> ScoredDistinctRows<'a> {
@@ -844,7 +845,14 @@ impl<'a> ScoredDistinctRows<'a> {
         allele_span: i32,
     ) -> Self {
         let model = ReadModel::of(evidence, slippage, allele_span);
-        let rows = distinct
+        // [`ln_reads`] reads a row against its log table bucket by bucket and would drop a bucket
+        // the table lacks; every row of a table is built `2 · read_span + 1` buckets long.
+        let buckets = (2 * evidence.read_span + 1) as usize;
+        assert!(
+            distinct.reads.iter().all(|reads| reads.len() == buckets),
+            "every distinct row holds one count a bucket"
+        );
+        let scored = distinct
             .reads
             .par_iter()
             .map(|reads| model.score(reads))
@@ -852,7 +860,7 @@ impl<'a> ScoredDistinctRows<'a> {
         Self {
             distinct,
             model,
-            rows,
+            scored,
         }
     }
 
@@ -862,15 +870,19 @@ impl<'a> ScoredDistinctRows<'a> {
     pub(super) fn expected_counts(&self, shares: &[f64], concentration: f64) -> Counts {
         let (distinct, model) = (self.distinct, &self.model);
         let prior = GenotypePrior::of(&model.genotypes, shares, concentration);
-        let totals: Vec<PriorWeightedTotals> =
-            self.rows.par_iter().map(|row| prior.totals(row)).collect();
+        let totals: Vec<PriorWeightedTotals> = self
+            .scored
+            .par_iter()
+            .map(|row| prior.totals(row))
+            .collect();
         // In fixed chunks summed in order, so that the answer does not depend on the thread pool.
         //
         // A chunk keeps only the distinct rows its samples hold, not one entry for every distinct
-        // row: with up to 256 chunks, a dense entry each made the partials up to 256 times the
+        // row: with about 256 chunks, a dense entry each made the partials about 256 times the
         // distinct rows. The research bench on one class of 1,000 loci, 2,000 samples of 30
-        // reads, peaked at 6.3 GB with them and 2.9 GB without. The sums are the same to the bit. Each row's chunk sums are still added in chunk order; what is left out
-        // is the `+0.0` an untouched chunk added. Adding `+0.0` changes nothing but `-0.0`, and a
+        // reads, peaked at 6.3 GB with them and 2.9 GB without. The sums are the same to the bit.
+        // Each row's chunk sums are still added in chunk order; what is left out is the `+0.0`
+        // an untouched chunk added. Adding `+0.0` changes nothing but `-0.0`, and a
         // sum begun at `+0.0` is never `-0.0`: a floating-point sum is `-0.0` only when both its
         // terms are.
         let chunk = (distinct.rows.len() / 256).max(4096);
@@ -888,7 +900,7 @@ impl<'a> ScoredDistinctRows<'a> {
                         held.len() - 1
                     });
                     let index = *index as usize;
-                    let largest = self.rows[index].largest;
+                    let largest = self.scored[index].largest;
                     if let Some(ll) =
                         prior.add_sample(largest, totals[index], *excess, &mut held[at].1)
                     {
@@ -914,7 +926,7 @@ impl<'a> ScoredDistinctRows<'a> {
         let per_row: Vec<Counts> = distinct
             .reads
             .par_iter()
-            .zip(&self.rows)
+            .zip(&self.scored)
             .zip(&weights)
             .map(|((reads, row), weights)| {
                 let mut counts = Counts::new(model.classes);
@@ -935,8 +947,11 @@ impl<'a> ScoredDistinctRows<'a> {
     fn expected_counts_by_tract(&self, shares: &[f64], concentration: f64) -> Vec<Counts> {
         let (distinct, model) = (self.distinct, &self.model);
         let prior = GenotypePrior::of(&model.genotypes, shares, concentration);
-        let totals: Vec<PriorWeightedTotals> =
-            self.rows.par_iter().map(|row| prior.totals(row)).collect();
+        let totals: Vec<PriorWeightedTotals> = self
+            .scored
+            .par_iter()
+            .map(|row| prior.totals(row))
+            .collect();
         distinct
             .tract_starts
             .par_windows(2)
@@ -953,7 +968,7 @@ impl<'a> ScoredDistinctRows<'a> {
                             held.push((index, RowWeights::default()));
                             held.len() - 1
                         });
-                    let largest = self.rows[index].largest;
+                    let largest = self.scored[index].largest;
                     if let Some(ll) =
                         prior.add_sample(largest, totals[index], *excess, &mut held[at].1)
                     {
@@ -961,7 +976,7 @@ impl<'a> ScoredDistinctRows<'a> {
                     }
                 }
                 for (index, weights) in held {
-                    let (reads, row) = (&distinct.reads[index], &self.rows[index]);
+                    let (reads, row) = (&distinct.reads[index], &self.scored[index]);
                     model.counts_of(&prior, reads, row, weights, &mut counts);
                 }
                 counts
