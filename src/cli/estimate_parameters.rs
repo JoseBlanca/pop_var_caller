@@ -55,7 +55,7 @@ use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile, Parame
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
-use crate::parameter_estimation::joint::census::CohortCensusEvidence;
+use crate::parameter_estimation::joint::census::{CohortCensusEvidence, SampleCensusEvidence};
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::PenalisedFitConfig;
@@ -503,9 +503,14 @@ pub(crate) fn a_file_the_next_run_can_read(
 /// everything `estimate-parameters` does before it fits, and what the repeat-tract subset
 /// comparison (`examples/ng_ssr_subset_against_every_sample.rs`) needs too.
 pub struct OpenedCensuses {
-    /// The psps, opened together.
+    /// The psps, opened together and put in the order of their sample names.
+    ///
+    /// **Its read-group table is not the evidence's numbering**: within a sample it keeps the
+    /// header's order, where the evidence's is by declared ID. The run's table is built from the
+    /// evidence ([`read_groups_of`]); this one is for mapping a psp's own records.
     pub cohort: OpenPspCohort,
-    /// Their censuses, as one cohort.
+    /// Their censuses, as one cohort, samples in name order and each sample's read groups in
+    /// the order of their declared IDs.
     pub evidence: CohortCensusEvidence,
     /// The selection rebuilt from the reference and catalog, and the run's contigs.
     pub plan: CensusPlan,
@@ -552,6 +557,18 @@ pub fn open_the_censuses(
             report: Box::new(report),
         });
     }
+    // **One order for the cohort, whatever order its psps were typed in** (spec
+    // `str_penalised_fit.md` §3; arch §2.4a): samples by the name in each psp's header here, and
+    // read groups within a sample by their declared ID where the censuses are assembled, below.
+    // The fit numbers samples and read groups in the order the cohort is held and sums in that
+    // numbering, so a cohort held as typed fitted to a file that depended on the typing — on
+    // tomato2, two orders of four psps gave inbreeding coefficients differing in the fourth
+    // figure. The written file lists samples in name order, which `parameters_file.md` §6
+    // allows: calling joins its rows by sample name and `@RG ID`.
+    //
+    // **After the head's report and not before**, so that report names stale psps in the order
+    // they were typed. Nothing has been summed yet: every census is read below, in this order.
+    let cohort = cohort.in_sample_name_order();
     // **The censuses come out of the psps' trailers**, read lazily: their headers and directories
     // now, a section when the fit asks for it (spec §5).
     //
@@ -678,11 +695,27 @@ pub fn open_the_censuses(
     // **What assembling can still refuse is damage**: every census now records this run's
     // settings, so two cannot disagree on them, and two psps declaring one read group were refused
     // when the cohort was opened, from their headers.
-    let evidence = the_censuses_as_one_cohort(censuses).map_err(|source| {
-        EstimateParametersCliError::Cohort {
-            source: Box::new(source),
-        }
+    //
+    // **Each sample's read groups in the order of their declared IDs**, the second half of the
+    // cohort's one order; assembling then numbers them run-wide in (sample, declared ID) order.
+    let evidence = the_censuses_as_one_cohort(
+        censuses
+            .into_iter()
+            .map(SampleCensusEvidence::with_read_groups_in_declared_id_order)
+            .collect(),
+    )
+    .map_err(|source| EstimateParametersCliError::Cohort {
+        source: Box::new(source),
     })?;
+    // **The evidence's sample order is the cohort's**, because each census was read out of its
+    // psp in the cohort's order. `read_groups_of` pairs the two by position. That pairing is
+    // checked one sample at a time, in release builds, by
+    // `what_the_run_says_about_every_census_in_a_cohort` above, and assembling keeps that order;
+    // this assertion only repeats the check over the assembled evidence.
+    debug_assert!(
+        evidence.sample_names().eq(cohort.sample_names()),
+        "each census names the sample of the psp it is the trailer of",
+    );
 
     setup.always(|into| {
         format!(

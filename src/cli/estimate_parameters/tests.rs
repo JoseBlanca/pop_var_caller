@@ -59,7 +59,15 @@ fn a_cohort_walked_asking_for(min_copies: MinCopies) -> (AVaryingCohort, PathBuf
 /// *every base of the reference* are the same set of positions and no test can tell a command
 /// that takes one from a command that takes the other.
 fn a_cohort_walked(min_copies: MinCopies, regions: Option<&str>) -> (AVaryingCohort, PathBuf) {
-    let cohort = a_varying_cohort_on_disk();
+    walked_into_psps(a_varying_cohort_on_disk(), min_copies, regions)
+}
+
+/// Any fixture cohort walked into psps, one a sample, in a `psps` directory beside it.
+fn walked_into_psps(
+    cohort: AVaryingCohort,
+    min_copies: MinCopies,
+    regions: Option<&str>,
+) -> (AVaryingCohort, PathBuf) {
     let psps = cohort.directory.path().join("psps");
     let regions = regions.map(|bed| {
         let path = cohort.directory.path().join("walked.bed");
@@ -274,6 +282,128 @@ fn one_cohort_fitted_twice_writes_the_same_file() {
         first.to_toml(),
         again.to_toml(),
         "one cohort's parameters are one file",
+    );
+}
+
+/// **One cohort fitted from two orderings of its psps writes the same bytes, listing its samples
+/// in name order** (spec `str_penalised_fit.md` §3 and §4.3; arch §2.4a).
+///
+/// The fit numbers samples and read groups in the order the cohort is held, and sums over them in
+/// that numbering; floating-point addition is not associative, so a cohort held in the order its
+/// psps were typed fits to a file that depends on how they were typed. On tomato2 the same four
+/// psps in two orders gave two files whose inbreeding coefficients differed in the fourth figure.
+///
+/// **Three samples, so the two orders are a real permutation**: `two, s03, one` and `one, two,
+/// s03` share no position, and neither is the name order `one, s03, two`. Before the fix the
+/// files differ at least in their sample lists, so this fails without it.
+#[test]
+fn one_cohort_fitted_from_two_orderings_of_its_psps_writes_the_same_file() {
+    use crate::cli::generate_psps::psp_path_for;
+    use crate::cli::test_fixtures::a_larger_varying_cohort_with_sequencing_errors_on_disk;
+
+    let (cohort, psps) = walked_into_psps(
+        a_larger_varying_cohort_with_sequencing_errors_on_disk(1),
+        MinCopies::default(),
+        None,
+    );
+    let named = |order: &[&str]| -> EstimateParametersArgs {
+        let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+        args.psps = order
+            .iter()
+            .map(|sample| psp_path_for(&psps, sample))
+            .collect();
+        args
+    };
+
+    let (typed_one_way, _) =
+        fit_and_assemble(&named(&["two", "s03", "one"])).expect("the cohort fits");
+    let (typed_another, _) =
+        fit_and_assemble(&named(&["one", "two", "s03"])).expect("and fits typed another way");
+
+    assert_eq!(
+        typed_one_way.to_toml(),
+        typed_another.to_toml(),
+        "one cohort's parameters are one file, however its psps were typed",
+    );
+    assert_eq!(
+        typed_one_way.fitted_from.samples,
+        vec!["one", "s03", "two"],
+        "the samples are listed in name order",
+    );
+    // **The read-group table follows the samples**: its rows are numbered in the same order the
+    // sample list is in, so a sort that moved the names and not the rows would show here.
+    let rows: Vec<(u32, &str, &str)> = typed_one_way
+        .fitted_from
+        .read_groups
+        .iter()
+        .map(|row| {
+            (
+                row.read_group,
+                row.sample.as_str(),
+                row.declared_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (0, "one", "rg-one-a"),
+            (1, "one", "rg-one-b"),
+            (2, "s03", "rg-s03"),
+            (3, "two", "rg-two"),
+        ],
+    );
+}
+
+/// **A sample whose header lists its read groups out of ID order is fitted as if it listed them in
+/// order**: the read-group rows run `rg-one-a` then `rg-one-b`, and the file's bytes are those of
+/// the same cohort declared in order (spec `str_penalised_fit.md` §3; arch §2.4a).
+///
+/// The walk numbers a sample's read groups in its header's order, so the fixture here gives
+/// `rg-one-b` the first number. Only the sort by declared ID, applied to each census before the
+/// cohort is assembled, puts `rg-one-a` back at row 0; without it this test fails at the rows.
+#[test]
+fn read_groups_declared_out_of_id_order_fit_to_the_same_file() {
+    use crate::cli::test_fixtures::{
+        a_varying_cohort_declaring_read_groups_out_of_order_on_disk,
+        a_varying_cohort_with_sequencing_errors_on_disk,
+    };
+
+    let fitted_from = |cohort: AVaryingCohort| {
+        let (cohort, psps) = walked_into_psps(cohort, MinCopies::default(), None);
+        let output = cohort.directory.path().join("out.toml");
+        fit_and_assemble(&args_over(&cohort, &psps, output))
+            .expect("the cohort fits")
+            .0
+    };
+    let out_of_order = fitted_from(a_varying_cohort_declaring_read_groups_out_of_order_on_disk());
+    let in_order = fitted_from(a_varying_cohort_with_sequencing_errors_on_disk());
+
+    let rows: Vec<(u32, &str, &str)> = out_of_order
+        .fitted_from
+        .read_groups
+        .iter()
+        .map(|row| {
+            (
+                row.read_group,
+                row.sample.as_str(),
+                row.declared_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (0, "one", "rg-one-a"),
+            (1, "one", "rg-one-b"),
+            (2, "two", "rg-two"),
+        ],
+        "a sample's read groups are numbered in the order of their declared IDs",
+    );
+    assert_eq!(
+        out_of_order.to_toml(),
+        in_order.to_toml(),
+        "one sample's header listing its read groups in two orders gives one file",
     );
 }
 

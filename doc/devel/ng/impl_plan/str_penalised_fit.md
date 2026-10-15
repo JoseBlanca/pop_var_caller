@@ -297,7 +297,7 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
   figure is the one after C8), and with it calls at classes without an F and at tracts with no row,
   which take the fallback. Any other move is investigated before re-recording.
 
-- ☐ **C10** *(owner, 2026-10-15.)* **Own commit, do not bundle; oracle before and after.** The cohort
+- ✅ **C10** *(owner, 2026-10-15.)* **Own commit, do not bundle; oracle before and after.** The cohort
   in one fixed order: in `open_the_censuses` (`src/cli/estimate_parameters.rs`), before anything is
   summed, samples sorted by the sample name in each psp's header, and read groups within a sample by
   their declared ID. The fitted file then lists samples in name order, which `parameters_file.md` §6
