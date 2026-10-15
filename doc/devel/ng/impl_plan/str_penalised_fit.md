@@ -174,7 +174,7 @@ what goes with it (arch §4.1).
   (one-base) and 2,201 to 634 MiB (two-base); grid bit-identical; 1.3–1.45× the wall time at 2,000
   samples. Within a class, `DistinctRows::of` blocks by ~8,192 rows and the errors build a class's
   table once. **"Periods one at a time" lands with C5**, which owns the loop over motif lengths.
-- ☐ **C5** `fit_repeat_tracts`: per-period grouping, one slippage group asserted, the
+- ✅ **C5** `fit_repeat_tracts`: per-period grouping, one slippage group asserted, the
   `StratumOutcome` conversion, F absent at an end of its search, the error mapping with
   `LOCI_FOR_AN_ERROR` and `LOCI_FOR_A_SHARE_ERROR`. Tested on drawn cohorts: outcomes in input order;
   `Fitted` for a class with reads, `Refused { NoSpanningReads }` for one without, never `Derived`;

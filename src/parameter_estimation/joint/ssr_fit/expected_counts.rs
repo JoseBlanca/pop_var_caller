@@ -18,11 +18,11 @@
 //! sample's genotype probabilities, and every sample's alleles among the lengths; the slip rate, the
 //! shorter share, the fall-off and the shares then follow from the expected counts.
 //!
-//! **Why the file is named for the expected counts.** The penalised fit
-//! ([`penalised_fit`](super::penalised_fit)) becomes the production fit, and what it takes from here is
-//! that first step — [`expected_counts`] and [`ClassCounts`] — and the likelihood of pairs of
-//! samples ([`SamplePairs`]). The counting fit's own drivers (`fit_class_by_counting*`) stay here
-//! as the zero-penalty answer the penalised fit's tests compare against.
+//! **Why the file is named for the expected counts.** The penalised fit ([`penalised_fit`])
+//! becomes the production fit, and what it takes from here is that first step — [`expected_counts`](fn@expected_counts) and [`ClassCounts`] — and the
+//! likelihood of pairs of samples ([`SamplePairs`]). The counting fit's own drivers
+//! (`fit_class_by_counting*`) stay here as the zero-penalty answer the penalised fit's tests
+//! compare against.
 
 use super::*;
 
@@ -84,8 +84,10 @@ impl CountedClass {
 /// of a standard error at the bench's base setting.
 pub const SHARE_PRIOR_TRACTS: f64 = 1.0;
 
-/// The ends of the concentration's search, where an estimate says the data did not place it.
-const CONCENTRATION_SEARCH: (f64, f64) = (1e-3, 1e4);
+/// **The ends of the concentration's search**, where an estimate says the data did not place it.
+/// The penalised fit clamps its concentration to these same ends, so an estimate pinned at its
+/// clamp is the one [`concentration_stopped_inside_its_search`] reports as absent.
+pub(super) const CONCENTRATION_SEARCH: (f64, f64) = (1e-3, 1e4);
 
 /// **Whether a concentration `estimate` is placed**: its estimator `source` had something to read
 /// in `evidence` ([`concentration_is_identified`]), and the estimate stopped inside its search, not
@@ -97,10 +99,18 @@ pub fn concentration_is_placed(
     homozygote_excess: &[f64],
     estimate: f64,
 ) -> bool {
-    let (lowest, highest) = CONCENTRATION_SEARCH;
     concentration_is_identified(evidence, source, homozygote_excess)
-        && estimate > lowest * 1.01
-        && estimate < highest / 1.01
+        && concentration_stopped_inside_its_search(estimate)
+}
+
+/// **Whether a concentration `estimate` stopped inside its search**, not within 1% of either end
+/// of `10⁻³ ..= 10⁴`. An estimate at an end is where the search ran out of room, not where the
+/// data put it, so it is reported as absent (spec `str_penalised_fit.md` §2.5). Not a number is
+/// not inside.
+#[must_use]
+pub fn concentration_stopped_inside_its_search(estimate: f64) -> bool {
+    let (lowest, highest) = CONCENTRATION_SEARCH;
+    estimate > lowest * 1.01 && estimate < highest / 1.01
 }
 
 /// **Whether `source` has anything to read the concentration from**: pairs need a tract with two
@@ -126,9 +136,9 @@ pub fn concentration_is_identified(
 }
 
 /// **The expected counts one round gathers over a class, or over one tract of it**
-/// ([`expected_counts`], [`expected_counts_by_tract`]): every read shared between "read exactly"
-/// and "slipped", every sample's alleles shared among the lengths, given the class's current
-/// numbers. Each of the class's numbers is a closed-form function of them.
+/// ([`expected_counts`](fn@expected_counts), [`expected_counts_by_tract`]): every read shared
+/// between "read exactly" and "slipped", every sample's alleles shared among the lengths, given
+/// the class's current numbers. Each of the class's numbers is a closed-form function of them.
 ///
 /// **They are also the objective's slope.** The slope of the log of a sum over hidden genotypes
 /// and slips is the expected slope of the log-likelihood that knew them (Fisher's identity), and

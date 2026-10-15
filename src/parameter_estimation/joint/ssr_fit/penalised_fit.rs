@@ -1,13 +1,15 @@
 //! **Every repeat class of one motif length fitted at once, each number a smooth curve across the
 //! reference repeat count** — penalised expectation maximisation, a research prototype
-//! (`doc/devel/ng/research/str_fit_research_plan.md`, avenue D).
+//! (`doc/devel/ng/research/str_fit_research_plan.md`, avenue D), being promoted to the caller's
+//! repeat-tract fit (spec `doc/devel/ng/spec/str_penalised_fit.md`): [`fit_repeat_tracts`] is the
+//! entry point that fits a whole cohort and returns what the rest of the caller reads.
 //!
-//! The counting fit ([`expected_counts`](super::expected_counts)) fits each class — one motif length,
-//! one reference repeat count — on its own, and the curves across repeat count are drawn afterwards
-//! through its answers. Here each round gathers every class's expected counts exactly as the
-//! counting fit does ([`expected_counts`]), and then chooses all the classes' numbers together: each
-//! number is the best fit to the counts **subject to a penalty on how sharply it bends from one
-//! repeat count to the next**. A thin class then borrows from its neighbours during the fit, by as
+//! The counting fit ([`expected_counts`](mod@super::expected_counts)) fits each class — one motif
+//! length, one reference repeat count — on its own, and the curves across repeat count are drawn
+//! afterwards through its answers. Here each round gathers every class's expected counts exactly as
+//! the counting fit does ([`expected_counts`](fn@expected_counts)), and then chooses all the
+//! classes' numbers together: each number is the best fit to the counts **subject to a penalty on
+//! how sharply it bends from one repeat count to the next**. A thin class then borrows from its neighbours during the fit, by as
 //! much as its own counts leave undecided, instead of being blended with a curve afterwards.
 //!
 //! **How sharply a curve may bend is measured, not chosen.** Each curve's penalty strength is the
@@ -24,9 +26,11 @@
 use std::time::Instant;
 
 use super::expected_counts::{
-    ClassCounts, DistinctRows, SamplePairs, expected_counts, expected_counts_by_distinct_rows,
+    CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs,
+    concentration_stopped_inside_its_search, expected_counts, expected_counts_by_distinct_rows,
 };
 use super::*;
+use crate::parameter_estimation::joint::slippage_curve::PenalisedPoint;
 
 /// **How the penalised fit runs.** [`production`](Self::production) is what `estimate-parameters`
 /// runs (spec `str_penalised_fit.md` §2.7); [`prototype`](Self::prototype) keeps the research
@@ -308,6 +312,16 @@ pub struct PenalisedClass {
     /// an estimate of how much loci differ when [`concentration`](Self::concentration) is `None`;
     /// there for a scorer that needs every number to compute a likelihood.
     pub working_concentration: f64,
+    /// **How many of the class's reads slipped, by the fit's last expected counts**: each read's
+    /// chance of having slipped, given its sample's genotype probabilities, summed over the class's
+    /// reads. These are the counts the returned numbers were fitted to; they were gathered at the
+    /// numbers one round before, which differ from the returned ones by less than the fit's
+    /// tolerance when it converged.
+    ///
+    /// **Not the level times the reads.** The level is a point on the penalised curve, so for a
+    /// thin class it is mostly the neighbours'; this count is what the class's own reads said.
+    /// `None` only when no round ran (`max_rounds` of 0).
+    pub expected_slipped_reads: Option<f64>,
     /// Standard errors, when [`PenalisedFitConfig::standard_errors`] asked for them.
     pub errors: Option<PenalisedClassErrors>,
 }
@@ -435,6 +449,18 @@ pub fn fit_period_by_penalised_counting(
     homozygote_excess: &[f64],
     fit: &PenalisedFitConfig,
 ) -> PenalisedPeriodFit {
+    let classes: Vec<&StratumEvidence> = classes.iter().collect();
+    fit_one_period(&classes, homozygote_excess, fit)
+}
+
+/// [`fit_period_by_penalised_counting`] over borrowed classes, so that [`fit_repeat_tracts`] can
+/// hand one motif length's classes over from wherever they sit in its input without copying
+/// their reads.
+fn fit_one_period(
+    classes: &[&StratumEvidence],
+    homozygote_excess: &[f64],
+    fit: &PenalisedFitConfig,
+) -> PenalisedPeriodFit {
     if let Some(first) = classes.first() {
         assert!(
             classes
@@ -480,7 +506,8 @@ pub fn fit_period_by_penalised_counting(
         let mut moved: f64 = 0.0;
         for (point, class) in period.class_at_point.iter().enumerate() {
             if class.is_some() {
-                let concentration = float::exp(-spreads[point]).clamp(1e-3, 1e4);
+                let concentration = float::exp(-spreads[point])
+                    .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1);
                 moved = moved
                     .max((float::ln(concentration) - float::ln(period.concentration[point])).abs());
                 period.concentration[point] = concentration;
@@ -502,10 +529,250 @@ pub fn fit_period_by_penalised_counting(
     period.into_fit(classes, errors)
 }
 
+/// **Fit every repeat-tract class of a cohort by penalised EM, one motif length at a time**
+/// (spec `str_penalised_fit.md` §2), and return one [`StratumOutcome`] per class handed in, in
+/// the same order. This is the repeat-tract fit `estimate-parameters` is to run.
+///
+/// The classes are grouped by motif length, and each group is fitted together by
+/// [`fit_period_by_penalised_counting`], since every curve runs across a motif length's repeat
+/// counts. What each class gets back:
+///
+/// - **A class with reads at even one locus is [`StratumOutcome::Fitted`].** Its numbers are
+///   points on its motif length's penalised curves: the level and both shares carry
+///   [`LevelSource::PenalisedCurve`] / [`ShareSource::PenalisedCurve`], inside the curves' range,
+///   with no parametric curve beside them. It was read from every sample, so
+///   [`StratumFit::samples_fitted_on`] is `None`, and [`StratumFit::climb`] is `None`. There is no
+///   floor of loci below which a class is refused.
+/// - **A class with no reads at any locus is [`StratumOutcome::Refused`]** for
+///   [`StratumRefusal::NoSpanningReads`], and takes no value off the curves.
+/// - **No class is [`StratumOutcome::Derived`].**
+///
+/// A class's concentration is `None` when no locus of its motif length holds two samples with
+/// reads, or when the estimate stopped within 1% of an end of its search
+/// ([`concentration_stopped_inside_its_search`], spec §2.5). The concentration the fit worked at
+/// is never reported in its place.
+///
+/// Each number carries its standard error or the reason it has none, by the table of arch
+/// `str_penalised_fit.md` §1.4: [`StratumError::Estimated`] only for a positive, finite error that
+/// places the number; [`StratumError::TooFewLoci`] for every number of a class with fewer than
+/// [`LOCI_FOR_AN_ERROR`] loci with reads, and for a share worth fewer than
+/// [`LOCI_FOR_A_SHARE_ERROR`] loci; [`StratumError::NotPlaced`] for the rest, an absent
+/// concentration's error included.
+///
+/// **Memory: one motif length at a time, and one class at a time within it.** Each motif
+/// length's classes are handed to its fit by reference, never copied, and everything that fit
+/// built beyond the outcomes — its curves, its timings — is dropped before the next motif length
+/// starts. Within a motif length, see [`fit_period_by_penalised_counting`].
+///
+/// `homozygote_excess` is indexed by sample, as the evidence's samples are.
+///
+/// # Panics
+///
+/// - When a class's evidence declares more than one slippage group. The fit scores every library
+///   at one stutter, and a class's [`StratumFit::slippage`] holds that one; stutter per slippage
+///   group is not built (`str_library_stutter.md`).
+/// - When a class's libraries do not fit together ([`StratumEvidence::check_libraries`]), or two
+///   classes with reads share a motif length and a repeat count. Two classes at one repeat count
+///   where one has no reads do not panic: each comes back, the one without reads refused.
+#[must_use]
+pub fn fit_repeat_tracts(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    config: &PenalisedFitConfig,
+) -> Vec<StratumOutcome> {
+    for evidence in strata {
+        assert_eq!(
+            evidence.groups, 1,
+            "period {} at {} repeats: the evidence declares {} slippage groups, and the \
+             penalised fit fits one stutter for every library; stutter per slippage group is not \
+             built (str_library_stutter.md)",
+            evidence.stratum.period, evidence.stratum.reference_repeats, evidence.groups
+        );
+        evidence.check_libraries();
+    }
+    let mut classes_of_each_period: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    for (index, evidence) in strata.iter().enumerate() {
+        classes_of_each_period
+            .entry(evidence.stratum.period)
+            .or_default()
+            .push(index);
+    }
+    let mut outcomes: Vec<Option<StratumOutcome>> = vec![None; strata.len()];
+    for indices in classes_of_each_period.values() {
+        let classes: Vec<&StratumEvidence> = indices.iter().map(|&index| &strata[index]).collect();
+        let PenalisedPeriodFit {
+            classes: fitted,
+            curves,
+            ..
+        } = fit_one_period(&classes, homozygote_excess, config);
+        for ((&index, evidence), fitted) in indices.iter().zip(&classes).zip(fitted) {
+            outcomes[index] = Some(outcome_of_a_class(
+                evidence,
+                fitted,
+                curves.as_ref(),
+                config.standard_errors,
+            ));
+        }
+    }
+    outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("every class is in its motif length's group"))
+        .collect()
+}
+
+/// **One class's [`StratumOutcome`], from what its motif length's fit returned for it.**
+///
+/// `fitted` is `None` for a class with no reads at any locus, which is refused. `curves` are the
+/// motif length's, `None` only when no class of it had reads. `standard_errors` says whether the
+/// fit was asked for errors: when it was not, the outcome carries none
+/// ([`StratumFit::standard_errors`] is `None`); when it was, every number has an error or a reason
+/// for having none ([`errors_of_a_class`]).
+fn outcome_of_a_class(
+    evidence: &StratumEvidence,
+    fitted: Option<PenalisedClass>,
+    curves: Option<&SmoothCurves>,
+    standard_errors: bool,
+) -> StratumOutcome {
+    let Some(fitted) = fitted else {
+        return StratumOutcome::Refused {
+            stratum: evidence.stratum,
+            tracts: evidence.tracts_with_reads(),
+            reason: StratumRefusal::NoSpanningReads,
+        };
+    };
+    let curves = curves.expect(
+        "a fitted class has curves: its motif length's fit returns no curves only when no class of \
+         it had reads, and then it fits no class",
+    );
+    let repeats = evidence.stratum.reference_repeats;
+    let point_on = |curve: &ParameterCurve| PenalisedPoint {
+        strength: curve.smoothing,
+        eased_here: curve.eased_at.contains(&repeats),
+    };
+    let share_on = |curve: &ParameterCurve| ShareProvenance {
+        source: ShareSource::PenalisedCurve(point_on(curve)),
+        curve: None,
+        reach: Some(CurveReach::Inside),
+    };
+    let concentration = fitted
+        .concentration
+        .filter(|estimate| concentration_stopped_inside_its_search(*estimate));
+    let loci_with_reads = evidence.tracts_with_reads();
+    let reads_crossing = evidence.spanning_reads();
+    // The class's own reads that slipped, from the fit's expected counts, not the curve's level
+    // times the reads: for a thin class that level is mostly the neighbours'.
+    let slipped_reads = fitted.expected_slipped_reads;
+    let standard_errors =
+        standard_errors.then(|| errors_of_a_class(&fitted, concentration, loci_with_reads));
+    StratumOutcome::Fitted(Box::new(StratumFit {
+        stratum: evidence.stratum,
+        slippage: vec![Some(fitted.slippage)],
+        allele_length_variation: fitted.allele_length_variation,
+        concentration,
+        climb: None,
+        samples_fitted_on: None,
+        tracts_of_its_own: loci_with_reads,
+        reads_crossing,
+        level_provenance: vec![Some(LevelProvenance {
+            source: LevelSource::PenalisedCurve(point_on(&curves.level)),
+            curve: None,
+            reach: Some(CurveReach::Inside),
+            slipped_reads,
+        })],
+        shares_provenance: vec![Some(SharesProvenance {
+            slipped_reads,
+            shorter_share: share_on(&curves.shorter_share),
+            fall_off: share_on(&curves.fall_off),
+        })],
+        standard_errors,
+    }))
+}
+
+/// **Every standard error of one fitted class as the rest of the caller reads it**, or why a
+/// number has none (arch `str_penalised_fit.md` §1.4). Each number is judged by the first rule
+/// that applies:
+///
+/// | case | error |
+/// |---|---|
+/// | the concentration, where `concentration` is `None` | [`StratumError::NotPlaced`] |
+/// | any number of a class with fewer than [`LOCI_FOR_AN_ERROR`] loci with reads | [`StratumError::TooFewLoci`] |
+/// | a share whose expected count of loci, share × loci with reads, is below [`LOCI_FOR_A_SHARE_ERROR`] | [`StratumError::TooFewLoci`] |
+/// | the fit gave no error, or one that is zero or not finite | [`StratumError::NotPlaced`] |
+/// | an error above [`NOT_PLACED`] on the scale the number is fitted on | [`StratumError::NotPlaced`] |
+/// | otherwise | [`StratumError::Estimated`] |
+///
+/// **The scale a number is fitted on** is the logit for the three stutter numbers and the
+/// shares, so the error is divided by `value × (1 − value)`, and the log for the concentration, so
+/// it is divided by the concentration. **No error is ever `Estimated(0)`**: the fit sets a
+/// negative variance to zero, and a zero error is not placed.
+///
+/// `concentration` is the class's reported concentration, already `None` where it stopped at an
+/// end of its search; the fit's own error beside an absent concentration is ignored. A class with
+/// no errors from the fit (the motif length's covariance could not be inverted) gets every number
+/// `NotPlaced`, the withheld ones aside.
+fn errors_of_a_class(
+    fitted: &PenalisedClass,
+    concentration: Option<f64>,
+    loci_with_reads: usize,
+) -> StratumErrors {
+    let none = PenalisedClassErrors::default();
+    let errors = fitted.errors.as_ref().unwrap_or(&none);
+    let too_few_loci = loci_with_reads < LOCI_FOR_AN_ERROR;
+    let of_a_probability = |error: Option<f64>, value: f64| {
+        if too_few_loci {
+            StratumError::TooFewLoci
+        } else {
+            an_error_of(error, value * (1.0 - value))
+        }
+    };
+    let slippage = fitted.slippage;
+    StratumErrors {
+        slippage: vec![Some(SlippageErrors {
+            level: of_a_probability(errors.level, slippage.level),
+            shorter_share: of_a_probability(errors.shorter_share, slippage.shorter_share),
+            fall_off: of_a_probability(errors.fall_off, slippage.fall_off),
+        })],
+        allele_length_variation: fitted
+            .allele_length_variation
+            .iter()
+            .enumerate()
+            .map(|(allele, &share)| {
+                if share * (loci_with_reads as f64) < LOCI_FOR_A_SHARE_ERROR {
+                    StratumError::TooFewLoci
+                } else {
+                    of_a_probability(errors.allele_length_variation.get(allele).copied(), share)
+                }
+            })
+            .collect(),
+        concentration: match concentration {
+            None => StratumError::NotPlaced,
+            Some(_) if too_few_loci => StratumError::TooFewLoci,
+            Some(concentration) => an_error_of(errors.concentration, concentration),
+        },
+    }
+}
+
+/// **One number's error, `error` on the number's own scale, judged on the scale it is fitted
+/// on**: `error / slope` is its size there, `slope` being how fast the number moves with that
+/// scale. [`StratumError::Estimated`] only for a positive, finite error whose size on the fitted
+/// scale is at most [`NOT_PLACED`]; [`StratumError::NotPlaced`] for anything else, an absent error
+/// included.
+fn an_error_of(error: Option<f64>, slope: f64) -> StratumError {
+    match error {
+        Some(error) if error.is_finite() && error > 0.0 && error / slope <= NOT_PLACED => {
+            StratumError::Estimated(error)
+        }
+        _ => StratumError::NotPlaced,
+    }
+}
+
 /// The ln-spread grid a class's pairwise likelihood is tabulated on, as the logit of the
 /// between-locus share (`−ln spread`): 57 points from a spread of 10⁴ to 10⁻³.
 fn between_share_grid() -> Vec<f64> {
-    let (low, high) = (-float::ln(1e4), -float::ln(1e-3));
+    let (low, high) = (
+        -float::ln(CONCENTRATION_SEARCH.1),
+        -float::ln(CONCENTRATION_SEARCH.0),
+    );
     (0..57)
         .map(|step| low + (high - low) * f64::from(step) / 56.0)
         .collect()
@@ -553,7 +820,7 @@ struct Period {
 impl Period {
     /// The grid over the classes with reads, every number at its start; `None` when no class has
     /// reads.
-    fn new(classes: &[StratumEvidence], fit: &PenalisedFitConfig) -> Option<Self> {
+    fn new(classes: &[&StratumEvidence], fit: &PenalisedFitConfig) -> Option<Self> {
         let with_reads: Vec<usize> = (0..classes.len())
             .filter(|&index| classes[index].rows_with_reads() > 0)
             .collect();
@@ -616,7 +883,7 @@ impl Period {
     /// rounds run out. With `spread_held`, the concentration stays where it is.
     fn count(
         &mut self,
-        classes: &[StratumEvidence],
+        classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
         fit: &PenalisedFitConfig,
         spread_held: bool,
@@ -668,7 +935,7 @@ impl Period {
                     }
                     class.map(|index| {
                         expected_counts(
-                            &classes[index],
+                            classes[index],
                             self.slippage[point],
                             &self.shares[point],
                             self.concentration[point],
@@ -773,8 +1040,11 @@ impl Period {
                     fall_off: logistic(fall_off[point]).clamp(0.0, 0.99),
                 };
                 let new_concentration = between.as_ref().map_or(self.concentration[point], |b| {
-                    let share = logistic(b[point]).clamp(1.0 / (1.0 + 1e4), 1.0 / (1.0 + 1e-3));
-                    (1.0 / share - 1.0).clamp(1e-3, 1e4)
+                    let share = logistic(b[point]).clamp(
+                        1.0 / (1.0 + CONCENTRATION_SEARCH.1),
+                        1.0 / (1.0 + CONCENTRATION_SEARCH.0),
+                    );
+                    (1.0 / share - 1.0).clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1)
                 });
                 let new_shares = softmax_with_reference(
                     &share_logits[point * (alleles - 1)..(point + 1) * (alleles - 1)],
@@ -828,7 +1098,7 @@ impl Period {
     /// allele draw a class adds is left out of `H` and `P`.
     fn standard_errors(
         &self,
-        classes: &[StratumEvidence],
+        classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
         allele_span: i32,
     ) -> Vec<Option<PenalisedClassErrors>> {
@@ -860,7 +1130,8 @@ impl Period {
                 fall_off: logistic(theta[2]).clamp(0.0, 0.99),
             };
             let concentration = if f_in_counting {
-                (1.0 / logistic(theta[3]) - 1.0).clamp(1e-3, 1e4)
+                (1.0 / logistic(theta[3]) - 1.0)
+                    .clamp(CONCENTRATION_SEARCH.0, CONCENTRATION_SEARCH.1)
             } else {
                 self.concentration[point]
             };
@@ -914,7 +1185,7 @@ impl Period {
             .iter()
             .enumerate()
             .map(|(point, class)| {
-                let evidence = &classes[(*class)?];
+                let evidence = classes[(*class)?];
                 let theta = theta_at(point);
                 let distinct = DistinctRows::of(evidence, homozygote_excess);
                 let mut curvature = vec![0.0; width * width];
@@ -1027,7 +1298,7 @@ impl Period {
                 for (point, class) in self.class_at_point.iter().enumerate() {
                     let Some(index) = class else { continue };
                     let pairs = SamplePairs::of(
-                        &classes[*index],
+                        classes[*index],
                         self.slippage[point],
                         &self.shares[point],
                         homozygote_excess,
@@ -1124,7 +1395,7 @@ impl Period {
     /// class's current stutter and shares; `None` when no class has a locus with two samples.
     fn pair_tables(
         &self,
-        classes: &[StratumEvidence],
+        classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
         allele_span: i32,
     ) -> Option<CurveData> {
@@ -1138,7 +1409,7 @@ impl Period {
                     return Vec::new();
                 };
                 let pairs = SamplePairs::of(
-                    &classes[*index],
+                    classes[*index],
                     self.slippage[point],
                     &self.shares[point],
                     homozygote_excess,
@@ -1160,7 +1431,7 @@ impl Period {
 
     fn into_fit(
         self,
-        classes: &[StratumEvidence],
+        classes: &[&StratumEvidence],
         mut errors: Vec<Option<PenalisedClassErrors>>,
     ) -> PenalisedPeriodFit {
         let alleles = self.alleles;
@@ -1185,6 +1456,9 @@ impl Period {
                         .between_locus_share_measurable
                         .then(|| 1.0 / (1.0 + self.concentration[point])),
                     working_concentration: self.concentration[point],
+                    expected_slipped_reads: self.last_counts[point]
+                        .as_ref()
+                        .map(|counts| counts.slipped),
                     errors: errors[point].take(),
                 })
             })
@@ -1211,7 +1485,10 @@ impl Period {
             }),
             between_locus_share: self.between_locus_share_measurable.then(|| {
                 scalar_curve(&self.between_curve, &|value| {
-                    logistic(value).clamp(1.0 / (1.0 + 1e4), 1.0 / (1.0 + 1e-3))
+                    logistic(value).clamp(
+                        1.0 / (1.0 + CONCENTRATION_SEARCH.1),
+                        1.0 / (1.0 + CONCENTRATION_SEARCH.0),
+                    )
                 })
             }),
             allele_length_variation: (0..alleles)
@@ -2370,6 +2647,598 @@ mod tests {
             standard_errors: true,
         };
         assert_eq!(production, spec);
+    }
+
+    /// **A class drawn at a known stutter**: one-base or two-base runs, `loci` loci of `samples`
+    /// samples at `depth` reads each, the three-length spectrum every drawn test here uses, and a
+    /// slip rate rising with the repeat count. With `loci` of 0 the class has no reads at all.
+    fn a_drawn_class(
+        period: u8,
+        repeats: u64,
+        loci: usize,
+        samples: usize,
+        depth: u32,
+        seed: u64,
+    ) -> StratumEvidence {
+        let truth = Slippage {
+            level: 0.01 * (repeats as f64 - 5.0),
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let mut evidence = draw_stratum(
+            truth,
+            &spectrum_of(3),
+            2.0,
+            0.3,
+            loci,
+            samples,
+            depth,
+            1,
+            seed,
+        );
+        evidence.stratum = Stratum {
+            period,
+            reference_repeats: repeats,
+        };
+        evidence
+    }
+
+    /// The fit `fit_repeat_tracts` runs in these tests: production's settings at a window of ±2,
+    /// so a test takes seconds.
+    fn a_narrow_production_fit() -> PenalisedFitConfig {
+        PenalisedFitConfig::production().with_allele_span(2)
+    }
+
+    /// Every error a class carries, slippage, shares and concentration together.
+    fn every_error_of(errors: &StratumErrors) -> Vec<StratumError> {
+        let mut every: Vec<StratumError> = errors
+            .slippage
+            .iter()
+            .flatten()
+            .flat_map(|group| [group.level, group.shorter_share, group.fall_off])
+            .collect();
+        every.extend(&errors.allele_length_variation);
+        every.push(errors.concentration);
+        every
+    }
+
+    /// **Every class comes back in the order it was handed in**, fitted when it has reads and
+    /// refused when it has none, never derived, and each fitted class's numbers are the points of
+    /// its own motif length's fit.
+    ///
+    /// Six classes of three motif lengths, interleaved: one-base runs at 8, 10 (no reads) and 9
+    /// repeats; two-base runs at 9 and 10; three-base runs at 7, with no reads, the only class of
+    /// its motif length. Twelve samples at 5 reads, 30 loci a class.
+    #[test]
+    fn every_class_comes_back_in_order_fitted_with_reads_and_refused_without() {
+        let strata = vec![
+            a_drawn_class(2, 9, 30, 12, 5, 11),
+            a_drawn_class(1, 8, 30, 12, 5, 12),
+            a_drawn_class(1, 10, 0, 12, 5, 13),
+            a_drawn_class(3, 7, 0, 12, 5, 14),
+            a_drawn_class(2, 10, 30, 12, 5, 15),
+            a_drawn_class(1, 9, 30, 12, 5, 16),
+        ];
+        let excess = [0.3; 12];
+        let config = a_narrow_production_fit();
+        let outcomes = fit_repeat_tracts(&strata, &excess, &config);
+
+        assert_eq!(outcomes.len(), strata.len());
+        for (outcome, evidence) in outcomes.iter().zip(&strata) {
+            assert_eq!(outcome.stratum(), evidence.stratum, "in input order");
+            match outcome {
+                StratumOutcome::Refused {
+                    tracts,
+                    reason: StratumRefusal::NoSpanningReads,
+                    ..
+                } => {
+                    assert_eq!(evidence.rows_with_reads(), 0, "{:?}", evidence.stratum);
+                    assert_eq!(*tracts, 0);
+                }
+                StratumOutcome::Fitted(fit) => {
+                    assert!(evidence.rows_with_reads() > 0);
+                    assert_eq!(fit.climb, None);
+                    assert_eq!(fit.samples_fitted_on, None);
+                    assert_eq!(fit.slippage.len(), 1, "one slippage group");
+                    assert_eq!(fit.tracts_of_its_own, 30);
+                    assert_eq!(fit.reads_crossing, evidence.spanning_reads());
+                    let level = fit.level_provenance[0].expect("group 0 has numbers");
+                    assert!(matches!(level.source, LevelSource::PenalisedCurve(_)));
+                    assert_eq!(level.curve, None);
+                    assert_eq!(level.reach, Some(CurveReach::Inside));
+                    let slipped = level
+                        .slipped_reads
+                        .expect("a fitted class counted its reads");
+                    assert!(
+                        (0.0..=evidence.spanning_reads() as f64).contains(&slipped),
+                        "{slipped}"
+                    );
+                    let shares = fit.shares_provenance[0].expect("group 0 has numbers");
+                    assert_eq!(shares.slipped_reads, Some(slipped));
+                    for share in [shares.shorter_share, shares.fall_off] {
+                        assert!(matches!(share.source, ShareSource::PenalisedCurve(_)));
+                        assert_eq!(share.curve, None);
+                        assert_eq!(share.reach, Some(CurveReach::Inside));
+                    }
+                    let errors = fit
+                        .standard_errors
+                        .as_ref()
+                        .expect("production asks for errors");
+                    for error in every_error_of(errors) {
+                        if let StratumError::Estimated(value) = error {
+                            assert!(value.is_finite() && value > 0.0, "{error:?}");
+                        }
+                    }
+                }
+                StratumOutcome::Derived(_) => panic!("the penalised fit derives no class"),
+                StratumOutcome::Refused { reason, .. } => {
+                    panic!("refused only for no spanning reads, not {reason:?}")
+                }
+            }
+        }
+        assert!(matches!(outcomes[1], StratumOutcome::Fitted(_)));
+        assert!(matches!(outcomes[2], StratumOutcome::Refused { .. }));
+        assert!(matches!(outcomes[3], StratumOutcome::Refused { .. }));
+
+        // The one-base classes, fitted on their own in input order, give the same numbers.
+        let one_base = [strata[1].clone(), strata[2].clone(), strata[5].clone()];
+        let alone = fit_period_by_penalised_counting(&one_base, &excess, &config);
+        for (outcome, fitted) in [&outcomes[1], &outcomes[2], &outcomes[5]]
+            .into_iter()
+            .zip(&alone.classes)
+        {
+            match (outcome, fitted) {
+                (StratumOutcome::Fitted(fit), Some(fitted)) => {
+                    assert_eq!(fit.slippage[0], Some(fitted.slippage));
+                    assert_eq!(fit.allele_length_variation, fitted.allele_length_variation);
+                    let level = fit.level_provenance[0].expect("group 0 has numbers");
+                    assert_eq!(level.slipped_reads, fitted.expected_slipped_reads);
+                }
+                (StratumOutcome::Refused { .. }, None) => {}
+                other => panic!("the motif length's own fit disagrees: {other:?}"),
+            }
+        }
+    }
+
+    /// **At one sample no class has a concentration**, and its error says it was not placed: no
+    /// locus holds two samples, so how much loci differ cannot be told apart from the sample's
+    /// own inbreeding (spec §2.5). Three one-base classes of 40 loci at 10 reads.
+    #[test]
+    fn at_one_sample_no_class_has_a_concentration() {
+        let strata: Vec<StratumEvidence> = (8..=10)
+            .map(|repeats| a_drawn_class(1, repeats, 40, 1, 10, 20 + repeats))
+            .collect();
+        let outcomes = fit_repeat_tracts(&strata, &[0.3], &a_narrow_production_fit());
+        for outcome in &outcomes {
+            let StratumOutcome::Fitted(fit) = outcome else {
+                panic!("every class has reads: {outcome:?}");
+            };
+            assert_eq!(fit.concentration, None);
+            let errors = fit
+                .standard_errors
+                .as_ref()
+                .expect("production asks for errors");
+            assert_eq!(errors.concentration, StratumError::NotPlaced);
+            for error in every_error_of(errors) {
+                assert_ne!(error, StratumError::Estimated(0.0));
+            }
+        }
+    }
+
+    /// **A class with fewer than 8 loci with reads has every error withheld, and a rare share has
+    /// its own withheld** (spec §2.6). Two-base runs at 8, 9 and 10 repeats with 40, 5 and 40
+    /// loci, 12 samples at 8 reads. The thin class's every number is `TooFewLoci` (its
+    /// concentration `NotPlaced` instead if the fit could not place it); on the rich classes a
+    /// share below 3 loci's worth, 3/40, is `TooFewLoci` and a larger one is not, and some number
+    /// carries an error.
+    #[test]
+    fn a_thin_class_and_a_rare_share_have_their_errors_withheld() {
+        let strata = vec![
+            a_drawn_class(2, 8, 40, 12, 8, 31),
+            a_drawn_class(2, 9, 5, 12, 8, 32),
+            a_drawn_class(2, 10, 40, 12, 8, 33),
+        ];
+        let outcomes = fit_repeat_tracts(&strata, &[0.3; 12], &a_narrow_production_fit());
+        let fits: Vec<&StratumFit> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                StratumOutcome::Fitted(fit) => fit.as_ref(),
+                other => panic!("every class has reads: {other:?}"),
+            })
+            .collect();
+
+        let thin = fits[1];
+        assert_eq!(thin.tracts_of_its_own, 5);
+        let errors = thin
+            .standard_errors
+            .as_ref()
+            .expect("production asks for errors");
+        let group = errors.slippage[0].expect("group 0 has numbers");
+        for error in [group.level, group.shorter_share, group.fall_off] {
+            assert_eq!(error, StratumError::TooFewLoci);
+        }
+        assert!(
+            errors
+                .allele_length_variation
+                .iter()
+                .all(|error| *error == StratumError::TooFewLoci)
+        );
+        let expected_concentration_error = if thin.concentration.is_some() {
+            StratumError::TooFewLoci
+        } else {
+            StratumError::NotPlaced
+        };
+        assert_eq!(errors.concentration, expected_concentration_error);
+
+        let mut rare_shares = 0;
+        for rich in [fits[0], fits[2]] {
+            let errors = rich
+                .standard_errors
+                .as_ref()
+                .expect("production asks for errors");
+            assert!(errors.any(), "a rich class has some error: {errors:?}");
+            for (share, error) in rich
+                .allele_length_variation
+                .iter()
+                .zip(&errors.allele_length_variation)
+            {
+                if share * 40.0 < LOCI_FOR_A_SHARE_ERROR {
+                    rare_shares += 1;
+                    assert_eq!(*error, StratumError::TooFewLoci, "share {share}");
+                } else {
+                    assert_ne!(*error, StratumError::TooFewLoci, "share {share}");
+                }
+            }
+        }
+        assert!(rare_shares > 0, "the window's outer lengths are rare");
+    }
+
+    /// **A class's slipped reads are the fit's expected count, not the level times the reads.**
+    /// One-base runs at 8 to 12 repeats, 40 loci each, drawn at a slip rate of 0.01 per repeat
+    /// above 5, except the class at 10 repeats: 3 loci, drawn at 0.08 where its neighbours' line
+    /// passes through 0.05. Twelve samples at 8 reads.
+    ///
+    /// - On a well-measured class (9 repeats) the field is the expected count at the returned
+    ///   numbers, to within the one round's lag the fit's tolerance allows.
+    /// - On the thin class the penalised level is pulled towards its neighbours, while the
+    ///   expected count stays with the class's own reads, so the two numbers differ.
+    #[test]
+    fn slipped_reads_are_the_fits_expected_count() {
+        let mut strata: Vec<StratumEvidence> = (8..=12)
+            .map(|repeats| a_drawn_class(1, repeats, 40, 12, 8, 40 + repeats))
+            .collect();
+        let mut thin = draw_stratum(
+            Slippage {
+                level: 0.08,
+                shorter_share: 0.8,
+                fall_off: 0.25,
+            },
+            &spectrum_of(3),
+            2.0,
+            0.3,
+            3,
+            12,
+            8,
+            1,
+            61,
+        );
+        thin.stratum = Stratum {
+            period: 1,
+            reference_repeats: 10,
+        };
+        strata[2] = thin;
+        let excess = [0.3; 12];
+        let config = a_narrow_production_fit();
+        let outcomes = fit_repeat_tracts(&strata, &excess, &config);
+        let fits: Vec<&StratumFit> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                StratumOutcome::Fitted(fit) => fit.as_ref(),
+                other => panic!("every class has reads: {other:?}"),
+            })
+            .collect();
+        let slipped_reads_of = |fit: &StratumFit| {
+            let level = fit.level_provenance[0].expect("group 0 has numbers");
+            let shares = fit.shares_provenance[0].expect("group 0 has numbers");
+            assert_eq!(level.slipped_reads, shares.slipped_reads);
+            level
+                .slipped_reads
+                .expect("a fitted class counted its reads")
+        };
+
+        let rich = fits[1];
+        let counts = expected_counts(
+            &strata[1],
+            rich.slippage[0].expect("group 0 has numbers"),
+            &rich.allele_length_variation,
+            rich.concentration
+                .expect("twelve samples place the concentration"),
+            &excess,
+            config.allele_span,
+        );
+        let field = slipped_reads_of(rich);
+        eprintln!(
+            "rich class: expected slipped reads {field:.4}, recounted at the returned numbers {:.4}",
+            counts.slipped
+        );
+        assert!(
+            (field - counts.slipped).abs() <= 1e-3 * counts.slipped,
+            "field {field}, expected count at the returned numbers {}",
+            counts.slipped
+        );
+
+        let thin = fits[2];
+        let field = slipped_reads_of(thin);
+        let level = thin.slippage[0].expect("group 0 has numbers").level;
+        let level_times_reads = level * thin.reads_crossing as f64;
+        eprintln!(
+            "thin class: {} reads crossing, level {level:.4}; expected slipped reads {field:.2}, \
+             level × reads crossing {level_times_reads:.2}",
+            thin.reads_crossing
+        );
+        assert!(
+            field > 1.2 * level_times_reads,
+            "the class's own reads slipped more than the curve's level says: {field} against \
+             {level_times_reads}"
+        );
+    }
+
+    /// A class as the fit returns it, for the conversion's own tests: 5% slip rate, every error
+    /// given, five allele lengths.
+    fn a_fitted_class(concentration: Option<f64>) -> PenalisedClass {
+        PenalisedClass {
+            stratum: Stratum {
+                period: 2,
+                reference_repeats: 9,
+            },
+            slippage: Slippage {
+                level: 0.05,
+                shorter_share: 0.8,
+                fall_off: 0.25,
+            },
+            allele_length_variation: vec![0.01, 0.2, 0.5, 0.25, 0.04],
+            concentration,
+            between_locus_share: concentration.map(|c| 1.0 / (1.0 + c)),
+            working_concentration: concentration.unwrap_or(1.0),
+            expected_slipped_reads: Some(50.0),
+            errors: Some(PenalisedClassErrors {
+                level: Some(0.01),
+                shorter_share: Some(0.05),
+                fall_off: Some(0.03),
+                concentration: Some(0.5),
+                between_locus_share: Some(0.01),
+                allele_length_variation: vec![0.002, 0.03, 0.04, 0.03, 0.01],
+            }),
+        }
+    }
+
+    /// **The error mapping follows its table, rule by rule** (arch `str_penalised_fit.md` §1.4),
+    /// on a class built by hand.
+    #[test]
+    fn the_error_mapping_follows_its_table() {
+        use StratumError::{Estimated, NotPlaced, TooFewLoci};
+        // 100 loci: every error given is placed except the rarest share's (1% of 100 loci is 1
+        // locus's worth, under 3). The last share, 4% of 100 = 4 loci's worth, keeps its error.
+        let class = a_fitted_class(Some(2.0));
+        let errors = errors_of_a_class(&class, Some(2.0), 100);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: Estimated(0.01),
+                shorter_share: Estimated(0.05),
+                fall_off: Estimated(0.03),
+            })]
+        );
+        assert_eq!(
+            errors.allele_length_variation,
+            vec![
+                TooFewLoci,
+                Estimated(0.03),
+                Estimated(0.04),
+                Estimated(0.03),
+                Estimated(0.01)
+            ]
+        );
+        assert_eq!(errors.concentration, Estimated(0.5));
+
+        // Seven loci: every number withheld, the concentration too.
+        let errors = errors_of_a_class(&class, Some(2.0), 7);
+        assert!(every_error_of(&errors).iter().all(|e| *e == TooFewLoci));
+        // An absent concentration is not placed, before any other rule.
+        let errors = errors_of_a_class(&class, None, 7);
+        assert_eq!(errors.concentration, NotPlaced);
+        let errors = errors_of_a_class(&class, None, 100);
+        assert_eq!(errors.concentration, NotPlaced);
+
+        // Zero, not a number, infinite and absent errors are not placed; so is an error wider
+        // than 3 on the fitted scale: 0.2 on a slip rate of 5% is 0.2 / 0.0475 ≈ 4.2 in logit,
+        // and 7 on a concentration of 2 is 3.5 in log.
+        let mut bad = a_fitted_class(Some(2.0));
+        bad.errors = Some(PenalisedClassErrors {
+            level: Some(0.2),
+            shorter_share: Some(0.0),
+            fall_off: Some(f64::NAN),
+            concentration: Some(7.0),
+            between_locus_share: None,
+            allele_length_variation: vec![0.002, f64::INFINITY, 0.0],
+        });
+        let errors = errors_of_a_class(&bad, Some(2.0), 100);
+        assert!(
+            every_error_of(&errors)
+                .iter()
+                .all(|e| matches!(e, NotPlaced | TooFewLoci)),
+            "{errors:?}"
+        );
+        assert_eq!(errors.concentration, NotPlaced);
+        // Just inside: 0.14 on a slip rate of 5% is about 2.9 in logit.
+        bad.errors = Some(PenalisedClassErrors {
+            level: Some(0.14),
+            ..PenalisedClassErrors::default()
+        });
+        let errors = errors_of_a_class(&bad, Some(2.0), 100);
+        assert_eq!(
+            errors.slippage[0].map(|group| group.level),
+            Some(Estimated(0.14))
+        );
+
+        // A class the fit gave no errors at all: not placed, the withheld aside.
+        let mut none = a_fitted_class(Some(2.0));
+        none.errors = None;
+        let errors = errors_of_a_class(&none, Some(2.0), 100);
+        assert_eq!(errors.allele_length_variation[0], TooFewLoci);
+        assert!(
+            every_error_of(&errors)
+                .iter()
+                .all(|e| matches!(e, NotPlaced | TooFewLoci))
+        );
+    }
+
+    /// One curve over 8 to 10 repeats, at `strength`, eased at `eased_at`.
+    fn a_curve(strength: f64, eased_at: Vec<u64>) -> ParameterCurve {
+        ParameterCurve {
+            first_repeats: 8,
+            values: vec![0.05; 3],
+            smoothing: strength,
+            eased_at,
+        }
+    }
+
+    /// **A concentration at an end of its search is reported absent, with its error not
+    /// placed**, and one inside is kept; and each number's point records its own curve's strength
+    /// and whether that curve was eased at the class's repeat count (9).
+    #[test]
+    fn a_concentration_at_an_end_of_its_search_is_absent() {
+        let curves = SmoothCurves {
+            level: a_curve(3.0, vec![9]),
+            shorter_share: a_curve(40.0, Vec::new()),
+            fall_off: a_curve(500.0, vec![9]),
+            between_locus_share: Some(a_curve(7.0, Vec::new())),
+            allele_length_variation: Vec::new(),
+        };
+        let evidence = a_drawn_class(2, 9, 20, 4, 5, 41);
+        for (estimate, kept) in [
+            (1e-3, false),
+            (1.01e-3, false),
+            (1e4, false),
+            (9_901.0, false),
+            (2.0, true),
+        ] {
+            let outcome = outcome_of_a_class(
+                &evidence,
+                Some(a_fitted_class(Some(estimate))),
+                Some(&curves),
+                true,
+            );
+            let StratumOutcome::Fitted(fit) = outcome else {
+                panic!("a fitted class is fitted");
+            };
+            let errors = fit.standard_errors.expect("errors were asked for");
+            if kept {
+                assert_eq!(fit.concentration, Some(estimate));
+                assert_eq!(errors.concentration, StratumError::Estimated(0.5));
+            } else {
+                assert_eq!(fit.concentration, None, "{estimate}");
+                assert_eq!(errors.concentration, StratumError::NotPlaced, "{estimate}");
+            }
+            let level = fit.level_provenance[0].expect("one group");
+            assert_eq!(
+                level.source,
+                LevelSource::PenalisedCurve(PenalisedPoint {
+                    strength: 3.0,
+                    eased_here: true
+                })
+            );
+            let shares = fit.shares_provenance[0].expect("one group");
+            assert_eq!(
+                shares.shorter_share.source,
+                ShareSource::PenalisedCurve(PenalisedPoint {
+                    strength: 40.0,
+                    eased_here: false
+                })
+            );
+            assert_eq!(
+                shares.fall_off.source,
+                ShareSource::PenalisedCurve(PenalisedPoint {
+                    strength: 500.0,
+                    eased_here: true
+                })
+            );
+        }
+        // A fit asked for no errors carries none.
+        let StratumOutcome::Fitted(fit) = outcome_of_a_class(
+            &evidence,
+            Some(a_fitted_class(Some(2.0))),
+            Some(&curves),
+            false,
+        ) else {
+            panic!("a fitted class is fitted");
+        };
+        assert_eq!(fit.standard_errors, None);
+    }
+
+    /// **A drawn cohort whose loci all carry the same spread of lengths puts F at the bottom of
+    /// its search**, and the class reports no concentration: 40 samples at 20 reads over 40 loci
+    /// drawn at a concentration of 10⁶, so the pairs of samples at a locus share nothing beyond
+    /// the motif length's spectrum.
+    #[test]
+    fn a_drawn_cohort_with_f_at_the_end_of_its_search_reports_none() {
+        let strata: Vec<StratumEvidence> = (8..=9)
+            .map(|repeats| {
+                let truth = Slippage {
+                    level: 0.03,
+                    shorter_share: 0.8,
+                    fall_off: 0.25,
+                };
+                let mut evidence = draw_stratum(
+                    truth,
+                    &spectrum_of(3),
+                    1e6,
+                    0.0,
+                    40,
+                    40,
+                    20,
+                    1,
+                    50 + repeats,
+                );
+                evidence.stratum = Stratum {
+                    period: 1,
+                    reference_repeats: repeats,
+                };
+                evidence
+            })
+            .collect();
+        let config = a_narrow_production_fit();
+        // The fit itself stopped at the end: the class's estimate is the search's top.
+        let raw = fit_period_by_penalised_counting(&strata, &[0.0; 40], &config);
+        for fitted in &raw.classes {
+            let estimate = fitted
+                .as_ref()
+                .and_then(|class| class.concentration)
+                .expect("every locus holds two samples, so the fit reports an estimate");
+            assert!(estimate >= 1e4 / 1.01, "{estimate}");
+        }
+        let outcomes = fit_repeat_tracts(&strata, &[0.0; 40], &config);
+        for outcome in &outcomes {
+            let StratumOutcome::Fitted(fit) = outcome else {
+                panic!("every class has reads");
+            };
+            assert_eq!(fit.concentration, None);
+            let errors = fit
+                .standard_errors
+                .as_ref()
+                .expect("production asks for errors");
+            assert_eq!(errors.concentration, StratumError::NotPlaced);
+        }
+    }
+
+    /// **Evidence that declares two slippage groups is refused**, by name: the fit has one
+    /// stutter for every library.
+    #[test]
+    #[should_panic(expected = "declares 2 slippage groups")]
+    fn evidence_with_two_slippage_groups_is_refused() {
+        let mut evidence = a_drawn_class(1, 8, 5, 2, 3, 61);
+        evidence.groups = 2;
+        let _ = fit_repeat_tracts(&[evidence], &[0.3; 2], &a_narrow_production_fit());
     }
 
     /// **Setting the window rescales the first floor to one draw a class**, and at production's

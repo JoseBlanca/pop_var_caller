@@ -3363,6 +3363,167 @@ mod tests {
         }
     }
 
+    /// **What the penalised fit returns for a drawn cohort of `samples` samples at 6 reads**,
+    /// production's settings at a window of ±2: two-base runs at 6, 7 and 8 repeats on 30, 5 and
+    /// 30 loci (the middle one too thin for any error), one-base runs at 8 repeats with no reads
+    /// and at 9 and 10 on 30 loci, and three-base runs at 9 and 10 on 30 loci drawn so alike from
+    /// locus to locus that F stops at the end of its search.
+    fn the_penalised_fits_outcomes_on_a_drawn_cohort(samples: usize) -> Vec<StratumOutcome> {
+        use crate::parameter_estimation::joint::ssr_fit::StratumEvidence;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{
+            draw_stratum, spectrum_of,
+        };
+        use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
+            PenalisedFitConfig, fit_repeat_tracts,
+        };
+        let class = |period: u8, repeats: u64, loci: usize, concentration: f64| {
+            let truth = Slippage {
+                level: 0.01 * repeats as f64,
+                shorter_share: 0.8,
+                fall_off: 0.25,
+            };
+            let seed = u64::from(period) * 100 + repeats;
+            let mut evidence = draw_stratum(
+                truth,
+                &spectrum_of(3),
+                concentration,
+                0.3,
+                loci,
+                samples,
+                6,
+                1,
+                seed,
+            );
+            evidence.stratum = Stratum {
+                period,
+                reference_repeats: repeats,
+            };
+            evidence
+        };
+        let strata: Vec<StratumEvidence> = vec![
+            class(2, 6, 30, 2.0),
+            class(2, 7, 5, 2.0),
+            class(2, 8, 30, 2.0),
+            class(1, 8, 0, 2.0),
+            class(1, 9, 30, 2.0),
+            class(1, 10, 30, 2.0),
+            class(3, 9, 30, 1e6),
+            class(3, 10, 30, 1e6),
+        ];
+        fit_repeat_tracts(
+            &strata,
+            &vec![0.3; samples],
+            &PenalisedFitConfig::production().with_allele_span(2),
+        )
+    }
+
+    /// **The penalised fit's own outcomes survive the whole trip and pass the file's checks**, on
+    /// a drawn cohort of twelve samples: classes with an F, without one (at the end of its
+    /// search), too thin for any error, and with no reads, through `StratumFits::over`, the writer,
+    /// the validator `estimate-parameters` runs before writing, the reader, and the writer again
+    /// byte for byte.
+    #[test]
+    fn the_penalised_fits_own_outcomes_survive_the_whole_trip() {
+        use crate::cli::estimate_parameters::a_file_the_next_run_can_read;
+        let outcomes = the_penalised_fits_outcomes_on_a_drawn_cohort(12);
+        let concentrations: Vec<Option<f64>> = outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                StratumOutcome::Fitted(fit) => Some(fit.concentration),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(concentrations.len(), 7, "one class has no reads");
+        assert!(concentrations.iter().any(Option::is_some));
+        assert!(concentrations.iter().any(Option::is_none));
+        let read_groups = a_runs_read_groups();
+        let run = a_run_with(
+            &read_groups,
+            &the_runs_contamination(),
+            a_declared_batching(&read_groups),
+            StratumFits::over(
+                &outcomes,
+                BTreeMap::from([
+                    (ReadGroupId(0), 0),
+                    (ReadGroupId(1), 0),
+                    (ReadGroupId(2), 0),
+                ]),
+            ),
+            the_runs_substitution_rates(),
+        );
+        a_file_the_next_run_can_read(projected(&run, &read_groups))
+            .unwrap_or_else(|error| panic!("estimate-parameters writes the file: {error}"));
+        let file = after_the_whole_trip(
+            &run,
+            &read_groups,
+            &the_runs_fitted_rates(),
+            &the_runs_inbreeding(),
+        );
+        let tracts = &file.repeat_tracts;
+        assert_eq!(tracts.slippage_by_stratum_and_group.len(), 7);
+        for row in &tracts.slippage_by_stratum_and_group {
+            assert!(matches!(
+                row.share_of_reads_that_slip_origin.smoothing,
+                LevelSmoothing::PenalisedCurve { .. }
+            ));
+        }
+        assert_eq!(
+            tracts.fallback_between_locus_share.warrant,
+            Warrant::FittedHere
+        );
+    }
+
+    /// **At one sample the penalised fit's own outcomes survive the whole trip too**: no class has
+    /// an F, and the fallback is the built-in F, marked `defaulted`.
+    #[test]
+    fn the_penalised_fits_own_outcomes_at_one_sample_survive_the_whole_trip() {
+        use crate::cli::estimate_parameters::a_file_the_next_run_can_read;
+        let outcomes = the_penalised_fits_outcomes_on_a_drawn_cohort(1);
+        for outcome in &outcomes {
+            if let StratumOutcome::Fitted(fit) = outcome {
+                assert_eq!(fit.concentration, None);
+            }
+        }
+        let read_groups = ReadGroups::of_lanes(&[("HWI.3", "TS-1", "lib3")]);
+        let rates = BTreeMap::from([(
+            ReadGroupId(0),
+            a_fitted_rate(0.004, Provenance::FittedHere, 812_344),
+        )]);
+        let inbreeding = vec![an_inbreeding_estimate(
+            0.42,
+            Provenance::FittedHere,
+            180_600_412,
+        )];
+        let run = RunParameters::assemble(
+            &rates,
+            &BTreeMap::from([(ReadGroupId(0), a_read_groups_minted_totals(0.008, 1_000))]),
+            &BTreeMap::from([(ReadGroupId(0), identified(0.031, 4_211, 90_233))]),
+            DeclaredBatches::all_together(&read_groups),
+            inbreeding.iter().map(|estimate| estimate.value).collect(),
+            a_seed(),
+            StratumFits::over(&outcomes, BTreeMap::from([(ReadGroupId(0), 0)])),
+            BTreeMap::new(),
+            diploid(),
+        );
+        a_file_the_next_run_can_read(ParametersFile::of_run(
+            &run,
+            &read_groups,
+            &the_counts_of(&run, &rates),
+            &inbreeding,
+            &A_REFERENCE,
+            a_census(),
+            &StrRepeatCriteria::default(),
+        ))
+        .unwrap_or_else(|error| panic!("estimate-parameters writes the file: {error}"));
+        let file = after_the_whole_trip(&run, &read_groups, &rates, &inbreeding);
+        assert!(
+            file.to_toml().contains(
+                "fallback_between_locus_share = { value = 0.5, warrant = \"defaulted\" }"
+            ),
+            "the fallback is the built-in F, defaulted"
+        );
+    }
+
     /// **A stratum with shares and no concentration is written with no F, and reads back so.**
     ///
     /// Through the whole writer and back through the reader into calling's tables: the stratum's
