@@ -371,6 +371,19 @@ pub struct ParameterCurve {
     /// **The repeat counts where the curve was let bend**: the middle repeat count of each bend
     /// whose penalty was eased below half its full weight because the counts insisted on it.
     pub eased_at: Vec<u64>,
+    /// **How many strengths tried while choosing this one could not be scored**: the curve's fit
+    /// there could not be factorised, even with a larger ridge, so its marginal likelihood is
+    /// unknown and the strength was never chosen. Counted over every search of the fit.
+    pub strengths_rejected: usize,
+    /// **How many searches found no strength that could be scored**, and so kept the strength
+    /// held before. When this is above zero, the strength reported may not be a maximum of
+    /// anything.
+    pub searches_without_a_strength: usize,
+    /// **How many fits at a strength no search chose could not be factorised**: a strength held
+    /// from an earlier round, fixed by the configuration, or kept when a search scored none. The
+    /// curve then keeps the values Newton's method had reached when it stopped, which need not be
+    /// the peak of the penalised objective.
+    pub unfactorised_fits_kept: usize,
 }
 
 impl ParameterCurve {
@@ -427,6 +440,45 @@ pub struct PenalisedPeriodFit {
     pub class_rounds_counted: usize,
     /// Time computing standard errors.
     pub error_seconds: f64,
+    /// **Which standard errors the fit could not determine**, because the curvature they come
+    /// from could not be inverted; `None` when nothing was left undetermined that way, or when no
+    /// errors were asked for. The classes' errors are already absent where this says so.
+    pub undetermined_errors: Option<UndeterminedErrors>,
+}
+
+/// **Standard errors a motif length's fit left undetermined because the curvature they come from
+/// could not be inverted.**
+///
+/// A standard error is read off the inverse of `H`, the curvature of the fit's objective plus the
+/// curves' bend penalties ([`PenalisedClassErrors`]). The inversion fails for one of two reasons:
+///
+/// - **some combination of numbers has next to no reads behind it**: the slope of a stiff curve
+///   through a single repeat count's slipped reads, say, or a share pushed to nearly 0 or 1;
+/// - **the fit's curvature is not positive in some direction** at the values the fit reached.
+///
+/// A stiff curve does not cause it alone. Its penalty, up to 10¹⁰ a number, adds rounding of
+/// about 10⁻⁵ to the inversion, so the inversion fails only along a straight line of the curve
+/// whose reads' curvature is below that. In a reconstruction of this inversion on a curve of 21
+/// repeat counts at a strength of 10¹⁰, it succeeded wherever every repeat count's reads gave a
+/// curvature of 10⁻⁴ or more, and it still succeeded with six curves interleaved or with one
+/// repeat count's curvature negative.
+///
+/// **Such errors are left out, not rescued.** Adding a ridge large enough to make `H` invertible
+/// is not a remedy: the ridge then sets the inverse in place of the reads and shrinks every error
+/// with it, by up to a millionfold. The numbers themselves are unaffected; only their errors are
+/// absent, and the rest of the caller reads an absent error as not placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndeterminedErrors {
+    /// Every number's error at every class: the curvature of every number together could not be
+    /// inverted.
+    EveryNumber,
+    /// Every number's error at every class except the between-locus share's: the curvature of the
+    /// other numbers together could not be inverted, but F is read off pairs of samples, with a
+    /// curvature of its own, and that one could, so F's errors are kept.
+    EveryNumberButBetweenLocusShare,
+    /// The between-locus share's alone: it is read off pairs of samples, a second objective with
+    /// a curvature of its own, and that one could not be inverted.
+    BetweenLocusShare,
 }
 
 /// **Fits every class of one motif length at once, by penalised counting.**
@@ -498,6 +550,7 @@ fn fit_one_period(
             rounds_per_counting: Vec::new(),
             class_rounds_counted: 0,
             error_seconds: 0.0,
+            undetermined_errors: None,
         };
     };
     period.count(classes, homozygote_excess, fit, false, round_ended);
@@ -533,13 +586,13 @@ fn fit_one_period(
         }
     }
     let started = Instant::now();
-    let errors = if fit.standard_errors {
+    let (errors, undetermined_errors) = if fit.standard_errors {
         period.standard_errors(classes, homozygote_excess, fit.allele_span)
     } else {
-        vec![None; period.points()]
+        (vec![None; period.points()], None)
     };
     period.error_seconds = started.elapsed().as_secs_f64();
-    period.into_fit(classes, errors)
+    period.into_fit(classes, errors, undetermined_errors)
 }
 
 /// **Fit every repeat-tract class of a cohort by penalised EM, one motif length at a time**
@@ -1217,12 +1270,19 @@ impl Period {
     /// the same formula over F's curve, its slope and curvature taken numerically locus by locus
     /// from the pairwise likelihood, and the other numbers' errors taken with F held. The half
     /// allele draw a class adds is left out of `H` and `P`.
+    ///
+    /// **Where `H` cannot be inverted, the errors it would give are left out** and the second
+    /// value says which ([`UndeterminedErrors`]): every number's when the joint `H` fails, except
+    /// F's when F is read off pairs and its own `H` is inverted; F's alone when only F's own fails.
     fn standard_errors(
         &self,
         classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
         allele_span: i32,
-    ) -> Vec<Option<PenalisedClassErrors>> {
+    ) -> (
+        Vec<Option<PenalisedClassErrors>>,
+        Option<UndeterminedErrors>,
+    ) {
         let points = self.points();
         let shares_block = self.alleles - 1;
         let f_in_counting = !self.spread_from_pairs && self.between_locus_share_measurable;
@@ -1406,12 +1466,11 @@ impl Period {
             add_curve(&self.between_curve, 3);
         }
         add_curve(&self.shares_curve, share_offset);
-        let Some(covariance) = penalised_sandwich(&curvature, &spread, &penalty, size) else {
-            return vec![None; points];
-        };
-        // F off pairs of samples: the same formula over F's curve alone.
-        let pairs_variance: Option<Vec<f64>> = (self.spread_from_pairs
-            && self.between_locus_share_measurable)
+        let covariance = penalised_sandwich(&curvature, &spread, &penalty, size);
+        // F off pairs of samples: the same formula over F's curve alone. It does not use the joint
+        // `H`, so its errors stand whether or not that one could be inverted.
+        let pairs_counted = self.spread_from_pairs && self.between_locus_share_measurable;
+        let pairs_variance: Option<Vec<f64>> = pairs_counted
             .then(|| {
                 let mut curvature = vec![0.0; points * points];
                 let mut spread = vec![0.0; points * points];
@@ -1456,9 +1515,35 @@ impl Period {
                     .map(|covariance| (0..points).map(|p| covariance[p * points + p]).collect())
             })
             .flatten();
-        (0..points)
+        let undetermined = match (&covariance, &pairs_variance) {
+            (None, Some(_)) => Some(UndeterminedErrors::EveryNumberButBetweenLocusShare),
+            (None, None) => Some(UndeterminedErrors::EveryNumber),
+            (Some(_), None) if pairs_counted => Some(UndeterminedErrors::BetweenLocusShare),
+            (Some(_), _) => None,
+        };
+        let errors = (0..points)
             .map(|point| {
                 self.class_at_point[point]?;
+                let concentration = self.concentration[point];
+                let share = 1.0 / (1.0 + concentration);
+                // c = e^(−logit F), so dc / dlogit F = −c.
+                let f_errors = |f_variance: Option<f64>| {
+                    (
+                        f_variance.map(|v| concentration * v.sqrt()),
+                        f_variance.map(|v| share * (1.0 - share) * v.sqrt()),
+                    )
+                };
+                let pairs_f_variance = pairs_variance.as_ref().map(|v| v[point].max(0.0));
+                let Some(covariance) = covariance.as_ref() else {
+                    // Only F read off pairs of samples keeps its errors.
+                    let f_variance = pairs_f_variance?;
+                    let (concentration, between_locus_share) = f_errors(Some(f_variance));
+                    return Some(PenalisedClassErrors {
+                        concentration,
+                        between_locus_share,
+                        ..PenalisedClassErrors::default()
+                    });
+                };
                 let variance = |component: usize| {
                     let index = point * width + component;
                     covariance[index * size + index].max(0.0)
@@ -1467,14 +1552,12 @@ impl Period {
                     Some(value * (1.0 - value) * variance(component).sqrt())
                 };
                 let slippage = self.slippage[point];
-                let concentration = self.concentration[point];
-                let share = 1.0 / (1.0 + concentration);
                 let f_variance = if !self.between_locus_share_measurable {
                     None
                 } else if f_in_counting {
                     Some(variance(3))
                 } else {
-                    pairs_variance.as_ref().map(|v| v[point].max(0.0))
+                    pairs_f_variance
                 };
                 // The shares through the softmax: d share_a / d ratio_b = share_a (δ_ab − share_b).
                 let shares = &self.shares[point];
@@ -1499,17 +1582,18 @@ impl Period {
                         total.max(0.0).sqrt()
                     })
                     .collect();
+                let (concentration, between_locus_share) = f_errors(f_variance);
                 Some(PenalisedClassErrors {
                     level: probability_error(0, slippage.level),
                     shorter_share: probability_error(1, slippage.shorter_share),
                     fall_off: probability_error(2, slippage.fall_off),
-                    // c = e^(−logit F), so dc / dlogit F = −c.
-                    concentration: f_variance.map(|v| concentration * v.sqrt()),
-                    between_locus_share: f_variance.map(|v| share * (1.0 - share) * v.sqrt()),
+                    concentration,
+                    between_locus_share,
                     allele_length_variation,
                 })
             })
-            .collect()
+            .collect();
+        (errors, undetermined)
     }
 
     /// **Every class's pairwise log-likelihood tabulated over the between-locus share**, at the
@@ -1554,6 +1638,7 @@ impl Period {
         self,
         classes: &[&StratumEvidence],
         mut errors: Vec<Option<PenalisedClassErrors>>,
+        undetermined_errors: Option<UndeterminedErrors>,
     ) -> PenalisedPeriodFit {
         let alleles = self.alleles;
         let reference_allele = self.reference_allele;
@@ -1590,6 +1675,9 @@ impl Period {
             values: state.values.iter().map(|value| transform(*value)).collect(),
             smoothing: float::exp(state.ln_smoothing),
             eased_at: state.eased_points(0, lowest),
+            strengths_rejected: state.strengths_rejected,
+            searches_without_a_strength: state.searches_without_a_strength,
+            unfactorised_fits_kept: state.unfactorised_fits_kept,
         };
         let share_values: Vec<Vec<f64>> = (0..self.points())
             .map(|point| {
@@ -1625,6 +1713,9 @@ impl Period {
                             self.shares_curve.eased_points(allele - 1, lowest)
                         }
                     },
+                    strengths_rejected: self.shares_curve.strengths_rejected,
+                    searches_without_a_strength: self.shares_curve.searches_without_a_strength,
+                    unfactorised_fits_kept: self.shares_curve.unfactorised_fits_kept,
                 })
                 .collect(),
         };
@@ -1643,6 +1734,7 @@ impl Period {
             rounds_per_counting: self.rounds_per_counting,
             class_rounds_counted: self.class_rounds_counted,
             error_seconds: self.error_seconds,
+            undetermined_errors,
         }
     }
 }
@@ -1828,6 +1920,24 @@ pub(crate) struct CurveState {
     /// Whether the strength has stopped moving ([`PenalisedFitConfig::strength_steady_within`]),
     /// after which a search near it keeps it.
     steady: bool,
+    /// How many strengths tried in searches so far could not be scored, because the fit there
+    /// could not be factorised even with a larger ridge, and so were never chosen.
+    strengths_rejected: usize,
+    /// How many searches so far found no strength that could be scored, and so kept the strength
+    /// held before.
+    searches_without_a_strength: usize,
+    /// How many fits at a strength no search chose could not be factorised, so the curve kept the
+    /// values Newton's method had reached when it stopped.
+    unfactorised_fits_kept: usize,
+}
+
+/// What a search for a curve's penalty strength found.
+struct StrengthChoice {
+    /// The strength chosen, as a natural logarithm, and the fit there; `None` when not one
+    /// strength tried could be scored.
+    chosen: Option<(f64, CurveFit)>,
+    /// How many strengths tried could not be scored, and so were never chosen.
+    rejected: usize,
 }
 
 /// What a fit at one penalty strength reached.
@@ -1892,6 +2002,9 @@ impl CurveState {
             ln_smoothing: 0.0,
             bend_weights: vec![1.0; points.saturating_sub(2) * block],
             steady: false,
+            strengths_rejected: 0,
+            searches_without_a_strength: 0,
+            unfactorised_fits_kept: 0,
         }
     }
 
@@ -1952,18 +2065,37 @@ impl CurveState {
                 )
             }
             Smoothing::MarginalLikelihood => {
-                let (ln_smoothing, fitted) =
-                    self.choose_strength(data, knee, search == StrengthSearch::Wide);
-                if search == StrengthSearch::Near
-                    && config.strength_steady_within > 0.0
-                    && (ln_smoothing - self.ln_smoothing).abs() < config.strength_steady_within
-                {
-                    self.steady = true;
+                let choice = self.choose_strength(data, knee, search == StrengthSearch::Wide);
+                self.strengths_rejected += choice.rejected;
+                if let Some((ln_smoothing, fitted)) = choice.chosen {
+                    if search == StrengthSearch::Near
+                        && config.strength_steady_within > 0.0
+                        && (ln_smoothing - self.ln_smoothing).abs() < config.strength_steady_within
+                    {
+                        self.steady = true;
+                    }
+                    self.ln_smoothing = ln_smoothing;
+                    fitted
+                } else {
+                    // No strength could be scored: the strength held is kept, and the curve is
+                    // fitted at it as a held strength would be.
+                    self.searches_without_a_strength += 1;
+                    self.fit_robustly_at(
+                        data,
+                        self.ln_smoothing,
+                        &self.values,
+                        &self.bend_weights,
+                        knee,
+                    )
                 }
-                self.ln_smoothing = ln_smoothing;
-                fitted
             }
         };
+        // A search never chooses a fit that could not be factorised, so this counts only fits at
+        // a strength no search chose. Their values are kept all the same: there is no better fit
+        // at that strength to put in their place.
+        if fitted.marginal == f64::NEG_INFINITY {
+            self.unfactorised_fits_kept += 1;
+        }
         if let Smoothing::Fixed(strength) = config.smoothing {
             self.ln_smoothing = float::ln(strength);
         }
@@ -1986,12 +2118,25 @@ impl CurveState {
     /// values and eased bends, then golden-section search around the best. **Strong first, so that
     /// a kink is found where the curve is stiff**: at a weak penalty the curve can bend through a
     /// kink without easing anything, and a search started there stays there.
+    ///
+    /// **A strength whose fit could not be factorised is never chosen** (its marginal likelihood
+    /// is minus infinity, [`Self::fit_robustly_at`]); each one is counted in
+    /// [`StrengthChoice::rejected`]. When no strength tried can be scored, a narrow search
+    /// searches the whole range instead, and nothing is chosen only when that scores none either.
     fn choose_strength(
         &self,
         data: &CurveData,
         knee: BendPrior,
         search_widely: bool,
-    ) -> (f64, CurveFit) {
+    ) -> StrengthChoice {
+        let rejected = std::cell::Cell::new(0_usize);
+        let fit_at = |ln_smoothing: f64, from: &[f64], weights: &[f64]| {
+            let fitted = self.fit_robustly_at(data, ln_smoothing, from, weights, knee);
+            if fitted.marginal == f64::NEG_INFINITY {
+                rejected.set(rejected.get() + 1);
+            }
+            fitted
+        };
         let (low, high) = if search_widely {
             LN_SMOOTHING_RANGE
         } else {
@@ -2008,7 +2153,7 @@ impl CurveState {
         let mut best: Option<(usize, CurveFit)> = None;
         let mut from = (self.values.clone(), self.bend_weights.clone());
         for (index, &ln_smoothing) in grid.iter().enumerate() {
-            let fitted = self.fit_robustly_at(data, ln_smoothing, &from.0, &from.1, knee);
+            let fitted = fit_at(ln_smoothing, &from.0, &from.1);
             from = (fitted.values.clone(), fitted.bend_weights.clone());
             if best
                 .as_ref()
@@ -2018,28 +2163,38 @@ impl CurveState {
             }
         }
         // PANIC-FREE: the grid has at least three strengths.
-        let (best_index, best_fit) = best.expect("a strength was scored");
+        let (best_index, best_fit) = best.expect("a strength was tried");
+        if best_fit.marginal == f64::NEG_INFINITY {
+            // Not one strength on the grid could be scored. Searching between two of them would
+            // compare minus infinity with minus infinity. A narrow search tries the whole range
+            // first, since the strengths it skipped may score; only when they do not either is
+            // nothing chosen.
+            if !search_widely && (low > LN_SMOOTHING_RANGE.0 || high < LN_SMOOTHING_RANGE.1) {
+                let mut wider = self.choose_strength(data, knee, true);
+                wider.rejected += rejected.get();
+                return wider;
+            }
+            return StrengthChoice {
+                chosen: None,
+                rejected: rejected.get(),
+            };
+        }
         // On a narrow search, an edge best means the strength moved further than two units: search
         // the whole range instead.
         if !search_widely
             && ((best_index == steps && low > LN_SMOOTHING_RANGE.0)
                 || (best_index == 0 && high < LN_SMOOTHING_RANGE.1))
         {
-            return self.choose_strength(data, knee, true);
+            let mut wider = self.choose_strength(data, knee, true);
+            wider.rejected += rejected.get();
+            return wider;
         }
         let (mut left_end, mut right_end) = (
             grid[(best_index + 1).min(steps)],
             grid[best_index.saturating_sub(1)],
         );
-        let score = |ln_smoothing: f64| {
-            self.fit_robustly_at(
-                data,
-                ln_smoothing,
-                &best_fit.values,
-                &best_fit.bend_weights,
-                knee,
-            )
-        };
+        let score =
+            |ln_smoothing: f64| fit_at(ln_smoothing, &best_fit.values, &best_fit.bend_weights);
         let ratio = 0.5 * (5.0_f64.sqrt() - 1.0);
         let (mut left, mut right) = (
             right_end - ratio * (right_end - left_end),
@@ -2066,16 +2221,23 @@ impl CurveState {
         } else {
             (right, right_fit)
         };
-        if refined.1.marginal >= best_fit.marginal {
+        let chosen = if refined.1.marginal >= best_fit.marginal {
             refined
         } else {
             (grid[best_index], best_fit)
+        };
+        StrengthChoice {
+            chosen: Some(chosen),
+            rejected: rejected.get(),
         }
     }
 
     /// **The fit at one strength with every bend's weight settled**: Newton's method at the weights,
     /// then the weights from the bends it reached, until they stop moving (at most eight times).
     /// Each pass lowers the penalised objective's surrogate, so the passes climb the objective.
+    ///
+    /// Its marginal likelihood is minus infinity when the last pass's Newton system could not be
+    /// factorised ([`Self::newton`]).
     fn fit_robustly_at(
         &self,
         data: &CurveData,
@@ -2094,7 +2256,7 @@ impl CurveState {
         };
         let passes = if knee.eases() { 8 } else { 1 };
         let mut log_likelihood = 0.0;
-        let mut ln_determinant = 0.0;
+        let mut ln_determinant = None;
         for _ in 0..passes {
             (values, log_likelihood, ln_determinant) =
                 self.newton(data, strength, &values, &weights);
@@ -2123,8 +2285,11 @@ impl CurveState {
         }
         let rank = (self.bends() * self.block) as f64;
         let ridge = 0.5 * RIDGE * values.iter().map(|v| v * v).sum::<f64>();
-        let marginal =
-            log_likelihood + prior - ridge + 0.5 * rank * ln_smoothing - 0.5 * ln_determinant;
+        // A fit whose system could not be factorised has no determinant, so no marginal
+        // likelihood: it is scored below every strength that has one and is never chosen.
+        let marginal = ln_determinant.map_or(f64::NEG_INFINITY, |ln_determinant| {
+            log_likelihood + prior - ridge + 0.5 * rank * ln_smoothing - 0.5 * ln_determinant
+        });
         CurveFit {
             values,
             bend_weights: weights,
@@ -2147,13 +2312,18 @@ impl CurveState {
     /// **The penalised fit at one strength and one set of bend weights**, by Newton's method with
     /// step halving from `from`. Returns the values, their log-likelihood, and ln |information +
     /// penalty + ridge| there.
+    ///
+    /// **The log-determinant is `None` when a step's system could not be factorised**, even with
+    /// the larger ridges of [`factorise_with_retries`]; the values are then those of the last step
+    /// taken, `from` if none was. A strength whose fit has no log-determinant cannot be scored,
+    /// and [`Self::fit_robustly_at`] scores it as never to be chosen.
     fn newton(
         &self,
         data: &CurveData,
         strength: f64,
         from: &[f64],
         weights: &[f64],
-    ) -> (Vec<f64>, f64, f64) {
+    ) -> (Vec<f64>, f64, Option<f64>) {
         let size = self.points * self.block;
         let mut values = from.to_vec();
         let mut gradient = vec![0.0; self.block];
@@ -2177,7 +2347,7 @@ impl CurveState {
         };
         let mut log_likelihood = log_likelihood_at(&values, &mut gradient, &mut information);
         let mut current = objective(log_likelihood, &values);
-        let mut ln_determinant = 0.0;
+        let mut ln_determinant = None;
         for iteration in 0..100 {
             // The system: (information + λ·penalty + ridge) · step = gradient of the objective.
             let mut matrix = self.penalty_matrix(strength, weights);
@@ -2208,10 +2378,16 @@ impl CurveState {
             for (into, penalty) in right_hand.iter_mut().zip(&penalty_gradient) {
                 *into -= strength * penalty;
             }
-            let Some(factor) = matrix.cholesky() else {
+            let factor = factorise_with_retries(&matrix);
+            // A test can make the factorisation fail at chosen strengths, which real counts
+            // reach only through rounding the retry ridges almost always rescue.
+            #[cfg(test)]
+            let factor = factor.filter(|_| !tests::factorisation_fails_at(strength));
+            let Some(factor) = factor else {
+                ln_determinant = None;
                 break;
             };
-            ln_determinant = factor.ln_determinant();
+            ln_determinant = Some(factor.ln_determinant());
             if iteration > 0 && right_hand.iter().all(|g| g.abs() < 1e-9) {
                 break;
             }
@@ -2291,43 +2467,52 @@ impl CurveState {
     }
 }
 
+/// **The ridges a Newton system is retried with when it cannot be factorised at the fit's own
+/// [`RIDGE`]**, each ten times the last.
+///
+/// At a strength of 10¹⁰ the rounding in the band factorisation's last pivots is about
+/// 10¹⁰ × 2.2×10⁻¹⁶ × the stencil's diagonal of 6, about 1.3×10⁻⁵, so a pivot that the reads
+/// barely inform can come out zero or negative at a ridge of 10⁻⁶. A ridge in the system alone only shortens
+/// the step: the objective climbed is unchanged, and so is the point Newton's method converges
+/// to. It does enter the log-determinant, by at most ln 1000 for each number no read informs,
+/// which lowers that strength's score; a retried strength is therefore never favoured by its
+/// retry.
+const NEWTON_RETRY_RIDGES: [f64; 3] = [1e-5, 1e-4, 1e-3];
+
+/// **The Cholesky factor of a Newton system**, at the ridge it was built with and then, if that
+/// fails, at each of [`NEWTON_RETRY_RIDGES`] in turn; `None` when every one fails.
+fn factorise_with_retries(matrix: &SymmetricBand) -> Option<BandCholesky> {
+    if let Some(factor) = matrix.clone().cholesky() {
+        return Some(factor);
+    }
+    NEWTON_RETRY_RIDGES.iter().find_map(|&ridge| {
+        let mut retried = matrix.clone();
+        for index in 0..retried.size {
+            retried.add(index, index, ridge - RIDGE);
+        }
+        retried.cholesky()
+    })
+}
+
 // ---------------------------------------------------------------------
 // The penalised sandwich, in dense matrices
 // ---------------------------------------------------------------------
 
-/// **`H⁻¹ (B + P) H⁻¹` with `H = A + P` plus the ridge**, every matrix `size × size` row by row.
-/// `None` when `H` cannot be made positive definite by a ridge up to a thousandth of its mean
-/// diagonal.
+/// **`H⁻¹ (B + P) H⁻¹` with `H = A + P` plus the fit's own ridge**, every matrix `size × size`
+/// row by row. `None` when that `H` is not positive definite to working precision: no larger
+/// ridge is tried, because one large enough to rescue the inversion would set the errors in place
+/// of the reads ([`UndeterminedErrors`]).
 fn penalised_sandwich(
     curvature: &[f64],
     spread: &[f64],
     penalty: &[f64],
     size: usize,
 ) -> Option<Vec<f64>> {
-    let mean_diagonal = (0..size)
-        .map(|i| curvature[i * size + i] + penalty[i * size + i])
-        .sum::<f64>()
-        / size as f64;
-    let mut inverse = None;
-    // The fit's own ridge first; then larger ones, as shares of the mean diagonal.
-    let scale = mean_diagonal.abs().max(1.0);
-    for ridge in [
-        RIDGE,
-        1e-9 * scale,
-        1e-7 * scale,
-        1e-5 * scale,
-        1e-3 * scale,
-    ] {
-        let mut matrix: Vec<f64> = curvature.iter().zip(penalty).map(|(a, p)| a + p).collect();
-        for i in 0..size {
-            matrix[i * size + i] += ridge;
-        }
-        if let Some(found) = dense_inverse(&matrix, size) {
-            inverse = Some(found);
-            break;
-        }
+    let mut matrix: Vec<f64> = curvature.iter().zip(penalty).map(|(a, p)| a + p).collect();
+    for i in 0..size {
+        matrix[i * size + i] += RIDGE;
     }
-    let inverse = inverse?;
+    let inverse = dense_inverse(&matrix, size)?;
     let middle: Vec<f64> = spread.iter().zip(penalty).map(|(b, p)| b + p).collect();
     let left = dense_product(&inverse, &middle, size);
     Some(dense_product(&left, &inverse, size))
@@ -2396,6 +2581,7 @@ fn dense_product(left: &[f64], right: &[f64], size: usize) -> Vec<f64> {
 // ---------------------------------------------------------------------
 
 /// A symmetric matrix kept as its lower band: entry `(i, i − d)` for `d ≤ width`.
+#[derive(Clone)]
 struct SymmetricBand {
     size: usize,
     width: usize,
@@ -3225,6 +3411,9 @@ mod tests {
             values: vec![0.05; 3],
             smoothing: strength,
             eased_at,
+            strengths_rejected: 0,
+            searches_without_a_strength: 0,
+            unfactorised_fits_kept: 0,
         }
     }
 
@@ -3384,5 +3573,315 @@ mod tests {
             .allele_pseudo_draws,
             1.0 / 19.0
         );
+    }
+
+    /// **A stiff three-base cohort whose curvature cannot be inverted**: six classes at 6 to 11
+    /// repeats, 10 loci each, 4 samples at 5 reads, drawn at a slip rate of 0.003, so the whole
+    /// motif length holds a handful of slipped reads. Its stutter curves come out near the top
+    /// of the strengths searched, about 10¹⁰, so each is close to a straight line, and with so
+    /// few slipped reads some such line has next to no reads behind it: `A + P` cannot be
+    /// inverted (measured before the fix: the inversion needed a ridge of 39 a number to
+    /// succeed, against a mean curvature of the reads of 1.5).
+    pub(super) fn a_stiff_three_base_cohort() -> Vec<StratumEvidence> {
+        (6..=11)
+            .map(|repeats| {
+                let mut evidence = draw_stratum(
+                    Slippage {
+                        level: 0.003,
+                        shorter_share: 0.8,
+                        fall_off: 0.25,
+                    },
+                    &spectrum_of(3),
+                    2.0,
+                    0.3,
+                    10,
+                    4,
+                    5,
+                    1,
+                    100 + repeats,
+                );
+                evidence.stratum = Stratum {
+                    period: 3,
+                    reference_repeats: repeats,
+                };
+                evidence
+            })
+            .collect()
+    }
+
+    /// **The sandwich is computed at the fit's own ridge or not at all**: a curvature that is not
+    /// positive definite at a ridge of 10⁻⁶ gives no covariance, although a larger ridge (here
+    /// 10⁻³, which the sandwich used to try) would make it invertible. A positive-definite one
+    /// gives `H⁻¹ (B + P) H⁻¹`.
+    #[test]
+    fn the_sandwich_tries_no_ridge_larger_than_the_fits_own() {
+        let spread = [1.0, 0.0, 0.0, 1.0];
+        let penalty = [0.0; 4];
+        let not_positive_definite = [1.0, 0.0, 0.0, -1e-5];
+        assert_eq!(
+            penalised_sandwich(&not_positive_definite, &spread, &penalty, 2),
+            None
+        );
+        let curvature = [4.0, 0.0, 0.0, 2.0];
+        let covariance = penalised_sandwich(&curvature, &spread, &penalty, 2)
+            .expect("a positive-definite curvature is inverted");
+        assert!((covariance[0] - 1.0 / 16.0).abs() < 1e-6, "{covariance:?}");
+        assert!((covariance[3] - 1.0 / 4.0).abs() < 1e-6, "{covariance:?}");
+    }
+
+    /// **A motif length whose curvature cannot be inverted reports no errors, and says why**,
+    /// where it used to report errors set by a large ridge: on this cohort the three-base level's
+    /// logit error came out about 300 times smaller than one slipped read supports. Its numbers
+    /// are still fitted. **F's errors are kept**: F is read off pairs of samples, and its own
+    /// curvature is inverted on its own.
+    #[test]
+    fn errors_that_need_a_ridge_are_left_undetermined() {
+        let fit = fit_period_by_penalised_counting(
+            &a_stiff_three_base_cohort(),
+            &[0.3; 4],
+            &a_narrow_production_fit(),
+        );
+        assert_eq!(
+            fit.undetermined_errors,
+            Some(UndeterminedErrors::EveryNumberButBetweenLocusShare)
+        );
+        // With F fitted inside the counting, not off pairs, its error comes from the same `H`
+        // and is lost with the rest.
+        let counting_only = fit_period_by_penalised_counting(
+            &a_stiff_three_base_cohort(),
+            &[0.3; 4],
+            &PenalisedFitConfig {
+                pair_alternations: 0,
+                ..a_narrow_production_fit()
+            },
+        );
+        assert_eq!(
+            counting_only.undetermined_errors,
+            Some(UndeterminedErrors::EveryNumber)
+        );
+        assert!(
+            counting_only
+                .classes
+                .iter()
+                .flatten()
+                .all(|class| class.errors.is_none())
+        );
+        let classes: Vec<&PenalisedClass> = fit.classes.iter().flatten().collect();
+        assert_eq!(classes.len(), 6);
+        for class in classes {
+            let errors = class.errors.as_ref().expect("F's errors are kept");
+            assert_eq!(errors.level, None, "{:?}", class.stratum);
+            assert_eq!(errors.shorter_share, None, "{:?}", class.stratum);
+            assert_eq!(errors.fall_off, None, "{:?}", class.stratum);
+            assert!(
+                errors.allele_length_variation.is_empty(),
+                "{:?}",
+                class.stratum
+            );
+            let share = errors.between_locus_share.expect("F's error is kept");
+            let concentration = errors.concentration.expect("F's error is kept");
+            assert!(share.is_finite() && share > 0.0, "{share}");
+            assert!(
+                concentration.is_finite() && concentration > 0.0,
+                "{concentration}"
+            );
+            assert!(class.slippage.level.is_finite());
+        }
+    }
+
+    /// **Where errors are reported, a slip rate's is no smaller than the reads allow**: on the
+    /// logit scale, about `1 / √(slipped reads)` pooled over the whole motif length, since a point
+    /// on a curve cannot be more precise than every class's reads together. Checked at half that,
+    /// for the play of the locus-to-locus spread. Two well-read cohorts: one-base runs at 8 to
+    /// 10 repeats and two-base runs at 8 to 10, 40 loci a class, 12 samples at 8 reads.
+    #[test]
+    fn a_reported_slip_rate_error_is_no_smaller_than_the_pooled_reads_allow() {
+        for period in [1, 2] {
+            let strata: Vec<StratumEvidence> = (8..=10)
+                .map(|repeats| a_drawn_class(period, repeats, 40, 12, 8, 70 + repeats))
+                .collect();
+            let fit =
+                fit_period_by_penalised_counting(&strata, &[0.3; 12], &a_narrow_production_fit());
+            assert_eq!(fit.undetermined_errors, None, "motif length {period}");
+            let classes: Vec<&PenalisedClass> = fit.classes.iter().flatten().collect();
+            let slipped: f64 = classes
+                .iter()
+                .map(|class| class.expected_slipped_reads.expect("rounds ran"))
+                .sum();
+            let pooled_bound = 1.0 / slipped.sqrt();
+            for class in classes {
+                let level = class.slippage.level;
+                let error = class
+                    .errors
+                    .as_ref()
+                    .and_then(|errors| errors.level)
+                    .expect("an error was reported");
+                let on_logit_scale = error / (level * (1.0 - level));
+                assert!(
+                    on_logit_scale >= 0.5 * pooled_bound,
+                    "motif length {period} at {} repeats: {on_logit_scale} against {pooled_bound}",
+                    class.stratum.reference_repeats
+                );
+            }
+        }
+    }
+
+    /// Counts of a straight line on the logit scale, from −3 to 3 across `points` points, 1,000
+    /// trials each, so that the marginal likelihood favours the stiffest penalty searched.
+    fn counts_on_a_line(points: usize) -> CurveData {
+        let trials = vec![1000.0; points];
+        let successes = (0..points)
+            .map(|point| {
+                let logit = -3.0 + 6.0 * point as f64 / (points - 1) as f64;
+                (1000.0 * logistic(logit)).round()
+            })
+            .collect();
+        CurveData::Binomial { successes, trials }
+    }
+
+    /// **A strength whose Newton system cannot be factorised is never chosen**, even where the
+    /// marginal likelihood would otherwise favour it.
+    ///
+    /// The counts lie on a straight line, so the stiffest penalty scores best. Real counts make a
+    /// system fail only through rounding at strengths near 10¹⁰, and the larger retry ridges
+    /// rescue every case tried, so the test makes the factorisation fail at every strength above
+    /// 10⁵ ([`tests::failing_factorisation_above`]). Before the fix a failed fit kept a
+    /// log-determinant of 0, which raised its score with the strength and so chose the top of the
+    /// range.
+    #[test]
+    fn a_strength_whose_system_cannot_be_factorised_is_never_chosen() {
+        let data = counts_on_a_line(6);
+        let curve = CurveState::new(6, 1);
+        let knee = BendPrior::QUADRATIC;
+        let unhindered = curve.choose_strength(&data, knee, true);
+        let (unhindered_strength, _) = unhindered.chosen.expect("every strength scores");
+        assert_eq!(unhindered.rejected, 0);
+        assert!(
+            unhindered_strength > float::ln(1e5),
+            "{unhindered_strength}"
+        );
+
+        let ceiling = float::ln(1e5);
+        let choice = failing_factorisation_above(1e5, || curve.choose_strength(&data, knee, true));
+        let (ln_smoothing, fitted) = choice.chosen.expect("strengths up to 10⁵ score");
+        assert!(
+            ln_smoothing <= ceiling,
+            "{} chosen",
+            float::exp(ln_smoothing)
+        );
+        assert!(fitted.marginal.is_finite());
+        assert!(
+            choice.rejected > 0,
+            "the strengths above 10⁵ were tried and rejected"
+        );
+        let at_the_top = failing_factorisation_above(1e5, || {
+            curve.fit_robustly_at(
+                &data,
+                LN_SMOOTHING_RANGE.1,
+                &curve.values,
+                &curve.bend_weights,
+                knee,
+            )
+        });
+        assert_eq!(at_the_top.marginal, f64::NEG_INFINITY);
+    }
+
+    /// **When no strength can be scored, the strength held is kept and the search is counted**:
+    /// one point's trials are not a number, which makes every system unfactorisable whatever the
+    /// penalty, while the other three points still have counts.
+    #[test]
+    fn with_no_strength_scored_the_strength_held_is_kept() {
+        let data = CurveData::Binomial {
+            successes: vec![10.0, 20.0, 30.0, 5.0],
+            trials: vec![100.0, 100.0, 100.0, f64::NAN],
+        };
+        let mut curve = CurveState::new(4, 1);
+        curve.ln_smoothing = 3.0;
+        let choice = curve.choose_strength(&data, BendPrior::QUADRATIC, true);
+        assert!(choice.chosen.is_none());
+        assert!(choice.rejected > 0);
+        curve.refit(&data, &a_narrow_production_fit(), StrengthSearch::Wide);
+        assert_eq!(curve.ln_smoothing, 3.0);
+        assert_eq!(curve.searches_without_a_strength, 1);
+        assert!(curve.strengths_rejected > 0);
+        // The fit at the strength kept could not be factorised either, and is counted.
+        assert_eq!(curve.unfactorised_fits_kept, 1);
+    }
+
+    /// **A narrow search that can score no strength searches the whole range before keeping the
+    /// strength held.** The curve holds a strength of e²⁰ and every system above e¹⁵ fails, so
+    /// none of the narrow search's strengths, e¹⁸ to e²², scores; the whole range does, at or
+    /// below e¹⁵. Before the fix the narrow search returned nothing and the curve kept e²⁰.
+    #[test]
+    fn a_narrow_search_that_scores_nothing_searches_the_whole_range() {
+        let data = counts_on_a_line(6);
+        let mut curve = CurveState::new(6, 1);
+        curve.ln_smoothing = 20.0;
+        let ceiling = float::exp(15.0);
+        let choice = failing_factorisation_above(ceiling, || {
+            curve.choose_strength(&data, BendPrior::QUADRATIC, false)
+        });
+        let (ln_smoothing, fitted) = choice
+            .chosen
+            .expect("the whole range has strengths that score");
+        assert!(ln_smoothing <= 15.0, "{ln_smoothing}");
+        assert!(fitted.marginal.is_finite());
+        // The narrow grid's five strengths, e¹⁸ to e²², all failed, and are counted with the
+        // whole range's failures.
+        assert!(choice.rejected >= 5, "{}", choice.rejected);
+
+        failing_factorisation_above(ceiling, || {
+            curve.refit(&data, &a_narrow_production_fit(), StrengthSearch::Near)
+        });
+        assert!(curve.ln_smoothing <= 15.0, "{}", curve.ln_smoothing);
+        assert_eq!(curve.searches_without_a_strength, 0);
+        assert_eq!(curve.unfactorised_fits_kept, 0);
+    }
+
+    /// **A fit at a held strength that cannot be factorised is counted, and its values kept**:
+    /// the curve holds e²⁰, every system above e¹⁵ fails, and the round holds the strength
+    /// rather than searching. The values are where Newton's method stopped, here the start.
+    #[test]
+    fn a_held_fit_that_cannot_be_factorised_is_counted() {
+        let data = counts_on_a_line(6);
+        let mut curve = CurveState::new(6, 1);
+        curve.ln_smoothing = 20.0;
+        let start = curve.values.clone();
+        let values = failing_factorisation_above(float::exp(15.0), || {
+            curve.refit(&data, &a_narrow_production_fit(), StrengthSearch::Held)
+        });
+        assert_eq!(curve.ln_smoothing, 20.0);
+        assert_eq!(curve.unfactorised_fits_kept, 1);
+        assert_eq!(curve.strengths_rejected, 0);
+        assert_eq!(values, start);
+        // Factorised, the same held fit is not counted.
+        curve.refit(&data, &a_narrow_production_fit(), StrengthSearch::Held);
+        assert_eq!(curve.unfactorised_fits_kept, 1);
+    }
+
+    thread_local! {
+        /// The strength above which [`factorisation_fails_at`] says a Newton system fails, on
+        /// this test's thread; infinite outside [`failing_factorisation_above`].
+        static FAILING_ABOVE: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::INFINITY) };
+    }
+
+    /// Runs `run` with every Newton system at a strength above `strength` failing to factorise,
+    /// on this thread only.
+    pub(super) fn failing_factorisation_above<T>(strength: f64, run: impl FnOnce() -> T) -> T {
+        /// Lifts the failure when dropped, so that it is lifted even if `run` panics.
+        struct Lift;
+        impl Drop for Lift {
+            fn drop(&mut self) {
+                FAILING_ABOVE.with(|cell| cell.set(f64::INFINITY));
+            }
+        }
+        FAILING_ABOVE.with(|cell| cell.set(strength));
+        let _lift = Lift;
+        run()
+    }
+
+    /// Whether a test has made the Newton system at `strength` fail to factorise.
+    pub(super) fn factorisation_fails_at(strength: f64) -> bool {
+        FAILING_ABOVE.with(|cell| strength > cell.get())
     }
 }

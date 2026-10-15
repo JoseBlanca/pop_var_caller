@@ -19,8 +19,13 @@
 //! - **how stiff each of the five kinds of curve came out**: slip rate, shorter share, fall-off, F
 //!   and the allele-length shares (one strength for all of them), against the range searched. With
 //!   one or two repeat counts there is no bend to penalise, and the line says so instead;
+//! - **which strengths could not be scored**, printed only when some could not: a strength whose
+//!   curve's fit could not be factorised is never chosen, and a search that scores none keeps the
+//!   strength held before;
 //! - **where bends were eased**: the repeat counts where a curve's reads insisted on a kink, so its
 //!   penalty was eased there;
+//! - **why standard errors are absent**, printed only when they are for this reason: the curvature
+//!   they are read off could not be inverted, so they are written as not placed;
 //! - **one line a class**: its loci with reads, its (locus, sample) pairs with reads and how many
 //!   distinct rows of read counts they hold, and whether F is absent and why.
 //!
@@ -137,11 +142,19 @@ pub(super) fn lines_of_a_motif_length(
         )));
     } else {
         lines.push(Line::Detail(stiffness_line(period, curves)));
+    }
+    // A fit kept at a strength it could not factorise can happen with one or two repeat counts
+    // too, so this line is not tied to a curve having bends.
+    lines.extend(unscored_strengths_line(period, curves).map(Line::Detail));
+    if fitted > 2 {
         lines.push(Line::Detail(eased_bends_line(
             period,
             curves,
             config.allele_span,
         )));
+    }
+    if let Some(undetermined) = fit.undetermined_errors {
+        lines.push(Line::Detail(undetermined_errors_line(period, undetermined)));
     }
     let f_measurable = curves.between_locus_share.is_some();
     lines.extend(classes.iter().zip(outcomes).zip(distinct_rows).map(
@@ -259,6 +272,101 @@ fn stiffness_line(period: u8, curves: &SmoothCurves) -> String {
             .allele_length_variation
             .first()
             .map_or_else(|| "none".to_owned(), strength),
+    )
+}
+
+/// **Which curves met strengths that could not be scored**, for the line printed only when one
+/// did: a strength whose fit could not be factorised, even with a larger ridge, is never chosen;
+/// a search that could score none keeps the strength held before; and a fit at a strength no
+/// search chose that could not be factorised keeps the values Newton's method had reached. `None`
+/// when every strength tried was scored and every fit kept was factorised.
+fn unscored_strengths_line(period: u8, curves: &SmoothCurves) -> Option<String> {
+    let mut named: Vec<(&str, &ParameterCurve)> = vec![
+        ("slip rate", &curves.level),
+        ("shorter share", &curves.shorter_share),
+        ("fall-off", &curves.fall_off),
+    ];
+    if let Some(curve) = &curves.between_locus_share {
+        named.push(("F", curve));
+    }
+    if let Some(curve) = curves.allele_length_variation.first() {
+        named.push(("allele-length shares", curve));
+    }
+    let rejected: Vec<String> = named
+        .iter()
+        .filter(|(_, curve)| curve.strengths_rejected > 0)
+        .map(|(name, curve)| format!("{name} {}", curve.strengths_rejected))
+        .collect();
+    let kept: Vec<String> = named
+        .iter()
+        .filter(|(_, curve)| curve.searches_without_a_strength > 0)
+        .map(|(name, curve)| {
+            format!(
+                "{name} in {}",
+                count_of(curve.searches_without_a_strength, "search", "searches")
+            )
+        })
+        .collect();
+    let unfactorised: Vec<String> = named
+        .iter()
+        .filter(|(_, curve)| curve.unfactorised_fits_kept > 0)
+        .map(|(name, curve)| format!("{name} {}", curve.unfactorised_fits_kept))
+        .collect();
+    if rejected.is_empty() && kept.is_empty() && unfactorised.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if !rejected.is_empty() {
+        parts.push(format!(
+            "strengths never chosen because the curve's fit there could not be factorised, even \
+             with a larger ridge: {}",
+            rejected.join(", ")
+        ));
+    }
+    if !kept.is_empty() {
+        parts.push(format!(
+            "no strength tried could be scored, so the strength held before was kept: {}",
+            kept.join(", ")
+        ));
+    }
+    if !unfactorised.is_empty() {
+        parts.push(format!(
+            "fits at a strength no search chose that could not be factorised, so the curve kept \
+             the values Newton's method had reached when it stopped: {}",
+            unfactorised.join(", ")
+        ));
+    }
+    Some(format!(
+        "motif length {period}, strengths that could not be scored: {}",
+        parts.join("; ")
+    ))
+}
+
+/// **Why some of a motif length's standard errors are absent**: the curvature they are read off
+/// could not be inverted ([`UndeterminedErrors`]). Every error so left out, and not already
+/// withheld for too few loci, is written as not placed.
+fn undetermined_errors_line(period: u8, undetermined: UndeterminedErrors) -> String {
+    let (which, curvature) = match undetermined {
+        UndeterminedErrors::EveryNumber => (
+            "none determined for any of its numbers",
+            "the fit's curvature, with the curves' bend penalties added",
+        ),
+        UndeterminedErrors::EveryNumberButBetweenLocusShare => (
+            "none determined for any of its numbers except F, which is read off pairs of samples \
+             with a curvature of its own",
+            "the fit's curvature, with the curves' bend penalties added",
+        ),
+        UndeterminedErrors::BetweenLocusShare => (
+            "none determined for F",
+            "the curvature of F read off pairs of samples, with its curve's bend penalty added",
+        ),
+    };
+    format!(
+        "motif length {period}, standard errors: {which}: {curvature}, could not be inverted, \
+         either because some combination of numbers has next to no reads behind it (the slope of \
+         a stiff curve through a single repeat count's slipped reads, for one) or because the \
+         curvature is not positive in some direction at the values the fit reached; those errors \
+         are written as not placed, except where too few loci already withheld them"
     )
 }
 
@@ -420,7 +528,7 @@ pub(super) fn withheld_errors_line(outcomes: &[StratumOutcome]) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{a_drawn_class, a_narrow_production_fit};
+    use super::super::tests::{a_drawn_class, a_narrow_production_fit, a_stiff_three_base_cohort};
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
     use crate::parameter_estimation::joint::ssr_fit::expected_counts::DistinctRows;
@@ -787,6 +895,9 @@ mod tests {
             values: vec![0.1, 0.2, 0.3, 0.4],
             smoothing: 10.0,
             eased_at,
+            strengths_rejected: 0,
+            searches_without_a_strength: 0,
+            unfactorised_fits_kept: 0,
         };
         let mut curves = SmoothCurves {
             level: curve(vec![9]),
@@ -827,5 +938,126 @@ mod tests {
         };
         let outcomes = fit_repeat_tracts(&strata, &[0.3; 3], &config);
         assert_eq!(withheld_errors_line(&outcomes), None);
+    }
+
+    /// **A motif length whose errors could not be determined says so, and writes every error as
+    /// not placed** (or withheld for too few loci, which comes first); the stiff three-base cohort
+    /// of the fit's own test, 10 loci a class.
+    #[test]
+    fn undetermined_errors_are_logged_and_written_as_not_placed() {
+        let (outcomes, lines) = fit_and_log(&a_stiff_three_base_cohort(), &[0.3; 4]);
+        let line = the_line(&lines, "motif length 3, standard errors:");
+        assert_eq!(
+            line.text(),
+            "motif length 3, standard errors: none determined for any of its numbers except F, \
+             which is read off pairs of samples with a curvature of its own: the fit's \
+             curvature, with the curves' bend penalties added, could not be inverted, either \
+             because some combination of numbers has next to no reads behind it (the slope of a \
+             stiff curve through a single repeat count's slipped reads, for one) or because the \
+             curvature is not positive in some direction at the values the fit reached; those \
+             errors are written as not placed, except where too few loci already withheld them"
+        );
+        let mut errors = 0;
+        for outcome in &outcomes {
+            let StratumOutcome::Fitted(fit) = outcome else {
+                panic!("every class has reads");
+            };
+            let every = fit.standard_errors.as_ref().expect("errors were asked for");
+            let slippage = every
+                .slippage
+                .iter()
+                .flatten()
+                .flat_map(|group| [group.level, group.shorter_share, group.fall_off]);
+            for error in slippage.chain(every.allele_length_variation.iter().copied()) {
+                assert!(
+                    matches!(error, StratumError::NotPlaced | StratumError::TooFewLoci),
+                    "{error:?}"
+                );
+                errors += 1;
+            }
+            // F's own curvature, read off pairs of samples, was inverted: its error is kept.
+            assert!(
+                matches!(every.concentration, StratumError::Estimated(_)),
+                "{:?}",
+                every.concentration
+            );
+        }
+        assert!(errors > 0);
+    }
+
+    /// **Strengths that could not be scored are named by curve**, and no line is printed when
+    /// every strength tried was scored.
+    #[test]
+    fn unscored_strengths_are_named_by_curve() {
+        let curve = |rejected: usize, kept: usize| ParameterCurve {
+            first_repeats: 8,
+            values: vec![0.1, 0.2, 0.3],
+            smoothing: 10.0,
+            eased_at: Vec::new(),
+            strengths_rejected: rejected,
+            searches_without_a_strength: kept,
+            unfactorised_fits_kept: 0,
+        };
+        let mut curves = SmoothCurves {
+            level: curve(0, 0),
+            shorter_share: curve(0, 0),
+            fall_off: curve(0, 0),
+            between_locus_share: Some(curve(0, 0)),
+            allele_length_variation: vec![curve(0, 0); 3],
+        };
+        assert_eq!(unscored_strengths_line(2, &curves), None);
+        curves.shorter_share = curve(3, 0);
+        curves.between_locus_share = Some(curve(5, 1));
+        assert_eq!(
+            unscored_strengths_line(2, &curves).as_deref(),
+            Some(
+                "motif length 2, strengths that could not be scored: strengths never chosen \
+                 because the curve's fit there could not be factorised, even with a larger \
+                 ridge: shorter share 3, F 5; no strength tried could be scored, so the strength \
+                 held before was kept: F in 1 search"
+            )
+        );
+        // A fit kept at a strength no search chose, alone, is enough for the line.
+        let mut curves = SmoothCurves {
+            level: curve(0, 0),
+            shorter_share: curve(0, 0),
+            fall_off: curve(0, 0),
+            between_locus_share: None,
+            allele_length_variation: vec![curve(0, 0); 3],
+        };
+        curves.fall_off.unfactorised_fits_kept = 2;
+        assert_eq!(
+            unscored_strengths_line(2, &curves).as_deref(),
+            Some(
+                "motif length 2, strengths that could not be scored: fits at a strength no search \
+                 chose that could not be factorised, so the curve kept the values Newton's method \
+                 had reached when it stopped: fall-off 2"
+            )
+        );
+    }
+
+    /// **The two variants that keep some errors name what they keep**: F's alone undetermined,
+    /// and every number's but F's.
+    #[test]
+    fn undetermined_errors_lines_name_what_is_kept() {
+        assert_eq!(
+            undetermined_errors_line(2, UndeterminedErrors::BetweenLocusShare),
+            "motif length 2, standard errors: none determined for F: the curvature of F read off \
+             pairs of samples, with its curve's bend penalty added, could not be inverted, either \
+             because some combination of numbers has next to no reads behind it (the slope of a \
+             stiff curve through a single repeat count's slipped reads, for one) or because the \
+             curvature is not positive in some direction at the values the fit reached; those \
+             errors are written as not placed, except where too few loci already withheld them"
+        );
+        assert_eq!(
+            undetermined_errors_line(2, UndeterminedErrors::EveryNumberButBetweenLocusShare),
+            "motif length 2, standard errors: none determined for any of its numbers except F, \
+             which is read off pairs of samples with a curvature of its own: the fit's curvature, \
+             with the curves' bend penalties added, could not be inverted, either because some \
+             combination of numbers has next to no reads behind it (the slope of a stiff curve \
+             through a single repeat count's slipped reads, for one) or because the curvature is \
+             not positive in some direction at the values the fit reached; those errors are \
+             written as not placed, except where too few loci already withheld them"
+        );
     }
 }
