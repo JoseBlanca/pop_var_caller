@@ -576,15 +576,24 @@ fn ln_reads(ln_chances: &[f64], reads: &[u32]) -> f64 {
     total
 }
 
-/// One distinct row of reads scored at a round's numbers: the largest genotype log-likelihood,
-/// and each genotype's prior times its likelihood (scaled by the largest), for the sample's copies
-/// as one draw and as two, with their sums.
+/// **One distinct row of reads scored at one stutter**: the largest genotype log-likelihood, and
+/// each genotype's likelihood divided by the largest, in `genotypes` order.
+///
+/// It holds no prior. A genotype's weight in a round is this likelihood times the genotype's prior
+/// ([`GenotypePrior`]), multiplied where it is read, so a step that moves only the shares or the
+/// spread reuses the row as it is.
 struct ScoredRow {
     largest: f64,
-    one: Vec<f64>,
-    two: Vec<f64>,
-    one_total: f64,
-    two_total: f64,
+    scaled: Vec<f64>,
+}
+
+/// **A scored row's likelihoods summed under the prior**: over the genotypes, each scaled
+/// likelihood times the genotype's prior with the sample's copies one draw, and times its prior
+/// with them two draws. A sample's likelihood mixes the two by its chances of each.
+#[derive(Clone, Copy)]
+struct PriorWeightedTotals {
+    one_draw: f64,
+    two_draws: f64,
 }
 
 /// **What a set of samples holding one distinct row add up to**: with `c₁` and `c₂` a sample's
@@ -599,10 +608,11 @@ struct RowWeights {
     alike: f64,
 }
 
-/// **One round's fixed inputs**: the genotypes, the read distributions at the round's stutter, the
-/// log chance of a read in each bucket under each genotype, and each genotype's prior at its
-/// shares — what scores a distinct row and turns its weights into counts.
-struct RoundModel {
+/// **What scores a row of reads at one stutter**: the genotypes, each allele's read-length
+/// distribution, the log chance of a read in each bucket under each genotype, and where the
+/// slipped reads land. Everything in it depends on the stutter alone, so the rows scored with it
+/// serve every set of shares and spread ([`ScoredDistinctRows`]).
+struct ReadModel {
     classes: usize,
     span: i32,
     read_span: i32,
@@ -612,19 +622,10 @@ struct RoundModel {
     ln_read_chances: Vec<Vec<f64>>,
     stay: f64,
     slips_by_bucket: Vec<Vec<SlipsIntoBucket>>,
-    one_draw: Vec<f64>,
-    two_draws: Vec<f64>,
-    concentration: f64,
 }
 
-impl RoundModel {
-    fn of(
-        evidence: &StratumEvidence,
-        slippage: Slippage,
-        shares: &[f64],
-        concentration: f64,
-        allele_span: i32,
-    ) -> Self {
+impl ReadModel {
+    fn of(evidence: &StratumEvidence, slippage: Slippage, allele_span: i32) -> Self {
         let classes = allele_classes_in(allele_span);
         let genotypes = genotype_pairs(classes);
         let span = allele_span;
@@ -637,22 +638,6 @@ impl RoundModel {
         let slips_by_bucket = (0..classes)
             .map(|class| slips_into_each_bucket(slippage, class as i32 - span, read_span))
             .collect();
-        // Each genotype's prior, given a sample's homozygote excess, split into the part where
-        // its two copies are one draw (identical by descent) and the part where they are two.
-        let one_draw = genotypes
-            .iter()
-            .map(|(a, b)| if a == b { shares[*a] } else { 0.0 })
-            .collect();
-        let two_draws = genotypes
-            .iter()
-            .map(|(a, b)| {
-                if a == b {
-                    shares[*a] * shares[*a]
-                } else {
-                    2.0 * shares[*a] * shares[*b]
-                }
-            })
-            .collect();
         Self {
             classes,
             span,
@@ -662,80 +647,52 @@ impl RoundModel {
             ln_read_chances,
             stay: 1.0 - slippage.level,
             slips_by_bucket,
-            one_draw,
-            two_draws,
-            concentration,
         }
     }
 
     /// `reads` scored under every genotype, each log-likelihood read off [`Self::ln_read_chances`].
     fn score(&self, reads: &[u32]) -> ScoredRow {
-        // `one` holds each genotype's log-likelihood, then its likelihood scaled by the largest,
-        // then that times its one-draw prior: one vector where three were allocated.
-        let mut one: Vec<f64> = self
+        // Each genotype's log-likelihood, then its likelihood scaled by the largest, in place.
+        let mut scaled: Vec<f64> = self
             .ln_read_chances
             .iter()
             .map(|ln_chances| ln_reads(ln_chances, reads))
             .collect();
-        let largest = one.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        for value in &mut one {
+        let largest = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        for value in &mut scaled {
             *value = float::exp(*value - largest);
         }
-        let two: Vec<f64> = one
-            .iter()
-            .zip(&self.two_draws)
-            .map(|(l, p)| l * p)
-            .collect();
-        for (value, prior) in one.iter_mut().zip(&self.one_draw) {
-            *value *= prior;
-        }
-        ScoredRow {
-            largest,
-            one_total: one.iter().sum(),
-            two_total: two.iter().sum(),
-            one,
-            two,
-        }
+        ScoredRow { largest, scaled }
     }
 
-    /// Adds one sample holding `row` at homozygote excess `excess` to `into`, and returns its
-    /// log-likelihood; `None` for a sample whose reads no genotype explains.
-    fn add_sample(&self, row: &ScoredRow, excess: f64, into: &mut RowWeights) -> Option<f64> {
-        // A sample's two copies are one draw if identical by descent, or, failing that, if they
-        // drew the same chromosome lineage from the tract's own frequencies: chance
-        // 1 / (1 + concentration) under a Dirichlet.
-        let from_the_tract = (1.0 - excess) / (1.0 + self.concentration);
-        let one_draw_chance = excess + from_the_tract;
-        let two_draw_chance = (1.0 - excess) * self.concentration / (1.0 + self.concentration);
-        let total = one_draw_chance * row.one_total + two_draw_chance * row.two_total;
-        if total <= 0.0 {
-            return None;
-        }
-        into.as_one += one_draw_chance / total;
-        into.as_two += two_draw_chance / total;
-        into.alike += from_the_tract / total;
-        Some(float::ln(total) + row.largest)
-    }
-
-    /// **The counts of every sample that holds `reads`**, from the row's genotype columns and the
-    /// samples' summed [`RowWeights`]: each read shared between "reported its allele's length" and
-    /// "slipped this far, this way", and each sample's alleles among the lengths.
-    fn counts_of(&self, reads: &[u32], row: &ScoredRow, weights: RowWeights, into: &mut Counts) {
+    /// **The counts of every sample that holds `reads`**, from the row's scaled likelihoods, the
+    /// genotypes' `prior` and the samples' summed [`RowWeights`]: each read shared between
+    /// "reported its allele's length" and "slipped this far, this way", and each sample's alleles
+    /// among the lengths.
+    fn counts_of(
+        &self,
+        prior: &GenotypePrior,
+        reads: &[u32],
+        row: &ScoredRow,
+        weights: RowWeights,
+        into: &mut Counts,
+    ) {
         let per_allele = &self.per_allele;
         let slot = |class: usize| {
             ((class as i32 - self.span).clamp(-self.read_span, self.read_span) + self.read_span)
                 as usize
         };
         for (index, (a, b)) in self.genotypes.iter().enumerate() {
-            let one = row.one[index] * weights.as_one;
-            let two = row.two[index] * weights.as_two;
+            let as_one_draw = row.scaled[index] * prior.one_draw[index];
+            let one = as_one_draw * weights.as_one;
+            let two = (row.scaled[index] * prior.two_draws[index]) * weights.as_two;
             let weight = one + two;
             if weight < 1e-12 {
                 continue;
             }
             into.draws[*a] += one + two;
             into.draws[*b] += two;
-            let shared = row.one[index] * weights.alike;
+            let shared = as_one_draw * weights.alike;
             into.shared_in_tract += shared;
             into.pairs_not_by_descent += shared + two;
             for (bucket, count) in reads.iter().enumerate() {
@@ -775,6 +732,217 @@ impl RoundModel {
     }
 }
 
+/// **Each genotype's prior at a round's allele-length shares and spread**, given a sample's
+/// homozygote excess, split into the part where the sample's two copies are one draw (identical
+/// by descent, or drawn alike from the tract) and the part where they are two.
+struct GenotypePrior {
+    /// The allele's share for a homozygote, zero for a heterozygote; in `genotypes` order.
+    one_draw: Vec<f64>,
+    /// The genotype's Hardy–Weinberg chance from the shares; in `genotypes` order.
+    two_draws: Vec<f64>,
+    concentration: f64,
+}
+
+impl GenotypePrior {
+    fn of(genotypes: &[(usize, usize)], shares: &[f64], concentration: f64) -> Self {
+        let one_draw = genotypes
+            .iter()
+            .map(|(a, b)| if a == b { shares[*a] } else { 0.0 })
+            .collect();
+        let two_draws = genotypes
+            .iter()
+            .map(|(a, b)| {
+                if a == b {
+                    shares[*a] * shares[*a]
+                } else {
+                    2.0 * shares[*a] * shares[*b]
+                }
+            })
+            .collect();
+        Self {
+            one_draw,
+            two_draws,
+            concentration,
+        }
+    }
+
+    /// `row`'s scaled likelihoods summed under this prior, genotype by genotype in order.
+    fn totals(&self, row: &ScoredRow) -> PriorWeightedTotals {
+        PriorWeightedTotals {
+            one_draw: row
+                .scaled
+                .iter()
+                .zip(&self.one_draw)
+                .map(|(l, p)| l * p)
+                .sum(),
+            two_draws: row
+                .scaled
+                .iter()
+                .zip(&self.two_draws)
+                .map(|(l, p)| l * p)
+                .sum(),
+        }
+    }
+
+    /// Adds one sample holding a row with largest log-likelihood `largest` and `totals`, at
+    /// homozygote excess `excess`, to `into`, and returns its log-likelihood; `None` for a sample
+    /// whose reads no genotype explains.
+    fn add_sample(
+        &self,
+        largest: f64,
+        totals: PriorWeightedTotals,
+        excess: f64,
+        into: &mut RowWeights,
+    ) -> Option<f64> {
+        // A sample's two copies are one draw if identical by descent, or, failing that, if they
+        // drew the same chromosome lineage from the tract's own frequencies: chance
+        // 1 / (1 + concentration) under a Dirichlet.
+        let from_the_tract = (1.0 - excess) / (1.0 + self.concentration);
+        let one_draw_chance = excess + from_the_tract;
+        let two_draw_chance = (1.0 - excess) * self.concentration / (1.0 + self.concentration);
+        let total = one_draw_chance * totals.one_draw + two_draw_chance * totals.two_draws;
+        if total <= 0.0 {
+            return None;
+        }
+        into.as_one += one_draw_chance / total;
+        into.as_two += two_draw_chance / total;
+        into.alike += from_the_tract / total;
+        Some(float::ln(total) + largest)
+    }
+}
+
+/// **A class's distinct rows of reads, each scored at one stutter**: the [`ReadModel`] and a
+/// [`ScoredRow`] for every row of `distinct`, in its order.
+///
+/// **Why it is kept apart from the shares and the spread.** Scoring the rows is the costly part of
+/// a round and depends on the stutter alone. The standard errors take steps in the shares and in F
+/// at fixed stutter, and these all read one scoring of the class instead of scoring it again for
+/// each step ([`Self::expected_counts`]).
+pub(super) struct ScoredDistinctRows<'a> {
+    distinct: &'a DistinctRows,
+    model: ReadModel,
+    rows: Vec<ScoredRow>,
+}
+
+impl<'a> ScoredDistinctRows<'a> {
+    /// Every row of `distinct`, a table of `evidence`, scored at `slippage`.
+    pub(super) fn of(
+        evidence: &StratumEvidence,
+        distinct: &'a DistinctRows,
+        slippage: Slippage,
+        allele_span: i32,
+    ) -> Self {
+        let model = ReadModel::of(evidence, slippage, allele_span);
+        let rows = distinct
+            .reads
+            .par_iter()
+            .map(|reads| model.score(reads))
+            .collect();
+        Self {
+            distinct,
+            model,
+            rows,
+        }
+    }
+
+    /// **One round's expected counts over the whole class** at the scored stutter, the
+    /// allele-length shares `shares` and the spread `concentration`
+    /// ([`expected_counts_by_distinct_rows`]).
+    pub(super) fn expected_counts(&self, shares: &[f64], concentration: f64) -> Counts {
+        let (distinct, model) = (self.distinct, &self.model);
+        let prior = GenotypePrior::of(&model.genotypes, shares, concentration);
+        let totals: Vec<PriorWeightedTotals> =
+            self.rows.par_iter().map(|row| prior.totals(row)).collect();
+        // In fixed chunks summed in order, so that the answer does not depend on the thread pool.
+        let width = distinct.reads.len();
+        let chunk = (distinct.rows.len() / 256).max(4096);
+        let partials: Vec<(Vec<RowWeights>, f64)> = distinct
+            .rows
+            .par_chunks(chunk)
+            .map(|rows| {
+                let mut weights = vec![RowWeights::default(); width];
+                let mut log_likelihood = 0.0;
+                for (index, excess) in rows {
+                    let index = *index as usize;
+                    let largest = self.rows[index].largest;
+                    if let Some(ll) =
+                        prior.add_sample(largest, totals[index], *excess, &mut weights[index])
+                    {
+                        log_likelihood += ll;
+                    }
+                }
+                (weights, log_likelihood)
+            })
+            .collect();
+        let mut weights = vec![RowWeights::default(); width];
+        let mut log_likelihood = 0.0;
+        for (part, part_ll) in &partials {
+            for (into, from) in weights.iter_mut().zip(part) {
+                into.as_one += from.as_one;
+                into.as_two += from.as_two;
+                into.alike += from.alike;
+            }
+            log_likelihood += part_ll;
+        }
+        let per_row: Vec<Counts> = distinct
+            .reads
+            .par_iter()
+            .zip(&self.rows)
+            .zip(&weights)
+            .map(|((reads, row), weights)| {
+                let mut counts = Counts::new(model.classes);
+                model.counts_of(&prior, reads, row, *weights, &mut counts);
+                counts
+            })
+            .collect();
+        let mut counts = Counts::new(model.classes);
+        for row in &per_row {
+            counts.add(row);
+        }
+        counts.log_likelihood = log_likelihood;
+        counts
+    }
+
+    /// **One round's expected counts, tract by tract** ([`expected_counts_by_tract`]), at the
+    /// scored stutter, the shares `shares` and the spread `concentration`.
+    fn expected_counts_by_tract(&self, shares: &[f64], concentration: f64) -> Vec<Counts> {
+        let (distinct, model) = (self.distinct, &self.model);
+        let prior = GenotypePrior::of(&model.genotypes, shares, concentration);
+        let totals: Vec<PriorWeightedTotals> =
+            self.rows.par_iter().map(|row| prior.totals(row)).collect();
+        distinct
+            .tract_starts
+            .par_windows(2)
+            .map(|bounds| {
+                let mut counts = Counts::new(model.classes);
+                // The tract's distinct rows in the order first met, each with its samples' weights.
+                let mut held: Vec<(usize, RowWeights)> = Vec::new();
+                for (index, excess) in &distinct.rows[bounds[0]..bounds[1]] {
+                    let index = *index as usize;
+                    let at = held
+                        .iter()
+                        .position(|(row, _)| *row == index)
+                        .unwrap_or_else(|| {
+                            held.push((index, RowWeights::default()));
+                            held.len() - 1
+                        });
+                    let largest = self.rows[index].largest;
+                    if let Some(ll) =
+                        prior.add_sample(largest, totals[index], *excess, &mut held[at].1)
+                    {
+                        counts.log_likelihood += ll;
+                    }
+                }
+                for (index, weights) in held {
+                    let (reads, row) = (&distinct.reads[index], &self.rows[index]);
+                    model.counts_of(&prior, reads, row, weights, &mut counts);
+                }
+                counts
+            })
+            .collect()
+    }
+}
+
 /// **One round's expected counts over the whole class**, at the stutter `slippage`, the
 /// allele-length shares `shares` and the spread `concentration`: the counts of
 /// [`expected_counts_by_tract`] summed, with every distinct row of reads scored once however many
@@ -792,57 +960,8 @@ pub(super) fn expected_counts_by_distinct_rows(
     concentration: f64,
     allele_span: i32,
 ) -> Counts {
-    let model = RoundModel::of(evidence, slippage, shares, concentration, allele_span);
-    let scored: Vec<ScoredRow> = distinct
-        .reads
-        .par_iter()
-        .map(|reads| model.score(reads))
-        .collect();
-    // In fixed chunks summed in order, so that the answer does not depend on the thread pool.
-    let width = distinct.reads.len();
-    let chunk = (distinct.rows.len() / 256).max(4096);
-    let partials: Vec<(Vec<RowWeights>, f64)> = distinct
-        .rows
-        .par_chunks(chunk)
-        .map(|rows| {
-            let mut weights = vec![RowWeights::default(); width];
-            let mut log_likelihood = 0.0;
-            for (index, excess) in rows {
-                let index = *index as usize;
-                if let Some(ll) = model.add_sample(&scored[index], *excess, &mut weights[index]) {
-                    log_likelihood += ll;
-                }
-            }
-            (weights, log_likelihood)
-        })
-        .collect();
-    let mut weights = vec![RowWeights::default(); width];
-    let mut log_likelihood = 0.0;
-    for (part, part_ll) in &partials {
-        for (into, from) in weights.iter_mut().zip(part) {
-            into.as_one += from.as_one;
-            into.as_two += from.as_two;
-            into.alike += from.alike;
-        }
-        log_likelihood += part_ll;
-    }
-    let per_row: Vec<Counts> = distinct
-        .reads
-        .par_iter()
-        .zip(&scored)
-        .zip(&weights)
-        .map(|((reads, row), weights)| {
-            let mut counts = Counts::new(model.classes);
-            model.counts_of(reads, row, *weights, &mut counts);
-            counts
-        })
-        .collect();
-    let mut counts = Counts::new(model.classes);
-    for row in &per_row {
-        counts.add(row);
-    }
-    counts.log_likelihood = log_likelihood;
-    counts
+    ScoredDistinctRows::of(evidence, distinct, slippage, allele_span)
+        .expected_counts(shares, concentration)
 }
 
 /// **One round's expected counts, tract by tract**, in the order of `evidence.tracts`, at the
@@ -862,44 +981,8 @@ pub(super) fn expected_counts_by_tract(
     config: &SsrFitConfig,
 ) -> Vec<Counts> {
     let distinct = DistinctRows::of(evidence, homozygote_excess);
-    let model = RoundModel::of(
-        evidence,
-        slippage,
-        shares,
-        concentration,
-        config.allele_span,
-    );
-    let scored: Vec<ScoredRow> = distinct
-        .reads
-        .par_iter()
-        .map(|reads| model.score(reads))
-        .collect();
-    distinct
-        .tract_starts
-        .par_windows(2)
-        .map(|bounds| {
-            let mut counts = Counts::new(model.classes);
-            // The tract's distinct rows in the order first met, each with its samples' weights.
-            let mut held: Vec<(usize, RowWeights)> = Vec::new();
-            for (index, excess) in &distinct.rows[bounds[0]..bounds[1]] {
-                let index = *index as usize;
-                let at = held
-                    .iter()
-                    .position(|(row, _)| *row == index)
-                    .unwrap_or_else(|| {
-                        held.push((index, RowWeights::default()));
-                        held.len() - 1
-                    });
-                if let Some(ll) = model.add_sample(&scored[index], *excess, &mut held[at].1) {
-                    counts.log_likelihood += ll;
-                }
-            }
-            for (index, weights) in held {
-                model.counts_of(&distinct.reads[index], &scored[index], weights, &mut counts);
-            }
-            counts
-        })
-        .collect()
+    ScoredDistinctRows::of(evidence, &distinct, slippage, config.allele_span)
+        .expected_counts_by_tract(shares, concentration)
 }
 
 /// **[`expected_counts_by_tract`] as it was, sample by sample**: the check that counting each

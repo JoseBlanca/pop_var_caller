@@ -27,7 +27,7 @@
 use std::time::Instant;
 
 use super::expected_counts::{
-    CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs,
+    CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs, ScoredDistinctRows,
     concentration_stopped_inside_its_search, expected_counts_by_distinct_rows,
 };
 use super::*;
@@ -1544,15 +1544,7 @@ impl Period {
                 let theta = theta_at(point);
                 let distinct = DistinctRows::of(evidence, homozygote_excess);
                 let mut curvature = vec![0.0; width * width];
-                for column in 0..width {
-                    let mut up = theta.clone();
-                    up[column] += step;
-                    let mut down = theta.clone();
-                    down[column] -= step;
-                    let (above, below) = (
-                        class_slope(evidence, &distinct, point, &up),
-                        class_slope(evidence, &distinct, point, &down),
-                    );
+                let mut add_column = |column: usize, above: &[f64], below: &[f64]| {
                     for row in 0..width {
                         let value = -(above[row] - below[row]) / (2.0 * step);
                         // Symmetrised: the objective's curvature is symmetric, its numerical
@@ -1560,6 +1552,36 @@ impl Period {
                         curvature[row * width + column] += 0.5 * value;
                         curvature[column * width + row] += 0.5 * value;
                     }
+                };
+                let steps_in = |column: usize| {
+                    let mut up = theta.clone();
+                    up[column] += step;
+                    let mut down = theta.clone();
+                    down[column] -= step;
+                    [up, down]
+                };
+                // A step in F or in a share moves no stutter number, so the rows' likelihoods are
+                // the central ones: the class is scored once for all those steps, and those
+                // columns go first so that the scored table is gone before each stutter step
+                // scores its own. Every entry of `curvature` receives exactly two additions to
+                // zero, which give the same sum in either order, so the order of the columns
+                // changes no bit.
+                let central_stutter = numbers_of(point, &theta).0;
+                let central =
+                    ScoredDistinctRows::of(evidence, &distinct, central_stutter, allele_span);
+                for column in 3..width {
+                    let [above, below] = steps_in(column).map(|theta| {
+                        let (slippage, shares, concentration) = numbers_of(point, &theta);
+                        debug_assert_eq!(slippage, central_stutter);
+                        slope_of(&central.expected_counts(&shares, concentration), &theta)
+                    });
+                    add_column(column, &above, &below);
+                }
+                drop(central);
+                for column in 0..3 {
+                    let [above, below] = steps_in(column)
+                        .map(|theta| class_slope(evidence, &distinct, point, &theta));
+                    add_column(column, &above, &below);
                 }
                 // Gone before the loci build their own small tables.
                 drop(distinct);
