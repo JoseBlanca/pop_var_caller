@@ -50,6 +50,7 @@ use crate::types::ReadGroupId;
 use super::census::Stratum;
 use super::share_curve::ShareSource;
 use super::slippage_curve::LevelSource;
+use super::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR;
 use super::ssr_fit::{LevelProvenance, SharesProvenance, Slippage, StratumOutcome};
 
 /// What one `(read group, stratum)` cell answers with.
@@ -512,8 +513,9 @@ pub struct StratumFits {
     /// it, which is what [`Self::with_period_allele_length_variations`] is.
     allele_length_variation_by_period: BTreeMap<u8, FittedAlleleLengthVariation>,
     /// The strength the second rung and the bottom rung state: the run's own median fitted
-    /// concentration, taken on the between-locus share (see `median_concentration`), where any
-    /// stratum has a concentration, and [`STATED_FLAT_CONCENTRATION`] where none has.
+    /// concentration, taken on the between-locus share over the strata with enough loci (see
+    /// `median_concentration`), where any stratum has a concentration, and
+    /// [`STATED_FLAT_CONCENTRATION`] where none has.
     stated_concentration: f64,
     /// **Where that strength came from, carried rather than re-derived.**
     ///
@@ -567,6 +569,9 @@ impl StratumFits {
     ) -> Self {
         let mut by_stratum = BTreeMap::new();
         let mut allele_length_variation_by_stratum = BTreeMap::new();
+        // Each fitted class's concentration beside its count of loci with reads: the count is
+        // what `median_concentration` chooses the classes it counts by.
+        let mut concentration_and_loci_of_each_class = Vec::new();
         for outcome in outcomes {
             if matches!(outcome, StratumOutcome::Refused { .. }) {
                 continue;
@@ -638,23 +643,25 @@ impl StratumFits {
             // no concentration keeps its shares** (`str_fit_to_calling.md` §3.2); the lookup holds
             // them at the stated concentration.
             if let StratumOutcome::Fitted(fit) = outcome {
-                allele_length_variation_by_stratum.insert(
-                    stratum,
-                    checked_allele_length_variation(
-                        &fit.allele_length_variation,
-                        fit.concentration,
-                        fit.standard_errors
-                            .as_ref()
-                            .and_then(|errors| errors.concentration.value()),
-                        &format_args!(
-                            "the fit of period {}, {} repeats",
-                            stratum.period, stratum.reference_repeats
-                        ),
+                let checked = checked_allele_length_variation(
+                    &fit.allele_length_variation,
+                    fit.concentration,
+                    fit.standard_errors
+                        .as_ref()
+                        .and_then(|errors| errors.concentration.value()),
+                    &format_args!(
+                        "the fit of period {}, {} repeats",
+                        stratum.period, stratum.reference_repeats
                     ),
                 );
+                if let Some(concentration) = checked.concentration {
+                    concentration_and_loci_of_each_class
+                        .push((concentration, fit.tracts_of_its_own));
+                }
+                allele_length_variation_by_stratum.insert(stratum, checked);
             }
         }
-        let stated_concentration = median_concentration(&allele_length_variation_by_stratum);
+        let stated_concentration = median_concentration(&concentration_and_loci_of_each_class);
         Self {
             slippage_group_of,
             // **The fit's own warrant for it**: a median over this run's strata is a number the
@@ -901,9 +908,11 @@ impl StratumFits {
     /// **The strength the tract ladder states where a stratum has no concentration of its own**:
     /// read by the second rung (a stratum's own shares) and the bottom rung (a flat shape). It is
     /// the median of the run's strata's between-locus shares `F = 1 / (1 + c)`, converted back to
-    /// a concentration `c`, or [`STATED_FLAT_CONCENTRATION`] where no stratum has a concentration
-    /// — which includes a one-sample run, where every stratum with reads is fitted but none
-    /// carries a concentration (`str_fit_to_calling.md` §3.5).
+    /// a concentration `c`. The median counts the strata with a concentration and at least
+    /// [`LOCI_FOR_AN_ERROR`] loci with reads, or every stratum with a concentration where none has
+    /// that many (see `median_concentration`). It is [`STATED_FLAT_CONCENTRATION`] where no stratum
+    /// has a concentration — which includes a one-sample run, where every stratum with reads is
+    /// fitted but none carries a concentration (`str_fit_to_calling.md` §3.5).
     ///
     /// **The run's own median rather than a constant wherever there is one**, because how
     /// monomorphic a species' tracts are is a fact about the species and the run has measured it
@@ -1243,15 +1252,34 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
 ///   mean of the middle two concentrations. Concentrations 4 and 6 have shares 1/5 and 1/7; their
 ///   mean, 6/35, converts back to 29/6 ≈ 4.83, where the mean of the concentrations is 5.
 ///
-/// **A stratum with no concentration does not count**: it has nothing to contribute, and its
-/// shares are held at this very median. The values are finite and positive by
-/// [`checked_allele_length_variation`], so the sort is total and every share lies strictly between
-/// 0 and 1.
-fn median_concentration(fitted: &BTreeMap<Stratum, FittedAlleleLengthVariation>) -> f64 {
-    let mut concentrations: Vec<f64> = fitted
-        .values()
-        .filter_map(|fit| fit.concentration)
+/// **Which strata count** (`str_fit_to_calling.md` §3.5, owner 2026-10-15). `fitted` holds one
+/// pair per stratum that has a concentration: the concentration, and the stratum's count of loci
+/// with at least one spanning read. A stratum with no concentration is not in it: it has nothing
+/// to contribute, and its shares are held at this very median.
+///
+/// - **The median is over the strata with at least [`LOCI_FOR_AN_ERROR`] loci with reads**, the
+///   same count below which the fit withholds every error of a stratum. A thin stratum's
+///   concentration is mostly its motif length's curve, sometimes extended past the last stratum
+///   with data, and would otherwise get the same vote as a stratum of a thousand loci.
+/// - **Where no stratum has that many, the median is over every stratum in `fitted`**, so a run
+///   of thin strata still states a number it measured.
+///
+/// The values are finite and positive by [`checked_allele_length_variation`], so the sort is total
+/// and every share lies strictly between 0 and 1.
+fn median_concentration(fitted: &[(f64, usize)]) -> f64 {
+    let with_enough_loci: Vec<f64> = fitted
+        .iter()
+        .filter(|&&(_, loci_with_reads)| loci_with_reads >= LOCI_FOR_AN_ERROR)
+        .map(|&(concentration, _)| concentration)
         .collect();
+    let mut concentrations = if with_enough_loci.is_empty() {
+        fitted
+            .iter()
+            .map(|&(concentration, _)| concentration)
+            .collect()
+    } else {
+        with_enough_loci
+    };
     if concentrations.is_empty() {
         return STATED_FLAT_CONCENTRATION;
     }
@@ -2041,6 +2069,101 @@ mod tests {
             four.stated_concentration()
         );
         assert_eq!(four.stated_concentration_warrant(), Provenance::FittedHere);
+    }
+
+    /// A stratum fitted on its own tracts as [`fitted`] builds it, on `loci_with_reads` loci with
+    /// at least one spanning read rather than `fitted`'s 40.
+    fn fitted_on_loci(at: Stratum, concentration: f64, loci_with_reads: usize) -> StratumOutcome {
+        let StratumOutcome::Fitted(mut fit) = fitted(at, 0.05, leaning_short(), concentration)
+        else {
+            unreachable!("`fitted` builds a fitted outcome")
+        };
+        fit.tracts_of_its_own = loci_with_reads;
+        StratumOutcome::Fitted(fit)
+    }
+
+    /// **The median counts only the strata with at least [`LOCI_FOR_AN_ERROR`] loci with
+    /// reads** (`str_fit_to_calling.md` §3.5, owner 2026-10-15). Three thick strata, at 8, 40
+    /// and 40 loci, have concentrations 1, 6 and 30, a median of 6. Four thin ones, at 7, 3, 1 and
+    /// 1 loci, have concentrations 0.1 to 0.4, between-locus shares near 1; counted, they would
+    /// move the median of the seven to 0.4. The stratum at exactly 8 loci counts and the one at 7
+    /// does not.
+    #[test]
+    fn the_stated_concentration_is_the_median_of_the_strata_with_enough_loci() {
+        let fits = StratumFits::over(
+            &[
+                fitted_on_loci(stratum(1, 8), 1.0, LOCI_FOR_AN_ERROR),
+                fitted_on_loci(stratum(1, 10), 6.0, 40),
+                fitted_on_loci(stratum(2, 8), 30.0, 40),
+                fitted_on_loci(stratum(2, 20), 0.1, LOCI_FOR_AN_ERROR - 1),
+                fitted_on_loci(stratum(3, 20), 0.2, 3),
+                fitted_on_loci(stratum(3, 30), 0.3, 1),
+                fitted_on_loci(stratum(4, 20), 0.4, 1),
+            ],
+            one_group(),
+        );
+        assert_eq!(
+            fits.stated_concentration(),
+            6.0,
+            "the three strata with 8 or more loci have concentrations 1, 6 and 30, a median of \
+             6; over all seven strata it would be 0.4"
+        );
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::FittedHere);
+    }
+
+    /// **Where no stratum has 8 loci with reads, the median is over every stratum with a
+    /// concentration**, as it was before the threshold: a run of thin strata still states a
+    /// number it measured.
+    #[test]
+    fn with_no_stratum_of_enough_loci_the_median_is_over_every_stratum_with_a_concentration() {
+        let fits = StratumFits::over(
+            &[
+                fitted_on_loci(stratum(2, 8), 1.0, LOCI_FOR_AN_ERROR - 1),
+                fitted_on_loci(stratum(2, 10), 30.0, 3),
+                fitted_on_loci(stratum(2, 12), 6.0, 1),
+            ],
+            one_group(),
+        );
+        assert_eq!(fits.stated_concentration(), 6.0);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::FittedHere);
+    }
+
+    /// **A thick stratum counts only if it has a concentration.** Here the strata with 40 loci
+    /// have shares and no concentration, so no stratum has both, and the median falls back to the
+    /// thin stratum that has one.
+    #[test]
+    fn a_thick_stratum_without_a_concentration_does_not_count_towards_the_threshold() {
+        let fits = StratumFits::over(
+            &[
+                fitted_without_a_concentration(stratum(2, 10), leaning_short()),
+                fitted_without_a_concentration(stratum(2, 12), leaning_short()),
+                fitted_on_loci(stratum(3, 8), 6.0, 2),
+            ],
+            one_group(),
+        );
+        assert_eq!(fits.stated_concentration(), 6.0);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::FittedHere);
+    }
+
+    /// **At one sample, thick and thin strata alike have no concentration**, so the stated one is
+    /// the constant and its warrant `Defaulted`, whatever the loci counts.
+    #[test]
+    fn at_one_sample_the_threshold_leaves_the_stated_concentration_defaulted() {
+        let StratumOutcome::Fitted(mut thin) =
+            fitted_without_a_concentration(stratum(3, 8), leaning_short())
+        else {
+            unreachable!("`fitted_without_a_concentration` builds a fitted outcome")
+        };
+        thin.tracts_of_its_own = 2;
+        let fits = StratumFits::over(
+            &[
+                fitted_without_a_concentration(stratum(2, 10), leaning_short()),
+                StratumOutcome::Fitted(thin),
+            ],
+            one_group(),
+        );
+        assert_eq!(fits.stated_concentration(), STATED_FLAT_CONCENTRATION);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::Defaulted);
     }
 
     /// **The even arm moves the median in the direction the share's curvature says**: at

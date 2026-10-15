@@ -277,7 +277,7 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
   answer is not expected to move: at 500 and 2,000 samples × 3 reads the prior shifts a rich class's
   slip rate by about one part in 100,000. D3 (cost) is unaffected.
 
-- ☐ **C9** *(owner, 2026-10-15.)* **Own commit, do not bundle; oracle before and after.** The stated
+- ✅ **C9** *(owner, 2026-10-15.)* **Own commit, do not bundle; oracle before and after.** The stated
   F's median counts only classes with an F and at least `LOCI_FOR_AN_ERROR` (8) loci with reads; if
   no class has 8, every class with an F, as before. `StratumFits::over` collects each fitted class's
   `StratumFit::tracts_of_its_own` beside its concentration and hands both to `median_concentration`

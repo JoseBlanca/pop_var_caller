@@ -61,6 +61,7 @@ use std::fmt::Write as _;
 
 use crate::alignment::StutterModel;
 use crate::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE;
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::LOCI_FOR_AN_ERROR;
 
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
@@ -329,6 +330,10 @@ impl ParametersFile {
 
         section(&mut out, "repeat_tracts");
         let tracts = &self.repeat_tracts;
+        // Built rather than written out so the loci threshold it states is the one the fit uses.
+        let fallback_share_paragraph = format!(
+            "`fallback_between_locus_share` is the between-locus share a tract is held at where its stratum has none of its own. A between-locus share says how much of a stratum's variation in allele length lies between its loci rather than within one: near 0, every locus carries the stratum's whole spread of lengths; near 1, each locus is fixed at one length. A stratum row with shares and no `between_locus_share` keeps its shares, held at this one; a tract whose stratum and period have no row gets a flat shape over whatever lengths it offers, held at this one. A smaller share makes the prior harder for the reads to move. A run in which any stratum has a between-locus share states the median of those shares and marks it `fitted_here`. The median counts only the strata whose fit had at least {LOCI_FOR_AN_ERROR} loci with reads, the same count below which a stratum carries no own-fit standard errors; where no stratum with a share has that many, it counts every stratum with a share. This file does not carry the counts, so the median cannot be recomputed from the rows below. A run in which no stratum has a between-locus share states the built-in 0.5 and marks it `defaulted`. A run handed this file writes back the warrant it found there, because a file's warrants survive being read — demoting them on every read would have the same cohort report different warrants depending on which way it was called. Mark it `supplied` yourself if you change the number. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size."
+        );
         note(
             &mut out,
             &[
@@ -344,7 +349,7 @@ impl ParametersFile {
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
                 "",
-                "`fallback_between_locus_share` is the between-locus share a tract is held at where its stratum has none of its own. A between-locus share says how much of a stratum's variation in allele length lies between its loci rather than within one: near 0, every locus carries the stratum's whole spread of lengths; near 1, each locus is fixed at one length. A stratum row with shares and no `between_locus_share` keeps its shares, held at this one; a tract whose stratum and period have no row gets a flat shape over whatever lengths it offers, held at this one. A smaller share makes the prior harder for the reads to move. A run in which any stratum has a between-locus share states the median of those shares and marks it `fitted_here`; a run in which none has one states the built-in 0.5 and marks it `defaulted`. A run handed this file writes back the warrant it found there, because a file's warrants survive being read — demoting them on every read would have the same cohort report different warrants depending on which way it was called. Mark it `supplied` yourself if you change the number. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size.",
+                &fallback_share_paragraph,
             ],
         );
         scalar_with_note(
