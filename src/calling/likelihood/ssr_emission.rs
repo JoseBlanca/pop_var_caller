@@ -514,21 +514,18 @@ pub struct StutterSubstitutionEmission;
 /// Held by the row and handed back on every call, so the buffers themselves are not
 /// reallocated per observation per candidate.
 ///
-/// **Two allocations do survive that, and are named here because the sentence above used to
+/// **One allocation does survive that, and is named here because the sentence above used to
 /// claim more than it delivers.** `segment_tract_into` builds a fresh `Vec<u8>` for every
-/// interruption it finds, and clearing a `Vec<Vec<u8>>` drops each inner buffer, so
-/// `placements` keeps only its spine between calls and `render_tract` allocates one buffer per
-/// placement. Both are **per call** rather than per length change — the censored term's exact
-/// sum segments once and then walks the support — and closing them needs `render_tract` to
-/// write into a reused buffer, which is a change of its own.
+/// interruption it finds. It is **per call** rather than per length change — the censored
+/// term's exact sum segments once and then walks the support.
 #[derive(Debug, Default)]
 pub struct StutterSubstitutionScratch {
     /// The candidate split into its runs and interruptions — **a property of the candidate,
     /// so it survives a whole walk over the length changes** rather than being rebuilt for
     /// each one.
     segments: Vec<TractSegment>,
-    /// One entry per placement-distinct realisation of the slip.
-    placements: Vec<Vec<u8>>,
+    /// One rendering per placement-distinct realisation of the slip.
+    placements: Renderings,
     /// The candidate resized to the read's length, for the single-placement branch.
     resized: Vec<u8>,
     /// What an STR bundle candidate's scoring reuses ([`bundle_emission`]).
@@ -547,7 +544,7 @@ struct BundleScoringScratch {
     /// Per run, its stretch of the candidate split as [`segment_tract_into`] splits a tract.
     run_segments: Vec<Vec<TractSegment>>,
     /// Per run, the distinct renderings of its stretch under the slip being priced.
-    run_placements: Vec<Vec<Vec<u8>>>,
+    run_placements: Vec<Renderings>,
     /// The candidate rendered with one placement chosen in every run.
     rendered: Vec<u8>,
     /// One run's stretch resized by a part-repeat change.
@@ -590,8 +587,6 @@ struct CensoredScratch {
     reached: Vec<f64>,
     /// A run's stretch split into whole copies and interruptions, while a layout is built.
     segments: Vec<TractSegment>,
-    /// A run's renderings under one slip, while a layout is built.
-    placements: Vec<Vec<u8>>,
     /// From the right flank, a run's stretch written backwards, while a layout is built.
     mirrored_stretch: Vec<u8>,
     /// From the right flank, the motif that mirrored stretch is written in
@@ -691,10 +686,8 @@ struct CensoredLayout {
     fixed_bases: Vec<u8>,
     /// Each fixed piece's bases in `fixed_bases`, in reading order — one more than the runs.
     fixed: Vec<std::ops::Range<usize>>,
-    /// Every run's renderings' bases, one after another.
-    rendering_bases: Vec<u8>,
-    /// Each rendering's bases in `rendering_bases`.
-    renderings: Vec<std::ops::Range<usize>>,
+    /// Every run's renderings, one after another.
+    renderings: Renderings,
     /// Each change a run can make — a whole-unit slip or a sequencing indel — with its price
     /// and its renderings.
     slips: Vec<CensoredSlip>,
@@ -998,6 +991,7 @@ fn letters_over(
     if bp_diff % period_bases == 0 {
         // A whole-repeat change: every run the slip could have landed in gives its own
         // sequence, and they are averaged with equal weight.
+        scratch.placements.clear();
         place_slip_in_each_run(
             &scratch.segments,
             motif,
@@ -1244,17 +1238,28 @@ fn agreeing_prefix_len(one: &[u8], other: &[u8]) -> usize {
 /// comparison model, which score one length change at a time and have no buffer to keep.
 #[cfg(test)]
 fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut Vec<Vec<u8>>) {
+    out.clear();
     if repeats == 0 {
-        out.clear();
         out.push(candidate.to_vec());
         return;
     }
-    place_slip_in_each_run(&segment_tract(candidate, motif), motif, repeats, out);
+    let mut placements = Renderings::default();
+    place_slip_in_each_run(
+        &segment_tract(candidate, motif),
+        motif,
+        repeats,
+        &mut placements,
+    );
+    out.extend(placements.iter().map(<[u8]>::to_vec));
 }
 
 /// The same enumeration over a tract whose runs have already been found — what a caller uses
 /// when it walks many length changes against **one** candidate, so the split is paid for once
 /// rather than once a change.
+///
+/// **It appends to `out`**, and deduplicates only among the renderings this call adds: an STR
+/// bundle's layout collects every slip of every run in one buffer, where two slips may well
+/// render the same bytes. A caller that wants this slip's renderings alone clears `out` first.
 ///
 /// `repeats` is non-zero: the identity has no slip to place, and [`enumerate_placements`]
 /// answers it without splitting anything.
@@ -1262,10 +1267,10 @@ fn place_slip_in_each_run(
     segments: &[TractSegment],
     motif: &[u8],
     repeats: i64,
-    out: &mut Vec<Vec<u8>>,
+    out: &mut Renderings,
 ) {
     debug_assert_ne!(repeats, 0, "the identity has no slip to place");
-    out.clear();
+    let first_of_this_slip = out.len();
     let run_count = segments
         .iter()
         .filter(|segment| matches!(segment, TractSegment::Run(_)))
@@ -1299,10 +1304,65 @@ fn place_slip_in_each_run(
         if held_in_total + resized as usize - held == 0 {
             continue;
         }
-        let rendered = render_tract(segments, motif, target, resized as usize);
-        if !out.contains(&rendered) {
-            out.push(rendered);
+        render_tract(segments, motif, target, resized as usize, out);
+        let rendered = &out[out.len() - 1];
+        if (first_of_this_slip..out.len() - 1).any(|earlier| &out[earlier] == rendered) {
+            out.pop();
         }
+    }
+}
+
+/// Byte strings held one after another in one buffer, each found by its range — renderings of
+/// a tract or a run, indexed in the order they were added.
+///
+/// **One buffer rather than a vector per rendering**, so that clearing it keeps its memory and a
+/// caller that reuses it across calls allocates nothing once it has grown.
+#[derive(Debug, Default)]
+struct Renderings {
+    /// Every rendering's bases, one after another.
+    bases: Vec<u8>,
+    /// Each rendering's bases in `bases`.
+    ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl Renderings {
+    fn clear(&mut self) {
+        self.bases.clear();
+        self.ranges.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.ranges.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Append one rendering.
+    fn push(&mut self, bases: &[u8]) {
+        let first = self.bases.len();
+        self.bases.extend_from_slice(bases);
+        self.ranges.push(first..self.bases.len());
+    }
+
+    /// Drop the last rendering.
+    fn pop(&mut self) {
+        if let Some(last) = self.ranges.pop() {
+            self.bases.truncate(last.start);
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.ranges.iter().map(|range| &self.bases[range.clone()])
+    }
+}
+
+impl std::ops::Index<usize> for Renderings {
+    type Output = [u8];
+
+    fn index(&self, rendering: usize) -> &[u8] {
+        &self.bases[self.ranges[rendering].clone()]
     }
 }
 
@@ -1367,23 +1427,47 @@ fn segment_tract_into(candidate: &[u8], motif: &[u8], segments: &mut Vec<TractSe
 }
 
 /// Render the segments back to bytes, with the run at `target` holding `resized` repeats
-/// instead of its own.
-fn render_tract(segments: &[TractSegment], motif: &[u8], target: usize, resized: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut seen = 0usize;
+/// instead of its own, and append the rendering to `out`.
+fn render_tract(
+    segments: &[TractSegment],
+    motif: &[u8],
+    target: usize,
+    resized: usize,
+    out: &mut Renderings,
+) {
+    let first = out.bases.len();
+    let mut run = 0;
     for segment in segments {
         match segment {
             TractSegment::Run(held) => {
-                let repeats = if seen == target { resized } else { *held };
-                for _ in 0..repeats {
-                    out.extend_from_slice(motif);
-                }
-                seen += 1;
+                let repeats = if run == target { resized } else { *held };
+                extend_with_copies(&mut out.bases, motif, repeats);
+                run += 1;
             }
-            TractSegment::Interruption(bases) => out.extend_from_slice(bases),
+            TractSegment::Interruption(bases) => out.bases.extend_from_slice(bases),
         }
     }
-    out
+    out.ranges.push(first..out.bases.len());
+}
+
+/// Append `copies` copies of `motif` to `bases`, doubling what is already written at each step
+/// rather than adding one copy at a time — a run of a one- or two-base motif is otherwise one
+/// tiny copy per repeat.
+///
+/// **Measured against the two plainer spellings**, calling 50 samples at 30x on one thread
+/// (2026-10-15): this helper costs 636.6 G instructions for the whole run, one
+/// `extend_from_slice` per copy 645.0 G, and `extend(motif.iter().cycle().take(..))` 660.3 G.
+fn extend_with_copies(bases: &mut Vec<u8>, motif: &[u8], copies: usize) {
+    if copies == 0 {
+        return;
+    }
+    let start = bases.len();
+    let end = start + motif.len() * copies;
+    bases.extend_from_slice(motif);
+    while bases.len() < end {
+        let written = bases.len() - start;
+        bases.extend_from_within(start..start + written.min(end - bases.len()));
+    }
 }
 
 /// Resize a candidate by `bp_diff` bases **at the tract's end**, in one placement — the
@@ -1533,14 +1617,16 @@ fn bundle_emission(
             continue;
         }
         // Each run's renderings under its slip of this set.
-        scratch.run_placements.resize_with(runs.len(), Vec::new);
+        scratch
+            .run_placements
+            .resize_with(runs.len(), Renderings::default);
         let mut reachable = true;
         for (run, reference_run) in runs.iter().enumerate() {
             let slip = scratch.slip_sets[set * set_len + run];
             let placements = &mut scratch.run_placements[run];
+            placements.clear();
             if slip == 0 {
-                placements.clear();
-                placements.push(candidate[stretch_of(run)].to_vec());
+                placements.push(&candidate[stretch_of(run)]);
             } else {
                 place_slip_in_each_run(
                     &scratch.run_segments[run],
@@ -1961,7 +2047,6 @@ fn bundle_censored_emission(
                 held,
                 LayoutBuffers {
                     segments: &mut censored.segments,
-                    placements: &mut censored.placements,
                     resized_stretch: &mut scratch.resized_stretch,
                     mirrored_stretch: &mut censored.mirrored_stretch,
                     mirrored_motif: &mut censored.mirrored_motif,
@@ -2068,8 +2153,6 @@ fn flank_beyond_the_hull<'a>(candidate: &SsrCandidate<'a>, held: HeldFlank) -> &
 struct LayoutBuffers<'a> {
     /// A run's stretch split into whole copies and interruptions.
     segments: &'a mut Vec<TractSegment>,
-    /// A run's renderings under one slip.
-    placements: &'a mut Vec<Vec<u8>>,
     /// One run's stretch resized by a sequencing indel of part of a unit.
     resized_stretch: &'a mut Vec<u8>,
     /// From the right flank, a run's stretch written backwards.
@@ -2102,7 +2185,6 @@ impl CensoredLayout {
     ) {
         let LayoutBuffers {
             segments,
-            placements,
             resized_stretch,
             mirrored_stretch,
             mirrored_motif,
@@ -2145,7 +2227,6 @@ impl CensoredLayout {
 
         // Every change each run can make, with its renderings: its slips of whole units, then its
         // sequencing indels of part of a unit.
-        self.rendering_bases.clear();
         self.renderings.clear();
         self.slips.clear();
         self.slips_of_run.clear();
@@ -2174,12 +2255,9 @@ impl CensoredLayout {
                 }
                 let first_rendering = self.renderings.len();
                 if slip == 0 {
-                    push_rendering(&mut self.rendering_bases, &mut self.renderings, stretch);
+                    self.renderings.push(stretch);
                 } else {
-                    place_slip_in_each_run(segments, motif_bytes, slip, placements);
-                    for placement in placements.iter() {
-                        push_rendering(&mut self.rendering_bases, &mut self.renderings, placement);
-                    }
+                    place_slip_in_each_run(segments, motif_bytes, slip, &mut self.renderings);
                 }
                 // A slip no place in the run can absorb is not made, as at a complete read.
                 if self.renderings.len() == first_rendering {
@@ -2213,11 +2291,7 @@ impl CensoredLayout {
                     }
                     resize_at_the_end(stretch, motif_bytes, bp_diff, resized_stretch);
                     let first_rendering = self.renderings.len();
-                    push_rendering(
-                        &mut self.rendering_bases,
-                        &mut self.renderings,
-                        resized_stretch,
-                    );
+                    self.renderings.push(resized_stretch);
                     self.slips.push(CensoredSlip {
                         probability,
                         renderings: first_rendering..self.renderings.len(),
@@ -2300,11 +2374,11 @@ fn walk_from_the_held_flank(
                 for slip in &layout.slips[layout.slips_of_run[at].clone()] {
                     let compared = slip.length.min(read_len - offset);
                     let each = 1.0 / slip.renderings.len() as f64;
-                    let shown: f64 = layout.renderings[slip.renderings.clone()]
-                        .iter()
-                        .map(|bases| {
-                            let rendered =
-                                &layout.rendering_bases[bases.start..bases.start + compared];
+                    let shown: f64 = slip
+                        .renderings
+                        .clone()
+                        .map(|rendering| {
+                            let rendered = &layout.renderings[rendering][..compared];
                             let letters = match last_compared {
                                 Some((before, letters)) if before == rendered => letters,
                                 _ => {
@@ -2328,17 +2402,6 @@ fn walk_from_the_held_flank(
         }
     }
     total
-}
-
-/// Append one rendering's bases, already in reading order, and its range.
-fn push_rendering(
-    rendering_bases: &mut Vec<u8>,
-    renderings: &mut Vec<std::ops::Range<usize>>,
-    bases: &[u8],
-) {
-    let first = rendering_bases.len();
-    rendering_bases.extend_from_slice(bases);
-    renderings.push(first..rendering_bases.len());
 }
 
 #[cfg(test)]
@@ -2898,6 +2961,31 @@ mod tests {
             whole_repeat_longer > one_base_longer,
             "a whole repeat scored {whole_repeat_longer}, a stray base {one_base_longer}"
         );
+    }
+
+    /// **Placing a slip appends to the renderings already held, and deduplicates only among its
+    /// own.** An STR bundle's layout keeps every slip of a run in one buffer; a rendering equal
+    /// to one an earlier slip left there is still this slip's, and must not be dropped.
+    #[test]
+    fn placing_a_slip_appends_and_deduplicates_only_its_own_renderings() {
+        let segments = segment_tract(b"CACATTCACA", b"CA");
+        let mut renderings = Renderings::default();
+        renderings.push(b"CACACATTCACA");
+        place_slip_in_each_run(&segments, b"CA", 1, &mut renderings);
+        let held: Vec<&[u8]> = renderings.iter().collect();
+        assert_eq!(
+            held,
+            [&b"CACACATTCACA"[..], b"CACACATTCACA", b"CACATTCACACA"],
+            "the earlier rendering, then both of this slip's, the first equal to the earlier one"
+        );
+
+        // Two runs that render the same bytes when either slips: this slip keeps them once.
+        renderings.clear();
+        renderings.push(b"CACACA");
+        let twin_runs = [TractSegment::Run(1), TractSegment::Run(1)];
+        place_slip_in_each_run(&twin_runs, b"CA", 1, &mut renderings);
+        let held: Vec<&[u8]> = renderings.iter().collect();
+        assert_eq!(held, [&b"CACACA"[..], b"CACACA"]);
     }
 
     /// **An interrupted tract has more than one place a slip could land, and they are averaged
