@@ -2,7 +2,9 @@
 
 **Draft, 2026-10-14; amended the same day after an adversarial review. Amended 2026-10-15: step
 C8, the stutter prior, and step C9, the stated F's median over classes with 8 or more loci, both
-approved by the owner 2026-10-15.** Turns the settled design —
+approved by the owner 2026-10-15. Amended again 2026-10-15 with the owner's answers to C8's review:
+the slip rate's error rule (C8), the one-sample cost recorded and measured at D1, the weight kept at
+one read, and step C10, the cohort in one fixed order.** Turns the settled design —
 specs [`../spec/str_penalised_fit.md`](../spec/str_penalised_fit.md) and
 [`../spec/str_fit_to_calling.md`](../spec/str_fit_to_calling.md), architecture
 [`../arch/str_penalised_fit.md`](../arch/str_penalised_fit.md) — into build order. **It invents no
@@ -31,10 +33,10 @@ what goes with it (arch §4.1).
 - **The prototype is the oracle, recorded before it moves.** The research bench's `D_tract_prior`
   gives the numbers the production fit must reproduce; C0 writes them down before C1 renames
   anything and C2 removes the bench methods that measured alternatives.
-- **Isolate the silent steps.** Seven steps can change numbers without failing anything: the stated
+- **Isolate the silent steps.** Eight steps can change numbers without failing anything: the stated
   F's median (A5), F's newtype and conversions (B1), the keys holding F (B2), making the fit
-  deterministic (C3), switching `estimate-parameters` to it (C7), the stutter prior (C8) and the
-  classes the stated F's median counts (C9). Each is its own commit, with its oracle run before and
+  deterministic (C3), switching `estimate-parameters` to it (C7), the stutter prior (C8), the
+  classes the stated F's median counts (C9) and the cohort's fixed order (C10). Each is its own commit, with its oracle run before and
   after.
 - **Delete last.** The climb goes only after the new fit has passed on real data (D2) and in calling
   (D5).
@@ -216,6 +218,12 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
     share and fall-off errors `NotPlaced` (today the ridge gives about 10⁻⁶);
   - one slipped read, one repeat shorter, in a one-class motif length: shorter share 0.75, fall-off
     0.025;
+  - *(owner, 2026-10-15, after C8's review; spec §2.10.4, arch §1.4)* **the slip rate of a class with
+    fewer expected slipped reads than `stutter_prior_reads` is `NotPlaced`**, by the same check as
+    the direction numbers, on `expected_slipped_reads`; the lone-class test with no slipped read
+    (10 loci × 3 reads, where the sandwich gave a logit error of 0.65) asserts it. The doc of
+    `errors_of_a_class` drops "the slip rate needs no such rule", and the file note's sentence says
+    the slip rate of such a row carries no error either (spec §2.10.5);
   - the calling-side test that `STUTTER_PRIOR_CENTRE` converts to `hipstr_shipped`'s whole-repeat
     shares;
   - weight 0 reproduces the fit before this step bit for bit.
@@ -230,7 +238,10 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
   - **the weight (spec §2.10.9, question 1)**: held-out prediction with `fit_bench.rs`'s scorer at
     weights 0, 1 and 5 on the cells 1 × 3, 10 × 3, 60 × 3 and 500 × 30 reads, one seed each. The
     owner chose one read; this sweep checks it. If 0 or 5 predicts better, the result goes back to
-    the owner and the constant is not changed in this step.
+    the owner and the constant is not changed in this step. *Answered 2026-10-15:* the review re-ran
+    the six thin cells at seeds 2 and 3; weight 0 beats 1 on two-base cohorts of 10 and 60 samples by
+    0.2–0.5 log units at every seed, weight 1 beats 0 at one sample by 0.3–1.4, weight 5 loses
+    3.2–6.1 on two-base runs at 1 and 10 samples. **The owner kept one read** (spec §2.10.2).
   *Oracle:*
   - **C0's fixture is re-recorded at this step**, because every stutter number moves: alone, a class
     moves by `a·(p₀ − p)/(n + a)` (spec §2.10.2), and the allele lengths and F follow through step 1.
@@ -246,11 +257,23 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
     three- to six-base records, and a genotype only where a homozygote has 4 to 6 reads with one read
     a repeat off (spec §2.10.7). Write the before-and-after table of the near-zero rows that the
     milestone C review listed.
+  *Two criteria above missed, and are restated in units of each number's own error* (owner,
+  2026-10-15, approved with the step; C8's review, `tmp/C8_review.md` on this branch):
+  - **moves at 60 samples or more**: the relative moves reached 2.8×10⁻³ on the slip rate and
+    5.8×10⁻³ on the direction numbers, against the 10⁻³ written above, which is the wrong scale for a
+    rate of 5×10⁻⁴. Measured against each number's error, over every cell of 60 samples or more and
+    every seed, the largest move is 0.023 of an error for the slip rate, 0.23 for the shorter share
+    and 0.086 for the fall-off. The criterion becomes: under a tenth of the number's own error for the
+    slip rate, a quarter for the direction numbers;
+  - **low stutter, "every class within two errors"**: 3 of 35 classes fell outside, at weight 0 and
+    weight 1 alike, and the prior moved those three by 1.2–2.7 parts in a million. Honest errors
+    put about 1.6 of 35 outside two errors, and 3 or more happens about 22 times in 100. The criterion
+    becomes: about 1 class in 20 outside two errors, and the prior moves no class by more than 10⁻³.
 
   **What C8 changes in milestone D.** D1 compares with `compare_D_prior_2026-10-14.md`, measured
   without the prior: the comparison is against C8's re-recorded fixture, and a cell that differs from
   the report beyond run-to-run noise is explained by the prior or investigated. D2, D4, D5 and D6 run
-  after C8, so they measure the fit with the prior; D4 re-records the oracle from C8's state. D6's
+  after C8, so they measure the fit with the prior; D4 re-records the oracle from C10's state, which includes C8's prior. D6's
   answer is not expected to move: at 500 and 2,000 samples × 3 reads the prior shifts a rich class's
   slip rate by about one part in 100,000. D3 (cost) is unaffected.
 
@@ -274,13 +297,36 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
   figure is the one after C8), and with it calls at classes without an F and at tracts with no row,
   which take the fallback. Any other move is investigated before re-recording.
 
+- ☐ **C10** *(owner, 2026-10-15.)* **Own commit, do not bundle; oracle before and after.** The cohort
+  in one fixed order: in `open_the_censuses` (`src/cli/estimate_parameters.rs`), before anything is
+  summed, samples sorted by the sample name in each psp's header, and read groups within a sample by
+  their declared ID. The fitted file then lists samples in name order, which `parameters_file.md` §6
+  allows. *Depends:* C9. *Source:* spec §3 (the order trap); arch §2.4a;
+  `parameter_prepass_cohort.md` test 7 ("The gather is order-independent"); `parameters_file.md` §6.
+  *Why:* the same four tomato2 psps fitted in the oracle's (VCF) order and in alphabetical order give
+  different files, md5 `4c4efa9…` against `5c53b9dc…`; the first difference is in the SNP/indel fit,
+  which stops at its pass limit; inbreeding 0.96645 against 0.96617; a two-base fall-off strength of
+  5.7×10⁹ against 1.2. Thread count is not the cause (`tmp/thread_determinism_report.md`).
+  **The defect is on main too**, so it is fixed on main when this branch merges.
+  *Test:* one cohort fitted from two orderings of its psps gives identical bytes.
+  *Oracle:* the oracle script before and after. Expected: every fitted number of the fitted file
+  moves, since the oracle names its psps in the VCF's order and the fit now sums in name order, and
+  with them the calls made with that file; the VCFs called with default parameters do not move. The
+  move is re-recorded at D4.
+
 ### Milestone D — checks (spec §4)
+
+Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as it will merge.
+
 
 - ☐ **D1** The bench reproduces `compare_D_prior_2026-10-14.md`'s `D_tract_prior` rows with the
   production fit, within run-to-run noise, and adds the cells spec §1.2 names as not run: 500 × 30,
   2,000 × 10, and three seeds at every 2,000-sample cell. It measures error coverage on classes with 1
-  to 7 loci, for the owner's decision on `LOCI_FOR_AN_ERROR`. *Depends:* C7. *Source:* spec §1.2,
-  §2.6, §4.2.
+  to 7 loci, for the owner's decision on `LOCI_FOR_AN_ERROR`. **It also counts, at one sample with the
+  stutter prior on, the two-base classes whose direction numbers lie more than two errors from the
+  truth** (spec §2.6; C8's review found 31/63, 28/126 and 21/126 against 18/62, 18/126 and 12/126
+  without the prior, where honest errors miss about 1 in 22), for the owner. *Depends:* C7.
+  *Source:* spec §1.2, §2.6, §4.2.
 - ☐ **D2a** The bench gains a real-psp mode: it reads a psp set's censuses, folds loci by whole locus
   over the real evidence, fits on the kept folds and scores the held-out ones with `fit_bench.rs`'s
   scorer. *Depends:* C7. *Source:* spec §4.4.
@@ -290,8 +336,8 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
   pairs with reads), the production fit's wall time, thread scaling and peak memory on this Mac.
   Within one hour, with a memory watchdog. *Depends:* C7. *Source:* spec §2.2, §4.5 (kimura's real
   run deferred).
-- ☐ **D4** The oracle and `cli::cross_platform_digests` re-recorded, each move explained.
-  *Depends:* C7. *Source:* spec §4.6.
+- ☐ **D4** The oracle and `cli::cross_platform_digests` re-recorded, each move explained, from
+  C10's state (the cohort in name order). *Depends:* C7, C10. *Source:* spec §4.6.
 - ☐ **D5** Calling on HG002 and the GIAB trio, **run once with a parameters file fitted by the climb
   and once with one fitted by the new fit**, on the same psps; nothing else differs.
   - HG002: `scripts/ng_str_accuracy/hg002_two_binaries.sh`, scored by
@@ -332,7 +378,7 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
 |---|---|
 | A | oracle checksums unchanged (A5's move explained); new-rung and warrant tests |
 | B | conversion, round-trip and migration tests; golden-file diffs; oracle as checkpoint B states |
-| C | C0's fixture reproduced (C2, C3, C4); determinism test; peak memory; oracle move explained (C7, C8, C9) |
+| C | C0's fixture reproduced (C2, C3, C4); determinism tests, threads and psp order (C3, C10); peak memory; oracle move explained (C7, C8, C9, C10) |
 | D | the bench, tomato2 held-out, simulated full scale, HG002 and GIAB calling, the D6 proxy |
 | E | full suite and code review |
 

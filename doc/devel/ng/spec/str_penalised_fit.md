@@ -21,6 +21,12 @@ the same day (§2.10.9, §7). It is built in the plan's step C8. **The same day 
 which classes the stated F's median counts** (companion [`str_fit_to_calling.md`](str_fit_to_calling.md)
 §3.5; plan step C9).
 
+**Amended 2026-10-15, after the review of step C8, with four answers from the owner the same day:** a
+slip rate with fewer expected slipped reads than the prior's weight gets no error (§2.10.4); at one
+sample the prior's pull on two-base direction numbers is a known dishonesty of their errors (§2.6);
+the prior's weight stays one read, on a three-seed sweep (§2.10.2); and the fit is made independent
+of the order the psps are named in before milestone D (§3, plan step C10).
+
 ---
 
 ## 1. What this is
@@ -222,7 +228,26 @@ the truth within one error only 0–2 times in 100 at 500 samples, where an hone
 - **not honest:** lengths of 1–5% from 60 samples up (42–55 in 100); lengths under 1% from 60 samples
   up (27–42); the homopolymer shorter share at 3 reads (29–55);
 - at the ends of the repeat range at 1 sample × 3 reads, the two-base slip rate's errors held the
-  truth within two errors in 2 draws of 6 (`track2_penalised_em_2026-10-12.md` §10.3).
+  truth within two errors in 2 draws of 6 (`track2_penalised_em_2026-10-12.md` §10.3);
+- **at one sample, the two-base direction numbers with the stutter prior on** *(accepted by the owner,
+  2026-10-15, as the known cost of §2.10; no code change)*. The prior pulls them toward its centre
+  (0.5 for the shorter share, 0.05 for the fall-off), and the errors do not widen to cover the pull: a
+  penalised fit's error measures the spread of the estimate, not how far the penalty moved it. So the
+  file can state a shorter share of 0.55 ± 0.08 where the truth is 0.8. Measured by step C8's review on
+  the bench, counting classes whose fitted number lies more than two of its own errors from the truth,
+  with the prior | without (an honest error misses about 1 time in 22):
+
+  | cell (1 sample, PCR truth unless named) | number | with the prior | without |
+  |---|---|---|---|
+  | two-base × 3 reads, PCR-free (3 seeds) | shorter share | 31/63 | 18/62 |
+  | two-base × 3 reads (6 seeds) | fall-off | 28/126 | 18/126 |
+  | two-base × 10 reads (6 seeds) | shorter share | 21/126 | 12/126 |
+
+  The corner was already weak without the prior (18 of 62 is about 6 times what honest errors give),
+  so this is not a new kind of defect. In the PCR-free cell the prior also removes a failure: one seed's
+  shorter share swung between 0 and 1 along the repeat count without it. The effect on calls was not
+  measured; in the example above, at a slip rate of 0.01, the share of reads one repeat short goes
+  from 0.008 to 0.0055. Plan step D1 counts these classes again, for the owner.
 
 Rare lengths get no error (§7).
 
@@ -245,14 +270,14 @@ these**:
 | start | slip rate 0.05, shorter share 0.5, fall-off 0.3 | bench; soft |
 | rounds at most / stop when no number moves more than | 2,000 / 10⁻⁷ | bench; soft |
 | floor | one locus's worth + one draw a class | §2.4, measured |
-| prior under the three stutter curves: weight (`STUTTER_PRIOR_READS`) | one read's worth a class, each curve | §2.10; owner 2026-10-15; C8's sweep of 0, 1 and 5 on held-out loci checks it |
+| prior under the three stutter curves: weight (`STUTTER_PRIOR_READS`) | one read's worth a class, each curve | §2.10.2; owner 2026-10-15, kept after C8's three-seed sweep of 0, 1 and 5 on held-out loci |
 | prior under the three stutter curves: centre (`STUTTER_PRIOR_CENTRE`) | slip rate 0.10, shorter share 0.5, fall-off 0.05: calling's default stutter | §2.10; owner 2026-10-15; not a measurement |
 | F from pairs, at most | 10 alternations | bench; soft |
 | kink knee / tail | 2.5 / 2 | §2.3 |
 | stiffness held once it moves less than | 0.1 natural-log units | measured, track 2 §10.1 |
 | a class whose numbers stopped moving reuses its counts | on | measured, every number unchanged to the third decimal |
 | clustering weight on allele draws | off | measured harmful at large cohorts, track 2 §2.5 |
-| errors withheld below | 8 loci with reads a class; a share under 3 loci's worth; a shorter share or fall-off under one expected slipped read | §2.6, §2.10.4, §7; soft |
+| errors withheld below | 8 loci with reads a class; a share under 3 loci's worth; a slip rate, shorter share or fall-off under one expected slipped read (the prior's weight) | §2.6, §2.10.4, §7; soft |
 
 ### 2.8 Two exact speed-ups, kept
 
@@ -365,11 +390,41 @@ class, measured), and one read is the smallest weight that changes calling at th
 (case A below). A heavier prior biases moderate classes with genuinely low stutter: at five reads'
 worth, a class with 1 slipped read among 1,000 reads would come out at 1.5×10⁻³ where the reads say
 10⁻³, half again its value. The owner chose one read (2026-10-15) before any weight was measured
-against held-out loci; step C8 of the plan checks it with a sweep of 0, 1 and 5, and a different
-winner goes back to the owner (§2.10.9, question 1).
+against held-out loci; step C8 of the plan then measured it.
+
+**What the sweep measured, and the owner's answer** *(owner, 2026-10-15, after C8's review)*. Held-out
+log-likelihood on the bench (`fit_bench.rs`'s scorer, about 900 held-out loci a cell, 5 folds),
+weight 0 or 5 minus weight 1, at seeds 1 / 2 / 3, PCR truth, 3 reads a sample:
+
+| cell | weight 0 − weight 1 | weight 5 − weight 1 |
+|---|---|---|
+| one-base, 1 sample | −0.62 / −0.98 / −0.70 | −0.16 / +1.06 / +0.33 |
+| one-base, 10 samples | −0.82 / +0.13 / +0.03 | −1.44 / −0.12 / −0.74 |
+| one-base, 60 samples | −1.25 / −0.26 / +0.08 | +0.23 / −0.44 / +0.43 |
+| two-base, 1 sample | −0.33 / −1.39 / −0.26 | −6.13 / −3.50 / −5.49 |
+| two-base, 10 samples | +0.49 / +0.49 / +0.36 | −4.43 / −3.24 / −4.22 |
+| two-base, 60 samples | +0.25 / +0.21 / +0.50 | −0.76 / −1.11 / +0.11 |
+
+Three results hold at every seed; the rest change sign from seed to seed:
+
+- weight 5 loses 3.2–6.1 log units on two-base runs at 1 and 10 samples;
+- weight 1 beats weight 0 at one sample, in both motif lengths, by 0.3–1.4 log units;
+- weight 0 beats weight 1 on two-base runs at 10 and 60 samples, by 0.2–0.5 log units over about 900
+  held-out loci, under one part in 1,700 a locus. This fits the pull on two-base direction numbers
+  that §2.6 records.
+
+(The 500 samples × 30 reads cell was run at seed 1 only; its differences were 0.00–0.03.) **The owner
+kept the weight at one read**: weight 0 is the weight that lets thin classes collapse to near-zero
+slip rates (§2.10.1), and its gain where data are plentiful is small. The weight remains a soft
+setting; the sweep compared three values, not a range.
 
 **Why that centre.** It is what calling already uses for a class with no reads, so the fit and calling
-agree on the limit of no evidence. It is not a measurement: `hipstr_shipped` is "HipSTR's shipped
+agree on the limit of no evidence **for the whole-repeat shares**: the centre gives 0.05 of reads one
+repeat short and 0.05 one long, as `hipstr_shipped` does. The part-repeat shares do not agree. Calling
+derives them from the fit's slip rate as `PART_REPEAT_SHARE_OF_WHOLE` (0.05) of it
+(`stutter_rates_for`, `calling/likelihood/stutter_rates.rs`), which at the centre gives 0.0025 each
+way, where `hipstr_shipped` has 0.01. The calling-side test pins the whole-repeat shares only. The
+centre is not a measurement: `hipstr_shipped` is "HipSTR's shipped
 constants and not a fit … on no organism in particular" (`calling/parameters_file/defaults.rs:114-121`).
 At one read's worth that matters only where a class has a handful of reads.
 
@@ -418,14 +473,25 @@ At one read's worth that matters only where a class has a handful of reads.
   adds to both H and B (`:2301-2334`). Leaving it out of the middle term would give a number with no
   reads behind it an error near zero from B alone, which the review's first finding shows is the
   dangerous direction.
-- **A stutter number whose class has fewer trials than the prior's weight gets no error**
-  (`NotPlaced`) *(owner, 2026-10-15)*. For the shorter share and the fall-off that means a
-  class with fewer than one expected slipped read: its value is the centre's, and its error would be
-  the prior's own width (2 logit units for the shorter share), not a measurement. For the slip rate
-  the trials are the class's reads, so the rule never fires on a fitted class; a slip rate with no
-  slipped read gets, alone, a logit error of `1/√(0.1 · (1 − p))` ≈ 3.2, which the existing
-  `NOT_PLACED` test (3 on the logit scale) already withholds.
-- Classes with fewer than 8 loci still withhold every error (§2.6); this rule matters for thicker
+- **A shorter share or fall-off whose class has fewer trials than the prior's weight gets no error**
+  (`NotPlaced`) *(owner, 2026-10-15)*. That means a class with fewer than one expected slipped read
+  (its slipped reads are the shorter share's trials, and its repeats slipped, never fewer, the
+  fall-off's): its value comes from the centre and from its neighbours on the curve, and its error
+  would be the prior's own width (2 logit units for the shorter share), not a measurement.
+- **So does a slip rate whose class has fewer expected slipped reads than the prior's weight**
+  (`NotPlaced`) *(owner, 2026-10-15, after C8's review)*. The rule counts the slip rate's successes,
+  not its trials. *Corrected: this section first said that the slip rate needed no rule, because
+  alone it would get a logit error of `1/√(0.1·(1 − p))` ≈ 3.2, which the `NOT_PLACED` test (3 on the
+  logit scale) withholds. That figure is the curvature's alone, `H^(-1/2)`. The reported error is the
+  sandwich, and with no slipped read its middle term collapses:* B sums each locus's squared score,
+  and with zero events every locus's score is near zero. Take a class of 10 loci × 3 reads with no
+  slip, at weight 1: the rate is 0.1/31 = 0.0032, H ≈ 31·p(1 − p) ≈ 0.1, B ≈ 10 × (3p)² ≈ 9.4×10⁻⁴,
+  P = p(1 − p) ≈ 3.2×10⁻³, so the variance is (B + P)/H² ≈ 0.42 and the logit error 0.65. The class
+  has 8 loci or more and 0.65 is under 3, so without this rule the file would say 0.0032 `Estimated`,
+  about 0.0017–0.006 within one error, when no slip in 30 reads is consistent with any rate up to
+  about 0.1. With the rule, case C2 of §2.10.6 (10,000 reads, none slipped) carries its 10⁻⁵ with no
+  error: zero events place no logit error.
+- Classes with fewer than 8 loci still withhold every error (§2.6); these rules matter for thicker
   classes with genuinely no slips, such as a long-motif class at a large cohort.
 - **The prior adds a positive diagonal at every class**, which removes the exactly flat directions
   the review blamed for failed factorisations (`newton`, `penalised_fit.rs:2180`, `:2211-2213`). It is too small to
@@ -436,15 +502,22 @@ At one read's worth that matters only where a class has a handful of reads.
 
 - **The run log states the prior once**, in the stage's opening line: "stutter: a prior of one read's
   worth a class, centred on calling's default (slip rate 0.10, shorter share 0.5, fall-off 0.05)".
-  Per motif length, it counts the classes whose shorter share and fall-off rest on the prior (fewer
-  than one expected slipped read).
+  Per motif length, it counts the classes with fewer expected slipped reads than the prior's weight:
+  "in N of the M classes fitted, fewer than one read slipped, so their shorter share and fall-off come
+  from their neighbours on the curve and the stutter prior, not from their own reads" (`how_the_fit_ran`,
+  `penalised_fit/run_log.rs`). *Corrected 2026-10-15 after C8's review: this section said such numbers
+  "rest on the stutter prior", which is true of a class fitted alone; a thin class on a curve with
+  well-read neighbours takes most of its value from them.*
 - **The parameters file gets no new key** *(owner, 2026-10-15; §2.10.9, question 3)*. §2.4's
   floor is not written either. A reader can tell a prior-led number from its row: it carries
-  `expected_slipped_reads` below one and, by §2.10.4, no error. The file's own note on stutter
-  provenance (`to_toml.rs:343`) gains one sentence saying that a class's three numbers carry one
-  read's worth of the default stutter, and that a row with fewer than one expected slipped read has
-  its shorter share and fall-off from that prior. *That sentence is the lead's reading of "no key"
-  (2026-10-15); the owner may still drop it.*
+  `expected_slipped_reads` below one and, by §2.10.4, no error on any of its three stutter numbers.
+  The file's own note on stutter provenance (the `repeat_tracts` note in `to_toml.rs`) gains one
+  sentence: a stratum on a penalised curve was fitted with one extra read's worth of evidence that
+  behaves as calling's default stutter does, so a row with `expected_slipped_reads` below one has its
+  shorter share and fall-off from that default and from its neighbours on the curve, not from its own
+  reads, and no error on them. With §2.10.4's slip-rate rule the sentence should also say the slip
+  rate there carries no error. *That sentence is the lead's reading of "no key" (2026-10-15); the
+  owner may still drop it.*
 
 #### 2.10.6 Worked cases
 
@@ -482,7 +555,7 @@ Read the table this way:
 - **At one sample** nothing new is needed: the prior is per class and does not use pairs of samples.
   **At thousands of samples** every class with reads has thousands of reads, and the prior's share is
   below one part in a thousand except at classes with no slip, where it sets the rate's order of
-  magnitude (case E) and the error rule withholds the direction numbers' errors.
+  magnitude (case E) and the error rules withhold the errors of all three stutter numbers (§2.10.4).
 
 #### 2.10.7 What it changes in calling, at the cases the review measured
 
@@ -524,6 +597,8 @@ The lead put five questions with a recommendation each; the owner answered all f
 1. **Weight: one read's worth, or more?** *Recommended: one.* **Owner: one read's worth a class.**
    Step C8's held-out comparison on the bench at weights 0, 1 and 5 checks it; if a weight other
    than one predicts better, that result goes back to the owner rather than changing the constant.
+   *It did, in part: weight 0 predicts slightly better on two-base cohorts of 10 and 60 samples. The
+   owner kept one read (2026-10-15); the sweep and the reason are in §2.10.2.*
 2. **Centre: calling's default (0.10, 0.5, 0.05), or the fit's start (0.05, 0.5, 0.3)?**
    *Recommended: calling's default.* **Owner: calling's default stutter** (`hipstr_shipped`), so that
    a class with one read and a class with none agree in the limit; the start is a starting point,
@@ -533,7 +608,9 @@ The lead put five questions with a recommendation each; the owner answered all f
    (§2.10.5); that is the lead's reading, and the owner may still drop it.
 4. **The error rule of §2.10.4** (no error on a shorter share or fall-off whose class has fewer than
    one expected slipped read)? *Recommended: adopt.* **Owner: yes.** Without it a shorter share of
-   0.5 that no read placed would be written with an error of 2 logit units, `Estimated`.
+   0.5 that no read placed would be written with an error of 2 logit units, `Estimated`. *Extended
+   by the owner after C8's review (2026-10-15) to the slip rate, counted by its slipped reads
+   (§2.10.4).*
 5. **Keep `RIDGE` at 10⁻⁶ for F and the allele lengths?** *Recommended: keep.* **Owner: keep.** With
    the prior the ridge no longer sets any stutter number, and changing it would move F and the
    allele lengths for a reason unrelated to this fix.
@@ -551,6 +628,23 @@ The lead put five questions with a recommendation each; the owner answered all f
   2×10⁻¹⁰ difference can flip a discrete decision** (a strength held below 0.1 log units, a class's
   counts reused below the tolerance, the pair loop stopping below 0.01; `penalised_fit.rs:387`,
   `:575-578`), so a comparison before and after the fix can differ for that reason too.
+- **The output must also not depend on the order the psps are named in, and today it does** *(found
+  2026-10-15; the owner chose to fix it on this branch before milestone D, plan step C10)*.
+  `estimate-parameters` numbers the cohort's samples and read groups in the order its psps were
+  named, and the fit's sums over them run in that numbering; floating-point addition is not
+  associative, so a re-ordered cohort sums differently in the last places. The same four tomato2
+  psps fitted in the oracle's order (the VCF's) and in alphabetical order give two different files
+  (md5 `4c4efa9…` against `5c53b9dc…`; `tmp/thread_determinism_report.md` on this branch, not
+  committed). The first difference is in the SNP/indel fit, which stops at its pass limit rather than
+  converged and so carries it into its returned values: the inbreeding coefficient of SRS1839219 is
+  0.96645 against 0.96617. Through the repeat-tract fit, whose curve strengths near the top of their
+  search sit on an almost flat marginal likelihood, it becomes a two-base fall-off strength of 5.7×10⁹
+  against 1.2. Thread count is not the cause: the oracle's order gives `4c4efa9…` at 4 threads and
+  at 18. The specs already require order independence: `parameter_prepass_cohort.md` test 7 ("The
+  gather is order-independent — same summaries, same parameters, whatever order they are read in")
+  and `parameters_file.md` §6 (the sample list: "Order is immaterial and must be"). **The defect
+  predates this branch and is on main too**; the fix (put the cohort in one fixed order before
+  anything is summed; architecture §2.4a) reaches main when this branch merges.
 - **The renaming is half done** on this branch (`aa42d629`): the parameters file's keys were renamed
   without a format version or reading of older files, so this branch refuses every parameters file
   written before it ("unknown field `length_spectrum_by_period`" on kimura). Fixed by
@@ -598,13 +692,14 @@ The lead put five questions with a recommendation each; the owner answered all f
    end of its search (§2.5); a motif length with one class, and one with two, fits and reports
    (§2.3). **Added 2026-10-15 (approved by the owner, §2.10):** a one-class motif length with no slipped read
    returns a slip rate of 0.1/(n + 1) for its n reads, a shorter share of 0.5 and a fall-off of 0.05,
-   with those two errors `NotPlaced`; no stutter logit of any test ends within one unit of ±40; a
+   with all three errors `NotPlaced`; no stutter logit of any test ends within one unit of ±40; a
    drawn class with genuinely low stutter and many reads keeps its rate within its error.
 2. **The bench reproduces the recommendation's numbers** for the production settings at the cells of
    `compare_D_prior_2026-10-14.md` (same seeds), within run-to-run noise, plus the cells §1.2 says
    were not run (500 × 30, 2,000 × 10, three seeds at every 2,000-sample cell), and the coverage of
    errors on classes with fewer than 8 loci (§2.6).
-3. **Determinism:** two runs, and runs at 1 and 18 threads, give the same bits.
+3. **Determinism:** two runs, and runs at 1 and 18 threads, give the same bits; so do two orderings
+   of the same psps (§3; plan step C10).
 4. **Real data, held-out:** on tomato2, held-out prediction by whole locus, the new fit against the
    counting fit, with the scorer of the bench (`fit_bench.rs`). This is the first test on real reads.
 5. **Cost on kimura, measured:** the fit alone within one hour and the run's peak memory reported, at
@@ -689,6 +784,24 @@ The lead put five questions with a recommendation each; the owner answered all f
 - **Owner, 2026-10-15: the stated F's median counts only classes with at least `LOCI_FOR_AN_ERROR`
   (8) loci with reads**, falling back to every class with an F when none has 8. Recorded in the
   companion, [`str_fit_to_calling.md`](str_fit_to_calling.md) §3.5; built in plan step C9.
+
+### 2026-10-15: the owner's answers to step C8's review
+
+Each as the lead recommended.
+
+- **Owner: a slip rate whose class has fewer expected slipped reads than the prior's weight gets no
+  error (`NotPlaced`)**, like its shorter share and fall-off (§2.10.4). It corrects §2.10.4's
+  assumption that the `NOT_PLACED` threshold would withhold it: the sandwich's middle term collapses
+  with zero slipped reads, so a class of 30 reads with no slip got a logit error of 0.65.
+- **Owner: at one sample, the prior's pull on two-base direction numbers is accepted** as the known
+  cost of §2.10 and recorded in §2.6's list of errors that are not honest; plan step D1 measures it
+  again. No code change.
+- **Owner: the prior's weight stays one read.** The three-seed sweep is in §2.10.2. Weight 0 is the
+  weight that lets thin classes collapse to near-zero slip rates; its gain where data are plentiful
+  (0.2–0.5 log units over about 900 held-out loci, two-base, 10 and 60 samples) is small.
+- **Owner: the fit's dependence on the order the psps are named in is fixed on this branch before
+  milestone D** (§3), as plan step C10: the cohort is put in one fixed order, samples by name and read
+  groups within a sample by ID, before anything is summed. The defect is on main too.
 
 ## 8. Reuse map
 

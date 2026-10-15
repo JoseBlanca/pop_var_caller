@@ -9,7 +9,9 @@ main (`e0b41ad4`). **Amended 2026-10-14 after an adversarial review**; records t
 decisions say so and point to the spec's §7 or the companion's §6, where the owner confirms them.
 **Amended 2026-10-15, approved by the owner the same day:** the stutter prior of spec §2.10, in §1.1a
 and one row of §1.4; and the stated F's median over classes with at least 8 loci with reads
-(companion §3.5), in §1.5.
+(companion §3.5), in §1.5. **Amended again 2026-10-15, owner, after step C8's review:** the
+slip rate joins §1.4's prior row (§1.1a); and §2.4a, the cohort put in one fixed order before the
+fit.
 
 ---
 
@@ -122,9 +124,13 @@ pub const STUTTER_PRIOR_CENTRE: Slippage = Slippage {
   prior. Two siblings beside it carry the trials of the direction numbers, for the error rule:
   `expected_slips_with_a_direction` (`shorter + longer`) and `expected_repeats_slipped` (`steps`),
   both from the class's last counts.
-- **The error mapping** (§1.4) gains one row, after the `TooFewLoci` rows: a shorter share whose
-  `expected_slips_with_a_direction`, or a fall-off whose `expected_repeats_slipped`, is below
-  `stutter_prior_reads` → `NotPlaced`.
+- **The error mapping** (§1.4) gains one row, after the `TooFewLoci` rows: a slip rate whose
+  `expected_slipped_reads`, a shorter share whose `expected_slips_with_a_direction`, or a fall-off
+  whose `expected_repeats_slipped`, is below `stutter_prior_reads` → `NotPlaced`. The slip rate's
+  part is the owner's, 2026-10-15, after C8's review (spec §2.10.4): with no slipped read the
+  sandwich gave a logit error of 0.65, which the `NOT_PLACED` test does not withhold. In
+  `errors_of_a_class` (`penalised_fit.rs`) the slip rate goes through the same check as
+  `of_a_direction`, with `fitted.expected_slipped_reads` as its count.
 - **The run log** (`penalised_fit/run_log.rs`): `opening_line` (`:67`) states the weight and centre;
   `how_the_fit_ran` (`:156`) counts the motif length's classes whose direction numbers rest on the
   prior. **The file:** no new key (owner, 2026-10-15); one sentence in the stutter-provenance note
@@ -229,7 +235,7 @@ converted only at the file's edge (§2.3) *(lead, 2026-10-14)*. The prototype's 
 | F absent (its error, `concentration`) | `NotPlaced` |
 | class with fewer than `LOCI_FOR_AN_ERROR` loci with reads | `TooFewLoci` |
 | a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` | `TooFewLoci` |
-| *(owner, 2026-10-15, §1.1a)* a shorter share or fall-off whose class's trials are below `stutter_prior_reads` | `NotPlaced` |
+| *(owner, 2026-10-15, §1.1a)* a slip rate whose class's expected slipped reads, a shorter share whose slipped reads with a direction, or a fall-off whose repeats slipped, are below `stutter_prior_reads` | `NotPlaced` |
 | an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — as the climb judges it (`ssr_fit.rs:2172`) | `NotPlaced` |
 | a positive, finite error | `Estimated` |
 | zero, absent or not finite | `NotPlaced` |
@@ -409,6 +415,19 @@ if given, exits with an error saying the repeat-tract fit no longer holds per-st
 spec §7). Its doc and the `strata_at_once` plumbing (`:362-366`) go. Detecting "was given" changes
 its type, which touches the `EstimateParametersArgs` literals in `cli/cross_platform_digests.rs:371`
 and `cli/estimate_parameters/tests.rs:98`.
+
+### 2.4a One fixed order for the cohort — owner, 2026-10-15
+
+Spec §3 (the second trap); plan step C10. `OpenPspCohort::open` (`run/psp_caller.rs`) keeps its psps
+"in the order the paths were given", which becomes the run's sample order, and numbers every read
+group run-wide in that order; the fit's sums over samples and read groups follow that numbering. So
+`open_the_censuses` (`cli/estimate_parameters.rs`) puts the cohort into one fixed order **before
+anything is summed**: samples sorted by the sample name in each psp's header, and read groups within
+a sample by their declared ID (`@RG ID`). The sort lives in `open_the_censuses`, not in the opener,
+because the opener is shared with `call-from-psps`, whose run order is the order its paths were
+given. The written file then lists samples in name order, which `parameters_file.md` §6 allows:
+calling joins the file's rows by sample name and `@RG ID`, not by position. The defect is on main
+too; this change reaches main with the branch.
 
 ---
 
