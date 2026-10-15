@@ -45,6 +45,13 @@
 //! measure each method, run one method a process, as `scripts/research/str_fit_grid.sh` does; it
 //! also records the process's peak through `/usr/bin/time`, which works on macOS too.
 
+// The allocator `pvc` ships (`src/main.rs`), so that the bench's times and peak memory describe
+// what `estimate-parameters` runs. A `#[global_allocator]` is per binary: without this line the
+// bench ran the system allocator. dhat takes the slot when both features are on.
+#[cfg(all(feature = "alloc-mimalloc", not(feature = "dhat-heap")))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
