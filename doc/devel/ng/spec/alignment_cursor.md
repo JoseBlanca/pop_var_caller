@@ -197,6 +197,26 @@ place in the file.
 | path, header, index, chromosome list, read groups | yes — never changes | one shared copy |
 | the CRAM reference bases | **no** — one window per CRAM reader (section 10) | fetched per slice through a windowed reference reader the decode owns |
 | file descriptor, position, kept reads, last region served, tallies | **no** | owned by one cursor |
+| the unpacked data: CRAM containers, BAM blocks | **yes** — a small cache behind a lock | one per open file, so per walk (amendment below) |
+
+**Amended 2026-10-15 — the unpacked data is now shared, and the table's last row was added.**
+A walk holds more than one cursor on a sample's file on purpose (§7, *two generators, two
+cursors*; the STR bundle generator has since made it three), and their regions interleave, so they
+unpack the same stretch of the file once each. The cursors still own their place in the file, their
+kept reads and their tallies; what they now share is the step below that, unpacking. On CRAM the
+file holds the last few decoded containers (`SharedContainers`, `aligned_reads_reader/container.rs`,
+since 2026-09-08, with a prefetch thread filling it — `run_streaming.md` §11 question 8). On BAM it
+holds the last 32 inflated BGZF blocks (`SharedBgzfBlocks`, `aligned_reads_reader/bgzf_blocks.rs`)
+together with **the one file descriptor they are inflated through**, so a BAM cursor no longer opens
+a descriptor of its own. Each cache is the one written part of the shared side, and its lock is
+never contended in practice, because a sample's cursors all belong to one walk and a walk runs on
+one thread at a time. Measured on `generate-psps` over one simulated sample at 30x, the three
+cursors asked for 12,334 blocks and the shared cache inflated 4,572 of them (of 4,114 distinct
+blocks). The slot count, why it is 32, and what it costs in memory are in `bgzf_blocks.rs`.
+
+This is not the compressed-block cache §1 rules out. That one would have kept the *compressed*
+bytes so one cursor could skip a file read, and would still have paid the inflate. This keeps the
+*inflated* bytes, and what it saves is a second and third cursor inflating them again.
 
 **Nothing on the shared side is written to, and the file keeps no counters.** It keeps two kinds
 today and neither survives. `readers_opened` exists only to catch a reader leaked back to the
@@ -593,7 +613,9 @@ refused region both returns the error and leaves the cursor serving its own chro
 
 **Threads.** Nothing inside a cursor is locked, because nothing is shared. `AlignmentFile` can be
 used from many threads; a cursor cannot be, in the same way and for the same reason as the
-windowed reference reader — an open file position belongs to one consumer.
+windowed reference reader — an open file position belongs to one consumer. *(2026-10-15: the
+file's unpacked-data cache is the exception — locked, and shared by the file's cursors; see the
+amendment in §3.)*
 
 ### The CRAM reference bases — a window per slice, from a reader of the decode's own
 

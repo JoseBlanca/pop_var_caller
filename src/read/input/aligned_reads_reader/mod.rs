@@ -87,11 +87,12 @@
 //! # What is here
 //!
 //! All three arms: [`InMemoryAlignedReadsReader`], [`BamAlignedReadsReader`] and
-//! [`CramAlignedReadsReader`], plus [`container`], which holds the CRAM decode's unit of work
-//! and is not an arm. The order they were built in was deliberate — the forget rule that
-//! decides which kept reads may be dropped is the one part of this design that can lose reads
-//! *silently*, so it was built and tested against a reader with no file behind it before any
-//! real input could hide a defect in it (spec §6, and the plan's principles).
+//! [`CramAlignedReadsReader`], plus [`container`], which holds the CRAM decode's unit of work,
+//! and [`bgzf_blocks`], the BGZF blocks a BAM's readers share; neither is an arm. The order the
+//! arms were built in was deliberate — the forget rule that decides which kept reads may be
+//! dropped is the one part of this design that can lose reads *silently*, so it was built and
+//! tested against a reader with no file behind it before any real input could hide a defect in
+//! it (spec §6, and the plan's principles).
 
 // Covers this module and `in_memory` below it, so the reason is stated once.
 // Narrowed after Milestone C: the BAM arm is live, and what is left unused is the in-memory
@@ -105,6 +106,7 @@
 )]
 
 mod bam;
+mod bgzf_blocks;
 mod container;
 mod cram;
 mod in_memory;
@@ -118,6 +120,7 @@ use crate::read::aligned_read::NoodlesRawAlignedRead;
 use crate::types::GenomeRegion;
 
 pub(crate) use bam::BamAlignedReadsReader;
+pub(crate) use bgzf_blocks::SharedBgzfBlocks;
 pub(crate) use container::SharedContainers;
 pub(crate) use cram::CramAlignedReadsReader;
 pub(crate) use in_memory::InMemoryAlignedReadsReader;
@@ -135,6 +138,13 @@ pub(crate) use prefetch::{ContainerPrefetcher, SharedDecode};
 /// the dispatcher. The dynamic-dispatch alternative pays a virtual call per record, about a
 /// million per run (spec §5).
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "there are a handful of these per walk, one per cursor, so the size is immaterial; \
+              the largest arm became the in-memory one when the BAM arm's blocks moved into the \
+              shared cache, and boxing it would only add a `Box::new` at each of its twelve \
+              construction sites"
+)]
 pub(crate) enum AlignedReadsReader {
     /// A fixed list of records with no file behind it. **Permanent, not test-only**: it is
     /// what lets the forget rule be driven from a scripted list and compared against a plain

@@ -35,7 +35,7 @@ use crate::fasta::{ContigEntry, ContigList};
 use crate::read::filtering::ReadFilterConfig;
 use crate::read::input::aligned_reads_reader::{
     AlignedReadsReader, BamAlignedReadsReader, ContainerPrefetcher, CramAlignedReadsReader,
-    SharedContainers, SharedDecode,
+    SharedBgzfBlocks, SharedContainers, SharedDecode,
 };
 use crate::read::input::cursor::AlignmentCursor;
 use crate::read::input::read_groups::ReadGroupResolution;
@@ -149,6 +149,13 @@ pub struct AlignmentFile {
     /// workers would give each its own, which is what a cache of the container
     /// a reader is on wants.
     container_cache: Arc<SharedContainers>,
+    /// The inflated BGZF blocks **every cursor on this BAM shares**, and the one descriptor
+    /// they are inflated through. `None` for a CRAM.
+    ///
+    /// The BAM counterpart of `container_cache` above, here for the same reason: a walk's
+    /// cursors over one sample pass through the same blocks, and each used to inflate them
+    /// itself. See [`SharedBgzfBlocks`] for the counts and the slot bound.
+    block_cache: Option<Arc<SharedBgzfBlocks>>,
     /// **The thread that decodes this file's containers a little ahead of the
     /// walk**, started by the first CRAM cursor and shared by every cursor after
     /// it. `None` for a BAM, and until the first CRAM cursor is minted.
@@ -315,6 +322,19 @@ impl AlignmentFile {
         // reference's, so position i really is `ContigId(i)`.
         let sq_md5s = file_contigs.entries.iter().map(|entry| entry.md5).collect();
 
+        // A BAM's cursors read through one shared descriptor, opened here rather than per
+        // cursor; the header read above has just shown the file opens.
+        let block_cache = if AlignmentFileKind::from_path(path) == Some(AlignmentFileKind::Bam) {
+            let blocks =
+                SharedBgzfBlocks::open(path).map_err(|source| AlignmentFileError::Open {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            Some(Arc::new(blocks))
+        } else {
+            None
+        };
+
         Ok(Arc::new(Self {
             path: Arc::from(path),
             header: Arc::new(header),
@@ -325,6 +345,7 @@ impl AlignmentFile {
             filter_config,
             crai_by_contig,
             container_cache: Arc::new(SharedContainers::new()),
+            block_cache,
             prefetcher: Mutex::new(None),
         }))
     }
@@ -353,12 +374,14 @@ impl AlignmentFile {
     /// One cursor for one chromosome of this file.
     ///
     /// **Called once per chromosome per worker, never per region — that is the whole point.**
-    /// A cursor opens its own descriptor and keeps it for as long as it lives, so it can stay
+    /// A cursor keeps its own place in the file for as long as it lives, so it can stay
     /// positioned between regions and hand back reads it has already decoded and filtered
-    /// rather than seeking to a block it is usually already sitting in.
+    /// rather than seeking to a block it is usually already sitting in. A CRAM cursor opens a
+    /// descriptor of its own for that; a BAM cursor reads through the file's one descriptor and
+    /// the block cache every cursor on the file shares (`block_cache`).
     ///
-    /// Fallible only here. Opening the descriptor is the one thing that can fail at
-    /// construction; after this returns, a cursor cannot fail to exist.
+    /// Fallible only here. Opening a descriptor and minting the reference readers are the
+    /// things that can fail at construction; after this returns, a cursor cannot fail to exist.
     ///
     /// **A format this function does not know is refused** rather than silently mis-read
     /// ([`CursorFormatUnsupported`](AlignmentFileError::CursorFormatUnsupported)), because a
@@ -513,20 +536,22 @@ impl AlignmentFile {
 
         let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {
-                let mut reader = bam::io::reader::Builder
-                    .build_from_path(&self.path)
-                    .map_err(open_error)?;
-                reader.read_header().map_err(open_error)?;
-                // A BAM always has one: `AlignmentIndex` is `None` only on the CRAM arm,
-                // and both arms are chosen from the same `AlignmentFileKind::from_path`.
-                let index = self.index.clone().ok_or_else(|| AlignmentFileError::Open {
+                // A BAM always has both: `AlignmentIndex` and the block cache are `None` only
+                // on the CRAM arm, and both arms are chosen from the same
+                // `AlignmentFileKind::from_path`.
+                let built_wrong = |what: &str| AlignmentFileError::Open {
                     path: self.path.to_path_buf(),
-                    source: std::io::Error::other(
-                        "a BAM was opened without the index a cursor is built from",
-                    ),
-                })?;
+                    source: std::io::Error::other(format!(
+                        "a BAM was opened without the {what} a cursor is built from"
+                    )),
+                };
+                let index = self.index.clone().ok_or_else(|| built_wrong("index"))?;
+                let blocks = self
+                    .block_cache
+                    .clone()
+                    .ok_or_else(|| built_wrong("block cache"))?;
                 AlignedReadsReader::Bam(BamAlignedReadsReader::new(
-                    reader,
+                    blocks,
                     Arc::clone(&self.header),
                     index,
                     Arc::clone(&self.path),
@@ -662,6 +687,7 @@ impl std::fmt::Debug for AlignmentFile {
             filter_config: _,
             crai_by_contig: _,
             container_cache: _,
+            block_cache: _,
             prefetcher: _,
         } = self;
 
@@ -2007,8 +2033,10 @@ mod tests {
     /// of them reading the whole contig correctly.
     ///
     /// The reader pool this replaces made concurrency a property of the *file*; it is now a
-    /// property of there being one cursor per worker, each with its own descriptor. What can
-    /// still fail is any sharing that crept in below — which is what this can catch.
+    /// property of there being one cursor per worker, each with its own place in the file. What
+    /// can still fail is any sharing below that — and on a BAM there now is some, by design: the
+    /// cursors inflate through one block cache behind a lock, which this drives from eight
+    /// threads at once.
     #[test]
     fn cursors_on_one_file_read_the_same_thing_from_many_threads() {
         let (_reference_dir, _bam_dir, file) = opened_over(&[

@@ -130,6 +130,11 @@ clap = { version = "4", features = ["derive"] }
 # (src/psp/writer.rs, src/run/psp_writer_line.rs).
 crossbeam-channel = "0.5"
 dhat = { version = "0.3", optional = true }
+# libdeflater: the BAM cursors' shared block cache inflates BGZF blocks itself
+# (src/read/input/aligned_reads_reader/bgzf_blocks.rs), because noodles' BGZF reader cannot
+# be handed a block it did not inflate. The same libdeflate noodles-bgzf uses below, at the
+# version its `libdeflate` feature already pulls in, so it adds nothing to the build.
+libdeflater = "1.26.1"
 # libm: the pure-Rust port of musl's maths library, and the caller's source of
 # transcendental functions (`ln`, `exp`, `pow`, `sin`, `lgamma`, ...).
 # `src/float.rs` routes every such call through it so that macOS and Linux compute
@@ -149,7 +154,8 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 # surface (which can shrink at any minor bump).
 noodles-bam = "0.89.0"
 # `libdeflate`: BGZF blocks are inflated and deflated by libdeflate, a C library, instead
-# of the pure-Rust zlib-rs. Every BAM decode goes through this crate; CRAM input does not
+# of the pure-Rust zlib-rs. Every BAM read outside the cursors goes through this crate (the
+# cursors inflate through `libdeflater` directly, above); CRAM input does not
 # (noodles-cram has its own `libdeflate` flag, left off). Measured 2026-10-15
 # (doc/devel/reports/reviews/str_bundles_performance_2026-10-15.md, L3), psps and VCFs
 # identical: generate-psps on 50 simulated samples at 30x fell from 9,193 G to 8,827 G
