@@ -539,6 +539,43 @@ impl DistinctRows {
     }
 }
 
+/// **The log chance that one read reports each bucket's length, for each genotype**: one row per
+/// genotype in `genotypes` order, one column per bucket, each entry
+/// `ln max(½ (per_allele[a][bucket] + per_allele[b][bucket]), 10⁻³⁰⁰)` for the genotype `(a, b)`.
+///
+/// **Taken once for a round, not once for each row of reads.** The log depends on the genotype and
+/// the bucket alone, yet scoring every distinct row took it afresh, and `ln` was a quarter of the
+/// research bench's CPU samples at 2,000 samples of 30 reads. [`ln_reads`] reads the table and adds the same
+/// terms in the same order, so a row's log-likelihood is the same to the bit.
+fn ln_read_chances(per_allele: &[Vec<f64>], genotypes: &[(usize, usize)]) -> Vec<Vec<f64>> {
+    genotypes
+        .iter()
+        .map(|(a, b)| {
+            per_allele[*a]
+                .iter()
+                .zip(&per_allele[*b])
+                .map(|(from_a, from_b)| float::ln((0.5 * (from_a + from_b)).max(1e-300)))
+                .collect()
+        })
+        .collect()
+}
+
+/// **The log-likelihood of a row of reads under one genotype**, from that genotype's row of
+/// [`ln_read_chances`]: each non-empty bucket's read count times its log chance, summed bucket by
+/// bucket from zero.
+#[inline]
+fn ln_reads(ln_chances: &[f64], reads: &[u32]) -> f64 {
+    debug_assert_eq!(ln_chances.len(), reads.len(), "one log chance a bucket");
+    let mut total = 0.0;
+    for (reads, ln_chance) in reads.iter().zip(ln_chances) {
+        if *reads == 0 {
+            continue;
+        }
+        total += f64::from(*reads) * ln_chance;
+    }
+    total
+}
+
 /// One distinct row of reads scored at a round's numbers: the largest genotype log-likelihood,
 /// and each genotype's prior times its likelihood (scaled by the largest), for the sample's copies
 /// as one draw and as two, with their sums.
@@ -562,14 +599,17 @@ struct RowWeights {
     alike: f64,
 }
 
-/// **One round's fixed inputs**: the genotypes, the read distributions at the round's stutter and
-/// each genotype's prior at its shares — what turns a distinct row's weights into counts.
+/// **One round's fixed inputs**: the genotypes, the read distributions at the round's stutter, the
+/// log chance of a read in each bucket under each genotype, and each genotype's prior at its
+/// shares — what scores a distinct row and turns its weights into counts.
 struct RoundModel {
     classes: usize,
     span: i32,
     read_span: i32,
     genotypes: Vec<(usize, usize)>,
     per_allele: Vec<Vec<f64>>,
+    /// [`ln_read_chances`] of `per_allele`: a row per genotype in `genotypes` order.
+    ln_read_chances: Vec<Vec<f64>>,
     stay: f64,
     slips_by_bucket: Vec<Vec<SlipsIntoBucket>>,
     one_draw: Vec<f64>,
@@ -593,6 +633,7 @@ impl RoundModel {
         let mut distributions =
             ReadDistributionsByLevel::of(&[slippage], &libraries, span, read_span);
         let per_allele = distributions.read_distribution_by_allele.swap_remove(0);
+        let ln_read_chances = ln_read_chances(&per_allele, &genotypes);
         let slips_by_bucket = (0..classes)
             .map(|class| slips_into_each_bucket(slippage, class as i32 - span, read_span))
             .collect();
@@ -618,6 +659,7 @@ impl RoundModel {
             read_span,
             genotypes,
             per_allele,
+            ln_read_chances,
             stay: 1.0 - slippage.level,
             slips_by_bucket,
             one_draw,
@@ -626,34 +668,27 @@ impl RoundModel {
         }
     }
 
+    /// `reads` scored under every genotype, each log-likelihood read off [`Self::ln_read_chances`].
     fn score(&self, reads: &[u32]) -> ScoredRow {
-        let log_likelihoods: Vec<f64> = self
-            .genotypes
+        // `one` holds each genotype's log-likelihood, then its likelihood scaled by the largest,
+        // then that times its one-draw prior: one vector where three were allocated.
+        let mut one: Vec<f64> = self
+            .ln_read_chances
             .iter()
-            .map(|(a, b)| {
-                let mut total = 0.0;
-                add_ln_reads(&mut total, &self.per_allele, reads, *a, *b);
-                total
-            })
+            .map(|ln_chances| ln_reads(ln_chances, reads))
             .collect();
-        let largest = log_likelihoods
-            .iter()
-            .copied()
-            .fold(f64::NEG_INFINITY, f64::max);
-        let scaled: Vec<f64> = log_likelihoods
-            .iter()
-            .map(|ll| float::exp(ll - largest))
-            .collect();
-        let one: Vec<f64> = scaled
-            .iter()
-            .zip(&self.one_draw)
-            .map(|(l, p)| l * p)
-            .collect();
-        let two: Vec<f64> = scaled
+        let largest = one.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        for value in &mut one {
+            *value = float::exp(*value - largest);
+        }
+        let two: Vec<f64> = one
             .iter()
             .zip(&self.two_draws)
             .map(|(l, p)| l * p)
             .collect();
+        for (value, prior) in one.iter_mut().zip(&self.one_draw) {
+            *value *= prior;
+        }
         ScoredRow {
             largest,
             one_total: one.iter().sum(),
@@ -1467,20 +1502,16 @@ pub(super) fn scaled_ln_pairs_of_tract(cubics: &[PairCubic], spread: f64) -> f64
 }
 
 /// **A row of reads' likelihood under every ordered allele pair**, `first · classes + second`,
-/// divided by the largest of them.
+/// divided by the largest of them; `ln_read_chances` is [`ln_read_chances`] for `genotypes`.
 fn ordered_row(
     reads: &[u32],
-    per_allele: &[Vec<f64>],
+    ln_read_chances: &[Vec<f64>],
     genotypes: &[(usize, usize)],
     classes: usize,
 ) -> Vec<f64> {
-    let log_likelihoods: Vec<f64> = genotypes
+    let log_likelihoods: Vec<f64> = ln_read_chances
         .iter()
-        .map(|(first, second)| {
-            let mut total = 0.0;
-            add_ln_reads(&mut total, per_allele, reads, *first, *second);
-            total
-        })
+        .map(|ln_chances| ln_reads(ln_chances, reads))
         .collect();
     let largest = log_likelihoods
         .iter()
@@ -1516,12 +1547,13 @@ pub(super) fn pair_cubics_by_tract(
     let libraries = one_stutter_for_every_library(evidence);
     let distributions =
         ReadDistributionsByLevel::of(&[slippage], &libraries, allele_span, evidence.read_span);
-    let per_allele = &distributions.read_distribution_by_allele[0];
+    let ln_read_chances =
+        ln_read_chances(&distributions.read_distribution_by_allele[0], &genotypes);
     let distinct = DistinctRows::of(evidence, homozygote_excess);
     let ordered: Vec<Vec<f64>> = distinct
         .reads
         .par_iter()
-        .map(|reads| ordered_row(reads, per_allele, &genotypes, classes))
+        .map(|reads| ordered_row(reads, &ln_read_chances, &genotypes, classes))
         .collect();
     let at: Vec<RowAtShares> = ordered
         .par_iter()
