@@ -166,10 +166,14 @@ what goes with it (arch §4.1).
   fit's spread objective) now add per-locus values in locus order; the full grid is bit-identical at 1
   and 18 threads; against C0 every count equal, largest move 1.14e-7 relative (a standard error),
   estimates ≤ 2.75e-13. The fixture is re-recorded at this step, so C4 compares bit for bit.
-- ☐ **C4** Memory bounded: classes one at a time within a period, periods one at a time, the
+- ✅ **C4** Memory bounded: classes one at a time within a period, periods one at a time, the
   parallel loops over classes (`penalised_fit.rs:588`, `:852`) made sequential. *Oracle:* bench
   numbers bit-identical before and after; peak memory at 2,000 samples × 30 reads below 2 × the
   counting fit's 1.1 GB. *Depends:* C3. *Source:* spec §2.2, §3; arch §2.1.
+  *Done:* the loops over classes are sequential; peak at 2,000 × 30 fell from 3,263 to 1,085 MiB
+  (one-base) and 2,201 to 634 MiB (two-base); grid bit-identical; 1.3–1.45× the wall time at 2,000
+  samples. Within a class, `DistinctRows::of` blocks by ~8,192 rows and the errors build a class's
+  table once. **"Periods one at a time" lands with C5**, which owns the loop over motif lengths.
 - ☐ **C5** `fit_repeat_tracts`: per-period grouping, one slippage group asserted, the
   `StratumOutcome` conversion, F absent at an end of its search, the error mapping with
   `LOCI_FOR_AN_ERROR` and `LOCI_FOR_A_SHARE_ERROR`. Tested on drawn cohorts: outcomes in input order;

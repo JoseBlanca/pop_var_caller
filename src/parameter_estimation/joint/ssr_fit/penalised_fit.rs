@@ -23,7 +23,9 @@
 
 use std::time::Instant;
 
-use super::expected_counts::{ClassCounts, SamplePairs, expected_counts};
+use super::expected_counts::{
+    ClassCounts, DistinctRows, SamplePairs, expected_counts, expected_counts_by_distinct_rows,
+};
 use super::*;
 
 /// **How the penalised fit runs.** [`production`](Self::production) is what `estimate-parameters`
@@ -415,6 +417,15 @@ pub struct PenalisedPeriodFit {
 /// does, its curve penalised like every other: each round of pairs alternates with penalised
 /// counting at the shares held.
 ///
+/// **Memory: one class's evidence table at a time.** Every round, and the standard errors, visit
+/// the classes one after another and use the threads inside each class, over its loci and distinct
+/// rows. So at most one class's table of distinct rows is alive, whatever the thread count (in the
+/// standard errors, also one locus's small table a busy thread, all from the same class). Between
+/// classes the fit keeps only what does not grow with samples or reads: each class's numbers and
+/// expected counts, a few dozen floats a class, and in the standard errors its curvature and spread
+/// blocks, `width × width` floats each: about 900 floats a class at the default allele window of ±9
+/// (`width` is 21, or 22 when the between-locus share is counted).
+///
 /// # Panics
 ///
 /// When the classes are of more than one motif length, or two share a repeat count.
@@ -627,8 +638,14 @@ impl Period {
                     StrengthSearch::Held
                 };
             let started = Instant::now();
-            // Classes side by side, each also spreading its loci over the pool: at one sample a
-            // class's loci alone leave most of the machine idle.
+            // **One class at a time**, the threads working inside it (`expected_counts` spreads the
+            // class's distinct rows over the pool). A class's table of distinct rows, with each
+            // row's genotype columns scored at the round's numbers, is the round's largest memory,
+            // and is dropped before the next class builds its own, so one table is alive at any
+            // thread count (spec §2.2, §3). A parallel loop over classes
+            // would build one table a busy thread, and more when a thread waiting on a class's
+            // inner work picks up another class. What stays from class to class is its counts: a
+            // few numbers and one per allele length.
             let reuse = |point: usize| {
                 fit.reuse_settled_counts
                     && rounds_here > 1
@@ -643,7 +660,7 @@ impl Period {
                 .count();
             let counts: Vec<Option<ClassCounts>> = self
                 .class_at_point
-                .par_iter()
+                .iter()
                 .enumerate()
                 .map(|(point, class)| {
                     if reuse(point) {
@@ -872,27 +889,34 @@ impl Period {
             }
             slope
         };
-        let class_slope = |evidence: &StratumEvidence, point: usize, theta: &[f64]| {
-            let (slippage, shares, concentration) = numbers_of(point, theta);
-            let counts = expected_counts(
-                evidence,
-                slippage,
-                &shares,
-                concentration,
-                homozygote_excess,
-                allele_span,
-            );
-            slope_of(&counts, theta)
-        };
+        // `distinct` is `evidence`'s table of distinct rows, built once and reused for every
+        // step: the table depends on the reads and the homozygote excesses, neither of which a
+        // step moves.
+        let class_slope =
+            |evidence: &StratumEvidence, distinct: &DistinctRows, point: usize, theta: &[f64]| {
+                let (slippage, shares, concentration) = numbers_of(point, theta);
+                let counts = expected_counts_by_distinct_rows(
+                    evidence,
+                    distinct,
+                    slippage,
+                    &shares,
+                    concentration,
+                    allele_span,
+                );
+                slope_of(&counts, theta)
+            };
         let step = 1e-3;
-        // Each class's curvature and spread blocks, classes side by side.
+        // Each class's curvature and spread blocks, **one class at a time** as in `count`, so one
+        // class's table of distinct rows is alive at once; the threads work inside the class,
+        // over its loci and its distinct rows.
         let blocks: Vec<Option<(Vec<f64>, Vec<f64>)>> = self
             .class_at_point
-            .par_iter()
+            .iter()
             .enumerate()
             .map(|(point, class)| {
                 let evidence = &classes[(*class)?];
                 let theta = theta_at(point);
+                let distinct = DistinctRows::of(evidence, homozygote_excess);
                 let mut curvature = vec![0.0; width * width];
                 for column in 0..width {
                     let mut up = theta.clone();
@@ -900,8 +924,8 @@ impl Period {
                     let mut down = theta.clone();
                     down[column] -= step;
                     let (above, below) = (
-                        class_slope(evidence, point, &up),
-                        class_slope(evidence, point, &down),
+                        class_slope(evidence, &distinct, point, &up),
+                        class_slope(evidence, &distinct, point, &down),
                     );
                     for row in 0..width {
                         let value = -(above[row] - below[row]) / (2.0 * step);
@@ -911,6 +935,8 @@ impl Period {
                         curvature[column * width + row] += 0.5 * value;
                     }
                 }
+                // Gone before the loci build their own small tables.
+                drop(distinct);
                 let by_locus: Vec<Vec<f64>> = evidence
                     .tracts
                     .par_iter()
@@ -928,7 +954,12 @@ impl Period {
                             bases_compared: 0,
                             mismatching_bases: 0,
                         };
-                        class_slope(&one, point, &theta)
+                        class_slope(
+                            &one,
+                            &DistinctRows::of(&one, homozygote_excess),
+                            point,
+                            &theta,
+                        )
                     })
                     .collect();
                 let mut spread = vec![0.0; width * width];

@@ -428,6 +428,10 @@ pub(super) struct DistinctRows {
     tract_starts: Vec<usize>,
 }
 
+/// About how many (tract, sample) rows one block of tracts holds while [`DistinctRows::of`] builds
+/// a class's table.
+const ROWS_PER_BLOCK: usize = 8192;
+
 /// One block of tracts' distinct rows of reads, and each of its (tract, sample)'s place among them
 /// with the sample's homozygote excess.
 type RowsOfABlock = (Vec<Vec<u32>>, Vec<(u32, f64)>);
@@ -435,14 +439,32 @@ type RowsOfABlock = (Vec<Vec<u32>>, Vec<(u32, f64)>);
 impl DistinctRows {
     /// **Built in blocks of tracts side by side**, each block finding its own distinct rows, then
     /// the blocks' rows merged in order: the same rows, numbered in the same order, as one pass
-    /// over the tracts would give.
+    /// over the tracts would give, whatever the size of a block.
+    ///
+    /// A block holds about [`ROWS_PER_BLOCK`] rows, and from 1 to 64 tracts: at 2,000 samples a
+    /// block of 64 tracts left a class of 100 loci two blocks, so two threads built its table
+    /// while the rest waited. That mattered once the penalised fit visits classes one at a time.
     pub(super) fn of(evidence: &StratumEvidence, homozygote_excess: &[f64]) -> Self {
+        let rows_in_class: usize = evidence.tracts.iter().map(|t| t.samples.len()).sum();
+        let tracts_per_block = (ROWS_PER_BLOCK * evidence.tracts.len())
+            .checked_div(rows_in_class)
+            .unwrap_or(64)
+            .clamp(1, 64);
+        Self::in_blocks_of(evidence, homozygote_excess, tracts_per_block)
+    }
+
+    /// [`of`](Self::of) with `tracts_per_block` tracts to a block, at least one.
+    fn in_blocks_of(
+        evidence: &StratumEvidence,
+        homozygote_excess: &[f64],
+        tracts_per_block: usize,
+    ) -> Self {
         let buckets = (2 * evidence.read_span + 1) as usize;
         // Per block: its distinct rows in the order first met, and each (tract, sample)'s place
         // among them with the sample's excess.
         let blocks: Vec<RowsOfABlock> = evidence
             .tracts
-            .par_chunks(64)
+            .par_chunks(tracts_per_block)
             .map(|tracts| {
                 let mut index_of: std::collections::HashMap<Vec<u32>, u32> =
                     std::collections::HashMap::new();
@@ -1826,6 +1848,47 @@ mod tests {
             config.allele_span,
         );
         assert!(same(&class, &summed), "{class:?} against {summed:?}");
+    }
+
+    /// **The table of distinct rows does not depend on the size of a block**: built in blocks of
+    /// one tract, of seven and of all the tracts at once, the rows are the same and numbered in the
+    /// same order, so the expected counts summed over them are the same bits.
+    #[test]
+    fn the_distinct_rows_are_the_same_in_blocks_of_any_size() {
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(5), 2.0, 0.3, 40, 12, 5, 1, 43);
+        let excess = [0.3; 12];
+        let whole = DistinctRows::in_blocks_of(&evidence, &excess, evidence.tracts.len());
+        // Some row must repeat across tracts, so that at one tract a block it is met in two
+        // blocks: only then does a merge that skipped de-duplication between blocks fail below.
+        let tracts_of_row = |row: u32| {
+            whole
+                .tract_starts
+                .windows(2)
+                .filter(|range| {
+                    whole.rows[range[0]..range[1]]
+                        .iter()
+                        .any(|(index, _)| *index == row)
+                })
+                .count()
+        };
+        assert!(
+            (0..whole.reads.len() as u32).any(|row| tracts_of_row(row) > 1),
+            "no row repeats across tracts"
+        );
+        for tracts_per_block in [1, 7] {
+            let blocks = DistinctRows::in_blocks_of(&evidence, &excess, tracts_per_block);
+            assert_eq!(
+                blocks.reads, whole.reads,
+                "{tracts_per_block} tracts a block"
+            );
+            assert_eq!(blocks.rows, whole.rows, "{tracts_per_block} tracts a block");
+            assert_eq!(blocks.tract_starts, whole.tract_starts);
+        }
     }
 
     /// **A class large enough to be summed in several chunks gives the same bits on 18 threads and
