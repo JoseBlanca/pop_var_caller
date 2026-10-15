@@ -463,6 +463,12 @@ impl DistinctRows {
         Self::in_blocks_of(evidence, homozygote_excess, tracts_per_block)
     }
 
+    /// **How many distinct rows the class holds**: the rows whose genotypes a round scores, one
+    /// for every set of (tract, sample) pairs with the same reads.
+    pub(super) fn distinct_rows(&self) -> usize {
+        self.reads.len()
+    }
+
     /// [`of`](Self::of) with `tracts_per_block` tracts to a block, at least one.
     fn in_blocks_of(
         evidence: &StratumEvidence,

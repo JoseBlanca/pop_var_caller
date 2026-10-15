@@ -180,7 +180,7 @@ what goes with it (arch §4.1).
   `Fitted` for a class with reads, `Refused { NoSpanningReads }` for one without, never `Derived`;
   provenance `PenalisedCurve` with `reach` inside; `samples_fitted_on` `None`; F `None` at one sample;
   no `Estimated(0)`. *Depends:* C4, A2, A3. *Source:* arch §1.4, §2.1.
-- ☐ **C6** The run's log of spec §2.9: per motif length, rounds, the five strengths, eased bends,
+- ✅ **C6** The run's log of spec §2.9: per motif length, rounds, the five strengths, eased bends,
   time in each step and peak memory (the progress lines' `VmHWM`, `parameter_estimation/progress.rs:79-110`,
   Linux only; nothing is printed on macOS); per class, rows with reads, distinct rows, F absent; the
   count of withheld errors. *Depends:* C5. *Source:* spec §2.9.

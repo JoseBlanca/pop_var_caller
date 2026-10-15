@@ -7,10 +7,11 @@
 //! The counting fit ([`expected_counts`](mod@super::expected_counts)) fits each class — one motif
 //! length, one reference repeat count — on its own, and the curves across repeat count are drawn
 //! afterwards through its answers. Here each round gathers every class's expected counts exactly as
-//! the counting fit does ([`expected_counts`](fn@expected_counts)), and then chooses all the
-//! classes' numbers together: each number is the best fit to the counts **subject to a penalty on
-//! how sharply it bends from one repeat count to the next**. A thin class then borrows from its neighbours during the fit, by as
-//! much as its own counts leave undecided, instead of being blended with a curve afterwards.
+//! the counting fit does ([`expected_counts`](fn@super::expected_counts::expected_counts)), and
+//! then chooses all the classes' numbers together: each number is the best fit to the counts
+//! **subject to a penalty on how sharply it bends from one repeat count to the next**. A thin class
+//! then borrows from its neighbours during the fit, by as much as its own counts leave undecided,
+//! instead of being blended with a curve afterwards.
 //!
 //! **How sharply a curve may bend is measured, not chosen.** Each curve's penalty strength is the
 //! one that maximises an approximation to the marginal likelihood of its counts (the Laplace
@@ -27,10 +28,13 @@ use std::time::Instant;
 
 use super::expected_counts::{
     CONCENTRATION_SEARCH, ClassCounts, DistinctRows, SamplePairs,
-    concentration_stopped_inside_its_search, expected_counts, expected_counts_by_distinct_rows,
+    concentration_stopped_inside_its_search, expected_counts_by_distinct_rows,
 };
 use super::*;
 use crate::parameter_estimation::joint::slippage_curve::PenalisedPoint;
+use crate::parameter_estimation::progress;
+
+mod run_log;
 
 /// **How the penalised fit runs.** [`production`](Self::production) is what `estimate-parameters`
 /// runs (spec `str_penalised_fit.md` §2.7); [`prototype`](Self::prototype) keeps the research
@@ -322,6 +326,11 @@ pub struct PenalisedClass {
     /// thin class it is mostly the neighbours'; this count is what the class's own reads said.
     /// `None` only when no round ran (`max_rounds` of 0).
     pub expected_slipped_reads: Option<f64>,
+    /// **How many distinct rows of read counts the class's (locus, sample) pairs with reads hold**:
+    /// the rows a round scores, each once however many samples share it (spec §2.8). The run's log
+    /// prints it beside the pairs, so that a reader sees how much the shortcut saved. `None` only
+    /// when no round ran (`max_rounds` of 0).
+    pub distinct_rows: Option<usize>,
     /// Standard errors, when [`PenalisedFitConfig::standard_errors`] asked for them.
     pub errors: Option<PenalisedClassErrors>,
 }
@@ -450,16 +459,20 @@ pub fn fit_period_by_penalised_counting(
     fit: &PenalisedFitConfig,
 ) -> PenalisedPeriodFit {
     let classes: Vec<&StratumEvidence> = classes.iter().collect();
-    fit_one_period(&classes, homozygote_excess, fit)
+    fit_one_period(&classes, homozygote_excess, fit, &|_, _| {})
 }
 
 /// [`fit_period_by_penalised_counting`] over borrowed classes, so that [`fit_repeat_tracts`] can
 /// hand one motif length's classes over from wherever they sit in its input without copying
 /// their reads.
+///
+/// `round_ended` is told, after every round, how many rounds have run and the largest change any
+/// number made in that round, so that a long fit can say where it is; it changes nothing.
 fn fit_one_period(
     classes: &[&StratumEvidence],
     homozygote_excess: &[f64],
     fit: &PenalisedFitConfig,
+    round_ended: &dyn Fn(usize, f64),
 ) -> PenalisedPeriodFit {
     if let Some(first) = classes.first() {
         assert!(
@@ -487,7 +500,7 @@ fn fit_one_period(
             error_seconds: 0.0,
         };
     };
-    period.count(classes, homozygote_excess, fit, false);
+    period.count(classes, homozygote_excess, fit, false, round_ended);
     for alternation in 0..fit.pair_alternations {
         let started = Instant::now();
         let Some(tables) = period.pair_tables(classes, homozygote_excess, fit.allele_span) else {
@@ -514,7 +527,7 @@ fn fit_one_period(
             }
         }
         period.pair_seconds += started.elapsed().as_secs_f64();
-        period.count(classes, homozygote_excess, fit, true);
+        period.count(classes, homozygote_excess, fit, true, round_ended);
         if moved < 0.01 {
             break;
         }
@@ -564,6 +577,15 @@ fn fit_one_period(
 /// built beyond the outcomes — its curves, its timings — is dropped before the next motif length
 /// starts. Within a motif length, see [`fit_period_by_penalised_counting`].
 ///
+/// **What it prints** (spec §2.9), to stderr as the other stages of `estimate-parameters` do
+/// (`parameter_estimation::progress`): while a motif length is fitted, at most once a minute the
+/// round it has reached; after each motif length, its rounds, the time in each step, how stiff
+/// each of the five kinds of curve came out and where bends were eased, then one line a class
+/// with its (locus, sample) pairs with reads, their distinct rows and whether F is absent; at the
+/// end, how many standard errors were withheld. The motif length's first line carries the
+/// process's memory now and its peak so far, on Linux only. The private module `run_log` says
+/// what each line holds. **When `strata` is empty, one line says there was nothing to fit.**
+///
 /// `homozygote_excess` is indexed by sample, as the evidence's samples are.
 ///
 /// # Panics
@@ -580,6 +602,59 @@ pub fn fit_repeat_tracts(
     homozygote_excess: &[f64],
     config: &PenalisedFitConfig,
 ) -> Vec<StratumOutcome> {
+    if strata.is_empty() {
+        return fit_repeat_tracts_logging(
+            strata,
+            homozygote_excess,
+            config,
+            &mut |line| progress::note(format!("repeat-tract fit: {}", line.text())),
+            &|_, _, _| {},
+        );
+    }
+    let stage = StageProgress::begin(format!(
+        "repeat-tract fit: {}",
+        run_log::opening_line(strata)
+    ));
+    let outcomes = fit_repeat_tracts_logging(
+        strata,
+        homozygote_excess,
+        config,
+        &mut |line| match line {
+            run_log::Line::StepEnded(text) => {
+                stage.always(|into| format!("repeat-tract fit: {text}; {into}"));
+            }
+            run_log::Line::Detail(text) => progress::detail(format!("repeat-tract fit: {text}")),
+        },
+        // Checking the clock once a round costs nothing beside a round, which scores every
+        // class's reads; the line is only built when a minute has passed.
+        &|period, round, largest_change| {
+            stage.now_and_then(|into| {
+                format!(
+                    "repeat-tract fit: {}; {into}",
+                    run_log::round_line(period, round, largest_change, config)
+                )
+            });
+        },
+    );
+    stage.always(|into| format!("repeat-tract fit: done; {into}"));
+    outcomes
+}
+
+/// [`fit_repeat_tracts`], each line of its run's log handed to `log` as soon as it is known: a
+/// motif length's lines once that motif length is fitted, the count of withheld errors at the end,
+/// and with no class at all the one line saying so. `round_ended` is told after every round of a
+/// motif length's fit its motif length, the rounds run so far and that round's largest change.
+fn fit_repeat_tracts_logging(
+    strata: &[StratumEvidence],
+    homozygote_excess: &[f64],
+    config: &PenalisedFitConfig,
+    log: &mut dyn FnMut(run_log::Line),
+    round_ended: &dyn Fn(u8, usize, f64),
+) -> Vec<StratumOutcome> {
+    if strata.is_empty() {
+        log(run_log::Line::Detail(run_log::no_classes_line()));
+        return Vec::new();
+    }
     for evidence in strata {
         assert_eq!(
             evidence.groups, 1,
@@ -600,24 +675,48 @@ pub fn fit_repeat_tracts(
     let mut outcomes: Vec<Option<StratumOutcome>> = vec![None; strata.len()];
     for indices in classes_of_each_period.values() {
         let classes: Vec<&StratumEvidence> = indices.iter().map(|&index| &strata[index]).collect();
-        let PenalisedPeriodFit {
-            classes: fitted,
-            curves,
-            ..
-        } = fit_one_period(&classes, homozygote_excess, config);
-        for ((&index, evidence), fitted) in indices.iter().zip(&classes).zip(fitted) {
-            outcomes[index] = Some(outcome_of_a_class(
-                evidence,
-                fitted,
-                curves.as_ref(),
-                config.standard_errors,
-            ));
+        let period = classes[0].stratum.period;
+        let mut fit = fit_one_period(&classes, homozygote_excess, config, &|round, change| {
+            round_ended(period, round, change);
+        });
+        let fitted = std::mem::take(&mut fit.classes);
+        let distinct_rows: Vec<Option<usize>> = fitted
+            .iter()
+            .map(|class| class.as_ref().and_then(|class| class.distinct_rows))
+            .collect();
+        let period_outcomes: Vec<StratumOutcome> = classes
+            .iter()
+            .zip(fitted)
+            .map(|(evidence, fitted)| {
+                outcome_of_a_class(
+                    evidence,
+                    fitted,
+                    fit.curves.as_ref(),
+                    config.standard_errors,
+                )
+            })
+            .collect();
+        for line in run_log::lines_of_a_motif_length(
+            &classes,
+            &period_outcomes,
+            &distinct_rows,
+            &fit,
+            config,
+        ) {
+            log(line);
+        }
+        for (&index, outcome) in indices.iter().zip(period_outcomes) {
+            outcomes[index] = Some(outcome);
         }
     }
-    outcomes
+    let outcomes: Vec<StratumOutcome> = outcomes
         .into_iter()
         .map(|outcome| outcome.expect("every class is in its motif length's group"))
-        .collect()
+        .collect();
+    if let Some(line) = run_log::withheld_errors_line(&outcomes) {
+        log(run_log::Line::Detail(line));
+    }
+    outcomes
 }
 
 /// **One class's [`StratumOutcome`], from what its motif length's fit returned for it.**
@@ -812,6 +911,9 @@ struct Period {
     /// counts last gathered for it.
     class_change: Vec<f64>,
     last_counts: Vec<Option<ClassCounts>>,
+    /// Per grid point, how many distinct rows of reads the class holds, once a round has built its
+    /// table; the count does not change from round to round.
+    distinct_rows: Vec<Option<usize>>,
     error_seconds: f64,
     /// Whether F was read off pairs of samples, so is not a number of the counting objective.
     spread_from_pairs: bool,
@@ -870,6 +972,7 @@ impl Period {
             class_rounds_counted: 0,
             class_change: vec![f64::INFINITY; points],
             last_counts: vec![None; points],
+            distinct_rows: vec![None; points],
             error_seconds: 0.0,
             spread_from_pairs: false,
         })
@@ -880,13 +983,15 @@ impl Period {
     }
 
     /// **Rounds of penalised counting** until no number moves by more than the tolerance or the
-    /// rounds run out. With `spread_held`, the concentration stays where it is.
+    /// rounds run out. With `spread_held`, the concentration stays where it is. After each round,
+    /// `round_ended` is told the rounds run so far and that round's largest change.
     fn count(
         &mut self,
         classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
         fit: &PenalisedFitConfig,
         spread_held: bool,
+        round_ended: &dyn Fn(usize, f64),
     ) {
         let points = self.points();
         let alleles = self.alleles;
@@ -925,24 +1030,39 @@ impl Period {
                 .enumerate()
                 .filter(|(point, class)| class.is_some() && !reuse(*point))
                 .count();
-            let counts: Vec<Option<ClassCounts>> = self
+            // Each class counted is returned with its count of distinct rows, read off the table
+            // before the table is dropped, for the run's log.
+            let gathered: Vec<(Option<ClassCounts>, Option<usize>)> = self
                 .class_at_point
                 .iter()
                 .enumerate()
                 .map(|(point, class)| {
                     if reuse(point) {
-                        return self.last_counts[point].clone();
+                        return (self.last_counts[point].clone(), None);
                     }
-                    class.map(|index| {
-                        expected_counts(
-                            classes[index],
-                            self.slippage[point],
-                            &self.shares[point],
-                            self.concentration[point],
-                            homozygote_excess,
-                            fit.allele_span,
-                        )
-                    })
+                    let Some(index) = *class else {
+                        return (None, None);
+                    };
+                    let distinct = DistinctRows::of(classes[index], homozygote_excess);
+                    let counts = expected_counts_by_distinct_rows(
+                        classes[index],
+                        &distinct,
+                        self.slippage[point],
+                        &self.shares[point],
+                        self.concentration[point],
+                        fit.allele_span,
+                    );
+                    (Some(counts), Some(distinct.distinct_rows()))
+                })
+                .collect();
+            let counts: Vec<Option<ClassCounts>> = gathered
+                .into_iter()
+                .enumerate()
+                .map(|(point, (counts, distinct_rows))| {
+                    if distinct_rows.is_some() {
+                        self.distinct_rows[point] = distinct_rows;
+                    }
+                    counts
                 })
                 .collect();
             self.expectation_seconds += started.elapsed().as_secs_f64();
@@ -1071,6 +1191,7 @@ impl Period {
             }
             self.last_counts = counts;
             self.last_change = change;
+            round_ended(self.rounds, change);
             if self.last_change < fit.tolerance {
                 break;
             }
@@ -1459,6 +1580,7 @@ impl Period {
                     expected_slipped_reads: self.last_counts[point]
                         .as_ref()
                         .map(|counts| counts.slipped),
+                    distinct_rows: self.distinct_rows[point],
                     errors: errors[point].take(),
                 })
             })
@@ -2370,7 +2492,9 @@ impl BandCholesky {
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
-    use crate::parameter_estimation::joint::ssr_fit::expected_counts::fit_class_by_counting_at_share_prior;
+    use crate::parameter_estimation::joint::ssr_fit::expected_counts::{
+        expected_counts, fit_class_by_counting_at_share_prior,
+    };
 
     /// **The banded Cholesky solves what a dense solve does**, on a random positive-definite
     /// matrix of bandwidth four.
@@ -2652,7 +2776,7 @@ mod tests {
     /// **A class drawn at a known stutter**: one-base or two-base runs, `loci` loci of `samples`
     /// samples at `depth` reads each, the three-length spectrum every drawn test here uses, and a
     /// slip rate rising with the repeat count. With `loci` of 0 the class has no reads at all.
-    fn a_drawn_class(
+    pub(super) fn a_drawn_class(
         period: u8,
         repeats: u64,
         loci: usize,
@@ -2685,7 +2809,7 @@ mod tests {
 
     /// The fit `fit_repeat_tracts` runs in these tests: production's settings at a window of ±2,
     /// so a test takes seconds.
-    fn a_narrow_production_fit() -> PenalisedFitConfig {
+    pub(super) fn a_narrow_production_fit() -> PenalisedFitConfig {
         PenalisedFitConfig::production().with_allele_span(2)
     }
 
@@ -3001,6 +3125,7 @@ mod tests {
             between_locus_share: concentration.map(|c| 1.0 / (1.0 + c)),
             working_concentration: concentration.unwrap_or(1.0),
             expected_slipped_reads: Some(50.0),
+            distinct_rows: Some(40),
             errors: Some(PenalisedClassErrors {
                 level: Some(0.01),
                 shorter_share: Some(0.05),
