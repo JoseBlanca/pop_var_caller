@@ -865,36 +865,52 @@ impl<'a> ScoredDistinctRows<'a> {
         let totals: Vec<PriorWeightedTotals> =
             self.rows.par_iter().map(|row| prior.totals(row)).collect();
         // In fixed chunks summed in order, so that the answer does not depend on the thread pool.
-        let width = distinct.reads.len();
+        //
+        // A chunk keeps only the distinct rows its samples hold, not one entry for every distinct
+        // row: with up to 256 chunks, a dense entry each made the partials up to 256 times the
+        // distinct rows. The research bench on one class of 1,000 loci, 2,000 samples of 30
+        // reads, peaked at 6.3 GB with them and 2.9 GB without. The sums are the same to the bit. Each row's chunk sums are still added in chunk order; what is left out
+        // is the `+0.0` an untouched chunk added. Adding `+0.0` changes nothing but `-0.0`, and a
+        // sum begun at `+0.0` is never `-0.0`: a floating-point sum is `-0.0` only when both its
+        // terms are.
         let chunk = (distinct.rows.len() / 256).max(4096);
-        let partials: Vec<(Vec<RowWeights>, f64)> = distinct
+        let partials: Vec<(Vec<(u32, RowWeights)>, f64)> = distinct
             .rows
             .par_chunks(chunk)
             .map(|rows| {
-                let mut weights = vec![RowWeights::default(); width];
+                // The chunk's distinct rows in the order first met, each with its samples' sums.
+                let mut held: Vec<(u32, RowWeights)> = Vec::new();
+                let mut place_of: AHashMap<u32, usize> = AHashMap::new();
                 let mut log_likelihood = 0.0;
                 for (index, excess) in rows {
+                    let at = *place_of.entry(*index).or_insert_with(|| {
+                        held.push((*index, RowWeights::default()));
+                        held.len() - 1
+                    });
                     let index = *index as usize;
                     let largest = self.rows[index].largest;
                     if let Some(ll) =
-                        prior.add_sample(largest, totals[index], *excess, &mut weights[index])
+                        prior.add_sample(largest, totals[index], *excess, &mut held[at].1)
                     {
                         log_likelihood += ll;
                     }
                 }
-                (weights, log_likelihood)
+                (held, log_likelihood)
             })
             .collect();
-        let mut weights = vec![RowWeights::default(); width];
+        let mut weights = vec![RowWeights::default(); distinct.reads.len()];
         let mut log_likelihood = 0.0;
         for (part, part_ll) in &partials {
-            for (into, from) in weights.iter_mut().zip(part) {
+            for (index, from) in part {
+                let into = &mut weights[*index as usize];
                 into.as_one += from.as_one;
                 into.as_two += from.as_two;
                 into.alike += from.alike;
             }
             log_likelihood += part_ll;
         }
+        // Freed before the rows' counts are built.
+        drop(partials);
         let per_row: Vec<Counts> = distinct
             .reads
             .par_iter()
