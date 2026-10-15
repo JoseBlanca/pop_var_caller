@@ -513,11 +513,6 @@ pub struct StutterSubstitutionEmission;
 ///
 /// Held by the row and handed back on every call, so the buffers themselves are not
 /// reallocated per observation per candidate.
-///
-/// **One allocation does survive that, and is named here because the sentence above used to
-/// claim more than it delivers.** `segment_tract_into` builds a fresh `Vec<u8>` for every
-/// interruption it finds. It is **per call** rather than per length change — the censored
-/// term's exact sum segments once and then walks the support.
 #[derive(Debug, Default)]
 pub struct StutterSubstitutionScratch {
     /// The candidate split into its runs and interruptions — **a property of the candidate,
@@ -994,6 +989,7 @@ fn letters_over(
         scratch.placements.clear();
         place_slip_in_each_run(
             &scratch.segments,
+            candidate,
             motif,
             bp_diff / period_bases,
             &mut scratch.placements,
@@ -1246,6 +1242,7 @@ fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut 
     let mut placements = Renderings::default();
     place_slip_in_each_run(
         &segment_tract(candidate, motif),
+        candidate,
         motif,
         repeats,
         &mut placements,
@@ -1255,7 +1252,7 @@ fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut 
 
 /// The same enumeration over a tract whose runs have already been found — what a caller uses
 /// when it walks many length changes against **one** candidate, so the split is paid for once
-/// rather than once a change.
+/// rather than once a change. `segments` is `tract` split by [`segment_tract_into`].
 ///
 /// **It appends to `out`**, and deduplicates only among the renderings this call adds: an STR
 /// bundle's layout collects every slip of every run in one buffer, where two slips may well
@@ -1265,6 +1262,7 @@ fn enumerate_placements(candidate: &[u8], motif: &[u8], repeats: i64, out: &mut 
 /// answers it without splitting anything.
 fn place_slip_in_each_run(
     segments: &[TractSegment],
+    tract: &[u8],
     motif: &[u8],
     repeats: i64,
     out: &mut Renderings,
@@ -1304,7 +1302,7 @@ fn place_slip_in_each_run(
         if held_in_total + resized as usize - held == 0 {
             continue;
         }
-        render_tract(segments, motif, target, resized as usize, out);
+        render_tract(segments, tract, motif, target, resized as usize, out);
         let rendered = &out[out.len() - 1];
         if (first_of_this_slip..out.len() - 1).any(|earlier| &out[earlier] == rendered) {
             out.pop();
@@ -1371,8 +1369,9 @@ impl std::ops::Index<usize> for Renderings {
 enum TractSegment {
     /// How many whole copies of the motif this run holds.
     Run(usize),
-    /// Bases that are not a whole copy — an interruption, or a partial copy at either end.
-    Interruption(Vec<u8>),
+    /// Bases that are not a whole copy — an interruption, or a partial copy at either end — as
+    /// their range in the tract that was split.
+    Interruption(std::ops::Range<usize>),
 }
 
 /// Split a tract into runs of the motif and the interruptions between them, matching the
@@ -1397,15 +1396,14 @@ fn segment_tract_into(candidate: &[u8], motif: &[u8], segments: &mut Vec<TractSe
     segments.clear();
     let period = motif.len();
     let mut run = 0usize;
-    let mut interruption: Vec<u8> = Vec::new();
+    // Where the interruption being read began, while one is.
+    let mut interruption_start: Option<usize> = None;
     let mut at = 0usize;
 
     while at < candidate.len() {
         if at + period <= candidate.len() && &candidate[at..at + period] == motif {
-            if !interruption.is_empty() {
-                segments.push(TractSegment::Interruption(std::mem::take(
-                    &mut interruption,
-                )));
+            if let Some(start) = interruption_start.take() {
+                segments.push(TractSegment::Interruption(start..at));
             }
             run += 1;
             at += period;
@@ -1414,22 +1412,23 @@ fn segment_tract_into(candidate: &[u8], motif: &[u8], segments: &mut Vec<TractSe
                 segments.push(TractSegment::Run(run));
                 run = 0;
             }
-            interruption.push(candidate[at]);
+            interruption_start.get_or_insert(at);
             at += 1;
         }
     }
     if run > 0 {
         segments.push(TractSegment::Run(run));
     }
-    if !interruption.is_empty() {
-        segments.push(TractSegment::Interruption(interruption));
+    if let Some(start) = interruption_start {
+        segments.push(TractSegment::Interruption(start..candidate.len()));
     }
 }
 
-/// Render the segments back to bytes, with the run at `target` holding `resized` repeats
-/// instead of its own, and append the rendering to `out`.
+/// Render the segments of `tract` back to bytes, with the run at `target` holding `resized`
+/// repeats instead of its own, and append the rendering to `out`.
 fn render_tract(
     segments: &[TractSegment],
+    tract: &[u8],
     motif: &[u8],
     target: usize,
     resized: usize,
@@ -1444,7 +1443,9 @@ fn render_tract(
                 extend_with_copies(&mut out.bases, motif, repeats);
                 run += 1;
             }
-            TractSegment::Interruption(bases) => out.bases.extend_from_slice(bases),
+            TractSegment::Interruption(bases_in_tract) => {
+                out.bases.extend_from_slice(&tract[bases_in_tract.clone()]);
+            }
         }
     }
     out.ranges.push(first..out.bases.len());
@@ -1630,6 +1631,7 @@ fn bundle_emission(
             } else {
                 place_slip_in_each_run(
                     &scratch.run_segments[run],
+                    &candidate[stretch_of(run)],
                     reference_run.motif().as_bytes(),
                     slip,
                     placements,
@@ -1698,11 +1700,13 @@ fn run_slip_ranges(
                     .map(|slip| model.probability(slip * period, period_of(&reference_run.motif())))
                     .collect()
             };
+            let most_probable = probability.iter().copied().fold(0.0, f64::max);
             RunSlipRange {
                 period,
                 lowest,
                 highest,
                 probability,
+                most_probable,
             }
         })
         .collect()
@@ -1870,6 +1874,9 @@ struct RunSlipRange {
     highest: i64,
     /// `probability[slip − lowest]`: the run's model at that slip, no slip included.
     probability: Vec<f64>,
+    /// The largest entry of `probability` — the most a slip set can gain from this run, which
+    /// [`collect_slip_sets`] prunes against.
+    most_probable: f64,
 }
 
 /// **The smallest probability a slip set must be able to reach to be walked**, from three runs on
@@ -1906,16 +1913,18 @@ fn collect_slip_sets(
     let rest = &ranges[run + 1..];
     let rest_lowest: i64 = rest.iter().map(|range| range.lowest * range.period).sum();
     let rest_highest: i64 = rest.iter().map(|range| range.highest * range.period).sum();
-    let rest_most_probable: f64 = rest
-        .iter()
-        .map(|range| range.probability.iter().copied().fold(0.0, f64::max))
-        .product();
+    let rest_most_probable: f64 = rest.iter().map(|range| range.most_probable).product();
     let range = &ranges[run];
-    for slip in range.lowest..=range.highest {
+    // Only the slips that leave a change the remaining runs can still make: those with
+    // `rest_lowest ≤ bp_diff − slip · period ≤ rest_highest`. Solved for the slip, that is
+    // `(bp_diff − rest_highest) / period` rounded up to `(bp_diff − rest_lowest) / period` rounded
+    // down; `div_euclid` rounds down for negatives too, since `period` is positive, and rounding
+    // `x / period` up is `−(−x / period)` rounded down. At the last run that is the one slip making
+    // up the change exactly, or none.
+    let fewest = -(rest_highest - bp_diff).div_euclid(range.period);
+    let most = (bp_diff - rest_lowest).div_euclid(range.period);
+    for slip in range.lowest.max(fewest)..=range.highest.min(most) {
         let left = bp_diff - slip * range.period;
-        if left < rest_lowest || left > rest_highest {
-            continue;
-        }
         let probability = probability_so_far * range.probability[(slip - range.lowest) as usize];
         if prune && probability * rest_most_probable < NEGLIGIBLE_SLIP_SET_PROBABILITY {
             continue;
@@ -2257,7 +2266,13 @@ impl CensoredLayout {
                 if slip == 0 {
                     self.renderings.push(stretch);
                 } else {
-                    place_slip_in_each_run(segments, motif_bytes, slip, &mut self.renderings);
+                    place_slip_in_each_run(
+                        segments,
+                        stretch,
+                        motif_bytes,
+                        slip,
+                        &mut self.renderings,
+                    );
                 }
                 // A slip no place in the run can absorb is not made, as at a complete read.
                 if self.renderings.len() == first_rendering {
@@ -2971,7 +2986,7 @@ mod tests {
         let segments = segment_tract(b"CACATTCACA", b"CA");
         let mut renderings = Renderings::default();
         renderings.push(b"CACACATTCACA");
-        place_slip_in_each_run(&segments, b"CA", 1, &mut renderings);
+        place_slip_in_each_run(&segments, b"CACATTCACA", b"CA", 1, &mut renderings);
         let held: Vec<&[u8]> = renderings.iter().collect();
         assert_eq!(
             held,
@@ -2983,7 +2998,7 @@ mod tests {
         renderings.clear();
         renderings.push(b"CACACA");
         let twin_runs = [TractSegment::Run(1), TractSegment::Run(1)];
-        place_slip_in_each_run(&twin_runs, b"CA", 1, &mut renderings);
+        place_slip_in_each_run(&twin_runs, b"CACA", b"CA", 1, &mut renderings);
         let held: Vec<&[u8]> = renderings.iter().collect();
         assert_eq!(held, [&b"CACACA"[..], b"CACACA"]);
     }
@@ -4067,6 +4082,53 @@ mod tests {
             .zip(rendered)
             .map(|(a, b)| if a == b { 1.0 - rate } else { rate / 3.0 })
             .product()
+    }
+
+    /// **The slip sets collected are exactly those a walk over every combination finds**, in the
+    /// same order: the walk visits only the slips that leave a change the remaining runs can still
+    /// make, and this checks that bound against no bound at all — periods 1 to 3, a run holding no
+    /// copy, and changes either side of zero, including ones no set reaches.
+    #[test]
+    fn collecting_slip_sets_finds_every_set_a_full_walk_finds() {
+        let range = |period: i64, lowest: i64, highest: i64| RunSlipRange {
+            period,
+            lowest,
+            highest,
+            probability: vec![0.5; (highest - lowest + 1) as usize],
+            most_probable: 0.5,
+        };
+        let bundles = [
+            vec![range(2, -7, 9), range(3, -4, 9)],
+            vec![range(1, -9, 9), range(2, 0, 0), range(3, -2, 9)],
+            vec![range(3, -9, 9), range(2, -1, 9), range(1, -5, 9)],
+        ];
+        for ranges in &bundles {
+            for bp_diff in -60..=60 {
+                let mut collected = Vec::new();
+                collect_slip_sets(ranges, bp_diff, false, 1.0, &mut Vec::new(), &mut collected);
+
+                // Every combination, the last run's slip turning fastest.
+                let mut walked = Vec::new();
+                let mut set: Vec<i64> = ranges.iter().map(|range| range.lowest).collect();
+                'every_set: loop {
+                    let total: i64 = set.iter().zip(ranges).map(|(k, r)| k * r.period).sum();
+                    if total == bp_diff {
+                        walked.extend_from_slice(&set);
+                    }
+                    for run in (0..ranges.len()).rev() {
+                        if set[run] < ranges[run].highest {
+                            set[run] += 1;
+                            for later in run + 1..ranges.len() {
+                                set[later] = ranges[later].lowest;
+                            }
+                            continue 'every_set;
+                        }
+                    }
+                    break;
+                }
+                assert_eq!(collected, walked, "Δ = {bp_diff}");
+            }
+        }
     }
 
     /// **Two runs: the emission is the sum over every slip set reaching the read's length, of the
