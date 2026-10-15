@@ -550,6 +550,9 @@ struct BundleScoringScratch {
     slip_sets: Vec<i64>,
     /// The slip set being built while the sets are enumerated.
     slip_set: Vec<i64>,
+    /// The read's comparisons with the candidate's renderings, at the context's rate, with the
+    /// sums of agreeing bases kept.
+    matched: MatchedPrefixLetters,
     /// What scoring a read that ended inside the hull reuses ([`bundle_censored_emission`]).
     censored: CensoredScratch,
 }
@@ -683,6 +686,10 @@ struct CensoredLayout {
     fixed: Vec<std::ops::Range<usize>>,
     /// Every run's renderings, one after another.
     renderings: Renderings,
+    /// Per rendering, how many leading bases it shares with the rendering before it in the same
+    /// run; zero for a run's first. What lets the walk find two renderings showing the read the
+    /// same bases without comparing them.
+    shared_with_previous: Vec<usize>,
     /// Each change a run can make — a whole-unit slip or a sequencing indel — with its price
     /// and its renderings.
     slips: Vec<CensoredSlip>,
@@ -1083,8 +1090,8 @@ fn substitution_probability(
 }
 
 /// **The two per-base scores of [`substitution_probability`]** under the context's rate — two
-/// logarithms, so a caller comparing one read many times looks them up once and calls
-/// [`letters_under`] (a read that ended inside an STR bundle, [`bundle_censored_emission`]).
+/// logarithms, so a caller comparing one read many times looks them up once — an STR bundle's
+/// reads do, through [`MatchedPrefixLetters`].
 fn substitution_scores(context: &SsrScoringContext<'_>) -> BaseScores {
     scores_at(context.substitution_rate)
 }
@@ -1129,10 +1136,15 @@ fn letters_under(scores: BaseScores, observation: &[u8], resized_candidate: &[u8
 /// It is what a read that ended inside an STR bundle is compared with ([`bundle_censored_emission`]):
 /// there most comparisons are a run's rendering against the same run in the read, which agree to
 /// their end (str_bundles_partial_reads review, 2026-10-12: the base-by-base sum was most of what was
-/// left of those reads' cost once their layouts were kept).
+/// left of those reads' cost once their layouts were kept). A complete bundle read is compared with
+/// it too ([`bundle_emission`]), at the context's rate, which makes it [`substitution_probability`]
+/// bit for bit: that is [`letters_under`] at [`scores_at`] of the same rate.
 #[derive(Debug, Default)]
 struct MatchedPrefixLetters {
-    /// The scores the sums are of; `None` before the first use.
+    /// The rate the scores are at; `None` before the first use. Compared bit for bit, so two
+    /// logarithms are taken only when it changes.
+    rate: Option<ErrorRate>,
+    /// The scores at `rate` ([`scores_at`]) the sums are of; `None` before the first use.
     scores: Option<BaseScores>,
     /// `sums[i]`: the sum of `i` match scores, taken as [`letters_under`] takes it.
     sums: Vec<f64>,
@@ -1141,17 +1153,18 @@ struct MatchedPrefixLetters {
 }
 
 impl MatchedPrefixLetters {
-    /// Make ready for comparisons of up to `longest` bases under `scores`.
-    fn prepare(&mut self, scores: BaseScores, longest: usize) {
-        let same_scores = self.scores.is_some_and(|kept| {
-            kept.match_ln.to_bits() == scores.match_ln.to_bits()
-                && kept.mismatch_ln.to_bits() == scores.mismatch_ln.to_bits()
-        });
-        if !same_scores {
-            self.scores = Some(scores);
+    /// Make ready for comparisons of up to `longest` bases under the scores at `rate`.
+    fn prepare(&mut self, rate: ErrorRate, longest: usize) {
+        let same_rate = self
+            .rate
+            .is_some_and(|kept| kept.get().to_bits() == rate.get().to_bits());
+        if !same_rate {
+            self.rate = Some(rate);
+            self.scores = Some(scores_at(rate));
             self.sums.clear();
             self.letters.clear();
         }
+        let scores = self.scores.expect("set with the rate");
         if self.sums.is_empty() {
             // The empty sum, whatever starting value `Sum` folds from.
             let empty: f64 = std::iter::empty::<f64>().sum();
@@ -1557,6 +1570,10 @@ fn bundle_emission(
         shift + placed[run].start as usize..shift + placed[run].end as usize
     };
     let scratch = &mut scratch.bundle;
+    // The per-base scores, looked up once for every rendering the read is compared with below.
+    scratch
+        .matched
+        .prepare(context.substitution_rate, observation.len());
 
     // Each run's stretch, split into whole copies and interruptions once for the whole walk.
     scratch.run_segments.resize_with(runs.len(), Vec::new);
@@ -1597,7 +1614,7 @@ fn bundle_emission(
             context,
             bp_diff,
             (&mut scratch.resized_stretch, &mut scratch.rendered),
-            |rendered| substitution_probability(observation, rendered, context),
+            |rendered| scratch.matched.letters(observation, rendered),
         );
     }
 
@@ -1650,7 +1667,6 @@ fn bundle_emission(
             candidate,
             &stretch_of,
             runs.len(),
-            context,
             scratch,
         );
         total += weight * letters;
@@ -1662,7 +1678,7 @@ fn bundle_emission(
             context,
             bp_diff,
             (&mut scratch.resized_stretch, &mut scratch.rendered),
-            |rendered| substitution_probability(observation, rendered, context),
+            |rendered| scratch.matched.letters(observation, rendered),
         );
     }
     total
@@ -1730,7 +1746,6 @@ fn letters_over_every_combination(
     candidate: &[u8],
     stretch_of: &impl Fn(usize) -> std::ops::Range<usize>,
     run_count: usize,
-    context: &SsrScoringContext<'_>,
     scratch: &mut BundleScoringScratch,
 ) -> f64 {
     scratch.chosen_placement.clear();
@@ -1754,7 +1769,7 @@ fn letters_over_every_combination(
             from = stretch.end;
         }
         scratch.rendered.extend_from_slice(&candidate[from..]);
-        letters += each * substitution_probability(observation, &scratch.rendered, context);
+        letters += each * scratch.matched.letters(observation, &scratch.rendered);
 
         // The next combination, the last run's placement turning fastest.
         let mut run = run_count;
@@ -2104,7 +2119,7 @@ fn bundle_censored_emission(
             .resize_with(censored.matched_rates.len(), MatchedPrefixLetters::default);
     }
     for (matched, rate) in censored.matched.iter_mut().zip(&censored.matched_rates) {
-        matched.prepare(scores_at(*rate), witnessed.len());
+        matched.prepare(*rate, witnessed.len());
     }
     let letters = WalkLetters {
         matched: &censored.matched,
@@ -2237,6 +2252,7 @@ impl CensoredLayout {
         // Every change each run can make, with its renderings: its slips of whole units, then its
         // sequencing indels of part of a unit.
         self.renderings.clear();
+        self.shared_with_previous.clear();
         self.slips.clear();
         self.slips_of_run.clear();
         for at in 0..run_count {
@@ -2315,6 +2331,18 @@ impl CensoredLayout {
                 }
             }
             self.slips_of_run.push(first_slip..self.slips.len());
+            let run_renderings = self.shared_with_previous.len()..self.renderings.len();
+            for rendering in run_renderings.clone() {
+                let shared = if rendering == run_renderings.start {
+                    0
+                } else {
+                    let before = &self.renderings[rendering - 1];
+                    let this = &self.renderings[rendering];
+                    let shorter = before.len().min(this.len());
+                    agreeing_prefix_len(&before[..shorter], &this[..shorter])
+                };
+                self.shared_with_previous.push(shared);
+            }
         }
     }
 }
@@ -2354,9 +2382,13 @@ fn walk_from_the_held_flank(
     reached[0] = 1.0;
     let mut total = 0.0;
     let mut dropped = 0.0;
+    // The offsets this piece is reached at lie in `reached_at`; where the next piece is reached is
+    // gathered while this one is walked, so offsets nothing reaches are not scanned.
+    let mut reached_at = 0..1;
     for piece in 0..pieces {
         let at = piece / 2;
-        for offset in 0..read_len {
+        let mut next_reached_at = read_len..0;
+        for offset in reached_at {
             let here = reached[piece * read_len + offset];
             if here == 0.0 {
                 continue;
@@ -2382,10 +2414,13 @@ fn walk_from_the_held_flank(
                     total += here * shown;
                 } else {
                     reached[(piece + 1) * read_len + next] += here * shown;
+                    widen_to(&mut next_reached_at, next);
                 }
             } else {
                 let matched = letters.of_run(at);
-                let mut last_compared: Option<(&[u8], f64)> = None;
+                // The rendering before, as compared: how many of its bases, and their letters. A
+                // rendering compared over as many bases, all shared with it, shows the same.
+                let mut last_compared: Option<(usize, f64)> = None;
                 for slip in &layout.slips[layout.slips_of_run[at].clone()] {
                     let compared = slip.length.min(read_len - offset);
                     let each = 1.0 / slip.renderings.len() as f64;
@@ -2393,13 +2428,18 @@ fn walk_from_the_held_flank(
                         .renderings
                         .clone()
                         .map(|rendering| {
-                            let rendered = &layout.renderings[rendering][..compared];
                             let letters = match last_compared {
-                                Some((before, letters)) if before == rendered => letters,
+                                Some((before, letters))
+                                    if before == compared
+                                        && layout.shared_with_previous[rendering] >= compared =>
+                                {
+                                    letters
+                                }
                                 _ => {
+                                    let rendered = &layout.renderings[rendering][..compared];
                                     let letters =
                                         matched.letters(&read[offset..offset + compared], rendered);
-                                    last_compared = Some((rendered, letters));
+                                    last_compared = Some((compared, letters));
                                     letters
                                 }
                             };
@@ -2411,12 +2451,20 @@ fn walk_from_the_held_flank(
                         total += here * slip.probability * shown;
                     } else {
                         reached[(piece + 1) * read_len + next] += here * slip.probability * shown;
+                        widen_to(&mut next_reached_at, next);
                     }
                 }
             }
         }
+        reached_at = next_reached_at;
     }
     total
+}
+
+/// Widen `span` to hold `offset`; an empty span becomes that offset alone.
+fn widen_to(span: &mut std::ops::Range<usize>, offset: usize) {
+    span.start = span.start.min(offset);
+    span.end = span.end.max(offset + 1);
 }
 
 #[cfg(test)]
@@ -4415,10 +4463,9 @@ mod tests {
         };
         let mut compared = 0;
         for rate in [1e-3, 0.02, 0.3, 1e-3] {
-            let scores = FlatEmission::try_new(rate)
-                .expect("a valid rate")
-                .scores_for(BaseQual(0));
-            matched.prepare(scores, 40);
+            let rate = ErrorRate::try_new(rate).expect("a valid rate");
+            let scores = scores_at(rate);
+            matched.prepare(rate, 40);
             for length in 0..=40_usize {
                 let read: Vec<u8> = (0..length).map(|_| b"ACGT"[next() as usize % 4]).collect();
                 for first_mismatch in 0..=length {
@@ -4438,7 +4485,8 @@ mod tests {
                     assert_eq!(
                         matched.letters(&read, &other).to_bits(),
                         letters_under(scores, &read, &other).to_bits(),
-                        "rate {rate}, {length} bases, first mismatch at {first_mismatch}"
+                        "rate {}, {length} bases, first mismatch at {first_mismatch}",
+                        rate.get()
                     );
                     compared += 1;
                 }
