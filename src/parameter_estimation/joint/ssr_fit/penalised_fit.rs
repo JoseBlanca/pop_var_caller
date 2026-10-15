@@ -2251,6 +2251,67 @@ mod tests {
         }
     }
 
+    /// **The same cohort gives the same bits on every run and at every thread count** (spec §3):
+    /// four classes of one-base runs, 12 samples at 5 reads over 60 loci each, fitted with
+    /// production's settings (F read off pairs, standard errors on) twice on 18 threads and once
+    /// on one. Every number and every count must agree; only the times may differ.
+    #[test]
+    fn the_fit_is_the_same_on_every_run_and_thread_count() {
+        let spectrum = spectrum_of(3);
+        let classes: Vec<StratumEvidence> = [(8_u64, 0.03), (9, 0.05), (10, 0.08), (11, 0.12)]
+            .iter()
+            .enumerate()
+            .map(|(index, (repeats, level))| {
+                let truth = Slippage {
+                    level: *level,
+                    shorter_share: 0.8,
+                    fall_off: 0.25,
+                };
+                let mut evidence =
+                    draw_stratum(truth, &spectrum, 2.0, 0.3, 60, 12, 5, 1, 71 + index as u64);
+                evidence.stratum = Stratum {
+                    period: 1,
+                    reference_repeats: *repeats,
+                };
+                evidence
+            })
+            .collect();
+        let excess = [0.3; 12];
+        let fit = PenalisedFitConfig::production().with_allele_span(2);
+        let on_threads = |threads: usize| {
+            let fitted = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool builds")
+                .install(|| fit_period_by_penalised_counting(&classes, &excess, &fit));
+            PenalisedPeriodFit {
+                expectation_seconds: 0.0,
+                maximisation_seconds: 0.0,
+                strength_search_seconds: 0.0,
+                pair_seconds: 0.0,
+                error_seconds: 0.0,
+                ..fitted
+            }
+        };
+        let first = on_threads(18);
+        assert!(
+            first.pair_alternations > 0,
+            "F is read off pairs, so the pairs' sums are exercised"
+        );
+        // Debug prints every number in the shortest form that reads back to the same bits.
+        let first = format!("{first:?}");
+        assert_eq!(
+            first,
+            format!("{:?}", on_threads(18)),
+            "two runs on 18 threads"
+        );
+        assert_eq!(
+            first,
+            format!("{:?}", on_threads(1)),
+            "18 threads against one"
+        );
+    }
+
     /// **Production runs the settings of spec §2.7**, each from its named constant, and the
     /// prototype's two settings §2.7 does not list.
     #[test]

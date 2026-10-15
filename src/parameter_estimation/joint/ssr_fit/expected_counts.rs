@@ -1235,11 +1235,7 @@ pub fn fit_spread_by_pairs(
         config.allele_span,
     );
     let objective = |ln_spread: f64| -> f64 {
-        let spread = float::exp(ln_spread);
-        per_tract
-            .par_iter()
-            .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
-            .sum()
+        ln_pairs_summed_in_tract_order(&per_tract, float::exp(ln_spread))
     };
     // A coarse grid, then golden-section search around its best point.
     let grid: Vec<f64> = (0..=28)
@@ -1582,11 +1578,7 @@ impl SamplePairs {
     /// tract as the independent unit needs.
     #[must_use]
     pub fn log_likelihood_by_tract(&self, ln_spread: f64) -> Vec<f64> {
-        let spread = float::exp(ln_spread);
-        self.per_tract
-            .par_iter()
-            .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
-            .collect()
+        ln_pairs_by_tract(&self.per_tract, float::exp(ln_spread))
     }
 
     /// Whether any tract has two samples with reads.
@@ -1599,12 +1591,30 @@ impl SamplePairs {
     /// at, up to a constant that depends on neither.
     #[must_use]
     pub fn log_likelihood(&self, ln_spread: f64) -> f64 {
-        let spread = float::exp(ln_spread);
-        self.per_tract
-            .par_iter()
-            .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
-            .sum()
+        ln_pairs_summed_in_tract_order(&self.per_tract, float::exp(ln_spread))
     }
+}
+
+/// **Every tract's pairwise log-likelihood at `spread`, summed in the order of the tracts.** The
+/// tracts are scored side by side, then added one after another, so the total has the same bits
+/// whatever the number of threads. Summed by the thread pool instead, the order of the additions
+/// followed how the work was split, and the total moved in its last places from one run to the
+/// next: enough to move F's curve, and through it every other number of the fit (spec
+/// `str_penalised_fit.md` §3).
+fn ln_pairs_summed_in_tract_order(per_tract: &[Vec<PairCubic>], spread: f64) -> f64 {
+    ln_pairs_by_tract(per_tract, spread).iter().sum()
+}
+
+/// **Each tract's pairwise log-likelihood at `spread`, in the order of the tracts.** The tracts are
+/// scored side by side and collected in order. Both the total
+/// ([`ln_pairs_summed_in_tract_order`]) and the per-tract values a standard error needs
+/// ([`SamplePairs::log_likelihood_by_tract`]) come from here, so the two hold the same numbers in
+/// the same order.
+fn ln_pairs_by_tract(per_tract: &[Vec<PairCubic>], spread: f64) -> Vec<f64> {
+    per_tract
+        .par_iter()
+        .map(|cubics| scaled_ln_pairs_of_tract(cubics, spread))
+        .collect()
 }
 
 /// One pair of samples' likelihood at a tract: both samples' reads summed over their alleles, each
@@ -1816,6 +1826,39 @@ mod tests {
             config.allele_span,
         );
         assert!(same(&class, &summed), "{class:?} against {summed:?}");
+    }
+
+    /// **A class large enough to be summed in several chunks gives the same bits on 18 threads and
+    /// on one** (spec `str_penalised_fit.md` §3). The samples' weights and the log-likelihood are
+    /// summed in chunks of at least 4,096 (tract, sample) rows; 1,000 tracts of 12 samples at 5
+    /// reads give about 12,000 rows, three chunks. A class of one chunk, as in the whole fit's test,
+    /// would leave the chunks' sum untested.
+    #[test]
+    fn a_class_of_several_chunks_counts_the_same_on_every_thread_count() {
+        let truth = Slippage {
+            level: 0.05,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let evidence = draw_stratum(truth, &spectrum_of(5), 2.0, 0.3, 1_000, 12, 5, 1, 41);
+        let excess = [0.3; 12];
+        let distinct = DistinctRows::of(&evidence, &excess);
+        assert!(
+            distinct.rows.len() > 2 * 4096,
+            "{} rows: fewer than three chunks",
+            distinct.rows.len()
+        );
+        let shares = [0.1, 0.15, 0.4, 0.2, 0.15];
+        let on_threads = |threads: usize| {
+            let counts = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("a thread pool builds")
+                .install(|| expected_counts(&evidence, truth, &shares, 0.7, &excess, 2));
+            // Debug prints every number in the shortest form that reads back to the same bits.
+            format!("{counts:?}")
+        };
+        assert_eq!(on_threads(18), on_threads(1));
     }
 
     /// **A pair's cubic in the spread is its closed-form likelihood**, to within rounding, on random

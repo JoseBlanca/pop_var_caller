@@ -157,11 +157,15 @@ what goes with it (arch §4.1).
   them the bench's `D_prior_*` methods and the clustering argument of `str_fit_penalised_em`; the
   bench's `D_tract_prior` built from `production()`. *Oracle:* C0's fixture reproduced. *Depends:* C1.
   *Source:* arch §1.1; spec §2.7.
-- ☐ **C3** **Own commit, do not bundle.** Every float sum on the fit's path taken in a fixed order,
+- ✅ **C3** **Own commit, do not bundle.** Every float sum on the fit's path taken in a fixed order,
   in every module the fit calls, `SamplePairs::log_likelihood` (`composite_fit.rs:1583-1590`)
   included; a test pins two runs and 1 against 18 threads. *Oracle:* the bench's numbers equal to C0's
   within 1e-6 relative, and every class's rounds equal, before and after; a discrete decision that
   flips (spec §3) is investigated, not tolerated. *Depends:* C2. *Source:* spec §3; arch §2.1.
+  *Done:* two parallel sums in `expected_counts.rs` (`SamplePairs::log_likelihood` and the counting
+  fit's spread objective) now add per-locus values in locus order; the full grid is bit-identical at 1
+  and 18 threads; against C0 every count equal, largest move 1.14e-7 relative (a standard error),
+  estimates ≤ 2.75e-13. The fixture is re-recorded at this step, so C4 compares bit for bit.
 - ☐ **C4** Memory bounded: classes one at a time within a period, periods one at a time, the
   parallel loops over classes (`penalised_fit.rs:588`, `:852`) made sequential. *Oracle:* bench
   numbers bit-identical before and after; peak memory at 2,000 samples × 30 reads below 2 × the
