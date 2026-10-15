@@ -6,12 +6,18 @@
 //! reached and the largest change any number made in it, as every looping stage of
 //! `estimate-parameters` does.
 //!
+//! The stage opens with **one line naming the classes and the stutter prior**: how much it weighs
+//! and where it is centred (spec §2.10.5).
+//!
 //! After each motif length is fitted:
 //!
 //! - **one line on how the fit ran**: how many rounds, whether it settled or used them all, how F
-//!   was read, and the time in each step: weighing genotypes and counting (steps 1 and 2 of each
-//!   round), drawing the curves (step 3, with the part of it spent in the rounds that also chose
-//!   how stiff the curves are), reading F off pairs of samples, and the standard errors. It is
+//!   was read, in how many classes fewer reads slipped than the stutter prior weighs (so their
+//!   shorter share and fall-off come from their neighbours on the curve and the prior, not from
+//!   their own reads), and the time in each step: weighing genotypes and counting (steps 1 and 2
+//!   of each round), drawing the curves (step 3, with the part of it spent in the rounds that
+//!   also chose how stiff the curves are), reading F off pairs of samples, and the standard
+//!   errors. It is
 //!   printed as a progress line, so it also carries the time into the stage and, on Linux, the
 //!   process's memory now and the most it has held so far (`VmHWM`). On macOS nothing is printed
 //!   for memory. F is named there, the first time, as "the between-locus share": how much the
@@ -68,17 +74,46 @@ pub(super) fn no_classes_line() -> String {
     "no repeat classes were handed in, so there was nothing to fit".to_owned()
 }
 
-/// The line that opens the stage: how many classes, of how many motif lengths.
-pub(super) fn opening_line(strata: &[StratumEvidence]) -> String {
+/// The line that opens the stage: how many classes, of how many motif lengths, and the prior
+/// the stutter curves carry (spec §2.10.5).
+pub(super) fn opening_line(strata: &[StratumEvidence], config: &PenalisedFitConfig) -> String {
     let motif_lengths: BTreeSet<u8> = strata
         .iter()
         .map(|evidence| evidence.stratum.period)
         .collect();
     format!(
         "fitting {classes} (one motif length and one reference repeat count each) of {motif_lengths} \
-         by curves along the repeat count, one motif length at a time",
+         by curves along the repeat count, one motif length at a time; {prior}",
         classes = count_of(strata.len(), "repeat class", "repeat classes"),
         motif_lengths = count_of(motif_lengths.len(), "motif length", "motif lengths"),
+        prior = stutter_prior_words(config),
+    )
+}
+
+/// **The stutter prior in words**, as the stage's opening line states it: its weight in reads and
+/// where it is centred, or that there is none.
+fn stutter_prior_words(config: &PenalisedFitConfig) -> String {
+    let reads = config.stutter_prior_reads;
+    if reads <= 0.0 {
+        return "stutter: no prior".to_owned();
+    }
+    let weight = if reads == 1.0 {
+        "one read's worth".to_owned()
+    } else {
+        format!("{reads} reads' worth")
+    };
+    let centre = config.stutter_prior_centre;
+    let calling_default = if centre == STUTTER_PRIOR_CENTRE {
+        "calling's default "
+    } else {
+        ""
+    };
+    format!(
+        "stutter: a prior of {weight} a class, centred on {calling_default}(slip rate {level:.2}, \
+         shorter share {shorter}, fall-off {fall_off})",
+        level = centre.level,
+        shorter = centre.shorter_share,
+        fall_off = centre.fall_off,
     )
 }
 
@@ -102,11 +137,14 @@ pub(super) fn round_line(
 ///
 /// `classes` are the motif length's classes in the order they were handed to its fit, and
 /// `outcomes` and `distinct_rows` are theirs in the same order; `fit` is what the motif length's
-/// fit returned, its classes already taken out.
+/// fit returned, its classes already taken out. `directions_on_the_prior` is how many of its
+/// fitted classes had fewer reads slip than the stutter prior weighs
+/// ([`classes_whose_directions_rest_on_the_prior`]).
 pub(super) fn lines_of_a_motif_length(
     classes: &[&StratumEvidence],
     outcomes: &[StratumOutcome],
     distinct_rows: &[Option<usize>],
+    directions_on_the_prior: usize,
     fit: &PenalisedPeriodFit,
     config: &PenalisedFitConfig,
 ) -> Vec<Line> {
@@ -125,7 +163,13 @@ pub(super) fn lines_of_a_motif_length(
         .filter(|outcome| matches!(outcome, StratumOutcome::Fitted(_)))
         .count();
     let mut lines = vec![Line::StepEnded(how_the_fit_ran(
-        period, outcomes, fitted, fit, curves, config,
+        period,
+        outcomes,
+        fitted,
+        directions_on_the_prior,
+        fit,
+        curves,
+        config,
     ))];
     // With one or two repeat counts with reads the curve through them is a line whatever the
     // strength, so the strength held is the top of the range searched and means nothing (spec
@@ -165,11 +209,34 @@ pub(super) fn lines_of_a_motif_length(
     lines
 }
 
-/// The motif length's rounds, how it stopped, how F was read and the time in each step.
+/// **How many fitted classes had fewer reads slip than the stutter prior weighs**: a class whose
+/// slipped reads, or whose repeats slipped, are fewer than the prior's weight (spec §2.10.4). The
+/// repeats slipped are never fewer than the slipped reads, since each slipped read slips at least
+/// one repeat, so this is the count of classes with fewer slipped reads than the weight. Such a
+/// class's shorter share and fall-off come from its neighbours on the curve and the prior's
+/// centre, not from its own reads, and carry no error; where its slipped reads are fewer than
+/// the weight, its slip rate carries none either. Zero when the fit has no prior.
+pub(super) fn classes_whose_directions_rest_on_the_prior(
+    fitted: &[Option<PenalisedClass>],
+    config: &PenalisedFitConfig,
+) -> usize {
+    let below = |trials: Option<f64>| trials.unwrap_or(0.0) < config.stutter_prior_reads;
+    fitted
+        .iter()
+        .flatten()
+        .filter(|class| {
+            below(class.expected_slips_with_a_direction) || below(class.expected_repeats_slipped)
+        })
+        .count()
+}
+
+/// The motif length's rounds, how it stopped, how F was read, in how many classes fewer reads
+/// slipped than the stutter prior weighs, and the time in each step.
 fn how_the_fit_ran(
     period: u8,
     outcomes: &[StratumOutcome],
     fitted: usize,
+    directions_on_the_prior: usize,
     fit: &PenalisedPeriodFit,
     curves: &SmoothCurves,
     config: &PenalisedFitConfig,
@@ -200,6 +267,20 @@ fn how_the_fit_ran(
     } else {
         format!("{f} read off each sample's own two copies only")
     };
+    let on_the_prior = if config.stutter_prior_reads > 0.0 {
+        let fewer_than = if config.stutter_prior_reads == 1.0 {
+            "fewer than one read slipped".to_owned()
+        } else {
+            format!("fewer than {} reads slipped", config.stutter_prior_reads)
+        };
+        format!(
+            "; in {directions_on_the_prior} of the {fitted} classes fitted, {fewer_than}, so their \
+             shorter share and fall-off come from their neighbours on the curve and the stutter \
+             prior, not from their own reads"
+        )
+    } else {
+        String::new()
+    };
     let time = |seconds: f64| progress::duration(Duration::from_secs_f64(seconds.max(0.0)));
     let which = if outcomes.len() == 1 {
         "its one class fitted".to_owned()
@@ -207,7 +288,7 @@ fn how_the_fit_ran(
         format!("{fitted} of {} classes fitted together", outcomes.len())
     };
     format!(
-        "motif length {period}: {which} in {rounds}, {ending}; {how_f_was_read}; time weighing \
+        "motif length {period}: {which} in {rounds}, {ending}; {how_f_was_read}{on_the_prior}; time weighing \
          genotypes and counting {expectation}, drawing the curves {maximisation} \
          ({strength_search} of it in the {choosing} that also chose how stiff they are), reading \
          F off pairs {pairs}, standard errors {errors}",
@@ -612,6 +693,9 @@ mod tests {
             "that also chose how stiff they are",
             "reading F off pairs ",
             "standard errors ",
+            " classes fitted, fewer than one read slipped, so their shorter share and fall-off \
+             come from their neighbours on the curve and the stutter prior, not from their own \
+             reads",
         ] {
             assert!(ran.contains(item), "{item:?} missing from {ran}");
         }
@@ -718,6 +802,111 @@ mod tests {
                 "{on_rare_lengths} on the shares of allele lengths expected at fewer than 3 loci"
             )),
             "{withheld}"
+        );
+    }
+
+    /// **The stage's opening line names the classes and states the stutter prior** (spec
+    /// §2.10.5): its weight and its centre, calling's default; at weight 0, that there is none.
+    #[test]
+    fn the_opening_line_states_the_stutter_prior() {
+        let strata = vec![
+            a_drawn_class(1, 8, 4, 2, 3, 1),
+            a_drawn_class(2, 8, 4, 2, 3, 2),
+        ];
+        assert_eq!(
+            opening_line(&strata, &a_narrow_production_fit()),
+            "fitting 2 repeat classes (one motif length and one reference repeat count each) of 2 \
+             motif lengths by curves along the repeat count, one motif length at a time; stutter: \
+             a prior of one read's worth a class, centred on calling's default (slip rate 0.10, \
+             shorter share 0.5, fall-off 0.05)"
+        );
+        let heavier = PenalisedFitConfig {
+            stutter_prior_reads: 5.0,
+            ..a_narrow_production_fit()
+        };
+        assert!(
+            opening_line(&strata, &heavier).ends_with(
+                "stutter: a prior of 5 reads' worth a class, centred on calling's default (slip \
+                 rate 0.10, shorter share 0.5, fall-off 0.05)"
+            ),
+            "{}",
+            opening_line(&strata, &heavier)
+        );
+        let none = PenalisedFitConfig {
+            stutter_prior_reads: 0.0,
+            ..a_narrow_production_fit()
+        };
+        assert!(opening_line(&strata, &none).ends_with("; stutter: no prior"));
+    }
+
+    /// **The classes with fewer slipped reads than the prior weighs are counted** (spec §2.10.5):
+    /// a class counts when its slipped reads, or its repeats slipped, are fewer than the prior's
+    /// weight, or were never counted; at weight 0 none counts, and the line on how the fit ran
+    /// leaves the clause out; at a weight other than one, the clause gives it in reads.
+    #[test]
+    fn classes_resting_on_the_prior_are_counted() {
+        let strata = vec![a_drawn_class(1, 8, 10, 3, 5, 61)];
+        let config = a_narrow_production_fit();
+        let fitted = fit_period_by_penalised_counting(&strata, &[0.3; 3], &config).classes;
+        let class = fitted[0].clone().expect("the class has reads");
+        let with = |directions: Option<f64>, repeats: Option<f64>| {
+            Some(PenalisedClass {
+                expected_slips_with_a_direction: directions,
+                expected_repeats_slipped: repeats,
+                ..class.clone()
+            })
+        };
+        let classes = vec![
+            with(Some(5.0), Some(6.0)),
+            with(Some(0.5), Some(6.0)),
+            with(Some(5.0), Some(0.9)),
+            with(None, None),
+            None,
+        ];
+        assert_eq!(
+            classes_whose_directions_rest_on_the_prior(&classes, &config),
+            3
+        );
+        let none = PenalisedFitConfig {
+            stutter_prior_reads: 0.0,
+            ..config.clone()
+        };
+        assert_eq!(
+            classes_whose_directions_rest_on_the_prior(&classes, &none),
+            0
+        );
+
+        let mut lines = Vec::new();
+        fit_repeat_tracts_logging(
+            &strata,
+            &[0.3; 3],
+            &none,
+            &mut |line| lines.push(line),
+            &|_, _, _| {},
+        );
+        let ran = the_line(&lines, "motif length 1: ").text();
+        assert!(!ran.contains("stutter prior"), "{ran}");
+
+        let heavier = PenalisedFitConfig {
+            stutter_prior_reads: 5.0,
+            ..config.clone()
+        };
+        let mut lines = Vec::new();
+        fit_repeat_tracts_logging(
+            &strata,
+            &[0.3; 3],
+            &heavier,
+            &mut |line| lines.push(line),
+            &|_, _, _| {},
+        );
+        let ran = the_line(&lines, "motif length 1: ").text();
+        assert!(
+            ran.contains(
+                " of the 1 classes fitted, fewer than 5 reads slipped, so their shorter share and \
+                 fall-off come from their neighbours on the curve and the stutter prior, not from \
+                 their own reads"
+            ),
+            "{ran}"
         );
     }
 

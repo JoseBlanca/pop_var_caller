@@ -206,7 +206,7 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
 (finding M2). They land before C8 so that C8's oracle move is the prior's alone. The review is
 `doc/devel/reports/reviews/str_penalised_fit_milestone_C_2026-10-15.md` on this branch, not committed.
 
-- ☐ **C8** *(approved by the owner 2026-10-15, spec §2.10 and its answers in §2.10.9.)* **Own commit,
+- ✅ **C8** *(approved by the owner 2026-10-15, spec §2.10 and its answers in §2.10.9.)* **Own commit,
   do not bundle.** The stutter prior: `stutter_prior_reads` and `stutter_prior_centre` in
   `PenalisedFitConfig`, `STUTTER_PRIOR_READS` and `STUTTER_PRIOR_CENTRE`; the prior added in the
   M-step's three stutter binomials at points with a class; its curvature in the errors' penalty; the

@@ -65,7 +65,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_be
     score_locus, with_the_curves, without_fold,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
-    ParameterCurve as FittedCurve, PenalisedPeriodFit,
+    ParameterCurve as FittedCurve, PenalisedPeriodFit, stutter_prior_weight_problem,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
     ALLELE_SPAN, SsrFitConfig, StratumEvidence, TractReads,
@@ -176,12 +176,28 @@ struct Cli {
     /// One between-locus share F for every class, in place of the truth's curve.
     #[arg(long)]
     between_locus_share: Option<f64>,
+    /// The stutter prior's weight, in reads a class, for every penalised method (`D`,
+    /// `D_working_F`, `D_tract_prior`), in place of the method's own weight (0 for `D` and
+    /// `D_working_F`, one read for `D_tract_prior`). The method keeps its name. For measuring
+    /// what the prior does: zero is the fit without it. A negative or non-finite weight is
+    /// refused.
+    #[arg(long, value_parser = a_stutter_prior_weight)]
+    stutter_prior_reads: Option<f64>,
+}
+
+/// `--stutter-prior-reads` read as a number, refused unless it is a weight the fit can use
+/// ([`stutter_prior_weight_problem`]).
+fn a_stutter_prior_weight(text: &str) -> Result<f64, String> {
+    let reads: f64 = text
+        .parse()
+        .map_err(|_| format!("{text:?} is not a number"))?;
+    stutter_prior_weight_problem(reads).map_or(Ok(reads), Err)
 }
 
 /// The penalised fit a name on the command line stands for, or `None` when the name is another
-/// method's.
-fn penalised_method_named(name: &str) -> Option<ThePenalisedFit> {
-    let fit = match name {
+/// method's; at `--stutter-prior-reads` when that is given.
+fn penalised_method_named(name: &str, cli: &Cli) -> Option<ThePenalisedFit> {
+    let mut fit = match name {
         "D" => ThePenalisedFit::default(),
         "D_working_F" => ThePenalisedFit {
             report_working_concentration: true,
@@ -190,13 +206,16 @@ fn penalised_method_named(name: &str) -> Option<ThePenalisedFit> {
         "D_tract_prior" => ThePenalisedFit::production(),
         _ => return None,
     };
+    if let Some(reads) = cli.stutter_prior_reads {
+        fit.config.stutter_prior_reads = reads;
+    }
     Some(fit)
 }
 
 /// The method a name on the command line stands for. **A new method adds a line here**, or in
 /// [`penalised_method_named`] for a variant of the penalised fit.
 fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
-    if let Some(fit) = penalised_method_named(name) {
+    if let Some(fit) = penalised_method_named(name, cli) {
         return Box::new(fit);
     }
     match name {
@@ -671,7 +690,7 @@ fn main() {
         let [name] = cli.methods.as_slice() else {
             panic!("--fixture-out records one method; name exactly one in --methods");
         };
-        let method = penalised_method_named(name)
+        let method = penalised_method_named(name, &cli)
             .unwrap_or_else(|| panic!("--fixture-out records a penalised fit; {name} is not one"));
         let started = Instant::now();
         let fitted =

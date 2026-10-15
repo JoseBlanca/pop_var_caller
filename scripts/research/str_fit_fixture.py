@@ -13,7 +13,7 @@ Commands (run from the repository root, through uv; macOS or Linux):
 
     uv run --no-project python scripts/research/str_fit_fixture.py list
     uv run --no-project python scripts/research/str_fit_fixture.py run --out tmp/fixture_runs \
-        [--only p1_n1_d3_pcr p2_n60_d10_pcr_free_s1] [--jobs 4]
+        [--only p1_n1_d3_pcr p2_n60_d10_pcr_free_s1] [--jobs 4] [--stutter-prior-reads 0]
     uv run --no-project python scripts/research/str_fit_fixture.py collect tmp/fixture_runs \
         src/parameter_estimation/joint/ssr_fit/bench_fixtures/d_tract_prior_reference.jsonl.gz
     uv run --no-project python scripts/research/str_fit_fixture.py compare FIXTURE NEW \
@@ -23,6 +23,9 @@ Commands (run from the repository root, through uv; macOS or Linux):
 **`run`** writes one `<cell>_s<seed>.json` a run into the directory and appends each run's wall
 time and peak memory (from `/usr/bin/time`: `-l` on macOS, `-v` on Linux) to `runs.tsv` there.
 `--only` takes whole names: a cell (`p1_n1_d3_pcr`, every seed) or a run (`p1_n1_d3_pcr_s2`).
+`--stutter-prior-reads` hands every run a stutter prior of that many reads a class in place of
+production's one; the runs keep their method's name, so `0` compares the fit without the prior
+with a fixture recorded before it.
 
 - **A run whose output is already there is skipped**, so an interrupted directory can be resumed.
   **An output older than the bench binary is refused**: `run` stops before starting anything and
@@ -307,6 +310,9 @@ def command_run(options):
     out = Path(options.out)
     bench = Path(options.bench) if options.bench else bench_binary()
     chosen = chosen_runs(options.only)
+    if options.stutter_prior_reads is not None:
+        extra = ["--stutter-prior-reads", str(options.stutter_prior_reads)]
+        chosen = [(run, cell, [*args, *extra], samples) for run, cell, args, samples in chosen]
     built = bench.stat().st_mtime
     stale = [run for run, _, _, _ in chosen
              if (out / f"{run}.json").exists() and (out / f"{run}.json").stat().st_mtime < built]
@@ -606,6 +612,10 @@ def main():
     run.add_argument("--bench", help="the bench binary, in place of the newest build")
     run.add_argument("--memory-floor-gib", type=float, default=MEMORY_FLOOR_GIB,
                      help="kill a 2,000-sample run when available memory falls below this")
+    run.add_argument("--stutter-prior-reads", type=float,
+                     help="the stutter prior's weight in reads a class, in place of production's; "
+                          "the runs keep the method's name, so 0 compares the fit without the "
+                          "prior with a fixture recorded before it")
     collect = commands.add_parser("collect", help="gather a run directory into a fixture file")
     collect.add_argument("runs")
     collect.add_argument("fixture")

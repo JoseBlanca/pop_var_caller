@@ -95,6 +95,23 @@ pub struct PenalisedFitConfig {
     /// carries; this one grows with the cohort and does (spec §2.4). Zero, the prototype's default,
     /// leaves only the first floor.
     pub allele_prior_tracts: f64,
+    /// **Pseudo-reads added to each class's three stutter counts before the curves are drawn**
+    /// (spec §2.10): as if every class had this many more reads, of which the share
+    /// [`stutter_prior_centre`](Self::stutter_prior_centre)`.level` slipped; this many more
+    /// slipped reads, of which its `shorter_share` were shorter; and this many more repeats
+    /// slipped, of which its `fall_off` went one repeat further. Added only at repeat counts with
+    /// a class; repeat counts between classes still take the curve's value.
+    ///
+    /// **Why it is there.** Without it nothing but a numerical guard holds a class's slip rate off
+    /// zero, and EM drifts there: a thin class with no slipped read came out at a rate set by the
+    /// guard, 10⁻⁶ to 10⁻¹⁸ on the oracle, not by its reads. With it, a class alone with `y`
+    /// slipped reads among `n` gets the slip rate `(y + a·0.10)/(n + a)` for weight `a`: never
+    /// zero, and outweighed by its own reads from the second read on. Production's is
+    /// [`STUTTER_PRIOR_READS`], one read; zero turns it off.
+    pub stutter_prior_reads: f64,
+    /// **Where the stutter prior sits**: production's is [`STUTTER_PRIOR_CENTRE`], the stutter
+    /// calling uses for a class with no reads.
+    pub stutter_prior_centre: Slippage,
     /// **How many times the between-locus share is read off pairs of samples at a locus**, each time
     /// followed by penalised counting with it held. Zero reads it only from each sample's own two
     /// copies, which says almost nothing in an inbred cohort.
@@ -142,6 +159,7 @@ impl PenalisedFitConfig {
     /// | start | [`STARTING_STUTTER`]: slip rate 0.05, shorter share 0.5, fall-off 0.3 |
     /// | rounds at most / stop when no number moves more than | [`MAX_ROUNDS`] 2,000 / [`TOLERANCE`] 10⁻⁷ |
     /// | floor under the allele lengths | [`ALLELE_PRIOR_LOCI`], one locus's worth, plus [`ALLELE_PSEUDO_DRAWS_A_CLASS`], one draw a class |
+    /// | prior under the three stutter curves | [`STUTTER_PRIOR_READS`], one read's worth a class, at [`STUTTER_PRIOR_CENTRE`]: slip rate 0.10, shorter share 0.5, fall-off 0.05 |
     /// | F read off pairs of samples, at most | [`PAIR_ALTERNATIONS`], 10 times |
     /// | kink knee / tail | [`KINK_KNEE`] 2.5 / [`KINK_TAIL`] 2 |
     /// | a curve's strength held once it moves less than | [`STRENGTH_STEADY_WITHIN`], 0.1 natural-log units |
@@ -164,6 +182,8 @@ impl PenalisedFitConfig {
             kink_tail: KINK_TAIL,
             allele_pseudo_draws: pseudo_draws_a_length(ALLELE_SPAN),
             allele_prior_tracts: ALLELE_PRIOR_LOCI,
+            stutter_prior_reads: STUTTER_PRIOR_READS,
+            stutter_prior_centre: STUTTER_PRIOR_CENTRE,
             pair_alternations: PAIR_ALTERNATIONS,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
@@ -175,8 +195,8 @@ impl PenalisedFitConfig {
 
     /// **The research prototype's own settings, not production's** (production's are
     /// [`production`](Self::production)), kept for the research examples and a few tests: a looser
-    /// start, at most 500 rounds, stop below 10⁻⁶, no second floor under the allele lengths, F not
-    /// read off pairs, and no standard errors.
+    /// start, at most 500 rounds, stop below 10⁻⁶, no second floor under the allele lengths, no
+    /// prior under the stutter curves, F not read off pairs, and no standard errors.
     #[must_use]
     pub fn prototype() -> Self {
         Self {
@@ -193,6 +213,8 @@ impl PenalisedFitConfig {
             kink_tail: KINK_TAIL,
             allele_pseudo_draws: pseudo_draws_a_length(ALLELE_SPAN),
             allele_prior_tracts: 0.0,
+            stutter_prior_reads: 0.0,
+            stutter_prior_centre: STUTTER_PRIOR_CENTRE,
             pair_alternations: 0,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
@@ -200,6 +222,32 @@ impl PenalisedFitConfig {
             reuse_settled_counts: true,
             standard_errors: false,
         }
+    }
+
+    /// **Why this stutter prior cannot be used, or `None` when it can**: the weight must be a
+    /// finite number of reads, zero or more ([`stutter_prior_weight_problem`]), and each of the
+    /// centre's three numbers a share strictly between 0 and 1. A negative weight would take reads
+    /// away from every class, a weight that is not a number would make every stutter count not a
+    /// number, and a centre at 0 or 1 would pull a class towards a rate its logit cannot reach.
+    #[must_use]
+    pub fn stutter_prior_problem(&self) -> Option<String> {
+        if let Some(problem) = stutter_prior_weight_problem(self.stutter_prior_reads) {
+            return Some(problem);
+        }
+        let centre = self.stutter_prior_centre;
+        [
+            ("slip rate", centre.level),
+            ("shorter share", centre.shorter_share),
+            ("fall-off", centre.fall_off),
+        ]
+        .into_iter()
+        .find(|&(_, value)| !(value > 0.0 && value < 1.0))
+        .map(|(name, value)| {
+            format!(
+                "the stutter prior's centre must be strictly between 0 and 1 in each number; its \
+                 {name} is {value}"
+            )
+        })
     }
 
     /// **These settings with the allele window set to `allele_span` and the first floor rescaled to
@@ -214,6 +262,17 @@ impl PenalisedFitConfig {
             ..self
         }
     }
+}
+
+/// **Why `reads` cannot be the stutter prior's weight, or `None` when it can**: it must be finite
+/// and zero or more ([`PenalisedFitConfig::stutter_prior_reads`]). Zero turns the prior off.
+#[must_use]
+pub fn stutter_prior_weight_problem(reads: f64) -> Option<String> {
+    (!(reads.is_finite() && reads >= 0.0)).then(|| {
+        format!(
+            "the stutter prior's weight must be a finite number of reads, 0 or more; got {reads}"
+        )
+    })
 }
 
 /// **The first floor's draws a length in a window of `allele_span`**: one draw a class
@@ -241,6 +300,23 @@ pub const ALLELE_PSEUDO_DRAWS_A_CLASS: f64 = 1.0;
 /// **One locus's worth of allele draws a class, spread evenly over the lengths**: the second
 /// floor ([`PenalisedFitConfig::allele_prior_tracts`]). Spec §2.4, measured.
 pub const ALLELE_PRIOR_LOCI: f64 = 1.0;
+/// **One read's worth of prior a class, on each of the three stutter curves**
+/// ([`PenalisedFitConfig::stutter_prior_reads`]; spec §2.10.2, owner 2026-10-15). Soft: the
+/// smallest weight that changes calling at the thinnest classes; a held-out comparison of 0, 1
+/// and 5 reads checks it.
+pub const STUTTER_PRIOR_READS: f64 = 1.0;
+/// **Calling's default stutter, written in the fit's three numbers**: the centre of the stutter
+/// prior ([`PenalisedFitConfig::stutter_prior_centre`]; spec §2.10.2, owner 2026-10-15).
+/// HipSTR's shipped constants (`StutterModel::hipstr_shipped`), which calling uses for a class
+/// with no reads, put 0.05 of reads one repeat short and 0.05 one repeat long, and keep 0.95 of
+/// slips to one repeat: a slip rate of 0.10, half of it shorter, and a fall-off of 1 − 0.95.
+/// Not a measurement. Written out here because this module does not depend on calling; a test on
+/// calling's side checks that the two agree.
+pub const STUTTER_PRIOR_CENTRE: Slippage = Slippage {
+    level: 0.10,
+    shorter_share: 0.5,
+    fall_off: 0.05,
+};
 /// Readings of F off pairs of samples, at most (spec §2.5). The bench's value; soft.
 pub const PAIR_ALTERNATIONS: usize = 10;
 /// **How many standard deviations a bend may reach before its penalty stops growing as its
@@ -287,7 +363,9 @@ const LN_SMOOTHING_RANGE: (f64, f64) = (-9.210_340_371_976_182, 23.025_850_929_9
 /// **A ridge on every unbounded number**, so that a number with no counts behind it at any class
 /// stays finite: a class with no slipped reads would otherwise send the logit of its slip rate to
 /// minus infinity. At 10⁻⁶ it moves a number with even one count behind it by less than one part in
-/// a million.
+/// a million. **With the stutter prior on ([`PenalisedFitConfig::stutter_prior_reads`]) it no
+/// longer sets any stutter number**: the prior pulls each class's logit with about a tenth of a
+/// read, the ridge with at most 10⁻⁶ × 40. It stays as the guard for F and the allele lengths.
 const RIDGE: f64 = 1e-6;
 
 /// Unbounded numbers are held within ±this many units, beyond which every probability here is
@@ -325,7 +403,20 @@ pub struct PenalisedClass {
     /// **Not the level times the reads.** The level is a point on the penalised curve, so for a
     /// thin class it is mostly the neighbours'; this count is what the class's own reads said.
     /// `None` only when no round ran (`max_rounds` of 0).
+    ///
+    /// **Without the stutter prior** ([`PenalisedFitConfig::stutter_prior_reads`]): a class whose
+    /// reads showed no slip says 0 here, not the prior's tenth of a read. Below the prior's
+    /// weight, the slip rate carries no error: too few reads slipped to say how wide it is.
     pub expected_slipped_reads: Option<f64>,
+    /// **How many of the class's slipped reads had their direction placed, shorter or longer**,
+    /// by the same last expected counts and without the prior: what the shorter share was fitted
+    /// to. Below the prior's weight, the shorter share is mostly the prior's and carries no
+    /// error. `None` only when no round ran.
+    pub expected_slips_with_a_direction: Option<f64>,
+    /// **How many repeats the class's slipped reads slipped, summed**, by the same last expected
+    /// counts and without the prior: what the fall-off was fitted to. Below the prior's weight,
+    /// the fall-off is mostly the prior's and carries no error. `None` only when no round ran.
+    pub expected_repeats_slipped: Option<f64>,
     /// **How many distinct rows of read counts the class's (locus, sample) pairs with reads hold**:
     /// the rows a round scores, each once however many samples share it (spec §2.8). The run's log
     /// prints it beside the pairs, so that a reader sees how much the shortcut saved. `None` only
@@ -503,7 +594,8 @@ pub enum UndeterminedErrors {
 ///
 /// # Panics
 ///
-/// When the classes are of more than one motif length, or two share a repeat count.
+/// When the classes are of more than one motif length, or two share a repeat count; or when the
+/// stutter prior's settings cannot be used ([`PenalisedFitConfig::stutter_prior_problem`]).
 #[must_use]
 pub fn fit_period_by_penalised_counting(
     classes: &[StratumEvidence],
@@ -526,6 +618,9 @@ fn fit_one_period(
     fit: &PenalisedFitConfig,
     round_ended: &dyn Fn(usize, f64),
 ) -> PenalisedPeriodFit {
+    if let Some(problem) = fit.stutter_prior_problem() {
+        panic!("{problem}");
+    }
     if let Some(first) = classes.first() {
         assert!(
             classes
@@ -587,7 +682,7 @@ fn fit_one_period(
     }
     let started = Instant::now();
     let (errors, undetermined_errors) = if fit.standard_errors {
-        period.standard_errors(classes, homozygote_excess, fit.allele_span)
+        period.standard_errors(classes, homozygote_excess, fit)
     } else {
         (vec![None; period.points()], None)
     };
@@ -631,13 +726,16 @@ fn fit_one_period(
 /// starts. Within a motif length, see [`fit_period_by_penalised_counting`].
 ///
 /// **What it prints** (spec §2.9), to stderr as the other stages of `estimate-parameters` do
-/// (`parameter_estimation::progress`): while a motif length is fitted, at most once a minute the
-/// round it has reached; after each motif length, its rounds, the time in each step, how stiff
-/// each of the five kinds of curve came out and where bends were eased, then one line a class
-/// with its (locus, sample) pairs with reads, their distinct rows and whether F is absent; at the
-/// end, how many standard errors were withheld. The motif length's first line carries the
-/// process's memory now and its peak so far, on Linux only. The private module `run_log` says
-/// what each line holds. **When `strata` is empty, one line says there was nothing to fit.**
+/// (`parameter_estimation::progress`): first, the classes and the stutter prior the curves carry;
+/// while a motif length is fitted, at most once a minute the round it has reached; after each
+/// motif length, its rounds, in how many classes fewer reads slipped than the stutter prior
+/// weighs (one, in production; their shorter share and fall-off come from their neighbours and
+/// the prior), the time in each step, how stiff each of the five kinds of curve came out and
+/// where bends were eased, then one line a class with its (locus, sample) pairs with reads, their
+/// distinct rows and whether F is absent; at the end, how many standard errors were withheld. The
+/// motif length's first line carries the process's memory now and its peak so far, on Linux
+/// only. The private module `run_log` says what each line holds. **When `strata` is empty, one
+/// line says there was nothing to fit.**
 ///
 /// `homozygote_excess` is indexed by sample, as the evidence's samples are.
 ///
@@ -649,6 +747,8 @@ fn fit_one_period(
 /// - When a class's libraries do not fit together ([`StratumEvidence::check_libraries`]), or two
 ///   classes with reads share a motif length and a repeat count. Two classes at one repeat count
 ///   where one has no reads do not panic: each comes back, the one without reads refused.
+/// - When the stutter prior's settings cannot be used
+///   ([`PenalisedFitConfig::stutter_prior_problem`]) and there is a class to fit.
 #[must_use]
 pub fn fit_repeat_tracts(
     strata: &[StratumEvidence],
@@ -666,7 +766,7 @@ pub fn fit_repeat_tracts(
     }
     let stage = StageProgress::begin(format!(
         "repeat-tract fit: {}",
-        run_log::opening_line(strata)
+        run_log::opening_line(strata, config)
     ));
     let outcomes = fit_repeat_tracts_logging(
         strata,
@@ -733,6 +833,8 @@ fn fit_repeat_tracts_logging(
             round_ended(period, round, change);
         });
         let fitted = std::mem::take(&mut fit.classes);
+        let directions_on_the_prior =
+            run_log::classes_whose_directions_rest_on_the_prior(&fitted, config);
         let distinct_rows: Vec<Option<usize>> = fitted
             .iter()
             .map(|class| class.as_ref().and_then(|class| class.distinct_rows))
@@ -741,18 +843,14 @@ fn fit_repeat_tracts_logging(
             .iter()
             .zip(fitted)
             .map(|(evidence, fitted)| {
-                outcome_of_a_class(
-                    evidence,
-                    fitted,
-                    fit.curves.as_ref(),
-                    config.standard_errors,
-                )
+                outcome_of_a_class(evidence, fitted, fit.curves.as_ref(), config)
             })
             .collect();
         for line in run_log::lines_of_a_motif_length(
             &classes,
             &period_outcomes,
             &distinct_rows,
+            directions_on_the_prior,
             &fit,
             config,
         ) {
@@ -775,15 +873,15 @@ fn fit_repeat_tracts_logging(
 /// **One class's [`StratumOutcome`], from what its motif length's fit returned for it.**
 ///
 /// `fitted` is `None` for a class with no reads at any locus, which is refused. `curves` are the
-/// motif length's, `None` only when no class of it had reads. `standard_errors` says whether the
-/// fit was asked for errors: when it was not, the outcome carries none
-/// ([`StratumFit::standard_errors`] is `None`); when it was, every number has an error or a reason
-/// for having none ([`errors_of_a_class`]).
+/// motif length's, `None` only when no class of it had reads. `config` is the fit's settings:
+/// when [`PenalisedFitConfig::standard_errors`] did not ask for errors, the outcome carries none
+/// ([`StratumFit::standard_errors`] is `None`); when it did, every number has an error or a
+/// reason for having none ([`errors_of_a_class`], which also reads the stutter prior's weight).
 fn outcome_of_a_class(
     evidence: &StratumEvidence,
     fitted: Option<PenalisedClass>,
     curves: Option<&SmoothCurves>,
-    standard_errors: bool,
+    config: &PenalisedFitConfig,
 ) -> StratumOutcome {
     let Some(fitted) = fitted else {
         return StratumOutcome::Refused {
@@ -814,8 +912,14 @@ fn outcome_of_a_class(
     // The class's own reads that slipped, from the fit's expected counts, not the curve's level
     // times the reads: for a thin class that level is mostly the neighbours'.
     let slipped_reads = fitted.expected_slipped_reads;
-    let standard_errors =
-        standard_errors.then(|| errors_of_a_class(&fitted, concentration, loci_with_reads));
+    let standard_errors = config.standard_errors.then(|| {
+        errors_of_a_class(
+            &fitted,
+            concentration,
+            loci_with_reads,
+            config.stutter_prior_reads,
+        )
+    });
     StratumOutcome::Fitted(Box::new(StratumFit {
         stratum: evidence.stratum,
         slippage: vec![Some(fitted.slippage)],
@@ -849,6 +953,7 @@ fn outcome_of_a_class(
 /// | the concentration, where `concentration` is `None` | [`StratumError::NotPlaced`] |
 /// | any number of a class with fewer than [`LOCI_FOR_AN_ERROR`] loci with reads | [`StratumError::TooFewLoci`] |
 /// | a share whose expected count of loci, share × loci with reads, is below [`LOCI_FOR_A_SHARE_ERROR`] | [`StratumError::TooFewLoci`] |
+/// | the slip rate, where the class's slipped reads ([`PenalisedClass::expected_slipped_reads`]) are fewer than `stutter_prior_reads`; the shorter share, where its slipped reads with a direction ([`PenalisedClass::expected_slips_with_a_direction`]) are; the fall-off, where the repeats slipped ([`PenalisedClass::expected_repeats_slipped`]) are | [`StratumError::NotPlaced`] |
 /// | the fit gave no error, or one that is zero or not finite | [`StratumError::NotPlaced`] |
 /// | an error above [`NOT_PLACED`] on the scale the number is fitted on | [`StratumError::NotPlaced`] |
 /// | otherwise | [`StratumError::Estimated`] |
@@ -862,10 +967,23 @@ fn outcome_of_a_class(
 /// end of its search; the fit's own error beside an absent concentration is ignored. A class with
 /// no errors from the fit (the motif length's covariance could not be inverted) gets every number
 /// `NotPlaced`, the withheld ones aside.
+///
+/// **A direction number with fewer trials than the stutter prior's weight** (`stutter_prior_reads`,
+/// spec §2.10.4) is the prior's more than the reads': its value is close to the prior's centre and
+/// its error would be the prior's own width, 2 logit units for the shorter share at one read, not
+/// a measurement. A class with no counts (no round ran) counts as none.
+///
+/// **The slip rate is judged on its slipped reads, not on its reads.** With no slipped read the
+/// error's middle term, the spread of each locus's pull on the rate, all but vanishes, so the
+/// error comes out far too narrow: a class of 30 reads with none slipped would be written as a
+/// slip rate of 0.0032 with a logit error of 0.65, when no slip in 30 reads is consistent with any
+/// rate up to about one in ten. Fewer slipped reads than the prior's weight therefore place no
+/// error on the slip rate either, though its value still rests on the class's reads.
 fn errors_of_a_class(
     fitted: &PenalisedClass,
     concentration: Option<f64>,
     loci_with_reads: usize,
+    stutter_prior_reads: f64,
 ) -> StratumErrors {
     let none = PenalisedClassErrors::default();
     let errors = fitted.errors.as_ref().unwrap_or(&none);
@@ -877,12 +995,29 @@ fn errors_of_a_class(
             an_error_of(error, value * (1.0 - value))
         }
     };
+    // `events` is what the number was fitted to: slipped reads for the slip rate, slipped reads
+    // with a direction for the shorter share, repeats slipped for the fall-off.
+    let of_a_stutter_number = |error: Option<f64>, value: f64, events: Option<f64>| {
+        if !too_few_loci && events.unwrap_or(0.0) < stutter_prior_reads {
+            StratumError::NotPlaced
+        } else {
+            of_a_probability(error, value)
+        }
+    };
     let slippage = fitted.slippage;
     StratumErrors {
         slippage: vec![Some(SlippageErrors {
-            level: of_a_probability(errors.level, slippage.level),
-            shorter_share: of_a_probability(errors.shorter_share, slippage.shorter_share),
-            fall_off: of_a_probability(errors.fall_off, slippage.fall_off),
+            level: of_a_stutter_number(errors.level, slippage.level, fitted.expected_slipped_reads),
+            shorter_share: of_a_stutter_number(
+                errors.shorter_share,
+                slippage.shorter_share,
+                fitted.expected_slips_with_a_direction,
+            ),
+            fall_off: of_a_stutter_number(
+                errors.fall_off,
+                slippage.fall_off,
+                fitted.expected_repeats_slipped,
+            ),
         })],
         allele_length_variation: fitted
             .allele_length_variation
@@ -1121,14 +1256,22 @@ impl Period {
             self.expectation_seconds += started.elapsed().as_secs_f64();
             let started = Instant::now();
             self.composite_log_likelihood = counts.iter().flatten().map(|c| c.log_likelihood).sum();
+            // Each class's counts as successes in trials. A stutter curve's counts also carry the
+            // stutter prior (spec §2.10.2): `stutter_prior_reads` more trials, of which the
+            // centre's share are successes, at every repeat count with a class and nowhere else.
+            // F's counts (`prior_centre` `None`) carry none.
             let binomial = |successes: &dyn Fn(&ClassCounts) -> f64,
-                            trials: &dyn Fn(&ClassCounts) -> f64| {
+                            trials: &dyn Fn(&ClassCounts) -> f64,
+                            prior_centre: Option<f64>| {
+                let (prior_successes, prior_trials) = prior_centre.map_or((0.0, 0.0), |centre| {
+                    (fit.stutter_prior_reads * centre, fit.stutter_prior_reads)
+                });
                 let (mut ys, mut ns) = (vec![0.0; points], vec![0.0; points]);
                 for (point, count) in counts.iter().enumerate() {
                     if let Some(count) = count {
                         let n = trials(count).max(0.0);
-                        ns[point] = n;
-                        ys[point] = successes(count).clamp(0.0, n);
+                        ns[point] = n + prior_trials;
+                        ys[point] = successes(count).clamp(0.0, n) + prior_successes;
                     }
                 }
                 CurveData::Binomial {
@@ -1136,20 +1279,29 @@ impl Period {
                     trials: ns,
                 }
             };
+            let centre = fit.stutter_prior_centre;
             let level = self.level_curve.refit(
-                &binomial(&|c| c.slipped, &|c| c.slipped + c.exact),
+                &binomial(&|c| c.slipped, &|c| c.slipped + c.exact, Some(centre.level)),
                 fit,
                 search,
             );
             let shorter = self.shorter_curve.refit(
-                &binomial(&|c| c.shorter, &|c| c.shorter + c.longer),
+                &binomial(
+                    &|c| c.shorter,
+                    &|c| c.shorter + c.longer,
+                    Some(centre.shorter_share),
+                ),
                 fit,
                 search,
             );
             // A slip of k steps has probability (1 − f) f^(k − 1): k − 1 "one step further" against
             // one "stopped".
             let fall_off = self.fall_off_curve.refit(
-                &binomial(&|c| c.steps - c.stepped, &|c| c.steps),
+                &binomial(
+                    &|c| c.steps - c.stepped,
+                    &|c| c.steps,
+                    Some(centre.fall_off),
+                ),
                 fit,
                 search,
             );
@@ -1157,7 +1309,7 @@ impl Period {
                 None
             } else {
                 Some(self.between_curve.refit(
-                    &binomial(&|c| c.shared_in_tract, &|c| c.pairs_not_by_descent),
+                    &binomial(&|c| c.shared_in_tract, &|c| c.pairs_not_by_descent, None),
                     fit,
                     search,
                 ))
@@ -1264,7 +1416,12 @@ impl Period {
     ///   (Fisher's identity, as track 1 computes the counting fit's errors);
     /// - `B`, the sum over loci of each locus's slope times itself: the locus is the unit that
     ///   repeats independently;
-    /// - `P`, each curve's bend penalty at the strength and bend weights it was fitted at.
+    /// - `P`, each curve's bend penalty at the strength and bend weights it was fitted at, and the
+    ///   stutter prior's curvature (spec §2.10.4): `a·p(1 − p)` on each class's slip rate, shorter
+    ///   share and fall-off, `a` the prior's weight and `p` the number. Like the bend penalty it
+    ///   is part of the fit's prior, not of the reads, so it enters both `H` and the middle term:
+    ///   a number with no reads behind it then gets the prior's own width as its error, not one
+    ///   near zero from `B` alone.
     ///
     /// F read off pairs of samples is the answer to a second objective, so it is handled on its own:
     /// the same formula over F's curve, its slope and curvature taken numerically locus by locus
@@ -1278,11 +1435,12 @@ impl Period {
         &self,
         classes: &[&StratumEvidence],
         homozygote_excess: &[f64],
-        allele_span: i32,
+        fit: &PenalisedFitConfig,
     ) -> (
         Vec<Option<PenalisedClassErrors>>,
         Option<UndeterminedErrors>,
     ) {
+        let allele_span = fit.allele_span;
         let points = self.points();
         let shares_block = self.alleles - 1;
         let f_in_counting = !self.spread_from_pairs && self.between_locus_share_measurable;
@@ -1466,6 +1624,20 @@ impl Period {
             add_curve(&self.between_curve, 3);
         }
         add_curve(&self.shares_curve, share_offset);
+        // The stutter prior's curvature on the logit of each class's three stutter numbers.
+        for (point, class) in self.class_at_point.iter().enumerate() {
+            if class.is_none() {
+                continue;
+            }
+            let slippage = self.slippage[point];
+            for (component, value) in [slippage.level, slippage.shorter_share, slippage.fall_off]
+                .into_iter()
+                .enumerate()
+            {
+                let index = point * width + component;
+                penalty[index * size + index] += fit.stutter_prior_reads * value * (1.0 - value);
+            }
+        }
         let covariance = penalised_sandwich(&curvature, &spread, &penalty, size);
         // F off pairs of samples: the same formula over F's curve alone. It does not use the joint
         // `H`, so its errors stand whether or not that one could be inverted.
@@ -1665,6 +1837,12 @@ impl Period {
                     expected_slipped_reads: self.last_counts[point]
                         .as_ref()
                         .map(|counts| counts.slipped),
+                    expected_slips_with_a_direction: self.last_counts[point]
+                        .as_ref()
+                        .map(|counts| counts.shorter + counts.longer),
+                    expected_repeats_slipped: self.last_counts[point]
+                        .as_ref()
+                        .map(|counts| counts.steps),
                     distinct_rows: self.distinct_rows[point],
                     errors: errors[point].take(),
                 })
@@ -2949,6 +3127,12 @@ mod tests {
             kink_tail: 2.0,
             allele_pseudo_draws: 1.0 / 19.0,
             allele_prior_tracts: 1.0,
+            stutter_prior_reads: 1.0,
+            stutter_prior_centre: Slippage {
+                level: 0.10,
+                shorter_share: 0.5,
+                fall_off: 0.05,
+            },
             pair_alternations: 10,
             rounds_choosing_strength: 200,
             settled_change_for_strength: 1e-5,
@@ -3311,6 +3495,8 @@ mod tests {
             between_locus_share: concentration.map(|c| 1.0 / (1.0 + c)),
             working_concentration: concentration.unwrap_or(1.0),
             expected_slipped_reads: Some(50.0),
+            expected_slips_with_a_direction: Some(48.0),
+            expected_repeats_slipped: Some(60.0),
             distinct_rows: Some(40),
             errors: Some(PenalisedClassErrors {
                 level: Some(0.01),
@@ -3331,7 +3517,7 @@ mod tests {
         // 100 loci: every error given is placed except the rarest share's (1% of 100 loci is 1
         // locus's worth, under 3). The last share, 4% of 100 = 4 loci's worth, keeps its error.
         let class = a_fitted_class(Some(2.0));
-        let errors = errors_of_a_class(&class, Some(2.0), 100);
+        let errors = errors_of_a_class(&class, Some(2.0), 100, STUTTER_PRIOR_READS);
         assert_eq!(
             errors.slippage,
             vec![Some(SlippageErrors {
@@ -3353,12 +3539,12 @@ mod tests {
         assert_eq!(errors.concentration, Estimated(0.5));
 
         // Seven loci: every number withheld, the concentration too.
-        let errors = errors_of_a_class(&class, Some(2.0), 7);
+        let errors = errors_of_a_class(&class, Some(2.0), 7, STUTTER_PRIOR_READS);
         assert!(every_error_of(&errors).iter().all(|e| *e == TooFewLoci));
         // An absent concentration is not placed, before any other rule.
-        let errors = errors_of_a_class(&class, None, 7);
+        let errors = errors_of_a_class(&class, None, 7, STUTTER_PRIOR_READS);
         assert_eq!(errors.concentration, NotPlaced);
-        let errors = errors_of_a_class(&class, None, 100);
+        let errors = errors_of_a_class(&class, None, 100, STUTTER_PRIOR_READS);
         assert_eq!(errors.concentration, NotPlaced);
 
         // Zero, not a number, infinite and absent errors are not placed; so is an error wider
@@ -3373,7 +3559,7 @@ mod tests {
             between_locus_share: None,
             allele_length_variation: vec![0.002, f64::INFINITY, 0.0],
         });
-        let errors = errors_of_a_class(&bad, Some(2.0), 100);
+        let errors = errors_of_a_class(&bad, Some(2.0), 100, STUTTER_PRIOR_READS);
         assert!(
             every_error_of(&errors)
                 .iter()
@@ -3386,7 +3572,7 @@ mod tests {
             level: Some(0.14),
             ..PenalisedClassErrors::default()
         });
-        let errors = errors_of_a_class(&bad, Some(2.0), 100);
+        let errors = errors_of_a_class(&bad, Some(2.0), 100, STUTTER_PRIOR_READS);
         assert_eq!(
             errors.slippage[0].map(|group| group.level),
             Some(Estimated(0.14))
@@ -3395,7 +3581,7 @@ mod tests {
         // A class the fit gave no errors at all: not placed, the withheld aside.
         let mut none = a_fitted_class(Some(2.0));
         none.errors = None;
-        let errors = errors_of_a_class(&none, Some(2.0), 100);
+        let errors = errors_of_a_class(&none, Some(2.0), 100, STUTTER_PRIOR_READS);
         assert_eq!(errors.allele_length_variation[0], TooFewLoci);
         assert!(
             every_error_of(&errors)
@@ -3441,7 +3627,7 @@ mod tests {
                 &evidence,
                 Some(a_fitted_class(Some(estimate))),
                 Some(&curves),
-                true,
+                &a_narrow_production_fit(),
             );
             let StratumOutcome::Fitted(fit) = outcome else {
                 panic!("a fitted class is fitted");
@@ -3483,7 +3669,10 @@ mod tests {
             &evidence,
             Some(a_fitted_class(Some(2.0))),
             Some(&curves),
-            false,
+            &PenalisedFitConfig {
+                standard_errors: false,
+                ..a_narrow_production_fit()
+            },
         ) else {
             panic!("a fitted class is fitted");
         };
@@ -3857,6 +4046,608 @@ mod tests {
         // Factorised, the same held fit is not counted.
         curve.refit(&data, &a_narrow_production_fit(), StrengthSearch::Held);
         assert_eq!(curve.unfactorised_fits_kept, 1);
+    }
+
+    // ---------------------------------------------------------------------
+    // The stutter prior (spec §2.10)
+    // ---------------------------------------------------------------------
+
+    /// **A one-class motif length of `loci` loci, one sample each, every read at the reference
+    /// length except those `slipped` lists**: `(locus, offset)` for one read moved `offset`
+    /// repeats off the reference length, in place of one of that locus's reference reads. Three
+    /// reads a locus; reads recorded to ±2, so an offset of ±1 is exact (the outermost bucket
+    /// means "this far or further", and a read there says nothing about the fall-off).
+    fn a_lone_class_of_reads(loci: usize, slipped: &[(usize, i32)]) -> StratumEvidence {
+        let mut evidence = draw_stratum(
+            Slippage {
+                level: 0.0,
+                shorter_share: 0.5,
+                fall_off: 0.05,
+            },
+            &[1e-6, 1e-6, 1.0 - 4e-6, 1e-6, 1e-6],
+            100.0,
+            0.99,
+            loci,
+            1,
+            3,
+            2,
+            7,
+        );
+        evidence.stratum = Stratum {
+            period: 3,
+            reference_repeats: 6,
+        };
+        for (locus, tract) in evidence.tracts.iter_mut().enumerate() {
+            let mut buckets = vec![0_u32, 0, 3, 0, 0];
+            for &(at, offset) in slipped {
+                if at == locus {
+                    buckets[2] -= 1;
+                    buckets[(2 + offset) as usize] += 1;
+                }
+            }
+            tract.samples = vec![SampleTractReads {
+                sample: 0,
+                by_library: vec![(LibraryIndex(0), buckets)],
+            }];
+        }
+        evidence
+    }
+
+    /// The one class's fit, alone in its motif length, at production's settings (±2) with the
+    /// stutter prior at `prior_reads`; the sample's homozygote excess 0.99, so a read off its
+    /// locus's length is explained as a slip, not as a second allele.
+    fn the_lone_class_fitted(evidence: &StratumEvidence, prior_reads: f64) -> PenalisedClass {
+        let fit = PenalisedFitConfig {
+            stutter_prior_reads: prior_reads,
+            ..a_narrow_production_fit()
+        };
+        fit_period_by_penalised_counting(std::slice::from_ref(evidence), &[0.99], &fit).classes[0]
+            .clone()
+            .expect("the class has reads")
+    }
+
+    fn logit(probability: f64) -> f64 {
+        float::ln(probability / (1.0 - probability))
+    }
+
+    /// **A one-class motif length with no slipped read rests on the prior** (spec §4.1, §2.10.6
+    /// case A): 10 loci of one sample at 3 reads, 30 reads at the reference length. A class alone
+    /// has no bend to penalise, so its slip rate is its own counts plus one read's worth of the
+    /// prior, `(slipped + 0.1)/(reads + 1)`: 0.1/31 = 0.0032, with no slipped read. The shorter
+    /// share and fall-off have no slipped read behind them and are the centre's, 0.5 and 0.05,
+    /// with their errors not placed. Without the prior the slip rate is where the 10⁻⁶ ridge
+    /// balances the reads, below 10⁻⁵.
+    #[test]
+    fn a_lone_class_with_no_slipped_read_rests_on_the_prior() {
+        let evidence = a_lone_class_of_reads(10, &[]);
+        let reads = evidence.spanning_reads() as f64;
+        assert_eq!(reads, 30.0);
+        let class = the_lone_class_fitted(&evidence, STUTTER_PRIOR_READS);
+        let slipped = class.expected_slipped_reads.expect("a round ran");
+        let with_a_direction = class.expected_slips_with_a_direction.expect("a round ran");
+        let repeats_slipped = class.expected_repeats_slipped.expect("a round ran");
+        eprintln!(
+            "alone, no slipped read: {class:?}; expected slipped reads {slipped:e}, with a \
+             direction {with_a_direction:e}, repeats slipped {repeats_slipped:e}"
+        );
+        assert!(slipped < 1e-3, "{slipped}");
+        // The prior's own value, written without the fit's own counts, and the same value with
+        // them: the second checks the arithmetic, the first that it lands where the spec says.
+        let level = class.slippage.level;
+        assert!((level / (0.1 / 31.0) - 1.0).abs() < 0.01, "{level}");
+        assert!(
+            (level / ((slipped + 0.1) / (reads + 1.0)) - 1.0).abs() < 1e-3,
+            "{level} against (slipped + 0.1)/(reads + 1)"
+        );
+        assert!(
+            (class.slippage.shorter_share - 0.5).abs() < 1e-3,
+            "{class:?}"
+        );
+        assert!((class.slippage.fall_off - 0.05).abs() < 1e-3, "{class:?}");
+
+        let outcomes = fit_repeat_tracts(
+            std::slice::from_ref(&evidence),
+            &[0.99],
+            &a_narrow_production_fit(),
+        );
+        let StratumOutcome::Fitted(fit) = &outcomes[0] else {
+            panic!("the class has reads: {:?}", outcomes[0]);
+        };
+        let errors = fit
+            .standard_errors
+            .as_ref()
+            .expect("production asks for errors");
+        let group = errors.slippage[0].expect("group 0 has numbers");
+        // No slipped read in 30 places no error on the slip rate, though the fit's own error
+        // (0.65 logit units) is under the `NOT_PLACED` bound and the class has 10 loci.
+        assert_eq!(group.level, StratumError::NotPlaced);
+        assert_eq!(group.shorter_share, StratumError::NotPlaced);
+        assert_eq!(group.fall_off, StratumError::NotPlaced);
+        // The reads' own count, without the prior: no slipped read says (nearly) none.
+        assert_eq!(
+            fit.level_provenance[0]
+                .expect("group 0 has numbers")
+                .slipped_reads,
+            Some(slipped)
+        );
+
+        let without = the_lone_class_fitted(&evidence, 0.0);
+        eprintln!("alone, no slipped read, no prior: {without:?}");
+        assert!(without.slippage.level < 1e-5, "{without:?}");
+    }
+
+    /// **One slipped read, one repeat shorter, in a one-class motif length** (spec §4.1, §2.10.3):
+    /// the shorter share is (1 + 0.5)/(1 + 1) = 0.75 and the fall-off 0.05/(1 + 1) = 0.025, where
+    /// without the prior one slipped read drives them to 1 and 0. The fit's expected count of
+    /// slipped reads is within a tenth of one: a second allele could explain the short read, and
+    /// a reference read could be a slip back, each with a small chance.
+    #[test]
+    fn one_slipped_read_one_repeat_shorter_gives_three_quarters_shorter() {
+        let evidence = a_lone_class_of_reads(10, &[(4, -1)]);
+        let class = the_lone_class_fitted(&evidence, STUTTER_PRIOR_READS);
+        let slipped = class.expected_slipped_reads.expect("a round ran");
+        let with_a_direction = class.expected_slips_with_a_direction.expect("a round ran");
+        let repeats_slipped = class.expected_repeats_slipped.expect("a round ran");
+        eprintln!(
+            "alone, one read one repeat shorter: {class:?}; expected slipped reads {slipped}, \
+             with a direction {with_a_direction}, repeats slipped {repeats_slipped}"
+        );
+        assert!((0.9..=1.1).contains(&slipped), "{slipped}");
+        assert!(
+            (with_a_direction - slipped).abs() < 1e-9,
+            "every slip here has a direction"
+        );
+        // Every slip is one repeat, shorter: `shorter` is the slips with a direction, and no
+        // repeat slipped beyond the first.
+        assert!(
+            (repeats_slipped - with_a_direction).abs() < 1e-3,
+            "{repeats_slipped} repeats slipped"
+        );
+        let shorter_share = (with_a_direction + 0.5) / (with_a_direction + 1.0);
+        let fall_off = 0.05 / (repeats_slipped + 1.0);
+        assert!(
+            (class.slippage.shorter_share - shorter_share).abs() < 1e-3,
+            "{} against {shorter_share}",
+            class.slippage.shorter_share
+        );
+        assert!(
+            (class.slippage.fall_off - fall_off).abs() < 1e-4,
+            "{} against {fall_off}",
+            class.slippage.fall_off
+        );
+        assert!(
+            (class.slippage.shorter_share - 0.75).abs() < 0.01,
+            "{class:?}"
+        );
+        assert!((class.slippage.fall_off - 0.025).abs() < 0.002, "{class:?}");
+
+        let without = the_lone_class_fitted(&evidence, 0.0);
+        eprintln!("alone, one read one repeat shorter, no prior: {without:?}");
+        assert!(without.slippage.shorter_share > 0.999, "{without:?}");
+        assert!(without.slippage.fall_off < 1e-3, "{without:?}");
+    }
+
+    /// **The prior's centre is calling's default stutter**: [`STUTTER_PRIOR_CENTRE`] is slip rate
+    /// 0.10, shorter share 0.5 and fall-off 0.05, and production carries it at one read's worth.
+    /// That it converts to `StutterModel::hipstr_shipped`'s shares is checked on calling's side,
+    /// which this module does not depend on.
+    #[test]
+    fn production_carries_one_read_of_prior_at_calling_s_default() {
+        let production = PenalisedFitConfig::production();
+        assert_eq!(production.stutter_prior_reads, 1.0);
+        assert_eq!(production.stutter_prior_centre, STUTTER_PRIOR_CENTRE);
+        assert_eq!(
+            STUTTER_PRIOR_CENTRE,
+            Slippage {
+                level: 0.10,
+                shorter_share: 0.5,
+                fall_off: 0.05,
+            }
+        );
+        assert_eq!(PenalisedFitConfig::prototype().stutter_prior_reads, 0.0);
+    }
+
+    /// **The stutter prior's settings are checked**: a weight must be finite and zero or more
+    /// (zero turns the prior off), and each of the centre's numbers strictly between 0 and 1.
+    /// The bench's `--stutter-prior-reads` refuses a weight through the same check.
+    #[test]
+    fn the_stutter_prior_s_settings_are_checked() {
+        assert_eq!(
+            PenalisedFitConfig::production().stutter_prior_problem(),
+            None
+        );
+        assert_eq!(
+            PenalisedFitConfig::prototype().stutter_prior_problem(),
+            None
+        );
+        for usable in [0.0, 0.5, 1.0, 5.0] {
+            assert_eq!(stutter_prior_weight_problem(usable), None, "{usable}");
+        }
+        for unusable in [-1.0, -1e-9, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let problem = stutter_prior_weight_problem(unusable).expect("refused");
+            assert!(problem.contains("the stutter prior's weight"), "{problem}");
+            let config = PenalisedFitConfig {
+                stutter_prior_reads: unusable,
+                ..PenalisedFitConfig::production()
+            };
+            assert_eq!(config.stutter_prior_problem(), Some(problem));
+        }
+        let with_centre = |level: f64, shorter_share: f64, fall_off: f64| PenalisedFitConfig {
+            stutter_prior_centre: Slippage {
+                level,
+                shorter_share,
+                fall_off,
+            },
+            ..PenalisedFitConfig::production()
+        };
+        assert_eq!(with_centre(0.001, 0.999, 0.5).stutter_prior_problem(), None);
+        for (config, name) in [
+            (with_centre(0.0, 0.5, 0.05), "slip rate is 0"),
+            (with_centre(1.0, 0.5, 0.05), "slip rate is 1"),
+            (with_centre(0.1, -0.5, 0.05), "shorter share is -0.5"),
+            (with_centre(0.1, 1.0, 0.05), "shorter share is 1"),
+            (with_centre(0.1, 0.5, f64::NAN), "fall-off is NaN"),
+        ] {
+            let problem = config.stutter_prior_problem().expect("refused");
+            assert!(problem.ends_with(name), "{problem}");
+        }
+    }
+
+    /// **A fit handed a stutter prior it cannot use panics**, naming the setting, rather than
+    /// fitting with reads taken away from every class.
+    #[test]
+    #[should_panic(expected = "the stutter prior's weight must be a finite number of reads")]
+    fn a_fit_with_a_negative_stutter_prior_panics() {
+        let evidence = a_lone_class_of_reads(10, &[]);
+        let config = PenalisedFitConfig {
+            stutter_prior_reads: -1.0,
+            ..a_narrow_production_fit()
+        };
+        let _ = fit_period_by_penalised_counting(&[evidence], &[0.0], &config);
+    }
+
+    /// **The same for a centre outside (0, 1)**, through the production entry point.
+    #[test]
+    #[should_panic(expected = "the stutter prior's centre must be strictly between 0 and 1")]
+    fn a_fit_with_a_stutter_prior_centre_at_zero_panics() {
+        let evidence = a_lone_class_of_reads(10, &[]);
+        let config = PenalisedFitConfig {
+            stutter_prior_centre: Slippage {
+                level: 0.0,
+                ..STUTTER_PRIOR_CENTRE
+            },
+            ..a_narrow_production_fit()
+        };
+        let _ = fit_repeat_tracts(&[evidence], &[0.0], &config);
+    }
+
+    /// **The error rule of spec §2.10.4**: a shorter share whose class has fewer slipped reads with
+    /// a direction than the prior's weight, or a fall-off whose class has fewer repeats slipped, is
+    /// not placed, whatever error the fit gave it; at the weight or above, the rest of the table
+    /// decides; a class with fewer than 8 loci is withheld first; and at weight 0 the rule never
+    /// fires.
+    #[test]
+    fn a_direction_number_resting_on_the_prior_is_not_placed() {
+        use StratumError::{Estimated, NotPlaced, TooFewLoci};
+        let mut class = a_fitted_class(Some(2.0));
+        class.expected_slips_with_a_direction = Some(0.6);
+        class.expected_repeats_slipped = Some(0.7);
+        let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: Estimated(0.01),
+                shorter_share: NotPlaced,
+                fall_off: NotPlaced,
+            })]
+        );
+        let errors = errors_of_a_class(&class, Some(2.0), 100, 0.0);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: Estimated(0.01),
+                shorter_share: Estimated(0.05),
+                fall_off: Estimated(0.03),
+            })]
+        );
+        let errors = errors_of_a_class(&class, Some(2.0), 7, 1.0);
+        assert!(every_error_of(&errors).iter().all(|e| *e == TooFewLoci));
+
+        // One trial is enough; the two numbers are judged on their own trials.
+        class.expected_slips_with_a_direction = Some(1.0);
+        let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: Estimated(0.01),
+                shorter_share: Estimated(0.05),
+                fall_off: NotPlaced,
+            })]
+        );
+        // No round ran: no trials.
+        class.expected_slips_with_a_direction = None;
+        class.expected_repeats_slipped = None;
+        let errors = errors_of_a_class(&class, Some(2.0), 100, 1.0);
+        let group = errors.slippage[0].expect("group 0 has numbers");
+        assert_eq!(
+            (group.shorter_share, group.fall_off),
+            (NotPlaced, NotPlaced)
+        );
+    }
+
+    /// **The slip rate's error rule** (spec §2.10.4): a class with fewer slipped reads than the
+    /// prior's weight has its slip rate not placed, whatever error the fit gave it; one slipped
+    /// read or more, at a weight of one, leaves the slip rate `Estimated`; the rule looks at the
+    /// slipped reads, not at the slips with a direction; and at weight 0 it never fires.
+    #[test]
+    fn a_slip_rate_is_placed_only_from_one_slipped_read() {
+        use StratumError::{Estimated, NotPlaced};
+        let level_of = |class: &PenalisedClass, prior_reads: f64| {
+            errors_of_a_class(class, Some(2.0), 100, prior_reads).slippage[0]
+                .expect("group 0 has numbers")
+                .level
+        };
+        let mut class = a_fitted_class(Some(2.0));
+        for slipped in [1.0, 1.5, 50.0] {
+            class.expected_slipped_reads = Some(slipped);
+            assert_eq!(level_of(&class, 1.0), Estimated(0.01), "{slipped} slipped");
+        }
+        // A slipped read with no direction still counts for the slip rate.
+        class.expected_slipped_reads = Some(1.0);
+        class.expected_slips_with_a_direction = Some(0.0);
+        let group = errors_of_a_class(&class, Some(2.0), 100, 1.0).slippage[0]
+            .expect("group 0 has numbers");
+        assert_eq!(
+            (group.level, group.shorter_share),
+            (Estimated(0.01), NotPlaced)
+        );
+
+        for slipped in [Some(0.0), Some(0.999), None] {
+            class.expected_slipped_reads = slipped;
+            assert_eq!(level_of(&class, 1.0), NotPlaced, "{slipped:?} slipped");
+            assert_eq!(
+                level_of(&class, 0.0),
+                Estimated(0.01),
+                "{slipped:?} slipped"
+            );
+        }
+
+        // The same through the whole fit: the lone class of 10 loci × 3 reads, five of its reads
+        // slipped by one repeat, keeps its slip rate's error.
+        let evidence = a_lone_class_of_reads(10, &[(0, -1), (2, 1), (4, -1), (6, 1), (8, -1)]);
+        let outcomes = fit_repeat_tracts(
+            std::slice::from_ref(&evidence),
+            &[0.99],
+            &a_narrow_production_fit(),
+        );
+        let StratumOutcome::Fitted(fit) = &outcomes[0] else {
+            panic!("the class has reads: {:?}", outcomes[0]);
+        };
+        let slipped = fit.level_provenance[0]
+            .expect("group 0 has numbers")
+            .slipped_reads
+            .expect("a round ran");
+        assert!(slipped >= 1.0, "{slipped} slipped");
+        let group = fit
+            .standard_errors
+            .as_ref()
+            .expect("production asks for errors")
+            .slippage[0]
+            .expect("group 0 has numbers");
+        assert!(
+            matches!(group.level, Estimated(error) if error > 0.0),
+            "{:?} at {slipped} slipped",
+            group.level
+        );
+    }
+
+    /// **The stutter prior enters the errors' curvature and middle term** (spec §2.10.4). On the
+    /// lone class with no slipped read the slip rate's logit error comes out about 0.65 with the
+    /// prior; without it the rate sits at the ridge (5×10⁻⁷) and its error is 0.30, narrower
+    /// although nothing but a numerical guard placed the number. The test checks that the error
+    /// with the prior is finite, positive and wider. Both are far too narrow for no slip in 30
+    /// reads, which is why the error mapping does not place either
+    /// (`a_slip_rate_is_placed_only_from_one_slipped_read`).
+    #[test]
+    fn the_prior_is_in_the_errors_sandwich() {
+        let evidence = a_lone_class_of_reads(10, &[]);
+        let with = the_lone_class_fitted(&evidence, 1.0);
+        let without = the_lone_class_fitted(&evidence, 0.0);
+        let error_of = |class: &PenalisedClass| {
+            let level = class.slippage.level;
+            class
+                .errors
+                .as_ref()
+                .and_then(|errors| errors.level)
+                .map(|error| error / (level * (1.0 - level)))
+        };
+        eprintln!(
+            "logit error of the slip rate: with the prior {:?}, without {:?}",
+            error_of(&with),
+            error_of(&without)
+        );
+        let with_error = error_of(&with).expect("the lone class's covariance inverts");
+        assert!(with_error.is_finite() && with_error > 0.0, "{with_error}");
+        let without_error = error_of(&without).expect("the lone class's covariance inverts");
+        assert!(
+            with_error > without_error,
+            "{with_error} against {without_error}"
+        );
+    }
+
+    /// **A thin tail no longer drifts to zero** (plan step C8's simulator check; spec §4.1): a
+    /// motif length with four classes of 10 to 30 loci and a tail of ten classes of 1 to 3 loci,
+    /// at 1 sample × 3 reads and at 4 samples × 5 reads, drawn at two truths whose every slip rate
+    /// is 0.005 or more:
+    ///
+    /// - one-base runs at the tomato-like truth (0.005 at 8 repeats, rising to 0.27), classes at
+    ///   8 to 21 repeats;
+    /// - two-base runs whose slip rate is 0.006 at every repeat count, classes at 6 to 19: so few
+    ///   slipped reads that, as on the oracle's three-base runs, most classes have none.
+    ///
+    /// With the prior, no stutter number's logit ends within one unit of ±40, and no class's slip
+    /// rate is below a tenth of what the prior alone gives a class with no slipped read,
+    /// `0.1/(reads + 1)`. The same cohorts at weight 0 are fitted and printed beside them. On the
+    /// slip-poor truth at weight 0 the direction numbers run to a boundary: some class's shorter
+    /// share or fall-off ends beyond a logit of ±9 (within one part in 8,000 of 0 or 1), which
+    /// the test checks so that it is seen to catch the drift. (Neither truth drives a slip rate
+    /// down to ±40 at weight 0 on these draws; the oracle did, through a stiff straight line.)
+    #[test]
+    fn a_thin_tail_no_longer_drifts_to_zero() {
+        use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
+            CohortModel, LociPerClass, ParameterCurve as TrueCurve, StutterRegime, draw_period,
+        };
+        for (slip_poor, samples, depth) in [
+            (false, 1_usize, 3.0),
+            (false, 4, 5.0),
+            (true, 1, 3.0),
+            (true, 4, 5.0),
+        ] {
+            let (mut model, first) = if slip_poor {
+                let mut model = CohortModel::tomato_like(2, StutterRegime::Pcr);
+                model.stutter.level = TrueCurve::Constant(0.006);
+                (model, 6)
+            } else {
+                (CohortModel::tomato_like(1, StutterRegime::Pcr), 8)
+            };
+            let mut listed = vec![
+                (first, 30),
+                (first + 1, 30),
+                (first + 2, 20),
+                (first + 3, 10),
+            ];
+            listed.extend(
+                (first + 4..first + 14).map(|repeats| (repeats, 1 + (repeats as usize % 3))),
+            );
+            model.loci = LociPerClass::Listed(listed);
+            model.samples = samples;
+            model.depth = depth;
+            model.seed = 5;
+            let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
+            let cell = format!(
+                "{} {samples} × {depth}",
+                if slip_poor {
+                    "two-base at 0.006"
+                } else {
+                    "one-base tomato-like"
+                }
+            );
+            let mut drifted_without = 0;
+            for prior_reads in [STUTTER_PRIOR_READS, 0.0] {
+                let fit = PenalisedFitConfig {
+                    stutter_prior_reads: prior_reads,
+                    ..PenalisedFitConfig::production()
+                };
+                let fitted =
+                    fit_period_by_penalised_counting(&drawn.strata, &drawn.homozygote_excess, &fit);
+                let mut at_a_guard = 0;
+                let mut below_the_floor = 0;
+                let mut at_a_boundary = 0;
+                for (evidence, class) in drawn.strata.iter().zip(&fitted.classes) {
+                    let Some(class) = class else { continue };
+                    let reads = evidence.spanning_reads() as f64;
+                    let slippage = class.slippage;
+                    let logits = [
+                        logit(slippage.level),
+                        logit(slippage.shorter_share),
+                        logit(slippage.fall_off),
+                    ];
+                    let floor = 0.1 * 0.1 / (reads + 1.0);
+                    eprintln!(
+                        "{cell}, prior {prior_reads}: {} repeats, {} loci, {reads} \
+                         reads, expected slipped {:.3}: slip rate {:.3e} (floor {floor:.2e}), \
+                         shorter share {:.4}, fall-off {:.4}; logits {logits:.2?}",
+                        evidence.stratum.reference_repeats,
+                        evidence.tracts_with_reads(),
+                        class.expected_slipped_reads.unwrap_or(f64::NAN),
+                        slippage.level,
+                        slippage.shorter_share,
+                        slippage.fall_off,
+                    );
+                    if logits
+                        .iter()
+                        .any(|value| value.abs() > LARGEST_UNBOUNDED - 1.0)
+                    {
+                        at_a_guard += 1;
+                    }
+                    if slippage.level < floor {
+                        below_the_floor += 1;
+                    }
+                    if logits.iter().any(|value| value.abs() > 9.0) {
+                        at_a_boundary += 1;
+                    }
+                }
+                eprintln!(
+                    "{cell}, prior {prior_reads}: {at_a_guard} classes with a logit \
+                     within one unit of ±40, {below_the_floor} with a slip rate below a tenth of \
+                     0.1/(reads + 1), {at_a_boundary} with a logit beyond ±9"
+                );
+                if prior_reads > 0.0 {
+                    assert_eq!(at_a_guard, 0, "{cell}");
+                    assert_eq!(below_the_floor, 0, "{cell}");
+                } else {
+                    drifted_without = at_a_boundary;
+                }
+            }
+            if slip_poor {
+                assert!(
+                    drifted_without > 0,
+                    "{cell}: without the prior nothing drifted"
+                );
+            }
+        }
+    }
+
+    /// **Genuinely low stutter on many reads keeps its rate** (spec §2.10.6 case D, §4.1): one-base
+    /// runs drawn at the PCR-free truth, every slip rate a tenth of tomato's (5×10⁻⁴ at 8 repeats),
+    /// five classes of 40 loci at 8 to 12 repeats, 200 samples × 30 reads. Each class's slip rate
+    /// with the prior holds the truth within two of its errors and moves from the fit without the
+    /// prior by less than one part in a thousand.
+    #[test]
+    fn genuinely_low_stutter_on_many_reads_keeps_its_rate() {
+        use crate::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
+        use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
+            CohortModel, LociPerClass, StutterRegime, draw_period,
+        };
+        let mut model = CohortModel::tomato_like(1, StutterRegime::PcrFree);
+        model.loci = LociPerClass::Listed((8..=12).map(|repeats| (repeats, 40)).collect());
+        model.samples = 200;
+        model.depth = 30.0;
+        model.seed = 3;
+        let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
+        let fit_at = |prior_reads: f64| {
+            fit_period_by_penalised_counting(
+                &drawn.strata,
+                &drawn.homozygote_excess,
+                &PenalisedFitConfig {
+                    stutter_prior_reads: prior_reads,
+                    ..PenalisedFitConfig::production()
+                },
+            )
+        };
+        let (with, without) = (fit_at(STUTTER_PRIOR_READS), fit_at(0.0));
+        for ((truth, with), without) in drawn.truth.iter().zip(&with.classes).zip(&without.classes)
+        {
+            let (with, without) = (
+                with.as_ref().expect("every class has reads"),
+                without.as_ref().expect("every class has reads"),
+            );
+            let (level, true_level) = (with.slippage.level, truth.slippage.level);
+            let error = with.errors.as_ref().and_then(|errors| errors.level);
+            let moved = (level / without.slippage.level - 1.0).abs();
+            eprintln!(
+                "{} repeats: truth {true_level:.3e}, with the prior {level:.4e} ± {error:?}, \
+                 without {:.4e}; moved by {moved:.2e} of itself",
+                truth.stratum.reference_repeats, without.slippage.level,
+            );
+            assert!(moved < 1e-3, "{moved}");
+            let error = error.expect("40 loci and many reads give an error");
+            assert!(
+                (level - true_level).abs() <= 2.0 * error,
+                "{level} against the truth {true_level}, error {error}"
+            );
+        }
     }
 
     thread_local! {

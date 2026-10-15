@@ -306,4 +306,38 @@ mod tests {
         // No slippage at all means every read shows the allele's own length.
         assert!((model.same_length_share() - 1.0).abs() < 1e-15);
     }
+
+    /// **The repeat-tract fit's stutter prior is centred on the stutter calling uses for a class
+    /// with no reads**: `STUTTER_PRIOR_CENTRE`, converted as every fitted row is, gives
+    /// `StutterModel::hipstr_shipped`'s whole-repeat shares, 0.05 shorter, 0.05 longer and 0.95 of
+    /// slips one repeat (spec `str_penalised_fit.md` §2.10.2). The fit writes the centre out
+    /// because it does not depend on calling; this pins the copy to the original.
+    #[test]
+    fn the_fits_stutter_prior_is_centred_on_calling_s_default() {
+        use crate::parameter_estimation::joint::ssr_fit::penalised_fit::STUTTER_PRIOR_CENTRE;
+        let rates = stutter_rates_for(&STUTTER_PRIOR_CENTRE);
+        let shipped = StutterModel::hipstr_shipped();
+        for (name, ours, theirs) in [
+            (
+                "shorter",
+                rates.whole_repeat_shorter_share,
+                shipped.whole_repeat_shorter_share(),
+            ),
+            (
+                "longer",
+                rates.whole_repeat_longer_share,
+                shipped.whole_repeat_longer_share(),
+            ),
+            (
+                "one step",
+                rates.whole_repeat_one_step_share,
+                shipped.whole_repeat_one_step_share(),
+            ),
+        ] {
+            assert!(
+                (ours - theirs).abs() < 1e-12,
+                "{name}: the prior's centre gives {ours}, hipstr_shipped {theirs}"
+            );
+        }
+    }
 }
