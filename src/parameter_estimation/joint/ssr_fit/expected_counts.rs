@@ -24,6 +24,8 @@
 //! (`fit_class_by_counting*`) stay here as the zero-penalty answer the penalised fit's tests
 //! compare against.
 
+use ahash::AHashMap;
+
 use super::*;
 
 /// What [`fit_class_by_counting`] returns.
@@ -477,29 +479,37 @@ impl DistinctRows {
     ) -> Self {
         let buckets = (2 * evidence.read_span + 1) as usize;
         // Per block: its distinct rows in the order first met, and each (tract, sample)'s place
-        // among them with the sample's excess.
+        // among them with the sample's excess. Every sample's reads are pooled into one scratch
+        // row and looked up by value; only a row not met before is copied.
         let blocks: Vec<RowsOfABlock> = evidence
             .tracts
             .par_chunks(tracts_per_block)
             .map(|tracts| {
-                let mut index_of: std::collections::HashMap<Vec<u32>, u32> =
-                    std::collections::HashMap::new();
-                let mut reads: Vec<Vec<u32>> = Vec::new();
+                let mut index_of: AHashMap<Vec<u32>, u32> = AHashMap::new();
                 let mut rows = Vec::new();
+                let mut pooled = vec![0_u32; buckets];
                 for sample in tracts.iter().flat_map(|tract| &tract.samples) {
-                    let pooled = pooled_reads(sample, buckets);
-                    let next = reads.len() as u32;
-                    let index = *index_of.entry(pooled).or_insert_with_key(|pooled| {
-                        reads.push(pooled.clone());
-                        next
-                    });
+                    pool_reads_into(sample, &mut pooled);
+                    let index = match index_of.get(pooled.as_slice()) {
+                        Some(index) => *index,
+                        None => {
+                            let next = index_of.len() as u32;
+                            index_of.insert(pooled.clone(), next);
+                            next
+                        }
+                    };
                     rows.push((index, homozygote_excess[sample.sample as usize]));
+                }
+                // Each row put at its own number, so the map's order is never read.
+                let mut reads = vec![Vec::new(); index_of.len()];
+                for (row, index) in index_of {
+                    reads[index as usize] = row;
                 }
                 (reads, rows)
             })
             .collect();
-        let mut index_of: std::collections::HashMap<Vec<u32>, u32> =
-            std::collections::HashMap::new();
+        // Keyed by the blocks' own rows, so a row met in an earlier block is not copied again.
+        let mut index_of: AHashMap<&[u32], u32> = AHashMap::new();
         let mut reads: Vec<Vec<u32>> = Vec::new();
         let renumbered: Vec<Vec<u32>> = blocks
             .iter()
@@ -507,15 +517,16 @@ impl DistinctRows {
                 block_reads
                     .iter()
                     .map(|pooled| {
-                        let next = reads.len() as u32;
-                        *index_of.entry(pooled.clone()).or_insert_with_key(|pooled| {
+                        *index_of.entry(pooled.as_slice()).or_insert_with(|| {
                             reads.push(pooled.clone());
-                            next
+                            reads.len() as u32 - 1
                         })
                     })
                     .collect()
             })
             .collect();
+        // Freed before the rows' table is built.
+        drop(index_of);
         let rows: Vec<(u32, f64)> = blocks
             .par_iter()
             .zip(&renumbered)
@@ -1169,14 +1180,22 @@ fn one_stutter_for_every_library(evidence: &StratumEvidence) -> Vec<Library> {
         .collect()
 }
 
-/// One sample's reads at a tract, its libraries summed bucket by bucket.
-fn pooled_reads(sample: &SampleTractReads, buckets: usize) -> Vec<u32> {
-    let mut reads = vec![0_u32; buckets];
+/// One sample's reads at a tract, its libraries summed bucket by bucket, written over `reads`,
+/// which holds one count a bucket.
+fn pool_reads_into(sample: &SampleTractReads, reads: &mut [u32]) {
+    reads.fill(0);
     for (_, library_reads) in &sample.by_library {
         for (into, count) in reads.iter_mut().zip(library_reads) {
             *into += count;
         }
     }
+}
+
+/// [`pool_reads_into`] into a new row of `buckets` counts.
+#[cfg(test)]
+fn pooled_reads(sample: &SampleTractReads, buckets: usize) -> Vec<u32> {
+    let mut reads = vec![0_u32; buckets];
+    pool_reads_into(sample, &mut reads);
     reads
 }
 
