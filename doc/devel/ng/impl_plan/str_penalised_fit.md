@@ -184,7 +184,7 @@ what goes with it (arch §4.1).
   time in each step and peak memory (the progress lines' `VmHWM`, `parameter_estimation/progress.rs:79-110`,
   Linux only; nothing is printed on macOS); per class, rows with reads, distinct rows, F absent; the
   count of withheld errors. *Depends:* C5. *Source:* spec §2.9.
-- ☐ **C7** **Own commit, do not bundle.** `fit_a_cohort` calls `fit_repeat_tracts` and takes
+- ✅ **C7** **Own commit, do not bundle.** `fit_a_cohort` calls `fit_repeat_tracts` and takes
   `&PenalisedFitConfig`; `repeat_tract_config` returns `production()`;
   `--str-param-estimates-at-once` removed with an error, and the `EstimateParametersArgs` literals
   (`cli/cross_platform_digests.rs:371`, `cli/estimate_parameters/tests.rs:98`) updated. *Oracle:* the

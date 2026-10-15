@@ -46,7 +46,6 @@
 //!   run lands here even though the fit ran**, because one genome's totals cannot identify an
 //!   excess and it comes out zero whatever the truth.
 
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
@@ -59,7 +58,7 @@ use crate::cli::run_ground::{self, GroundError};
 use crate::parameter_estimation::joint::census::CohortCensusEvidence;
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
-use crate::parameter_estimation::joint::ssr_fit::{DEFAULT_STRATA_AT_ONCE, SsrFitConfig};
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::PenalisedFitConfig;
 use crate::parameter_estimation::progress::StageProgress;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfo, ReferenceInfoError, read_reference_observing_or_creating_fai,
@@ -127,22 +126,15 @@ pub struct EstimateParametersArgs {
     #[arg(long)]
     pub inbreeding: Option<f64>,
 
-    /// How many repeat-tract strata the fit works on at once; 1 uses the least memory.
-    ///
-    /// A stratum is every repeat tract with one motif length and one reference copy number, and
-    /// the fit estimates each stratum's slippage on its own. **This decides how much memory that
-    /// step needs.** Fitting one stratum holds one table, with a row for each tract and each
-    /// sample with reads there, 190 numbers wide (one for each pair of allele lengths a sample can
-    /// carry): for a 5,000-tract stratum, about 0.71 GiB at 100 samples and 15.3 GiB at 2,169.
-    /// N strata at once hold up to N of those tables.
-    ///
-    /// At 1, the default, the fit works on one stratum at a time with every thread on its tracts.
-    /// Above 1, N threads each fit a stratum of their own, and the other cores are idle during
-    /// this step when N is below the core count. The step's first progress line prints the
-    /// largest stratum's table, so a run can choose N from that number. No value changes a fitted
-    /// number.
-    #[arg(long, value_name = "N", default_value_t = DEFAULT_STRATA_AT_ONCE)]
-    pub str_param_estimates_at_once: NonZeroUsize,
+    /// **Removed; a run that gives it is refused** with
+    /// [`EstimateParametersCliError::RemovedOption`]. It chose how many repeat-tract strata the
+    /// earlier fit held a per-stratum likelihood table for at once. The penalised fit builds a
+    /// table for each class (the class's distinct rows of read counts) but holds only one class's
+    /// table at a time, whatever the thread count, so its memory is fixed and there is nothing
+    /// left for the option to choose. Hidden from `--help`, and kept so that a script still
+    /// passing it is told why rather than told the option does not exist.
+    #[arg(long, value_name = "N", hide = true)]
+    pub str_param_estimates_at_once: Option<String>,
 
     /// Do not estimate contamination: every read group is taken as uncontaminated.
     ///
@@ -303,6 +295,18 @@ pub enum EstimateParametersCliError {
         value: String,
     },
 
+    /// An option this command no longer has was given.
+    ///
+    /// **Refused rather than ignored**, so that a run cannot believe it chose something that no
+    /// longer exists.
+    #[error("{option} was removed: {why}; run again without it")]
+    RemovedOption {
+        /// The option, as typed.
+        option: &'static str,
+        /// Why it went, in a phrase.
+        why: &'static str,
+    },
+
     /// The output is already there and `--force` was not given.
     #[error("{} is already there; pass --force to replace it", path.display())]
     OutputAlreadyThere {
@@ -374,13 +378,21 @@ fn ordinary_position_config(args: &EstimateParametersArgs, ploidy: Ploidy) -> Jo
     }
 }
 
-/// The repeat-tract fit's settings this run asked for: the defaults, with the number of strata
-/// fitted at once from `--str-param-estimates-at-once`.
-fn repeat_tract_config(args: &EstimateParametersArgs) -> SsrFitConfig {
-    SsrFitConfig {
-        strata_at_once: args.str_param_estimates_at_once,
-        ..SsrFitConfig::default()
+/// The repeat-tract fit's settings: production's, which no option changes.
+fn repeat_tract_config() -> PenalisedFitConfig {
+    PenalisedFitConfig::production()
+}
+
+/// **Refuse an option this command no longer has**, before anything is read.
+fn refuse_removed_options(args: &EstimateParametersArgs) -> Result<(), EstimateParametersCliError> {
+    if args.str_param_estimates_at_once.is_some() {
+        return Err(EstimateParametersCliError::RemovedOption {
+            option: "--str-param-estimates-at-once",
+            why: "the repeat-tract fit now holds one class's table of read counts at a time, \
+                  whatever the thread count, so there is no number to choose",
+        });
     }
+    Ok(())
 }
 
 /// The run itself, with the writing left to the caller — which is what lets a test read the file
@@ -388,6 +400,7 @@ fn repeat_tract_config(args: &EstimateParametersArgs) -> SsrFitConfig {
 fn fit_and_assemble(
     args: &EstimateParametersArgs,
 ) -> Result<(ParametersFile, usize), EstimateParametersCliError> {
+    refuse_removed_options(args)?;
     let ploidy =
         Ploidy::try_new(args.ploidy).map_err(|_| EstimateParametersCliError::NotAValue {
             what: "--ploidy",
@@ -427,7 +440,7 @@ fn fit_and_assemble(
         &contig_of,
         &pooled,
         &ordinary_position_config(args, ploidy),
-        &repeat_tract_config(args),
+        &repeat_tract_config(),
     )
     .map_err(|source| EstimateParametersCliError::Fit {
         source: Box::new(source),

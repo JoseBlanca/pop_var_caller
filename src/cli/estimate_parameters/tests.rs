@@ -95,7 +95,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         force: false,
         ploidy: 2,
         inbreeding: None,
-        str_param_estimates_at_once: std::num::NonZeroUsize::MIN,
+        str_param_estimates_at_once: None,
         skip_contamination: false,
     }
 }
@@ -115,37 +115,56 @@ fn the_subcommand_is_spelled_estimate_parameters() {
     );
 }
 
-/// **One stratum at a time unless the run says otherwise**, and the run says it as a count of at
-/// least one.
+/// **`--str-param-estimates-at-once` is refused, saying it was removed and why**, whatever value
+/// it is given, and before anything is read.
 ///
-/// The default is the smallest memory whatever the cohort, so a run told nothing cannot run out
-/// of memory in this step for want of a flag; zero strata at once is not a schedule and is refused
-/// when the command line is read.
+/// It chose how many per-stratum likelihood tables the earlier repeat-tract fit held at once; the
+/// penalised fit holds one class's table at a time, whatever the thread count. A script that still passes it must learn that, rather than be told
+/// the option does not exist or have it silently ignored. It is hidden from `--help`.
 #[test]
-fn strata_are_fitted_one_at_a_time_unless_the_run_asks_for_more() {
-    assert_eq!(
-        args_of(&a_shortest_run()).str_param_estimates_at_once.get(),
-        1
-    );
+fn the_removed_strata_at_once_option_is_refused_saying_why() {
+    for value in ["1", "4", "0"] {
+        let mut asked = a_shortest_run();
+        asked.extend(["--str-param-estimates-at-once", value]);
+        let args = args_of(&asked);
+        assert_eq!(args.str_param_estimates_at_once.as_deref(), Some(value));
 
-    let mut asked = a_shortest_run();
-    asked.extend(["--str-param-estimates-at-once", "4"]);
-    assert_eq!(args_of(&asked).str_param_estimates_at_once.get(), 4);
+        // **Before anything is read**: none of `ref.fa`, `zeta.psp` exists, so any other step
+        // would fail with another error.
+        let error = fit_and_assemble(&args).expect_err("the removed option is refused");
+        assert!(
+            matches!(error, EstimateParametersCliError::RemovedOption { .. }),
+            "{error:?}"
+        );
+        let said = error.to_string();
+        assert!(
+            said.starts_with("--str-param-estimates-at-once was removed: "),
+            "it names the option and says it was removed: {said}"
+        );
+        assert!(
+            said.contains("holds one class's table of read counts at a time"),
+            "and says why: {said}"
+        );
+        assert!(
+            said.ends_with("run again without it"),
+            "and what to do: {said}"
+        );
+    }
 
-    assert_eq!(
-        repeat_tract_config(&args_of(&asked)).strata_at_once.get(),
-        4,
-        "the count the run asked for reaches the repeat-tract fit"
-    );
-    assert_eq!(
-        repeat_tract_config(&args_of(&a_shortest_run())).strata_at_once,
-        crate::parameter_estimation::joint::ssr_fit::DEFAULT_STRATA_AT_ONCE
-    );
-
+    assert_eq!(args_of(&a_shortest_run()).str_param_estimates_at_once, None);
+    let help = Cli::try_parse_from(["pvc", SUBCOMMAND, "--help"])
+        .expect_err("--help exits")
+        .to_string();
     assert!(
-        !args_of(&a_shortest_run()).skip_contamination,
-        "contamination is estimated unless the run says not to"
+        !help.contains("str-param-estimates-at-once"),
+        "the removed option is not offered: {help}"
     );
+}
+
+/// **Contamination is estimated unless the run says not to**, and the choice reaches the fit.
+#[test]
+fn contamination_is_estimated_unless_the_run_says_not_to() {
+    assert!(!args_of(&a_shortest_run()).skip_contamination);
     let mut skipping = a_shortest_run();
     skipping.push("--skip-contamination");
     assert!(args_of(&skipping).skip_contamination);
@@ -154,13 +173,63 @@ fn strata_are_fitted_one_at_a_time_unless_the_run_asks_for_more() {
     let diploid = Ploidy::try_new(2).expect("two is a ploidy");
     assert!(ordinary_position_config(&args_of(&a_shortest_run()), diploid).estimate_contamination);
     assert!(!ordinary_position_config(&args_of(&skipping), diploid).estimate_contamination);
+}
 
-    let mut zero = a_shortest_run();
-    zero.extend(["--str-param-estimates-at-once", "0"]);
-    assert!(
-        Cli::try_parse_from(zero).is_err(),
-        "zero strata at once is refused, not read as one"
+/// **The repeat-tract fit this command runs is the penalised fit, at production's settings**, and
+/// the file it writes says so: every stratum fitted here carries its numbers as points on its
+/// motif length's penalised curves, each inside the range of strata with reads and read off every
+/// sample, and the file passes the validator a calling run applies.
+#[test]
+fn the_files_repeat_tract_rows_are_points_on_penalised_curves() {
+    use crate::calling::parameters_file::{CurveReach, LevelSmoothing, ShareSmoothing};
+
+    assert_eq!(
+        repeat_tract_config(),
+        crate::parameter_estimation::joint::ssr_fit::penalised_fit::PenalisedFitConfig::production(
+        )
     );
+
+    let (cohort, psps) = a_walked_cohort();
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let (file, _) = fit_and_assemble(&args_over(&cohort, &psps, output)).expect("the cohort fits");
+    file.validate().expect("a calling run reads the file");
+
+    let rows = &file.repeat_tracts.slippage_by_stratum_and_group;
+    assert!(
+        !rows.is_empty(),
+        "the fixture's tract is fitted, so this test reads a row"
+    );
+    for row in rows {
+        let at = (row.period, row.reference_repeats);
+        assert!(
+            matches!(
+                row.share_of_reads_that_slip_origin.smoothing,
+                LevelSmoothing::PenalisedCurve {
+                    reach: CurveReach::InsideTheFittedRange,
+                    ..
+                }
+            ),
+            "{at:?}: {:?}",
+            row.share_of_reads_that_slip_origin.smoothing
+        );
+        let shares = row
+            .shorter_share_and_fall_off_origin
+            .as_ref()
+            .unwrap_or_else(|| panic!("{at:?}: a fitted stratum carries its shares' origin"));
+        for smoothing in [&shares.shorter_share_smoothing, &shares.fall_off_smoothing] {
+            assert!(
+                matches!(
+                    smoothing,
+                    ShareSmoothing::PenalisedCurve {
+                        reach: CurveReach::InsideTheFittedRange,
+                        ..
+                    }
+                ),
+                "{at:?}: {smoothing:?}"
+            );
+        }
+        assert_eq!(row.samples_fitted_on, None, "{at:?}: every sample is read");
+    }
 }
 
 /// **The command writes a parameters file from a cohort's own censuses.**

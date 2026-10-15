@@ -368,7 +368,7 @@ mod tests {
             force: false,
             ploidy: 2,
             inbreeding: None,
-            str_param_estimates_at_once: std::num::NonZeroUsize::MIN,
+            str_param_estimates_at_once: None,
             skip_contamination: false,
         })
         .expect("the cohort fits");

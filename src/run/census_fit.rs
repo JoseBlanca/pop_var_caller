@@ -43,11 +43,12 @@ use crate::parameter_estimation::joint::fit::{
 };
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
-use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
+    PenalisedFitConfig, fit_repeat_tracts,
+};
 use crate::parameter_estimation::joint::ssr_fit::{
-    self, SsrFitConfig, StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata,
-    strata_of_kept_loci,
+    StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata, strata_of_kept_loci,
 };
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
@@ -211,19 +212,26 @@ pub fn the_tract_strata_of_a_cohort(
 /// `loci` is the selection rebuilt from this run's reference and catalog; it is checked against
 /// the digest every census carries before a tract is read. `contig_of` turns a contig's name
 /// into the identifier the records use, and `slippage_group_of` says which slippage group each
-/// read group is in — a declaration of the run's, never estimated.
+/// read group is in — a declaration of the run's, never estimated. `tracts` holds the repeat-tract
+/// fit's settings; `estimate-parameters` passes [`PenalisedFitConfig::production`].
 ///
 /// # Errors
 ///
 /// [`CohortFitError::AnotherSelection`] when the rebuilt loci are not the ones the censuses were
 /// written against, and the two halves' own failures otherwise.
+///
+/// # Panics
+///
+/// When `slippage_group_of` puts the read groups in more than one slippage group: the repeat-tract
+/// fit scores every library at one stutter ([`fit_repeat_tracts`]), so a caller pools them first,
+/// as [`every_read_group_pooled`] does.
 pub fn fit_a_cohort(
     cohort: &mut CohortCensusEvidence,
     loci: &CensusLoci,
     contig_of: &dyn Fn(&str) -> Option<ContigId>,
     slippage_group_of: &BTreeMap<ReadGroupId, u32>,
     generic: &JointFitConfig,
-    tracts: &SsrFitConfig,
+    tracts: &PenalisedFitConfig,
 ) -> Result<CohortFit, CohortFitError> {
     // **Checked before anything is fitted**, because the selection decides how every tract record
     // is indexed and a wrong one produces numbers rather than a failure.
@@ -253,13 +261,10 @@ pub fn fit_a_cohort(
         strata: evidence,
         tracts: kept_tracts,
     } = the_tract_strata_of_a_cohort(cohort, loci, contig_of, slippage_group_of)?;
-    // **A large cohort's strata are each read from a subset of its samples**, the first in a
-    // fixed order drawn from the samples' names (`fit_precision.md` §4.4); the order is indexed as
-    // the evidence's samples and `homozygote_excess` are, the cohort's own order.
-    let names: Vec<&str> = cohort.sample_names().collect();
-    let order = sample_order(&names, SAMPLE_ORDER_SEED);
-    let outcomes =
-        ssr_fit::fit_strata_on_sample_subsets(&evidence, &homozygote_excess, &order, tracts);
+    // **Every sample's reads at every stratum**: the penalised fit reads the whole cohort, one
+    // motif length at a time, so no sample order is drawn. `homozygote_excess` is indexed as the
+    // evidence's samples are, the cohort's own order.
+    let outcomes = fit_repeat_tracts(&evidence, &homozygote_excess, tracts);
     // **The evidence is the largest thing the tract half holds and nothing after the fit needs
     // more of it than these two counts a stratum**, so it goes here rather than when the
     // parameters file has been written.
@@ -759,7 +764,7 @@ mod tests {
             &contig_of,
             &pooled,
             &a_generic_config(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         );
 
         let fit = fitted.expect("a cohort of two censuses fits");
@@ -794,7 +799,7 @@ mod tests {
             &contig_of,
             &pooled,
             &a_generic_config(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         )
         .expect("it fits the second time too");
 
@@ -932,7 +937,7 @@ mod tests {
             &contig_of,
             &pooled,
             &a_generic_config(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         )
         .expect_err("these censuses were written against another selection");
 
@@ -1197,7 +1202,7 @@ mod writing_the_parameters_file {
             &contig_of,
             &pooled,
             &JointFitConfig::default(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         )
         .expect("the cohort fits");
         fit.substitution_counts.extend_from_slice(extra);
