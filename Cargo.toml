@@ -148,7 +148,17 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 # directly rather than relying on noodles-cram's re-export
 # surface (which can shrink at any minor bump).
 noodles-bam = "0.89.0"
-noodles-bgzf = "0.47.0"
+# `libdeflate`: BGZF blocks are inflated and deflated by libdeflate, a C library, instead
+# of the pure-Rust zlib-rs. Every BAM decode goes through this crate; CRAM input does not
+# (noodles-cram has its own `libdeflate` flag, left off). Measured 2026-10-15
+# (doc/devel/reports/reviews/str_bundles_performance_2026-10-15.md, L3), psps and VCFs
+# identical: generate-psps on 50 simulated samples at 30x fell from 9,193 G to 8,827 G
+# instructions (4 in 100 fewer), call-from-alignments on HG002 at 30x at one thread from
+# 761 G to 738 G (3 in 100). The visible side effect: a `.vcf.gz` now has different
+# compressed bytes from one written before, about 3 in 100 smaller; the decompressed text
+# is the same. `libdeflate-sys` compiles the C source, so a C compiler is needed, as it
+# already was for `zstd-sys`.
+noodles-bgzf = { version = "0.47.0", features = ["libdeflate"] }
 noodles-core = "0.20.0"
 noodles-cram = "0.93.0"
 noodles-csi = "0.56.0"
