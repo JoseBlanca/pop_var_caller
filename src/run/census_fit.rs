@@ -246,16 +246,7 @@ pub fn fit_a_cohort(
         },
     )?;
 
-    // **The one number the tract half takes from the generic one**, per sample and in the
-    // cohort's own sample order.
-    let homozygote_excess: Vec<f64> = cohort
-        .sample_names()
-        .map(|name| {
-            fit.hom_excess
-                .get(name)
-                .map_or(0.0, |estimate| estimate.value.get())
-        })
-        .collect();
+    let homozygote_excess = homozygote_excess_in_cohort_order(cohort, &fit);
 
     let CohortTractStrata {
         strata: evidence,
@@ -280,6 +271,29 @@ pub fn fit_a_cohort(
         tracts: kept_tracts,
         substitution_counts,
     })
+}
+
+/// **The one number the tract half takes from the generic one**: each sample's homozygote excess,
+/// in the cohort's own sample order — the order the tract evidence numbers its samples in — and 0
+/// for a sample the generic fit gave none.
+///
+/// [`fit_a_cohort`] hands this to the repeat-tract fit; the fitting bench's psp mode
+/// (`examples/ng_str_fit_bench.rs`) calls it so that its held-out fits weigh genotypes exactly as
+/// `estimate-parameters` does.
+#[must_use]
+pub fn homozygote_excess_in_cohort_order(
+    cohort: &CohortCensusEvidence,
+    generic: &JointFit,
+) -> Vec<f64> {
+    cohort
+        .sample_names()
+        .map(|name| {
+            generic
+                .hom_excess
+                .get(name)
+                .map_or(0.0, |estimate| estimate.value.get())
+        })
+        .collect()
 }
 
 /// **Every read group in one slippage group**, which is what a cohort too thin to fit them apart

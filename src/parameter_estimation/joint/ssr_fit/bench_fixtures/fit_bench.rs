@@ -55,6 +55,8 @@
 //! Every method's score at a locus uses the same random numbers, so differences between methods
 //! carry less Monte Carlo noise than either score alone.
 
+use std::time::Instant;
+
 use super::cohort_draw::ClassTruth;
 use super::*;
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
@@ -804,6 +806,40 @@ impl FoldPlan {
     }
 }
 
+/// **A class's seed in a cohort read from psps**, where one repeat count recurs at several motif
+/// lengths: the motif length is mixed in, so that the one-base and two-base classes at ten repeats
+/// are not shuffled alike. It seeds the class's folds and its loci's Monte Carlo draws.
+///
+/// The drawn bench, one motif length a run, seeds a class by its repeat count alone, and keeps
+/// doing so: changing that would move every recorded drawn result.
+#[must_use]
+pub fn class_seed_across_motif_lengths(stratum: Stratum) -> u64 {
+    (u64::from(stratum.period) << 16) ^ stratum.reference_repeats
+}
+
+/// **Every class's folds, for a cohort of several motif lengths** — the bench's psp mode.
+///
+/// Each class is folded on its own by [`FoldPlan::of`], **whole loci**: a locus's every sample
+/// lands in one fold, since samples at one locus share its alleles, and every locus is in exactly
+/// one fold, so over the folds each locus is held out once. The order is fixed by
+/// `settings.seed` and [`class_seed_across_motif_lengths`]; the same seed folds the same way.
+#[must_use]
+pub fn fold_plans_across_motif_lengths(
+    classes: &[StratumEvidence],
+    settings: &HeldOutSettings,
+) -> Vec<FoldPlan> {
+    classes
+        .iter()
+        .map(|evidence| {
+            FoldPlan::of(
+                evidence,
+                settings,
+                class_seed_across_motif_lengths(evidence.stratum),
+            )
+        })
+        .collect()
+}
+
 /// **The class with fold `fold`'s loci taken out**, for fitting.
 #[must_use]
 pub fn without_fold(evidence: &StratumEvidence, plan: &FoldPlan, fold: usize) -> StratumEvidence {
@@ -819,12 +855,374 @@ pub fn without_fold(evidence: &StratumEvidence, plan: &FoldPlan, fold: usize) ->
         read_span: evidence.read_span,
         groups: evidence.groups,
         libraries: Arc::clone(&evidence.libraries),
+        // **These five are the whole class's totals, held-out loci included**, copied as they
+        // are. No fit and not the score reads them today, so nothing leaks. A fit that starts
+        // reading one (the mismatch rate from `bases_compared`, say) must recount it over the
+        // kept tracts here, or the held-out loci inform their own score.
         tracts_over_guard_threshold: evidence.tracts_over_guard_threshold,
         reads_reaching_not_crossing: evidence.reads_reaching_not_crossing,
         guard_reads: evidence.guard_reads,
         bases_compared: evidence.bases_compared,
         mismatching_bases: evidence.mismatching_bases,
     }
+}
+
+// ---------------------------------------------------------------------
+// The held-out run of one method
+// ---------------------------------------------------------------------
+
+/// The names a method's answers are reported under: its own name for a method that draws its own
+/// curves; otherwise `<name>_raw` (as it comes) and `<name>_curves` (after the caller's curves).
+#[must_use]
+pub fn variant_names(method: &dyn PeriodFit) -> Vec<String> {
+    let base = method.name();
+    if method.draws_its_own_curves() {
+        vec![base]
+    } else {
+        vec![format!("{base}_raw"), format!("{base}_curves")]
+    }
+}
+
+/// A method's answers under each of [`variant_names`].
+#[must_use]
+pub fn variants_of(
+    method: &dyn PeriodFit,
+    raw: Vec<ClassEstimate>,
+    classes: &[StratumEvidence],
+    curve_config: &SsrFitConfig,
+) -> Vec<(String, Vec<ClassEstimate>)> {
+    let names = variant_names(method);
+    if method.draws_its_own_curves() {
+        names.into_iter().zip([raw]).collect()
+    } else {
+        let smoothed = with_the_curves(&raw, classes, curve_config);
+        names.into_iter().zip([raw, smoothed]).collect()
+    }
+}
+
+/// A locus's Monte Carlo seed, the same for every method so their scores share their draws.
+#[must_use]
+pub fn locus_seed(settings: &HeldOutSettings, class_seed: u64, locus: usize) -> u64 {
+    settings.seed ^ (class_seed << 40) ^ (locus as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+/// **One motif length's classes, folded, with everything the held-out score reads.**
+pub struct HeldOutClasses<'a> {
+    classes: &'a [StratumEvidence],
+    /// Per sample, indexed as the classes' evidence numbers samples.
+    homozygote_excess: &'a [f64],
+    plans: Vec<FoldPlan>,
+    /// Per class, the seed its loci's Monte Carlo draws are taken from ([`locus_seed`]).
+    class_seeds: Vec<u64>,
+    scored: Vec<FoldedLocus>,
+}
+
+/// **One locus whose held-out score is taken**: its class, its index in the class, its fold, and
+/// the truth's score there — `NaN` until [`HeldOutClasses::with_truth_scores`] gives it, and for
+/// good without a truth.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoldedLocus {
+    pub class: usize,
+    pub locus: usize,
+    pub fold: usize,
+    pub truth_ln: f64,
+}
+
+impl<'a> HeldOutClasses<'a> {
+    /// `classes` folded by `plans` (one a class), each class's loci drawn from `class_seeds`.
+    ///
+    /// # Panics
+    ///
+    /// When `plans` or `class_seeds` do not hold one entry a class.
+    #[must_use]
+    pub fn new(
+        classes: &'a [StratumEvidence],
+        homozygote_excess: &'a [f64],
+        plans: Vec<FoldPlan>,
+        class_seeds: Vec<u64>,
+    ) -> Self {
+        assert_eq!(plans.len(), classes.len(), "one fold plan a class");
+        assert_eq!(class_seeds.len(), classes.len(), "one seed a class");
+        let scored = plans
+            .iter()
+            .enumerate()
+            .flat_map(|(class, plan)| {
+                plan.scored
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, scored)| **scored)
+                    .map(move |(locus, _)| FoldedLocus {
+                        class,
+                        locus,
+                        fold: plan.fold_of_locus[locus],
+                        truth_ln: f64::NAN,
+                    })
+            })
+            .collect();
+        Self {
+            classes,
+            homozygote_excess,
+            plans,
+            class_seeds,
+            scored,
+        }
+    }
+
+    /// Every locus whose held-out score is taken, class by class.
+    #[must_use]
+    pub fn scored(&self) -> &[FoldedLocus] {
+        &self.scored
+    }
+
+    /// The truth's score at every scored locus, in the order of [`Self::scored`].
+    ///
+    /// # Panics
+    ///
+    /// When `truth_scores` does not hold one score a scored locus.
+    #[must_use]
+    pub fn with_truth_scores(mut self, truth_scores: &[f64]) -> Self {
+        assert_eq!(truth_scores.len(), self.scored.len());
+        for (scored, truth) in self.scored.iter_mut().zip(truth_scores) {
+            scored.truth_ln = *truth;
+        }
+        self
+    }
+
+    /// One locus's held-out score at `numbers`.
+    #[must_use]
+    pub fn score(
+        &self,
+        class: usize,
+        locus: usize,
+        numbers: &ClassNumbers,
+        settings: &HeldOutSettings,
+    ) -> LocusScore {
+        let evidence = &self.classes[class];
+        score_locus(
+            &evidence.tracts[locus],
+            numbers,
+            &evidence.libraries,
+            self.homozygote_excess,
+            evidence.read_span,
+            settings,
+            locus_seed(settings, self.class_seeds[class], locus),
+        )
+    }
+}
+
+/// Held-out sums for one method variant over one class.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeldOutSums {
+    pub ln: f64,
+    pub variance: f64,
+    pub truth_ln: f64,
+    pub reads: u64,
+    pub loci: usize,
+    /// Of `loci`, those whose class was scored at calling's fallback rung (no concentration or no
+    /// shares of its own).
+    pub fallback_loci: usize,
+}
+
+/// **One held-out locus's score under one variant**, for the bench's `--locus-out` file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldOutLocusScore {
+    /// Index into [`HeldOutRun::variants`].
+    pub variant: usize,
+    pub class: usize,
+    pub locus: usize,
+    /// **The fold the fit that scored this locus was made without** — the locus's own fold, which
+    /// is what makes the score held out.
+    pub fit_without_fold: usize,
+    pub ln_likelihood: f64,
+    pub truth_ln: f64,
+    pub reads: u64,
+    /// The read offset most of the locus's reads report ([`most_reported_offset`]).
+    pub most_reported_offset: i32,
+    /// The share the fit gave that offset's allele class.
+    pub fitted_share: f64,
+}
+
+/// What one method's held-out run over one motif length produced: per variant and fallback (named
+/// in `variants`), per class, the summed scores; the time its fits and its scoring took; and,
+/// when asked for, every scored locus.
+#[derive(Debug, Clone)]
+pub struct HeldOutRun {
+    pub variants: Vec<String>,
+    pub sums: Vec<Vec<HeldOutSums>>,
+    pub fit_seconds: f64,
+    pub score_seconds: f64,
+    /// Empty unless the run was asked to keep them; fold by fold, then variant by variant.
+    pub loci: Vec<HeldOutLocusScore>,
+}
+
+/// One held-out locus's score under a variant: its class, its log-likelihood and that score's
+/// Monte Carlo variance, the truth's log-likelihood, and its reads.
+type HeldOutLocus = (usize, f64, f64, f64, u64);
+
+/// One fallback's per-class numbers and the scores of the fold's loci at them, kept so that the
+/// next fallback reuses a score where a class's numbers did not change.
+type ScoredAtNumbers = (Vec<Option<ClassNumbers>>, Vec<Option<HeldOutLocus>>);
+
+/// **The held-out score of one method over one motif length**: for each fold, the method fitted on
+/// the other folds' loci, then every scored locus of the fold scored at the fitted numbers of its
+/// class, under each variant and fallback (`fallbacks` pairs each with the suffix its variant names
+/// get). A class without its own shares or concentration is scored at the fallback rung and
+/// counted, not skipped. With `keep_loci`, every scored locus is kept in [`HeldOutRun::loci`].
+#[must_use]
+pub fn held_out_run(
+    method: &dyn PeriodFit,
+    folded: &HeldOutClasses,
+    settings: &HeldOutSettings,
+    fallbacks: &[(&str, ScoringFallback)],
+    curve_config: &SsrFitConfig,
+    keep_loci: bool,
+) -> HeldOutRun {
+    let variants: Vec<String> = variant_names(method)
+        .iter()
+        .flat_map(|variant| {
+            fallbacks
+                .iter()
+                .map(move |(suffix, _)| format!("{variant}{suffix}"))
+        })
+        .collect();
+    let classes = folded.classes;
+    let mut sums = vec![vec![HeldOutSums::default(); classes.len()]; variants.len()];
+    let mut loci = Vec::new();
+    let mut fit_seconds = 0.0;
+    let mut score_seconds = 0.0;
+    for fold in 0..settings.folds {
+        let training: Vec<StratumEvidence> = classes
+            .iter()
+            .zip(&folded.plans)
+            .map(|(evidence, plan)| without_fold(evidence, plan, fold))
+            .collect();
+        let started = Instant::now();
+        let raw = method.fit_period(&training, folded.homozygote_excess, ALLELE_SPAN);
+        let fitted = variants_of(method, raw, &training, curve_config);
+        fit_seconds += started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        // **Only the loci of the fold the fit was made without** are scored with it.
+        let in_fold: Vec<&FoldedLocus> = folded
+            .scored
+            .iter()
+            .filter(|scored| scored.fold == fold)
+            .collect();
+        for (variant_index, (_, estimates)) in fitted.iter().enumerate() {
+            // The numbers and scores of the variant's previous fallback: a class scored at the
+            // same numbers again reuses its scores.
+            let mut previous: Option<ScoredAtNumbers> = None;
+            for (fallback_index, (_, fallback)) in fallbacks.iter().enumerate() {
+                let output = variant_index * fallbacks.len() + fallback_index;
+                let scored_numbers = numbers_for_scoring(estimates, *fallback);
+                let numbers: Vec<Option<ClassNumbers>> = scored_numbers
+                    .iter()
+                    .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))
+                    .collect();
+                let on_the_fallback: Vec<bool> = scored_numbers
+                    .iter()
+                    .map(|scored| scored.as_ref().is_some_and(|s| s.on_the_fallback))
+                    .collect();
+                let scores: Vec<Option<HeldOutLocus>> = in_fold
+                    .par_iter()
+                    .enumerate()
+                    .map(|(index, scored)| {
+                        let numbers_here = numbers[scored.class].as_ref()?;
+                        if let Some((earlier_numbers, earlier_scores)) = &previous
+                            && earlier_numbers[scored.class].as_ref() == Some(numbers_here)
+                        {
+                            return earlier_scores[index];
+                        }
+                        let score =
+                            folded.score(scored.class, scored.locus, numbers_here, settings);
+                        Some((
+                            scored.class,
+                            score.ln_likelihood,
+                            score.variance,
+                            scored.truth_ln,
+                            score.reads,
+                        ))
+                    })
+                    .collect();
+                if keep_loci {
+                    for (scored, score) in in_fold.iter().zip(&scores) {
+                        let Some((_, ln, _, truth, reads)) = score else {
+                            continue;
+                        };
+                        let evidence = &classes[scored.class];
+                        let (offset, share) = most_reported_offset(
+                            &evidence.tracts[scored.locus],
+                            evidence.read_span,
+                            numbers[scored.class].as_ref(),
+                        );
+                        loci.push(HeldOutLocusScore {
+                            variant: output,
+                            class: scored.class,
+                            locus: scored.locus,
+                            fit_without_fold: fold,
+                            ln_likelihood: *ln,
+                            truth_ln: *truth,
+                            reads: *reads,
+                            most_reported_offset: offset,
+                            fitted_share: share,
+                        });
+                    }
+                }
+                for (class, ln, variance, truth, reads) in scores.iter().flatten().copied() {
+                    let into = &mut sums[output][class];
+                    into.ln += ln;
+                    into.variance += variance;
+                    into.truth_ln += truth;
+                    into.reads += reads;
+                    into.loci += 1;
+                    into.fallback_loci += usize::from(on_the_fallback[class]);
+                }
+                previous = Some((numbers, scores));
+            }
+        }
+        score_seconds += started.elapsed().as_secs_f64();
+    }
+    HeldOutRun {
+        variants,
+        sums,
+        fit_seconds,
+        score_seconds,
+        loci,
+    }
+}
+
+/// **The read offset most of a locus's reads report**, summed over its samples, and the share the
+/// fit gave that offset's allele class; at an end bucket, the smaller of the two classes it can
+/// hold (`±8` and `±9`), since either could be the allele. The share is `NaN` without numbers.
+#[must_use]
+pub fn most_reported_offset(
+    tract: &TractReads,
+    read_span: i32,
+    numbers: Option<&ClassNumbers>,
+) -> (i32, f64) {
+    let mut totals = vec![0_u64; (2 * read_span + 1) as usize];
+    for sample in &tract.samples {
+        for (_, counts) in &sample.by_library {
+            for (into, count) in totals.iter_mut().zip(counts) {
+                *into += u64::from(*count);
+            }
+        }
+    }
+    let bucket = totals
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, count)| **count)
+        .map_or(0, |(index, _)| index);
+    let offset = bucket as i32 - read_span;
+    let share = numbers.map_or(f64::NAN, |numbers| {
+        let span = (numbers.allele_length_variation.len() as i32 - 1) / 2;
+        let at = |offset: i32| numbers.allele_length_variation[(offset + span) as usize];
+        if offset.abs() == read_span && span > read_span {
+            at(offset).min(at(offset + offset.signum()))
+        } else {
+            at(offset)
+        }
+    });
+    (offset, share)
 }
 
 // ---------------------------------------------------------------------
@@ -1794,6 +2192,264 @@ mod tests {
         assert_eq!(plan.scored.iter().filter(|s| **s).count(), 20);
         let training = without_fold(&evidence, &plan, 2);
         assert_eq!(training.tracts.len(), 53 - sizes[2]);
+    }
+
+    /// **The psp mode's folds: whole loci, each held out exactly once, fixed by the seed.** Two
+    /// classes at the same repeat count and different motif lengths, as a real cohort has them.
+    /// For every fold, the loci fitted are the class's loci outside the fold with every sample's
+    /// reads intact, and the loci held out are the rest; over the folds every locus is held out
+    /// once. The same seed folds the same way; another seed, and the other motif length at the
+    /// same repeat count, fold differently.
+    #[test]
+    fn the_psp_modes_folds_hold_each_whole_locus_out_once_and_follow_the_seed() {
+        let drawn = |period: u8, seed: u64| {
+            let mut evidence = bench_fixtures::draw_stratum(
+                Slippage {
+                    level: 0.05,
+                    shorter_share: 0.6,
+                    fall_off: 0.3,
+                },
+                &spectrum_of(3),
+                1.0,
+                0.5,
+                40,
+                4,
+                3,
+                1,
+                seed,
+            );
+            evidence.stratum = Stratum {
+                period,
+                reference_repeats: 10,
+            };
+            evidence
+        };
+        let classes = vec![drawn(1, 5), drawn(2, 6)];
+        let settings = HeldOutSettings {
+            folds: 5,
+            ..HeldOutSettings::default()
+        };
+        let plans = fold_plans_across_motif_lengths(&classes, &settings);
+        assert_eq!(plans.len(), 2);
+        for (evidence, plan) in classes.iter().zip(&plans) {
+            let loci = evidence.tracts.len();
+            assert_eq!(plan.fold_of_locus.len(), loci);
+            let mut times_held_out = vec![0_usize; loci];
+            for fold in 0..settings.folds {
+                let held_out: Vec<usize> = (0..loci)
+                    .filter(|&locus| plan.fold_of_locus[locus] == fold)
+                    .collect();
+                assert!(!held_out.is_empty(), "fold {fold} holds no locus");
+                for &locus in &held_out {
+                    times_held_out[locus] += 1;
+                }
+                // Whole loci: the fitted set is the class's other tracts, each with all its
+                // samples, in their own order.
+                let expected: Vec<TractReads> = (0..loci)
+                    .filter(|&locus| plan.fold_of_locus[locus] != fold)
+                    .map(|locus| evidence.tracts[locus].clone())
+                    .collect();
+                assert_eq!(without_fold(evidence, plan, fold).tracts, expected);
+            }
+            assert!(times_held_out.iter().all(|&times| times == 1));
+        }
+        // Fixed by the seed.
+        assert_eq!(fold_plans_across_motif_lengths(&classes, &settings), plans);
+        let reseeded = fold_plans_across_motif_lengths(
+            &classes,
+            &HeldOutSettings {
+                seed: settings.seed + 1,
+                ..settings
+            },
+        );
+        assert_ne!(reseeded[0].fold_of_locus, plans[0].fold_of_locus);
+        // The two motif lengths at ten repeats are not shuffled alike.
+        assert_ne!(
+            FoldPlan::of(
+                &classes[1],
+                &settings,
+                class_seed_across_motif_lengths(classes[1].stratum)
+            )
+            .fold_of_locus,
+            FoldPlan::of(
+                &classes[1],
+                &settings,
+                class_seed_across_motif_lengths(classes[0].stratum)
+            )
+            .fold_of_locus,
+        );
+    }
+
+    /// **A stand-in method that records what each of its fits was given**, and answers with numbers
+    /// that tell its fits apart: fit `k` (counting from 0) returns concentration `1 + k`.
+    struct RecordingFit {
+        /// Per fit, in the order they were made: per class, the tracts it was handed.
+        handed: std::sync::Mutex<Vec<Vec<Vec<TractReads>>>>,
+    }
+
+    impl RecordingFit {
+        fn numbers_of_fit(fit: usize) -> ClassNumbers {
+            ClassNumbers {
+                slippage: Slippage {
+                    level: 0.1,
+                    shorter_share: 0.6,
+                    fall_off: 0.3,
+                },
+                allele_length_variation: vec![0.25, 0.5, 0.25],
+                concentration: 1.0 + fit as f64,
+            }
+        }
+    }
+
+    impl PeriodFit for RecordingFit {
+        fn name(&self) -> String {
+            "recording".to_owned()
+        }
+
+        fn fit_period(
+            &self,
+            classes: &[StratumEvidence],
+            _homozygote_excess: &[f64],
+            _allele_span: i32,
+        ) -> Vec<ClassEstimate> {
+            let mut handed = self.handed.lock().expect("no fit panicked");
+            let fit = handed.len();
+            handed.push(
+                classes
+                    .iter()
+                    .map(|evidence| evidence.tracts.clone())
+                    .collect(),
+            );
+            let numbers = Self::numbers_of_fit(fit);
+            classes
+                .iter()
+                .map(|evidence| ClassEstimate {
+                    slippage: Some(numbers.slippage),
+                    allele_length_variation: Some(numbers.allele_length_variation.clone()),
+                    concentration: Some(numbers.concentration),
+                    ..ClassEstimate::absent(evidence)
+                })
+                .collect()
+        }
+
+        fn draws_its_own_curves(&self) -> bool {
+            true
+        }
+    }
+
+    /// **Every held-out locus is scored by the fit made without it.** A stand-in method records
+    /// the loci each fold's fit was handed and answers with numbers unique to that fit. Then, for
+    /// every locus scored: the fit that scored it was made without the locus's fold, was not
+    /// handed the locus, and its numbers give exactly the recorded score. Every locus picked for
+    /// scoring is scored once, and each fit was handed every locus outside its fold.
+    #[test]
+    fn every_held_out_locus_is_scored_by_the_fit_made_without_it() {
+        // Two classes of 12 loci, two samples each, every locus's reads distinct, so a locus can
+        // be recognised among the tracts a fit was handed.
+        let class = |period: u8, first: u32| {
+            let mut evidence = bench_fixtures::draw_stratum(
+                Slippage {
+                    level: 0.05,
+                    shorter_share: 0.6,
+                    fall_off: 0.3,
+                },
+                &spectrum_of(3),
+                1.0,
+                0.5,
+                12,
+                2,
+                3,
+                1,
+                u64::from(first),
+            );
+            evidence.stratum = Stratum {
+                period,
+                reference_repeats: 10,
+            };
+            evidence.tracts = (0..12)
+                .map(|locus| tiny_locus(&[[first + locus, 2, 0], [0, 3, locus + 1]]))
+                .collect();
+            evidence
+        };
+        let classes = vec![class(1, 1), class(2, 100)];
+        let excess = [0.3, 0.8];
+        let settings = HeldOutSettings {
+            folds: 4,
+            ..HeldOutSettings::default()
+        };
+        let folded = HeldOutClasses::new(
+            &classes,
+            &excess,
+            fold_plans_across_motif_lengths(&classes, &settings),
+            classes
+                .iter()
+                .map(|evidence| class_seed_across_motif_lengths(evidence.stratum))
+                .collect(),
+        );
+        assert_eq!(folded.scored().len(), 24, "every locus has reads");
+        let method = RecordingFit {
+            handed: std::sync::Mutex::new(Vec::new()),
+        };
+        let run = held_out_run(
+            &method,
+            &folded,
+            &settings,
+            &[("", ScoringFallback::default())],
+            &SsrFitConfig::default(),
+            true,
+        );
+        let handed = method.handed.into_inner().expect("no fit panicked");
+        assert_eq!(handed.len(), settings.folds, "one fit a fold");
+
+        let plan_of = fold_plans_across_motif_lengths(&classes, &settings);
+        // Each fit was handed exactly the loci outside its fold.
+        for (fit, by_class) in handed.iter().enumerate() {
+            for (class, tracts) in by_class.iter().enumerate() {
+                let expected: Vec<TractReads> = (0..12)
+                    .filter(|&locus| plan_of[class].fold_of_locus[locus] != fit)
+                    .map(|locus| classes[class].tracts[locus].clone())
+                    .collect();
+                assert_eq!(tracts, &expected, "fit {fit}, class {class}");
+            }
+        }
+        // Each scored locus: scored by the fit made without its fold, which never saw it, at that
+        // fit's numbers.
+        let mut times_scored = vec![vec![0_usize; 12]; 2];
+        for scored in &run.loci {
+            let fit = scored.fit_without_fold;
+            assert_eq!(
+                fit, plan_of[scored.class].fold_of_locus[scored.locus],
+                "locus {} of class {} scored by the fit without fold {fit}",
+                scored.locus, scored.class
+            );
+            assert!(
+                !handed[fit][scored.class].contains(&classes[scored.class].tracts[scored.locus]),
+                "the fit that scored locus {} of class {} was handed it",
+                scored.locus,
+                scored.class
+            );
+            let expected = folded.score(
+                scored.class,
+                scored.locus,
+                &RecordingFit::numbers_of_fit(fit),
+                &settings,
+            );
+            assert_eq!(
+                scored.ln_likelihood.to_bits(),
+                expected.ln_likelihood.to_bits(),
+                "locus {} of class {}: not the score at fit {fit}'s numbers",
+                scored.locus,
+                scored.class
+            );
+            times_scored[scored.class][scored.locus] += 1;
+        }
+        assert!(times_scored.iter().flatten().all(|&times| times == 1));
+        assert_eq!(run.variants, ["recording"]);
+        assert_eq!(
+            run.sums[0].iter().map(|sums| sums.loci).sum::<usize>(),
+            24,
+            "every scored locus is in the sums"
+        );
     }
 
     /// **A class without a concentration is scored at calling's bottom rung, not skipped**: a flat

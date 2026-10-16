@@ -326,9 +326,14 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   truth** (spec §2.6; C8's review found 31/63, 28/126 and 21/126 against 18/62, 18/126 and 12/126
   without the prior, where honest errors miss about 1 in 22), for the owner. *Depends:* C7.
   *Source:* spec §1.2, §2.6, §4.2.
-- ☐ **D2a** The bench gains a real-psp mode: it reads a psp set's censuses, folds loci by whole locus
+- ✅ **D2a** The bench gains a real-psp mode: it reads a psp set's censuses, folds loci by whole locus
   over the real evidence, fits on the kept folds and scores the held-out ones with `fit_bench.rs`'s
   scorer. *Depends:* C7. *Source:* spec §4.4.
+  *Done (2026-10-16):* `--psp`, `--reference`, `--catalog`, `[--parameters]`; the evidence comes from
+  `estimate-parameters`' own path (`open_the_censuses` … `the_tract_strata_of_a_cohort`), checked
+  bit-identical to the oracle's fitted slip numbers on its 4 psps. The held-out loop moved into
+  `fit_bench.rs` with a test that every locus is scored by the fit made without it. No full-cohort
+  fit in this mode (no truth). Review: `reports/reviews/str_penalised_fit_D2a_2026-10-16.md`.
 - ☐ **D2** tomato2, held-out by whole locus: the production fit against the counting fit, with D2a's
   mode. *Depends:* D2a. *Source:* spec §4.4.
 - ☐ **D3** Full scale, simulated: 2,169 samples with kimura's loci per class (about 66 million
