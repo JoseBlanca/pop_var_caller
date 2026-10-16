@@ -103,9 +103,14 @@ pub struct EstimateParametersArgs {
     #[arg(long)]
     pub output: PathBuf,
 
-    /// Replace the parameters file if it is already there.
+    /// Replace the parameters file and the log if they are already there.
     #[arg(long)]
     pub force: bool,
+
+    /// Where to write the run's log. Defaults to `pvc_call_parameters.log` beside the parameters
+    /// file.
+    #[arg(long)]
+    pub log: Option<std::path::PathBuf>,
 
     /// Copies of each chromosome in every sample.
     #[arg(long, default_value_t = 2)]
@@ -147,6 +152,10 @@ pub struct EstimateParametersArgs {
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum EstimateParametersCliError {
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] crate::cli::run_output::LogFileError),
+
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
     Reference {
@@ -351,6 +360,21 @@ pub fn run_estimate_parameters(
             .num_threads(args.threads)
             .build_global();
     }
+    // **Refused before the log opens**, so a run that would not write its answer leaves no log
+    // claiming it ran; `fit_and_assemble` makes the same check for its other callers.
+    if !args.force && args.output.exists() {
+        return Err(EstimateParametersCliError::OutputAlreadyThere {
+            path: args.output.clone(),
+        });
+    }
+    let started = std::time::Instant::now();
+    let log = args
+        .log
+        .clone()
+        .unwrap_or_else(|| crate::cli::run_output::beside(&args.output, "pvc_call_parameters.log"));
+    crate::cli::run_output::open_log(&log, args.force)?;
+    say_what_this_run_does(args, &log)?;
+
     let (file, samples) = fit_and_assemble(args)?;
 
     let toml = file.to_toml();
@@ -358,13 +382,38 @@ pub fn run_estimate_parameters(
         path: args.output.clone(),
         source,
     })?;
-    println!(
-        "fitted {} sample{} and wrote {} bytes to {}",
-        samples,
+    tracing::info!(
+        "done: parameters of {samples} sample{} written to {} in {}",
         if samples == 1 { "" } else { "s" },
-        toml.len(),
         args.output.display(),
+        crate::cli::run_output::elapsed_text(started.elapsed()),
     );
+    tracing::info!("log: {}", log.display());
+    Ok(())
+}
+
+/// **The run's first words**: on the terminal, what it is doing and on how much; in the log, the
+/// inputs by name (`doc/devel/ng/spec/command_line.md` §7.2, §7.3).
+fn say_what_this_run_does(
+    args: &EstimateParametersArgs,
+    log: &std::path::Path,
+) -> Result<(), EstimateParametersCliError> {
+    let paths = psps_named_by(args)?;
+    let threads = rayon::current_num_threads();
+    tracing::info!(
+        "pvc estimate-parameters: fitting parameters from {} psp file{}, {threads} thread{}",
+        paths.len(),
+        if paths.len() == 1 { "" } else { "s" },
+        if threads == 1 { "" } else { "s" },
+    );
+    tracing::info!("log: {}", log.display());
+    tracing::debug!("input: reference {}", args.reference.display());
+    let catalog = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+    tracing::debug!("input: repeat catalogue {}", catalog.display());
+    for psp in &paths {
+        tracing::debug!("input: psp {}", psp.display());
+    }
+    tracing::debug!("output: {}", args.output.display());
     Ok(())
 }
 

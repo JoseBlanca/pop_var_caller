@@ -57,12 +57,16 @@ pub struct RepeatCatalogArgs {
     #[arg(long, default_value_t = 1)]
     pub threads: usize,
 
-    /// Replace a catalogue that is already there.
+    /// Replace a catalogue, and its log, that are already there.
     ///
     /// Without it, an existing catalogue is left alone: a run reading a catalogue while another
     /// rebuilds it fails without a clear message.
     #[arg(long)]
     pub force: bool,
+
+    /// Where to write the run's log. Defaults to `<catalogue>.log` beside the catalogue.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
 
     /// The shortest repeat unit scanned, in bases.
     #[arg(long, default_value_t = CATALOG_MIN_PERIOD, help_heading = "Advanced")]
@@ -103,6 +107,10 @@ pub struct RepeatCatalogArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RepeatCatalogCliError {
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] crate::cli::run_output::LogFileError),
+
     /// `--min-period` / `--max-period` do not describe a range.
     #[error("--min-period {min} / --max-period {max}")]
     PeriodRange {
@@ -183,12 +191,22 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         return Err(RepeatCatalogCliError::Exists { path: output });
     }
 
-    eprintln!(
-        "repeat-catalog: reference={} output={} threads={}",
+    let started = std::time::Instant::now();
+    let log = args.log.clone().unwrap_or_else(|| {
+        let mut name = output.as_os_str().to_os_string();
+        name.push(".log");
+        PathBuf::from(name)
+    });
+    crate::cli::run_output::open_log(&log, args.force)?;
+    tracing::info!(
+        "pvc repeat-catalog: scanning {}, {} thread{}",
         args.reference.display(),
-        output.display(),
-        args.threads
+        args.threads,
+        if args.threads == 1 { "" } else { "s" },
     );
+    tracing::info!("log: {}", log.display());
+    tracing::debug!("input: reference {}", args.reference.display());
+    tracing::debug!("output: {}", output.display());
 
     let mut builder = RepeatCatalogBuilder::create(&output, criteria, scan)
         .map_err(|source| RepeatCatalogCliError::Build { source })?
@@ -211,6 +229,14 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         .map_err(|source| RepeatCatalogCliError::Build { source })?;
 
     report(&tally, reference.contigs.len());
+    tracing::info!(
+        "done: {} repeats in {} contigs written to {} in {}",
+        crate::cli::run_output::with_thousands(tally.rows.total() as u64),
+        reference.contigs.len(),
+        output.display(),
+        crate::cli::run_output::elapsed_text(started.elapsed()),
+    );
+    tracing::info!("log: {}", log.display());
     Ok(())
 }
 
@@ -265,15 +291,18 @@ fn catalog_criteria(args: &RepeatCatalogArgs) -> Result<StrRepeatCriteria, Repea
 /// the measurement open question 1 asks for, so the command produces it rather than a
 /// separate harness.
 fn report(tally: &BuildTally, contigs: usize) {
-    println!("contigs\t{contigs}");
-    println!("repeats\t{}", tally.rows.total());
+    tracing::debug!("report: contigs\t{contigs}");
+    tracing::debug!("report: repeats\t{}", tally.rows.total());
     for period in 1..=MAX_MOTIF_LEN as u8 {
-        println!("period_{period}\t{}", tally.rows.for_period(period));
+        tracing::debug!("report: period_{period}\t{}", tally.rows.for_period(period));
     }
-    println!("below_copy_floor\t{}", tally.below_copy_floor);
-    println!("too_close_to_contig_end\t{}", tally.too_close_to_contig_end);
+    tracing::debug!("report: below_copy_floor\t{}", tally.below_copy_floor);
+    tracing::debug!(
+        "report: too_close_to_contig_end\t{}",
+        tally.too_close_to_contig_end
+    );
     if tally.malformed > 0 {
-        println!("malformed\t{}", tally.malformed);
+        tracing::debug!("report: malformed\t{}", tally.malformed);
     }
 }
 

@@ -472,6 +472,7 @@ mod tests {
             psps: vec![psps.clone()],
             output: parameters.clone(),
             force: false,
+            log: None,
             ploidy: 2,
             inbreeding: None,
             str_param_estimates_at_once: None,

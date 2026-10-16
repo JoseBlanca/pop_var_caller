@@ -101,6 +101,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         psps: vec![psps.to_path_buf()],
         output,
         force: false,
+        log: None,
         ploidy: 2,
         inbreeding: None,
         str_param_estimates_at_once: None,

@@ -140,6 +140,16 @@ both modes' records are identical, and each log's block is byte-identical to the
 writes. The three VCF checksums are re-recorded: putting `##source=ng` and `##parametersFile` back
 reproduces the old ones.
 
+**Other subcommands' logs done (2026-10-16).** `estimate-parameters` (`--log`, default
+`pvc_call_parameters.log` beside its output), `repeat-catalog` (`--log`, default `<catalogue>.log`)
+and `generate-psps` (one `<sample>.psp.log` beside each psp, always replaced: an existing psp is
+refused before it unless `--force`, so a log without its psp is a failed walk's) open a log, say
+what they are doing, and end with a `done:` line; their old printed summaries go to the log as
+`report:` lines. A stopped sample keeps its log, and the binary writes the error into it. Their
+progress lines from the library are still `eprintln!` — step 5's. Checked with
+`scripts/ng_fit_stage_end_to_end.sh` on four tomato1 accessions over three regions: walk, fit and
+both calling passes ran, every log was written, and the script's parsing reads the new lines.
+
 ## Step 4 — `--output -` and `--tmp-dir` (now, after step 1)
 
 Spec §7.4 and §7.5.

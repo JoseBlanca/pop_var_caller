@@ -79,7 +79,7 @@ say "the walk left one file a sample, with a census in it"
 # trailer.
 #
 # **Each parse insists on exactly one match**, and that is not caution for its own sake: the
-# per-sample lines say "of which N bytes are **its** census" and are printed twice a sample, so a
+# per-sample lines say "of which N bytes are **its** census" and each sample has one, so a
 # pattern one word looser would return twelve numbers for six samples — which is the shape this
 # check was found in at Checkpoint A. A count other than one means the wording drifted and this
 # check has stopped checking.
@@ -103,8 +103,8 @@ one_number_from() {
     printf '%s' "$found"
 }
 
-walked=$(one_number_from "sample count" 's/^\([0-9][0-9]*\) samples: .* bytes of psp,.*/\1/p') || exit 1
-inside=$(one_number_from "census total" 's/^[0-9][0-9]* samples: .* of which \([0-9][0-9]*\) bytes are census.*/\1/p') || exit 1
+walked=$(one_number_from "sample count" 's/^done: \([0-9][0-9]*\) samples: .* bytes of psp,.*/\1/p') || exit 1
+inside=$(one_number_from "census total" 's/^done: [0-9][0-9]* samples: .* of which \([0-9][0-9]*\) bytes are census.*/\1/p') || exit 1
 if (( walked != psps )); then
     echo "the walk says it wrote $walked samples and there are $psps psps on disk" >&2
     exit 1
@@ -125,7 +125,7 @@ say "2. estimate-parameters"
     --psp "$out/psps" --output "$out/cohort.parameters.toml" \
     > "$out/estimate-parameters.log" 2>&1 || {
     echo "estimate-parameters failed:" >&2; cat "$out/estimate-parameters.log" >&2; exit 1; }
-tail -1 "$out/estimate-parameters.log"
+tail -2 "$out/estimate-parameters.log" | head -1
 # **The file, not only the exit status.** Without this the first thing to notice an empty
 # parameters file is the second call below, which would report itself as the failure.
 if [[ ! -s "$out/cohort.parameters.toml" ]]; then

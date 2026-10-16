@@ -229,6 +229,10 @@ pub struct GeneratePspsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GeneratePspsCliError {
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] crate::cli::run_output::LogFileError),
+
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
     Reference {
@@ -536,9 +540,19 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
 /// the first sample whose walk stops ends the run naming that sample — with every earlier
 /// sample's psp finished on disk, and nothing left at the stopped sample's own path.
 pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliError> {
+    let started = std::time::Instant::now();
     let report = walk_every_sample(args)?;
-    for line in report.lines() {
-        println!("{line}");
+    // **The report goes to the last sample's log, and its total to the terminal** — every
+    // sample's own line was said as it finished, so the total is all the terminal still lacks.
+    let lines = report.lines();
+    for line in &lines {
+        tracing::debug!("report: {line}");
+    }
+    if let Some(total) = lines.last() {
+        tracing::info!(
+            "done: {total}, in {}",
+            crate::cli::run_output::elapsed_text(started.elapsed())
+        );
     }
     Ok(())
 }
@@ -668,9 +682,37 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
     // sample (spec §11 question 8), not across samples.
     let mut walked: Vec<SampleWalkOutcome> =
         Vec::with_capacity(read_groups.read_groups_per_sample().len());
-    for sample in read_groups.read_groups_per_sample() {
+    let how_many = read_groups.read_groups_per_sample().len();
+    let ground_said = format!(
+        "{} ({})",
+        args.regions.as_ref().map_or_else(
+            || "the whole genome".to_owned(),
+            |bed| bed.display().to_string()
+        ),
+        crate::cli::run_output::size_of_ground(analysed.iter().map(|region| region.len()).sum())
+    );
+    tracing::info!(
+        "pvc generate-psps: storing {how_many} sample{}' evidence over {ground_said}, one after \
+         another",
+        if how_many == 1 { "" } else { "s" },
+    );
+    for (index, sample) in read_groups.read_groups_per_sample().iter().enumerate() {
         let files = alignment_files_of(sample, &read_groups);
         let psp_path = psp_path_for(&args.output_dir, sample.sample.as_ref());
+        // **A log of its own beside each psp**, `<sample>.psp.log`, because a cohort's samples
+        // are usually written by separate commands at once and one shared log would interleave
+        // them (`doc/devel/ng/spec/command_line.md` §7.3). **Always replaced**: an existing psp
+        // was refused above unless `--force`, so a log here without its psp is a failed walk's,
+        // and walking that sample again is this command's advertised repair.
+        let mut log_name = psp_path.as_os_str().to_os_string();
+        log_name.push(".log");
+        crate::cli::run_output::open_log(std::path::Path::new(&log_name), true)?;
+        tracing::info!("sample {} of {how_many}: {}", index + 1, sample.sample);
+        tracing::debug!("this sample's run stores {how_many} sample(s) over {ground_said}");
+        for file in &files {
+            tracing::debug!("input: alignments {}", file.display());
+        }
+        tracing::debug!("output: {}", psp_path.display());
         // **Written beside the psp and renamed once it is whole.** `PspWriter::create`
         // truncates what it finds, and this command's advertised repair is *re-run the one
         // sample that failed* — so writing straight to the final path would destroy a good
@@ -745,7 +787,7 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         // hung one. **To stderr**, so a shell capturing the report gets the report and a
         // person watching gets the progress — and in the same words, because both come from
         // `SampleWalkOutcome::line`.
-        eprintln!("{}", outcome.line());
+        tracing::info!("{}", outcome.line());
         walked.push(outcome);
     }
     Ok(WalkReport {
