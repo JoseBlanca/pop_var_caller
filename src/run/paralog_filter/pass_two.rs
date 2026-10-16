@@ -42,7 +42,7 @@ use super::{CohortSizeMismatch, ParalogScoringContext, SpillEntry, SpillFile, Sp
 /// The share of the records the filter removes that were really variants: `0.01` means about one
 /// wrong removal in a hundred.
 ///
-/// **Zero is not one of these, and that is the point.** `--paralog-fdr 0` means *do not run the
+/// **Zero is not one of these, and that is the point.** `--hidden-dup-fdr 0` means *do not run the
 /// filter*, and it has to mean that somewhere a caller cannot forget. Handed a target of zero the
 /// scoring does **not** remove nothing — a strongly duplicated record's tail false-discovery value
 /// underflows to exactly zero, and zero is not above zero, so the most extreme records go. Until
@@ -59,7 +59,7 @@ use super::{CohortSizeMismatch, ParalogScoringContext, SpillEntry, SpillFile, Sp
 /// is simply unreachable. So a run report cannot tell a wrong knob from a clean cohort. The crate
 /// already draws this line for [`InbreedingF`](crate::types::InbreedingF); this mirrors it.
 ///
-/// The admitted range is `[0, 1)`, the same range the `--paralog-fdr` flag already parses, so the
+/// The admitted range is `[0, 1)`, the same range the `--hidden-dup-fdr` flag already parses, so the
 /// flag and this type cannot disagree about what a target is.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct TargetFdr(f64);

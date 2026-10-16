@@ -335,7 +335,7 @@ fn a_refusal_that_did_not_happen_is_a_count_and_nothing_else() {
         "{text}",
     );
     assert!(
-        !text.contains("--max-cohort-locus-span"),
+        !text.contains("--max-locus-span"),
         "nothing was refused, so nothing tells the reader to raise the bound: {text}",
     );
 }
@@ -384,7 +384,7 @@ fn a_refusal_that_happened_shows_a_handful_of_spans_and_what_to_do() {
          {text}",
     );
     assert!(
-        text.contains("the bound is --max-cohort-locus-span 50"),
+        text.contains("the bound is --max-locus-span 50"),
         "and the bound is named as the flag a person types, with its value: {text}",
     );
 }

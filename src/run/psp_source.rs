@@ -599,7 +599,7 @@ pub struct StoredSampleTallies {
     /// Reads those records lost to the thinning.
     pub reads_thinned_by_the_read_cap: u64,
     /// **Records dropped as they were read because a read group there was deeper than the run's
-    /// depth ceiling** (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)). Not
+    /// depth ceiling** (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)). Not
     /// in [`loci_read`](Self::loci_read). No locus was called over their ground, for any sample.
     pub loci_over_the_depth_ceiling: u64,
     /// **Of those, the records too large for the psp reader to hold** — dropped without their

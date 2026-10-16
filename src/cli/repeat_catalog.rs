@@ -40,59 +40,62 @@ const SCANNER_MIN_COPIES: u32 = 2;
 /// outlive any one calling policy, so its floors sit below every one of them (spec §4.1).
 #[derive(Debug, Args, Clone)]
 pub struct RepeatCatalogArgs {
-    /// Reference FASTA. Read from byte zero — the digests and the scan come from the same
-    /// pass.
+    /// The reference FASTA to scan.
     #[arg(long)]
     pub reference: PathBuf,
 
-    /// Where to write the catalog. Defaults to `<reference>.repeats.parquet`.
+    /// Where to write the catalogue. Defaults to `<reference>.repeats.parquet`, where every
+    /// other command looks for it.
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// How many contigs to scan at once. The file is byte-identical at every value.
+    /// How many contigs to scan at once. The catalogue is the same at any number.
     ///
-    /// **It buys speed with memory, and a whole contig is the unit.** Each thread holds the
-    /// contig it is scanning, so the peak is set by the largest contigs in flight rather than
-    /// by the genome: six threads on GRCh38 in a 16 GB container is killed by the kernel, while
-    /// the default of one builds the same catalog in 103 seconds. Raise it on a machine with
-    /// room, and expect the first few chromosomes to be the expensive ones.
+    /// Each thread holds a whole contig in memory, so memory grows with the largest contigs
+    /// scanned together: six threads on the human genome need more than 16 GB, while one builds
+    /// its catalogue in under two minutes. Raise it on a machine with memory to spare.
     #[arg(long, default_value_t = 1)]
     pub threads: usize,
 
-    /// Overwrite an existing catalog.
+    /// Replace a catalogue that is already there.
     ///
-    /// Without it an existing file is left alone: a run reading a catalog while another
-    /// rebuilds it in place fails with no error message, so replacing one is said out loud.
+    /// Without it, an existing catalogue is left alone: a run reading a catalogue while another
+    /// rebuilds it fails without a clear message.
     #[arg(long)]
     pub force: bool,
 
-    /// Smallest motif length scanned, in bases.
-    #[arg(long, default_value_t = CATALOG_MIN_PERIOD)]
+    /// The shortest repeat unit scanned, in bases.
+    #[arg(long, default_value_t = CATALOG_MIN_PERIOD, help_heading = "Advanced")]
     pub min_period: u8,
 
-    /// Largest motif length scanned, in bases.
-    #[arg(long, default_value_t = CATALOG_MAX_PERIOD)]
+    /// The longest repeat unit scanned, in bases.
+    #[arg(long, default_value_t = CATALOG_MAX_PERIOD, help_heading = "Advanced")]
     pub max_period: u8,
 
-    /// The fewest motif copies a tract needs to be written down, one per period 1..=6.
+    /// The fewest repeat-unit copies a repeat needs to be written down: six comma-separated
+    /// numbers, for repeat units of 1 to 6 bases.
     ///
-    /// Measured on the span the scanner reports, as classification's own pre-screen
-    /// measures it. Below every floor a caller routes on, so a caller can move its floor by
-    /// filtering this file rather than re-scanning the genome.
-    #[arg(long, value_parser = parse_min_copies, default_value = "5,5,4,4,4,3")]
+    /// Deliberately below the calling commands' own `--min-copies`, so those can choose among
+    /// the catalogue's repeats without scanning the genome again.
+    #[arg(
+        long,
+        value_parser = parse_min_copies,
+        default_value = "5,5,4,4,4,3",
+        help_heading = "Advanced"
+    )]
     pub min_copies: MinCopies,
 
-    /// Sequence required on each side of a tract, to the contig's own end, in bases. A
-    /// tract with less than this beside it cannot be anchored by a read.
-    #[arg(long, default_value_t = CATALOG_MIN_FLANK_BP)]
+    /// The sequence needed on each side of a repeat, in bases. A repeat with less beside it
+    /// before the contig's end cannot be anchored by a read and is not written down.
+    #[arg(long, default_value_t = CATALOG_MIN_FLANK_BP, help_heading = "Advanced")]
     pub min_flank_bp: u64,
 
-    /// Score added when two bases one period apart agree.
-    #[arg(long, default_value_t = DEFAULT_MATCH_REWARD, help_heading = "Scoring")]
+    /// The scan's score for two bases one repeat unit apart that agree.
+    #[arg(long, default_value_t = DEFAULT_MATCH_REWARD, help_heading = "Advanced")]
     pub match_reward: i32,
 
-    /// Score subtracted when they disagree.
-    #[arg(long, default_value_t = DEFAULT_MISMATCH_PENALTY, help_heading = "Scoring")]
+    /// The scan's penalty for two bases one repeat unit apart that disagree.
+    #[arg(long, default_value_t = DEFAULT_MISMATCH_PENALTY, help_heading = "Advanced")]
     pub mismatch_penalty: i32,
 }
 

@@ -8,6 +8,10 @@ use clap::Parser;
 use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
 use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
+use crate::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> CallFromPspsArgs {
@@ -209,25 +213,22 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         catalog: Some(cohort.catalog.clone()),
         psps: vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")],
         output: cohort.directory.path().join("calls.vcf"),
+        // Several tests call this cohort again into the same directory.
+        force: true,
+        log: None,
         parameters: None,
         defaults: true,
         ploidy: None,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,
-        min_copies: MinCopies::default(),
-        min_period: DEFAULT_MIN_PERIOD,
-        max_period: DEFAULT_MAX_PERIOD,
-        max_str_len: DEFAULT_MAX_STR_LEN,
-        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-        min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     };
     (cohort, args)
@@ -335,21 +336,42 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
     );
 }
 
-/// **A cohort walked under a different catalog is refused before a block is decoded**, naming
-/// what differs — the refusal that makes stored evidence safe to call at all.
+/// **A cohort walked under its own repeat settings is called under them, with nothing to type**
+/// (`doc/devel/ng/spec/command_line.md` §4.4). Before the settings were read from the psp
+/// headers, this run — psps written at a purity of 0.99, called at the default 0.8 — was refused
+/// for routing differently from its walk.
 #[test]
-fn a_run_whose_routing_is_not_the_walks_is_refused() {
-    let (_cohort, mut args) = a_cohort_of_psps();
-    // A tract that is a repeat to the walk and ordinary sequence to this run.
-    args.min_purity = 0.99;
+fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
+    let cohort = a_cohort_on_disk();
+    let psps = cohort.directory.path().join("psps-pure");
+    run_generate_psps(&GeneratePspsArgs {
+        reference: cohort.reference.clone(),
+        catalog: Some(cohort.catalog.clone()),
+        alignments: cohort.alignments.clone(),
+        output_dir: psps.clone(),
+        regions: None,
+        force: false,
+        build_index_if_missing: false,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
+        min_purity: 0.99,
+        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+    })
+    .expect("the cohort walks into psps at a purity of 0.99");
 
-    let refused = run_call_from_psps(&args).expect_err("this run did not route as the walk did");
-
-    let rendered = crate::error_render::format_error_chain(&refused);
-    assert!(
-        rendered.contains("purity") || rendered.contains("criteria"),
-        "the refusal names the field that differs, and got: {rendered}",
-    );
+    let (_defaults_cohort, args) = a_cohort_of_psps();
+    let args = CallFromPspsArgs {
+        catalog: Some(cohort.catalog.clone()),
+        reference: cohort.reference.clone(),
+        psps: vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")],
+        output: cohort.directory.path().join("pure.vcf"),
+        log: Some(cohort.directory.path().join("pure.log")),
+        ..args
+    };
+    run_call_from_psps(&args).expect("the psps' own settings are the run's");
 }
 
 // ---------------------------------------------------------------------
@@ -497,7 +519,7 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
 #[test]
 fn a_run_asking_for_the_filter_writes_a_calibrated_file() {
     let (cohort, mut args) = a_cohort_of_psps();
-    args.paralog_fdr = 0.01;
+    args.hidden_dup_fdr = 0.01;
 
     run_call_from_psps(&args).expect("the filter finishes a run now");
 
@@ -508,7 +530,7 @@ fn a_run_asking_for_the_filter_writes_a_calibrated_file() {
         written.lines().take(12).collect::<Vec<_>>().join("\n")
     );
     assert!(
-        written.contains("##FILTER=<ID=hiddenParalog,"),
+        written.contains("##FILTER=<ID=hiddenDup,"),
         "and it must declare the filter it may have applied"
     );
     assert!(
@@ -529,12 +551,12 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
     let args = args_of(&a_defaults_run());
 
     assert!(
-        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        (args.hidden_dup_fdr - 0.01).abs() < 1e-12,
         "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
-        args.paralog_fdr
+        args.hidden_dup_fdr
     );
     assert!(
-        !args.paralog_filter_tag,
+        !args.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
 }
@@ -549,7 +571,7 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused() {
     let (cohort, mut args) = a_cohort_of_psps();
 
     for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
-        args.paralog_fdr = asked;
+        args.hidden_dup_fdr = asked;
 
         let refused = run_call_from_psps(&args).expect_err("not a false-discovery rate");
 

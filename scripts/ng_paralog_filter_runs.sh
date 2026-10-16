@@ -4,10 +4,10 @@
 #
 # One cohort of alignment files, called three ways, and the numbers each run reports:
 #
-#   off      --paralog-fdr 0            the run before this work, byte for byte
-#   drop     --paralog-fdr <target>     flagged records leave the file
-#   tag      --paralog-fdr <target> --paralog-filter-tag
-#                                       flagged records stay, on the hiddenParalog filter
+#   off      --hidden-dup-fdr 0            the run before this work, byte for byte
+#   drop     --hidden-dup-fdr <target>     flagged records leave the file
+#   tag      --hidden-dup-fdr <target> --hidden-dup-tag
+#                                       flagged records stay, on the hiddenDup filter
 #
 # **Why all three every time.** The off run is what the other two are measured against — how many
 # records went, and whether anything but the filter's own lines moved. The tag run is where a
@@ -162,9 +162,9 @@ run_one() {
 
 echo
 echo "=== the three runs ==="
-run_one off --paralog-fdr 0
-run_one drop --paralog-fdr "$fdr"
-run_one tag --paralog-fdr "$fdr" --paralog-filter-tag
+run_one off --hidden-dup-fdr 0
+run_one drop --hidden-dup-fdr "$fdr"
+run_one tag --hidden-dup-fdr "$fdr" --hidden-dup-tag
 
 # **The off run is the one compared against the standing pre-filter baseline**, so it is the only
 # one whose hash means anything; the other two carry the filter's own lines by design.
@@ -184,9 +184,9 @@ done
 if [[ ${written[off]} -eq 0 ]]; then
   echo "WARNING: the off run wrote no records at all — nothing below is a measurement of anything"
 fi
-tagged=$(awk -F'\t' '!/^#/ { n = split($7, ids, ";"); for (i = 1; i <= n; i++) if (ids[i] == "hiddenParalog") { print; next } }' \
+tagged=$(awk -F'\t' '!/^#/ { n = split($7, ids, ";"); for (i = 1; i <= n; i++) if (ids[i] == "hiddenDup") { print; next } }' \
   "$out/tag.vcf" | wc -l | tr -d ' ')
-printf 'of the tag run, carrying hiddenParalog: %s\n' "$tagged"
+printf 'of the tag run, carrying hiddenDup: %s\n' "$tagged"
 if [[ $tagged -eq 0 && ${written[off]} -gt 0 ]]; then
   echo "NOTE: nothing was flagged, so every relation below is the empty case"
 fi

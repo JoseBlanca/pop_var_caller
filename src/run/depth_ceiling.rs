@@ -1,5 +1,5 @@
 //! **The depth ceiling: a locus where any sample has a read group deeper than this is not
-//! called**, and none of its evidence is held (`--max-read-group-depth`).
+//! called**, and none of its evidence is held (`--max-depth`).
 //!
 //! # What it is for
 //!
@@ -33,7 +33,7 @@
 
 use crate::locus_generation::SampleLocusObservations;
 
-/// The default of `--max-read-group-depth`: 1,000 reads of one read group at one locus.
+/// The default of `--max-depth`: 1,000 reads of one read group at one locus.
 ///
 /// **The owner's choice (2026-09-29).** It is far above any honest depth at the coverages the
 /// caller is for — a 30× sample is thirty times below it, a 300× sample three times — and far

@@ -47,9 +47,9 @@ use super::psp_caller::StoredCohortTallies;
 /// makes the advice actionable.
 #[derive(Clone, Copy, Debug)]
 pub struct BoundsTheRunCalledUnder {
-    /// `--max-cohort-locus-span`, in reference bases.
+    /// `--max-locus-span`, in reference bases.
     pub max_cohort_locus_span: u32,
-    /// `--max-candidate-alleles`, the reference counted among them.
+    /// `--max-generic-alleles`, the reference counted among them.
     pub max_candidate_alleles: u16,
 }
 
@@ -357,7 +357,7 @@ impl<'a> RunReport<'a> {
             "loci the merge declined to assemble for being too wide",
             &self.calling.loci_too_wide_to_assemble,
             &format!(
-                "the bound is --max-cohort-locus-span {}; raise it and call again if the \
+                "the bound is --max-locus-span {}; raise it and call again if the \
                  lengths above cluster just past it",
                 self.max_cohort_locus_span,
             ),
@@ -367,7 +367,7 @@ impl<'a> RunReport<'a> {
             "loci where the allele cap left no sample callable",
             &self.calling.loci_with_nobody_to_call,
             &format!(
-                "the cap is --max-candidate-alleles {}; raise it to keep more of what they vary \
+                "the cap is --max-generic-alleles {}; raise it to keep more of what they vary \
                  over",
                 self.max_candidate_alleles,
             ),
@@ -666,7 +666,7 @@ fn what_each_stored_file_gave(lines: &mut Vec<String>, stored: &StoredCohortTall
     where_the_walks_disagreed(lines, stored);
 }
 
-/// **The cohort's total of loci dropped over the depth ceiling** (`--max-read-group-depth`), and
+/// **The cohort's total of loci dropped over the depth ceiling** (`--max-depth`), and
 /// in how many samples — nothing where there were none.
 ///
 /// **Loci per sample, summed, and not ground**: a pile-up that every sample shares is counted
@@ -678,7 +678,7 @@ fn depth_ceiling_total(lines: &mut Vec<String>, per_sample: impl Iterator<Item =
     });
     if loci > 0 {
         lines.push(format!(
-            "depth ceiling (--max-read-group-depth): {loci} loci dropped in {samples} samples, \
+            "depth ceiling (--max-depth): {loci} loci dropped in {samples} samples, \
              counted once per sample; nothing was called over their ground, for any sample"
         ));
     }

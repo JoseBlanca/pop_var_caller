@@ -2,7 +2,7 @@
 //!
 //! Every record the run would write reaches one sink. With the filter **off** that sink is the
 //! VCF writer, exactly as it was before this work existed — and *exactly* is the point, because
-//! the standing oracle for the whole filter is that `--paralog-fdr 0` reproduces the previous
+//! the standing oracle for the whole filter is that `--hidden-dup-fdr 0` reproduces the previous
 //! run byte for byte (spec §1.1 goal 7, §10). Nothing is inserted in that path: no encode and
 //! no copy — only the match that chooses the sink, taken once per record.
 //!

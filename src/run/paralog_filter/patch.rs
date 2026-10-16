@@ -14,9 +14,9 @@
 //! **The two rules that are easy to get backwards** (spec §6 traps 5 and 7):
 //!
 //! - **A `FILTER` that already says something is joined, not replaced.** A record the calling
-//!   loop marked `EMNoConv` and the filter then flags carries `EMNoConv;hiddenParalog`, which
+//!   loop marked `EMNoConv` and the filter then flags carries `EMNoConv;hiddenDup`, which
 //!   the VCF grammar allows and which the header will declare once step C4 adds the
-//!   `hiddenParalog` id to [`FILTER_DECLARATIONS`](crate::vcf::header). Only `PASS` — and
+//!   `hiddenDup` id to [`FILTER_DECLARATIONS`](crate::vcf::header). Only `PASS` — and
 //!   `.`, which means no filter was applied — are replaced, because joining to either would
 //!   state a contradiction.
 //! - **An `INFO` that says nothing is replaced, not appended to.** `.` is VCF's *missing*, and
@@ -54,7 +54,7 @@ const PASS: &[u8] = crate::vcf::FilterVerdict::Pass.as_str().as_bytes();
 /// short circuit around it.
 ///
 /// **Call once per line.** A second call adds the id and the fields again, giving
-/// `hiddenParalog;hiddenParalog` and a repeated `PARALOG_LR`, which strict readers reject.
+/// `hiddenDup;hiddenDup` and a repeated `PARALOG_LR`, which strict readers reject.
 ///
 /// **What this does not refuse**, because a line reaching pass three came from the encoder by way
 /// of the spill and neither adds these: a `\n` anywhere in `line`, which makes the writer put two

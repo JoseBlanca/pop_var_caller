@@ -89,7 +89,7 @@ pub enum CallingRunError {
 
     /// A bound that is not a bound.
     #[error(
-        "--max-cohort-locus-span {asked}: a locus covers at least one reference base, so a \
+        "--max-locus-span {asked}: a locus covers at least one reference base, so a \
          bound of zero would refuse every locus there is"
     )]
     MaxCohortLocusSpanIsZero {
@@ -99,7 +99,7 @@ pub enum CallingRunError {
 
     /// A round that covers no ground.
     #[error(
-        "--cohort-locus-builder-regions-len {asked}: a round covers at least one reference \
+        "--locus-builder-regions-len {asked}: a round covers at least one reference \
          base, so a width of zero would never advance"
     )]
     CohortLocusBuilderRegionsLenIsZero {
@@ -113,7 +113,7 @@ pub enum CallingRunError {
     /// truncation, so a locus carrying two obvious variants would lose both — which
     /// `candidate_alleles.md` §4.1 rules out.
     #[error(
-        "--max-candidate-alleles {asked}: a cap counts the reference among the alleles, so it \
+        "--max-generic-alleles {asked}: a cap counts the reference among the alleles, so it \
          needs at least {smallest} — the reference and one alternative"
     )]
     MaxCandidateAllelesTooSmall {

@@ -400,7 +400,7 @@ pub struct PspVariantCaller {
     /// ([`read_cap`](super::psp_source::read_cap)).
     max_reads_per_position: u32,
     /// The most reads one read group may have at a locus before the locus is dropped for the
-    /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
     depth_ceiling: DepthCeiling,
     /// The loci `--explain-loci` asked about, if it was given (`spec/explain_loci.md`).
     explain: Option<ExplainRegions>,

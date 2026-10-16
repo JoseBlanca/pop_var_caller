@@ -309,12 +309,12 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -322,8 +322,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     }
 }
@@ -389,12 +389,12 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -402,8 +402,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     };
 
@@ -762,12 +762,12 @@ fn a_cohort_on_disk() -> (
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -775,8 +775,8 @@ fn a_cohort_on_disk() -> (
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     };
     (cohort.directory, cohort.zeta, cohort.alpha, args)
@@ -1404,12 +1404,12 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
     let args = args_of(&a_defaults_run());
 
     assert!(
-        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        (args.hidden_dup_fdr - 0.01).abs() < 1e-12,
         "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
-        args.paralog_fdr
+        args.hidden_dup_fdr
     );
     assert!(
-        !args.paralog_filter_tag,
+        !args.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
 }
@@ -1427,7 +1427,7 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused_in_direct_mode_too() {
     let (_reference, _alignments, _directory, mut args) = a_cohort_on_disk();
 
     for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
-        args.paralog_fdr = asked;
+        args.hidden_dup_fdr = asked;
         let refused = run_call_from_alignments(&args).expect_err("not a false-discovery rate");
         assert!(
             matches!(

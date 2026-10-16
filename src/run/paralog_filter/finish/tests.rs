@@ -176,7 +176,7 @@ fn the_header_states_the_run_s_calibration_and_declares_the_filter() {
     );
     assert!(written.contains("##INFO=<ID=PARALOG_LR,"));
     assert!(written.contains("##INFO=<ID=PARALOG_POST,"));
-    assert!(written.contains("##FILTER=<ID=hiddenParalog,"));
+    assert!(written.contains("##FILTER=<ID=hiddenDup,"));
     assert_eq!(run.did.written + run.did.dropped, 2);
 }
 
@@ -226,7 +226,7 @@ fn a_header_without_the_filter_declares_none_of_it() {
     assert!(!text.contains("##paralogFilter="));
     assert!(!text.contains("PARALOG_LR"));
     assert!(!text.contains("PARALOG_POST"));
-    assert!(!text.contains("hiddenParalog"));
+    assert!(!text.contains("hiddenDup"));
 }
 
 /// **A sample with no coverage model is named in the report, with the reason.**

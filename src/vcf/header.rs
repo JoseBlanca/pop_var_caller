@@ -422,7 +422,7 @@ const INFO_DECLARATIONS: &[&str] = &[
 const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
     r#"##INFO=<ID=PARALOG_LR,Number=1,Type=Float,Description="Log likelihood ratio of a hidden paralog over a real variant, from coverage and allele balance across samples">"#,
     r#"##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the run's fitted paralog rate">"#,
-    r#"##FILTER=<ID=hiddenParalog,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
+    r#"##FILTER=<ID=hiddenDup,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
 ];
 
 /// **The filter's id, as it appears in a removed record's `FILTER` column.**
@@ -431,7 +431,7 @@ const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
 /// the `##FILTER` line that declares it are one fact spelled twice — and a file whose records
 /// carry an id its header does not declare is invalid VCF. `the_declared_filter_id_is_the_one_a_record_carries`
 /// is what holds the two together.
-pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenParalog";
+pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenDup";
 
 /// **How a record's likelihood ratio is written**, and how the header writes the cut it is
 /// compared against — one number of decimals, because an operator auditing why a record went

@@ -198,7 +198,12 @@ mod tests {
     /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
     /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
     /// was `bc75ec4d5a3c67dcaa776f56746b2bdd`. Recorded in the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "b1a1a907e4e7adf22fb62c56f3305258";
+    ///
+    /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
+    /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `b1a1a907e4e7adf22fb62c56f3305258`.
+    /// Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "a3851d08516834b43b3f9a09863d90dc";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -261,7 +266,12 @@ mod tests {
     /// field of this fixture moves for it. It was `977f08d389bdba037ee350ab38164e1b` on str-bundles
     /// and `e9e8aee5b6714aa33ce91bd04290984e` on main. Recorded in the Linux container (arm64,
     /// glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "f65f586f58163d23d127d7f8c823e433";
+    ///
+    /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
+    /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `f65f586f58163d23d127d7f8c823e433`.
+    /// Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "c51e03c6244f0eaa83a702e140230903";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -306,7 +316,12 @@ mod tests {
     /// branch's and the repeat tract's record main's to the byte (`QUAL` 37.3, `AF=0.023718`). It
     /// was `08a675fd6ba4bc8a627fa2bd2118b415` on str-bundles and `efa3947cb4eacd394de0425ce87c40ed`
     /// on main. Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "5c2414e47ecc6748f12db076d7513de1";
+    ///
+    /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
+    /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `5c2414e47ecc6748f12db076d7513de1`.
+    /// Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "b57178a3280be672f1c4ead1f258df55";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -383,29 +398,25 @@ mod tests {
                 .map(|sample| psp_path_for(&psps, sample))
                 .collect(),
             output: calls.clone(),
+            force: false,
+            log: None,
             parameters: Some(parameters.clone()),
             defaults: false,
             ploidy: None,
-            max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             // The shipped false-discovery target, so the hidden-duplication filter scores and
             // writes its two fields: it computes with `ln`, `exp` and `ln_1p` as well.
-            paralog_fdr: 0.01,
+            hidden_dup_fdr: 0.01,
             // Off: this test pins that platforms write the same bytes, over a fixture whose three
             // variant sites include low-quality ones; the threshold is pinned elsewhere.
             min_site_quality: 0.0,
-            paralog_filter_tag: false,
-            cohort_locus_builder_regions_len: None,
+            hidden_dup_tag: false,
+            locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
-            min_copies: MinCopies::default(),
-            min_period: DEFAULT_MIN_PERIOD,
-            max_period: DEFAULT_MAX_PERIOD,
-            max_str_len: DEFAULT_MAX_STR_LEN,
-            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-            min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            max_reads_per_position: None,
+            max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
         })
         .expect("the cohort calls with its own fit");

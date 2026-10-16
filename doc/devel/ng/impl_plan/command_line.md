@@ -61,26 +61,47 @@ writes a log with the header, and its VCF is byte-identical to `main`'s.
 
 Spec §4, §5.3, §5.4 and §6.
 
-Now:
+**Done before the merge (2026-10-16):**
 
-- `pvc dev` with `inspect-psp`, `type-regions`, `estimate-contamination`; scripts that call them
-  updated.
-- `regenerate-census` deleted, with its code and its two scripts' calls.
-- Renames on the calling commands: `--max-locus-span`, `--locus-builder-regions-len`,
-  `--max-generic-alleles`, `--hidden-dup-fdr`, `--hidden-dup-tag`; the VCF filter `hiddenDup`.
-  **Only the flag's spelling changes in this step** (`#[arg(long = "…")]`); the Rust field names
-  follow in step 5, so that `test_fixtures.rs` does not conflict with the fit branch.
-- `--max-depth` replaces `--max-read-group-depth` and sets the read cap too; `--max-reads-per-position`
-  moves to the *Developer* heading.
-- The repeat settings removed from `call-from-psps`, which reads them from the psp headers.
-- Help text rewritten: one or two sentences an option, no spec paths or internal step numbers; a
-  real top-level description; subcommands in workflow order; *Advanced* and *Developer* headings.
-- `--threads` on `repeat-catalog` keeps its default of 1 with the reason in its help.
+- `pvc dev` with `inspect-psp`, `type-regions`, `estimate-contamination`; subcommands listed in
+  workflow order with one-line summaries; `pvc --help` describes the two workflows and what a psp
+  is.
+- Renames on both calling commands, flag and Rust field alike: `--max-locus-span`,
+  `--locus-builder-regions-len`, `--max-generic-alleles` (its help says repeat loci are not
+  affected), `--hidden-dup-fdr`, `--hidden-dup-tag`; the VCF filter `hiddenDup`. The fit branch
+  builds none of these structs, so renaming the fields costs no conflict beyond
+  `cross_platform_digests.rs`, which builds `CallFromPspsArgs` and had to change anyway.
+- `--max-depth` replaces `--max-read-group-depth` on both calling commands and sets the read cap
+  too; `--max-reads-per-position` is a *Developer* option that defaults to it. On `generate-psps`,
+  which calls nothing and so has only the cap, `--max-depth` is the cap. **Its Rust field keeps the
+  name `max_reads_per_position` until step 5**: `census_fit.rs` and the `estimate-parameters`
+  tests build that struct.
+- The repeat settings removed from `call-from-psps`, which reads them from the psp headers. The
+  test that a run routing differently from its psps is refused became a test that psps written
+  under non-default settings are called under them.
+- `call-from-psps` gets step 1's treatment: `--force`, `--log`, its first line and `done:` line, the
+  report in the log.
+- Help rewritten for `call-from-alignments`, `call-from-psps`, `generate-psps` and
+  `repeat-catalog`: one or two sentences an option, no spec paths or internal step numbers;
+  *Advanced*, *What counts as a repeat* and *Developer* headings; `repeat-catalog`'s scan settings
+  under *Advanced*, `--threads`' default of 1 explained.
+- The three VCF checksums in `cross_platform_digests.rs` re-recorded: only the `##FILTER` line
+  moved, and putting `hiddenParalog` back reproduces the old checksums.
 
-After the merge:
+**Checked:** four tomato1 accessions over three regions, both modes, 3,119 records each: the VCFs
+are identical to `main`'s apart from `##commandline` and the filter's name
+(`tmp/step2/run_both_modes.sh`).
 
+**After the merge:**
+
+- `regenerate-census` deleted, with its CLI module and tests, and `estimate-parameters`' refusal
+  rewritten to tell the user to write old psps again with `generate-psps`. **Moved here from the
+  first half** because that refusal builds a `regenerate-census` command line
+  (`the_command_that_regenerates`, `THE_COMMAND_THAT_REBUILDS_A_CENSUS`), and both live in files
+  the fit branch rewrites. The library's `census_from_psp` stays: three tests and an example use it
+  to check the walk's census.
 - `--threads` on `estimate-parameters`; `--str-strata-at-once`; its description's inbreeding
-  sentence corrected; its refusal message tells the user to rewrite old psps with `generate-psps`.
+  sentence corrected; its help rewritten like the others'.
 
 ## Step 3 — what a run writes beside its output (after the merge)
 

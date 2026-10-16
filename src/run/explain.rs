@@ -542,7 +542,7 @@ pub(crate) enum LocusEnd<'a> {
 pub enum MergeDrop {
     /// No sample showed enough reads disagreeing with the reference.
     TooQuiet,
-    /// Some sample's read group was deeper than `--max-read-group-depth`.
+    /// Some sample's read group was deeper than `--max-depth`.
     OverDepthCeiling,
 }
 
@@ -595,7 +595,7 @@ impl DroppedLoci {
                 ),
                 MergeDrop::OverDepthCeiling => (
                     "over_depth_ceiling",
-                    "some sample's read group is deeper here than --max-read-group-depth, so \
+                    "some sample's read group is deeper here than --max-depth, so \
                      the locus is dropped for every sample",
                 ),
             };
@@ -607,7 +607,7 @@ impl DroppedLoci {
 }
 
 /// The rows of the explained loci the merge refused for being wider than
-/// `--max-cohort-locus-span` — read off the run's own list of them.
+/// `--max-locus-span` — read off the run's own list of them.
 #[must_use]
 pub fn too_wide_rows(regions: &ExplainRegions, too_wide: &[GenomeRegion]) -> Vec<ExplainRow> {
     let mut rows = Vec::new();
@@ -616,7 +616,7 @@ pub fn too_wide_rows(regions: &ExplainRegions, too_wide: &[GenomeRegion]) -> Vec
         rows.push(
             ExplainRow::of(locus, ExplainStep::Outcome, "too_wide").with(
                 "why",
-                "the locus is wider than --max-cohort-locus-span, so it is not assembled",
+                "the locus is wider than --max-locus-span, so it is not assembled",
             ),
         );
     }
@@ -689,7 +689,7 @@ impl ParalogExplanations {
                     "why",
                     DetailValue::Text(
                         "the hidden-paralog filter flagged it, and flagged records are dropped \
-                         unless --paralog-filter-tag is given"
+                         unless --hidden-dup-tag is given"
                             .to_owned(),
                     ),
                 )];

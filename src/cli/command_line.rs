@@ -184,7 +184,7 @@ mod tests {
                 "--output",
                 "calls.vcf",
                 "--defaults",
-                "--max-candidate-alleles",
+                "--max-generic-alleles",
                 "4",
             ])
             .expect("the command line parses");
@@ -197,14 +197,14 @@ mod tests {
                 .clone()
         };
 
-        let typed = named("max-candidate-alleles");
+        let typed = named("max-generic-alleles");
         assert_eq!((typed.value.as_deref(), typed.typed), (Some("4"), true));
-        let defaulted = named("max-reads-per-position");
+        let defaulted = named("max-depth");
         assert_eq!(
             (defaulted.value.as_deref(), defaulted.typed),
             (Some("1000"), false)
         );
-        let not_given = named("regions");
+        let not_given = named("max-reads-per-position");
         assert_eq!((not_given.value, not_given.typed), (None, false));
         assert!(settings.iter().all(|setting| setting.name != "help"));
     }

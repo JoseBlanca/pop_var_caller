@@ -24,7 +24,7 @@ import re
 import sys
 from collections import defaultdict
 
-FILTER_ID = "hiddenParalog"
+FILTER_ID = "hiddenDup"
 CHROM, POS, REF, ALT, FILTER_COLUMN, INFO_COLUMN = 0, 1, 3, 4, 6, 7
 
 # The order kinds are reported in: the four that carry both signals, then the one scored on
