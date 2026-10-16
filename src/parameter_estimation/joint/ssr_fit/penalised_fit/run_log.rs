@@ -428,18 +428,20 @@ fn unscored_strengths_line(period: u8, curves: &SmoothCurves) -> Option<String> 
 /// **Why some of a motif length's standard errors are absent**: the curvature they are read off
 /// could not be inverted ([`UndeterminedErrors`]). Every error so left out, and not already
 /// withheld for too few loci, is written as not placed. **The line names no cause**: the run
-/// does not measure why the inversion failed, and the cause measured so far
-/// ([`UndeterminedErrors`]) is not the only one possible.
+/// does not measure why the inversion failed, and no cohort is known to fail it since `H` holds
+/// the allele-length prior's curvature ([`UndeterminedErrors`]).
 fn undetermined_errors_line(period: u8, undetermined: UndeterminedErrors) -> String {
     let (which, curvature) = match undetermined {
         UndeterminedErrors::EveryNumber => (
             "none determined for any of its numbers",
-            "the fit's curvature, with the curves' bend penalties added",
+            "the fit's curvature, with its priors added (the curves' bend penalties, the stutter \
+             prior and the allele-length prior)",
         ),
         UndeterminedErrors::EveryNumberButBetweenLocusShare => (
             "none determined for any of its numbers except F, which is read off pairs of samples \
              with a curvature of its own",
-            "the fit's curvature, with the curves' bend penalties added",
+            "the fit's curvature, with its priors added (the curves' bend penalties, the stutter \
+             prior and the allele-length prior)",
         ),
         UndeterminedErrors::BetweenLocusShare => (
             "none determined for F",
@@ -611,9 +613,10 @@ pub(super) fn withheld_errors_line(outcomes: &[StratumOutcome]) -> Option<String
 
 #[cfg(test)]
 mod tests {
+    use super::super::outcomes_and_lines_of_a_motif_length;
     use super::super::tests::{
-        a_drawn_class, a_narrow_production_fit,
-        a_three_base_cohort_whose_curvature_cannot_be_inverted,
+        a_drawn_class, a_fit_whose_curvature_cannot_be_inverted, a_narrow_production_fit,
+        a_three_base_cohort_whose_reads_alone_curve_upward,
     };
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
@@ -1136,23 +1139,26 @@ mod tests {
     }
 
     /// **A motif length whose errors could not be determined says so, and writes every error as
-    /// not placed** (or withheld for too few loci, which comes first); the three-base cohort of
-    /// the fit's own test, 10 loci a class, whose `H` fails along a trade between two allele
-    /// lengths because it leaves out the allele-length prior's curvature (see the cohort's doc).
+    /// not placed** (or withheld for too few loci, which comes first): the three-base cohort of
+    /// the fit's own tests, 10 loci a class, its errors read off a curvature built to fail
+    /// (`a_fit_whose_curvature_cannot_be_inverted`). No real cohort is known to fail since `H`
+    /// holds the allele-length prior's curvature ([`UndeterminedErrors`]).
     #[test]
     fn undetermined_errors_are_logged_and_written_as_not_placed() {
-        let (outcomes, lines) = fit_and_log(
-            &a_three_base_cohort_whose_curvature_cannot_be_inverted(),
-            &[0.3; 4],
-        );
+        let cohort = a_three_base_cohort_whose_reads_alone_curve_upward();
+        let config = a_narrow_production_fit();
+        let fit = a_fit_whose_curvature_cannot_be_inverted(&cohort, &[0.3; 4], &config);
+        let classes: Vec<&StratumEvidence> = cohort.iter().collect();
+        let (outcomes, lines) = outcomes_and_lines_of_a_motif_length(&classes, fit, &config);
         let line = the_line(&lines, "motif length 3, standard errors:");
         assert_eq!(
             line.text(),
             "motif length 3, standard errors: none determined for any of its numbers except F, \
              which is read off pairs of samples with a curvature of its own: the fit's \
-             curvature, with the curves' bend penalties added, could not be inverted at the \
-             values the fit reached; those errors are written as not placed, except where too \
-             few loci already withheld them"
+             curvature, with its priors added (the curves' bend penalties, the stutter prior and \
+             the allele-length prior), could not be inverted at the values the fit reached; \
+             those errors are written as not placed, except where too few loci already withheld \
+             them"
         );
         let mut errors = 0;
         for outcome in &outcomes {
@@ -1248,9 +1254,9 @@ mod tests {
             undetermined_errors_line(2, UndeterminedErrors::EveryNumberButBetweenLocusShare),
             "motif length 2, standard errors: none determined for any of its numbers except F, \
              which is read off pairs of samples with a curvature of its own: the fit's curvature, \
-             with the curves' bend penalties added, could not be inverted at the values the fit \
-             reached; those errors are written as not placed, except where too few loci already \
-             withheld them"
+             with its priors added (the curves' bend penalties, the stutter prior and the \
+             allele-length prior), could not be inverted at the values the fit reached; those \
+             errors are written as not placed, except where too few loci already withheld them"
         );
     }
 }

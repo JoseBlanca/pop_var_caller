@@ -382,12 +382,20 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   low changes about 4 calls in 100,000 (500 and 2,000 × 3), both directions alike, against 5–6 in 100
   already wrong; the fitted stutter changes 2 to 5 in 10,000.
 
-- ☐ **D7** *(owner, 2026-10-16; after checkpoint D)* The errors' `H` and middle term gain the
+- ✅ **D7** *(owner, 2026-10-16; after checkpoint D)* The errors' `H` and middle term gain the
   allele-length prior's curvature (spec §7, 2026-10-16), as the stutter prior's already is; the
   rule that withholds every error when `H` still fails stays as the fallback. The tests that pinned the
-  failed inversion on a real cohort (`a_three_base_cohort_whose_curvature_cannot_be_inverted`) now
+  failed inversion on a real cohort (now `a_three_base_cohort_whose_reads_alone_curve_upward`)
   expect errors, and the fallback is tested on a matrix built to fail. Checked on the D1 coverage runs
   that lost their errors, with the diagnosis report's numbers. *Source:* spec §2.4, §2.6, §7.
+  *Implemented (2026-10-16), for review:* `Q·(diag(s) − s sᵀ)` on each class's share logits, in
+  `P` (so in `H` and the middle term), from one helper shared with counting. All 89 of D1's coverage
+  runs that lost their errors now invert (56 at 500 samples or fewer, coverage identical to the
+  diagnosis' option (c) table; 33 at 2,000). The fixture is re-recorded: no fitted number moves;
+  59,443 of 63,000 error fields move (median ratio 1.000 for the stutter numbers, 0.990 for the
+  shares), and the one run whose errors were withheld (`p2_n60_d10_pcr_free` seed 2) has them.
+  The cohort test is renamed `a_three_base_cohort_whose_reads_alone_curve_upward`; the fallback is
+  tested on a curvature built to fail.
 - ☐ **D8** *(owner, 2026-10-16)* Where errors start (spec §7, 2026-10-16): stutter numbers from 3
   loci with reads, F and allele-length shares from 8, a share's rule from 1 expected locus; the stated
   F's median keeps 8. The run log, the parameters file's notes and the error table follow. *Depends:*

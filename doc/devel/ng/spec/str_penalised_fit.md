@@ -214,11 +214,27 @@ slip rate 0.5% of its value low changes any call is not measured (§5).
 ### 2.6 Standard errors
 
 **Every reported number carries one, computed as `H⁻¹(B + P)H⁻¹`**: H the penalised curvature of the
-objective, B the sum over loci of each locus's score contribution times itself, P the bend penalties.
+objective, B the sum over loci of each locus's score contribution times itself, P the fit's prior —
+the bend penalties, the stutter prior's curvature (§2.10.4) and the allele-length prior's (below).
 This is the Bayesian covariance of a penalised fit with B in place of the curvature, **because the
 objective treats samples at one locus as independent and they are not**; errors that ignore this held
 the truth within one error only 0–2 times in 100 at 500 samples, where an honest error holds it about
 68 times (`track1_counting_fit_errors_2026-10-12.md`).
+
+**The allele-length prior's curvature is in H and in the middle term** *(owner, 2026-10-16; plan step
+D7)*. The floor of §2.4 adds `q` draws to each of a class's lengths (both floors together), so the
+objective the fit climbs carries `Σ q·ln s` over the lengths, `s` the shares. On the share logits,
+the reference length's held at 0, its curvature is `Q·(diag(s) − s sᵀ)`, with `Q` the prior's draws
+over every length and `s` the shares of the other lengths (`allele_prior_curvature`,
+`penalised_fit.rs`). It enters P, so H and the middle term both get it, as the stutter prior's does
+(§2.10.4); putting it in H alone gave the same coverage to within 0.01. Without it, H was not the
+curvature of the objective the fit maximises, and at thin classes it was not positive: the reads'
+likelihood alone curves upward along a trade between two rare allele lengths, which only the prior
+holds. Every error of the motif length was then withheld, in 89 of D1's 480 coverage runs
+(`reports/implementations/str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`); with the
+curvature, all 89 invert. The fitted numbers do not change. **The rule that withholds every error of
+a motif length when H cannot be inverted stays, as a fallback no measured case reaches**
+(`UndeterminedErrors`).
 
 **What was measured** (`compare_D_prior_2026-10-14.md` §3, truth within one error, honest about 68 in
 100):
@@ -508,7 +524,8 @@ At one read's worth that matters only where a class has a handful of reads.
   (`doc/devel/reports/implementations/str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`) fail
   not along a stiff stutter curve but along a trade between two rare allele lengths at a thin
   class, because H leaves out the curvature of the allele-length prior of §2.4; the stutter numbers
-  alone had positive curvature in every such run.*
+  alone had positive curvature in every such run.* *Done 2026-10-16 (plan step D7): H and the middle
+  term now hold that curvature too (§2.6), and every one of those runs inverts.*
 
 #### 2.10.5 What the run log and the parameters file say
 
@@ -826,7 +843,7 @@ Each as the lead recommended (`reports/implementations/str_penalised_fit_checkpo
 
 - **Owner: D2 and D5 pass; the climb is deleted** (plan milestone E).
 - **Owner: the errors' `H` and middle term gain the allele-length prior's curvature** (§2.4's floor:
-  one locus's worth of draws spread over the lengths, plus the half draw a class), as §2.10.4 already
+  one locus's worth of draws spread over the lengths, plus the half draw a class [*correction, review of D7: one draw a class, `ALLELE_PSEUDO_DRAWS_A_CLASS`*]), as §2.10.4 already
   does for the stutter prior. Without it `H` is not invertible at thin classes, where the reads'
   likelihood alone curves upward along a trade between two rare lengths, and every error of the motif
   length was withheld (`reports/implementations/str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`:

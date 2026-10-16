@@ -281,6 +281,62 @@ fn pseudo_draws_a_length(allele_span: i32) -> f64 {
     ALLELE_PSEUDO_DRAWS_A_CLASS / allele_classes_in(allele_span) as f64
 }
 
+/// **The second floor's draws a length at one class** (spec §2.4):
+/// [`PenalisedFitConfig::allele_prior_tracts`] loci's worth of the class's allele draws, `draws`
+/// summed over its lengths and divided by its loci with reads, spread evenly over the lengths.
+/// The whole allele-length prior a length is this plus
+/// [`PenalisedFitConfig::allele_pseudo_draws`], the first floor.
+///
+/// **One function for the two places that need it**: counting adds the prior to every length's
+/// draws before it chooses the shares, and the standard errors add the prior's curvature
+/// ([`allele_prior_curvature`]). So the prior the errors account for is the prior the fit used.
+fn allele_prior_draws_from_loci(
+    fit: &PenalisedFitConfig,
+    draws: &[f64],
+    tracts_with_reads: usize,
+) -> f64 {
+    let prior_total = if fit.allele_prior_tracts > 0.0 {
+        let total: f64 = draws.iter().sum();
+        fit.allele_prior_tracts * total / tracts_with_reads.max(1) as f64
+    } else {
+        0.0
+    };
+    prior_total / draws.len().max(1) as f64
+}
+
+/// **The allele-length prior's curvature over one class's share logits**: `Q·(diag(s) − s sᵀ)`,
+/// `(alleles − 1)²` entries row by row, in the order of the lengths with the reference length
+/// left out. `s` are the class's shares at those lengths and `Q` the prior's draws over every
+/// length, `prior_draws_a_length × alleles`.
+///
+/// **Derivation.** The shares are a softmax of one logit `η_b` a length, the reference length's
+/// held at 0: `s_a = e^(η_a) / Σ_c e^(η_c)`. The prior adds `q = prior_draws_a_length` draws to
+/// every length, so the objective the fit climbs carries the term `Σ_a q·ln s_a` over all
+/// `alleles` lengths, the reference's included. With `∂ ln s_a / ∂η_b = δ_ab − s_b`, its slope is
+/// `q − Q s_b` and its second derivative `−Q s_b (δ_bc − s_c)`; this function returns minus that,
+/// the curvature as `H` holds it. `Q` is held fixed, as each round of counting holds it: it comes
+/// from the class's expected draws, not from the shares being chosen. It is exactly the prior's
+/// part of the information a round of counting uses to choose the shares (`CurveData::evaluate`,
+/// whose count total includes the prior's draws).
+fn allele_prior_curvature(prior_draws_a_length: f64, shares: &[f64], reference: usize) -> Vec<f64> {
+    let prior_total = prior_draws_a_length * shares.len() as f64;
+    let others: Vec<f64> = shares
+        .iter()
+        .enumerate()
+        .filter(|(allele, _)| *allele != reference)
+        .map(|(_, share)| *share)
+        .collect();
+    let block = others.len();
+    let mut curvature = vec![0.0; block * block];
+    for (row, first) in others.iter().enumerate() {
+        for (column, second) in others.iter().enumerate() {
+            let same = if row == column { *first } else { 0.0 };
+            curvature[row * block + column] = prior_total * (same - first * second);
+        }
+    }
+    curvature
+}
+
 /// **Where every class's stutter starts in production**: slip rate 0.05, shorter share 0.5,
 /// fall-off 0.3 (spec §2.7). The bench's values; soft.
 pub const STARTING_STUTTER: Slippage = Slippage {
@@ -542,21 +598,23 @@ pub struct PenalisedPeriodFit {
 /// **Standard errors a motif length's fit left undetermined because the curvature they come from
 /// could not be inverted.**
 ///
-/// A standard error is read off the inverse of `H`, the curvature of the fit's objective plus the
-/// curves' bend penalties ([`PenalisedClassErrors`]). The inversion fails for one of two reasons:
+/// A standard error is read off the inverse of `H`, the curvature of the fit's objective plus its
+/// prior: the curves' bend penalties, the stutter prior and the allele-length prior
+/// ([`PenalisedClassErrors`]). **This is the fallback, and no fit that ran a round is known to
+/// reach it.** A fit with no rounds (`max_rounds = 0`, which no production setting uses) has no
+/// counts to hold the allele-length prior at, adds no prior curvature, and can reach it.
+/// The inversion could fail for one of two reasons:
 ///
-/// - **the fit's curvature is not positive in some direction** at the values the fit reached.
-///   This is the only cause measured so far (diagnosis report
-///   `str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`: all 56 runs of step D1's coverage
-///   grid at 500 samples or fewer that lost their errors, and the test cohort
-///   `a_three_base_cohort_whose_curvature_cannot_be_inverted`). `H` leaves out the curvature of
-///   the allele-length prior (spec §2.4), which the fit does maximise. At a thin class the reads'
-///   likelihood alone can curve upward along a trade between two rare allele lengths, typically
-///   the two outermost lengths on one side of the window, and only that prior's curvature would
-///   make the total curve downward there. The stutter numbers alone had positive curvature in
-///   every such run;
-/// - **some combination of numbers has next to no reads behind it**: a share pushed to nearly 0
-///   or 1, say. Possible, but not seen in the cases measured.
+/// - **the fit's curvature is not positive in some direction** at the values the fit reached:
+///   the reads' likelihood curves upward there by more than the prior curves downward. Until
+///   2026-10-16 (plan step D7) `H` left out the allele-length prior's curvature (spec §2.4), and
+///   then this happened at thin classes along a trade between two rare allele lengths, typically
+///   the two outermost on one side of the window: in 56 of step D1's 384 coverage runs at 500
+///   samples or fewer, and in the test cohort `a_three_base_cohort_whose_reads_alone_curve_upward`
+///   (diagnosis report `str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`). With that
+///   curvature in `H`, every one of those inverts;
+/// - **some combination of numbers has next to no reads and next to no prior behind it**.
+///   Possible, but not seen in the cases measured.
 ///
 /// A stiff curve does not cause it alone. Its penalty, up to 10¹⁰ a number, adds rounding of
 /// about 10⁻⁵ to the inversion, so the inversion fails only along a straight line of the curve
@@ -629,18 +687,7 @@ fn fit_one_period(
     fit: &PenalisedFitConfig,
     round_ended: &dyn Fn(usize, f64),
 ) -> PenalisedPeriodFit {
-    if let Some(problem) = fit.stutter_prior_problem() {
-        panic!("{problem}");
-    }
-    if let Some(first) = classes.first() {
-        assert!(
-            classes
-                .iter()
-                .all(|class| class.stratum.period == first.stratum.period),
-            "one motif length at a time"
-        );
-    }
-    let Some(mut period) = Period::new(classes, fit) else {
+    let Some(mut period) = fitted_period(classes, homozygote_excess, fit, round_ended) else {
         return PenalisedPeriodFit {
             classes: vec![None; classes.len()],
             curves: None,
@@ -659,6 +706,36 @@ fn fit_one_period(
             undetermined_errors: None,
         };
     };
+    let started = Instant::now();
+    let (errors, undetermined_errors) = if fit.standard_errors {
+        period.standard_errors(classes, homozygote_excess, fit)
+    } else {
+        (vec![None; period.points()], None)
+    };
+    period.error_seconds = started.elapsed().as_secs_f64();
+    period.into_fit(classes, errors, undetermined_errors)
+}
+
+/// **The fit of [`fit_one_period`] before its standard errors**: penalised counting, then F read
+/// off pairs of samples alternating with it. `None` when no class has reads.
+fn fitted_period(
+    classes: &[&StratumEvidence],
+    homozygote_excess: &[f64],
+    fit: &PenalisedFitConfig,
+    round_ended: &dyn Fn(usize, f64),
+) -> Option<Period> {
+    if let Some(problem) = fit.stutter_prior_problem() {
+        panic!("{problem}");
+    }
+    if let Some(first) = classes.first() {
+        assert!(
+            classes
+                .iter()
+                .all(|class| class.stratum.period == first.stratum.period),
+            "one motif length at a time"
+        );
+    }
+    let mut period = Period::new(classes, fit)?;
     period.count(classes, homozygote_excess, fit, false, round_ended);
     for alternation in 0..fit.pair_alternations {
         let started = Instant::now();
@@ -691,14 +768,7 @@ fn fit_one_period(
             break;
         }
     }
-    let started = Instant::now();
-    let (errors, undetermined_errors) = if fit.standard_errors {
-        period.standard_errors(classes, homozygote_excess, fit)
-    } else {
-        (vec![None; period.points()], None)
-    };
-    period.error_seconds = started.elapsed().as_secs_f64();
-    period.into_fit(classes, errors, undetermined_errors)
+    Some(period)
 }
 
 /// **Fit every repeat-tract class of a cohort by penalised EM, one motif length at a time**
@@ -840,31 +910,11 @@ fn fit_repeat_tracts_logging(
     for indices in classes_of_each_period.values() {
         let classes: Vec<&StratumEvidence> = indices.iter().map(|&index| &strata[index]).collect();
         let period = classes[0].stratum.period;
-        let mut fit = fit_one_period(&classes, homozygote_excess, config, &|round, change| {
+        let fit = fit_one_period(&classes, homozygote_excess, config, &|round, change| {
             round_ended(period, round, change);
         });
-        let fitted = std::mem::take(&mut fit.classes);
-        let directions_on_the_prior =
-            run_log::classes_whose_directions_rest_on_the_prior(&fitted, config);
-        let distinct_rows: Vec<Option<usize>> = fitted
-            .iter()
-            .map(|class| class.as_ref().and_then(|class| class.distinct_rows))
-            .collect();
-        let period_outcomes: Vec<StratumOutcome> = classes
-            .iter()
-            .zip(fitted)
-            .map(|(evidence, fitted)| {
-                outcome_of_a_class(evidence, fitted, fit.curves.as_ref(), config)
-            })
-            .collect();
-        for line in run_log::lines_of_a_motif_length(
-            &classes,
-            &period_outcomes,
-            &distinct_rows,
-            directions_on_the_prior,
-            &fit,
-            config,
-        ) {
+        let (period_outcomes, lines) = outcomes_and_lines_of_a_motif_length(&classes, fit, config);
+        for line in lines {
             log(line);
         }
         for (&index, outcome) in indices.iter().zip(period_outcomes) {
@@ -879,6 +929,36 @@ fn fit_repeat_tracts_logging(
         log(run_log::Line::Detail(line));
     }
     outcomes
+}
+
+/// **One motif length's fit as each class's [`StratumOutcome`] and the run log's lines for it**:
+/// `classes` are the motif length's, in the order its fit was given them.
+fn outcomes_and_lines_of_a_motif_length(
+    classes: &[&StratumEvidence],
+    mut fit: PenalisedPeriodFit,
+    config: &PenalisedFitConfig,
+) -> (Vec<StratumOutcome>, Vec<run_log::Line>) {
+    let fitted = std::mem::take(&mut fit.classes);
+    let directions_on_the_prior =
+        run_log::classes_whose_directions_rest_on_the_prior(&fitted, config);
+    let distinct_rows: Vec<Option<usize>> = fitted
+        .iter()
+        .map(|class| class.as_ref().and_then(|class| class.distinct_rows))
+        .collect();
+    let outcomes: Vec<StratumOutcome> = classes
+        .iter()
+        .zip(fitted)
+        .map(|(evidence, fitted)| outcome_of_a_class(evidence, fitted, fit.curves.as_ref(), config))
+        .collect();
+    let lines = run_log::lines_of_a_motif_length(
+        classes,
+        &outcomes,
+        &distinct_rows,
+        directions_on_the_prior,
+        &fit,
+        config,
+    );
+    (outcomes, lines)
 }
 
 /// **One class's [`StratumOutcome`], from what its motif length's fit returned for it.**
@@ -1338,16 +1418,9 @@ impl Period {
                 .enumerate()
                 .map(|(point, count)| {
                     count.as_ref().map_or_else(Vec::new, |c| {
-                        let prior_total = if fit.allele_prior_tracts > 0.0 {
-                            let tracts = self.class_at_point[point]
-                                .map_or(1, |index| classes[index].tracts_with_reads().max(1))
-                                as f64;
-                            let total: f64 = c.draws.iter().sum();
-                            fit.allele_prior_tracts * total / tracts
-                        } else {
-                            0.0
-                        };
-                        let prior = prior_total / c.draws.len().max(1) as f64;
+                        let tracts = self.class_at_point[point]
+                            .map_or(1, |index| classes[index].tracts_with_reads());
+                        let prior = allele_prior_draws_from_loci(fit, &c.draws, tracts);
                         c.draws
                             .iter()
                             .map(|d| d + fit.allele_pseudo_draws + prior)
@@ -1432,17 +1505,25 @@ impl Period {
     ///   (Fisher's identity, as track 1 computes the counting fit's errors);
     /// - `B`, the sum over loci of each locus's slope times itself: the locus is the unit that
     ///   repeats independently;
-    /// - `P`, each curve's bend penalty at the strength and bend weights it was fitted at, and the
-    ///   stutter prior's curvature (spec §2.10.4): `a·p(1 − p)` on each class's slip rate, shorter
-    ///   share and fall-off, `a` the prior's weight and `p` the number. Like the bend penalty it
-    ///   is part of the fit's prior, not of the reads, so it enters both `H` and the middle term:
-    ///   a number with no reads behind it then gets the prior's own width as its error, not one
-    ///   near zero from `B` alone.
+    /// - `P`, the fit's prior, which is not the reads: each curve's bend penalty at the strength
+    ///   and bend weights it was fitted at; the stutter prior's curvature (spec §2.10.4),
+    ///   `a·p(1 − p)` on each class's slip rate, shorter share and fall-off, `a` the prior's
+    ///   weight and `p` the number; and the allele-length prior's curvature (spec §2.4, owner
+    ///   2026-10-16), `Q·(diag(s) − s sᵀ)` over each class's share logits
+    ///   ([`allele_prior_curvature`]), `Q` the prior's draws over the class's lengths, both
+    ///   floors together, and `s` its shares. **`P` enters both `H` and the middle term**: a
+    ///   number with no reads behind it then gets the prior's own width as its error, not one
+    ///   near zero from `B` alone. For the allele-length prior this follows the stutter prior's
+    ///   rule; measured on step D1's coverage runs, putting it in `H` alone gave the same coverage
+    ///   to within 0.01 (diagnosis report `str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`).
+    ///
+    /// **Without the allele-length prior's curvature, `H` was not the curvature of the objective
+    /// the fit climbs**, and at thin classes it was not positive: the reads' likelihood alone can
+    /// curve upward along a trade between two rare allele lengths, which only the prior holds.
     ///
     /// F read off pairs of samples is the answer to a second objective, so it is handled on its own:
     /// the same formula over F's curve, its slope and curvature taken numerically locus by locus
-    /// from the pairwise likelihood, and the other numbers' errors taken with F held. The half
-    /// allele draw a class adds is left out of `H` and `P`.
+    /// from the pairwise likelihood, and the other numbers' errors taken with F held.
     ///
     /// **Where `H` cannot be inverted, the errors it would give are left out** and the second
     /// value says which ([`UndeterminedErrors`]): every number's when the joint `H` fails, except
@@ -1456,13 +1537,41 @@ impl Period {
         Vec<Option<PenalisedClassErrors>>,
         Option<UndeterminedErrors>,
     ) {
-        let allele_span = fit.allele_span;
-        let points = self.points();
-        let shares_block = self.alleles - 1;
+        let joint = self.joint_curvature(classes, homozygote_excess, fit);
+        self.errors_from(classes, homozygote_excess, fit, &joint)
+    }
+
+    /// **Where each class's numbers sit in the joint matrices of the standard errors**: `width`
+    /// rows a repeat count, the three stutter numbers first, then F when it is counted with them,
+    /// then the shares from `share_offset`.
+    fn error_layout(&self) -> ErrorLayout {
         let f_in_counting = !self.spread_from_pairs && self.between_locus_share_measurable;
         let share_offset = 3 + usize::from(f_in_counting);
-        let width = share_offset + shares_block;
-        let size = points * width;
+        let width = share_offset + self.alleles - 1;
+        ErrorLayout {
+            f_in_counting,
+            share_offset,
+            width,
+            size: self.points() * width,
+        }
+    }
+
+    /// **`A`, `B` and `P` of [`standard_errors`](Self::standard_errors)** over every number of
+    /// every class, at the values the fit reached.
+    fn joint_curvature(
+        &self,
+        classes: &[&StratumEvidence],
+        homozygote_excess: &[f64],
+        fit: &PenalisedFitConfig,
+    ) -> SandwichMatrices {
+        let allele_span = fit.allele_span;
+        let shares_block = self.alleles - 1;
+        let ErrorLayout {
+            f_in_counting,
+            share_offset,
+            width,
+            size,
+        } = self.error_layout();
         let reference = self.reference_allele;
         let theta_at = |point: usize| -> Vec<f64> {
             let mut theta = vec![
@@ -1676,7 +1785,78 @@ impl Period {
                 penalty[index * size + index] += fit.stutter_prior_reads * value * (1.0 - value);
             }
         }
-        let covariance = penalised_sandwich(&curvature, &spread, &penalty, size);
+        self.add_allele_prior_curvature(classes, fit, &mut penalty);
+        SandwichMatrices {
+            curvature,
+            spread,
+            penalty,
+        }
+    }
+
+    /// **Adds the allele-length prior's curvature to `penalty`** (`size × size` in
+    /// [`ErrorLayout`]), class by class over its share logits ([`allele_prior_curvature`]). The
+    /// prior's draws are taken from the counts the last round chose the shares from, as that
+    /// round took them.
+    fn add_allele_prior_curvature(
+        &self,
+        classes: &[&StratumEvidence],
+        fit: &PenalisedFitConfig,
+        penalty: &mut [f64],
+    ) {
+        let ErrorLayout {
+            share_offset,
+            width,
+            size,
+            ..
+        } = self.error_layout();
+        let shares_block = self.alleles - 1;
+        for (point, class) in self.class_at_point.iter().enumerate() {
+            let (Some(index), Some(counts)) = (class, &self.last_counts[point]) else {
+                continue;
+            };
+            let prior_draws_a_length = fit.allele_pseudo_draws
+                + allele_prior_draws_from_loci(
+                    fit,
+                    &counts.draws,
+                    classes[*index].tracts_with_reads(),
+                );
+            let block = allele_prior_curvature(
+                prior_draws_a_length,
+                &self.shares[point],
+                self.reference_allele,
+            );
+            let base = point * width + share_offset;
+            for row in 0..shares_block {
+                for column in 0..shares_block {
+                    penalty[(base + row) * size + base + column] +=
+                        block[row * shares_block + column];
+                }
+            }
+        }
+    }
+
+    /// **The standard errors from `A`, `B` and `P`** ([`standard_errors`](Self::standard_errors)),
+    /// and F's own when it is read off pairs of samples.
+    fn errors_from(
+        &self,
+        classes: &[&StratumEvidence],
+        homozygote_excess: &[f64],
+        fit: &PenalisedFitConfig,
+        joint: &SandwichMatrices,
+    ) -> (
+        Vec<Option<PenalisedClassErrors>>,
+        Option<UndeterminedErrors>,
+    ) {
+        let allele_span = fit.allele_span;
+        let points = self.points();
+        let ErrorLayout {
+            f_in_counting,
+            share_offset,
+            width,
+            size,
+        } = self.error_layout();
+        let reference = self.reference_allele;
+        let covariance = penalised_sandwich(&joint.curvature, &joint.spread, &joint.penalty, size);
         // F off pairs of samples: the same formula over F's curve alone. It does not use the joint
         // `H`, so its errors stand whether or not that one could be inverted.
         let pairs_counted = self.spread_from_pairs && self.between_locus_share_measurable;
@@ -2713,6 +2893,28 @@ fn factorise_with_retries(matrix: &SymmetricBand) -> Option<BandCholesky> {
 // ---------------------------------------------------------------------
 // The penalised sandwich, in dense matrices
 // ---------------------------------------------------------------------
+
+/// **Where each class's numbers sit in [`SandwichMatrices`]'s matrices**: `width` rows a repeat
+/// count, `size` in all; the shares start at `share_offset`, after the three stutter numbers and,
+/// when `f_in_counting`, F.
+#[derive(Debug, Clone, Copy)]
+struct ErrorLayout {
+    f_in_counting: bool,
+    share_offset: usize,
+    width: usize,
+    size: usize,
+}
+
+/// **The three matrices the standard errors are read from**, each `size × size` row by row
+/// ([`ErrorLayout`]): `curvature`, `A`, the reads' curvature class by class; `spread`, `B`, the
+/// sum over loci of each locus's slope times itself; `penalty`, `P`, the fit's prior (the curves'
+/// bend penalties, the stutter prior's curvature and the allele-length prior's).
+#[derive(Debug, Clone)]
+struct SandwichMatrices {
+    curvature: Vec<f64>,
+    spread: Vec<f64>,
+    penalty: Vec<f64>,
+}
 
 /// **`H⁻¹ (B + P) H⁻¹` with `H = A + P` plus the fit's own ridge**, every matrix `size × size`
 /// row by row. `None` when that `H` is not positive definite to working precision: no larger
@@ -3802,18 +4004,48 @@ mod tests {
         );
     }
 
-    /// **A three-base cohort whose curvature cannot be inverted**: six classes at 6 to 11
-    /// repeats, 10 loci each, 4 samples at 5 reads, drawn at a slip rate of 0.003, so the whole
-    /// motif length holds a handful of slipped reads. `A + P` is not positive definite: it has
-    /// one negative direction (eigenvalue −0.14), the trade between the shares one and two
-    /// repeats longer than the reference at the classes of 11, 6 and 10 repeats, and its
-    /// factorisation fails at the last row, the share two repeats longer at 11 repeats. **The
-    /// cause is the allele lengths, not the stutter curves**: the 18 stutter numbers alone have
-    /// positive curvature (smallest eigenvalue 0.044), and with the allele-length prior's
-    /// curvature added, which `H` leaves out, the matrix inverts (measured by the review of
-    /// commits `0b12941d..53a3e4f9`; see [`UndeterminedErrors`]). The stutter curves do come out
-    /// stiff here, near 10¹⁰, but that is not why the inversion fails.
-    pub(super) fn a_three_base_cohort_whose_curvature_cannot_be_inverted() -> Vec<StratumEvidence> {
+    /// **`cohort`'s fit with its standard errors read off a curvature built to fail**: the reads'
+    /// curvature at the first class's first share set so that `H`'s diagonal there is −1, every
+    /// other entry of `A`, `B` and `P` as the fit computed it. What the fallback of
+    /// [`UndeterminedErrors`] gets.
+    pub(super) fn a_fit_whose_curvature_cannot_be_inverted(
+        cohort: &[StratumEvidence],
+        homozygote_excess: &[f64],
+        fit: &PenalisedFitConfig,
+    ) -> PenalisedPeriodFit {
+        let classes: Vec<&StratumEvidence> = cohort.iter().collect();
+        let period = fitted_period(&classes, homozygote_excess, fit, &|_, _| {})
+            .expect("the classes have reads");
+        let ErrorLayout {
+            share_offset,
+            width,
+            size,
+            ..
+        } = period.error_layout();
+        let mut joint = period.joint_curvature(&classes, homozygote_excess, fit);
+        let point = period
+            .class_at_point
+            .iter()
+            .position(Option::is_some)
+            .expect("a class with reads");
+        let row = point * width + share_offset;
+        let diagonal = row * size + row;
+        joint.curvature[diagonal] = -1.0 - joint.penalty[diagonal] - RIDGE;
+        let (errors, undetermined) = period.errors_from(&classes, homozygote_excess, fit, &joint);
+        period.into_fit(&classes, errors, undetermined)
+    }
+
+    /// **A three-base cohort whose reads alone curve upward**: six classes at 6 to 11 repeats, 10
+    /// loci each, 4 samples at 5 reads, drawn at a slip rate of 0.003, so the whole motif length
+    /// holds a handful of slipped reads. Without the allele-length prior's curvature, `H` is not
+    /// positive definite: it has one negative direction (eigenvalue −0.14), the trade between
+    /// the shares one and two repeats longer than the reference at the classes of 11, 6 and 10
+    /// repeats, and its factorisation fails at the last row, the share two repeats longer at 11
+    /// repeats. The 18 stutter numbers alone have positive curvature (smallest eigenvalue 0.044;
+    /// measured by the review of commits `0b12941d..53a3e4f9`). With the prior's curvature, which
+    /// `H` holds since plan step D7, it inverts. The stutter curves come out stiff here, near
+    /// 10¹⁰.
+    pub(super) fn a_three_base_cohort_whose_reads_alone_curve_upward() -> Vec<StratumEvidence> {
         (6..=11)
             .map(|repeats| {
                 let mut evidence = draw_stratum(
@@ -3860,19 +4092,182 @@ mod tests {
         assert!((covariance[3] - 1.0 / 4.0).abs() < 1e-6, "{covariance:?}");
     }
 
-    /// **A motif length whose curvature cannot be inverted reports no errors, and says why**,
-    /// where it used to report errors set by a large ridge: on this cohort the three-base level's
-    /// logit error came out about 300 times smaller than one slipped read supports. Its numbers
-    /// are still fitted. **F's errors are kept**: F is read off pairs of samples, and its own
-    /// curvature is inverted on its own.
-    ///
-    /// **This pins today's `H`, not a property of the cohort.** The cohort fails only because `H`
-    /// leaves out the allele-length prior's curvature (see its doc); with that curvature in `H`,
-    /// its matrix inverts, and this path would need a matrix built to fail instead.
+    /// **The allele-length prior's curvature is the second derivative of the prior's term in the
+    /// objective**, at a fitted class's own shares and prior draws. The term is `Σ_a q·ln s_a` over
+    /// every length, `q` the prior's draws a length as counting adds them and `s` the softmax of
+    /// the class's share logits, the reference's held at 0; its second derivatives are taken by
+    /// central differences over those logits and compared with the block `H` receives, at the
+    /// class's place in the joint matrix. The class is the cohort's one at 11 repeats, whose `H`
+    /// fails without the prior.
     #[test]
-    fn errors_that_need_a_ridge_are_left_undetermined() {
-        let fit = fit_period_by_penalised_counting(
-            &a_three_base_cohort_whose_curvature_cannot_be_inverted(),
+    fn the_allele_length_prior_curvature_is_the_second_derivative_of_its_term() {
+        let cohort = a_three_base_cohort_whose_reads_alone_curve_upward();
+        let classes: Vec<&StratumEvidence> = cohort.iter().collect();
+        let fit = a_narrow_production_fit();
+        let period =
+            fitted_period(&classes, &[0.3; 4], &fit, &|_, _| {}).expect("the classes have reads");
+        let ErrorLayout {
+            share_offset,
+            width,
+            size,
+            ..
+        } = period.error_layout();
+        let mut added = vec![0.0; size * size];
+        period.add_allele_prior_curvature(&classes, &fit, &mut added);
+        let index = classes
+            .iter()
+            .position(|class| class.stratum.reference_repeats == 11)
+            .expect("a class at 11 repeats");
+        let point = period
+            .class_at_point
+            .iter()
+            .position(|class| *class == Some(index))
+            .expect("the class has a point");
+        let counts = period.last_counts[point].as_ref().expect("counted");
+        let q = fit.allele_pseudo_draws
+            + allele_prior_draws_from_loci(&fit, &counts.draws, classes[index].tracts_with_reads());
+        assert!(q > fit.allele_pseudo_draws, "both floors are in it: {q}");
+        let reference = period.reference_allele;
+        let block = period.alleles - 1;
+        let logits = period.shares_curve.values[point * block..(point + 1) * block].to_vec();
+        let term = |logits: &[f64]| -> f64 {
+            softmax_with_reference(logits, reference)
+                .iter()
+                .map(|share| q * float::ln(*share))
+                .sum()
+        };
+        let step = 1e-4;
+        let mut largest: f64 = 0.0;
+        for row in 0..block {
+            for column in 0..block {
+                let at = |up_row: f64, up_column: f64| {
+                    let mut moved = logits.clone();
+                    moved[row] += up_row * step;
+                    moved[column] += up_column * step;
+                    term(&moved)
+                };
+                let second = (at(1.0, 1.0) - at(1.0, -1.0) - at(-1.0, 1.0) + at(-1.0, -1.0))
+                    / (4.0 * step * step);
+                let base = point * width + share_offset;
+                let entry = added[(base + row) * size + base + column];
+                largest = largest.max(entry.abs());
+                assert!(
+                    (entry + second).abs() <= 1e-5 * q.max(1.0),
+                    "row {row}, column {column}: added {entry}, minus the second derivative {}",
+                    -second
+                );
+            }
+        }
+        assert!(largest > 0.01 * q, "the block is not empty: {largest}");
+        // Nothing is added outside the classes' share blocks.
+        for row in 0..size {
+            for column in 0..size {
+                let (point_row, within_row) = (row / width, row % width);
+                let (point_column, within_column) = (column / width, column % width);
+                if point_row != point_column
+                    || within_row < share_offset
+                    || within_column < share_offset
+                {
+                    assert_eq!(added[row * size + column], 0.0, "{row}, {column}");
+                }
+            }
+        }
+    }
+
+    /// **A cohort whose reads alone curve upward gets every error** once `H` holds the
+    /// allele-length prior's curvature: without it, the same `A`, `B` and `P` cannot be inverted
+    /// (the cohort's doc), which is how this cohort lost every error but F's before plan step D7.
+    /// The errors are finite and plausible: the slip rate's, on the logit scale, is at least half
+    /// what the motif length's expected slipped reads allow pooled, and small enough to place
+    /// the number; the truth, 0.003, lies within 3 errors at every class. With F fitted inside
+    /// the counting too.
+    #[test]
+    fn a_cohort_whose_reads_alone_curve_upward_gets_its_errors() {
+        let cohort = a_three_base_cohort_whose_reads_alone_curve_upward();
+        let classes: Vec<&StratumEvidence> = cohort.iter().collect();
+        let fit = a_narrow_production_fit();
+        let period =
+            fitted_period(&classes, &[0.3; 4], &fit, &|_, _| {}).expect("the classes have reads");
+        let size = period.error_layout().size;
+        let joint = period.joint_curvature(&classes, &[0.3; 4], &fit);
+        assert!(
+            penalised_sandwich(&joint.curvature, &joint.spread, &joint.penalty, size).is_some()
+        );
+        let mut prior = vec![0.0; size * size];
+        period.add_allele_prior_curvature(&classes, &fit, &mut prior);
+        let without: Vec<f64> = joint
+            .penalty
+            .iter()
+            .zip(&prior)
+            .map(|(p, s)| p - s)
+            .collect();
+        assert_eq!(
+            penalised_sandwich(&joint.curvature, &joint.spread, &without, size),
+            None,
+            "without the allele-length prior's curvature this cohort's H cannot be inverted"
+        );
+
+        for pair_alternations in [fit.pair_alternations, 0] {
+            let fitted = fit_period_by_penalised_counting(
+                &cohort,
+                &[0.3; 4],
+                &PenalisedFitConfig {
+                    pair_alternations,
+                    ..fit.clone()
+                },
+            );
+            assert_eq!(fitted.undetermined_errors, None, "{pair_alternations}");
+            let classes: Vec<&PenalisedClass> = fitted.classes.iter().flatten().collect();
+            assert_eq!(classes.len(), 6);
+            for class in classes {
+                let errors = class.errors.as_ref().expect("errors were asked for");
+                let level = class.slippage.level;
+                let level_error = errors.level.expect("the slip rate's error");
+                let logit_error = level_error / (level * (1.0 - level));
+                // Measured: 0.66 to 1.26 on the logit scale, the truth within one error at
+                // every class. The floor: 6 classes × 10 loci × 4 samples × 5 reads at 0.003
+                // expect 3.6 slipped reads in all, so `1/√3.6` pooled, halved. The ceiling: an
+                // error above `NOT_PLACED` would be written as not placed.
+                let pooled = 1.0 / (6.0 * 10.0 * 4.0 * 5.0 * 0.003_f64).sqrt();
+                assert!(
+                    (pooled / 2.0..=crate::parameter_estimation::joint::ssr_fit::NOT_PLACED)
+                        .contains(&logit_error),
+                    "{:?}: {logit_error}",
+                    class.stratum
+                );
+                assert!(
+                    (level - 0.003).abs() <= 3.0 * level_error,
+                    "{:?}: {level} ± {level_error}",
+                    class.stratum
+                );
+                for error in [
+                    errors.shorter_share,
+                    errors.fall_off,
+                    errors.between_locus_share,
+                ]
+                .into_iter()
+                .chain(errors.allele_length_variation.iter().map(|e| Some(*e)))
+                {
+                    let error = error.expect("every error is present");
+                    assert!(error.is_finite() && error > 0.0, "{error}");
+                }
+                assert!(errors.concentration.is_some_and(f64::is_finite));
+            }
+        }
+    }
+
+    /// **A curvature that cannot be inverted leaves the errors undetermined, and says which**: the
+    /// fallback, on a matrix built to fail. The fit of a real cohort, with one share's reads'
+    /// curvature set so that its row of `H` is −1 on the diagonal: no Cholesky factor exists, and
+    /// no ridge but a large one would make one. Every number's error is absent but F's when F is
+    /// read off pairs of samples, whose own curvature is inverted on its own; with F fitted
+    /// inside the counting, F's error comes from the same `H` and is lost with the rest. The
+    /// numbers themselves are those of the fit.
+    #[test]
+    fn a_curvature_that_cannot_be_inverted_leaves_the_errors_undetermined() {
+        let cohort = a_three_base_cohort_whose_reads_alone_curve_upward();
+        let fit = a_fit_whose_curvature_cannot_be_inverted(
+            &cohort,
             &[0.3; 4],
             &a_narrow_production_fit(),
         );
@@ -3880,10 +4275,18 @@ mod tests {
             fit.undetermined_errors,
             Some(UndeterminedErrors::EveryNumberButBetweenLocusShare)
         );
-        // With F fitted inside the counting, not off pairs, its error comes from the same `H`
-        // and is lost with the rest.
-        let counting_only = fit_period_by_penalised_counting(
-            &a_three_base_cohort_whose_curvature_cannot_be_inverted(),
+        let as_fitted =
+            fit_period_by_penalised_counting(&cohort, &[0.3; 4], &a_narrow_production_fit());
+        for (broken, whole) in fit.classes.iter().zip(&as_fitted.classes) {
+            let (broken, whole) = (broken.as_ref().unwrap(), whole.as_ref().unwrap());
+            assert_eq!(broken.slippage, whole.slippage);
+            assert_eq!(
+                broken.allele_length_variation,
+                whole.allele_length_variation
+            );
+        }
+        let counting_only = a_fit_whose_curvature_cannot_be_inverted(
+            &cohort,
             &[0.3; 4],
             &PenalisedFitConfig {
                 pair_alternations: 0,
