@@ -854,6 +854,12 @@ Each as the lead recommended (`reports/implementations/str_penalised_fit_checkpo
   with reads; F and the allele-length shares keep **8**; a share's rule (`LOCI_FOR_A_SHARE_ERROR`,
   share × loci with reads) drops from 3 to **1**. The stated F's median (C9, companion §3.5) keeps
   counting classes with at least 8 loci. Plan step D8.
+- **Owner, later the same day: the slip rate keeps the line at 8 loci**; only the shorter share and
+  the fall-off get an error from 3. D7 recovered the errors of 33 runs at 2,000 samples that D1's
+  coverage had not counted; with them, at 3 to 7 loci and 2,000 samples, the slip rate's error holds
+  the truth within two errors 72 to 79 times in 100 (the shorter share's and fall-off's 89 to 93),
+  because the slip rate itself is biased low there by a median of 1.5–2.8% (§2.4's floor), not
+  because its error is narrow (`tmp/d7/coverage_by_number.md`, quoted in plan step D8).
 - **Owner: the SNP/indel fit's convergence is a separate job** after this branch merges (the
   performance review's finding L5); not on this branch.
 

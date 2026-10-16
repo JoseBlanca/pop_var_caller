@@ -396,8 +396,8 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   shares), and the one run whose errors were withheld (`p2_n60_d10_pcr_free` seed 2) has them.
   The cohort test is renamed `a_three_base_cohort_whose_reads_alone_curve_upward`; the fallback is
   tested on a curvature built to fail.
-- ☐ **D8** *(owner, 2026-10-16)* Where errors start (spec §7, 2026-10-16): stutter numbers from 3
-  loci with reads, F and allele-length shares from 8, a share's rule from 1 expected locus; the stated
+- ☐ **D8** *(owner, 2026-10-16)* Where errors start (spec §7, 2026-10-16): the shorter share and
+  the fall-off from 3 loci with reads; the slip rate, F and allele-length shares from 8; a share's rule from 1 expected locus; the stated
   F's median keeps 8. The run log, the parameters file's notes and the error table follow. *Depends:*
   D7. D4's re-recording is repeated after D7 and D8.
 
