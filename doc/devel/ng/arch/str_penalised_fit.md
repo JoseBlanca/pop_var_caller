@@ -11,7 +11,9 @@ decisions say so and point to the spec's §7 or the companion's §6, where the o
 and one row of §1.4; and the stated F's median over classes with at least 8 loci with reads
 (companion §3.5), in §1.5. **Amended again 2026-10-15, owner, after step C8's review:** the
 slip rate joins §1.4's prior row (§1.1a); and §2.4a, the cohort put in one fixed order before the
-fit.
+fit. **Amended 2026-10-16, owner (spec §7):** the loci thresholds of §1.1 and §1.4 — the shorter
+share and the fall-off get an error from 3 loci with reads (`LOCI_FOR_A_DIRECTION_ERROR`), the slip
+rate, F and the shares keep 8, and a rare share's line drops from 3 loci's worth to 1.
 
 ---
 
@@ -65,13 +67,19 @@ impl PenalisedFitConfig {
 pub const ALLELE_PRIOR_LOCI: f64 = 1.0;
 /// Readings of F off pairs of samples, at most (spec §2.5). The bench's value; soft.
 pub const PAIR_ALTERNATIONS: usize = 10;
-/// A share's error is withheld when the class's loci with reads times the share is below this
-/// (spec §7, owner 2026-10-14). Rests on two settings; soft.
-pub const LOCI_FOR_A_SHARE_ERROR: f64 = 3.0;
-/// **Every error of a class is withheld below this many loci with reads** (spec §2.6; confirmed
-/// by the owner, 2026-10-14). Errors on thinner classes were never measured; soft.
+/// An allele-length share's error is withheld when the share times the class's loci with reads is
+/// below this (spec §7: 3, owner 2026-10-14; 1, owner 2026-10-16). Soft.
+pub const LOCI_FOR_A_SHARE_ERROR: f64 = 1.0;
+/// The slip rate's, F's and every allele-length share's error is withheld below this many loci
+/// with reads (spec §2.6; owner 2026-10-14, kept for these numbers 2026-10-16). Soft.
 pub const LOCI_FOR_AN_ERROR: usize = 8;
+/// The shorter share's and the fall-off's error is withheld below this many loci with reads
+/// (spec §2.6, §7; owner 2026-10-16). Soft.
+pub const LOCI_FOR_A_DIRECTION_ERROR: usize = 3;
 ```
+
+*Amended 2026-10-16 (owner; plan step D8):* until then `LOCI_FOR_AN_ERROR` withheld every number's
+error, and `LOCI_FOR_A_SHARE_ERROR` was 3.
 
 ### 1.1a The stutter prior — approved by the owner 2026-10-15
 
@@ -221,9 +229,10 @@ pub enum StratumError {         // ssr_fit.rs:632
     NotIdentified,
     NotPlaced,
     NoShare,
-    /// **Withheld: too few loci for the error to be honest** — a class below
-    /// `LOCI_FOR_AN_ERROR` loci with reads, or a share below `LOCI_FOR_A_SHARE_ERROR` loci's
-    /// worth (spec §2.6, §7).
+    /// **Withheld: too few loci for the error to be honest** — a slip rate, F or share of a class
+    /// below `LOCI_FOR_AN_ERROR` loci with reads, a shorter share or fall-off of one below
+    /// `LOCI_FOR_A_DIRECTION_ERROR`, or a share below `LOCI_FOR_A_SHARE_ERROR` loci's worth
+    /// (spec §2.6, §7).
     TooFewLoci,
 }
 ```
@@ -238,8 +247,9 @@ converted only at the file's edge (§2.3) *(lead, 2026-10-14)*. The prototype's 
 | case | `StratumError` |
 |---|---|
 | F absent (its error, `concentration`) | `NotPlaced` |
-| class with fewer than `LOCI_FOR_AN_ERROR` loci with reads | `TooFewLoci` |
-| a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` | `TooFewLoci` |
+| *(owner, 2026-10-16)* the slip rate, F and every share of a class with fewer than `LOCI_FOR_AN_ERROR` (8) loci with reads | `TooFewLoci` |
+| *(owner, 2026-10-16)* the shorter share and the fall-off of a class with fewer than `LOCI_FOR_A_DIRECTION_ERROR` (3) loci with reads | `TooFewLoci` |
+| a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` (1) | `TooFewLoci` |
 | *(owner, 2026-10-15, §1.1a)* a slip rate or a fall-off whose class's expected slipped reads, or a shorter share whose slipped reads with a direction, are below `stutter_prior_reads` | `NotPlaced` |
 | an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — as the climb judges it (`ssr_fit.rs:2172`) | `NotPlaced` |
 | a positive, finite error | `Estimated` |

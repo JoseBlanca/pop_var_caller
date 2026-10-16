@@ -552,14 +552,20 @@ fn class_line(
 }
 
 /// **How many standard errors were withheld because too few loci stand behind them**, over every
-/// fitted class: every number fitted for a class with fewer than [`LOCI_FOR_AN_ERROR`] loci with
-/// reads, and, in the other classes, each allele-length share expected at fewer than
-/// [`LOCI_FOR_A_SHARE_ERROR`] loci. A kind with nothing withheld is left out, and with nothing
-/// withheld at all the line says so. `None` when no class carries standard errors (none was
-/// fitted, or none was asked for).
+/// fitted class, in two kinds:
+///
+/// - **in the classes with fewer than [`LOCI_FOR_AN_ERROR`] loci with reads**: each one's slip
+///   rate, F and allele-length shares, and also its shorter share and fall-off where it has fewer
+///   than [`LOCI_FOR_A_DIRECTION_ERROR`]. The line says how many of those classes there are;
+/// - **in the other classes**, each allele-length share expected at fewer than
+///   [`LOCI_FOR_A_SHARE_ERROR`] loci.
+///
+/// A kind with nothing withheld is left out, and with nothing withheld at all the line says so.
+/// `None` when no class carries standard errors (none was fitted, or none was asked for).
 pub(super) fn withheld_errors_line(outcomes: &[StratumOutcome]) -> Option<String> {
     let mut any_errors = false;
     let (mut in_thin_classes, mut thin_classes, mut on_rare_lengths) = (0_usize, 0_usize, 0_usize);
+    let mut classes_below_the_direction_line = 0_usize;
     for outcome in outcomes {
         let StratumOutcome::Fitted(fit) = outcome else {
             continue;
@@ -581,6 +587,9 @@ pub(super) fn withheld_errors_line(outcomes: &[StratumOutcome]) -> Option<String
         if fit.tracts_of_its_own < LOCI_FOR_AN_ERROR {
             in_thin_classes += withheld;
             thin_classes += 1;
+            if fit.tracts_of_its_own < LOCI_FOR_A_DIRECTION_ERROR {
+                classes_below_the_direction_line += 1;
+            }
         } else {
             on_rare_lengths += withheld;
         }
@@ -592,16 +601,29 @@ pub(super) fn withheld_errors_line(outcomes: &[StratumOutcome]) -> Option<String
         }
         let mut parts = Vec::new();
         if thin_classes > 0 {
+            let directions_too = if classes_below_the_direction_line > 0 {
+                format!(
+                    ", and, in {classes_below_the_direction_line} of them with fewer than \
+                     {LOCI_FOR_A_DIRECTION_ERROR}, the shorter share and fall-off too"
+                )
+            } else {
+                String::new()
+            };
             parts.push(format!(
                 "{in_thin_classes} in the {} with fewer than {LOCI_FOR_AN_ERROR} loci with reads \
-                 (every number fitted for such a class)",
+                 (each one's slip rate, F where it has one, and shares of allele \
+                 lengths{directions_too})",
                 count_of(thin_classes, "class", "classes"),
             ));
         }
         if on_rare_lengths > 0 {
+            let loci = if LOCI_FOR_A_SHARE_ERROR == 1.0 {
+                "less than one locus".to_owned()
+            } else {
+                format!("fewer than {LOCI_FOR_A_SHARE_ERROR} loci")
+            };
             parts.push(format!(
-                "{on_rare_lengths} on the shares of allele lengths expected at fewer than \
-                 {LOCI_FOR_A_SHARE_ERROR} loci"
+                "{on_rare_lengths} on the shares of allele lengths expected at {loci}"
             ));
         }
         format!(
@@ -666,15 +688,18 @@ mod tests {
     /// **The log of a small drawn cohort holds every item of spec §2.9**, and logging changes no
     /// number.
     ///
-    /// Two-base runs at 8, 9 and 10 repeats with 40, 5 and 40 loci, and one at 11 repeats with no
+    /// Two-base runs at 8, 9 and 10 repeats with 40, 5 and 8 loci, and one at 11 repeats with no
     /// reads; one three-base class with no reads, the only one of its motif length. Twelve samples
-    /// at 8 reads. The class at 9 repeats is too thin for any error, so some are withheld.
+    /// at 8 reads. The class at 9 repeats is too thin for an error on its slip rate, F or shares,
+    /// and the class of 8 loci has a share under 1/8, so some errors of each kind are withheld.
     #[test]
     fn the_log_holds_every_item_the_spec_names() {
         let strata = vec![
             a_drawn_class(2, 8, 40, 12, 8, 31),
             a_drawn_class(2, 9, 5, 12, 8, 32),
-            a_drawn_class(2, 10, 40, 12, 8, 33),
+            // Seed 38 was found by scanning: its two rare shares are expected at 0.646 and 0.624
+            // loci, about 0.35 under the line of one locus.
+            a_drawn_class(2, 10, 8, 12, 8, 38),
             a_drawn_class(2, 11, 0, 12, 8, 34),
             a_drawn_class(3, 7, 0, 12, 8, 35),
         ];
@@ -769,8 +794,10 @@ mod tests {
             StratumOutcome::Fitted(fit) => fit.as_ref(),
             other => panic!("the thin class has reads: {other:?}"),
         };
+        // At 5 loci, the slip rate, F and the shares; the shorter share and fall-off are past
+        // their line of 3.
         let thin_withheld =
-            3 + thin.allele_length_variation.len() + usize::from(thin.concentration.is_some());
+            1 + thin.allele_length_variation.len() + usize::from(thin.concentration.is_some());
         let withheld = lines
             .last()
             .map(Line::text)
@@ -778,8 +805,8 @@ mod tests {
             .unwrap_or_else(|| panic!("the last line counts the withheld errors: {lines:#?}"));
         assert!(
             withheld.contains(&format!(
-                "; {thin_withheld} in the 1 class with fewer than 8 loci with reads (every number \
-                 fitted for such a class), "
+                "; {thin_withheld} in the 1 class with fewer than 8 loci with reads (each one's \
+                 slip rate, F where it has one, and shares of allele lengths), "
             )),
             "{withheld}"
         );
@@ -807,7 +834,48 @@ mod tests {
         );
         assert!(
             withheld.ends_with(&format!(
-                "{on_rare_lengths} on the shares of allele lengths expected at fewer than 3 loci"
+                "{on_rare_lengths} on the shares of allele lengths expected at less than one locus"
+            )),
+            "{withheld}"
+        );
+    }
+
+    /// **The withheld-errors line names the classes below the direction numbers' line of 3
+    /// loci.** Two-base runs at 8 to 12 repeats with 40, 2, 5, 40 and 3 loci, twelve samples at 8
+    /// reads: the class of 2 loci loses every error, the classes of 5 and of exactly 3 all but
+    /// their shorter share's and fall-off's, so only the class of 2 is counted as having fewer
+    /// than 3.
+    #[test]
+    fn the_withheld_errors_line_counts_the_classes_below_three_loci() {
+        let strata = vec![
+            a_drawn_class(2, 8, 40, 12, 8, 41),
+            a_drawn_class(2, 9, 2, 12, 8, 42),
+            a_drawn_class(2, 10, 5, 12, 8, 43),
+            a_drawn_class(2, 11, 40, 12, 8, 44),
+            a_drawn_class(2, 12, 3, 12, 8, 45),
+        ];
+        let (outcomes, lines) = fit_and_log(&strata, &[0.3; 12]);
+        let withheld_in = |outcome: &StratumOutcome, numbers: usize| match outcome {
+            StratumOutcome::Fitted(fit) => {
+                numbers
+                    + fit.allele_length_variation.len()
+                    + usize::from(fit.concentration.is_some())
+            }
+            other => panic!("every thin class has reads: {other:?}"),
+        };
+        let in_thin_classes = withheld_in(&outcomes[1], 3)
+            + withheld_in(&outcomes[2], 1)
+            + withheld_in(&outcomes[4], 1);
+        let withheld = lines
+            .last()
+            .map(Line::text)
+            .filter(|line| line.contains("standard errors withheld"))
+            .unwrap_or_else(|| panic!("the last line counts the withheld errors: {lines:#?}"));
+        assert!(
+            withheld.contains(&format!(
+                "; {in_thin_classes} in the 3 classes with fewer than 8 loci with reads (each \
+                 one's slip rate, F where it has one, and shares of allele lengths, and, in 1 of \
+                 them with fewer than 3, the shorter share and fall-off too)"
             )),
             "{withheld}"
         );

@@ -209,9 +209,10 @@ extended past the last class with a pair of samples; yet each such class got one
 the one-base class at 8 repeats with 1,214 loci. Over the 15 classes with 8 or more loci the median
 is 0.615.
 
-The threshold is the same constant that withholds every error of a class (`str_penalised_fit.md`
-§2.6), so if the plan's step D1 leads the owner to change `LOCI_FOR_AN_ERROR`, this threshold moves
-with it.
+The threshold is the same constant below which a class's F, slip rate and allele-length shares carry
+no error (`str_penalised_fit.md` §2.6), so a change to `LOCI_FOR_AN_ERROR` moves it too. *2026-10-16,
+owner:* after plan step D1 the shorter share and the fall-off got their own, lower line of 3 loci
+(`LOCI_FOR_A_DIRECTION_ERROR`); `LOCI_FOR_AN_ERROR` stays 8, and so does this median's threshold.
 
 **Its warrant says whether it was measured** *(lead, 2026-10-14; restated 2026-10-15 for the owner's
 rule above)*: `fitted_here` whenever the median is taken from any class's F, whether over the classes

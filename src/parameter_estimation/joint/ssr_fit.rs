@@ -592,12 +592,14 @@ pub enum StratumError {
     /// **Withheld: too few loci for the error to be trusted.** Two rules, for two different
     /// reasons (`str_penalised_fit.md` §2.6, §7):
     ///
-    /// - **Every number of a class with fewer than 8 loci with reads.** These errors were never
-    ///   checked against the truth: the bench's thinnest class had 8 loci, and the between-locus
-    ///   term of the error has at most one dimension a locus, so on a handful of loci it cannot
-    ///   cover every number. The rule is a precaution until that coverage is measured.
+    /// - **A class's numbers below a count of loci with reads**: its slip rate, F and
+    ///   allele-length shares below 8 loci, its shorter share and fall-off below 3. Measured on
+    ///   drawn cohorts of 2,000 samples at 3 to 7 loci, the truth lay within two of the direction
+    ///   numbers' errors 89 to 93 times in 100, against 95 for an honest error; within two of the
+    ///   slip rate's only 72 to 79 times in 100, because the rate itself comes out low on so few
+    ///   loci. Below 3 no number's error is reported.
     /// - **A share whose expected count of loci — the share times the class's loci with reads —
-    ///   is below 3.** These errors were measured, and they were too small.
+    ///   is below 1.** These errors were measured, and they were too small.
     TooFewLoci,
 }
 

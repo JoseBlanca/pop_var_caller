@@ -168,7 +168,8 @@ impl PenalisedFitConfig {
     ///
     /// Two settings §2.7 does not list keep the prototype's values: strengths are chosen for at
     /// most 200 rounds, or until no number moves by more than 10⁻⁵. The rule that withholds errors
-    /// on thin classes ([`LOCI_FOR_AN_ERROR`], [`LOCI_FOR_A_SHARE_ERROR`]) is not a setting of the
+    /// on thin classes ([`LOCI_FOR_AN_ERROR`], [`LOCI_FOR_A_DIRECTION_ERROR`],
+    /// [`LOCI_FOR_A_SHARE_ERROR`]) is not a setting of the
     /// fit: it is applied when the fit's numbers are handed to the rest of the caller.
     #[must_use]
     pub fn production() -> Self {
@@ -384,12 +385,22 @@ pub const KINK_TAIL: f64 = 2.0;
 /// **A curve whose strength moved by less than this many natural-log units keeps it** (spec
 /// §2.7). Measured.
 pub const STRENGTH_STEADY_WITHIN: f64 = 0.1;
-/// A share's error is withheld when the class's loci with reads times the share is below this
-/// (spec §7, owner 2026-10-14). Rests on two settings; soft.
-pub const LOCI_FOR_A_SHARE_ERROR: f64 = 3.0;
-/// **Every error of a class is withheld below this many loci with reads** (spec §2.6; confirmed
-/// by the owner, 2026-10-14). Errors on thinner classes were never measured; soft.
+/// **An allele-length share's error is withheld when the loci it is expected at, the share times
+/// the class's loci with reads, are fewer than this** (spec §7: 3, owner 2026-10-14; 1, owner
+/// 2026-10-16 after plan step D1 measured the coverage). Applies only to classes with at least
+/// [`LOCI_FOR_AN_ERROR`] loci; soft.
+pub const LOCI_FOR_A_SHARE_ERROR: f64 = 1.0;
+/// **The slip rate's, F's and every allele-length share's error is withheld below this many loci
+/// with reads** (spec §2.6; owner 2026-10-14, kept at 8 for these numbers 2026-10-16). At 3 to 7
+/// loci and 2,000 samples the slip rate comes out below the truth in 81 to 86 classes of 100, so
+/// the truth lay within two of its errors only 72 to 79 times in 100. The stated F's median
+/// counts only classes with this many loci too (`str_fit_to_calling.md` §3.5).
 pub const LOCI_FOR_AN_ERROR: usize = 8;
+/// **The shorter share's and the fall-off's error is withheld below this many loci with reads**
+/// (spec §2.6, §7; owner 2026-10-16). At 3 to 7 loci and 2,000 samples the truth lay within two
+/// of these direction numbers' errors 89 to 93 times in 100, against 95 for an honest error.
+/// Soft.
+pub const LOCI_FOR_A_DIRECTION_ERROR: usize = 3;
 
 /// **How a curve's penalty strength is set.**
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -795,9 +806,10 @@ fn fitted_period(
 ///
 /// Each number carries its standard error or the reason it has none, by the table of arch
 /// `str_penalised_fit.md` §1.4: [`StratumError::Estimated`] only for a positive, finite error that
-/// places the number; [`StratumError::TooFewLoci`] for every number of a class with fewer than
-/// [`LOCI_FOR_AN_ERROR`] loci with reads, and for a share worth fewer than
-/// [`LOCI_FOR_A_SHARE_ERROR`] loci; [`StratumError::NotPlaced`] for the rest, an absent
+/// places the number; [`StratumError::TooFewLoci`] for the slip rate, F and the allele-length
+/// shares of a class with fewer than [`LOCI_FOR_AN_ERROR`] loci with reads, for the shorter share
+/// and the fall-off of one with fewer than [`LOCI_FOR_A_DIRECTION_ERROR`], and for a share worth
+/// fewer than [`LOCI_FOR_A_SHARE_ERROR`] loci; [`StratumError::NotPlaced`] for the rest, an absent
 /// concentration's error included.
 ///
 /// **Memory: one motif length at a time, and one class at a time within it.** Each motif
@@ -1035,13 +1047,14 @@ fn outcome_of_a_class(
 
 /// **Every standard error of one fitted class as the rest of the caller reads it**, or why a
 /// number has none (arch `str_penalised_fit.md` §1.4). Each number is judged by the first rule
-/// that applies:
+/// that applies, in this order:
 ///
 /// | case | error |
 /// |---|---|
 /// | the concentration, where `concentration` is `None` | [`StratumError::NotPlaced`] |
-/// | any number of a class with fewer than [`LOCI_FOR_AN_ERROR`] loci with reads | [`StratumError::TooFewLoci`] |
-/// | a share whose expected count of loci, share × loci with reads, is below [`LOCI_FOR_A_SHARE_ERROR`] | [`StratumError::TooFewLoci`] |
+/// | the slip rate, the concentration and every allele-length share of a class with fewer than [`LOCI_FOR_AN_ERROR`] (8) loci with reads | [`StratumError::TooFewLoci`] |
+/// | the shorter share and the fall-off of a class with fewer than [`LOCI_FOR_A_DIRECTION_ERROR`] (3) loci with reads | [`StratumError::TooFewLoci`] |
+/// | a share whose expected count of loci, share × loci with reads, is below [`LOCI_FOR_A_SHARE_ERROR`] (1) | [`StratumError::TooFewLoci`] |
 /// | the slip rate and the fall-off, where the class's slipped reads ([`PenalisedClass::expected_slipped_reads`]) are fewer than `stutter_prior_reads`; the shorter share, where its slipped reads with a direction ([`PenalisedClass::expected_slips_with_a_direction`]) are | [`StratumError::NotPlaced`] |
 /// | the fit gave no error, or one that is zero or not finite | [`StratumError::NotPlaced`] |
 /// | an error above [`NOT_PLACED`] on the scale the number is fitted on | [`StratumError::NotPlaced`] |
@@ -1073,6 +1086,13 @@ fn outcome_of_a_class(
 /// slip rate of 0.0032 with a logit error of 0.65, when no slip in 30 reads is consistent with any
 /// rate up to about one in ten. Fewer slipped reads than the prior's weight therefore place no
 /// error on the slip rate either, though its value still rests on the class's reads.
+///
+/// **Two lines of loci, not one** (spec §7, owner 2026-10-16). Measured on drawn cohorts of 2,000
+/// samples, at 3 to 7 loci with reads the shorter share's and the fall-off's errors held the truth
+/// within two errors 89 to 93 times in 100, close to the 95 of an honest error; the slip rate's
+/// only 72 to 79, because the rate itself comes out low there. So the two direction numbers carry
+/// an error from [`LOCI_FOR_A_DIRECTION_ERROR`] loci, and the slip rate, F and the shares keep
+/// [`LOCI_FOR_AN_ERROR`].
 fn errors_of_a_class(
     fitted: &PenalisedClass,
     concentration: Option<f64>,
@@ -1082,34 +1102,41 @@ fn errors_of_a_class(
     let none = PenalisedClassErrors::default();
     let errors = fitted.errors.as_ref().unwrap_or(&none);
     let too_few_loci = loci_with_reads < LOCI_FOR_AN_ERROR;
-    let of_a_probability = |error: Option<f64>, value: f64| {
-        if too_few_loci {
-            StratumError::TooFewLoci
-        } else {
-            an_error_of(error, value * (1.0 - value))
-        }
-    };
-    // `events` is what the number is judged on: slipped reads for the slip rate and the fall-off
-    // (the owner's rule, spec §7), slipped reads with a direction for the shorter share.
-    let of_a_stutter_number = |error: Option<f64>, value: f64, events: Option<f64>| {
-        if !too_few_loci && events.unwrap_or(0.0) < stutter_prior_reads {
-            StratumError::NotPlaced
-        } else {
-            of_a_probability(error, value)
-        }
-    };
+    let of_a_probability =
+        |error: Option<f64>, value: f64| an_error_of(error, value * (1.0 - value));
+    // `loci_needed` is the class's line for this number: `LOCI_FOR_AN_ERROR` for the slip rate,
+    // `LOCI_FOR_A_DIRECTION_ERROR` for the two direction numbers. `events` is what the number is
+    // judged on after that: slipped reads for the slip rate and the fall-off (the owner's rule,
+    // spec §7), slipped reads with a direction for the shorter share.
+    let of_a_stutter_number =
+        |error: Option<f64>, value: f64, loci_needed: usize, events: Option<f64>| {
+            if loci_with_reads < loci_needed {
+                StratumError::TooFewLoci
+            } else if events.unwrap_or(0.0) < stutter_prior_reads {
+                StratumError::NotPlaced
+            } else {
+                of_a_probability(error, value)
+            }
+        };
     let slippage = fitted.slippage;
     StratumErrors {
         slippage: vec![Some(SlippageErrors {
-            level: of_a_stutter_number(errors.level, slippage.level, fitted.expected_slipped_reads),
+            level: of_a_stutter_number(
+                errors.level,
+                slippage.level,
+                LOCI_FOR_AN_ERROR,
+                fitted.expected_slipped_reads,
+            ),
             shorter_share: of_a_stutter_number(
                 errors.shorter_share,
                 slippage.shorter_share,
+                LOCI_FOR_A_DIRECTION_ERROR,
                 fitted.expected_slips_with_a_direction,
             ),
             fall_off: of_a_stutter_number(
                 errors.fall_off,
                 slippage.fall_off,
+                LOCI_FOR_A_DIRECTION_ERROR,
                 fitted.expected_slipped_reads,
             ),
         })],
@@ -1118,7 +1145,7 @@ fn errors_of_a_class(
             .iter()
             .enumerate()
             .map(|(allele, &share)| {
-                if share * (loci_with_reads as f64) < LOCI_FOR_A_SHARE_ERROR {
+                if too_few_loci || share * (loci_with_reads as f64) < LOCI_FOR_A_SHARE_ERROR {
                     StratumError::TooFewLoci
                 } else {
                     of_a_probability(errors.allele_length_variation.get(allele).copied(), share)
@@ -3559,18 +3586,25 @@ mod tests {
         }
     }
 
-    /// **A class with fewer than 8 loci with reads has every error withheld, and a rare share has
-    /// its own withheld** (spec §2.6). Two-base runs at 8, 9 and 10 repeats with 40, 5 and 40
-    /// loci, 12 samples at 8 reads. The thin class's every number is `TooFewLoci` (its
-    /// concentration `NotPlaced` instead if the fit could not place it); on the rich classes a
-    /// share below 3 loci's worth, 3/40, is `TooFewLoci` and a larger one is not, and some number
-    /// carries an error.
+    /// **A class with fewer than 8 loci with reads has its slip rate's, F's and shares' errors
+    /// withheld, one with fewer than 3 its shorter share's and fall-off's too, and a rare share has
+    /// its own withheld** (spec §2.6, §7). Two-base runs at 8 to 12 repeats with 40, 5, 2, 40 and
+    /// 8 loci, 12 samples at 8 reads. The class of 5 loci has its slip rate, F and every share
+    /// `TooFewLoci` (its concentration `NotPlaced` instead if the fit could not place it), and its
+    /// shorter share and fall-off `Estimated`; the class of 2 has every number `TooFewLoci`. On the
+    /// classes of 8 loci or more a share below one locus's worth (1/40, or 1/8) is `TooFewLoci`
+    /// and a larger one is not, and some number carries an error; the class of 8 has such a
+    /// share.
     #[test]
     fn a_thin_class_and_a_rare_share_have_their_errors_withheld() {
         let strata = vec![
             a_drawn_class(2, 8, 40, 12, 8, 31),
             a_drawn_class(2, 9, 5, 12, 8, 32),
-            a_drawn_class(2, 10, 40, 12, 8, 33),
+            a_drawn_class(2, 10, 2, 12, 8, 34),
+            a_drawn_class(2, 11, 40, 12, 8, 33),
+            // Seed 35 was found by scanning: its one rare share, 0.1113, is expected at 0.891
+            // loci, 0.11 under the line, so a change to the fit's arithmetic can tip it over.
+            a_drawn_class(2, 12, 8, 12, 8, 35),
         ];
         let outcomes = fit_repeat_tracts(&strata, &[0.3; 12], &a_narrow_production_fit());
         let fits: Vec<&StratumFit> = outcomes
@@ -3588,8 +3622,9 @@ mod tests {
             .as_ref()
             .expect("production asks for errors");
         let group = errors.slippage[0].expect("group 0 has numbers");
-        for error in [group.level, group.shorter_share, group.fall_off] {
-            assert_eq!(error, StratumError::TooFewLoci);
+        assert_eq!(group.level, StratumError::TooFewLoci);
+        for error in [group.shorter_share, group.fall_off] {
+            assert!(matches!(error, StratumError::Estimated(_)), "{error:?}");
         }
         assert!(
             errors
@@ -3604,19 +3639,37 @@ mod tests {
         };
         assert_eq!(errors.concentration, expected_concentration_error);
 
+        let thinnest = fits[2];
+        assert_eq!(thinnest.tracts_of_its_own, 2);
+        let errors = thinnest
+            .standard_errors
+            .as_ref()
+            .expect("production asks for errors");
+        let group = errors.slippage[0].expect("group 0 has numbers");
+        for error in [group.level, group.shorter_share, group.fall_off] {
+            assert_eq!(error, StratumError::TooFewLoci);
+        }
+        assert!(
+            errors
+                .allele_length_variation
+                .iter()
+                .all(|error| *error == StratumError::TooFewLoci)
+        );
+
         let mut rare_shares = 0;
-        for rich in [fits[0], fits[2]] {
+        for rich in [fits[0], fits[3], fits[4]] {
             let errors = rich
                 .standard_errors
                 .as_ref()
                 .expect("production asks for errors");
             assert!(errors.any(), "a rich class has some error: {errors:?}");
+            let loci = rich.tracts_of_its_own as f64;
             for (share, error) in rich
                 .allele_length_variation
                 .iter()
                 .zip(&errors.allele_length_variation)
             {
-                if share * 40.0 < LOCI_FOR_A_SHARE_ERROR {
+                if share * loci < LOCI_FOR_A_SHARE_ERROR {
                     rare_shares += 1;
                     assert_eq!(*error, StratumError::TooFewLoci, "share {share}");
                 } else {
@@ -3624,7 +3677,11 @@ mod tests {
                 }
             }
         }
-        assert!(rare_shares > 0, "the window's outer lengths are rare");
+        assert!(
+            rare_shares > 0,
+            "some share of the class of 8 loci is under 1/8: {:?}",
+            fits[4].allele_length_variation
+        );
     }
 
     /// **A class's slipped reads are the fit's expected count, not the level times the reads.**
@@ -3754,10 +3811,10 @@ mod tests {
     #[test]
     fn the_error_mapping_follows_its_table() {
         use StratumError::{Estimated, NotPlaced, TooFewLoci};
-        // 100 loci: every error given is placed except the rarest share's (1% of 100 loci is 1
-        // locus's worth, under 3). The last share, 4% of 100 = 4 loci's worth, keeps its error.
+        // 50 loci: every error given is placed except the rarest share's (1% of 50 loci is half a
+        // locus's worth, under 1). The last share, 4% of 50 = 2 loci's worth, keeps its error.
         let class = a_fitted_class(Some(2.0));
-        let errors = errors_of_a_class(&class, Some(2.0), 100, STUTTER_PRIOR_READS);
+        let errors = errors_of_a_class(&class, Some(2.0), 50, STUTTER_PRIOR_READS);
         assert_eq!(
             errors.slippage,
             vec![Some(SlippageErrors {
@@ -3778,8 +3835,26 @@ mod tests {
         );
         assert_eq!(errors.concentration, Estimated(0.5));
 
-        // Seven loci: every number withheld, the concentration too.
+        // Seven loci: the slip rate, every share and the concentration withheld; the shorter
+        // share and the fall-off, past their line of 3, keep theirs.
         let errors = errors_of_a_class(&class, Some(2.0), 7, STUTTER_PRIOR_READS);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: TooFewLoci,
+                shorter_share: Estimated(0.05),
+                fall_off: Estimated(0.03),
+            })]
+        );
+        assert!(
+            errors
+                .allele_length_variation
+                .iter()
+                .all(|e| *e == TooFewLoci)
+        );
+        assert_eq!(errors.concentration, TooFewLoci);
+        // Two loci: every number withheld.
+        let errors = errors_of_a_class(&class, Some(2.0), 2, STUTTER_PRIOR_READS);
         assert!(every_error_of(&errors).iter().all(|e| *e == TooFewLoci));
         // An absent concentration is not placed, before any other rule.
         let errors = errors_of_a_class(&class, None, 7, STUTTER_PRIOR_READS);
@@ -3799,7 +3874,7 @@ mod tests {
             between_locus_share: None,
             allele_length_variation: vec![0.002, f64::INFINITY, 0.0],
         });
-        let errors = errors_of_a_class(&bad, Some(2.0), 100, STUTTER_PRIOR_READS);
+        let errors = errors_of_a_class(&bad, Some(2.0), 50, STUTTER_PRIOR_READS);
         assert!(
             every_error_of(&errors)
                 .iter()
@@ -3821,12 +3896,86 @@ mod tests {
         // A class the fit gave no errors at all: not placed, the withheld aside.
         let mut none = a_fitted_class(Some(2.0));
         none.errors = None;
-        let errors = errors_of_a_class(&none, Some(2.0), 100, STUTTER_PRIOR_READS);
+        let errors = errors_of_a_class(&none, Some(2.0), 50, STUTTER_PRIOR_READS);
         assert_eq!(errors.allele_length_variation[0], TooFewLoci);
         assert!(
             every_error_of(&errors)
                 .iter()
                 .all(|e| matches!(e, NotPlaced | TooFewLoci))
+        );
+    }
+
+    /// **Each line of loci falls where spec §7 (owner, 2026-10-16) puts it**, on a class built by
+    /// hand whose every error would otherwise be placed: the shorter share and the fall-off carry
+    /// an error from 3 loci with reads and not at 2; the slip rate from 8 and not at 7; a share
+    /// expected at 1.1 loci carries one, a share expected at exactly 1 locus carries one, and a
+    /// share expected at 0.9 does not. At 3 loci the
+    /// direction numbers still answer to the rule on slipped reads.
+    #[test]
+    fn the_lines_of_loci_fall_where_the_owner_set_them() {
+        use StratumError::{Estimated, NotPlaced, TooFewLoci};
+        assert_eq!(
+            (
+                LOCI_FOR_A_DIRECTION_ERROR,
+                LOCI_FOR_AN_ERROR,
+                LOCI_FOR_A_SHARE_ERROR
+            ),
+            (3, 8, 1.0)
+        );
+        let class = a_fitted_class(Some(2.0));
+        let slippage_at = |loci: usize, class: &PenalisedClass| {
+            errors_of_a_class(class, Some(2.0), loci, STUTTER_PRIOR_READS).slippage[0]
+                .expect("group 0 has numbers")
+        };
+
+        let at_two = slippage_at(2, &class);
+        assert_eq!(
+            (at_two.level, at_two.shorter_share, at_two.fall_off),
+            (TooFewLoci, TooFewLoci, TooFewLoci)
+        );
+        let at_three = slippage_at(3, &class);
+        assert_eq!(
+            (at_three.level, at_three.shorter_share, at_three.fall_off),
+            (TooFewLoci, Estimated(0.05), Estimated(0.03))
+        );
+        assert_eq!(slippage_at(7, &class).level, TooFewLoci);
+        assert_eq!(slippage_at(8, &class).level, Estimated(0.01));
+
+        // At 3 loci, fewer slipped reads than the prior's weight: not placed, not withheld.
+        let mut few_slips = a_fitted_class(Some(2.0));
+        few_slips.expected_slipped_reads = Some(0.5);
+        few_slips.expected_slips_with_a_direction = Some(0.5);
+        let at_three = slippage_at(3, &few_slips);
+        assert_eq!(
+            (at_three.level, at_three.shorter_share, at_three.fall_off),
+            (TooFewLoci, NotPlaced, NotPlaced)
+        );
+
+        // 10 loci: shares of 0.09 and 0.11 are expected at 0.9 and 1.1 loci.
+        let mut rare = a_fitted_class(Some(2.0));
+        rare.allele_length_variation = vec![0.09, 0.11, 0.8];
+        rare.errors = Some(PenalisedClassErrors {
+            allele_length_variation: vec![0.01, 0.01, 0.02],
+            ..a_fitted_class(Some(2.0)).errors.expect("every error given")
+        });
+        let errors = errors_of_a_class(&rare, Some(2.0), 10, STUTTER_PRIOR_READS);
+        assert_eq!(
+            errors.allele_length_variation,
+            vec![TooFewLoci, Estimated(0.01), Estimated(0.02)]
+        );
+
+        // 8 loci: a share of 0.125 is expected at exactly one locus (exact in `f64`), which is
+        // not less than one, so it keeps its error.
+        let mut at_one = a_fitted_class(Some(2.0));
+        at_one.allele_length_variation = vec![0.125, 0.875];
+        at_one.errors = Some(PenalisedClassErrors {
+            allele_length_variation: vec![0.01, 0.01],
+            ..a_fitted_class(Some(2.0)).errors.expect("every error given")
+        });
+        let errors = errors_of_a_class(&at_one, Some(2.0), 8, STUTTER_PRIOR_READS);
+        assert_eq!(
+            errors.allele_length_variation,
+            vec![Estimated(0.01), Estimated(0.01)]
         );
     }
 
@@ -4773,8 +4922,8 @@ mod tests {
     /// **The error rule of spec §2.10.4 and §7**: a shorter share whose class has fewer slipped
     /// reads with a direction than the prior's weight, or a fall-off whose class has fewer slipped
     /// reads, is not placed, whatever error the fit gave it; at the weight or above, the rest of
-    /// the table decides; a class with fewer than 8 loci is withheld first; and at weight 0 the
-    /// rule never fires.
+    /// the table decides; a number below its line of loci (8 for the slip rate, 3 for the
+    /// direction numbers) is withheld first; and at weight 0 the rule never fires.
     #[test]
     fn a_direction_number_resting_on_the_prior_is_not_placed() {
         use StratumError::{Estimated, NotPlaced, TooFewLoci};
@@ -4810,7 +4959,17 @@ mod tests {
                 fall_off: Estimated(0.03),
             })]
         );
+        // Too few loci comes first: at 7 for the slip rate, at 2 for every number.
         let errors = errors_of_a_class(&class, Some(2.0), 7, 1.0);
+        assert_eq!(
+            errors.slippage,
+            vec![Some(SlippageErrors {
+                level: TooFewLoci,
+                shorter_share: NotPlaced,
+                fall_off: NotPlaced,
+            })]
+        );
+        let errors = errors_of_a_class(&class, Some(2.0), 2, 1.0);
         assert!(every_error_of(&errors).iter().all(|e| *e == TooFewLoci));
 
         // One slipped read is enough; the shorter share is judged on its own count.

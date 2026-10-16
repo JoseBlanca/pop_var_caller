@@ -27,6 +27,10 @@ sample the prior's pull on two-base direction numbers is a known dishonesty of t
 the prior's weight stays one read, on a three-seed sweep (§2.10.2); and the fit is made independent
 of the order the psps are named in before milestone D (§3, plan step C10).
 
+**Amended 2026-10-16, owner (§7):** where a thin class's errors start (§2.6) — the shorter share and
+the fall-off from 3 loci with reads, the slip rate, F and the allele-length shares from 8 — and a rare
+share's line lowered from 3 loci's worth to 1. Built in plan step D8.
+
 ---
 
 ## 1. What this is
@@ -265,14 +269,28 @@ a motif length when H cannot be inverted stays, as a fallback no measured case r
   measured; in the example above, at a slip rate of 0.01, the share of reads one repeat short goes
   from 0.008 to 0.0055. Plan step D1 counts these classes again, for the owner.
 
-Rare lengths get no error (§7).
+Rare lengths get no error: a share expected at less than one locus, share × loci with reads < 1
+(§7; it was 3 until 2026-10-16).
 
-**Classes with fewer than 8 loci with reads get no error for any number** *(lead, 2026-10-14; confirmed by
-the owner the same day)*. The fit now reports such classes (§2.2), and their errors were never
-measured: the bench drew 8 to 4,947 loci a class (`phase0_bench_2026-10-12.md:55`) and track 1 started at
-20. The sandwich's B has rank at most the number of loci. The errors are withheld until the plan's
-first check measures their coverage on thin classes; the owner may then lift the rule. On kimura, 107
-of 141 classes had fewer than 8 loci with reads (`kimura_shapes_span9_2026-10-14.md`).
+**Where a thin class's errors start** *(owner, 2026-10-16, after plan step D1 measured them; §7)*:
+
+| number | error reported from | constant |
+|---|---|---|
+| shorter share, fall-off | 3 loci with reads | `LOCI_FOR_A_DIRECTION_ERROR` |
+| slip rate, F, the allele-length shares | 8 loci with reads | `LOCI_FOR_AN_ERROR` |
+
+Measured on drawn cohorts of 2,000 samples, at 3 to 7 loci the truth lay within two of the shorter
+share's and the fall-off's errors 89 to 93 times in 100, against 95 for an honest error; within two
+of the slip rate's only 72 to 79 times, because the rate itself comes out low there (below the truth
+in 81 to 86 classes of 100, by a median of 1.5–2.8%; §2.4's floor), not because its error is narrow.
+Below 3 loci no number gets an error. The other rules of the error table (arch §1.4) — too few
+slipped reads, an error that is absent, zero or wider than `NOT_PLACED` — apply after these.
+
+*History:* from 2026-10-14 every number of a class with fewer than 8 loci with reads got no error
+*(lead; confirmed by the owner the same day)*, because thin classes' errors had never been measured:
+the bench drew 8 to 4,947 loci a class (`phase0_bench_2026-10-12.md:55`) and track 1 started at 20, and
+the sandwich's B has rank at most the number of loci. On kimura, 107 of 141 classes had fewer than 8
+loci with reads (`kimura_shapes_span9_2026-10-14.md`).
 
 ### 2.7 The settings, as named constants
 
@@ -293,7 +311,7 @@ these**:
 | stiffness held once it moves less than | 0.1 natural-log units | measured, track 2 §10.1 |
 | a class whose numbers stopped moving reuses its counts | on | measured, every number unchanged to the third decimal |
 | clustering weight on allele draws | off | measured harmful at large cohorts, track 2 §2.5 |
-| errors withheld below | 8 loci with reads a class; a share under 3 loci's worth; a slip rate, shorter share or fall-off under one expected slipped read (the prior's weight) | §2.6, §2.10.4, §7; soft |
+| errors withheld below | 3 loci with reads a class for the shorter share and the fall-off, 8 for the slip rate, F and the allele-length shares; a share under one locus's worth; a slip rate, shorter share or fall-off under one expected slipped read (the prior's weight) | §2.6, §2.10.4, §7 (owner 2026-10-16); soft |
 
 ### 2.8 Two exact speed-ups, kept
 
@@ -515,8 +533,10 @@ At one read's worth that matters only where a class has a handful of reads.
   about 0.0017–0.006 within one error, when no slip in 30 reads is consistent with any rate up to
   about 0.1. With the rule, case C2 of §2.10.6 (10,000 reads, none slipped) carries its 10⁻⁵ with no
   error: zero events place no logit error.
-- Classes with fewer than 8 loci still withhold every error (§2.6); these rules matter for thicker
-  classes with genuinely no slips, such as a long-motif class at a large cohort.
+- Classes with fewer than 3 loci withhold every error, and classes with fewer than 8 the slip
+  rate's (§2.6), before these rules apply; so the rules decide the slip rate's error from 8 loci
+  and the shorter share's and fall-off's from 3. They matter most for classes with genuinely no
+  slips, such as a long-motif class at a large cohort.
 - **The prior adds a positive diagonal at every class**, which removes the exactly flat directions
   the review blamed for failed factorisations (`newton`, `penalised_fit.rs:2514`, `:2575-2583`). It
   is too small to fix the review's first finding (about 0.01 a class against strengths of 10¹⁰),
@@ -775,6 +795,7 @@ The lead put five questions with a recommendation each; the owner answered all f
 - **2026-10-14, owner: errors on rare allele lengths are reported as absent.** A share under 3 loci's
   worth (share × loci with reads < 3) gets no error, and the log says how many were withheld; such
   errors were measured too small (§2.6). The 3 rests on two settings measured by track 1; soft.
+  [*Lowered to 1 by the owner, 2026-10-16, below.*]
 - **2026-10-14, owner: the overshoot at the ends of the repeat range at 1 sample × 3 reads is
   accepted** (+49% to +127% at the extreme class, `track2_penalised_em_2026-10-12.md` §10.3), and
   stated as a known limit of the fit.
@@ -787,7 +808,8 @@ The lead put five questions with a recommendation each; the owner answered all f
 
 - **Errors withheld for every number of a class with fewer than 8 loci with reads** (§2.6), until
   measured; the plan's first check measures their coverage, and the owner may lift the rule.
-  **Confirmed by the owner, 2026-10-14.**
+  **Confirmed by the owner, 2026-10-14.** [*Narrowed by the owner, 2026-10-16, below: the shorter
+  share and the fall-off get an error from 3 loci.*]
 - **Classes visited one at a time within a motif length, motif lengths one at a time**, parallel
   inside a class (§2.2, §3). Thread scaling and wall time are measured again at full scale.
 - **A class with no reads stays refused**, as today; the new fit produces no `Derived` class (§2.2).
@@ -860,6 +882,8 @@ Each as the lead recommended (`reports/implementations/str_penalised_fit_checkpo
   the truth within two errors 72 to 79 times in 100 (the shorter share's and fall-off's 89 to 93),
   because the slip rate itself is biased low there by a median of 1.5–2.8% (§2.4's floor), not
   because its error is narrow (`tmp/d7/coverage_by_number.md`, quoted in plan step D8).
+  *Done 2026-10-16 (plan step D8): `LOCI_FOR_A_DIRECTION_ERROR` = 3, `LOCI_FOR_AN_ERROR` = 8,
+  `LOCI_FOR_A_SHARE_ERROR` = 1; §2.6, §2.7 and arch §1.4 state the rules.*
 - **Owner: the SNP/indel fit's convergence is a separate job** after this branch merges (the
   performance review's finding L5); not on this branch.
 

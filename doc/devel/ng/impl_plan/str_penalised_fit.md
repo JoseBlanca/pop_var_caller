@@ -396,10 +396,19 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   shares), and the one run whose errors were withheld (`p2_n60_d10_pcr_free` seed 2) has them.
   The cohort test is renamed `a_three_base_cohort_whose_reads_alone_curve_upward`; the fallback is
   tested on a curvature built to fail.
-- ☐ **D8** *(owner, 2026-10-16)* Where errors start (spec §7, 2026-10-16): the shorter share and
+- ✅ **D8** *(owner, 2026-10-16)* Where errors start (spec §7, 2026-10-16): the shorter share and
   the fall-off from 3 loci with reads; the slip rate, F and allele-length shares from 8; a share's rule from 1 expected locus; the stated
   F's median keeps 8. The run log, the parameters file's notes and the error table follow. *Depends:*
   D7. D4's re-recording is repeated after D7 and D8.
+  *Done (2026-10-16):* a new constant `LOCI_FOR_A_DIRECTION_ERROR` = 3 beside `LOCI_FOR_AN_ERROR`
+  = 8 (now the slip rate's, F's and the shares' line, and still the stated F's median's);
+  `LOCI_FOR_A_SHARE_ERROR` 3 → 1. In `errors_of_a_class` each number meets its line of loci first,
+  then the share rule, then the rule on slipped reads, then the checks on the error itself. On the
+  four tomato accessions' psps (`tmp/oracle_D4/psps`), D8 adds 14 errors to the parameters file:
+  the shorter share and fall-off of 7 of the 11 classes with 3 to 7 loci (the other 4 have under
+  one expected slipped read); nothing else in the file moves but two note paragraphs. The three
+  fitted-file checksums of `cli::cross_platform_digests` were re-recorded for that note text
+  alone. The reference fixture records raw errors and does not move.
 
 > **Checkpoint D:** a short report under `doc/devel/reports/implementations/` with every D result.
 > Pause for review: the owner decides whether D2 and D5 pass before the climb is deleted, and whether

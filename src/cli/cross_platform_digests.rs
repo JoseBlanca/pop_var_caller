@@ -156,7 +156,20 @@ mod tests {
     /// No number outside the repeat-tract rows moved; C10's ordering moved nothing, as the cohort's
     /// two samples were already in name order. Recorded on macOS (arm64) only; it was
     /// `a5b4997bc35e77425525e25e821cf40c`.
-    const FITTED_PARAMETERS_MD5: &str = "b673dc9611c7126b5c35e9d7629493b3";
+    ///
+    /// **Re-recorded 2026-10-16 again** (plan step D8, where a thin class's errors start): two note
+    /// paragraphs now state the lines of loci below which an error is withheld. No number or key
+    /// moved: the contig holds one repeat tract ([`crate::cli::test_fixtures::TRACT`]), so the
+    /// file's one repeat-tract row is a class of 1 locus with reads. That is below both lines of
+    /// loci — 8 before D8, and 3 for the shorter share and fall-off after it — so every error of
+    /// the row is withheld for too few loci, before its slipped reads are looked at, and the row
+    /// carries no error before or after. Putting the two paragraphs' earlier wording back into the
+    /// new file gives `b673dc9611c7126b5c35e9d7629493b3` exactly. The same holds for the next two
+    /// fitted checksums, whose cohorts use the same contig. **So none of the three fitted
+    /// checksums pins a repeat-tract error**, not even the two "with standard errors" pairs: their
+    /// repeat-tract half pins values only. A cohort with at least 3 tracts of one class (8 for the
+    /// slip rate) would be needed to put one in the file. Recorded on macOS (arm64) only.
+    const FITTED_PARAMETERS_MD5: &str = "168e7f326230e988286ef16b4c4fc5cd";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -249,8 +262,9 @@ mod tests {
     ///
     /// **Re-recorded 2026-10-16** for the four reasons [`FITTED_PARAMETERS_MD5`] gives, with the
     /// same repeat-tract rows to the last digit. Recorded on macOS (arm64) only; it was
-    /// `4859eacd5645e607b6f99b667d184dc0`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "3a016fb7a40bc91eb5bb9ae2adc6e286";
+    /// `4859eacd5645e607b6f99b667d184dc0`. **Again the same day** for the note text of plan step
+    /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says; it was `3a016fb7a40bc91eb5bb9ae2adc6e286`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "a48841ff7b0d8ca924b758dc7a33fcbf";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -312,8 +326,10 @@ mod tests {
     /// **Re-recorded 2026-10-16** for the four reasons [`FITTED_PARAMETERS_MD5`] gives. Here the
     /// tract's row has F 0.897 and a slip rate of 0.00032 (5.4 × 10⁻⁸ at C7, before the stutter
     /// prior), and the fallback F is that F. Recorded on macOS (arm64) only; it was
-    /// `0573095bb8f1ed6608ed74d62051ade1`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "5abcd04153d5acc32463fcd751970024";
+    /// `0573095bb8f1ed6608ed74d62051ade1`. **Again the same day** for the note text of plan step
+    /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says (the tract is again a class of 1 locus); it was
+    /// `5abcd04153d5acc32463fcd751970024`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "33eab2535f49967c6459db376a745d01";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.

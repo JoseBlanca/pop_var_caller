@@ -1275,9 +1275,10 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
 /// to contribute, and its shares are held at this very median.
 ///
 /// - **The median is over the strata with at least [`LOCI_FOR_AN_ERROR`] loci with reads**, the
-///   same count below which the fit withholds every error of a stratum. A thin stratum's
-///   concentration is mostly its motif length's curve, sometimes extended past the last stratum
-///   with data, and would otherwise get the same vote as a stratum of a thousand loci.
+///   same count below which the fit withholds a stratum's errors on its F, its slip rate and its
+///   allele-length shares. A thin stratum's concentration is mostly its motif length's curve,
+///   sometimes extended past the last stratum with data, and would otherwise get the same vote as
+///   a stratum of a thousand loci.
 /// - **Where no stratum has that many, the median is over every stratum in `fitted`**, so a run
 ///   of thin strata still states a number it measured.
 ///
