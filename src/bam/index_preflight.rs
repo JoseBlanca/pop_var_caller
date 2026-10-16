@@ -245,7 +245,7 @@ pub fn preflight_alignment_indexes(
     let total = missing.len();
     for (sequence, (idx, kind)) in missing.into_iter().enumerate() {
         let input = &inputs[idx];
-        eprintln!(
+        tracing::info!(
             "building index for {} ({} of {})...",
             input.display(),
             sequence + 1,

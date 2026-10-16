@@ -336,8 +336,8 @@ impl Drop for SpillFile {
             // `VerificationHandle`. Stay quiet while a panic is unwinding: a second message
             // there buries the first, and a `Drop` must not panic.
             if !std::thread::panicking() {
-                eprintln!(
-                    "warning: the paralog spill `{}` could not be removed and is still on \
+                tracing::warn!(
+                    "the hidden-dup filter's spill `{}` could not be removed and is still on \
                      disk: {source}",
                     path.display()
                 );

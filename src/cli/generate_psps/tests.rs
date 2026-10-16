@@ -529,7 +529,7 @@ fn a_cohort_on_disk() -> (
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };
     (cohort.directory, cohort.zeta, cohort.alpha, args)
 }

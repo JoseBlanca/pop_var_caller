@@ -160,7 +160,7 @@ run_one() {
   fi
   mv "$out/run.vcf" "$out/$side.vcf"
   # The numbers the run scored with are in its log, between two marker lines that are TOML comments.
-  sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/$side.pvc.log" > "$out/$side.parameters.toml"
+  sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/$side.pvc.log" | sed '1d;$d' > "$out/$side.parameters.toml"
 }
 
 echo

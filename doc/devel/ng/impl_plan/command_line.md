@@ -179,6 +179,30 @@ Spec §7.7.
 - `--quiet`, `--log` and the §7.2 first line on every user subcommand.
 - **The oracle run**: the tomato and GIAB oracles, confirming the records are unchanged.
 
+**Done (2026-10-16).** Twenty-eight prints were left outside tests, most already moved in steps 1
+to 3. The fit's progress (`parameter_estimation/progress.rs`): a stage's start and its milestones
+are `info`, the once-a-minute updates a progress line drawn in place, the details `debug`. Warnings
+(the walker's held-reads ceiling, a spill that would not delete, a dropped reference verification,
+a parameters file routed differently) are `warn`, without their hand-written `warning:`/`note:`
+prefix; the two developer tools' messages are `info`. A `warning:` line inside the calling report
+now reaches the terminal as a warning. `generate-psps`' field is `max_depth`.
+
+- **The rule is a lint, not a test**: `#![warn(clippy::print_stdout, clippy::print_stderr)]` in
+  `src/lib.rs`, with `allow-print-in-tests = true` in `clippy.toml`. A lint reads the code the
+  compiler reads, where a test scanning source text would have to guess which lines are test code.
+  It covers the library only, so examples, which print on purpose, are untouched.
+- **No `tracing` spans**: every log line carries its time, and the fit's stages announce their
+  start and end, which is the timing the log needed.
+- **Internal names keep `paralog`** (`run::paralog_filter`, `HIDDEN_PARALOG_FILTER_ID`): what the
+  user reads says hidden-dup; renaming the module is churn for no reader.
+- **The oracle**, `scripts/promote_ng_oracle.sh` on its baseline slice (the four tomato2 accessions
+  of `benchmarks/tomato2/bams`, the first 20 regions of `regions_n160_200kb.bed`): records, both
+  parameters files, windows and histograms identical to the baseline; the three VCF checksums moved
+  by header lines only, and putting the old lines back reproduces each. Re-recorded with a note.
+  The oracles leave `##pvcLog` out of their comparison, as they leave out `##commandline`.
+  **No GIAB run**: nothing in steps 1 to 5 touches arithmetic, so a high-depth run would check
+  nothing the tomato slice does not.
+
 ## Step 6 — `--call-satellites` and `--generic-path-only` (last)
 
 Spec §4.4.1. New behaviour, not interface, so it gets its own short plan before code, written once

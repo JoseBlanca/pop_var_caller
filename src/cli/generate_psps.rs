@@ -149,15 +149,13 @@ pub struct GeneratePspsArgs {
     /// `--max-depth` when calling drops the loci it reaches. The default, 1,000, is about three
     /// times the depth of a 300× sample. The reads kept are chosen by a hash of their names, so
     /// neighbouring positions keep the same reads.
-    // The field keeps the read cap's name until the parameter-fit branch is merged, since
-    // several of its files build this struct; the option is `--max-depth`.
     #[arg(
-        long = "max-depth",
+        long,
         default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         value_parser = clap::value_parser!(u32).range(1..),
         help_heading = "Advanced"
     )]
-    pub max_reads_per_position: u32,
+    pub max_depth: u32,
 
     /// Build a `.bai` or `.crai` index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
@@ -734,7 +732,7 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                     reference: &reference,
                     read_filters: ReadFilterConfig::default(),
                     locus_generator_settings: PileupGeneratorConfig::with_max_reads_per_position(
-                        args.max_reads_per_position,
+                        args.max_depth,
                     ),
                     build_index_if_missing: args.build_index_if_missing,
                 },

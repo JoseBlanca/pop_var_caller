@@ -194,7 +194,7 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
         psps
@@ -817,8 +817,7 @@ mod tests {
                 max_str_len: DEFAULT_MAX_STR_LEN,
                 max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
-                max_reads_per_position:
-                    crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+                max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             })
             .expect("one sample walks on its own");
             apart.push(psp_path_for(&directory, sample));
@@ -866,7 +865,7 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
 

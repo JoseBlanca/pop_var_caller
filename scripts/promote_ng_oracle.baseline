@@ -132,12 +132,19 @@
 # the file holds one, which only the climb wrote. Neither file has such a row, so each loses 24 comment lines (fitted
 # 298 -> 274, defaults run 341 -> 317); with comment lines taken out both are the previous files line for line
 # (tmp/oracle_E vs tmp/oracle_E2). No other line moved. They were bd7b9bea… / c84ce763….
+# Three VCF lines re-recorded 2026-10-16 (macOS, arm64; command_line.md, branch command-line, step 5) on main's slice:
+# `##source` reads `pvc` where it read `ng`; `##parametersFile=` became `##pvcLog=` (left out of the comparison, as
+# `##commandline` is, since it names each route's own log) and `##pvcParameters=` (`defaults`, or the fitted file's
+# name and MD5, which is the fitted.parameters.toml line below); the hidden-duplication filter's id became `hiddenDup`.
+# Putting `ng`, the old `##parametersFile` line and `hiddenParalog` back reproduces all three old checksums exactly;
+# the records (7,508), both parameters files, the windows and the histograms did not move. They were 67bfe9a1… /
+# 67bfe9a1… / 61b09b60….
 slice: 20 regions, 4 alignments
 # records: 7508
-67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
-67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
+92758b01922e1f1b080c6d6e5dccd156  from_alignments.comparable
+92758b01922e1f1b080c6d6e5dccd156  from_psps.comparable
 920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
 0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
 5ea720b63c4674239720087f21a72674  fitted.parameters.toml
-61b09b604ee5fb2d7196150824c2c996  from_fit.comparable
+e7dc72ebde9c69c10cf4a02e5105041c  from_fit.comparable

@@ -64,6 +64,9 @@
 //!   which wins it — so a heap profile is
 //!   `--no-default-features --features dhat-heap`.
 
+// **The library never prints** (`doc/devel/ng/spec/command_line.md` §7.7): it states events
+// with `tracing`, and only the binary decides where they go. `clippy.toml` lets tests print.
+#![warn(clippy::print_stdout, clippy::print_stderr)]
 #![forbid(unsafe_code)]
 
 #[cfg(test)]

@@ -671,8 +671,8 @@ pub fn run_parameters(
     // knowing it happened, because a tract this run admits and the fit's selection did not is
     // scored from strata fitted over other loci.
     if let Some(axis) = file.routing_disagreement(routing) {
-        eprintln!(
-            "note: {} was written by a run that routed on a different {axis}; calling on",
+        tracing::warn!(
+            "{} was written by a run that routed on a different {axis}; calling on",
             path.display()
         );
     }
@@ -878,7 +878,12 @@ pub fn where_the_numbers_came_from(parameters: Option<&Path>) -> String {
 pub fn log_the_report(calls: &Path, report: &RunReport<'_>, filter_lines: &[String]) {
     tracing::debug!("report: calls: {}", where_the_calls_went(calls));
     for line in report.lines().iter().chain(filter_lines) {
-        tracing::debug!("report: {line}");
+        // **A warning in the report is a warning on the terminal too**, where the rest of the
+        // report is not: it is the line a person must not miss.
+        match line.trim_start().strip_prefix("warning: ") {
+            Some(warning) => tracing::warn!("{warning}"),
+            None => tracing::debug!("report: {line}"),
+        }
     }
 }
 

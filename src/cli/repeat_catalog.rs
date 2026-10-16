@@ -231,7 +231,7 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
     report(&tally, reference.contigs.len());
     tracing::info!(
         "done: {} repeats in {} contigs written to {} in {}",
-        crate::cli::run_output::with_thousands(tally.rows.total() as u64),
+        crate::cli::run_output::with_thousands(tally.rows.total()),
         reference.contigs.len(),
         output.display(),
         crate::cli::run_output::elapsed_text(started.elapsed()),

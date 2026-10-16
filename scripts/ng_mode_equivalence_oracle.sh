@@ -70,7 +70,7 @@ mv "$out/run.vcf" "$out/from_alignments.vcf"
 # **The numbers each run scored with are in its log**, as a parameters file between two marker
 # lines (doc/devel/ng/spec/command_line.md §7.3); the markers are TOML comments, so the range is
 # a parameters file as it stands.
-sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/alignments.pvc.log" > "$out/from_alignments.parameters.toml"
+sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/alignments.pvc.log" | sed '1d;$d' > "$out/from_alignments.parameters.toml"
 
 echo "=== the walk, stored ==="
 # shellcheck disable=SC2086
@@ -93,19 +93,20 @@ NG_WINDOW_COVERAGE_FILE="$out/from_psps.windows" "$bin" call-from-psps \
   --defaults --threads 4 --output "$out/run.vcf" --force --log "$out/psps.pvc.log" \
   > "$out/psps.log" 2>&1
 mv "$out/run.vcf" "$out/from_psps.vcf"
-sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/psps.pvc.log" > "$out/from_psps.parameters.toml"
+sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/psps.pvc.log" | sed '1d;$d' > "$out/from_psps.parameters.toml"
 
 echo "=== the comparison ==="
-# **`##commandline` is the one line that cannot match and must not**: it records which command
-# was typed, and the two routes are two different commands. Everything else — every other header
+# **`##commandline` and `##pvcLog` are the two lines that cannot match and must not**: one records
+# which command was typed, and the two routes are two different commands; the other names each
+# route's own log, which this script keeps apart. Everything else — every other header
 # line and every record — is compared byte for byte. This is spec §12.1's timestamp exemption in
 # another place, not a weakening of §12.3; the unit test, where both routes run inside one
 # process and record the same line, compares the files whole with nothing filtered out.
 for side in from_alignments from_psps; do
-  grep -v '^##commandline=' "$out/$side.vcf" > "$out/$side.comparable"
+  grep -v '^##commandline=\|^##pvcLog=' "$out/$side.vcf" > "$out/$side.comparable"
 done
 if cmp -s "$out/from_alignments.comparable" "$out/from_psps.comparable"; then
-  echo "IDENTICAL apart from ##commandline: psp mode's VCF is direct mode's"
+  echo "IDENTICAL apart from ##commandline and ##pvcLog: psp mode's VCF is direct mode's"
   printf 'records: '; grep -vc '^#' "$out/from_alignments.vcf"
   shasum -a 256 "$out/from_alignments.comparable" "$out/from_psps.comparable"
 else

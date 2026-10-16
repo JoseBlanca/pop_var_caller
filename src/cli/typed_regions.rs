@@ -664,7 +664,7 @@ fn report_counts(counts: &CatalogRegionCounts) {
         no_clean_trim,
     } = rejected_by_reason;
 
-    eprintln!(
+    tracing::info!(
         "counts: spans={spans} ssr_loci={ssr_loci} ssr_bundles={ssr_bundles} \
          ssr_bundle_bp={ssr_bundle_bp} generic={generic} satellites={satellites} \
          satellite_bp={satellite_bp} repeat_bp_with_no_locus={repeat_bp_with_no_locus}"
@@ -673,7 +673,7 @@ fn report_counts(counts: &CatalogRegionCounts) {
     // (overlapping rejected repeats are each charged, and bases with no locus for
     // a reason that is not a rejection — bundled, capped, out of scope — are in
     // the total but under no reason here).
-    eprintln!(
+    tracing::info!(
         "rejected_bp (does not partition repeat_bp_with_no_locus): copy_floor={copy_floor} \
          purity={purity} compound={compound} no_clean_trim={no_clean_trim}"
     );
@@ -707,7 +707,7 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
         verify,
     } = prepare_walk_inputs(args, &cache)?;
 
-    eprintln!(
+    tracing::info!(
         "type-regions: reference={} regions={} output={}",
         args.reference.display(),
         args.regions

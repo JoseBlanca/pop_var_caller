@@ -204,7 +204,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
     .expect("the cohort walks into psps");
 
@@ -316,7 +316,7 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: 0.99,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
     .expect("the cohort walks into psps a second time");
     // zeta from the first walk, alpha from the second: the disagreement is between the files.
@@ -360,7 +360,7 @@ fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: 0.99,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
     .expect("the cohort walks into psps at a purity of 0.99");
 
