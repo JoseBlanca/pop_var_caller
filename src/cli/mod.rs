@@ -32,7 +32,7 @@ pub use call_from_alignments::{
     CallFromAlignmentsArgs, CallFromAlignmentsCliError, run_call_from_alignments,
 };
 pub use call_from_psps::{CallFromPspsArgs, CallFromPspsCliError, run_call_from_psps};
-pub use command_line::{Cli, PopVarCallerCommand};
+pub use command_line::{Cli, DevCommand, PopVarCallerCommand};
 pub use estimate_contamination::{
     EstimateContaminationArgs, EstimateContaminationCliError, run_estimate_contamination,
 };
