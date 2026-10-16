@@ -364,10 +364,13 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   *Done (2026-10-16), for the owner to judge:* `reports/implementations/str_penalised_fit_D5_2026-10-16.md`.
   HG002: within 10 tracts of the climb's right genotypes in every class and depth; trio: SNPs identical,
   one indel fewer at each depth. Six one-sample fits per arm (the trio's HG002 reused the tier's fit).
-- ☐ **D6** Does a slip rate 0.5% of its value low change calls? On the bench's read counts, at 500 and
+- ✅ **D6** Does a slip rate 0.5% of its value low change calls? On the bench's read counts, at 500 and
   2,000 samples × 3 reads: each sample's genotype call from its genotype weights under the fitted
   stutter against under the true stutter. **A proxy for calling**: nothing in the project simulates
   reads for that many samples. *Depends:* C7. *Source:* spec §5.1.
+  *Done (2026-10-16):* `reports/implementations/str_penalised_fit_D6_2026-10-16.md`. A slip rate 0.5%
+  low changes about 4 calls in 100,000 (500 and 2,000 × 3), both directions alike, against 5–6 in 100
+  already wrong; the fitted stutter changes 2 to 5 in 10,000.
 
 > **Checkpoint D:** a short report under `doc/devel/reports/implementations/` with every D result.
 > Pause for review: the owner decides whether D2 and D5 pass before the climb is deleted, and whether
