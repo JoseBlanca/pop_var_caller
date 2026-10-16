@@ -3667,8 +3667,6 @@ mod tests {
     /// the allele-frequency shapes inside their bounds, and four samples at 8 reads with the
     /// duplicated class fitted.
     #[test]
-    #[ignore = "plan step A2 to B1: without the Newton step the 4-sample fit crawls, its decrement \
-                still 0.008 at the 200-pass limit; B1 restores it"]
     fn a_settled_fit_lands_within_a_tenth_of_an_error_of_a_long_one() {
         let settled_config = JointFitConfig {
             estimate_contamination: false,
@@ -3963,6 +3961,12 @@ mod tests {
         });
     }
 
+    /// **A pass limit the four-sample fixture of the tests below runs into**: with the Newton step
+    /// its three starts converge after 24 to 27 passes (25, 27 and 24), so at 15 every one stops at
+    /// the limit — after judging, which starts within the first 15. Before the step they ran to the
+    /// default 200.
+    const SHORT_OF_CONVERGING: u32 = 15;
+
     /// **A start at the pass limit is no yardstick** (spec §3.4's second trap): on four samples at 3
     /// reads every start runs to the limit alone, and `fit_jointly` returns the best of them — none is
     /// judged against another, so no later start stops early on an answer that is not the maximum.
@@ -3972,6 +3976,7 @@ mod tests {
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
+            max_passes: SHORT_OF_CONVERGING,
             ..JointFitConfig::default()
         };
         let cohort = a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200);
@@ -4015,11 +4020,12 @@ mod tests {
     }
 
     /// **Once a start converges, later starts heading there stop and do not compete**: on 20 samples
-    /// at 3 reads, where the second start run alone converges a little higher than the first,
-    /// `fit_jointly` returns the first start's answer, pass for pass.
+    /// at 3 reads, where the second start run alone converges a little higher than the first
+    /// (−16686.00559 against −16686.00591), `fit_jointly` returns the first start's answer, pass for
+    /// pass. The cohort was redrawn when the Newton step came in (plan step B1): on the earlier draw
+    /// the second start no longer scored above the first; this one is the first of 40 seeds tried
+    /// (`+ 1000` to `+ 1039`) where it does.
     #[test]
-    #[ignore = "plan step A2 to B1: under the decrement rule the second start alone no longer scores \
-                above the first on this cohort; the fixture is redrawn at B1"]
     fn later_starts_that_agree_leave_the_first_converged_answer() {
         use crate::parameter_estimation::joint::fit::settled::StartEnding;
         let config = JointFitConfig {
@@ -4027,7 +4033,7 @@ mod tests {
             duplicated_positions: false,
             ..JointFitConfig::default()
         };
-        let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000);
+        let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000 + 1001);
         let alone: Vec<_> =
             with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
                 (1..=2)
@@ -4101,7 +4107,10 @@ mod tests {
 
         let (at_the_limit, _) = fitted(
             &a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200),
-            &config,
+            &JointFitConfig {
+                max_passes: SHORT_OF_CONVERGING,
+                ..config.clone()
+            },
         );
         for record in &at_the_limit.starts {
             assert_eq!(record.ended, StartEnding::AtTheLimit);
@@ -4179,8 +4188,10 @@ mod tests {
             converged.trace[0].decrement, None,
             "the first pass never judges"
         );
+        // A cycle ended by an accepted Newton step has its next judging pass one pass later; any
+        // other, three or more.
         assert!(
-            judged.windows(2).all(|pair| pair[1].0 >= pair[0].0 + 3),
+            judged.windows(2).all(|pair| pair[1].0 > pair[0].0),
             "one judged pass a cycle: {judged:?}"
         );
         assert_eq!(
@@ -4214,7 +4225,7 @@ mod tests {
         let (at_the_limit, _) = fitted(
             &a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200),
             &JointFitConfig {
-                max_passes: 30,
+                max_passes: SHORT_OF_CONVERGING,
                 ..config.clone()
             },
         );
@@ -4245,6 +4256,7 @@ mod tests {
             estimate_contamination: false,
             duplicated_positions: false,
             settled_fraction: 0.15,
+            max_passes: SHORT_OF_CONVERGING,
             ..JointFitConfig::default()
         };
         let cohort = a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200);
@@ -4361,8 +4373,6 @@ mod tests {
     /// form of the Newton rule, which held a parameter only when it sat exactly on an end, the last
     /// three ran to the pass limit (plan step B1's review).
     #[test]
-    #[ignore = "plan step A2 to B1: without the Newton step the second shape's case crawls, its \
-                decrement still 0.39 to 0.47 at the 200-pass limit; B1 restores it"]
     fn a_fit_whose_maximum_lies_on_a_bound_converges() {
         let config = JointFitConfig {
             duplicated_positions: false,
@@ -4468,11 +4478,13 @@ mod tests {
     /// **The trace files what the fit returns under the winning start, one pass after its last**:
     /// on the four-sample fixture of the test above, with three starts, the rows after the
     /// winner's last pass are exactly the returned values and their errors, under the names the
-    /// value rows use, with the final pass's log-likelihood; the winner's last pass left the
-    /// returned values too (its last accelerated step was kept, not refused at the pass limit);
-    /// and **no other start's last pass did**, so rows filed under another start are a different
-    /// start's. Which start wins moves with the draw and with the fit's arithmetic, so the test
-    /// reads it from the rows rather than naming it.
+    /// value rows use, with the final pass's log-likelihood. A winner that converged stopped at the
+    /// pass that judged it, which was run at the returned values (its log-likelihood theirs to
+    /// rounding); one at the pass limit left the returned values in its last pass (its last
+    /// accelerated step was kept, not refused at the limit). **No other start's last pass left
+    /// them**, so rows filed under another start are a different start's. Which start wins moves
+    /// with the draw and with the fit's arithmetic, so the test reads it from the rows rather than
+    /// naming it.
     #[test]
     fn the_trace_files_the_returned_fit_after_the_winning_starts_last_pass() {
         use crate::parameter_estimation::joint::fit_trace::captured;
@@ -4511,7 +4523,23 @@ mod tests {
         // `Debug` prints every `f64` as its shortest round-trip form: equal strings are equal bits.
         let returned = format!("{:?}", parameters.named());
         assert_eq!(format!("{:?}", values_at(pass)), returned);
-        assert_eq!(format!("{:?}", values_at(fit.passes)), returned);
+        if fit.converged {
+            // A converged start stops at the pass that judged it, whose rows are the values that
+            // pass's maximisation left; the returned values are the ones it was run at, and its
+            // log-likelihood is theirs to rounding.
+            let judged_at = rows
+                .iter()
+                .find(|row| (row.0, row.1) == (start, fit.passes))
+                .expect("the winner's last pass is traced")
+                .2;
+            assert!(
+                (judged_at - fit.log_likelihood).abs() <= 1e-12 * fit.log_likelihood.abs(),
+                "{judged_at} against {}",
+                fit.log_likelihood
+            );
+        } else {
+            assert_eq!(format!("{:?}", values_at(fit.passes)), returned);
+        }
         let starts: std::collections::BTreeSet<usize> = rows.iter().map(|row| row.0).collect();
         assert_eq!(starts.len(), 3, "the fixture runs three starts");
         let ending_at_the_returned_values: Vec<usize> = starts
@@ -4526,10 +4554,10 @@ mod tests {
                 format!("{:?}", values_of(of, last)) == returned
             })
             .collect();
+        let expected: &[usize] = if fit.converged { &[] } else { &[start] };
         assert_eq!(
-            ending_at_the_returned_values,
-            [start],
-            "only the winner's last pass left the returned values"
+            ending_at_the_returned_values, expected,
+            "only the winner's last pass left the returned values, and only when it did not converge"
         );
         let group_index: Vec<Vec<usize>> = (0..4).map(|s| vec![s]).collect();
         let errors: Vec<(String, f64)> = error_rows

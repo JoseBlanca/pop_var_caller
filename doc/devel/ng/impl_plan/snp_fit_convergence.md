@@ -114,7 +114,7 @@ what moves, and how the move is checked.
 
 ### Milestone B — the Newton step with halving
 
-- ☐ **B1** **Own commit, do not bundle.** At a judging pass that does not stop the start, try its
+- ✅ **B1** **Own commit, do not bundle.** At a judging pass that does not stop the start, try its
   Newton step as `parameter_prepass_joint_fit.md` §3.3.1 sets out: the target from the same
   distances, the first fraction `min(1, 2·f_last)`, a try kept only if strictly higher, the kept
   try's pass reused as the next cycle's judging pass, up to `NEWTON_TRIES` = 4 (beside `JUMP_SLACK`
@@ -134,6 +134,12 @@ what moves, and how the move is checked.
   the digests, re-recorded here with the moves explained. A start that never reaches a judging pass
   is unchanged.
   *Depends:* A2. *Source:* `parameter_prepass_joint_fit.md` §3.3.1, §12 test 11.
+  *Done 2026-10-16:* the prototype's 0.001 runs reproduced byte for byte once its old note is put
+  back (1 sample: 22, 20, 21 passes, all converged; 4 samples: 53 converged, 46 and 37 agreed). The
+  oracle's fit is that same file; with it 6,680 → 6,682 records (two added at QUAL 9.4) and 5 of
+  26,720 sample genotypes changed, all at one locus. One addition the plan did not name: when refused
+  tries leave fewer than the two passes a SQUAREM cycle needs, the start ends at the judged point
+  rather than overrunning `max_passes`.
 
 > Checkpoint B (lead): B1 reproduces the prototype; the oracle's moves are explained. No owner pause
 > unless the reproduction fails for a reason that is not a bug.

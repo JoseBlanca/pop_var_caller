@@ -2348,6 +2348,15 @@ struct WhichStart<'a> {
 /// once, the rest of the cycle not run, and returns the parameters that pass judged, with that
 /// pass's statistics in place of a final one. **A start that pass finds converged is not stopped by
 /// agreement**: it converges, and so competes to be the fit's answer.
+///
+/// **A judging pass that stops nothing tries its Newton step** (`parameter_prepass_joint_fit.md`
+/// §3.3.1, [`try_the_newton_step`]): towards where its distances put the maximum, first at twice
+/// the fraction this start last accepted, at most the whole step, halved up to [`NEWTON_TRIES`]
+/// times, each try a pass that sums the information. A try that rises is kept, and its pass is the
+/// next cycle's judging pass; when none rises the SQUAREM cycle runs from the judged point as
+/// before. Expectation–maximisation crawls along the ridge where the invariant share and the
+/// density's first shape trade against each other; the Newton step crosses it. Every pass before a
+/// start's first judging pass is the same as without the step.
 fn maximise(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -2395,9 +2404,18 @@ fn maximise(
     // The statistics of the pass that found this start heading where an earlier one converged: at
     // the parameters it returns, with their information, so no final pass is needed.
     let mut agreed_at: Option<Statistics> = None;
+    // A pass an accepted Newton step already ran at `parameters`, with the information, and the
+    // maximisation step from it: the next cycle's judging pass and first step.
+    let mut accepted_pass: Option<(Parameters, Statistics)> = None;
+    // The fraction of its Newton step this start last accepted; before any, a half, so the first
+    // try is the whole step.
+    let mut last_fraction = 0.5_f64;
     while alternation.passes + 3 <= config.max_passes {
         let cycle_began = std::time::Instant::now();
-        let (first, entering) = alternation.step(&parameters, judging);
+        let (first, entering) = match accepted_pass.take() {
+            Some(already_run) => already_run,
+            None => alternation.step(&parameters, judging),
+        };
         let judging_pass = alternation.passes;
         // What this cycle's information pass found, at the parameters it judged; `None` before the
         // fit judges them.
@@ -2425,6 +2443,7 @@ fn maximise(
                 not_settled: not_settled(&errors, &step.distances, config.settled_fraction),
                 furthest: furthest(&errors, &step.distances),
                 heading_to,
+                distances: step.distances,
             }
         });
         // The traced pass that judged records its verdict.
@@ -2457,6 +2476,64 @@ fn maximise(
         {
             ended = StartEnding::Agreed { with_start };
             agreed_at = Some(entering);
+            break;
+        }
+        // **The Newton step** (`parameter_prepass_joint_fit.md` §3.3.1): from the parameters this
+        // pass judged, towards where its distances put the maximum, kept only if the
+        // log-likelihood rises and halved when it does not. A kept try's pass is the next cycle's
+        // judging pass, so an accepted step costs one pass in all.
+        let mut newton_rejected = None;
+        if let Some(judgement) = &judged_here
+            && alternation.passes < config.max_passes
+        {
+            let target = parameters.newton_target(&judgement.distances);
+            let outcome = try_the_newton_step(
+                &parameters,
+                &target,
+                first_newton_fraction(last_fraction),
+                entering.log_likelihood,
+                |candidate| {
+                    (alternation.passes < config.max_passes).then(|| {
+                        let (next, at_candidate) = alternation.step(candidate, true);
+                        (at_candidate.log_likelihood, (next, at_candidate))
+                    })
+                },
+            );
+            match outcome {
+                NewtonOutcome::Accepted {
+                    fraction,
+                    parameters: candidate,
+                    pass,
+                } => {
+                    let gain = pass.1.log_likelihood - entering.log_likelihood;
+                    last_fraction = fraction;
+                    parameters = candidate;
+                    accepted_pass = Some(pass);
+                    print_the_cycle(
+                        which,
+                        config,
+                        alternation.passes,
+                        gain,
+                        Some(&format!(
+                            "Newton step at {} accepted",
+                            as_a_fraction(fraction)
+                        )),
+                        || {
+                            judgement.described(
+                                &parameters.plain_names(which.sample_names, group_index),
+                                config,
+                            )
+                        },
+                        cycle_began,
+                    );
+                    continue;
+                }
+                NewtonOutcome::Rejected { tries } => newton_rejected = Some(tries),
+            }
+        }
+        // The SQUAREM cycle needs two passes at least; tries that spent them end the start here,
+        // at the parameters this pass judged.
+        if newton_rejected.is_some() && alternation.passes + 2 > config.max_passes {
             break;
         }
         let (second, _) = alternation.step(&first, false);
@@ -2494,8 +2571,17 @@ fn maximise(
         parameters = landed;
         // How far the fit is from stopping, and which parameter holds it, so a fit that runs to the
         // pass limit says why.
-        which.stage.now_and_then(|into| {
-            let judged = match &judged_here {
+        print_the_cycle(
+            which,
+            config,
+            alternation.passes,
+            gain,
+            newton_rejected
+                .map(|tries| {
+                    format!("Newton step rejected {tries} time(s); SQUAREM from the judged point")
+                })
+                .as_deref(),
+            || match &judged_here {
                 None => format!(
                     "the parameters are judged against their errors once a cycle moves the \
                      log-likelihood less than {gain_to_judge:.2e}"
@@ -2504,18 +2590,9 @@ fn maximise(
                     &parameters.plain_names(which.sample_names, group_index),
                     config,
                 ),
-            };
-            format!(
-                "SNP/indel fit, start {} of {}, pass {} of at most {}: log-likelihood moved \
-                 {:.2e}; {judged}; {} a cycle, {into}",
-                which.number,
-                which.of,
-                alternation.passes,
-                config.max_passes,
-                gain.abs(),
-                crate::parameter_estimation::progress::duration(cycle_began.elapsed()),
-            )
-        });
+            },
+            cycle_began,
+        );
     }
     // The reported statistics must be the ones the reported parameters produce, so the last
     // cycle is followed by one more pass rather than by a pass that preceded it — and it is
@@ -2593,6 +2670,9 @@ struct Judgement {
     /// The earlier start whose answer this one is heading to, if any (spec §3.4); never for a
     /// start that has converged.
     heading_to: Option<usize>,
+    /// Each parameter's distance to the maximum, in the order the fit's vector lists them: what
+    /// the Newton step moves by.
+    distances: Vec<Option<f64>>,
 }
 
 impl Judgement {
@@ -2615,6 +2695,115 @@ impl Judgement {
                 ))
         )
     }
+}
+
+/// **How a judging pass's Newton step went** (`parameter_prepass_joint_fit.md` §3.3.1).
+enum NewtonOutcome<Pass> {
+    /// A try at `fraction` of the step rose above the judged point: the parameters it was run at,
+    /// and what its pass handed back.
+    Accepted {
+        fraction: f64,
+        parameters: Parameters,
+        pass: Pass,
+    },
+    /// No try rose: `tries` were made, a try halved at the shares' bound without a pass included.
+    /// Fewer than [`NEWTON_TRIES`] when the passes ran out first.
+    Rejected { tries: u32 },
+}
+
+/// **Try the Newton step from `judged` towards `target`**, one value a coordinate in
+/// [`Parameters::coordinates`]' order (§3.3.1): first at `first_fraction` of the way, each try at
+/// `judged + fraction · (target − judged)` coordinate by coordinate, and kept as soon as its
+/// log-likelihood is strictly above `judged_log_likelihood`; one that is not is halved, up to
+/// [`NEWTON_TRIES`] tries. A try whose invariant and fixed non-reference shares together reach
+/// their upper bound is halved without a pass, as SQUAREM's jump refuses such a point, and counts as
+/// a try. `pass_at` runs one pass at a try and hands back its log-likelihood and whatever else the
+/// caller keeps of it, or `None` once the passes are spent, which ends the tries.
+///
+/// A coordinate the step does not move keeps its exact bits, since `fraction · 0` adds nothing:
+/// that is how a homozygote excess the fit holds at zero stays zero.
+fn try_the_newton_step<Pass>(
+    judged: &Parameters,
+    target: &[f64],
+    first_fraction: f64,
+    judged_log_likelihood: f64,
+    mut pass_at: impl FnMut(&Parameters) -> Option<(f64, Pass)>,
+) -> NewtonOutcome<Pass> {
+    let coordinates = judged.coordinates();
+    assert_eq!(
+        coordinates.len(),
+        target.len(),
+        "one target value a coordinate"
+    );
+    let mut fraction = first_fraction;
+    for tried in 1..=NEWTON_TRIES {
+        let values: Vec<f64> = coordinates
+            .iter()
+            .zip(target)
+            .map(|(coordinate, full)| coordinate.value + fraction * (full - coordinate.value))
+            .collect();
+        let candidate = judged.with_coordinates(&values);
+        if candidate.density.p_invariant + candidate.density.p_fixed_alt >= P_INVARIANT_BOUNDS.1 {
+            fraction /= 2.0;
+            continue;
+        }
+        let Some((log_likelihood, pass)) = pass_at(&candidate) else {
+            return NewtonOutcome::Rejected { tries: tried - 1 };
+        };
+        if log_likelihood > judged_log_likelihood {
+            return NewtonOutcome::Accepted {
+                fraction,
+                parameters: candidate,
+                pass,
+            };
+        }
+        fraction /= 2.0;
+    }
+    NewtonOutcome::Rejected {
+        tries: NEWTON_TRIES,
+    }
+}
+
+/// **The fraction of its Newton step a start tries first**: twice the fraction it last accepted, at
+/// most the whole step (§3.3.1). A start begins at a half, so its first try is the whole step.
+fn first_newton_fraction(last_accepted: f64) -> f64 {
+    (2.0 * last_accepted).min(1.0)
+}
+
+/// A fraction of the Newton step as the progress line prints it: `1`, `1/2`, `1/4` and so on.
+fn as_a_fraction(fraction: f64) -> String {
+    if fraction >= 1.0 {
+        "1".to_owned()
+    } else {
+        format!("1/{}", (1.0 / fraction).round())
+    }
+}
+
+/// **One cycle's progress line**, printed now and then: the start, the passes, how far the cycle
+/// moved the log-likelihood, which way it went when a Newton step was tried (`way`), and the
+/// judgement or why there is none yet (`judged`, built only when the line is printed).
+fn print_the_cycle(
+    which: &WhichStart<'_>,
+    config: &JointFitConfig,
+    passes: u32,
+    gain: f64,
+    way: Option<&str>,
+    judged: impl FnOnce() -> String,
+    began: std::time::Instant,
+) {
+    which.stage.now_and_then(|into| {
+        format!(
+            "SNP/indel fit, start {} of {}, pass {passes} of at most {}: log-likelihood moved \
+             {:.2e}{}; {}; {} a cycle, {into}",
+            which.number,
+            which.of,
+            config.max_passes,
+            gain.abs(),
+            way.map_or_else(String::new, |way| format!("; {way}")),
+            judged(),
+            crate::parameter_estimation::progress::duration(began.elapsed()),
+        )
+    });
 }
 
 /// **How far from settled `parameters` are**, by the information and slope one pass summed there:
@@ -2913,6 +3102,26 @@ impl Parameters {
         all
     }
 
+    /// **Where a Newton step from these parameters lands**: each coordinate plus its distance
+    /// (`distances`, a [`newton_step`]'s, in [`coordinates`](Self::coordinates)' order; a parameter
+    /// not solved for moves 0), clamped into its interval.
+    fn newton_target(&self, distances: &[Option<f64>]) -> Vec<f64> {
+        let coordinates = self.coordinates();
+        assert_eq!(
+            coordinates.len(),
+            distances.len(),
+            "one distance a coordinate"
+        );
+        coordinates
+            .iter()
+            .zip(distances)
+            .map(|(coordinate, distance)| {
+                let (low, high) = coordinate.bounds;
+                (coordinate.value + distance.unwrap_or(0.0)).clamp(low, high)
+            })
+            .collect()
+    }
+
     /// These parameters with every number replaced, in [`coordinates`](Self::coordinates)'
     /// order.
     fn with_coordinates(&self, values: &[f64]) -> Self {
@@ -2979,6 +3188,16 @@ impl Parameters {
 /// it needed three — 600 passes to converge where the plain alternation took 228. A unit is
 /// far below what separates two parameter values statistically, about two.
 const JUMP_SLACK: f64 = 1.0;
+
+/// **How many fractions of its Newton step a judging pass tries** before it gives up and runs the
+/// SQUAREM cycle from the judged point: `f`, `f/2`, `f/4`, `f/8` (`parameter_prepass_joint_fit.md`
+/// §3.3.1). The prototype's value, not tuned. **No slack**, unlike [`JUMP_SLACK`]: a try is kept
+/// only if it rises, since a step that lost a unit could be retried from the same point forever.
+/// The halving is not optional: the information from per-position slopes describes the curved ridge
+/// between the invariant share and the density's first shape as straight, so the whole step
+/// overshoots it — on 59 samples the first whole steps lost 2,299 to 3,556 units where a quarter of
+/// the step gained 4 to 29.
+const NEWTON_TRIES: u32 = 4;
 
 /// The intervals each maximisation keeps its parameter in — shared with the SQUAREM jump,
 /// which maps each to the whole real line and so must know them.
@@ -4526,6 +4745,166 @@ fn trigamma(x: f64) -> f64 {
 mod tests {
     use super::*;
 
+    // ---- the Newton step's tries (`parameter_prepass_joint_fit.md` §3.3.1, §12 test 11) -----
+
+    /// Parameters of one read group and one sample, the duplicated class off, every number inside
+    /// its interval: the point a Newton step is tried from.
+    fn a_judged_point() -> Parameters {
+        Parameters {
+            clean: vec![0.003],
+            noisy: vec![0.06],
+            noisy_share: 0.3,
+            density: FrequencyDensity {
+                p_invariant: 0.9,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            hom_excess: vec![0.0],
+            duplicated: None,
+        }
+    }
+
+    /// A target that moves only the density's first shape, from 0.6 to 1.4.
+    fn a_target_moving_the_first_shape(judged: &Parameters) -> Vec<f64> {
+        let mut target = judged.values();
+        target[3] = 1.4;
+        target
+    }
+
+    /// Run the tries against log-likelihoods handed out in turn, one a pass, recording the first
+    /// shape each pass was run at.
+    fn tried_against(
+        judged: &Parameters,
+        target: &[f64],
+        first_fraction: f64,
+        log_likelihoods: &[f64],
+    ) -> (NewtonOutcome<usize>, Vec<f64>) {
+        let mut run_at = Vec::new();
+        let outcome = try_the_newton_step(judged, target, first_fraction, -100.0, |candidate| {
+            let pass = run_at.len();
+            run_at.push(candidate.density.a);
+            log_likelihoods.get(pass).map(|&ll| (ll, pass))
+        });
+        (outcome, run_at)
+    }
+
+    /// **A whole step that overshoots is halved and the halved try kept**: the judged point at
+    /// −100, the whole step at −103, half of it exactly −100 — not strictly higher, so refused —
+    /// and a quarter at −99.5, kept. Three passes, at shapes 1.4, 1.0 and 0.8; every other
+    /// coordinate keeps its exact bits, the homozygote excess at zero included.
+    #[test]
+    fn an_overshooting_newton_step_is_halved_and_the_halved_try_kept() {
+        let judged = a_judged_point();
+        let target = a_target_moving_the_first_shape(&judged);
+        let (outcome, run_at) = tried_against(&judged, &target, 1.0, &[-103.0, -100.0, -99.5]);
+        assert_eq!(run_at.len(), 3);
+        for (got, expected) in run_at.iter().zip([1.4, 1.0, 0.8]) {
+            assert!((got - expected).abs() < 1e-12, "{run_at:?}");
+        }
+        let NewtonOutcome::Accepted {
+            fraction,
+            parameters,
+            pass,
+        } = outcome
+        else {
+            panic!("the quarter step rose and is kept");
+        };
+        assert_eq!((fraction, pass), (0.25, 2));
+        let (kept, before) = (parameters.values(), judged.values());
+        for (j, (kept, before)) in kept.iter().zip(&before).enumerate() {
+            if j != 3 {
+                assert_eq!(kept.to_bits(), before.to_bits(), "coordinate {j}");
+            }
+        }
+        assert_eq!(parameters.hom_excess[0].to_bits(), 0.0_f64.to_bits());
+    }
+
+    /// **The fraction a start accepted is remembered**: the next judging pass tries twice it first,
+    /// at most the whole step; a start begins at a half, so its first try is the whole step.
+    #[test]
+    fn the_next_first_try_is_twice_the_fraction_last_accepted() {
+        assert_eq!(first_newton_fraction(0.5), 1.0);
+        assert_eq!(first_newton_fraction(0.25), 0.5);
+        assert_eq!(first_newton_fraction(0.125), 0.25);
+        assert_eq!(first_newton_fraction(1.0), 1.0);
+        // Started at a half after an accepted quarter, the first pass is at half the way.
+        let judged = a_judged_point();
+        let target = a_target_moving_the_first_shape(&judged);
+        let (_, run_at) = tried_against(&judged, &target, first_newton_fraction(0.25), &[-99.0]);
+        assert_eq!(run_at.len(), 1);
+        assert!((run_at[0] - 1.0).abs() < 1e-12, "{run_at:?}");
+    }
+
+    /// **When every try falls, the step is refused after four**, at 1, 1/2, 1/4 and 1/8 of the way,
+    /// four passes, and the caller runs the SQUAREM cycle from the judged point.
+    #[test]
+    fn a_newton_step_whose_every_try_falls_is_refused_after_four() {
+        let judged = a_judged_point();
+        let target = a_target_moving_the_first_shape(&judged);
+        let (outcome, run_at) =
+            tried_against(&judged, &target, 1.0, &[-101.0, -102.0, -100.5, -100.0]);
+        assert!(matches!(outcome, NewtonOutcome::Rejected { tries: 4 }));
+        assert_eq!(run_at.len(), NEWTON_TRIES as usize);
+        for (got, expected) in run_at.iter().zip([1.4, 1.0, 0.8, 0.7]) {
+            assert!((got - expected).abs() < 1e-12, "{run_at:?}");
+        }
+    }
+
+    /// **A try past the shares' bound is halved without a pass**: a target putting the invariant
+    /// share on its upper end, so the whole step's two shares together pass `1 − 10⁻⁹`; the half
+    /// step is the first pass run, and the refused whole step counts as one of the four tries.
+    #[test]
+    fn a_try_past_the_shares_bound_is_halved_without_a_pass() {
+        let judged = a_judged_point();
+        let mut target = judged.values();
+        target[1] = P_INVARIANT_BOUNDS.1;
+        let mut run_at = Vec::new();
+        let outcome = try_the_newton_step(&judged, &target, 1.0, -100.0, |candidate| {
+            run_at.push(candidate.density.p_invariant);
+            Some((-101.0, ()))
+        });
+        assert!(matches!(outcome, NewtonOutcome::Rejected { tries: 4 }));
+        assert_eq!(run_at.len(), 3, "three passes for four tries: {run_at:?}");
+        assert!(
+            (run_at[0] - (0.9 + 0.5 * (P_INVARIANT_BOUNDS.1 - 0.9))).abs() < 1e-12,
+            "the first pass is at half the step: {run_at:?}"
+        );
+    }
+
+    /// **No try once the passes are spent**: a pass that cannot be run ends the tries, none counted,
+    /// and nothing is kept.
+    #[test]
+    fn no_newton_try_once_the_passes_are_spent() {
+        let judged = a_judged_point();
+        let target = a_target_moving_the_first_shape(&judged);
+        let (outcome, run_at) = tried_against(&judged, &target, 1.0, &[]);
+        assert!(matches!(outcome, NewtonOutcome::Rejected { tries: 0 }));
+        assert_eq!(run_at.len(), 1, "asked once, and told the passes are spent");
+    }
+
+    /// The target is each coordinate plus its distance, a parameter without one staying put, each
+    /// clamped into its interval; and the progress line's fractions.
+    #[test]
+    fn the_newton_target_is_clamped_into_each_interval() {
+        let judged = a_judged_point();
+        let mut distances = vec![None; judged.coordinates().len()];
+        distances[0] = Some(0.05);
+        distances[3] = Some(-10.0);
+        distances[1] = Some(1.0);
+        let target = judged.newton_target(&distances);
+        let values = judged.values();
+        assert_eq!(target[0], values[0] + 0.05);
+        assert_eq!(target[1], P_INVARIANT_BOUNDS.1);
+        assert_eq!(target[3], BETA_SHAPE_BOUNDS.0);
+        for j in [2, 4, 5, 6, 7] {
+            assert_eq!(target[j].to_bits(), values[j].to_bits(), "coordinate {j}");
+        }
+        assert_eq!(as_a_fraction(1.0), "1");
+        assert_eq!(as_a_fraction(0.25), "1/4");
+        assert_eq!(as_a_fraction(0.125), "1/8");
+    }
+
     // ---- the pieces, each on its own ------------------------------------------
 
     #[test]
@@ -5446,7 +5825,8 @@ mod whole_fit_tests {
             / fit.noise.len() as f64
     }
 
-    /// **A census cut into several chunks fits to the same bits at one thread as at four.**
+    /// **A census cut into several chunks fits to the same bits at one thread as at four and
+    /// eight.**
     ///
     /// Every total of the expectation pass is a floating-point sum over positions, so how the
     /// positions are split and in what order the parts are added reaches the fitted numbers' last
@@ -5473,19 +5853,22 @@ mod whole_fit_tests {
             0.2,
             0x5EED_0C4A_4C5E_0001,
         );
-        // Three passes, one cycle; and a fit whose stop is decided by the information and scores a
-        // cycle sums once the log-likelihood has nearly stopped moving (plan step B1) — with a
-        // decrement threshold so wide that the first cycle judged stops it, since this three-sample
-        // cohort is still crawling at 200 passes.
-        for max_passes in [3, 200] {
+        // Three passes, one cycle; a fit whose stop is decided by the information and scores a
+        // cycle sums once the log-likelihood has nearly stopped moving (`fit_precision.md` plan
+        // step B1), with a decrement threshold so wide that the first cycle judged stops it; and
+        // 60 passes at the default threshold, where judging passes that stop nothing try the
+        // Newton step (`snp_fit_convergence.md` plan step B1) — so its tries, kept and refused,
+        // are pinned at every width too.
+        for (max_passes, decrement_threshold) in [
+            (3, DECREMENT_THRESHOLD),
+            (200, 1e9),
+            (60, DECREMENT_THRESHOLD),
+        ] {
             let config = JointFitConfig {
                 quadrature_nodes: 8,
                 max_passes,
-                decrement_threshold: if max_passes == 200 {
-                    1e9
-                } else {
-                    DECREMENT_THRESHOLD
-                },
+                decrement_threshold,
+                pass_trace: true,
                 ..JointFitConfig::default()
             };
             let fitted_at = |threads: usize| {
@@ -5497,18 +5880,32 @@ mod whole_fit_tests {
                     .expect("the cohort pools")
             };
             let at_one = fitted_at(1);
-            assert_eq!(
-                at_one.converged,
-                max_passes == 200,
-                "{max_passes} passes: converged after {}",
-                at_one.passes
-            );
+            let judged = at_one
+                .trace
+                .iter()
+                .filter(|summary| summary.decrement.is_some())
+                .count();
+            match max_passes {
+                3 => assert!(!at_one.converged, "3 passes: converged"),
+                200 => assert!(
+                    at_one.converged && judged == 1,
+                    "200 passes: {judged} judged"
+                ),
+                _ => assert!(
+                    judged >= 2,
+                    "60 passes: the fixture needs a judging pass that stops nothing, and so tries \
+                     the Newton step; {judged} judged"
+                ),
+            }
             // `Debug` prints every `f64` as its shortest round-trip form, so two equal strings are
             // two equal sets of bits; `==` would also call `0.0` and `-0.0` equal.
-            assert!(
-                format!("{at_one:?}") == format!("{:?}", fitted_at(4)),
-                "{max_passes} passes: the census fitted to different numbers at one thread and at four"
-            );
+            for threads in [4, 8] {
+                assert!(
+                    format!("{at_one:?}") == format!("{:?}", fitted_at(threads)),
+                    "{max_passes} passes: the census fitted to different numbers at one thread and \
+                     at {threads}"
+                );
+            }
         }
     }
 

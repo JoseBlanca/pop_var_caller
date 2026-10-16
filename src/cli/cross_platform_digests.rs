@@ -196,7 +196,20 @@ mod tests {
     /// prior's `reference_concentration`, 20.047 to 39.089, and
     /// `alternative_concentration_total`, 2.08 × 10⁻² to 6.60 × 10⁻³. Recorded on macOS (arm64)
     /// only; it was `66d72ee84c4a49d4b6271d3e5b68437c`.
-    const FITTED_PARAMETERS_MD5: &str = "4966525dd98461b6aea6ecf845353b02";
+    ///
+    /// **Re-recorded 2026-10-16 again** (`snp_fit_convergence.md` plan step B1) when each judging
+    /// pass that stops nothing began to try its Newton step, halved up to four times, each try a
+    /// pass (`parameter_prepass_joint_fit.md` §3.3.1). Measured on four tomato accessions first: the
+    /// built fit reproduces the prototype's run there and on one accession byte for byte but for the
+    /// note. **Here every start still runs to the limit** (200 passes each, against 198): of the 29
+    /// judging passes each start makes, 26 or 27 have every try refused — the quadratic model of
+    /// the information on two samples over 600 bases is no guide — and each refusal spends up to
+    /// four passes, so the starts reach the limit after fewer SQUAREM cycles and end elsewhere; 2 or 3
+    /// steps were kept. Five lines move: the three starts' rows, and the ordinary-site prior's
+    /// `reference_concentration`, 39.089 to 43.393, and `alternative_concentration_total`,
+    /// 6.60 × 10⁻³ to 4.58 × 10⁻³. Recorded on macOS (arm64) only; it was
+    /// `4966525dd98461b6aea6ecf845353b02`.
+    const FITTED_PARAMETERS_MD5: &str = "5e36155136a9a0b33d5b89b6395d83fc";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -268,7 +281,12 @@ mod tests {
     /// two SNPs move with the ordinary-site prior, chrV:121 QUAL 520.7 to 513.1 and chrV:456 520.1
     /// to 512.5, the other sample's GQ 71 to 73 at both. No genotype moved, and the repeat tract
     /// did not move. Recorded on macOS (arm64) only; it was `dae7e77c280d7f240349cc8433207a81`.
-    const CALLS_MD5: &str = "407693c2f919227045b95996191f12ed";
+    ///
+    /// **Re-recorded 2026-10-16 again** with the fit above (plan step B1): the two SNPs' QUAL
+    /// 513.1 to 511.1 and 512.5 to 510.5, the other sample's GQ 73 to 74 at both. No genotype moved;
+    /// the repeat tract did not move. Recorded on macOS (arm64) only; it was
+    /// `407693c2f919227045b95996191f12ed`.
+    const CALLS_MD5: &str = "24afa05244c632f84f33f05bf86b4675";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -310,7 +328,14 @@ mod tests {
     /// from 2.97, 6.43 and 3.13 to 0.84, 6.37 and 1.09 (errors 0.54, 16.7 and 0.53), and the
     /// ordinary-site prior's two concentrations with the density; plus the note's seven lines.
     /// Recorded on macOS (arm64) only; it was `0586cd65f3dcbd192f0f8cf19e223ca9`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "4c64cac0190ef850c66dad4b50d366f1";
+    ///
+    /// **Re-recorded 2026-10-16 again** (plan step B1), for the reason [`FITTED_PARAMETERS_MD5`]
+    /// gives: every start still at the limit (198, 199, 200 passes), with 7, 16 and 3 Newton steps
+    /// kept and 21, 23 and 27 judging passes whose every try was refused. The multipliers move from
+    /// 0.84, 6.37 and 1.09 to 6.68, 6.24 and 6.09 (errors 13.4, 42.6 and 3.8), the ordinary-site
+    /// prior's two concentrations with the density, and the starts' three rows. Recorded on macOS
+    /// (arm64) only; it was `4c64cac0190ef850c66dad4b50d366f1`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "e5463fbf4a49798b810cc44db00f3a6d";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -360,7 +385,12 @@ mod tests {
     /// two SNPs' QUAL, chrV:121 222.1 to 277.1 and chrV:456 219.2 to 265.1, and the other sample's GQ
     /// 67 to 71 at both. No genotype moved; the repeat tract did not move. Recorded on macOS (arm64)
     /// only; it was `d315b4e4d0de2f21fd34cd673bbdfa8b`.
-    const WITH_ERRORS_CALLS_MD5: &str = "3ccf7a635b25ef0dcbfc54bc2fb42e92";
+    ///
+    /// **Re-recorded 2026-10-16 again** with the fit above (plan step B1): the two SNPs' QUAL
+    /// 277.1 to 185.7 and 265.1 to 189.1, with the multipliers' move, and the other sample's GQ 71
+    /// to 73 at both. No genotype moved; the repeat tract did not move. Recorded on macOS (arm64)
+    /// only; it was `3ccf7a635b25ef0dcbfc54bc2fb42e92`.
+    const WITH_ERRORS_CALLS_MD5: &str = "46d43b7dc786bc8717807898ebd67ac5";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -386,7 +416,15 @@ mod tests {
     /// `snp_indel_fit_starts` alone: its three starts ran to the limit before and still do, and
     /// putting the old note back gives the old checksum exactly. The calls do not move. Recorded on
     /// macOS (arm64) only; it was `e0902dab0b2d64082d42a40b134f6721`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "66397f1ecd8c0effcf46bb53e97126bc";
+    ///
+    /// **Re-recorded 2026-10-16 again** (plan step B1), for the reason [`FITTED_PARAMETERS_MD5`]
+    /// gives: every start still at the limit (199, 199, 198 passes), with 4, 18 and 22 Newton steps
+    /// kept and 17, 17 and 20 judging passes whose every try was refused. 26 lines move: two starts'
+    /// rows, all 22 libraries' multipliers (now 0.057 to 8.85 where they were 0.35 to 7.97), and the
+    /// ordinary-site prior's `reference_concentration`, 44.10 to 50.00, and
+    /// `alternative_concentration_total`, 0.0416 to 0.0580. Recorded on macOS (arm64) only; it was
+    /// `66397f1ecd8c0effcf46bb53e97126bc`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "8451e9ebed2660b2f35549d4844875d0";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -423,7 +461,14 @@ mod tests {
     /// chrV:201 moves, QUAL 37.3 to 78.6, AF 0.023718 to 0.023811, the heterozygote's GQ 24 to 65
     /// and every other sample's GQ up by 2 or 3; no genotype. Recorded on macOS (arm64) only; it
     /// was `5c2414e47ecc6748f12db076d7513de1`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "b23487bd69f9d39f1943fbe9350a7a3f";
+    ///
+    /// **Re-recorded 2026-10-16** with the fit above (`snp_fit_convergence.md` plan step B1; plan
+    /// step A2 moved neither this nor the fit's numbers): 22 records to 23. One appears, a
+    /// heterozygote at chrV:386 at QUAL 6.0 in one sample whose reads split 18 to 2; QUAL moves in
+    /// 21 of the 22 that both hold, by −108.5 to +212.2, with the libraries' multipliers. No
+    /// genotype of those 22 moved. Recorded on macOS (arm64) only; it was
+    /// `b23487bd69f9d39f1943fbe9350a7a3f`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "64ac9af7ecaf0b2c603984e9b4420e6f";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
