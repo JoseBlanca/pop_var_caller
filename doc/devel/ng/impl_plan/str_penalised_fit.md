@@ -350,7 +350,7 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   assumed from the tomato catalog and kimura's totals (two variants).
 - ☐ **D4** The oracle and `cli::cross_platform_digests` re-recorded, each move explained, from
   C10's state (the cohort in name order). *Depends:* C7, C10. *Source:* spec §4.6.
-- ☐ **D5** Calling on HG002 and the GIAB trio, **run once with a parameters file fitted by the climb
+- ✅ **D5** Calling on HG002 and the GIAB trio, **run once with a parameters file fitted by the climb
   and once with one fitted by the new fit**, on the same psps; nothing else differs.
   - HG002: `scripts/ng_str_accuracy/hg002_two_binaries.sh`, scored by
     `benchmarks/lib/tract_qual_experiment.py` against GIAB's tandem-repeat truth; the number is right
@@ -361,6 +361,9 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
     `doc/devel/reports/ng_str_routing_recovery_2026-09-02.md`.
   - Data: the main checkout's `benchmarks/` (preconditions).
   *Depends:* C7. *Source:* spec §4.7.
+  *Done (2026-10-16), for the owner to judge:* `reports/implementations/str_penalised_fit_D5_2026-10-16.md`.
+  HG002: within 10 tracts of the climb's right genotypes in every class and depth; trio: SNPs identical,
+  one indel fewer at each depth. Six one-sample fits per arm (the trio's HG002 reused the tier's fit).
 - ☐ **D6** Does a slip rate 0.5% of its value low change calls? On the bench's read counts, at 500 and
   2,000 samples × 3 reads: each sample's genotype call from its genotype weights under the fitted
   stutter against under the true stutter. **A proxy for calling**: nothing in the project simulates
