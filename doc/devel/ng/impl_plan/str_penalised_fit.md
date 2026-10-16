@@ -382,6 +382,17 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   low changes about 4 calls in 100,000 (500 and 2,000 × 3), both directions alike, against 5–6 in 100
   already wrong; the fitted stutter changes 2 to 5 in 10,000.
 
+- ☐ **D7** *(owner, 2026-10-16; after checkpoint D)* The errors' `H` and middle term gain the
+  allele-length prior's curvature (spec §7, 2026-10-16), as the stutter prior's already is; the
+  rule that withholds every error when `H` still fails stays as the fallback. The tests that pinned the
+  failed inversion on a real cohort (`a_three_base_cohort_whose_curvature_cannot_be_inverted`) now
+  expect errors, and the fallback is tested on a matrix built to fail. Checked on the D1 coverage runs
+  that lost their errors, with the diagnosis report's numbers. *Source:* spec §2.4, §2.6, §7.
+- ☐ **D8** *(owner, 2026-10-16)* Where errors start (spec §7, 2026-10-16): stutter numbers from 3
+  loci with reads, F and allele-length shares from 8, a share's rule from 1 expected locus; the stated
+  F's median keeps 8. The run log, the parameters file's notes and the error table follow. *Depends:*
+  D7. D4's re-recording is repeated after D7 and D8.
+
 > **Checkpoint D:** a short report under `doc/devel/reports/implementations/` with every D result.
 > Pause for review: the owner decides whether D2 and D5 pass before the climb is deleted, and whether
 > D1's thin-class coverage lifts `LOCI_FOR_AN_ERROR`.

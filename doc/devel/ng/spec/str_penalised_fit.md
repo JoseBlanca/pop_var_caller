@@ -820,6 +820,26 @@ Each as the lead recommended.
   milestone D** (§3), as plan step C10: the cohort is put in one fixed order, samples by name and read
   groups within a sample by ID, before anything is summed. The defect is on main too.
 
+### 2026-10-16: the owner's answers at checkpoint D
+
+Each as the lead recommended (`reports/implementations/str_penalised_fit_checkpoint_D_2026-10-16.md`).
+
+- **Owner: D2 and D5 pass; the climb is deleted** (plan milestone E).
+- **Owner: the errors' `H` and middle term gain the allele-length prior's curvature** (§2.4's floor:
+  one locus's worth of draws spread over the lengths, plus the half draw a class), as §2.10.4 already
+  does for the stutter prior. Without it `H` is not invertible at thin classes, where the reads'
+  likelihood alone curves upward along a trade between two rare lengths, and every error of the motif
+  length was withheld (`reports/implementations/str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`:
+  89 of D1's 480 coverage runs). Fitted values do not change. The rule that withholds every error
+  when `H` still cannot be inverted stays as the fallback. Plan step D7.
+- **Owner: where errors start, as D1 recommends** (`reports/implementations/str_penalised_fit_D1_2026-10-15.md`
+  §1): the three stutter numbers (slip rate, shorter share, fall-off) get an error from **3** loci
+  with reads; F and the allele-length shares keep **8**; a share's rule (`LOCI_FOR_A_SHARE_ERROR`,
+  share × loci with reads) drops from 3 to **1**. The stated F's median (C9, companion §3.5) keeps
+  counting classes with at least 8 loci. Plan step D8.
+- **Owner: the SNP/indel fit's convergence is a separate job** after this branch merges (the
+  performance review's finding L5); not on this branch.
+
 ## 8. Reuse map
 
 | what | existing code | reuse |
