@@ -34,6 +34,13 @@ fn main() {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     run_output::install(cli.quiet, settings_of(&matches));
+    // **A panic is recorded in the log before the process stops**: a release build aborts on a
+    // panic, so nothing after it runs. Rust's own message still goes to the terminal.
+    let print_the_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        print_the_panic(info);
+        run_output::close_log_after_a_panic(&format!("pvc stopped on an internal error: {info}"));
+    }));
     let result = match cli.cmd {
         PopVarCallerCommand::RepeatCatalog(args) => {
             run_repeat_catalog(&args).map_err(|e| format_error_chain(&e))

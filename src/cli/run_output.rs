@@ -139,7 +139,10 @@ pub enum LogFileError {
 /// setting's value, including the ones left at their default.
 ///
 /// An existing file is refused unless `replace`, which a subcommand passes as its `--force`: the
-/// log belongs to the output it sits beside and is replaced together with it.
+/// log belongs to the output it sits beside and is replaced together with it. **A log whose run
+/// failed is replaced without `--force`**: it belongs to no output, and refusing it would make
+/// the corrected command fail on the mistake it corrects. A log that ends any other way — a run
+/// that succeeded, one still running, one that was killed — is refused.
 ///
 /// **The returned handle writes to this file and no other**, which is what a run uses for what it
 /// writes itself — the parameters block. Events from anywhere in the crate go to whichever log is
@@ -158,7 +161,15 @@ pub fn open_log(path: &Path, replace: bool) -> Result<RunLog, LogFileError> {
         // cannot both decide the file is free.
         options.create_new(true);
     }
-    let file = options.open(path).map_err(|source| {
+    let opened = match options.open(path) {
+        Err(source)
+            if source.kind() == io::ErrorKind::AlreadyExists && left_by_a_failed_run(path) =>
+        {
+            OpenOptions::new().write(true).truncate(true).open(path)
+        }
+        opened => opened,
+    };
+    let file = opened.map_err(|source| {
         if source.kind() == io::ErrorKind::AlreadyExists {
             LogFileError::AlreadyThere {
                 path: path.to_path_buf(),
@@ -178,6 +189,22 @@ pub fn open_log(path: &Path, replace: bool) -> Result<RunLog, LogFileError> {
     *lock_the_log() = Some(log.clone());
     write_the_header();
     Ok(log)
+}
+
+/// The words [`close_log`] ends a log with, before the exit status.
+const FINISHED_WITH_EXIT_STATUS: &str = " finished: exit status ";
+
+/// Whether the log at `path` ends with its run's failure: a last line from [`close_log`] with an
+/// exit status other than 0.
+fn left_by_a_failed_run(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(last) = text.lines().rev().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    last.split_once(FINISHED_WITH_EXIT_STATUS)
+        .is_some_and(|(_, status)| !status.starts_with("0,"))
 }
 
 /// The path of the log this run is writing, while one is open.
@@ -200,10 +227,23 @@ pub fn close_log(exit_status: i32) {
         None => "peak memory not measured on this platform".to_owned(),
     };
     log.write_line(&format!(
-        "{} DEBUG finished: exit status {exit_status}, after {}, {memory}\n",
+        "{} DEBUG{FINISHED_WITH_EXIT_STATUS}{exit_status}, after {}, {memory}\n",
         rfc3339_now(),
         elapsed_text(log.opened.elapsed()),
     ));
+}
+
+/// **Close the run's log after a panic**: the panic's message as the log's last event, then how
+/// the run ended, with the exit status a panicking Rust process has. Called from the binary's
+/// panic hook, because a release build aborts on a panic and nothing after it runs — without
+/// this the log would end at its last event, which reads as a run that was killed.
+///
+/// Written to the file only: the terminal gets Rust's own panic message.
+pub fn close_log_after_a_panic(message: &str) {
+    if let Some(log) = lock_the_log().clone() {
+        log.write_line(&format!("{} ERROR {message}\n", rfc3339_now()));
+    }
+    close_log(101);
 }
 
 /// The log's lock. **A panic while it was held does not stop logging**: a line half-written by a
@@ -530,6 +570,28 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "an earlier run's log\n"
         );
+    }
+
+    /// **A failed run's log is replaced without `--force`**; a finished or unfinished one is not.
+    #[test]
+    fn only_a_failed_runs_log_is_replaced_without_force() {
+        std::fs::create_dir_all("tmp").unwrap();
+        let directory = tempfile::tempdir_in("tmp").unwrap();
+        let path = directory.path().join("pvc_calls.log");
+        for (earlier, replaced) in [
+            (
+                "t DEBUG finished: exit status 1, after 3s, peak memory 1 MiB\n",
+                true,
+            ),
+            (
+                "t DEBUG finished: exit status 0, after 3s, peak memory 1 MiB\n",
+                false,
+            ),
+            ("t INFO  calling: 40%\n", false),
+        ] {
+            std::fs::write(&path, earlier).unwrap();
+            assert_eq!(left_by_a_failed_run(&path), replaced, "{earlier}");
+        }
     }
 
     /// **The block a run writes is the text it was handed**, found again between its markers.

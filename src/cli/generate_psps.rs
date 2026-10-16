@@ -704,6 +704,13 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         // and walking that sample again is this command's advertised repair.
         let mut log_name = psp_path.as_os_str().to_os_string();
         log_name.push(".log");
+        // **The previous sample's log is closed first**, with how its sample ended: its psp is
+        // on disk, or the loop would have returned. Opening the next log alone would leave every
+        // log but the last without the line saying the run finished, so it would read as a run
+        // that was killed. The last is closed by the binary, after the cohort's report.
+        if index > 0 {
+            crate::cli::run_output::close_log(0);
+        }
         crate::cli::run_output::open_log(std::path::Path::new(&log_name), true)?;
         tracing::info!("sample {} of {how_many}: {}", index + 1, sample.sample);
         tracing::debug!("this sample's run stores {how_many} sample(s) over {ground_said}");

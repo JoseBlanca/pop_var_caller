@@ -197,12 +197,17 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         name.push(".log");
         PathBuf::from(name)
     });
+    // **The number of threads the scan uses, and the one the log's header records**: the builder
+    // takes 0 as 1, and the header reads the size of rayon's pool, which the scan runs on.
+    let threads = args.threads.max(1);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global();
     crate::cli::run_output::open_log(&log, args.force)?;
     tracing::info!(
-        "pvc repeat-catalog: scanning {}, {} thread{}",
+        "pvc repeat-catalog: scanning {}, {threads} thread{}",
         args.reference.display(),
-        args.threads,
-        if args.threads == 1 { "" } else { "s" },
+        if threads == 1 { "" } else { "s" },
     );
     tracing::info!("log: {}", log.display());
     tracing::debug!("input: reference {}", args.reference.display());
@@ -210,7 +215,7 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
 
     let mut builder = RepeatCatalogBuilder::create(&output, criteria, scan)
         .map_err(|source| RepeatCatalogCliError::Build { source })?
-        .with_threads(args.threads);
+        .with_threads(threads);
 
     let reference = read_reference_info_observing(
         ReferenceSource::Fasta {

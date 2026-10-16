@@ -123,8 +123,10 @@ pub enum DevCommand {
 /// is in the log without anyone remembering to add it.
 #[must_use]
 pub fn settings_of(matches: &ArgMatches) -> Vec<super::run_output::Setting> {
-    // **Down to the subcommand that ran**, through `pvc dev`'s group.
+    // **Down to the subcommand that ran**, through `pvc dev`'s group. Built first, because clap
+    // attaches the global options, `--quiet` among them, to each subcommand only when it builds.
     let mut command = Cli::command();
+    command.build();
     let Some((mut name, mut ran)) = matches.subcommand() else {
         return Vec::new();
     };
