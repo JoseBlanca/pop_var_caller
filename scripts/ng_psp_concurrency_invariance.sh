@@ -45,9 +45,14 @@ for threads in 1 2 4 8; do
   # shellcheck disable=SC2086
   "$bin" call-from-psps \
     --reference "$reference" --catalog "$catalog" $stored \
-    --defaults --threads "$threads" --output "$out/run.vcf" > "$out/threads-$threads.log" 2>&1
+    --defaults --threads "$threads" --output "$out/run.vcf" --log "$out/run.pvc.log" \
+    > "$out/threads-$threads.log" 2>&1
   mv "$out/run.vcf" "$out/threads-$threads.vcf"
-  mv "$out/run.parameters.toml" "$out/threads-$threads.parameters.toml"
+  # **The parameters are in the run's log**, between two marker lines; the log keeps one name for
+  # the same reason the VCF does, since the VCF header names it (`##pvcLog`).
+  mv "$out/run.pvc.log" "$out/threads-$threads.pvc.log"
+  sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' \
+    "$out/threads-$threads.pvc.log" | sed '1d;$d' > "$out/threads-$threads.parameters.toml"
   printf 'threads %s: ' "$threads"; grep -vc '^#' "$out/threads-$threads.vcf"
 done
 

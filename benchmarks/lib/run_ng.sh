@@ -23,7 +23,8 @@
 #     base-quality calibration, no contamination, no inbreeding.
 #   * It does NOT call inside tandem repeats. Every repeat tract in the BED is
 #     counted as ground it cannot speak for and named in the run report, which
-#     this script tees to the log — read it before reading the recall.
+#     is in pvc's own log beside the VCF (`<name>.pvc.log`) — read it before
+#     reading the recall.
 #
 # Unlike run_ours.sh, ng takes a BED, so it is restricted to the benchmark
 # regions exactly as GATK and freebayes are.
@@ -125,6 +126,7 @@ run_single() {
         --regions "$BED" \
         --ploidy "$PLOIDY" \
         --output "$raw_vcf" \
+        --log "${raw_vcf%.raw.vcf}.pvc.log" --force \
         $(model_args) \
         $EXTRA_ARGS 2>&1 | tee "$log"
     t1=$(bench_now)
@@ -174,6 +176,7 @@ run_cohort() {
         --regions "$BED" \
         --ploidy "$PLOIDY" \
         --output "$raw_vcf" \
+        --log "${raw_vcf%.raw.vcf}.pvc.log" --force \
         $(model_args) \
         $EXTRA_ARGS 2>&1 | tee "$log"
     t1=$(bench_now)

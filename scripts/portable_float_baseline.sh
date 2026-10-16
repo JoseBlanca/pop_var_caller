@@ -171,7 +171,8 @@ case "$mode" in
       # shellcheck disable=SC2086
       result=$(measure "$work/alignments.log" "$bin" call-from-alignments \
         --reference "$reference" --catalog "$catalog" $alignments --regions "$regions" \
-        --defaults --threads 0 --output "$work/from_alignments.vcf")
+        --defaults --threads 0 --output "$work/from_alignments.vcf" \
+        --log "$work/from_alignments.pvc.log")
       printf '%s\tcall-from-alignments\t%s\n' "$repeat" "$result" >> "$out/runs.tsv"
       # shellcheck disable=SC2086
       result=$(measure "$work/generate.log" "$bin" generate-psps \
@@ -183,7 +184,7 @@ case "$mode" in
       # shellcheck disable=SC2086
       result=$(measure "$work/psps.log" "$bin" call-from-psps \
         --reference "$reference" --catalog "$catalog" $stored \
-        --defaults --threads 0 --output "$work/from_psps.vcf")
+        --defaults --threads 0 --output "$work/from_psps.vcf" --log "$work/from_psps.pvc.log")
       printf '%s\tcall-from-psps\t%s\n' "$repeat" "$result" >> "$out/runs.tsv"
       repeat=$((repeat + 1))
     done

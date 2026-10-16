@@ -138,27 +138,28 @@ fi
 
 run_one() {
   local side=$1; shift
-  # **Every run writes to the same basename.** The header records the parameters file beside the
-  # VCF by name (`##parametersFile=`), so a run written as `off.vcf` and one written as
-  # `drop.vcf` would differ in the header whatever the filter did — which would make the off run
-  # uncomparable with the standing pre-filter baseline. Each writes `run.vcf` and is moved after.
+  # **Every run writes to the same basenames.** The header names the run's log (`##pvcLog=`), so
+  # runs whose logs were `off.pvc.log` and `drop.pvc.log` would differ in the header whatever the
+  # filter did, and the comparison of the off and drop headers would fail on a filename. Each
+  # writes `run.vcf` and `run.pvc.log`, and both are moved after.
   printf '%s: ' "$side"
   if [[ ${NG_MODE:-alignments} == psps ]]; then
     measure "$out/$side.log" \
       "$bin" call-from-psps \
       --reference "$reference" --catalog "$catalog" "${stored[@]}" \
       --defaults --threads "$threads" "$@" --output "$out/run.vcf" \
-      --force --log "$out/$side.pvc.log" || {
+      --force --log "$out/run.pvc.log" || {
         echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
   else
     measure "$out/$side.log" \
       "$bin" call-from-alignments \
       --reference "$reference" --catalog "$catalog" "${alignments[@]}" --regions "$regions" \
       --defaults --threads "$threads" "$@" --output "$out/run.vcf" \
-      --force --log "$out/$side.pvc.log" || {
+      --force --log "$out/run.pvc.log" || {
         echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
   fi
   mv "$out/run.vcf" "$out/$side.vcf"
+  mv "$out/run.pvc.log" "$out/$side.pvc.log"
   # The numbers the run scored with are in its log, between two marker lines that are TOML comments.
   sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/$side.pvc.log" | sed '1d;$d' > "$out/$side.parameters.toml"
 }
@@ -203,8 +204,10 @@ for side in drop tag; do
   # **An empty report is a failure, not a quiet section.** `sed` prints nothing and exits 0 when
   # the marker is absent, so a reworded first line would silently take π, the cut, the
   # convergence flag and the drop count out of every report written from this output.
-  # The run report is in the run's log, one `report:` line each.
-  report=$(sed -n 's/^[^ ]* DEBUG report: //p' "$out/$side.pvc.log" | sed -n '/^hidden-duplication filter:/,$p')
+  # The run report is in the run's log, one `report:` line each — except its warnings, which are
+  # `WARN` events (so the terminal shows them too) and carry no `report:` prefix.
+  report=$(sed -n 's/^[^ ]* DEBUG report: //p; s/^[^ ]* WARN  /warning: /p' "$out/$side.pvc.log" \
+    | sed -n '/^hidden-duplication filter:/,$p')
   if [[ -z $report ]]; then
     echo "the $side run printed no filter report — has the report's first line been reworded?" >&2
     exit 1

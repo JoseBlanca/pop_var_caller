@@ -2,12 +2,11 @@
 
     python3 scripts/ng_str_stutter_true_parameters.py <run-dir>
 
-Reads `<run-dir>/ng_defaults.parameters.toml` (what the `--defaults` run wrote) and replaces its
-two stutter tables with the stutter the simulator drew the reads under, from `stutter_rates.tsv`
-and `libraries.tsv`; everything else stays at the defaults. Writes
-`<run-dir>/true_stutter.parameters.toml`, for `call-from-psps --parameters` (not named after the
-VCF it makes, because the caller writes `<output>.parameters.toml` beside every VCF and refuses to
-overwrite its own input).
+Reads `<run-dir>/ng_defaults.parameters.toml` (the `--defaults` run's parameters, which
+ng_str_stutter_benchmark.sh copies out of that run's log) and replaces its two stutter tables
+with the stutter the simulator drew the reads under, from `stutter_rates.tsv` and
+`libraries.tsv`; everything else stays at the defaults. Writes
+`<run-dir>/true_stutter.parameters.toml`, for `call-from-psps --parameters`.
 
 Why (owner, 2026-10-09): the benchmark tests the STR calling, not the fit, and the fit is slow.
 Called with the true stutter, ng shows its STR calls with a stutter model that is right; if that

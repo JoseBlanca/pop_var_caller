@@ -108,7 +108,12 @@ for cov in "${COVERAGES[@]}"; do
         --alignment "$bam" \
         --regions "$REGIONS" \
         --output "$raw" \
+        --log "$OUT_DIR/HG002_${cov}.pvc.log" --force \
         --defaults 2>&1 | tee "$log"
+    # **The numbers the run scored with are in its log**, between two marker lines;
+    # sweep_tract_parameters.sh starts from them as `<raw>.parameters.toml`.
+    sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' \
+        "$OUT_DIR/HG002_${cov}.pvc.log" | sed '1d;$d' > "${raw%.vcf}.parameters.toml"
     t1=$(date +%s)
     awk -v min="$MIN_QUAL" "$FILTER_AWK" "$raw" > "$gated"
     echo

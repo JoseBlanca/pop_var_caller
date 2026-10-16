@@ -68,7 +68,7 @@ also overridable from the environment (`REFERENCE=… THREADS=8 …`).
   mount, the benchmark config points `NG_CATALOG` somewhere writable.
 - **Two limits to hold against ng's numbers.** It does not call inside tandem
   repeats — every tract in the BED is counted as ground it cannot speak for and
-  named in the run report, which `run_ng.sh` tees to the log — and nothing is
+  named in the run report, in pvc's log beside the VCF (`<name>.pvc.log`) — and nothing is
   fitted, because no command writes a fitted parameters file yet, so every run
   is `--defaults`. Both cost recall, not precision.
 - `compare_to_truth.sh` scores **allele** concordance (POS+REF+ALT), not
