@@ -341,10 +341,13 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   fit in this mode (no truth). Review: `reports/reviews/str_penalised_fit_D2a_2026-10-16.md`.
 - ☐ **D2** tomato2, held-out by whole locus: the production fit against the counting fit, with D2a's
   mode. *Depends:* D2a. *Source:* spec §4.4.
-- ☐ **D3** Full scale, simulated: 2,169 samples with kimura's loci per class (about 66 million
+- ✅ **D3** Full scale, simulated: 2,169 samples with kimura's loci per class (about 66 million
   pairs with reads), the production fit's wall time, thread scaling and peak memory on this Mac.
   Within one hour, with a memory watchdog. *Depends:* C7. *Source:* spec §2.2, §4.5 (kimura's real
   run deferred).
+  *Done (2026-10-16):* `reports/implementations/str_penalised_fit_D3_2026-10-16.md`. 83 to 173 s at
+  18 threads, 151 to 252 s at 6, peak 10,801 MiB, at 66.2 million pairs; kimura's per-class spread
+  assumed from the tomato catalog and kimura's totals (two variants).
 - ☐ **D4** The oracle and `cli::cross_platform_digests` re-recorded, each move explained, from
   C10's state (the cohort in name order). *Depends:* C7, C10. *Source:* spec §4.6.
 - ☐ **D5** Calling on HG002 and the GIAB trio, **run once with a parameters file fitted by the climb
