@@ -612,10 +612,6 @@ pub(super) struct NewtonStep {
     /// not solved for moving 0 — `½ gᵀ I⁻¹ g` when no bound binds. Never below zero when the
     /// active-set solve reached its maximum, since staying put is inside the box; a negative value,
     /// or one that is not a number, means it did not (`fit_precision.md` §2, traps).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "maximise stops on it from plan step A2")
-    )]
     pub(super) decrement: f64,
 }
 

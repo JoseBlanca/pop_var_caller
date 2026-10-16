@@ -711,7 +711,9 @@ pub struct SnpIndelFitStart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StartOutcome {
-    /// Every number came within a tenth of its standard error of the likelihood's maximum.
+    /// The step still left to the likelihood's maximum was worth less than a thousandth of a
+    /// log-likelihood unit (`fit_precision.md` §2), which on every cohort measured put every number
+    /// within about a tenth of its standard error of the maximum.
     Converged,
     /// It ran out of passes first. Not convergence.
     AtThePassLimit,

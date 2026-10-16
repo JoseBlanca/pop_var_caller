@@ -69,7 +69,8 @@ mod standard_errors;
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
 use settled::{
     AGREEMENT_FRACTION, DECREMENT_THRESHOLD, EarlierAnswer, SETTLED_FRACTION, agrees,
-    describe_short_of_settled, furthest, is_the_new_best, is_the_new_yardstick, not_settled,
+    describe_short_of_settled, furthest, has_converged, is_the_new_best, is_the_new_yardstick,
+    not_settled,
 };
 pub use settled::{FurthestFromSettled, StartEnding};
 use standard_errors::{StandardError, StandardErrors, newton_step};
@@ -672,12 +673,11 @@ pub struct JointFitConfig {
     pub quadrature_nodes: usize,
     pub starting_points: Vec<StartingPoint>,
     pub max_passes: u32,
-    /// **The fit stops when every parameter is within this share of its own standard error of the
-    /// likelihood's maximum**, as a Newton step estimates the distance — a tenth by default
-    /// ([`settled`]'s `SETTLED_FRACTION`), judged on each parameter's own scale, so a parameter the
-    /// data determine well is fitted closely and one they barely determine is fitted roughly. At
-    /// zero — or below it, or not a number — the fit never stops before `max_passes`, unless no
-    /// parameter has both an error and a distance.
+    /// **The share of its own standard error a parameter's distance to the maximum must fall below
+    /// for the parameter to count as settled** — a tenth by default ([`settled`]'s
+    /// `SETTLED_FRACTION`). It stops nothing: the progress line and a start that did not converge
+    /// report how many parameters are not settled by it, and the furthest (`fit_precision.md` §2,
+    /// §3.5). What stops a start is `decrement_threshold`.
     pub settled_fraction: f64,
     /// **A start converges once the remaining Newton step is worth less than this much
     /// log-likelihood** — the Newton decrement's threshold, 0.001 units by default ([`settled`]'s
@@ -1650,6 +1650,9 @@ pub struct PassSummary {
     /// On a pass that also judged every parameter's distance to the maximum, how many were not yet
     /// within the settled fraction of their standard error; `None` on a pass that did not judge.
     pub not_settled: Option<usize>,
+    /// On a pass that judged, the log-likelihood the remaining Newton step was worth — what the
+    /// start stops on (`fit_precision.md` §2); `None` on a pass that did not judge.
+    pub decrement: Option<f64>,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -2332,18 +2335,19 @@ struct WhichStart<'a> {
 /// log-likelihood a position, every later cycle's first pass also sums the information and each
 /// parameter's score, at the cycle's starting parameters; solved against each other they give each
 /// parameter's distance to the likelihood's maximum as a Newton step estimates it
-/// ([`newton_step`]). **The fit has converged at the end of a cycle whose first pass found every
-/// parameter within [`JointFitConfig::settled_fraction`] of its standard error of the maximum.**
-/// `max_passes` still bounds the passes over the data, and a cycle that would overrun it is not
-/// started.
+/// ([`newton_step`]), and what that step is worth, the Newton decrement. **A start has converged
+/// when a cycle's first pass finds the decrement below [`JointFitConfig::decrement_threshold`]**
+/// ([`has_converged`]): it stops there, at the parameters that pass judged, the rest of the cycle
+/// not run. `max_passes` still bounds the passes over the data, and a cycle that would overrun it is
+/// not started.
 ///
 /// **A start judged against an earlier answer (`which.earlier`) stops as soon as it is heading
 /// there** (spec §3.4): when a cycle's first pass puts its projected endpoint — each parameter's
 /// value plus its Newton distance — within [`JointFitConfig::agreement_fraction`] of the earlier
 /// answer's standard error of that answer on every parameter it gives one ([`agrees`]). It stops at
 /// once, the rest of the cycle not run, and returns the parameters that pass judged, with that
-/// pass's statistics in place of a final one. **A start that pass finds settled is not stopped by
-/// agreement**: it finishes its cycle and converges, and so competes to be the fit's answer.
+/// pass's statistics in place of a final one. **A start that pass finds converged is not stopped by
+/// agreement**: it converges, and so competes to be the fit's answer.
 fn maximise(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -2395,43 +2399,62 @@ fn maximise(
         let cycle_began = std::time::Instant::now();
         let (first, entering) = alternation.step(&parameters, judging);
         let judging_pass = alternation.passes;
-        // How many parameters this cycle's information pass found further than their share of an
-        // error from the maximum, the furthest, and — when some are — the earlier start this one is
-        // heading towards, if any; `None` before the fit judges them.
+        // What this cycle's information pass found, at the parameters it judged; `None` before the
+        // fit judges them.
         let judged_here = entering.information.as_ref().map(|information| {
             let errors = StandardErrors::of(information).by_coordinate(&parameters, group_index);
-            let distances = newton_step(information, &parameters, group_index).distances;
-            let not_settled = not_settled(&errors, &distances, config.settled_fraction);
-            // A start that is settled finishes its cycle, converges and competes: agreement stops
-            // only a start still on its way.
+            let step = newton_step(information, &parameters, group_index);
+            let converged = has_converged(step.decrement, config.decrement_threshold);
+            // A start that has converged is never stopped by agreement: it competes to be the
+            // fit's answer. Agreement stops only a start still on its way.
             let heading_to = which
                 .earlier
                 .filter(|answer| {
-                    not_settled > 0
+                    !converged
                         && agrees(
                             &parameters.values(),
-                            &distances,
+                            &step.distances,
                             answer,
                             config.agreement_fraction,
                         )
                 })
                 .map(|answer| answer.start);
-            (not_settled, furthest(&errors, &distances), heading_to)
+            Judgement {
+                decrement: step.decrement,
+                converged,
+                not_settled: not_settled(&errors, &step.distances, config.settled_fraction),
+                furthest: furthest(&errors, &step.distances),
+                heading_to,
+            }
         });
         // The traced pass that judged records its verdict.
-        if let (Some((not_settled, _, _)), Some(traced)) = (
-            judged_here,
+        if let (Some(judgement), Some(traced)) = (
+            &judged_here,
             alternation
                 .trace
                 .iter_mut()
                 .rev()
                 .find(|summary| summary.pass == judging_pass),
         ) {
-            traced.not_settled = Some(not_settled);
+            traced.not_settled = Some(judgement.not_settled);
+            traced.decrement = Some(judgement.decrement);
         }
-        // **Heading where an earlier start converged** (spec §3.4): it stops here, at the parameters
-        // this pass judged, and the rest of the cycle is not run.
-        if let Some((_, _, Some(with_start))) = judged_here {
+        // **Converged** (`fit_precision.md` §2): the remaining Newton step is worth less than the
+        // threshold. The start stops here, at the parameters this pass judged, and the rest of the
+        // cycle is not run; the final pass below follows at those parameters.
+        if judged_here
+            .as_ref()
+            .is_some_and(|judgement| judgement.converged)
+        {
+            ended = StartEnding::Converged;
+            break;
+        }
+        // **Heading where an earlier start converged** (spec §3.4): it stops here too, and the
+        // pass that judged it stands in for the final one.
+        if let Some(with_start) = judged_here
+            .as_ref()
+            .and_then(|judgement| judgement.heading_to)
+        {
             ended = StartEnding::Agreed { with_start };
             agreed_at = Some(entering);
             break;
@@ -2477,19 +2500,10 @@ fn maximise(
                     "the parameters are judged against their errors once a cycle moves the \
                      log-likelihood less than {gain_to_judge:.2e}"
                 ),
-                Some((not_settled, furthest, _)) => {
-                    let names = parameters.plain_names(which.sample_names, group_index);
-                    format!(
-                        "{not_settled} of {} parameter(s) still more than {} standard errors \
-                         from where the likelihood peaks{}",
-                        names.len(),
-                        config.settled_fraction,
-                        furthest.map_or_else(String::new, |(j, errors)| format!(
-                            "; furthest, the {}, at {errors:.2} standard errors",
-                            names[j]
-                        ))
-                    )
-                }
+                Some(judgement) => judgement.described(
+                    &parameters.plain_names(which.sample_names, group_index),
+                    config,
+                ),
             };
             format!(
                 "SNP/indel fit, start {} of {}, pass {} of at most {}: log-likelihood moved \
@@ -2502,10 +2516,6 @@ fn maximise(
                 crate::parameter_estimation::progress::duration(cycle_began.elapsed()),
             )
         });
-        if judged_here.is_some_and(|(not_settled, _, _)| not_settled == 0) {
-            ended = StartEnding::Converged;
-            break;
-        }
     }
     // The reported statistics must be the ones the reported parameters produce, so the last
     // cycle is followed by one more pass rather than by a pass that preceded it — and it is
@@ -2566,6 +2576,44 @@ fn maximise(
         last_pass_took,
         judging_passes,
         judging_took,
+    }
+}
+
+/// **What one judging pass found** at the parameters it judged (`fit_precision.md` §2, §3.5).
+struct Judgement {
+    /// The log-likelihood the remaining bounded Newton step is worth under the quadratic model.
+    decrement: f64,
+    /// Whether that is at least zero and below the run's threshold ([`has_converged`]).
+    converged: bool,
+    /// How many parameters are further than the settled fraction of their error from the maximum,
+    /// and the furthest with its distance in errors: what the progress line reports, stopping
+    /// nothing.
+    not_settled: usize,
+    furthest: Option<(usize, f64)>,
+    /// The earlier start whose answer this one is heading to, if any (spec §3.4); never for a
+    /// start that has converged.
+    heading_to: Option<usize>,
+}
+
+impl Judgement {
+    /// The progress line's account of the judgement: the decrement against the threshold, then how
+    /// many parameters are not yet settled and the furthest, named by `names`.
+    fn described(&self, names: &[String], config: &JointFitConfig) -> String {
+        format!(
+            "the remaining Newton step is worth {:.1e} log-likelihood units (stops below {:e}); \
+             {} of {} parameter(s) still more than {} standard errors from where the likelihood \
+             peaks{}",
+            self.decrement,
+            config.decrement_threshold,
+            self.not_settled,
+            names.len(),
+            config.settled_fraction,
+            self.furthest
+                .map_or_else(String::new, |(j, errors)| format!(
+                    "; furthest, the {}, at {errors:.2} standard errors",
+                    names[j]
+                ))
+        )
     }
 }
 
@@ -2777,6 +2825,7 @@ impl Alternation<'_, '_> {
                 density_a: parameters.density.a,
                 density_b: parameters.density.b,
                 not_settled: None,
+                decrement: None,
             });
         }
         (next, statistics)
@@ -5426,16 +5475,16 @@ mod whole_fit_tests {
         );
         // Three passes, one cycle; and a fit whose stop is decided by the information and scores a
         // cycle sums once the log-likelihood has nearly stopped moving (plan step B1) — with a
-        // settled fraction so wide that the first cycle judged stops it, since this three-sample
+        // decrement threshold so wide that the first cycle judged stops it, since this three-sample
         // cohort is still crawling at 200 passes.
         for max_passes in [3, 200] {
             let config = JointFitConfig {
                 quadrature_nodes: 8,
                 max_passes,
-                settled_fraction: if max_passes == 200 {
+                decrement_threshold: if max_passes == 200 {
                     1e9
                 } else {
-                    SETTLED_FRACTION
+                    DECREMENT_THRESHOLD
                 },
                 ..JointFitConfig::default()
             };

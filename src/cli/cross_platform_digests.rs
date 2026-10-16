@@ -179,7 +179,24 @@ mod tests {
     /// exactly, for this and the next two fitted checksums
     /// (`tmp/review_E/fixes/digests/swap_notes.py`). Recorded on macOS (arm64) only; it was
     /// `168e7f326230e988286ef16b4c4fc5cd`.
-    const FITTED_PARAMETERS_MD5: &str = "66d72ee84c4a49d4b6271d3e5b68437c";
+    ///
+    /// **Re-recorded 2026-10-16** (`snp_fit_convergence.md` plan step A2) when a start of the
+    /// SNP/indel fit began to stop on the Newton decrement — the log-likelihood the remaining
+    /// bounded Newton step is worth — below 0.001, in place of every parameter within a tenth of
+    /// its error (`fit_precision.md` §2). Measured on four tomato accessions first
+    /// (`scripts/promote_ng_oracle.sh`): every start there still runs to the limit, at the same pass
+    /// counts, and the fitted file moves by its note on `snp_indel_fit_starts` alone. **Here every
+    /// start runs to the limit again** (198 passes, where it converged at 18), and the file is back
+    /// at the numbers of 2026-09-28: no parameter has an error on two samples over 600 bases, so the
+    /// old test called every one settled at the first judging pass, while the decrement stays near
+    /// 290 to the limit. That 290 is not what a step is worth: the bounded solve ends at its round
+    /// limit with the density's second shape, already on its upper bound of 50, given a step of
+    /// 2.7 × 10⁶, which the active-set rule returns only when it stops at that limit. Five lines
+    /// move besides the note's: the three starts' rows (outcome and passes), and the ordinary-site
+    /// prior's `reference_concentration`, 20.047 to 39.089, and
+    /// `alternative_concentration_total`, 2.08 × 10⁻² to 6.60 × 10⁻³. Recorded on macOS (arm64)
+    /// only; it was `66d72ee84c4a49d4b6271d3e5b68437c`.
+    const FITTED_PARAMETERS_MD5: &str = "4966525dd98461b6aea6ecf845353b02";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -246,7 +263,12 @@ mod tests {
     /// prior), AF 0.249902 to 0.250006, the heterozygote's GQ 34 to 75 and the other sample's 45 to
     /// 47. No genotype moved; the two SNPs did not move. Recorded on macOS (arm64) only; it was
     /// `b1a1a907e4e7adf22fb62c56f3305258`.
-    const CALLS_MD5: &str = "dae7e77c280d7f240349cc8433207a81";
+    ///
+    /// **Re-recorded 2026-10-16** with the fit above (`snp_fit_convergence.md` plan step A2): the
+    /// two SNPs move with the ordinary-site prior, chrV:121 QUAL 520.7 to 513.1 and chrV:456 520.1
+    /// to 512.5, the other sample's GQ 71 to 73 at both. No genotype moved, and the repeat tract
+    /// did not move. Recorded on macOS (arm64) only; it was `dae7e77c280d7f240349cc8433207a81`.
+    const CALLS_MD5: &str = "407693c2f919227045b95996191f12ed";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -276,7 +298,19 @@ mod tests {
     /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says; it was `3a016fb7a40bc91eb5bb9ae2adc6e286`.
     /// **A third time** for the conditional notes alone, as [`FITTED_PARAMETERS_MD5`] says; it was
     /// `a48841ff7b0d8ca924b758dc7a33fcbf`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "0586cd65f3dcbd192f0f8cf19e223ca9";
+    ///
+    /// **Re-recorded 2026-10-16** (`snp_fit_convergence.md` plan step A2), for the reason
+    /// [`FITTED_PARAMETERS_MD5`] gives: the three starts, which converged at 49, 54 and 15 passes,
+    /// now run to the limit (199, 198, 198). Start 1 had been called converged at its judging pass 47,
+    /// every parameter with an error within a tenth of it, while the decrement there was 290 — again
+    /// a bounded solve ended at its round limit; it then climbs from −489.0 to −482.4 by pass 197.
+    /// Its judging passes alternate between about −482.4 and −532.0 from pass 53 to the limit:
+    /// every other cycle loses some 50 units, which the old rule's early stop had hidden; where in
+    /// the cycle they are lost was not traced. The multipliers move
+    /// from 2.97, 6.43 and 3.13 to 0.84, 6.37 and 1.09 (errors 0.54, 16.7 and 0.53), and the
+    /// ordinary-site prior's two concentrations with the density; plus the note's seven lines.
+    /// Recorded on macOS (arm64) only; it was `0586cd65f3dcbd192f0f8cf19e223ca9`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "4c64cac0190ef850c66dad4b50d366f1";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -321,7 +355,12 @@ mod tests {
     /// chrV:201 moves, QUAL 37.4 to 90.4, AF 0.249924 to 0.250010, the heterozygote's GQ 34 to 74
     /// and the other sample's 42 to 44; no genotype. Recorded on macOS (arm64) only; it was
     /// `f65f586f58163d23d127d7f8c823e433`.
-    const WITH_ERRORS_CALLS_MD5: &str = "d315b4e4d0de2f21fd34cd673bbdfa8b";
+    ///
+    /// **Re-recorded 2026-10-16** with the fit above (`snp_fit_convergence.md` plan step A2): the
+    /// two SNPs' QUAL, chrV:121 222.1 to 277.1 and chrV:456 219.2 to 265.1, and the other sample's GQ
+    /// 67 to 71 at both. No genotype moved; the repeat tract did not move. Recorded on macOS (arm64)
+    /// only; it was `d315b4e4d0de2f21fd34cd673bbdfa8b`.
+    const WITH_ERRORS_CALLS_MD5: &str = "3ccf7a635b25ef0dcbfc54bc2fb42e92";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -342,7 +381,12 @@ mod tests {
     /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says (the tract is again a class of 1 locus); it was
     /// `5abcd04153d5acc32463fcd751970024`. **A third time** for the conditional notes alone, as
     /// [`FITTED_PARAMETERS_MD5`] says; it was `33eab2535f49967c6459db376a745d01`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "e0902dab0b2d64082d42a40b134f6721";
+    ///
+    /// **Re-recorded 2026-10-16** (`snp_fit_convergence.md` plan step A2) for the note on
+    /// `snp_indel_fit_starts` alone: its three starts ran to the limit before and still do, and
+    /// putting the old note back gives the old checksum exactly. The calls do not move. Recorded on
+    /// macOS (arm64) only; it was `e0902dab0b2d64082d42a40b134f6721`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "66397f1ecd8c0effcf46bb53e97126bc";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.

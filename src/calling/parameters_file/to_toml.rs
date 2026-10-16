@@ -156,7 +156,7 @@ impl ParametersFile {
                 &mut out,
                 &[
                     "",
-                    "How each start of the SNP/indel fit ended, in the order it ran them. The fit starts from several points and keeps the best; `converged` means every number came within a tenth of its standard error of the best value the data allow, `at_the_pass_limit` means it ran out of passes first and is not convergence, and `agreed_with_an_earlier_start` means it was heading where an earlier one had converged and stopped there. `passes` counts passes over the data.",
+                    "How each start of the SNP/indel fit ended, in the order it ran them. The fit starts from several points and keeps the best; `converged` means the step still left to the best value the data allow was worth less than a thousandth of a log-likelihood unit, which on every cohort measured put every number within about a tenth of its standard error of that value; `at_the_pass_limit` means it ran out of passes first and is not convergence, and `agreed_with_an_earlier_start` means it was heading where an earlier one had converged and stopped there. `passes` counts passes over the data.",
                 ],
             );
             one_a_line(

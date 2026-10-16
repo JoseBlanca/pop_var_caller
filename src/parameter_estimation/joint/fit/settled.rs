@@ -1,28 +1,36 @@
-//! **When the SNP/indel fit stops**: once every parameter is within a tenth of its own standard error
-//! of the likelihood's maximum, as a Newton step estimates the distance.
+//! **When the SNP/indel fit stops**: once the step still left to the likelihood's maximum, as a
+//! Newton step estimates it, is worth less than a thousandth of a log-likelihood unit.
 //!
-//! Design: `doc/devel/ng/spec/fit_precision.md` §2 (as amended at plan step B1) and §3.3. Build
-//! order: `doc/devel/implementation_plans/fit_precision.md`, step B1.
+//! Design: `doc/devel/ng/spec/fit_precision.md` §2 (as amended at plan step B1, and again on
+//! 2026-10-16) and §3.3. Build order: `doc/devel/ng/impl_plan/snp_fit_convergence.md`, steps A1–A2.
 //!
 //! # The rule
 //!
 //! Once a cycle of the fit has gained less than
 //! [`JointFitConfig::log_likelihood_stillness`](super::JointFitConfig::log_likelihood_stillness) of
-//! log-likelihood a position, every later cycle's first pass also sums the information and each
-//! parameter's score — the slope of the whole log-likelihood. Solved against each other they give
-//! the Newton step to the maximum ([`newton_step`](super::standard_errors::newton_step)): how far each
-//! parameter still is from where the likelihood peaks, **however slowly the fit happens to be moving
-//! towards it**. That is what the first version of this rule lacked: it projected the distance from
-//! the fit's last two moves, and on the four-accession oracle cohort it stopped every start 74
-//! log-likelihood units short of a fit run to 1,000 passes, on a plateau the fit crosses slowly.
+//! log-likelihood a position, every later cycle's first pass — a *judging pass* — also sums the
+//! information and each parameter's score, the slope of the whole log-likelihood. Solved against
+//! each other they give the Newton step to the maximum within the parameters' bounds
+//! ([`newton_step`](super::standard_errors::newton_step)): how far each parameter still is from where
+//! the likelihood peaks, **however slowly the fit happens to be moving towards it**, and the
+//! log-likelihood that step would gain under the quadratic model — the *Newton decrement*.
 //!
-//! **A parameter is settled when its distance is below [`SETTLED_FRACTION`] of its standard error**,
-//! both on the parameter's own scale and both from the same pass: a distance of 10⁻⁹ in a quantity
-//! known to ±0.05 is nothing, whatever the quantity's size. A parameter without a standard error or
-//! without a distance — no position's likelihood depends on it, the fit holds it fixed, the data
-//! cannot tell it from others, or its error is wider than its whole range — is settled by definition:
-//! nothing the fit does to it matters to the likelihood. **The fit has converged when every parameter
-//! is settled**, and stops at the end of that cycle.
+//! **A start has converged when the decrement is at least zero and below [`DECREMENT_THRESHOLD`]**
+//! ([`has_converged`]), and stops at once at the parameters that pass judged; the final pass follows
+//! there. One number bounds every parameter and every quantity computed from them: the step moves
+//! any of them by at most `√(2λ)` of its own standard error. At 0.001 that is 0.045 errors, and on
+//! every cohort measured (1, 4 and 59 tomato samples) every determined quantity stopped within a
+//! tenth of its error of a fit run to 10⁻⁴; the decrement understates what is left by two and a half
+//! to six times near the maximum, so the threshold was chosen from that measurement and not from the
+//! bound. A negative decrement or one that is not a number is not convergence: it means the bounded
+//! solve did not reach the quadratic model's maximum.
+//!
+//! **The per-parameter test survives for reporting only.** A parameter is *settled* when its distance
+//! is below [`SETTLED_FRACTION`] of its standard error; a parameter without an error or a distance is
+//! settled by definition. The progress line, and a start that did not converge, say how many are not
+//! settled and which is furthest ([`not_settled`], [`furthest`]). It stopped the fit until
+//! 2026-10-16, and stops nothing now: with 185 parameters each a tenth of an error from the maximum,
+//! the remaining step can still be worth almost a unit.
 //!
 //! # Agreement between starts
 //!
@@ -31,8 +39,8 @@
 //! its judging passes, its *projected endpoint* — each parameter's value plus its Newton distance — lies
 //! within [`AGREEMENT_FRACTION`] of the earlier answer's standard error of that answer, on every
 //! parameter the earlier answer gives an error ([`agrees`]). It is recorded as having agreed
-//! ([`StartEnding::Agreed`]) and does not compete to be the fit's answer. A start whose judging pass finds
-//! every parameter settled is not stopped by agreement: it finishes its cycle, converges and competes.
+//! ([`StartEnding::Agreed`]) and does not compete to be the fit's answer. A start whose judging pass
+//! finds it converged is not stopped by agreement: it converges and competes.
 //!
 //! The earlier answer is the best-scoring start that has converged so far ([`EarlierAnswer`]); a start
 //! stopped at the pass limit is never one, since its errors need not be the maximum's.
@@ -55,10 +63,6 @@ pub(in crate::parameter_estimation::joint) const DECREMENT_THRESHOLD: f64 = 0.00
 /// means the bounded solve stopped at its round limit short of the quadratic model's maximum, and a
 /// decrement that is not a number came from a degenerate solve; neither is convergence
 /// (`fit_precision.md` §2, traps).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "maximise stops on it from plan step A2")
-)]
 pub(super) fn has_converged(decrement: f64, threshold: f64) -> bool {
     decrement >= 0.0 && decrement < threshold
 }
@@ -115,7 +119,7 @@ pub(super) const AGREEMENT_FRACTION: f64 = 0.5;
 /// **How one start of the SNP/indel fit ended** (spec §3.5).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StartEnding {
-    /// Every parameter was within the settled fraction of its standard error of the maximum.
+    /// The remaining Newton step was worth less than the decrement threshold ([`has_converged`]).
     Converged,
     /// It ran out of passes first.
     AtTheLimit,
