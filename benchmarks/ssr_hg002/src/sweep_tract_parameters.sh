@@ -20,6 +20,9 @@
 #                          of prior mass on heterozygous genotypes is
 #                          (K-1)C / (K(C+1)) — 42% at K=6, C=1, rising toward
 #                          (K-1)/K as C grows and falling to nothing as C -> 0.
+#                          Given as a concentration, and written into the
+#                          parameters file (format 3) as the between-locus
+#                          share F = 1 / (1 + C) its key holds.
 #     --coverage C         30x (default) or 50x
 #     --out DIR            where to put the run (default: tmp/tract_sweep/<label>)
 #
@@ -131,13 +134,27 @@ else
 fi
 
 if [[ -n "$CONCENTRATION" ]]; then
+    # The file carries the fallback as the between-locus share F = 1 / (1 + C),
+    # strictly between 0 and 1, so a concentration that is not above zero has
+    # none. Nor does an infinite one, and one above 1e300 (fits stay below 1e4)
+    # gives an F so near 0 that pvc may refuse it; both are refused here, where
+    # the number was typed. Seventeen significant digits read back as the same
+    # double.
+    SHARE_OF_C=$(awk -v c="$CONCENTRATION" \
+        'BEGIN { if (!(c + 0 > 0) || c + 0 > 1e300) exit 1; printf "%.17g", 1 / (1 + c) }') || {
+        echo "--concentration must be above zero and at most 1e300, got $CONCENTRATION" >&2; exit 2; }
+    # A file written by a build before parameters-file format 3 carries the
+    # fallback as `fallback_length_spectrum_concentration`, and the edit below
+    # would match nothing; say so rather than report a failed edit.
+    grep -q "^fallback_between_locus_share = " "$OUT/parameters.toml" || {
+        echo "$DEFAULTS_PARAMETERS has no \`fallback_between_locus_share\` line, so it was likely written by a build before parameters-file format 3; regenerate it with src/run_ng_coverages.sh $COVERAGE" >&2; exit 1; }
     # Same rule as the outlier weight: a value somebody typed says `supplied`,
     # so a run cannot report a number we chose as one it inherited.
-    sed -i.bak "s|^fallback_length_spectrum_concentration = .*|fallback_length_spectrum_concentration = { value = $CONCENTRATION, warrant = \"supplied\" }|" \
+    sed -i.bak "s|^fallback_between_locus_share = .*|fallback_between_locus_share = { value = $SHARE_OF_C, warrant = \"supplied\" }|" \
         "$OUT/parameters.toml"
     rm -f "$OUT/parameters.toml.bak"
-    grep -q "value = $CONCENTRATION, warrant = \"supplied\"" "$OUT/parameters.toml" || {
-        echo "the length-spectrum concentration was not set" >&2; exit 1; }
+    grep -q "value = $SHARE_OF_C, warrant = \"supplied\"" "$OUT/parameters.toml" || {
+        echo "the fallback between-locus share was not set" >&2; exit 1; }
 fi
 
 if [[ -n "$SHARE" || -n "$BASE" || -n "$ROWS" ]]; then

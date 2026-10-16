@@ -729,15 +729,15 @@ impl ParametersFile {
                 no_better_than_supplied(inbreeding_coefficient.warrant);
         }
         let RepeatTracts {
-            fallback_length_spectrum_concentration,
+            fallback_between_locus_share,
             slippage_group_by_read_group: _,
             slippage_by_stratum_and_group: _,
-            length_spectrum_by_stratum: _,
-            length_spectrum_by_period: _,
+            allele_length_variation_by_stratum: _,
+            allele_length_variation_by_period: _,
             substitution_rate_by_stratum,
         } = repeat_tracts;
-        fallback_length_spectrum_concentration.warrant =
-            no_better_than_supplied(fallback_length_spectrum_concentration.warrant);
+        fallback_between_locus_share.warrant =
+            no_better_than_supplied(fallback_between_locus_share.warrant);
         for SubstitutionRateRow {
             read_group: _,
             period: _,
@@ -2112,7 +2112,7 @@ mod the_fourth_binding_demotes {
             assert_eq!(is.value, was.value, "the substitution rate inside a tract");
         }
 
-        // **The slippage numbers and the length spectra are untouched by the demotion**, so they
+        // **The slippage numbers and the allele length variations are untouched by the demotion**, so they
         // compare whole rather than field by field: neither carries a `Provenance`, and what
         // they carry instead — which curve a number came off — is not a warrant and has no
         // *handed over* state to move to.
@@ -2129,10 +2129,10 @@ mod the_fourth_binding_demotes {
             }
             let was = kept
                 .ssr_slippage_fits()
-                .length_spectrum_at(row.period, row.reference_repeats);
+                .allele_length_variation_at(row.period, row.reference_repeats);
             let is = demoted
                 .ssr_slippage_fits()
-                .length_spectrum_at(row.period, row.reference_repeats);
+                .allele_length_variation_at(row.period, row.reference_repeats);
             assert_eq!(is.rung(), was.rung());
             assert_eq!(is.concentration(), was.concentration());
             assert_eq!(is.fitted_weights(), was.fitted_weights());
@@ -2280,9 +2280,7 @@ mod the_fourth_binding_demotes {
         }
         warrants.push((
             "the bottom rung",
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant,
+            file.repeat_tracts.fallback_between_locus_share.warrant,
         ));
         for row in &file.repeat_tracts.substitution_rate_by_stratum {
             warrants.push(("a substitution rate", row.rate.warrant));

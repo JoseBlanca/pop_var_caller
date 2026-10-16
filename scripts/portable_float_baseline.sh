@@ -137,6 +137,10 @@ case "$mode" in
         cargo bench --bench "$bench" > "$out/$bench.$pass.log" 2>&1
       done
     done
+    # **Only the generic-position groups since 2026-10-16.** The three repeat-tract groups
+    # (`ng_joint_fit/stratum_by_tracts`, `…/stratum_by_samples`, `…/strata`) timed the climb and
+    # were deleted with it, so a log from before then holds them and a newer one does not:
+    # compare only the `generic_by_*` groups across that date.
     for pass in 1 2; do
       echo "=== ng_joint_fit_perf, pass $pass"
       cargo bench --features bench-fixtures --bench ng_joint_fit_perf \

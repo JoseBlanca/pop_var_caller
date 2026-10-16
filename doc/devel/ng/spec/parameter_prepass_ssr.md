@@ -1,5 +1,25 @@
 # ng — the parameter pre-pass: the STR path
 
+> **Replaced, 2026-10-16: the fit this document specifies no longer runs anywhere.** Repeat tracts
+> are now fitted by penalised expectation maximisation (EM), specified in
+> [`str_penalised_fit.md`](str_penalised_fit.md), with what it hands calling in
+> [`str_fit_to_calling.md`](str_fit_to_calling.md). It fits every class of one motif length at once
+> (a *class* is what this document calls a stratum) and draws each number as a smoothed curve along
+> the reference repeat count; a locus's allele lengths come from the class's length shares and the
+> between-locus share F, not from genotype frequencies fitted freely per stratum. The fit it
+> replaced was the cohort route's `joint::ssr_fit` that the 2026-09-11 note below points to: each
+> stratum fitted on its own by §4.2's alternating climb, then borrowed from a neighbour (§4.3) or
+> blended with a curve ([`str_slippage_level_curve.md`](str_slippage_level_curve.md)) where it was
+> thin. Commit `3198d55d` deleted that code.
+>
+> **Still true:** slippage moves whole repeats (§2); the slip rate, which way a read slips and how
+> far, and what each measures (§1.1, §3); tracts grouped by motif period and reference repeat count
+> (§4); the substitution rate counted per stratum and its agreement with the generic path (§4.2's
+> first paragraph, §4.5's second requirement), which the new fit leaves alone; and what makes a locus
+> an STR locus (§5). **No longer describes any code:** §4.2's climb, §4.3, and §4.5's floor on
+> slipped reads. A parameters file the climb wrote still loads and calls as before; the code that
+> reads one was kept.
+
 *Design spec, 2026-08-03. **Revised 2026-08-06 against measurement**, and the measurements changed
 the accumulator's key rather than only its constants. **Revised again 2026-08-07**: §5.1 records
 that the copy floors cannot be swept downward far by re-typing. **Revised 2026-08-08**: the archive

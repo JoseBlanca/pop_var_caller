@@ -17,6 +17,22 @@ kimura took 9 h 25 min in the SNP/indel fit and about two hours a stratum in the
 > high degree of precision, what we need is an approximate estimate for those and, most
 > importantly, error estimates. Once we can calculate both we're fine and we can stop."
 
+> **Part B was replaced, 2026-10-16; Parts A and C stand.** Part B (§4, and goals 3 and 4 of §1.2)
+> is written for the climb: each repeat-tract stratum fitted on its own by coordinate ascent, its
+> errors taken from that climb's curvature, its stopping rule, and the subset of samples a stratum
+> was read from. Penalised expectation maximisation (EM),
+> [`str_penalised_fit.md`](str_penalised_fit.md), replaced that fit; it fits every stratum of one
+> motif length together, reads every sample, stops when no number moves by more than a fixed
+> tolerance (its §2.7), and gives every number a standard error by its own method (its §2.6). Commit
+> `3198d55d` deleted the climb, its errors, its stopping rule and the subsets; the links below to
+> that code now name the commit. Also no longer applicable: §1.4's *round*, Part B's lines in §6, the
+> first two items of §7 (the curves are now drawn inside the fit, not through its answers), and
+> questions 4 and 5 of §8.
+>
+> **Still true:** the principle (§2); Part A, the SNP/indel fit (§3); Part C, standard errors carried
+> in `Estimate<T>` and the parameters file (§5) — the repeat-tract rows still carry errors, now the
+> new fit's; and §1.1's kimura measurements, which are why both fits were changed.
+
 ---
 
 ## 1. What this is
@@ -58,8 +74,8 @@ measured one. A rule in units of each parameter's own error removes it either wa
 a quantity known to ±0.05 is nothing.
 
 **The repeat-tract fit's cost grows with the number of samples** (each score sums over every sample
-with reads at every tract, [`ssr_fit.rs`](../../../../src/parameter_estimation/joint/ssr_fit.rs)
-`ln_tract`), while a stratum's slippage is estimated from thousands of tracts and does not need
+with reads at every tract, `ssr_fit.rs`
+`ln_tract`, deleted in commit `3198d55d`), while a stratum's slippage is estimated from thousands of tracts and does not need
 thousands of samples to be known well.
 
 ### 1.2 Goals
@@ -115,7 +131,7 @@ thousands of samples to be known well.
   (SQUAREM, Varadhan & Roland 2008; [`fit.rs:1778-1924`](../../../../src/parameter_estimation/joint/fit.rs#L1778)).
 - **Round.** One sweep of the repeat-tract climb over all of a stratum's parameters, about 306
   evaluations of its likelihood at one slippage group
-  ([`ssr_fit.rs:1048-1100`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L1048)).
+  (`ssr_fit.rs:1048-1100`, deleted in commit `3198d55d`).
 
 ---
 
@@ -396,15 +412,15 @@ starts agree, which is exactly when running them all to the end was wasted.
 
 ### 4.1 What one stratum's fit estimates, for reference
 
-Per stratum ([`ssr_fit.rs:803-809`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L803)):
+Per stratum (`ssr_fit.rs:803-809`, deleted in commit `3198d55d`):
 three slippage numbers per slippage group (level, shorter share, fall-off), a length spectrum over 13
 allele classes, and a concentration. Production pools every read group into one slippage group
 (`every_read_group_pooled`, [`census_fit.rs:227-234`](../../../../src/run/census_fit.rs#L227)), so
 17 numbers a stratum. The score is the **mean log-likelihood a tract**
-([`ssr_fit.rs:2457`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L2457)); the climb is
+(`ssr_fit.rs:2457`, deleted in commit `3198d55d`); the climb is
 coordinate ascent by golden section, 18 evaluations a coordinate, up to 5 rounds from each of 3
 starts, stopping when a round gains less than 10⁻⁶ on that mean
-([`ssr_fit.rs:895`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L895)). **That was the climb
+(`ssr_fit.rs:895`, deleted in commit `3198d55d`). **That was the climb
 before plan step C3**; a walk now stops as §4.3's amendment says, within 40 rounds.
 
 **Trap: the mean is over every tract in the stratum, including those with no reads**, and a tract's
@@ -425,8 +441,8 @@ carried to the natural scale.
   the winning walk's last judgement (§4.3), and is not paid again.
 - **Why all the numbers and not only the slippage three:** a read off the reference length is either
   a slip or a real allele, so the level and the spectrum trade against each other
-  ([`ssr_fit.rs`](../../../../src/parameter_estimation/joint/ssr_fit.rs) `PeriodLengthSpectrum`
-  documentation). Holding the spectrum fixed would understate the level's error.
+  (`ssr_fit.rs` `PeriodLengthSpectrum`
+  documentation, deleted in commit `3198d55d`). Holding the spectrum fixed would understate the level's error.
 - **The step for each difference** is set relative to the coordinate's own scale, and the result is
   checked for a negative-definite curvature; where it is not (a flat or saddle direction), that
   number's error is reported as absent.
@@ -448,7 +464,7 @@ log-likelihood: Böhning et al. 1994) and stops when it is below that.
   thing whatever the number of samples, because the total log-likelihood's curvature, not its mean,
   is what the errors are made of.
 - **Trap:** a round that makes the score *worse* is counted as converged today
-  ([`ssr_fit.rs:895`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L895)); golden section
+  (`ssr_fit.rs:895`, deleted in commit `3198d55d`); golden section
   never re-evaluates its starting value, so it can move a coordinate to a worse one. Under the new
   rule a round that loses is **not** convergence: the round's worse moves are undone and the walk
   stops at the best point it held, recorded as such.
@@ -517,14 +533,14 @@ Each larger subset starts its climb from the previous subset's answer.
 - **What changes for the rest of the fit.** The stratum's evidence counts — reads crossing, slipped
   reads, tracts with reads — are those of the subset, so the curves across strata weight the stratum
   by the precision it was actually fitted to. The homozygote excess each sample carries is looked up
-  by the sample's index as today ([`ssr_fit.rs:2161-2165`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L2161));
+  by the sample's index as today (`ssr_fit.rs:2161-2165`, deleted in commit `3198d55d`);
   dropping rows from a stratum's evidence does not disturb it. The substitution counts are still
   summed over every sample when the evidence is gathered, since they cost nothing to keep.
 - **Memory falls too:** a stratum's likelihood table has one row per sample with reads a tract, so
   it shrinks in proportion (5.9 GiB for the largest stratum on kimura at 2,169 samples).
 - **Trap: the refusal floor is judged on the whole stratum**, not the subset: a stratum with reads in
   only the samples outside the subset must grow the subset rather than be refused. Refusal for too few
-  tracts ([`ssr_fit.rs:1135-1159`](../../../../src/parameter_estimation/joint/ssr_fit.rs#L1135)) looks
+  tracts (`ssr_fit.rs:1135-1159`, deleted in commit `3198d55d`) looks
   at every sample's tracts before any subset is drawn.
 - **The target is on the level, not on all three numbers.** One stratum can measure one of its
   numbers well and another to about 45% of itself ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md)

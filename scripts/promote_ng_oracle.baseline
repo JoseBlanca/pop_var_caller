@@ -79,6 +79,18 @@
 # filter's duplication rate 0.031605 → 0.031542, so PARALOG_LR and PARALOG_POST move on 3,541 default-parameter records
 # and 1,860 called with the fit, and nothing else in either file moves: no record, genotype, QUAL or filter
 # (6b86f72c → 6257aa6c, 42d02245 → b1b46ece). Fitted parameters unchanged.
+# Fit lines re-recorded 2026-10-12 (macOS, arm64) with the repeat-tract fit's allele window at ±9, one past the recorded
+# reads, where it was ±6 (str_allele_window.md): 53 lines of the fitted file move, all repeat-tract rows; the 37 slip rates
+# move by a median 1.2% (0.953 to 1.044 of their old values). With the fit, 302 repeat-tract records move QUAL (at most
+# 3.7), one record appears (a 1-repeat-short het at QUAL 6.8), one loses its +1 allele, and one sample genotype flips;
+# every genotype that changed was called at GQ 4 or less. Default-parameter lines unchanged.
+# They were 3338658c… / b1b46ece….
+# Re-recorded 2026-10-14 (macOS, arm64) on merging main (e4bd1e94) into str-penalised-fit. Main's own baseline was stale
+# against main's code: main measured here gives default-parameter VCFs 67bfe9a1 (7,508 records), windows 4acdda68 and
+# histograms 0d61963f, and the merge gives exactly those. The defaults run's parameters file moves only by this branch's
+# rename (`length_spectrum_by_*` -> `allele_length_variation_by_*` and five note paragraphs), 915d9f3f on main -> a27bb944.
+# The fit is this branch's (allele window at +-9): against main's fit (129492d3), 66 lines of the fitted file differ, 52 of
+# them repeat-tract slippage rows and the rest the rename; the fit's VCF holds 6,683 records on both (main 4c06e2f5).
 # promote-ng identity oracle
 # reference: S_lycopersicum_chromosomes.4.00.fa
 # catalog: S_lycopersicum_chromosomes.4.00.repeats.parquet
@@ -88,12 +100,44 @@
 #   SRR5079864.p1.bench.cram
 #   SRR5079878.p1.bench.cram
 #   SRR5079876.p1.bench.cram
+# Both parameters-file lines re-recorded 2026-10-14 (str_penalised_fit.md, plan step B2): format version 3 renames the
+# allele-length keys and stores the between-locus share F = 1/(1+c) in place of each concentration, with F's standard
+# error on the 5 strata that had one, and the fallback as F (0.526009726176786 = 1/(1 + 0.9011055313907091)). Every other
+# line is identical, the shares included, and no VCF moved — the one called with the fitted file included. They were
+# a27bb944… / ef9ada5a….
+# Both parameters-file lines re-recorded 2026-10-15 (str_penalised_fit.md, plan step B4): the file's notes on the
+# repeat-tract rows were reworded for the penalised-curve smoothing; every line that is not a comment is identical, and no
+# VCF moved. They were 73d8d5c8… / 122b72df….
+# Three lines re-recorded 2026-10-16 (macOS, arm64; str_penalised_fit.md, plan step D4) at 932fc9b0: the repeat-tract fit
+# is the penalised fit (C7), with a weak prior on stutter (C8), the stated F the median over strata of 8 or more loci (C9),
+# and the cohort fitted in sample-name order (C10). The default-parameter VCFs, windows and histograms do not move. The
+# defaults run's parameters file moves in notes only (C8, C9, 7265efd0). The fitted file: repeat-tract rows 37 → 49
+# slippage and 15 → 49 allele-length rows, fallback F 0.526 → 0.613 (C7–C9); samples and read groups listed in name
+# order and every SNP/indel number moved in its last digits, e.g. one sample's F 0.96645 → 0.96617 (C10); notes (C8, C9,
+# 7265efd0). With it, 6,683 → 6,680 records (one homopolymer deletion gone at C7; two SNVs at the paralog filter's edge,
+# posterior 0.51, gone at C10), QUAL moves in 747 records (426 repeat tracts; −19.8 to +21.8, median −0.1), 3 records
+# change a sample genotype, all repeat tracts. Report: reports/implementations/str_penalised_fit_D4_2026-10-16.md.
+# They were 3d1719c2… / 419869a0… / e4af91bd….
+# Both parameters-file lines re-recorded 2026-10-16 (macOS, arm64; str_penalised_fit.md, after plan steps D7 and D8) at
+# 909266ee, main (to 98230b01) merged in. Only standard errors and notes move; no fitted number and no VCF moves — the
+# one called with the fitted file included, since calling reads no standard error. The fitted file: 22 slippage rows
+# change error keys only. D7 (680435b2, the allele-length prior's curvature in the errors' matrix): the two-base classes
+# at 6-10 and 12 repeats gain all three errors, withheld before because that motif length's matrix could not be inverted,
+# and 27 errors on nine one- and three-base rows move by at most 0.54%. D8 (af6c71fd): seven classes of 3 or 4 loci gain
+# the shorter share's and fall-off's errors. Both files: two note paragraphs state the two loci lines (D8). E1, the curve
+# deletion (2276c93c) and main's STR performance commits move nothing, each checked by a fit or run on either side.
+# Report: reports/implementations/str_penalised_fit_oracle_after_D8_2026-10-16.md. They were 4f272d7e… / 5ed794a0….
+# Both parameters-file lines re-recorded 2026-10-16 again (checkpoint E review fixes): the repeat-tract notes explain a
+# subset of samples, numbers taken from a parametric curve or blended with one, and `curve_fitted_on` only when a row of
+# the file holds one, which only the climb wrote. Neither file has such a row, so each loses 24 comment lines (fitted
+# 298 -> 274, defaults run 341 -> 317); with comment lines taken out both are the previous files line for line
+# (tmp/oracle_E vs tmp/oracle_E2). No other line moved. They were bd7b9bea… / c84ce763….
 slice: 20 regions, 4 alignments
-# records: 7448
-770df4ce99cd6ce6ea398f40d74e1fcd  from_alignments.comparable
-770df4ce99cd6ce6ea398f40d74e1fcd  from_psps.comparable
-b7c0a2623898deb8dd751333549b8670  from_alignments.parameters.toml
-38ae39e27282a4aa9ede9a63ea9419b8  from_alignments.windows.sorted
-9d949511c6b0d17f4fd218dd8f7ec4af  from_alignments.windows.histograms
-d68e0540314d5a49d08a3d4c6e57ac63  fitted.parameters.toml
-6a0890f947cbcfed054b74ee1b6a2fdb  from_fit.comparable
+# records: 7508
+67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
+67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
+920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
+4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
+0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
+5ea720b63c4674239720087f21a72674  fitted.parameters.toml
+61b09b604ee5fb2d7196150824c2c996  from_fit.comparable

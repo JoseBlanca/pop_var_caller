@@ -239,14 +239,14 @@ mod tests {
 
     /// **The fit's own top level, which nothing covered.**
     ///
-    /// A slippage curve may report a level as high as `LEVEL_CEILING` (0.999). Because the
-    /// part-repeat mass is added on top rather than carved out, the four direction shares
-    /// then total `1.05 × level` — **past one**, at any level above 0.9524. Every individual
+    /// A parameters file the climb wrote may carry a level read off its curve as high as
+    /// `LEVEL_CEILING` (0.999). Because the part-repeat mass is added on top rather than carved
+    /// out, the four direction shares then total `1.05 × level` — **past one**, at any level above 0.9524. Every individual
     /// share is still under one, so `StutterModel::new`'s debug assertion does not fire; the
     /// same-length share floors at `GEOM_MIN` instead, and `unreachable_mass` reports
     /// **exactly no loss** for a row that has over-allocated six parts in a hundred.
     ///
-    /// **This is a row the parameter fit is entitled to emit**, not a hostile hand-built one,
+    /// **This is a row an older parameters file is entitled to carry**, not a hostile hand-built one,
     /// which is why it is pinned here rather than left to the floored-model test in the
     /// stutter module. Whether reporting nothing there is the wanted answer is a decision for
     /// whoever owns the fit's ceiling; this test makes it visible either way.
@@ -305,5 +305,39 @@ mod tests {
         );
         // No slippage at all means every read shows the allele's own length.
         assert!((model.same_length_share() - 1.0).abs() < 1e-15);
+    }
+
+    /// **The repeat-tract fit's stutter prior is centred on the stutter calling uses for a class
+    /// with no reads**: `STUTTER_PRIOR_CENTRE`, converted as every fitted row is, gives
+    /// `StutterModel::hipstr_shipped`'s whole-repeat shares, 0.05 shorter, 0.05 longer and 0.95 of
+    /// slips one repeat (spec `str_penalised_fit.md` §2.10.2). The fit writes the centre out
+    /// because it does not depend on calling; this pins the copy to the original.
+    #[test]
+    fn the_fits_stutter_prior_is_centred_on_calling_s_default() {
+        use crate::parameter_estimation::joint::ssr_fit::penalised_fit::STUTTER_PRIOR_CENTRE;
+        let rates = stutter_rates_for(&STUTTER_PRIOR_CENTRE);
+        let shipped = StutterModel::hipstr_shipped();
+        for (name, ours, theirs) in [
+            (
+                "shorter",
+                rates.whole_repeat_shorter_share,
+                shipped.whole_repeat_shorter_share(),
+            ),
+            (
+                "longer",
+                rates.whole_repeat_longer_share,
+                shipped.whole_repeat_longer_share(),
+            ),
+            (
+                "one step",
+                rates.whole_repeat_one_step_share,
+                shipped.whole_repeat_one_step_share(),
+            ),
+        ] {
+            assert!(
+                (ours - theirs).abs() < 1e-12,
+                "{name}: the prior's centre gives {ours}, hipstr_shipped {theirs}"
+            );
+        }
     }
 }

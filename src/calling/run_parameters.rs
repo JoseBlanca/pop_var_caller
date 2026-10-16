@@ -495,7 +495,7 @@ impl RunParameters {
         self.prior_seed
     }
 
-    /// Every stratum's slippage numbers and the length spectra beside them.
+    /// Every stratum's slippage numbers and the allele length variations beside them.
     #[must_use]
     pub fn ssr_slippage_fits(&self) -> &StratumFits {
         &self.ssr_slippage_fits

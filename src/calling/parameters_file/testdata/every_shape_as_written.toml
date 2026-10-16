@@ -1,7 +1,7 @@
 # **All 7 groups of numbers in this file were fitted from reads**: the
 # base-quality calibration, contamination, the inbreeding coefficients, the
-# ordinary-site prior's seed, repeat-tract slippage, repeat-tract length spectra
-# and repeat-tract substitution rates.
+# ordinary-site prior's seed, repeat-tract slippage, repeat-tract allele length
+# variations and repeat-tract substitution rates.
 #
 # **Whose reads is a second question, and only 3 of the 7 groups answer it.**
 # The base-quality calibration, the inbreeding coefficients and repeat-tract
@@ -13,11 +13,11 @@
 # supplied, so a stated constant was used.
 #
 # The other 4 — contamination, the ordinary-site prior's seed, repeat-tract
-# slippage and repeat-tract length spectra — say how a number was arrived at and
-# not whose reads it came from: a smoothing origin, a rung, or which reads a
-# contamination fraction was fitted from. **So in a file whose numbers were
-# fitted over a different cohort those 4 still read as fitted**, and only the 3
-# above are marked down to `supplied`.
+# slippage and repeat-tract allele length variations — say how a number was
+# arrived at and not whose reads it came from: a smoothing origin, a rung, or
+# which reads a contamination fraction was fitted from. **So in a file whose
+# numbers were fitted over a different cohort those 4 still read as fitted**,
+# and only the 3 above are marked down to `supplied`.
 #
 # A group counts as fitted where any part of it was; within one, each number's
 # own `warrant` or origin says which.
@@ -43,9 +43,9 @@
 # number, delete its `standard_error` with its `observations`.
 #
 # **Two keys do not take every warrant.**
-# `repeat_tracts.fallback_length_spectrum_concentration` is `fitted_here` only
-# where this file holds a fitted stratum spectrum for it to be the median of,
-# and `defaulted` only at the built-in constant;
+# `repeat_tracts.fallback_between_locus_share` is `fitted_here` only where a
+# stratum row of this file carries a `between_locus_share` for it to be the
+# median of, and `defaulted` only at the built-in 0.5;
 # `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the
 # built-in constant. Both take `supplied` freely, which is what you write when
 # you change one. Anything else is refused, and says so.
@@ -65,9 +65,9 @@
 # it never writes one as a row here — so a `defaulted` warrant on a row of
 # `substitution_rate_by_stratum` is a claim no build makes.
 #
-# The slippage numbers, the prior's two concentrations and the length spectrum
-# rows carry no warrant — they say where they came from another way, and there
-# is nowhere in them to record that you changed one. Note such an edit
+# The slippage numbers, the prior's two concentrations and the allele length
+# variation rows carry no warrant — they say where they came from another way,
+# and there is nowhere in them to record that you changed one. Note such an edit
 # elsewhere.
 #
 # An absent key is not a zero. A missing section, a missing row and a missing
@@ -76,7 +76,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 2
+format_version = 3
 ploidy = 2
 
 [fitted_from]
@@ -241,9 +241,10 @@ rung = "fitted_curve"
 # `slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage
 # group, and a triple with no row means that group put no read in that stratum —
 # so one stratum can have a row for one group and none for another. A stratum
-# with no row in `length_spectrum_by_stratum` was never fitted on its own tracts
-# and falls to its period's pooled one, or to the flat shape below. Neither
-# absence is a zero.
+# with no row in `allele_length_variation_by_stratum` was never fitted on its
+# own tracts and falls to its period's pooled one, or to the flat shape below; a
+# stratum whose row has no `between_locus_share` keeps its own shares, held at
+# the fallback below. Neither absence is a zero.
 #
 # Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports
 # a tract length other than its allele's; `shorter_share` — of the reads that
@@ -257,29 +258,44 @@ rung = "fitted_curve"
 # row is that subset's. A `samples_fitted_on` equal to the cohort's sample count
 # means the subset grew to every sample.
 #
-# Where a number is this stratum's own fit — its smoothing is `this_stratum` —
-# its origin carries an own-fit standard error: `own_fit_standard_error` for the
-# first number, `shorter_share_own_fit_standard_error` and
-# `fall_off_own_fit_standard_error` for the other two. It is how far that number
-# would typically move if the stratum's tracts were drawn again. A number taken
-# from a curve, or blended with one, has none: the blend's own error is not
-# computed. **Where the row's `samples_fitted_on` is fewer than the cohort's
-# samples, the error describes the subset's own fit, not how far that fit sits
-# from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers
-# compared sat further from the fit on every sample than the two fits' errors
-# allow for — more than two standard deviations of their difference — where
-# about one would by chance.
+# Where a number was fitted with this stratum's own reads — its smoothing is
+# `penalised_curve`, or `this_stratum` — its origin carries an own-fit standard
+# error: `own_fit_standard_error` for the first number,
+# `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error`
+# for the other two. It is how far that number would typically move if the
+# stratum's tracts were drawn again. A number taken from a parametric curve, or
+# blended with one, has none: the blend's own error is not computed. A number
+# fitted on too few of the stratum's loci with reads, a count this file does not
+# carry, has none: the first number below 8 loci, the other two below 3. **Where
+# the row's `samples_fitted_on` is fewer than the cohort's samples, the error
+# describes the subset's own fit, not how far that fit sits from one on every
+# sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further
+# from the fit on every sample than the two fits' errors allow for — more than
+# two standard deviations of their difference — where about one would by chance.
 #
 # `share_of_reads_that_slip_origin` says where the first of the three came from
-# and `shorter_share_and_fall_off_origin` where the other two did: this
-# stratum's own fit, its period's curve, or a blend of the two, with the curve
-# itself written down so an interpolation can be told from a measurement. A row
-# whose two shares were not fitted here at all has no
+# and `shorter_share_and_fall_off_origin` where the other two did: a point on
+# its period's penalised curve (`penalised_curve`), one value per repeat count,
+# fitted with the reads of every stratum of that period at once and held close
+# to its neighbours' values, the more so the larger its `strength`. `eased_here
+# = true` says the reads insisted on a bend at this repeat count, so the curve
+# was let bend there. In a file written by the fit before 2026-10-16, a number
+# may instead be this stratum's own fit (`this_stratum`), its period's
+# parametric curve (`this_periods_curve`), or a blend of the two (`blend`), with
+# the curve itself written down so an interpolation can be told from a
+# measurement. A row whose two shares were not fitted here at all has no
 # `shorter_share_and_fall_off_origin` key. Each origin carries its own
 # `expected_slipped_reads` where this stratum fitted a slip share of its own,
-# and neither carries one where the number was taken whole from a curve — so a
-# row showing the same count twice is not a duplicate, and a row showing none
-# fitted nothing of its own.
+# and in that older fit's rows neither carries one where the number was taken
+# whole from a parametric curve — so a row showing the same count twice is not a
+# duplicate, and a row showing none fitted nothing of its own. A stratum on a
+# penalised curve was fitted with one extra read's worth of evidence added to
+# its own, evidence that behaves as calling's default stutter does
+# (`share_of_reads_that_slip` 0.1, `shorter_share` 0.5, `fall_off` 0.05). So a
+# row with `expected_slipped_reads` below one carries no error on any of its
+# three numbers: too few of its reads slipped to say how far off they may be.
+# Its `shorter_share` and `fall_off` lean on that default, and on its neighbours
+# on the curve where it has any, as much as on its own reads.
 #
 # The curves under `shorter_share_and_fall_off_origin` also record
 # `curve_fitted_on`, which says what that curve itself was fitted on: this
@@ -289,19 +305,29 @@ rung = "fitted_curve"
 # (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a
 # different fit and has no such key.
 #
-# `fallback_length_spectrum_concentration` is what a tract falls back to where
-# neither its own stratum nor its period was fitted: this many chromosomes'
-# worth of belief, spread flat over whatever lengths the tract offers, so a
-# larger number makes the prior harder for the reads to move. A run that fitted
-# any stratum states the median of the concentrations those fits produced and
-# marks it `fitted_here`; a run that fitted none states a built-in constant and
-# marks it `defaulted`. A run handed this file writes back the warrant it found
-# there, because a file's warrants survive being read — demoting them on every
-# read would have the same cohort report different warrants depending on which
-# way it was called. Mark it `supplied` yourself if you change the number. It
-# carries no `observations` in any of those cases — a median over strata is not
-# a measurement with a sample size.
-fallback_length_spectrum_concentration = { value = 3.5, warrant = "fitted_here" }
+# `fallback_between_locus_share` is the between-locus share a tract is held at
+# where its stratum has none of its own. A between-locus share says how much of
+# a stratum's variation in allele length lies between its loci rather than
+# within one: near 0, every locus carries the stratum's whole spread of lengths;
+# near 1, each locus is fixed at one length. A stratum row with shares and no
+# `between_locus_share` keeps its shares, held at this one; a tract whose
+# stratum and period have no row gets a flat shape over whatever lengths it
+# offers, held at this one. A smaller share makes the prior harder for the reads
+# to move. A run in which any stratum has a between-locus share states the
+# median of those shares and marks it `fitted_here`. The median counts only the
+# strata whose fit had at least 8 loci with reads, the same count below which a
+# stratum carries no own-fit standard error on its between-locus share or its
+# `share_of_reads_that_slip`; where no stratum with a share has that many, it
+# counts every stratum with a share. This file does not carry the counts, so the
+# median cannot be recomputed from the rows below. A run in which no stratum has
+# a between-locus share states the built-in 0.5 and marks it `defaulted`. A run
+# handed this file writes back the warrant it found there, because a file's
+# warrants survive being read — demoting them on every read would have the same
+# cohort report different warrants depending on which way it was called. Mark it
+# `supplied` yourself if you change the number. It carries no `observations` in
+# any of those cases — a median over strata is not a measurement with a sample
+# size.
+fallback_between_locus_share = { value = 0.22222222222222224, warrant = "fitted_here" }
 slippage_group_by_read_group = [
     { read_group = 0, slippage_group = 0 },
     { read_group = 1, slippage_group = 0 },
@@ -311,16 +337,18 @@ slippage_by_stratum_and_group = [
     { period = 1, reference_repeats = 30, slippage_group = 0, share_of_reads_that_slip = 0.19, shorter_share = 0.77, fall_off = 0.24, share_of_reads_that_slip_origin = { smoothing = "this_stratum", expected_slipped_reads = 12040.25, own_fit_standard_error = 0.0021 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 12040.25, shorter_share_smoothing = { blend = { curve_weight = 0.61, curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 22.5, fitted_from_repeats = 5, fitted_to_repeats = 40, held_out_error = 0.167, strata = 36, curve_fitted_on = "this_period" }, reach = "inside_the_fitted_range" } }, fall_off_smoothing = "this_stratum", fall_off_own_fit_standard_error = 0.018 }, samples_fitted_on = 1 },
     { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.0421, shorter_share = 0.83, fall_off = 0.31, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 15 }, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 8000.5 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 8000.5, shorter_share_smoothing = "this_stratum", fall_off_smoothing = { this_periods_curve = { curve = { shape = "turning", intercept = 1.4, slope = -0.09, bend = 0.006, centre_repeats = 3.0, fitted_from_repeats = 2, fitted_to_repeats = 4, held_out_error = 0.167, strata = 3, curve_fitted_on = "this_period" }, reach = "above_the_fitted_range" } }, shorter_share_own_fit_standard_error = 0.011 } },
     { period = 2, reference_repeats = 11, slippage_group = 1, share_of_reads_that_slip = 0.0913, shorter_share = 0.79, fall_off = 0.28, share_of_reads_that_slip_origin = { smoothing = { this_periods_curve = { curve = { rise_shape = 0.55, intercept = 0.011, slope = 0.004, fitted_from_repeats = 12, fitted_to_repeats = 19, held_out_error = 0.3333333333333333, cells = 8 }, reach = "below_the_fitted_range" } } } },
+    { period = 2, reference_repeats = 14, slippage_group = 0, share_of_reads_that_slip = 0.0657, shorter_share = 0.71, fall_off = 0.35, share_of_reads_that_slip_origin = { smoothing = { penalised_curve = { strength = 18.5, eased_here = true, reach = "inside_the_fitted_range" } }, expected_slipped_reads = 5120.75, own_fit_standard_error = 0.0034 }, shorter_share_and_fall_off_origin = { expected_slipped_reads = 5120.75, shorter_share_smoothing = { penalised_curve = { strength = 6.25, eased_here = false, reach = "inside_the_fitted_range" } }, fall_off_smoothing = { penalised_curve = { strength = 9.75, eased_here = false, reach = "inside_the_fitted_range" } }, shorter_share_own_fit_standard_error = 0.014, fall_off_own_fit_standard_error = 0.027 } },
 ]
-# `shares_by_repeat_offset` runs from -span to +span in whole repeat units from
-# the **reference** tract length, so the middle entry is the reference length
-# itself, the count is odd, and the shares sum to one. An array read as starting
-# at zero shifts every length this stratum expects by one repeat.
-length_spectrum_by_stratum = [
-    { period = 2, reference_repeats = 6, concentration = 3.5, shares_by_repeat_offset = [0.1, 0.8, 0.1] },
+# `share_of_chromosomes_by_repeat_offset` runs from -span to +span in whole
+# repeat units from the **reference** tract length, so the middle entry is the
+# reference length itself, the count is odd, and the shares sum to one. An array
+# read as starting at zero shifts every length this stratum expects by one
+# repeat.
+allele_length_variation_by_stratum = [
+    { period = 2, reference_repeats = 6, between_locus_share = 0.22222222222222224, between_locus_share_standard_error = 0.03, share_of_chromosomes_by_repeat_offset = [0.1, 0.8, 0.1] },
 ]
-length_spectrum_by_period = [
-    { period = 2, concentration = 2.75, shares_by_repeat_offset = [0.15, 0.7, 0.15] },
+allele_length_variation_by_period = [
+    { period = 2, between_locus_share = 0.26666666666666666, share_of_chromosomes_by_repeat_offset = [0.15, 0.7, 0.15] },
 ]
 # How often a base reads wrong inside a tract — per read group as well as per
 # stratum, because that is a property of the chemistry, and per `ploidy` as

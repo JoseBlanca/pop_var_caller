@@ -421,10 +421,10 @@ impl GenericEvidence {
 /// 6-repeat tract cannot lose more than 6 — and is the better fix; it needs a variable-width
 /// record, which is the census's design and not this constant's. Deferred there.
 ///
-/// **Not the same constant as the span the fit may place allele mass on**, which reaches ±6.
-/// That is the load-bearing one — it is what lets an end bucket be attributed to a distant
-/// allele rather than to a far slip — and reading this width as that span is the confusion
-/// the two constants exist to prevent.
+/// **Not the same constant as the span the fit may place allele mass on**, which reaches one
+/// further (`ssr_fit::ALLELE_SPAN`). That is the load-bearing one — it is what lets an end bucket
+/// be attributed to a distant allele rather than to a far slip — and reading this width as that
+/// span is the confusion the two constants exist to prevent.
 pub const RECORDED_OFFSET_RANGE: i32 = 8;
 
 /// Buckets, `-8 … +8` with saturating ends.
@@ -1659,6 +1659,46 @@ impl SampleCensusEvidence {
             sections: self.sections.renumbered(of),
             ..self
         }
+    }
+
+    /// **The same sample with its read groups numbered in the order of their declared `@RG ID`s**,
+    /// each one's sections and claimed-error totals moved with it.
+    ///
+    /// A walk numbers a sample's read groups in the order its alignment file's header lists them,
+    /// and assembling a cohort keeps that order ([`CohortCensusEvidence::new`]). The fit sums over
+    /// read groups in that numbering, so the same sample whose header listed its groups the other
+    /// way round would fit to different last digits. `estimate-parameters` calls this on every
+    /// sample before assembling, which makes the order a property of the names (arch
+    /// `str_penalised_fit.md` §2.4a).
+    ///
+    /// **The numbers this sample already uses are reused, permuted**, so a sample whose groups were
+    /// already in name order comes back unchanged.
+    ///
+    /// **A sample holding a section under a group it does not declare is returned as it is**, so
+    /// that [`CohortCensusEvidence::new`] refuses it naming the number its census used.
+    #[must_use]
+    pub fn with_read_groups_in_declared_id_order(self) -> Self {
+        let undeclared = self
+            .sections
+            .keys()
+            .any(|key| !self.declared.contains_key(&key.read_group()));
+        if undeclared {
+            return self;
+        }
+        // The map's keys are this sample's numbers in ascending order; handing them out in the
+        // order of the declared IDs is the permutation.
+        let mut by_declared_id: Vec<(&str, ReadGroupId)> = self
+            .declared
+            .iter()
+            .map(|(group, named)| (named.declared_id.as_str(), *group))
+            .collect();
+        by_declared_id.sort_unstable();
+        let of: BTreeMap<ReadGroupId, ReadGroupId> = by_declared_id
+            .into_iter()
+            .map(|(_, group)| group)
+            .zip(self.declared.keys().copied())
+            .collect();
+        self.renumbered(&of)
     }
 
     /// Every read group this sample recorded, in the order the fit visits them.
@@ -3510,6 +3550,63 @@ mod tests {
             vec!["a:rg0", "b:rg0"],
             "and each keeps the name it was declared under, which is what they were merged on",
         );
+    }
+
+    /// **A sample's read groups are put in the order of their declared `@RG ID`s, and each one's
+    /// evidence moves with its name** (arch `str_penalised_fit.md` §2.4a).
+    ///
+    /// The walk numbered them in its header's order, `rg-z` before `rg-a`; afterwards `rg-a`
+    /// holds the lower number, and the section and claimed-error totals that were filed under
+    /// `rg-a` are still `rg-a`'s. A relabelling that moved the names and not the evidence would
+    /// put one library's reads under the other's error rate, and the last two assertions are
+    /// what would see it.
+    #[test]
+    fn a_samples_read_groups_are_put_in_declared_id_order_with_their_evidence() {
+        let mut sample = ssr_writer_for("a", ReadGroupId(0)).finish();
+        let named = |id: &str| NamedReadGroup {
+            declared_id: id.to_string(),
+            library: format!("lib-{id}"),
+        };
+        sample.declared = BTreeMap::from([
+            (ReadGroupId(0), named("rg-z")),
+            (ReadGroupId(1), named("rg-a")),
+        ]);
+        // Sections told apart by their length: three positions under `rg-z`, five under `rg-a`.
+        sample.sections = Sections::resident(BTreeMap::from([
+            (
+                SectionKey::Generic(ReadGroupId(0)),
+                Section::Generic(GenericEvidence::never_walked(3)),
+            ),
+            (
+                SectionKey::Generic(ReadGroupId(1)),
+                Section::Generic(GenericEvidence::never_walked(5)),
+            ),
+        ]));
+        let claimed = |reads: u64| MintedReadErrors::from_parts(0, reads);
+        sample.minted =
+            BTreeMap::from([(ReadGroupId(0), claimed(30)), (ReadGroupId(1), claimed(50))]);
+
+        let ordered = sample.with_read_groups_in_declared_id_order();
+
+        let ids: Vec<(ReadGroupId, &str)> = ordered
+            .declared_read_groups()
+            .iter()
+            .map(|(group, named)| (*group, named.declared_id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![(ReadGroupId(0), "rg-a"), (ReadGroupId(1), "rg-z")]
+        );
+        let Sections::Resident(sections) = &ordered.sections else {
+            panic!("a resident sample stays resident");
+        };
+        assert_eq!(
+            sections[&SectionKey::Generic(ReadGroupId(0))],
+            Section::Generic(GenericEvidence::never_walked(5)),
+            "rg-a's section went with it",
+        );
+        assert_eq!(ordered.minted_read_errors()[&ReadGroupId(0)], claimed(50));
+        assert_eq!(ordered.minted_read_errors()[&ReadGroupId(1)], claimed(30));
     }
 
     /// **Two samples declaring one `@RG ID` are refused**, because no run can produce that: the

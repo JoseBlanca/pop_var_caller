@@ -46,20 +46,19 @@
 //!   run lands here even though the fit ran**, because one genome's totals cannot identify an
 //!   excess and it comes out zero whatever the truth.
 
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use thiserror::Error;
 
-use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile};
+use crate::calling::parameters_file::{DeclaredInbreeding, ParametersFile, ParametersFileError};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
-use crate::parameter_estimation::joint::census::CohortCensusEvidence;
+use crate::parameter_estimation::joint::census::{CohortCensusEvidence, SampleCensusEvidence};
 use crate::parameter_estimation::joint::fit::JointFitConfig;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError, UnambiguousRuns};
-use crate::parameter_estimation::joint::ssr_fit::{DEFAULT_STRATA_AT_ONCE, SsrFitConfig};
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::PenalisedFitConfig;
 use crate::parameter_estimation::progress::StageProgress;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfo, ReferenceInfoError, read_reference_observing_or_creating_fai,
@@ -127,22 +126,15 @@ pub struct EstimateParametersArgs {
     #[arg(long)]
     pub inbreeding: Option<f64>,
 
-    /// How many repeat-tract strata the fit works on at once; 1 uses the least memory.
-    ///
-    /// A stratum is every repeat tract with one motif length and one reference copy number, and
-    /// the fit estimates each stratum's slippage on its own. **This decides how much memory that
-    /// step needs.** Fitting one stratum holds one table, with a row for each tract and each
-    /// sample with reads there, 91 numbers wide (one for each pair of allele lengths a sample can
-    /// carry): for a 5,000-tract stratum, about 0.34 GiB at 100 samples and 7.4 GiB at 2,169.
-    /// N strata at once hold up to N of those tables.
-    ///
-    /// At 1, the default, the fit works on one stratum at a time with every thread on its tracts.
-    /// Above 1, N threads each fit a stratum of their own, and the other cores are idle during
-    /// this step when N is below the core count. The step's first progress line prints the
-    /// largest stratum's table, so a run can choose N from that number. No value changes a fitted
-    /// number.
-    #[arg(long, value_name = "N", default_value_t = DEFAULT_STRATA_AT_ONCE)]
-    pub str_param_estimates_at_once: NonZeroUsize,
+    /// **Removed; a run that gives it is refused** with
+    /// [`EstimateParametersCliError::RemovedOption`]. It chose how many repeat-tract strata the
+    /// earlier fit held a per-stratum likelihood table for at once. The penalised fit builds a
+    /// table for each class (the class's distinct rows of read counts) but holds only one class's
+    /// table at a time, whatever the thread count, so its memory is fixed and there is nothing
+    /// left for the option to choose. Hidden from `--help`, and kept so that a script still
+    /// passing it is told why rather than told the option does not exist.
+    #[arg(long, value_name = "N", hide = true)]
+    pub str_param_estimates_at_once: Option<String>,
 
     /// Do not estimate contamination: every read group is taken as uncontaminated.
     ///
@@ -303,11 +295,40 @@ pub enum EstimateParametersCliError {
         value: String,
     },
 
+    /// An option this command no longer has was given.
+    ///
+    /// **Refused rather than ignored**, so that a run cannot believe it chose something that no
+    /// longer exists.
+    #[error("{option} was removed: {why}; run again without it")]
+    RemovedOption {
+        /// The option, as typed.
+        option: &'static str,
+        /// Why it went, in a phrase.
+        why: &'static str,
+    },
+
     /// The output is already there and `--force` was not given.
     #[error("{} is already there; pass --force to replace it", path.display())]
     OutputAlreadyThere {
         /// The file that would be replaced.
         path: PathBuf,
+    },
+
+    /// The fit finished, and the parameters file it built is one a calling run would refuse to
+    /// read, so no file was written.
+    ///
+    /// **A bug, not something the person typed.** The file is checked by the same validator a
+    /// calling run applies before it scores with one, and the validator's refusal, which names
+    /// the key and the class it sits on, is this error's source. Without the check the run would
+    /// write the file and only the next run would refuse it — after the whole fit had been spent.
+    #[error(
+        "the parameters file this fit built would be refused by the run that reads it, so none \
+         was written; this is a bug in this build, and the refusal that follows says where"
+    )]
+    RefusedByItsOwnReader {
+        /// What the validator said.
+        #[source]
+        source: Box<ParametersFileError>,
     },
 
     /// The output could not be written.
@@ -357,13 +378,21 @@ fn ordinary_position_config(args: &EstimateParametersArgs, ploidy: Ploidy) -> Jo
     }
 }
 
-/// The repeat-tract fit's settings this run asked for: the defaults, with the number of strata
-/// fitted at once from `--str-param-estimates-at-once`.
-fn repeat_tract_config(args: &EstimateParametersArgs) -> SsrFitConfig {
-    SsrFitConfig {
-        strata_at_once: args.str_param_estimates_at_once,
-        ..SsrFitConfig::default()
+/// The repeat-tract fit's settings: production's, which no option changes.
+fn repeat_tract_config() -> PenalisedFitConfig {
+    PenalisedFitConfig::production()
+}
+
+/// **Refuse an option this command no longer has**, before anything is read.
+fn refuse_removed_options(args: &EstimateParametersArgs) -> Result<(), EstimateParametersCliError> {
+    if args.str_param_estimates_at_once.is_some() {
+        return Err(EstimateParametersCliError::RemovedOption {
+            option: "--str-param-estimates-at-once",
+            why: "the repeat-tract fit now holds one class's table of read counts at a time, \
+                  whatever the thread count, so there is no number to choose",
+        });
     }
+    Ok(())
 }
 
 /// The run itself, with the writing left to the caller — which is what lets a test read the file
@@ -371,6 +400,7 @@ fn repeat_tract_config(args: &EstimateParametersArgs) -> SsrFitConfig {
 fn fit_and_assemble(
     args: &EstimateParametersArgs,
 ) -> Result<(ParametersFile, usize), EstimateParametersCliError> {
+    refuse_removed_options(args)?;
     let ploidy =
         Ploidy::try_new(args.ploidy).map_err(|_| EstimateParametersCliError::NotAValue {
             what: "--ploidy",
@@ -410,7 +440,7 @@ fn fit_and_assemble(
         &contig_of,
         &pooled,
         &ordinary_position_config(args, ploidy),
-        &repeat_tract_config(args),
+        &repeat_tract_config(),
     )
     .map_err(|source| EstimateParametersCliError::Fit {
         source: Box::new(source),
@@ -444,17 +474,43 @@ fn fit_and_assemble(
         &segmentation.inputs().repeat_tract_criteria,
         &fit.generic.starts,
     );
-    Ok((file, samples))
+    Ok((a_file_the_next_run_can_read(file)?, samples))
+}
+
+/// **The file a fit built, refused here if a calling run would refuse it** — so the run stops
+/// with the validator's message and writes nothing, rather than writing a file the next run
+/// cannot use.
+///
+/// The writer checks some of what the validator checks on its own (a concentration with no F,
+/// a concentration error with no F error), one assert at a time; this is the one call that
+/// covers every mismatch between the two, including one a future fit introduces.
+///
+/// # Errors
+///
+/// [`EstimateParametersCliError::RefusedByItsOwnReader`], carrying the validator's refusal.
+pub(crate) fn a_file_the_next_run_can_read(
+    file: ParametersFile,
+) -> Result<ParametersFile, EstimateParametersCliError> {
+    file.validate()
+        .map_err(|source| EstimateParametersCliError::RefusedByItsOwnReader {
+            source: Box::new(source),
+        })?;
+    Ok(file)
 }
 
 /// **A cohort's psps opened as a cohort, their censuses read, judged against this run's settings
 /// and assembled, and the reference and catalog they were walked against read and checked** —
-/// everything `estimate-parameters` does before it fits, and what the repeat-tract subset
-/// comparison (`examples/ng_ssr_subset_against_every_sample.rs`) needs too.
+/// everything `estimate-parameters` does before it fits, and what the research bench's psp mode
+/// (`examples/ng_str_fit_bench.rs`) needs too.
 pub struct OpenedCensuses {
-    /// The psps, opened together.
+    /// The psps, opened together and put in the order of their sample names.
+    ///
+    /// **Its read-group table is not the evidence's numbering**: within a sample it keeps the
+    /// header's order, where the evidence's is by declared ID. The run's table is built from the
+    /// evidence ([`read_groups_of`]); this one is for mapping a psp's own records.
     pub cohort: OpenPspCohort,
-    /// Their censuses, as one cohort.
+    /// Their censuses, as one cohort, samples in name order and each sample's read groups in
+    /// the order of their declared IDs.
     pub evidence: CohortCensusEvidence,
     /// The selection rebuilt from the reference and catalog, and the run's contigs.
     pub plan: CensusPlan,
@@ -501,6 +557,18 @@ pub fn open_the_censuses(
             report: Box::new(report),
         });
     }
+    // **One order for the cohort, whatever order its psps were typed in** (spec
+    // `str_penalised_fit.md` §3; arch §2.4a): samples by the name in each psp's header here, and
+    // read groups within a sample by their declared ID where the censuses are assembled, below.
+    // The fit numbers samples and read groups in the order the cohort is held and sums in that
+    // numbering, so a cohort held as typed fitted to a file that depended on the typing — on
+    // tomato2, two orders of four psps gave inbreeding coefficients differing in the fourth
+    // figure. The written file lists samples in name order, which `parameters_file.md` §6
+    // allows: calling joins its rows by sample name and `@RG ID`.
+    //
+    // **After the head's report and not before**, so that report names stale psps in the order
+    // they were typed. Nothing has been summed yet: every census is read below, in this order.
+    let cohort = cohort.in_sample_name_order();
     // **The censuses come out of the psps' trailers**, read lazily: their headers and directories
     // now, a section when the fit asks for it (spec §5).
     //
@@ -627,11 +695,27 @@ pub fn open_the_censuses(
     // **What assembling can still refuse is damage**: every census now records this run's
     // settings, so two cannot disagree on them, and two psps declaring one read group were refused
     // when the cohort was opened, from their headers.
-    let evidence = the_censuses_as_one_cohort(censuses).map_err(|source| {
-        EstimateParametersCliError::Cohort {
-            source: Box::new(source),
-        }
+    //
+    // **Each sample's read groups in the order of their declared IDs**, the second half of the
+    // cohort's one order; assembling then numbers them run-wide in (sample, declared ID) order.
+    let evidence = the_censuses_as_one_cohort(
+        censuses
+            .into_iter()
+            .map(SampleCensusEvidence::with_read_groups_in_declared_id_order)
+            .collect(),
+    )
+    .map_err(|source| EstimateParametersCliError::Cohort {
+        source: Box::new(source),
     })?;
+    // **The evidence's sample order is the cohort's**, because each census was read out of its
+    // psp in the cohort's order. `read_groups_of` pairs the two by position. That pairing is
+    // checked one sample at a time, in release builds, by
+    // `what_the_run_says_about_every_census_in_a_cohort` above, and assembling keeps that order;
+    // this assertion only repeats the check over the assembled evidence.
+    debug_assert!(
+        evidence.sample_names().eq(cohort.sample_names()),
+        "each census names the sample of the psp it is the trailer of",
+    );
 
     setup.always(|into| {
         format!(

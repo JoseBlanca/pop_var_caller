@@ -43,11 +43,12 @@ use crate::parameter_estimation::joint::fit::{
 };
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
-use crate::parameter_estimation::joint::sample_order::{SAMPLE_ORDER_SEED, sample_order};
 use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
+use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
+    PenalisedFitConfig, fit_repeat_tracts,
+};
 use crate::parameter_estimation::joint::ssr_fit::{
-    self, SsrFitConfig, StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata,
-    strata_of_kept_loci,
+    StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata, strata_of_kept_loci,
 };
 use crate::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
@@ -211,19 +212,26 @@ pub fn the_tract_strata_of_a_cohort(
 /// `loci` is the selection rebuilt from this run's reference and catalog; it is checked against
 /// the digest every census carries before a tract is read. `contig_of` turns a contig's name
 /// into the identifier the records use, and `slippage_group_of` says which slippage group each
-/// read group is in — a declaration of the run's, never estimated.
+/// read group is in — a declaration of the run's, never estimated. `tracts` holds the repeat-tract
+/// fit's settings; `estimate-parameters` passes [`PenalisedFitConfig::production`].
 ///
 /// # Errors
 ///
 /// [`CohortFitError::AnotherSelection`] when the rebuilt loci are not the ones the censuses were
 /// written against, and the two halves' own failures otherwise.
+///
+/// # Panics
+///
+/// When `slippage_group_of` puts the read groups in more than one slippage group: the repeat-tract
+/// fit scores every library at one stutter ([`fit_repeat_tracts`]), so a caller pools them first,
+/// as [`every_read_group_pooled`] does.
 pub fn fit_a_cohort(
     cohort: &mut CohortCensusEvidence,
     loci: &CensusLoci,
     contig_of: &dyn Fn(&str) -> Option<ContigId>,
     slippage_group_of: &BTreeMap<ReadGroupId, u32>,
     generic: &JointFitConfig,
-    tracts: &SsrFitConfig,
+    tracts: &PenalisedFitConfig,
 ) -> Result<CohortFit, CohortFitError> {
     // **Checked before anything is fitted**, because the selection decides how every tract record
     // is indexed and a wrong one produces numbers rather than a failure.
@@ -238,28 +246,16 @@ pub fn fit_a_cohort(
         },
     )?;
 
-    // **The one number the tract half takes from the generic one**, per sample and in the
-    // cohort's own sample order.
-    let homozygote_excess: Vec<f64> = cohort
-        .sample_names()
-        .map(|name| {
-            fit.hom_excess
-                .get(name)
-                .map_or(0.0, |estimate| estimate.value.get())
-        })
-        .collect();
+    let homozygote_excess = homozygote_excess_in_cohort_order(cohort, &fit);
 
     let CohortTractStrata {
         strata: evidence,
         tracts: kept_tracts,
     } = the_tract_strata_of_a_cohort(cohort, loci, contig_of, slippage_group_of)?;
-    // **A large cohort's strata are each read from a subset of its samples**, the first in a
-    // fixed order drawn from the samples' names (`fit_precision.md` §4.4); the order is indexed as
-    // the evidence's samples and `homozygote_excess` are, the cohort's own order.
-    let names: Vec<&str> = cohort.sample_names().collect();
-    let order = sample_order(&names, SAMPLE_ORDER_SEED);
-    let outcomes =
-        ssr_fit::fit_strata_on_sample_subsets(&evidence, &homozygote_excess, &order, tracts);
+    // **Every sample's reads at every stratum**: the penalised fit reads the whole cohort, one
+    // motif length at a time, so no sample order is drawn. `homozygote_excess` is indexed as the
+    // evidence's samples are, the cohort's own order.
+    let outcomes = fit_repeat_tracts(&evidence, &homozygote_excess, tracts);
     // **The evidence is the largest thing the tract half holds and nothing after the fit needs
     // more of it than these two counts a stratum**, so it goes here rather than when the
     // parameters file has been written.
@@ -275,6 +271,29 @@ pub fn fit_a_cohort(
         tracts: kept_tracts,
         substitution_counts,
     })
+}
+
+/// **The one number the tract half takes from the generic one**: each sample's homozygote excess,
+/// in the cohort's own sample order — the order the tract evidence numbers its samples in — and 0
+/// for a sample the generic fit gave none.
+///
+/// [`fit_a_cohort`] hands this to the repeat-tract fit; the fitting bench's psp mode
+/// (`examples/ng_str_fit_bench.rs`) calls it so that its held-out fits weigh genotypes exactly as
+/// `estimate-parameters` does.
+#[must_use]
+pub fn homozygote_excess_in_cohort_order(
+    cohort: &CohortCensusEvidence,
+    generic: &JointFit,
+) -> Vec<f64> {
+    cohort
+        .sample_names()
+        .map(|name| {
+            generic
+                .hom_excess
+                .get(name)
+                .map_or(0.0, |estimate| estimate.value.get())
+        })
+        .collect()
 }
 
 /// **Every read group in one slippage group**, which is what a cohort too thin to fit them apart
@@ -759,7 +778,7 @@ mod tests {
             &contig_of,
             &pooled,
             &a_generic_config(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         );
 
         let fit = fitted.expect("a cohort of two censuses fits");
@@ -794,7 +813,7 @@ mod tests {
             &contig_of,
             &pooled,
             &a_generic_config(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         )
         .expect("it fits the second time too");
 
@@ -825,6 +844,68 @@ mod tests {
             "the fixture's tracts compared no base, so no substitution rate is tested end to end",
         );
         assert_eq!(twice.substitution_counts, fit.substitution_counts);
+    }
+
+    /// **Gathering keeps each read group a library of its own, in the slippage group the run
+    /// declared for it** (`str_library_stutter.md` §1.2): the fixture's three read groups over two
+    /// samples come back as three libraries in the cohort's read-group order, each in its own
+    /// declared group at a multiplier of one, and a sample reading through two of them has its
+    /// reads kept apart rather than summed.
+    #[test]
+    fn gathering_keeps_each_read_group_a_library_in_its_declared_group() {
+        let (cohort, psps) = a_fitted_cohorts_inputs();
+        let (_segmentation, plan) = a_census_plan_over_selecting(
+            &cohort.reference,
+            &cohort.catalog,
+            crate::run::CensusSelection::SHIPPED.generic_target,
+        );
+        let mut open = the_censuses_in(&psps);
+        let contigs = std::sync::Arc::clone(&plan.contigs);
+        let contig_of = move |name: &str| {
+            contigs
+                .entries
+                .iter()
+                .position(|entry| entry.name == name)
+                .map(|index| crate::types::ContigId(index as u32))
+        };
+        let read_groups: Vec<ReadGroupId> = open.read_groups().to_vec();
+        assert_eq!(
+            (read_groups.len(), open.len()),
+            (3, 2),
+            "the fixture has a sample reading through two read groups"
+        );
+        let one_group_each: BTreeMap<ReadGroupId, u32> = read_groups
+            .iter()
+            .enumerate()
+            .map(|(index, read_group)| (*read_group, index as u32))
+            .collect();
+        let strata =
+            the_tract_strata_of_a_cohort(&mut open, &plan.loci, &contig_of, &one_group_each)
+                .expect("the tract sections read")
+                .strata;
+        assert!(!strata.is_empty(), "the fixture's tract is gathered");
+
+        let mut a_sample_read_through_two_libraries = false;
+        for stratum in &strata {
+            assert_eq!(stratum.groups, 3);
+            assert_eq!(stratum.libraries.len(), read_groups.len());
+            for (index, library) in stratum.libraries.iter().enumerate() {
+                assert_eq!(library.read_group, read_groups[index]);
+                assert_eq!(library.slippage_group, index as u32);
+                assert_eq!(library.stutter_multiplier, 1.0);
+            }
+            for row in stratum.tracts.iter().flat_map(|tract| &tract.samples) {
+                assert!(
+                    row.by_library.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                    "a sample's libraries are listed in increasing order"
+                );
+                a_sample_read_through_two_libraries |= row.by_library.len() == 2;
+            }
+        }
+        assert!(
+            a_sample_read_through_two_libraries,
+            "some sample's reads at some tract came through both its read groups, kept apart"
+        );
     }
 
     /// **A cohort fitted against another selection is refused before a tract is read.**
@@ -870,7 +951,7 @@ mod tests {
             &contig_of,
             &pooled,
             &a_generic_config(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         )
         .expect_err("these censuses were written against another selection");
 
@@ -1135,7 +1216,7 @@ mod writing_the_parameters_file {
             &contig_of,
             &pooled,
             &JointFitConfig::default(),
-            &SsrFitConfig::default(),
+            &PenalisedFitConfig::production(),
         )
         .expect("the cohort fits");
         fit.substitution_counts.extend_from_slice(extra);

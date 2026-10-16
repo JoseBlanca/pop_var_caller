@@ -83,8 +83,9 @@ use super::{RunError, Segmentation, SegmentationInputs};
 /// decoded to learn.
 #[derive(Debug)]
 pub struct OpenPspCohort {
-    /// One per sample, **in the order the paths were given** — which is the run's sample order
-    /// and the order every per-sample list is indexed by.
+    /// One per sample, **in the run's sample order**, which every per-sample list is indexed by:
+    /// the order the paths were given to [`open`](Self::open), unless
+    /// [`in_sample_name_order`](Self::in_sample_name_order) put them in sample-name order.
     psps: Vec<PspReader>,
     /// Where each came from, kept beside the readers because a refusal names the file and a
     /// [`PspReader`] does not hand its path out.
@@ -176,6 +177,46 @@ impl OpenPspCohort {
             read_groups,
             observation_reach_ceiling,
         })
+    }
+
+    /// **The same cohort with its samples in the order of the sample names in their headers**,
+    /// and its read groups numbered afresh in that order.
+    ///
+    /// [`open`](Self::open) keeps the order the paths were given, because a calling run's VCF
+    /// columns follow it. A parameter fit must not depend on that order: it sums over samples in
+    /// it, and floating-point sums taken in another order differ in their last digits
+    /// (arch `str_penalised_fit.md` §2.4a). So `estimate-parameters` calls this, and
+    /// `call-from-psps` does not.
+    ///
+    /// **Names are compared byte by byte**, so the order does not depend on the machine's locale.
+    /// No two samples share a name: `open` refused that. **Within a sample, read groups keep the
+    /// file's header order**, which is what [`read_group_remap`](Self::read_group_remap) relies
+    /// on; the census evidence orders them by declared ID on its own
+    /// ([`SampleCensusEvidence::with_read_groups_in_declared_id_order`](crate::parameter_estimation::joint::census::SampleCensusEvidence::with_read_groups_in_declared_id_order)).
+    #[must_use]
+    pub fn in_sample_name_order(self) -> Self {
+        let Self {
+            psps,
+            paths,
+            segmentation_inputs,
+            read_groups: _,
+            observation_reach_ceiling,
+        } = self;
+        let mut both: Vec<(PspReader, PathBuf)> = psps.into_iter().zip(paths).collect();
+        both.sort_by(|(one, _), (other, _)| one.header().sample.cmp(&other.header().sample));
+        let (psps, paths): (Vec<PspReader>, Vec<PathBuf>) = both.into_iter().unzip();
+        let headers: Vec<&Header> = psps.iter().map(PspReader::header).collect();
+        // Every check this makes is about one file or about the set, and the set merged when
+        // the cohort was opened.
+        let read_groups = merge_the_read_group_tables(&headers, &paths)
+            .expect("the same read-group tables merged in another order when the cohort opened");
+        Self {
+            psps,
+            paths,
+            segmentation_inputs,
+            read_groups,
+            observation_reach_ceiling,
+        }
     }
 
     /// How many samples this cohort holds.

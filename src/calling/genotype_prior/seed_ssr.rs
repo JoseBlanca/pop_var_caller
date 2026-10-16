@@ -1,4 +1,4 @@
-//! The STR starting point: the population's own fitted **length spectrum** at this tract's
+//! The STR starting point: the population's own fitted **allele length variation** at this tract's
 //! stratum, read onto the locus's candidate lengths.
 //!
 //! Everything the SNP/indel starting point leans on is false at a repeat tract, and the three
@@ -12,7 +12,7 @@
 //!
 //! ## The two questions, and both are answered by one fitted pair
 //!
-//! **Where the mass sits** is the stratum's fitted length spectrum: how that stratum's
+//! **Where the mass sits** is the stratum's fitted allele length variation: how that stratum's
 //! chromosomes are spread over tract lengths, indexed in whole repeat units either side of the
 //! **reference** tract length.
 //!
@@ -47,13 +47,15 @@
 //!
 //! ## Two words this project keeps apart, and they are both "spectrum"
 //!
-//! A **length spectrum** is this path's: how a stratum's chromosomes are spread over tract
+//! A **allele length variation** is this path's: how a stratum's chromosomes are spread over tract
 //! **lengths**. A **frequency spectrum** is the ordinary-site path's: how allele **frequencies**
 //! are spread across the population, which [`seed_generic`](super::seed_generic) reads. Neither
 //! is ever called just "the spectrum" (`population_diversity.md` §2).
 
 use crate::genetics::MIN_ALT_CONCENTRATION;
-use crate::parameter_estimation::joint::stratum_fits::{LengthSpectrum, LengthSpectrumRung};
+use crate::parameter_estimation::joint::stratum_fits::{
+    AlleleLengthVariation, AlleleLengthVariationRung,
+};
 
 use super::Concentration;
 
@@ -65,12 +67,11 @@ use super::Concentration;
 /// that the candidate set nearly missed has to stay recoverable rather than fall into a prior it
 /// can never climb out of (`calling_priors.md` §5).
 ///
-/// **Two candidates reach it, and they are different situations.** One is a candidate *outside*
-/// the fitted spectrum's reach — further from the reference tract length than the fit was ever
-/// allowed to place mass — which is outside everything the fit saw rather than something it
-/// measured as rare. The other is a candidate inside the reach at a length class the fit put no
-/// mass on. Both take the floor, and the floor is what makes the shape's total strictly
-/// positive, so the shares are always a distribution
+/// **A candidate reaches it when the fit put no mass on its length class**, which includes an edge
+/// class the fit left empty. A candidate past the fit's reach does not take the floor: it shares
+/// the edge class, which holds every allele that far or further (see [`fill_ssr_seed`]). The
+/// floor is what makes the shape's total strictly positive, so the shares are always a
+/// distribution
 /// (`tests::a_candidate_the_fit_reaches_and_gives_nothing_still_keeps_a_share`).
 ///
 /// It has production's value, which happens to equal [`MIN_ALT_CONCENTRATION`], and **the two
@@ -78,12 +79,13 @@ use super::Concentration;
 /// count of chromosomes.
 const SHAPE_FLOOR: f64 = 1e-12;
 
-/// Fill `out` with the STR seed: the stratum's fitted length spectrum read onto this locus's
+/// Fill `out` with the STR seed: the stratum's fitted allele length variation read onto this locus's
 /// candidate lengths, at the concentration it was fitted with.
 ///
 /// ```text
 /// offset:  d_j = repeat count of j − reference_repeat_count
 /// shape:   w_j = max(spectrum(d_j), SHAPE_FLOOR)          (1/K on the stated-flat rung)
+///          with d_j at or past ±span: spectrum(±span) / (candidate lengths at or past ±span)
 /// seed:    α_j = concentration · w_j,  floored at MIN_ALT_CONCENTRATION
 /// ```
 ///
@@ -124,7 +126,7 @@ const SHAPE_FLOOR: f64 = 1e-12;
 ///
 /// - **a candidate's repeat count passed as the reference tract's.** The shape re-centres on
 ///   that candidate, which is the flattening
-///   [`StratumFits::length_spectrum_at`](crate::parameter_estimation::joint::stratum_fits::StratumFits::length_spectrum_at)'s
+///   [`StratumFits::allele_length_variation_at`](crate::parameter_estimation::joint::stratum_fits::StratumFits::allele_length_variation_at)'s
 ///   own documentation warns about; measured as a difference within the prior row in
 ///   `tests::the_reference_repeat_count_is_the_tracts_and_nothing_here_can_check_it`.
 /// - **another stratum's spectrum.** Every fitted spectrum has the same shape and the same
@@ -136,10 +138,28 @@ const SHAPE_FLOOR: f64 = 1e-12;
 ///
 /// The seed is keyed by repeat count, so two candidates that differ by an interior
 /// substitution — an interrupted repeat — sit at the same offset and **each receives that
-/// class's full weight**, which is production's behaviour. Whether to divide the class instead
+/// class's full weight**, which is production's behaviour. At an edge class each receives its
+/// length's part of the edge, the same rule over the edge's split (below). Whether to divide the class instead
 /// needs the interrupted-repeat work to say how it should be weighted; the signature takes
 /// counts rather than sequences precisely so that change lands in this one function
 /// (`calling_priors.md` §5.2, open as that spec's Q3).
+///
+/// ## The two outermost classes hold everything that far or further
+///
+/// The fit's window reaches one repeat past the read offsets the census records, and reads can
+/// barely tell apart alleles beyond that: every unslipped read of theirs lands in the census's
+/// end bucket. So the
+/// fit's class at `−span` holds every allele `span` or more repeats shorter, and `+span` every
+/// one `span` or more longer (`str_allele_window.md` §1.2). **A candidate at or past an
+/// edge therefore takes that edge's weight divided by how many candidate lengths sit at or past
+/// it**, which is the same Dirichlet split into equal parts: the data say nothing about how
+/// alleles beyond the edge are spread, so an equal split assumes the least (spec §5.2). With no
+/// candidate that far, the edge's weight goes unused, as any class's does without a candidate
+/// (`tests::candidates_at_or_past_an_edge_share_its_weight_equally`).
+///
+/// Spectra written before the window reached past the recording, at ±6, are read the same way.
+/// Their end classes collected every allele that far or further too, because the fit had nowhere
+/// else to put them (spec §1.1).
 ///
 /// ## The ends of the range
 ///
@@ -156,7 +176,8 @@ const SHAPE_FLOOR: f64 = 1e-12;
 /// ## Shape and cost
 ///
 /// Fills the caller's buffer and **allocates nothing**. Three passes over the locus's candidate
-/// lengths — write the weights, sum them, scale — and no `lgamma`, against one `lgamma` per
+/// lengths — write the weights, sum them, scale — plus, on a fitted spectrum, a count of the
+/// lengths at each edge that is quadratic in a handful of candidates; and no `lgamma`, against one `lgamma` per
 /// allele a genotype carries a copy of in the prior row this feeds. (The sum is the shared
 /// filler's, and `fill_ssr_seed` discards it: the seed scales the *unnormalised* weights, which
 /// is §4.2's conditioning argument above.)
@@ -169,7 +190,7 @@ const SHAPE_FLOOR: f64 = 1e-12;
 pub fn fill_ssr_seed<'a>(
     candidate_repeat_counts: &[u32],
     reference_repeat_count: u32,
-    spectrum: LengthSpectrum<'_>,
+    spectrum: AlleleLengthVariation<'_>,
     out: &'a mut [f64],
 ) -> Concentration<'a> {
     let _ = fill_candidate_weights(
@@ -210,7 +231,8 @@ pub fn fill_ssr_seed<'a>(
 /// lands on one of them, and three cases break that. **None is this function's to settle**; they
 /// are recorded here so the likelihood step meets them as a decision rather than as a surprise:
 ///
-/// - **Two candidates of one length each take that class's full share.** Read as a claim about
+/// - **Two candidates of one length each take that class's full share** (at an edge, that
+///   length's part of the edge). Read as a claim about
 ///   *lengths* it double-counts
 ///   (`tests::two_spellings_of_one_length_carry_that_lengths_share_twice`).
 /// - **A read at a length that is not a candidate has no entry.** The candidate set is
@@ -246,7 +268,7 @@ pub fn fill_ssr_seed<'a>(
 pub fn fill_seed_share_per_candidate(
     candidate_repeat_counts: &[u32],
     reference_repeat_count: u32,
-    spectrum: LengthSpectrum<'_>,
+    spectrum: AlleleLengthVariation<'_>,
     out: &mut [f64],
 ) {
     let total = fill_candidate_weights(
@@ -276,7 +298,7 @@ pub fn fill_seed_share_per_candidate(
 fn fill_candidate_weights(
     candidate_repeat_counts: &[u32],
     reference_repeat_count: u32,
-    spectrum: LengthSpectrum<'_>,
+    spectrum: AlleleLengthVariation<'_>,
     out: &mut [f64],
 ) -> f64 {
     assert_lengths(candidate_repeat_counts, out);
@@ -291,18 +313,37 @@ fn fill_candidate_weights(
                     .allele_span()
                     .expect("a fitted spectrum has a span"),
             );
+            let offset_of = |repeat_count: u32| {
+                (i64::from(repeat_count) - i64::from(reference_repeat_count)).clamp(-span, span)
+            };
+            // How many candidate lengths share each edge class: every distinct length at or past
+            // it. Lengths, not candidates, because two candidates of one length each take their
+            // class's full weight everywhere else (see `fill_ssr_seed`). Quadratic in the
+            // candidates, which number a handful.
+            let lengths_at_edge = |edge: i64| {
+                candidate_repeat_counts
+                    .iter()
+                    .enumerate()
+                    .filter(|&(index, &count)| {
+                        offset_of(count) == edge
+                            && !candidate_repeat_counts[..index].contains(&count)
+                    })
+                    .count()
+            };
+            let at_short_edge = lengths_at_edge(-span);
+            let at_long_edge = lengths_at_edge(span);
             for (slot, &repeat_count) in out.iter_mut().zip(candidate_repeat_counts) {
-                let offset = i64::from(repeat_count) - i64::from(reference_repeat_count);
-                // **Outside the fit's reach takes the floor, not the end class's weight.** The
-                // end class holds the mass the fit put at exactly `±span` repeats; handing it to
-                // a candidate twelve repeats away would assert that a twelve-repeat departure is
-                // as common as a six-repeat one, which the fit never said and its own span is
-                // the statement that it declined to say
-                // (`tests::a_candidate_past_the_fits_reach_takes_the_floor_and_not_the_end_class`).
-                let weight = if offset.abs() <= span {
-                    weights[(offset + span) as usize]
+                let offset = offset_of(repeat_count);
+                let class_weight = weights[(offset + span) as usize];
+                // **An edge class is shared, not copied**: it holds every allele that far or
+                // further, so its weight is divided among the candidate lengths there
+                // (`tests::candidates_at_or_past_an_edge_share_its_weight_equally`).
+                let weight = if offset == -span {
+                    class_weight / at_short_edge as f64
+                } else if offset == span {
+                    class_weight / at_long_edge as f64
                 } else {
-                    0.0
+                    class_weight
                 };
                 *slot = weight.max(SHAPE_FLOOR);
             }
@@ -312,15 +353,15 @@ fn fill_candidate_weights(
 }
 
 /// **What an STR bundle's genotype prior is read from**: for each of its reference runs, the
-/// run's own reference count and the length spectrum of its stratum — period and reference count
+/// run's own reference count and the allele length variation of its stratum — period and reference count
 /// — looked up once per locus (`str_bundle_loci.md` §7.4).
 #[derive(Debug, Clone)]
 pub struct BundlePrior<'a> {
     /// Each reference run's whole copies in the reference hull, in hull order — what that run's
     /// offsets are measured from.
     pub reference_run_counts: Vec<u32>,
-    /// Each reference run's stratum's length spectrum, parallel to `reference_run_counts`.
-    pub run_spectra: Vec<LengthSpectrum<'a>>,
+    /// Each reference run's stratum's allele length variation, parallel to `reference_run_counts`.
+    pub run_spectra: Vec<AlleleLengthVariation<'a>>,
     /// The concentration the tract ladder's bottom rung states — what a bundle with no run is
     /// held with, flat over its candidates.
     pub stated_concentration: f64,
@@ -330,12 +371,12 @@ impl BundlePrior<'_> {
     /// **The weakest rung any run's spectrum came from** — what the bundle's record says its prior
     /// rested on; the stated flat rung for a bundle with no run.
     #[must_use]
-    pub fn rung(&self) -> LengthSpectrumRung {
+    pub fn rung(&self) -> AlleleLengthVariationRung {
         self.run_spectra
             .iter()
-            .map(LengthSpectrum::rung)
+            .map(AlleleLengthVariation::rung)
             .max()
-            .unwrap_or(LengthSpectrumRung::StatedFlat)
+            .unwrap_or(AlleleLengthVariationRung::StatedFlat)
     }
 
     /// **The conviction a bundle's seed is held with: its most variable run's** — the smallest of
@@ -343,14 +384,14 @@ impl BundlePrior<'_> {
     fn concentration(&self) -> f64 {
         self.run_spectra
             .iter()
-            .map(LengthSpectrum::concentration)
+            .map(AlleleLengthVariation::concentration)
             .reduce(f64::min)
             .unwrap_or(self.stated_concentration)
     }
 }
 
 /// Fill `out` with an STR bundle's seed (`str_bundle_loci.md` §7.4): **each candidate's shape is
-/// the product of its runs' shapes**, each run's read off its own stratum's length spectrum at the
+/// the product of its runs' shapes**, each run's read off its own stratum's allele length variation at the
 /// candidate's offset from that run's reference count, exactly as [`fill_ssr_seed`] reads a
 /// segment's; the seed is that shape times the bundle's concentration.
 ///
@@ -362,6 +403,10 @@ impl BundlePrior<'_> {
 ///         w_j = 1/K                                                where no run has one
 /// seed:   α_j = concentration · w_j,  floored at MIN_ALT_CONCENTRATION
 /// ```
+///
+/// **A run's offset at or past its fit's edge reads the edge class, shared** among the distinct
+/// counts that run takes there across the candidates — [`fill_ssr_seed`]'s edge rule applied run
+/// by run, which is what keeps a one-run bundle equal to its segment.
 ///
 /// **Two choices the specification leaves open, made here.**
 ///
@@ -420,7 +465,7 @@ fn fill_bundle_candidate_weights(
     assert_eq!(
         prior.run_spectra.len(),
         runs,
-        "a bundle's prior holds one length spectrum per reference run"
+        "a bundle's prior holds one allele length variation per reference run"
     );
     assert!(
         !out.is_empty(),
@@ -442,11 +487,12 @@ fn fill_bundle_candidate_weights(
     for (candidate, slot) in out.iter_mut().enumerate() {
         let counts = &candidate_run_counts[candidate * runs..(candidate + 1) * runs];
         let mut weight = 1.0;
-        for ((spectrum, &reference), &count) in prior
+        for (run, ((spectrum, &reference), &count)) in prior
             .run_spectra
             .iter()
             .zip(&prior.reference_run_counts)
             .zip(counts)
+            .enumerate()
         {
             let Some(weights) = spectrum.fitted_weights() else {
                 continue;
@@ -456,17 +502,44 @@ fn fill_bundle_candidate_weights(
                     .allele_span()
                     .expect("a fitted spectrum has a span"),
             );
-            let offset = i64::from(count) - i64::from(reference);
-            let run_weight = if offset.abs() <= span {
-                weights[(offset + span) as usize]
+            let offset_of =
+                |count: u32| (i64::from(count) - i64::from(reference)).clamp(-span, span);
+            let offset = offset_of(count);
+            let class_weight = weights[(offset + span) as usize];
+            // An edge class holds every allele that far or further, so its weight is shared among
+            // the distinct counts this run takes at or past it, as a segment's is
+            // (`fill_candidate_weights`).
+            let run_weight = if offset.abs() == span {
+                class_weight
+                    / run_lengths_at_edge(candidate_run_counts, runs, run, offset_of, offset)
             } else {
-                0.0
+                class_weight
             };
             weight *= run_weight.max(SHAPE_FLOOR);
         }
         *slot = weight.max(SHAPE_FLOOR);
     }
     out.iter().sum()
+}
+
+/// How many distinct counts run `run` takes, across a bundle's candidates, at the edge class
+/// `edge` once offsets are clamped to the fit's window — the bundle's per-run form of a segment's
+/// edge split. Quadratic in the candidates, which number a handful.
+fn run_lengths_at_edge(
+    candidate_run_counts: &[u32],
+    runs: usize,
+    run: usize,
+    offset_of: impl Fn(u32) -> i64,
+    edge: i64,
+) -> f64 {
+    let run_count = |candidate: usize| candidate_run_counts[candidate * runs + run];
+    let candidates = candidate_run_counts.len() / runs;
+    (0..candidates)
+        .filter(|&candidate| {
+            let count = run_count(candidate);
+            offset_of(count) == edge && !(0..candidate).any(|earlier| run_count(earlier) == count)
+        })
+        .count() as f64
 }
 
 /// The one shape check both fillers make, in release.
@@ -510,14 +583,14 @@ mod tests {
         vec![11, 12, 9, 13]
     }
 
-    fn own_fit(weights: &[f64], concentration: f64) -> LengthSpectrum<'_> {
-        LengthSpectrum::fitted(weights, concentration, FittedFrom::ThisStratum)
+    fn own_fit(weights: &[f64], concentration: f64) -> AlleleLengthVariation<'_> {
+        AlleleLengthVariation::fitted(weights, concentration, FittedFrom::ThisStratum)
     }
 
     fn seed(
         candidate_repeat_counts: &[u32],
         reference: u32,
-        spectrum: LengthSpectrum<'_>,
+        spectrum: AlleleLengthVariation<'_>,
         out: &mut [f64],
     ) -> Vec<f64> {
         fill_ssr_seed(candidate_repeat_counts, reference, spectrum, out)
@@ -528,7 +601,7 @@ mod tests {
     fn shares(
         candidate_repeat_counts: &[u32],
         reference: u32,
-        spectrum: LengthSpectrum<'_>,
+        spectrum: AlleleLengthVariation<'_>,
     ) -> Vec<f64> {
         let mut out = vec![0.0; candidate_repeat_counts.len()];
         fill_seed_share_per_candidate(candidate_repeat_counts, reference, spectrum, &mut out);
@@ -598,7 +671,7 @@ mod tests {
         let filled = seed(
             &candidates(),
             REFERENCE_REPEATS,
-            LengthSpectrum::fitted(&weights, 12.0, FittedFrom::ItsPeriodsPooledTracts),
+            AlleleLengthVariation::fitted(&weights, 12.0, FittedFrom::ItsPeriodsPooledTracts),
             &mut out,
         );
 
@@ -704,33 +777,58 @@ mod tests {
         );
     }
 
-    /// **Outside the fit's reach takes the floor, not the end class's weight.** The end class
-    /// holds what the fit put at exactly two repeats out; handing it to a candidate five repeats
-    /// out would claim the fit measured something it declined to measure.
+    /// **An edge class holds every allele that far or further, so the candidate lengths there
+    /// share its weight equally** (`str_allele_window.md` §5.2). On the five-class spectrum the
+    /// +2 class holds 0.05: one candidate five repeats out takes all of it; that candidate and
+    /// one at +2 take half each; a second spelling of a length already there takes that length's
+    /// share and does not split the edge further; and the −2 edge, with its own one candidate,
+    /// is untouched.
     #[test]
-    fn a_candidate_past_the_fits_reach_takes_the_floor_and_not_the_end_class() {
+    fn candidates_at_or_past_an_edge_share_its_weight_equally() {
         let weights = leaning_long();
+        let past = REFERENCE_REPEATS + 5;
+        let edge = REFERENCE_REPEATS + 2;
+        let short = REFERENCE_REPEATS - 3;
+
         let mut out = vec![0.0; 2];
-        let filled = seed(
-            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 5],
+        let alone = seed(
+            &[REFERENCE_REPEATS, past],
             REFERENCE_REPEATS,
             own_fit(&weights, 12.0),
             &mut out,
         );
-
-        assert!(close(filled[0], 6.0));
+        assert!(close(alone[0], 6.0));
         assert!(
-            close(filled[1], 12.0 * SHAPE_FLOOR),
-            "the candidate five repeats out starts with {} chromosomes; the floor puts it at \
-             {}, and the end class at +2 repeats would put it at {}",
-            filled[1],
-            12.0 * SHAPE_FLOOR,
-            12.0 * 0.05
+            close(alone[1], 12.0 * 0.05),
+            "five repeats out is past the +2 edge and the only candidate there, so it takes the \
+             edge's whole weight, and it gave {}",
+            alone[1]
         );
+
+        let mut out = vec![0.0; 5];
+        let shared = seed(
+            &[REFERENCE_REPEATS, past, edge, past, short],
+            REFERENCE_REPEATS,
+            own_fit(&weights, 12.0),
+            &mut out,
+        );
+        for (index, expected) in [
+            (0, 12.0 * 0.50),
+            (1, 12.0 * 0.025),
+            (2, 12.0 * 0.025),
+            (3, 12.0 * 0.025),
+            (4, 12.0 * 0.04),
+        ] {
+            assert!(
+                close(shared[index], expected),
+                "candidate {index}: {} against {expected}",
+                shared[index]
+            );
+        }
     }
 
-    /// **The span is read off the spectrum's own class count**, so the same candidate is outside
-    /// the reach of a three-class fit and inside a five-class one.
+    /// **The span is read off the spectrum's own class count**, so the same candidate sits in
+    /// the edge class of a three-class fit and in an ordinary class of a five-class one.
     #[test]
     fn how_far_the_spectrum_reaches_is_read_off_its_own_class_count() {
         let narrow = vec![0.2, 0.5, 0.3];
@@ -753,8 +851,9 @@ mod tests {
         );
 
         assert!(
-            close(at_span_one[0], 12.0 * SHAPE_FLOOR),
-            "two repeats out is past a three-class spectrum's reach, and it gave {}",
+            close(at_span_one[0], 12.0 * 0.3),
+            "two repeats out is past a three-class spectrum's +1 edge, which it takes whole, and it \
+             gave {}",
             at_span_one[0]
         );
         assert!(
@@ -797,11 +896,11 @@ mod tests {
     /// [`Concentration::new`] refuses in debug — so this is the check, and without it the
     /// builder panics rather than returning a small number.
     #[test]
-    fn a_far_candidate_at_a_weak_concentration_still_clears_the_concentration_floor() {
-        let weights = leaning_long();
+    fn an_empty_class_at_a_weak_concentration_still_clears_the_concentration_floor() {
+        let weights = vec![0.04, 0.0, 0.66, 0.25, 0.05];
         let mut out = vec![0.0; 2];
         let filled = seed(
-            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 5],
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS - 1],
             REFERENCE_REPEATS,
             own_fit(&weights, 1e-3),
             &mut out,
@@ -833,7 +932,7 @@ mod tests {
             let filled = seed(
                 &counts,
                 REFERENCE_REPEATS,
-                LengthSpectrum::stated_flat(2.5),
+                AlleleLengthVariation::stated_flat(2.5),
                 &mut out,
             );
 
@@ -922,8 +1021,8 @@ mod tests {
         let weights = leaning_long();
         for spectrum in [
             own_fit(&weights, 12.0),
-            LengthSpectrum::fitted(&weights, 3.0, FittedFrom::ItsPeriodsPooledTracts),
-            LengthSpectrum::stated_flat(2.5),
+            AlleleLengthVariation::fitted(&weights, 3.0, FittedFrom::ItsPeriodsPooledTracts),
+            AlleleLengthVariation::stated_flat(2.5),
         ] {
             let mut out = vec![0.0; 4];
             let filled = seed(&candidates(), REFERENCE_REPEATS, spectrum, &mut out);
@@ -972,8 +1071,8 @@ mod tests {
     /// what this test records.
     ///
     /// Measured on the four candidates above, with `9` passed as the reference instead of `11`:
-    /// the tract's own reference length falls from **0.595 of the prior's mass to 0.091**, a
-    /// factor of 6.5, while the candidate at 9 rises from **0.048 to 0.909**, a factor of 19.
+    /// the tract's own reference length falls from **0.595 of the prior's mass to 0.030**, a
+    /// factor of 20, while the candidate at 9 rises from **0.048 to 0.909**, a factor of 19.
     #[test]
     fn the_reference_repeat_count_is_the_tracts_and_nothing_here_can_check_it() {
         let weights = leaning_long();
@@ -981,7 +1080,7 @@ mod tests {
         let wrong = shares(&candidates(), 9, own_fit(&weights, 12.0));
 
         assert!(
-            (right[0] - 0.5952).abs() < 5e-4 && (wrong[0] - 0.0909).abs() < 5e-4,
+            (right[0] - 0.5952).abs() < 5e-4 && (wrong[0] - 0.0303).abs() < 5e-4,
             "the tract's own length holds {} of the mass and {} when a candidate's count is \
              passed instead",
             right[0],
@@ -1067,7 +1166,7 @@ mod tests {
             &mut out,
         );
         assert_eq!(bundle_seed(&candidates(), &prior), as_segment);
-        assert_eq!(prior.rung(), LengthSpectrumRung::StratumsOwnFit);
+        assert_eq!(prior.rung(), AlleleLengthVariationRung::StratumsOwnFit);
     }
 
     /// **Two runs: each candidate's shape is the product of its runs' shapes**, each read at its
@@ -1098,7 +1197,7 @@ mod tests {
         let long = leaning_long();
         let mixed = BundlePrior {
             reference_run_counts: vec![11, 5],
-            run_spectra: vec![own_fit(&long, 7.5), LengthSpectrum::stated_flat(4.0)],
+            run_spectra: vec![own_fit(&long, 7.5), AlleleLengthVariation::stated_flat(4.0)],
             stated_concentration: STATED_FLAT_CONCENTRATION,
         };
         let seeded = bundle_seed(&[11, 5, 12, 9], &mixed);
@@ -1106,7 +1205,7 @@ mod tests {
             close(seeded[0], 4.0 * 0.50) && close(seeded[1], 4.0 * 0.25),
             "{seeded:?}"
         );
-        assert_eq!(mixed.rung(), LengthSpectrumRung::StatedFlat);
+        assert_eq!(mixed.rung(), AlleleLengthVariationRung::StatedFlat);
 
         let no_run = BundlePrior {
             reference_run_counts: Vec::new(),
@@ -1116,10 +1215,42 @@ mod tests {
         let mut out = vec![f64::NAN; 4];
         let flat = fill_ssr_bundle_seed(&[], &no_run, &mut out).get().to_vec();
         assert!(flat.iter().all(|share| close(*share, 0.5)), "{flat:?}");
-        assert_eq!(no_run.rung(), LengthSpectrumRung::StatedFlat);
+        assert_eq!(no_run.rung(), AlleleLengthVariationRung::StatedFlat);
 
         let mut shares = vec![f64::NAN; 4];
         fill_bundle_seed_share_per_candidate(&[], &no_run, &mut shares);
         assert!(shares.iter().all(|share| close(*share, 0.25)));
+    }
+
+    /// **A run whose class kept its own shares at the stated concentration ranks between a run on
+    /// its own fit and a run on its period's pool** (`str_fit_to_calling.md` §3.2), so a bundle
+    /// reports it as its weakest rung beside the first and not beside the second.
+    #[test]
+    fn a_bundle_ranks_the_own_shares_at_the_stated_spread_between_own_fit_and_pool() {
+        let (long, narrow) = (leaning_long(), narrow());
+        let own_shares_stated_spread =
+            AlleleLengthVariation::fitted(&narrow, 2.0, FittedFrom::ThisStratumsSharesStatedSpread);
+        let beside_own_fit = BundlePrior {
+            reference_run_counts: vec![11, 5],
+            run_spectra: vec![own_fit(&long, 7.5), own_shares_stated_spread],
+            stated_concentration: 2.0,
+        };
+        assert_eq!(
+            beside_own_fit.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+
+        let beside_pool = BundlePrior {
+            reference_run_counts: vec![11, 5],
+            run_spectra: vec![
+                AlleleLengthVariation::fitted(&long, 7.5, FittedFrom::ItsPeriodsPooledTracts),
+                own_shares_stated_spread,
+            ],
+            stated_concentration: 2.0,
+        };
+        assert_eq!(
+            beside_pool.rung(),
+            AlleleLengthVariationRung::PeriodsPooledTracts
+        );
     }
 }

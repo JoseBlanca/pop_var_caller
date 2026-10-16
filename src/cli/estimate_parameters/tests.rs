@@ -59,7 +59,15 @@ fn a_cohort_walked_asking_for(min_copies: MinCopies) -> (AVaryingCohort, PathBuf
 /// *every base of the reference* are the same set of positions and no test can tell a command
 /// that takes one from a command that takes the other.
 fn a_cohort_walked(min_copies: MinCopies, regions: Option<&str>) -> (AVaryingCohort, PathBuf) {
-    let cohort = a_varying_cohort_on_disk();
+    walked_into_psps(a_varying_cohort_on_disk(), min_copies, regions)
+}
+
+/// Any fixture cohort walked into psps, one a sample, in a `psps` directory beside it.
+fn walked_into_psps(
+    cohort: AVaryingCohort,
+    min_copies: MinCopies,
+    regions: Option<&str>,
+) -> (AVaryingCohort, PathBuf) {
     let psps = cohort.directory.path().join("psps");
     let regions = regions.map(|bed| {
         let path = cohort.directory.path().join("walked.bed");
@@ -95,7 +103,7 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         force: false,
         ploidy: 2,
         inbreeding: None,
-        str_param_estimates_at_once: std::num::NonZeroUsize::MIN,
+        str_param_estimates_at_once: None,
         skip_contamination: false,
     }
 }
@@ -115,37 +123,56 @@ fn the_subcommand_is_spelled_estimate_parameters() {
     );
 }
 
-/// **One stratum at a time unless the run says otherwise**, and the run says it as a count of at
-/// least one.
+/// **`--str-param-estimates-at-once` is refused, saying it was removed and why**, whatever value
+/// it is given, and before anything is read.
 ///
-/// The default is the smallest memory whatever the cohort, so a run told nothing cannot run out
-/// of memory in this step for want of a flag; zero strata at once is not a schedule and is refused
-/// when the command line is read.
+/// It chose how many per-stratum likelihood tables the earlier repeat-tract fit held at once; the
+/// penalised fit holds one class's table at a time, whatever the thread count. A script that still passes it must learn that, rather than be told
+/// the option does not exist or have it silently ignored. It is hidden from `--help`.
 #[test]
-fn strata_are_fitted_one_at_a_time_unless_the_run_asks_for_more() {
-    assert_eq!(
-        args_of(&a_shortest_run()).str_param_estimates_at_once.get(),
-        1
-    );
+fn the_removed_strata_at_once_option_is_refused_saying_why() {
+    for value in ["1", "4", "0"] {
+        let mut asked = a_shortest_run();
+        asked.extend(["--str-param-estimates-at-once", value]);
+        let args = args_of(&asked);
+        assert_eq!(args.str_param_estimates_at_once.as_deref(), Some(value));
 
-    let mut asked = a_shortest_run();
-    asked.extend(["--str-param-estimates-at-once", "4"]);
-    assert_eq!(args_of(&asked).str_param_estimates_at_once.get(), 4);
+        // **Before anything is read**: none of `ref.fa`, `zeta.psp` exists, so any other step
+        // would fail with another error.
+        let error = fit_and_assemble(&args).expect_err("the removed option is refused");
+        assert!(
+            matches!(error, EstimateParametersCliError::RemovedOption { .. }),
+            "{error:?}"
+        );
+        let said = error.to_string();
+        assert!(
+            said.starts_with("--str-param-estimates-at-once was removed: "),
+            "it names the option and says it was removed: {said}"
+        );
+        assert!(
+            said.contains("holds one class's table of read counts at a time"),
+            "and says why: {said}"
+        );
+        assert!(
+            said.ends_with("run again without it"),
+            "and what to do: {said}"
+        );
+    }
 
-    assert_eq!(
-        repeat_tract_config(&args_of(&asked)).strata_at_once.get(),
-        4,
-        "the count the run asked for reaches the repeat-tract fit"
-    );
-    assert_eq!(
-        repeat_tract_config(&args_of(&a_shortest_run())).strata_at_once,
-        crate::parameter_estimation::joint::ssr_fit::DEFAULT_STRATA_AT_ONCE
-    );
-
+    assert_eq!(args_of(&a_shortest_run()).str_param_estimates_at_once, None);
+    let help = Cli::try_parse_from(["pvc", SUBCOMMAND, "--help"])
+        .expect_err("--help exits")
+        .to_string();
     assert!(
-        !args_of(&a_shortest_run()).skip_contamination,
-        "contamination is estimated unless the run says not to"
+        !help.contains("str-param-estimates-at-once"),
+        "the removed option is not offered: {help}"
     );
+}
+
+/// **Contamination is estimated unless the run says not to**, and the choice reaches the fit.
+#[test]
+fn contamination_is_estimated_unless_the_run_says_not_to() {
+    assert!(!args_of(&a_shortest_run()).skip_contamination);
     let mut skipping = a_shortest_run();
     skipping.push("--skip-contamination");
     assert!(args_of(&skipping).skip_contamination);
@@ -154,13 +181,63 @@ fn strata_are_fitted_one_at_a_time_unless_the_run_asks_for_more() {
     let diploid = Ploidy::try_new(2).expect("two is a ploidy");
     assert!(ordinary_position_config(&args_of(&a_shortest_run()), diploid).estimate_contamination);
     assert!(!ordinary_position_config(&args_of(&skipping), diploid).estimate_contamination);
+}
 
-    let mut zero = a_shortest_run();
-    zero.extend(["--str-param-estimates-at-once", "0"]);
-    assert!(
-        Cli::try_parse_from(zero).is_err(),
-        "zero strata at once is refused, not read as one"
+/// **The repeat-tract fit this command runs is the penalised fit, at production's settings**, and
+/// the file it writes says so: every stratum fitted here carries its numbers as points on its
+/// motif length's penalised curves, each inside the range of strata with reads and read off every
+/// sample, and the file passes the validator a calling run applies.
+#[test]
+fn the_files_repeat_tract_rows_are_points_on_penalised_curves() {
+    use crate::calling::parameters_file::{CurveReach, LevelSmoothing, ShareSmoothing};
+
+    assert_eq!(
+        repeat_tract_config(),
+        crate::parameter_estimation::joint::ssr_fit::penalised_fit::PenalisedFitConfig::production(
+        )
     );
+
+    let (cohort, psps) = a_walked_cohort();
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let (file, _) = fit_and_assemble(&args_over(&cohort, &psps, output)).expect("the cohort fits");
+    file.validate().expect("a calling run reads the file");
+
+    let rows = &file.repeat_tracts.slippage_by_stratum_and_group;
+    assert!(
+        !rows.is_empty(),
+        "the fixture's tract is fitted, so this test reads a row"
+    );
+    for row in rows {
+        let at = (row.period, row.reference_repeats);
+        assert!(
+            matches!(
+                row.share_of_reads_that_slip_origin.smoothing,
+                LevelSmoothing::PenalisedCurve {
+                    reach: CurveReach::InsideTheFittedRange,
+                    ..
+                }
+            ),
+            "{at:?}: {:?}",
+            row.share_of_reads_that_slip_origin.smoothing
+        );
+        let shares = row
+            .shorter_share_and_fall_off_origin
+            .as_ref()
+            .unwrap_or_else(|| panic!("{at:?}: a fitted stratum carries its shares' origin"));
+        for smoothing in [&shares.shorter_share_smoothing, &shares.fall_off_smoothing] {
+            assert!(
+                matches!(
+                    smoothing,
+                    ShareSmoothing::PenalisedCurve {
+                        reach: CurveReach::InsideTheFittedRange,
+                        ..
+                    }
+                ),
+                "{at:?}: {smoothing:?}"
+            );
+        }
+        assert_eq!(row.samples_fitted_on, None, "{at:?}: every sample is read");
+    }
 }
 
 /// **The command writes a parameters file from a cohort's own censuses.**
@@ -205,6 +282,128 @@ fn one_cohort_fitted_twice_writes_the_same_file() {
         first.to_toml(),
         again.to_toml(),
         "one cohort's parameters are one file",
+    );
+}
+
+/// **One cohort fitted from two orderings of its psps writes the same bytes, listing its samples
+/// in name order** (spec `str_penalised_fit.md` §3 and §4.3; arch §2.4a).
+///
+/// The fit numbers samples and read groups in the order the cohort is held, and sums over them in
+/// that numbering; floating-point addition is not associative, so a cohort held in the order its
+/// psps were typed fits to a file that depends on how they were typed. On tomato2 the same four
+/// psps in two orders gave two files whose inbreeding coefficients differed in the fourth figure.
+///
+/// **Three samples, so the two orders are a real permutation**: `two, s03, one` and `one, two,
+/// s03` share no position, and neither is the name order `one, s03, two`. Before the fix the
+/// files differ at least in their sample lists, so this fails without it.
+#[test]
+fn one_cohort_fitted_from_two_orderings_of_its_psps_writes_the_same_file() {
+    use crate::cli::generate_psps::psp_path_for;
+    use crate::cli::test_fixtures::a_larger_varying_cohort_with_sequencing_errors_on_disk;
+
+    let (cohort, psps) = walked_into_psps(
+        a_larger_varying_cohort_with_sequencing_errors_on_disk(1),
+        MinCopies::default(),
+        None,
+    );
+    let named = |order: &[&str]| -> EstimateParametersArgs {
+        let mut args = args_over(&cohort, &psps, cohort.directory.path().join("out.toml"));
+        args.psps = order
+            .iter()
+            .map(|sample| psp_path_for(&psps, sample))
+            .collect();
+        args
+    };
+
+    let (typed_one_way, _) =
+        fit_and_assemble(&named(&["two", "s03", "one"])).expect("the cohort fits");
+    let (typed_another, _) =
+        fit_and_assemble(&named(&["one", "two", "s03"])).expect("and fits typed another way");
+
+    assert_eq!(
+        typed_one_way.to_toml(),
+        typed_another.to_toml(),
+        "one cohort's parameters are one file, however its psps were typed",
+    );
+    assert_eq!(
+        typed_one_way.fitted_from.samples,
+        vec!["one", "s03", "two"],
+        "the samples are listed in name order",
+    );
+    // **The read-group table follows the samples**: its rows are numbered in the same order the
+    // sample list is in, so a sort that moved the names and not the rows would show here.
+    let rows: Vec<(u32, &str, &str)> = typed_one_way
+        .fitted_from
+        .read_groups
+        .iter()
+        .map(|row| {
+            (
+                row.read_group,
+                row.sample.as_str(),
+                row.declared_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (0, "one", "rg-one-a"),
+            (1, "one", "rg-one-b"),
+            (2, "s03", "rg-s03"),
+            (3, "two", "rg-two"),
+        ],
+    );
+}
+
+/// **A sample whose header lists its read groups out of ID order is fitted as if it listed them in
+/// order**: the read-group rows run `rg-one-a` then `rg-one-b`, and the file's bytes are those of
+/// the same cohort declared in order (spec `str_penalised_fit.md` §3; arch §2.4a).
+///
+/// The walk numbers a sample's read groups in its header's order, so the fixture here gives
+/// `rg-one-b` the first number. Only the sort by declared ID, applied to each census before the
+/// cohort is assembled, puts `rg-one-a` back at row 0; without it this test fails at the rows.
+#[test]
+fn read_groups_declared_out_of_id_order_fit_to_the_same_file() {
+    use crate::cli::test_fixtures::{
+        a_varying_cohort_declaring_read_groups_out_of_order_on_disk,
+        a_varying_cohort_with_sequencing_errors_on_disk,
+    };
+
+    let fitted_from = |cohort: AVaryingCohort| {
+        let (cohort, psps) = walked_into_psps(cohort, MinCopies::default(), None);
+        let output = cohort.directory.path().join("out.toml");
+        fit_and_assemble(&args_over(&cohort, &psps, output))
+            .expect("the cohort fits")
+            .0
+    };
+    let out_of_order = fitted_from(a_varying_cohort_declaring_read_groups_out_of_order_on_disk());
+    let in_order = fitted_from(a_varying_cohort_with_sequencing_errors_on_disk());
+
+    let rows: Vec<(u32, &str, &str)> = out_of_order
+        .fitted_from
+        .read_groups
+        .iter()
+        .map(|row| {
+            (
+                row.read_group,
+                row.sample.as_str(),
+                row.declared_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (0, "one", "rg-one-a"),
+            (1, "one", "rg-one-b"),
+            (2, "two", "rg-two"),
+        ],
+        "a sample's read groups are numbered in the order of their declared IDs",
+    );
+    assert_eq!(
+        out_of_order.to_toml(),
+        in_order.to_toml(),
+        "one sample's header listing its read groups in two orders gives one file",
     );
 }
 

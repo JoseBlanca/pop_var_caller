@@ -137,7 +137,49 @@ mod tests {
     /// hull runs to the furthest end of any repeat: restoring the earlier wording in the written
     /// file gives `4e643855f0dac8ee128f43a7a1a92095` exactly. Recorded in the Linux container (arm64, glibc) only; it was
     /// `860c3c65f27a1700e401d102833215e1`.
-    const FITTED_PARAMETERS_MD5: &str = "a5b4997bc35e77425525e25e821cf40c";
+    ///
+    /// **Re-recorded 2026-10-16** (`str_penalised_fit.md` plan step D4) after four changes, each
+    /// measured on four tomato accessions first (`scripts/promote_ng_oracle.sh`;
+    /// `doc/devel/reports/implementations/str_penalised_fit_D4_2026-10-16.md`):
+    /// - "length spectrum" renamed "allele length variation" (`aa42d629`): two keys and four note
+    ///   paragraphs. The allele window at ±9 (`38b1fe56`), merged at the same time, moved nothing
+    ///   here: the climb fitted no row for this fixture's one tract.
+    /// - file format 3 (plan steps B2, B4): `format_version = 3`, the fallback stated as the
+    ///   between-locus share F (0.5, `defaulted`) in place of a concentration, and notes.
+    /// - the repeat-tract fit is the penalised fit (C7), with a weak prior on stutter (C8): where the
+    ///   climb wrote no repeat-tract row, the file now holds one slippage row and one allele-length
+    ///   row for the two-base stratum at 10 repeats, with F 0.254, and the fallback F becomes that
+    ///   F, `fitted_here`. Its slip rate is 0.0042: 5.8 × 10⁻⁷ at C7, before the prior's one read's
+    ///   worth of default stutter.
+    /// - note text (C8, C9, `7265efd0`).
+    ///
+    /// No number outside the repeat-tract rows moved; C10's ordering moved nothing, as the cohort's
+    /// two samples were already in name order. Recorded on macOS (arm64) only; it was
+    /// `a5b4997bc35e77425525e25e821cf40c`.
+    ///
+    /// **Re-recorded 2026-10-16 again** (plan step D8, where a thin class's errors start): two note
+    /// paragraphs now state the lines of loci below which an error is withheld. No number or key
+    /// moved: the contig holds one repeat tract ([`crate::cli::test_fixtures::TRACT`]), so the
+    /// file's one repeat-tract row is a class of 1 locus with reads. That is below both lines of
+    /// loci — 8 before D8, and 3 for the shorter share and fall-off after it — so every error of
+    /// the row is withheld for too few loci, before its slipped reads are looked at, and the row
+    /// carries no error before or after. Putting the two paragraphs' earlier wording back into the
+    /// new file gives `b673dc9611c7126b5c35e9d7629493b3` exactly. The same holds for the next two
+    /// fitted checksums, whose cohorts use the same contig. **So none of the three fitted
+    /// checksums pins a repeat-tract error**, not even the two "with standard errors" pairs: their
+    /// repeat-tract half pins values only. A cohort with at least 3 tracts of one class (8 for the
+    /// slip rate) would be needed to put one in the file. Recorded on macOS (arm64) only.
+    ///
+    /// **Re-recorded 2026-10-16 a third time** (checkpoint E review, its nit on the notes): the
+    /// repeat-tract section's notes explain a subset of samples (`samples_fitted_on`), numbers taken
+    /// from a parametric curve or blended with one, and `curve_fitted_on` only when a row of the file
+    /// holds one, which only a file written by the climb can. This file's one repeat-tract row is a
+    /// point on a penalised curve, so its section note shrinks from 93 lines to 69. Note text
+    /// alone: putting the old note block back into the new file gives the previous checksum
+    /// exactly, for this and the next two fitted checksums
+    /// (`tmp/review_E/fixes/digests/swap_notes.py`). Recorded on macOS (arm64) only; it was
+    /// `168e7f326230e988286ef16b4c4fc5cd`.
+    const FITTED_PARAMETERS_MD5: &str = "66d72ee84c4a49d4b6271d3e5b68437c";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -199,11 +241,17 @@ mod tests {
     /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
     /// was `bc75ec4d5a3c67dcaa776f56746b2bdd`. Recorded in the Linux container (arm64, glibc) only.
     ///
+    /// **Re-recorded 2026-10-16** with the fit above (plan step D4), which now holds a row for the
+    /// repeat tract at chrV:201: that record's QUAL 36.7 to 90.1 (98.1 at C7, before the stutter
+    /// prior), AF 0.249902 to 0.250006, the heterozygote's GQ 34 to 75 and the other sample's 45 to
+    /// 47. No genotype moved; the two SNPs did not move. Recorded on macOS (arm64) only; it was
+    /// `b1a1a907e4e7adf22fb62c56f3305258`.
+    ///
     /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
     /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
-    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `b1a1a907e4e7adf22fb62c56f3305258`.
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `dae7e77c280d7f240349cc8433207a81`, the value `main` recorded for the fit above.
     /// Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "a3851d08516834b43b3f9a09863d90dc";
+    const CALLS_MD5: &str = "eb43b6968066b5d22525aaaeaed2f736";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -226,7 +274,14 @@ mod tests {
     ///
     /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
     /// Recorded in the Linux container (arm64, glibc) only; it was `8c71a5a95f1196e3dd8c05abdccf7355`, then `9265d0273c5400d8a2b2554b3f7ecf0a`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "4859eacd5645e607b6f99b667d184dc0";
+    ///
+    /// **Re-recorded 2026-10-16** for the four reasons [`FITTED_PARAMETERS_MD5`] gives, with the
+    /// same repeat-tract rows to the last digit. Recorded on macOS (arm64) only; it was
+    /// `4859eacd5645e607b6f99b667d184dc0`. **Again the same day** for the note text of plan step
+    /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says; it was `3a016fb7a40bc91eb5bb9ae2adc6e286`.
+    /// **A third time** for the conditional notes alone, as [`FITTED_PARAMETERS_MD5`] says; it was
+    /// `a48841ff7b0d8ca924b758dc7a33fcbf`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "0586cd65f3dcbd192f0f8cf19e223ca9";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -267,11 +322,16 @@ mod tests {
     /// and `e9e8aee5b6714aa33ce91bd04290984e` on main. Recorded in the Linux container (arm64,
     /// glibc) only.
     ///
+    /// **Re-recorded 2026-10-16** with the fit above (plan step D4): only the repeat tract at
+    /// chrV:201 moves, QUAL 37.4 to 90.4, AF 0.249924 to 0.250010, the heterozygote's GQ 34 to 74
+    /// and the other sample's 42 to 44; no genotype. Recorded on macOS (arm64) only; it was
+    /// `f65f586f58163d23d127d7f8c823e433`.
+    ///
     /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
     /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
-    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `f65f586f58163d23d127d7f8c823e433`.
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `d315b4e4d0de2f21fd34cd673bbdfa8b`, the value `main` recorded for the fit above.
     /// Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "c51e03c6244f0eaa83a702e140230903";
+    const WITH_ERRORS_CALLS_MD5: &str = "3a2e830acc6991ee3b2285a80abbb89e";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -284,7 +344,15 @@ mod tests {
     ///
     /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
     /// Recorded in the Linux container (arm64, glibc) only; it was `5e3dacbf558adc6787276897935dbbf8`, then `0cda09cc72a2a7bd9c46a4fe85388eff`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "0573095bb8f1ed6608ed74d62051ade1";
+    ///
+    /// **Re-recorded 2026-10-16** for the four reasons [`FITTED_PARAMETERS_MD5`] gives. Here the
+    /// tract's row has F 0.897 and a slip rate of 0.00032 (5.4 × 10⁻⁸ at C7, before the stutter
+    /// prior), and the fallback F is that F. Recorded on macOS (arm64) only; it was
+    /// `0573095bb8f1ed6608ed74d62051ade1`. **Again the same day** for the note text of plan step
+    /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says (the tract is again a class of 1 locus); it was
+    /// `5abcd04153d5acc32463fcd751970024`. **A third time** for the conditional notes alone, as
+    /// [`FITTED_PARAMETERS_MD5`] says; it was `33eab2535f49967c6459db376a745d01`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "e0902dab0b2d64082d42a40b134f6721";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -317,11 +385,16 @@ mod tests {
     /// was `08a675fd6ba4bc8a627fa2bd2118b415` on str-bundles and `efa3947cb4eacd394de0425ce87c40ed`
     /// on main. Recorded in the Linux container (arm64, glibc) only.
     ///
+    /// **Re-recorded 2026-10-16** with the fit above (plan step D4): only the repeat tract at
+    /// chrV:201 moves, QUAL 37.3 to 78.6, AF 0.023718 to 0.023811, the heterozygote's GQ 24 to 65
+    /// and every other sample's GQ up by 2 or 3; no genotype. Recorded on macOS (arm64) only; it
+    /// was `5c2414e47ecc6748f12db076d7513de1`.
+    ///
     /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
     /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
-    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `5c2414e47ecc6748f12db076d7513de1`.
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `b23487bd69f9d39f1943fbe9350a7a3f`, the value `main` recorded for the fit above.
     /// Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "b57178a3280be672f1c4ead1f258df55";
+    const OF_21_SAMPLES_CALLS_MD5: &str = "45a981f5c11fde06848374dcdfe574a3";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -383,7 +456,7 @@ mod tests {
             force: false,
             ploidy: 2,
             inbreeding: None,
-            str_param_estimates_at_once: std::num::NonZeroUsize::MIN,
+            str_param_estimates_at_once: None,
             skip_contamination: false,
         })
         .expect("the cohort fits");

@@ -2284,7 +2284,7 @@ mod tests {
     }
 
     /// A seed distribution over `lengths` with most of its mass on one of them — the shape a
-    /// stratum's fitted length spectrum produces where most of its chromosomes carry one length
+    /// stratum's fitted allele length variation produces where most of its chromosomes carry one length
     /// (`doc/devel/ng/spec/population_diversity.md` §4.2, which replaced the geometric decay
     /// away from the cohort's modal length this fixture was written against).
     fn a_seed_peaked_at(lengths: &[u32], peak: u32) -> Vec<f64> {

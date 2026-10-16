@@ -254,10 +254,11 @@ alloc-mimalloc = ["dep:mimalloc"]
 # slot.
 default = ["alloc-mimalloc"]
 # Compile the joint fit's drawn-evidence generators — `ssr_fit::bench_fixtures`
-# (a stratum drawn at a known slippage) and `fit::bench_fixtures` (a cohort drawn
-# at a known error rate, heterozygosity and inbreeding) — outside `cfg(test)`, so
-# `benches/ng_joint_fit_perf.rs` can time the real `fit_stratum` / `fit_strata` /
-# `fit_jointly` on evidence that needs no CRAM and no reference genome.
+# (a stratum drawn at a known slippage, and the repeat-tract fitting bench) and
+# `fit::bench_fixtures` (a cohort drawn at a known error rate, heterozygosity and
+# inbreeding) — outside `cfg(test)`, so `benches/ng_joint_fit_perf.rs` can time the
+# real `fit_jointly`, and `examples/ng_str_fit_bench.rs` the repeat-tract fit, on
+# evidence that needs no CRAM and no reference genome.
 #
 # **The generators are the ones the module's own positive controls draw from**, not
 # copies: a benchmark drawn differently from the oracle would be timing a workload
@@ -280,6 +281,8 @@ merge-timing = []
 
 [dev-dependencies]
 bstr = "1"
+# rustix's `time`: the process CPU clock `str_fit_cost_probe` reads, without `unsafe`.
+rustix = { version = "1", features = ["process", "time"] }
 criterion = "0.8.2"
 proptest = "1"
 
@@ -354,23 +357,26 @@ test = true
 name = "ng_str_stutter_benchmark"
 test = true
 
-# The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
-# only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
-# `cargo test` — which builds every example — fails to compile the crate at all.
+# Whether the counting fit's standard errors are honest: draws repeat classes from a known
+# truth and counts how often it lies within one and two reported errors, for the bootstrap,
+# the sandwich and the naive curvature (`ssr_fit::counting_fit_errors`).
 #
-# The `ng_joint_fit_perf` bench above deliberately avoids `required-features` so that
-# `cargo bench --no-run` still catches it going stale. That trade is not available
-# here: this example *names* the gated module in a `use`, so there is no version of it
-# that compiles without the feature and refuses at startup instead.
+# It draws from `ssr_fit::bench_fixtures`, which exists only under `cfg(test)` or the
+# `bench-fixtures` feature; without this entry a plain `cargo test` — which builds every
+# example — fails to compile the crate at all. The `ng_joint_fit_perf` bench above
+# deliberately avoids `required-features` so that `cargo bench --no-run` still catches it
+# going stale. That trade is not available here: this example *names* the gated module in a
+# `use`, so there is no version of it that compiles without the feature and refuses at
+# startup instead. The same holds for every example below that draws from the module.
 [[example]]
-name = "ng_ssr_thin_stratum_gate"
+name = "ng_str_counting_fit_errors"
 required-features = ["bench-fixtures"]
 
-# Where the repeat-tract fit's threads are better spent — over one repeat-length class's
-# tracts, or over the classes at once. Draws its classes from `ssr_fit::bench_fixtures`,
-# so it needs the same feature as the gate above.
+# The repeat-tract fitting bench: draws a cohort from a known model and scores every fitting
+# method on it (`doc/devel/ng/research/str_fit_research_plan.md` §2, §3.1). Draws from
+# `ssr_fit::bench_fixtures`, so it needs the same feature.
 [[example]]
-name = "ng_ssr_strata_threads"
+name = "ng_str_fit_bench"
 required-features = ["bench-fixtures"]
 
 # The site quality's cost across the cohort sizes the caller commits to —
@@ -387,3 +393,19 @@ harness = false
 # `doc/devel/ng/research/cram_read_path_2026-09-04.md`.
 [patch.crates-io]
 noodles-cram = { path = "vendor/noodles-cram" }
+
+# Penalised counting against the counting fit on one drawn motif length
+# (`doc/devel/ng/research/str_fit/`). Draws its classes from `ssr_fit::bench_fixtures`.
+[[example]]
+name = "str_fit_penalised_em"
+required-features = ["bench-fixtures"]
+
+# Where penalised counting's time goes against the counting fit's, on one bench cell.
+[[example]]
+name = "str_fit_penalised_cost"
+required-features = ["bench-fixtures"]
+
+# Where the repeat-tract fits' time goes, a class at a time, on real or drawn evidence.
+[[example]]
+name = "str_fit_cost_probe"
+required-features = ["bench-fixtures"]

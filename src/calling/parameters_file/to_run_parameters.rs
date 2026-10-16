@@ -55,9 +55,10 @@ use std::collections::BTreeMap;
 
 use super::validate::refuse;
 use super::{
-    ContaminationFittedFrom, ContaminationMeasurement, CurveReach, EvidenceCount, LevelSmoothing,
-    ParametersFile, ParametersFileError, SeedRung, ShareCurve, ShareCurveRung, ShareShape,
-    ShareSmoothing, SlippageCurve, Warrant,
+    BetweenLocusShare, ContaminationFittedFrom, ContaminationMeasurement, CurveReach,
+    EvidenceCount, LevelSmoothing, ParametersFile, ParametersFileError, SeedRung, ShareCurve,
+    ShareCurveRung, ShareShape, ShareSmoothing, SlippageCurve, Warrant, concentration_error_of,
+    concentration_of,
 };
 use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
 use crate::calling::likelihood::ssr::RepeatTractOutlierWeight;
@@ -70,13 +71,14 @@ use crate::parameter_estimation::joint::share_curve::{
     ShareCurve as FittedShareCurve, ShareCurveSource, ShareShape as FittedShape, ShareSource,
 };
 use crate::parameter_estimation::joint::slippage_curve::{
-    CurveReach as FittedCurveReach, LevelSource, RiseShape, SlippageCurve as FittedSlippageCurve,
+    CurveReach as FittedCurveReach, LevelSource, PenalisedPoint, RiseShape,
+    SlippageCurve as FittedSlippageCurve,
 };
 use crate::parameter_estimation::joint::ssr_fit::{
     LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
 };
 use crate::parameter_estimation::joint::stratum_fits::{
-    FittedLengthSpectrum, FittedSlippage, OwnFitStandardErrors, StratumFits,
+    FittedAlleleLengthVariation, FittedSlippage, OwnFitStandardErrors, StratumFits,
 };
 use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStratum, StratumKey};
 use crate::parameter_estimation::{Estimate, Provenance};
@@ -436,8 +438,8 @@ impl ParametersFile {
                 });
         }
 
-        let length_spectrum_by_stratum = tracts
-            .length_spectrum_by_stratum
+        let allele_length_variation_by_stratum = tracts
+            .allele_length_variation_by_stratum
             .iter()
             .map(|row| {
                 (
@@ -445,22 +447,31 @@ impl ParametersFile {
                         period: row.period,
                         reference_repeats: row.reference_repeats,
                     },
-                    FittedLengthSpectrum {
-                        weights: row.shares_by_repeat_offset.clone(),
-                        concentration: row.concentration,
+                    // **Converted at the file's edge**: calling holds a concentration, the file F
+                    // (`between_locus_share.rs`). An absent F is an absent concentration, and
+                    // `validate` has refused an error with no F beside it.
+                    FittedAlleleLengthVariation {
+                        weights: row.share_of_chromosomes_by_repeat_offset.clone(),
+                        concentration: row.between_locus_share.map(concentration_of),
+                        concentration_standard_error: row.between_locus_share.and_then(|share| {
+                            row.between_locus_share_standard_error
+                                .map(|error| concentration_error_of(share, error))
+                        }),
                     },
                 )
             })
             .collect();
-        let length_spectrum_by_period = tracts
-            .length_spectrum_by_period
+        let allele_length_variation_by_period = tracts
+            .allele_length_variation_by_period
             .iter()
             .map(|row| {
                 (
                     row.period,
-                    FittedLengthSpectrum {
-                        weights: row.shares_by_repeat_offset.clone(),
-                        concentration: row.concentration,
+                    // `validate` has refused a pool with no F.
+                    FittedAlleleLengthVariation {
+                        weights: row.share_of_chromosomes_by_repeat_offset.clone(),
+                        concentration: row.between_locus_share.map(concentration_of),
+                        concentration_standard_error: None,
                     },
                 )
             })
@@ -469,14 +480,18 @@ impl ParametersFile {
         Ok(StratumFits::of_gathered_rows(
             slippage_group_of,
             slippage_by_stratum,
-            length_spectrum_by_stratum,
-            length_spectrum_by_period,
-            tracts.fallback_length_spectrum_concentration.value,
+            allele_length_variation_by_stratum,
+            allele_length_variation_by_period,
+            // `validate` has checked the fallback is an F, so it has a concentration.
+            concentration_of(
+                BetweenLocusShare::new(tracts.fallback_between_locus_share.value)
+                    .expect("validation refuses a fallback that is not a between-locus share"),
+            ),
             // **The file's own warrant, carried rather than worked out from the strata beside
             // it.** A file demoted to `supplied` (spec §2.1) says nothing about whether *this*
             // run fitted anything, and re-deriving would turn every demoted file back into a
             // fitted one on the way out.
-            tracts.fallback_length_spectrum_concentration.warrant.into(),
+            tracts.fallback_between_locus_share.warrant.into(),
         ))
     }
 
@@ -629,6 +644,20 @@ fn a_level_provenance(
             Some(a_slippage_curve(&at, curve)?),
             Some((*reach).into()),
         ),
+        // **No curve**: a penalised point is not on a parametric curve, and the reach is all
+        // the file records of the range it was fitted over.
+        LevelSmoothing::PenalisedCurve {
+            strength,
+            eased_here,
+            reach,
+        } => (
+            LevelSource::PenalisedCurve(PenalisedPoint {
+                strength: *strength,
+                eased_here: *eased_here,
+            }),
+            None,
+            Some((*reach).into()),
+        ),
     };
     Ok(LevelProvenance {
         source,
@@ -658,6 +687,18 @@ fn a_share_provenance(smoothing: &ShareSmoothing) -> ShareProvenance {
                 curve_weight: *curve_weight,
             },
             Some(a_share_curve(curve)),
+            Some((*reach).into()),
+        ),
+        ShareSmoothing::PenalisedCurve {
+            strength,
+            eased_here,
+            reach,
+        } => (
+            ShareSource::PenalisedCurve(PenalisedPoint {
+                strength: *strength,
+                eased_here: *eased_here,
+            }),
+            None,
             Some((*reach).into()),
         ),
     };
@@ -794,12 +835,12 @@ pub(super) mod tests {
     use crate::repeat_catalog::StrRepeatCriteria;
 
     use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
+    use super::super::validate::the_built_in_fallback_share;
     use super::super::{
         ParametersFile, ParametersFileError, ReadsBehindEachCalibration, Warrant, WarrantedValue,
     };
     use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
     use crate::parameter_estimation::Provenance;
-    use crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
     use crate::read::input::read_groups::ReadGroups;
     use crate::types::ReadGroupId;
 
@@ -848,7 +889,7 @@ pub(super) mod tests {
     /// This is the round trip the whole design rests on (spec §1.2 goal 1), on the fixture that
     /// uses every shape: three read groups over two samples, one library measured for
     /// contamination and one not, a defaulted calibration beside two that were not, four strata
-    /// with three different slippage origins between them, a stratum's own length spectrum and a
+    /// with three different slippage origins between them, a stratum's own allele length variation and a
     /// period's pooled one, and a substitution rate keyed by all three of its axes.
     ///
     /// **It compares the two `ParametersFile`s rather than the two `RunParameters`.** The file
@@ -877,8 +918,8 @@ pub(super) mod tests {
 
     /// **⚑ The bottom rung's warrant survives the trip too, and until 2026-08-30 it could not.**
     ///
-    /// `repeat_tracts.fallback_length_spectrum_concentration` is the tract ladder's bottom rung:
-    /// one concentration for the whole run, the median of what its strata fitted. **The
+    /// `repeat_tracts.fallback_between_locus_share` is the tract ladder's bottom rung:
+    /// one between-locus share for the whole run, the median of its strata's shares. **The
     /// projection in read only the number and the writer worked the warrant out again** from
     /// whether any stratum was fitted — which is true of a run that took the median itself and
     /// equally true of a run handed one, so a file marked `supplied` came back out saying
@@ -892,11 +933,12 @@ pub(super) mod tests {
     fn the_bottom_rungs_warrant_is_the_files_and_not_worked_out_from_its_strata() {
         for warrant in [Warrant::Supplied, Warrant::Borrowed, Warrant::FittedHere] {
             let mut file = a_file_using_every_shape();
-            file.repeat_tracts
-                .fallback_length_spectrum_concentration
-                .warrant = warrant;
+            file.repeat_tracts.fallback_between_locus_share.warrant = warrant;
             assert!(
-                !file.repeat_tracts.length_spectrum_by_stratum.is_empty(),
+                !file
+                    .repeat_tracts
+                    .allele_length_variation_by_stratum
+                    .is_empty(),
                 "the fixture keeps its fitted strata, which is what a re-derivation would read"
             );
 
@@ -922,11 +964,7 @@ pub(super) mod tests {
             )
             .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
             assert_eq!(
-                written
-                    .repeat_tracts
-                    .fallback_length_spectrum_concentration
-                    .warrant,
-                warrant,
+                written.repeat_tracts.fallback_between_locus_share.warrant, warrant,
                 "and writes back the one it read"
             );
         }
@@ -1015,10 +1053,11 @@ pub(super) mod tests {
         // it does not — never a zero slip rate (spec §5's fifth row).
         let fits = run.ssr_slippage_fits();
         assert_eq!(fits.slippage_group_of(ReadGroupId(2)), Some(1));
+        // The file's fallback is the F written for 3.5, which converts back to exactly 3.5.
         assert_eq!(fits.stated_concentration(), 3.5);
-        assert_eq!(fits.strata_with_a_length_spectrum(), 1);
-        assert_eq!(fits.periods_with_a_pooled_length_spectrum(), 1);
-        assert_eq!(fits.strata(), 3);
+        assert_eq!(fits.strata_with_a_allele_length_variation(), 1);
+        assert_eq!(fits.periods_with_a_pooled_allele_length_variation(), 1);
+        assert_eq!(fits.strata(), 4);
         assert_eq!(run.ssr_substitution_rate().count(), 1);
     }
 
@@ -1078,14 +1117,20 @@ pub(super) mod tests {
         small.inbreeding.by_sample.truncate(1);
         small.repeat_tracts.slippage_group_by_read_group.clear();
         small.repeat_tracts.slippage_by_stratum_and_group.clear();
-        small.repeat_tracts.length_spectrum_by_stratum.clear();
-        small.repeat_tracts.length_spectrum_by_period.clear();
+        small
+            .repeat_tracts
+            .allele_length_variation_by_stratum
+            .clear();
+        small
+            .repeat_tracts
+            .allele_length_variation_by_period
+            .clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
         // **A run that fitted no stratum states the compiled-in flat concentration**, which is
         // what `defaulted` says: the fixture's `fitted_here` at 3.5 is a claim about a median
         // over strata this file no longer has.
-        small.repeat_tracts.fallback_length_spectrum_concentration = WarrantedValue {
-            value: STATED_FLAT_CONCENTRATION,
+        small.repeat_tracts.fallback_between_locus_share = WarrantedValue {
+            value: the_built_in_fallback_share(),
             warrant: Warrant::Defaulted,
             observations: None,
             standard_error: None,
@@ -1328,17 +1373,20 @@ mod the_north_star_round_trip {
     //! every accessor the run exposes is compared before against after.
     //!
     //! **What the second of those adds is the lookup**, which a file comparison cannot reach at
-    //! all: `StratumFits::at`'s four answers for a cell with no numbers, the three rungs of
-    //! `length_spectrum_at`, and the bottom rung's median. None of that is written down anywhere
-    //! in the file — the file carries the rows the lookup is built from, and the lookup is what
-    //! a locus asks.
+    //! all: `StratumFits::at`'s four answers for a cell with no numbers, the four rungs of
+    //! `allele_length_variation_at` a format-3 file can carry, and the bottom rung's median.
+    //! None of that is written down anywhere in the file — the file carries the rows the lookup
+    //! is built from, and the lookup is what a locus asks.
     //!
     //! **Two things the trip does not cover, and neither is this step's.** The identity block —
     //! the digest, the census, the sample list and the read-group table — is fed back into the
     //! second write rather than round-tripped, because `to_run_parameters` deliberately carries
     //! none of spec §6's four bindings; they are step D2's. And **the tract ladder's fallback
-    //! concentration carries a warrant the writer re-derives**, so a projection that lost it
-    //! would be invisible here; `validate` refuses the contradiction instead.
+    //! carries a warrant this fixture cannot test**: the warrant travels through the projection
+    //! (since 2026-08-30), but here it is `fitted_here` beside fitted strata, which is also what
+    //! re-deriving it would give, so a projection that lost it would be invisible.
+    //! `the_bottom_rungs_warrant_is_the_files_and_not_worked_out_from_its_strata` holds it
+    //! instead.
 
     use std::collections::BTreeMap;
 
@@ -1351,6 +1399,7 @@ mod the_north_star_round_trip {
     use super::super::{ParametersFile, ReadsBehindEachCalibration};
     // **The one helper both modules need**, rather than a second copy of it: the counts `of_run`
     // writes back are read out of the projection the same way whichever fixture they came from.
+    use super::super::validate::the_built_in_fallback_share;
     use super::tests::the_counts_the_projection_out_reads;
     use super::*;
     use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
@@ -1367,11 +1416,11 @@ mod the_north_star_round_trip {
         LevelSource, RiseShape, SlippageCurve as FittedSlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
-        StratumFit, StratumOutcome, StratumRefusal,
+        LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
+        StratumRefusal,
     };
     use crate::parameter_estimation::joint::stratum_fits::{
-        LengthSpectrumRung, NoSlippage, STATED_FLAT_CONCENTRATION,
+        AlleleLengthVariationRung, NoSlippage, StratumRowsOfAFile,
     };
     use crate::read::input::read_groups::ReadGroups;
     use crate::types::{Ploidy, SsrPeriod};
@@ -1552,9 +1601,10 @@ mod the_north_star_round_trip {
 
     /// **Which periods the run fitted curves for.** A period with no curve is a real state — it
     /// is what `LevelSource::Cell` and `ShareSource::Stratum` mean, in their own words — and it
-    /// is also what decides which outcomes a period's strata can have: `derive_thin_strata`
-    /// produces a derived stratum **only** where its period has a curve, so a period without one
-    /// holds fitted strata and refusals and nothing else.
+    /// is also what decides which outcomes a period's strata can have: the climb (deleted
+    /// 2026-10-16), whose files these fixtures stand for, derived a stratum **only** where its
+    /// period had a curve, so a period without one holds fitted strata and refusals and nothing
+    /// else.
     fn the_period_has_curves(period: u8) -> bool {
         period != PERIODS[0]
     }
@@ -1596,13 +1646,14 @@ mod the_north_star_round_trip {
     /// - **the other two have both curves**, so a stratum with its own evidence blends
     ///   (`LevelSource::Blend`, the fit's ordinary case) and one without is derived whole from
     ///   them (`LevelSource::Curve`, both shares `ShareSource::Curve` and no slipped-read count,
-    ///   which is exactly what `derive_thin_strata` writes).
+    ///   which is exactly what the climb wrote for a thin stratum, and what its files still hold).
+    ///   No fit produces that last shape now, so it is returned apart, as the rows of a file.
     ///
-    /// **A refused stratum is `NoSpanningReads` everywhere**, because the other refusal —
-    /// `BelowTheFloor` — is what `derive_thin_strata` converts into a derived stratum wherever a
-    /// curve exists, so it cannot survive in a period that has one.
-    fn the_runs_outcomes() -> Vec<StratumOutcome> {
+    /// **A refused stratum is `NoSpanningReads`**, the only refusal there is: the climb's other
+    /// one, below its floor of tracts, went with the climb on 2026-10-16.
+    fn the_runs_outcomes() -> (Vec<StratumOutcome>, Vec<StratumRowsOfAFile>) {
         let mut outcomes = Vec::new();
+        let mut derived = Vec::new();
         for (which_period, period) in PERIODS.iter().enumerate() {
             // **One curve a period**, which is what the fit produces and what the file's own
             // section comment says.
@@ -1665,7 +1716,7 @@ mod the_north_star_round_trip {
                     .collect();
                 // **A share's origin, and the curve it names where it names one.** A source of
                 // `Stratum` means the period had no curve at all, so it carries neither the curve
-                // nor a reach — which is what `blend_share` writes in that arm.
+                // nor a reach — which is what the climb's blend wrote in that arm.
                 let a_share = |source: ShareSource| match source {
                     ShareSource::Stratum => ShareProvenance {
                         source,
@@ -1704,7 +1755,7 @@ mod the_north_star_round_trip {
                                     }),
                                     fall_off: a_share(ShareSource::Curve),
                                 },
-                                // What `derive_thin_strata` writes, and it writes nothing else.
+                                // What the climb wrote for a derived stratum, and nothing else.
                                 (Some(_), false) => SharesProvenance {
                                     slipped_reads: None,
                                     shorter_share: a_share(ShareSource::Curve),
@@ -1716,8 +1767,6 @@ mod the_north_star_round_trip {
                     .collect();
 
                 if refused {
-                    // **`NoSpanningReads`, not `BelowTheFloor`**: the second is what a period's
-                    // curves turn into a derived stratum, so it cannot survive beside them.
                     outcomes.push(StratumOutcome::Refused {
                         stratum,
                         tracts: 0,
@@ -1735,19 +1784,18 @@ mod the_north_star_round_trip {
                     for weight in &mut weights {
                         *weight /= total;
                     }
+                    // **No concentration where the period has no curves and the stratum is the
+                    // second of each three**, as a fit reports where nothing places one: its
+                    // shares are its own and calling holds them at the stated concentration,
+                    // the rung format 3 added.
+                    let concentration =
+                        (has_curves || which_repeats % 3 == 0).then(|| a_number(3.0, &keys));
                     outcomes.push(StratumOutcome::Fitted(Box::new(StratumFit {
                         standard_errors: None,
                         stratum,
                         slippage,
-                        length_spectrum: weights,
-                        concentration: a_number(3.0, &keys),
-                        log_likelihood_a_tract: -a_number(2.0, &keys),
-                        tracts_fitted: 100 + which_repeats,
-                        // **Empty, which is what a stratum that stood on its own tracts has** —
-                        // this field names the neighbouring repeat counts it borrowed from.
-                        borrowed: Vec::new(),
-                        ending: ClimbEnding::Settled,
-                        walks: Vec::new(),
+                        allele_length_variation: weights,
+                        concentration,
                         samples_fitted_on: None,
                         tracts_of_its_own: 100 + which_repeats,
                         reads_crossing: 5_000 + which_repeats as u64,
@@ -1755,25 +1803,23 @@ mod the_north_star_round_trip {
                         shares_provenance: shares,
                     })));
                 } else {
-                    outcomes.push(StratumOutcome::Derived(Box::new(DerivedStratum {
+                    derived.push(StratumRowsOfAFile {
                         stratum,
                         slippage,
                         level_provenance: level,
                         shares_provenance: shares,
-                        tracts_of_its_own: 3,
-                        reads_crossing: 40,
-                    })));
+                    });
                 }
             }
         }
-        outcomes
+        (outcomes, derived)
     }
 
     /// **The tract ladder's middle rung**, one pooled spectrum a period, for the periods whose
     /// curves the fit drew — the rung a run that skips the second pass over its tracts does not
-    /// have, and the one the file writes in `length_spectrum_by_period`.
-    fn the_runs_period_pools()
-    -> BTreeMap<u8, crate::parameter_estimation::joint::ssr_fit::PeriodLengthSpectrum> {
+    /// have, and the one the file writes in `allele_length_variation_by_period`. Only the climb
+    /// pooled, so these too come in as the rows of an older file.
+    fn the_runs_period_pools() -> BTreeMap<u8, FittedAlleleLengthVariation> {
         PERIODS
             .iter()
             .enumerate()
@@ -1789,13 +1835,10 @@ mod the_north_star_round_trip {
                 }
                 (
                     *period,
-                    crate::parameter_estimation::joint::ssr_fit::PeriodLengthSpectrum {
-                        period: *period,
-                        length_spectrum: weights,
-                        concentration: a_number(2.5, &[which_period]),
-                        tracts_fitted: 400 + which_period,
-                        strata_pooled: REPEAT_COUNTS.count(),
-                        converged: true,
+                    FittedAlleleLengthVariation {
+                        weights,
+                        concentration: Some(a_number(2.5, &[which_period])),
+                        concentration_standard_error: None,
                     },
                 )
             })
@@ -1859,6 +1902,7 @@ mod the_north_star_round_trip {
         let slippage_group_of: BTreeMap<ReadGroupId, u32> = (0..read_group_count())
             .map(|group| (ReadGroupId(group as u32), (group % SLIPPAGE_GROUPS) as u32))
             .collect();
+        let (outcomes, derived) = the_runs_outcomes();
         let parameters = RunParameters::assemble(
             &rates,
             &minted,
@@ -1866,8 +1910,8 @@ mod the_north_star_round_trip {
             DeclaredBatches::all_together(&read_groups),
             inbreeding.iter().map(|estimate| estimate.value).collect(),
             SpectrumSeed::new(1.0, 6e-4, SeedRegime::FittedCurve),
-            StratumFits::over(&the_runs_outcomes(), slippage_group_of)
-                .with_period_length_spectra(the_runs_period_pools()),
+            StratumFits::over(&outcomes, slippage_group_of)
+                .with_rows_of_a_file(derived, the_runs_period_pools()),
             the_runs_substitution_rates(),
             Ploidy::try_new(2).expect("diploid"),
         );
@@ -1990,37 +2034,58 @@ mod the_north_star_round_trip {
                 }
             }
         }
-        // **A length spectrum at every stratum**, which rides on a different table and does not
+        // **An allele length variation at every stratum**, which rides on a different table and does not
         // depend on the read group — so it is walked once rather than once a library.
         let mut rungs: BTreeMap<&str, u32> = BTreeMap::new();
         for period in PERIODS {
             for repeats in REPEAT_COUNTS {
                 let was = before
                     .ssr_slippage_fits()
-                    .length_spectrum_at(period, repeats);
+                    .allele_length_variation_at(period, repeats);
                 let is = after
                     .ssr_slippage_fits()
-                    .length_spectrum_at(period, repeats);
+                    .allele_length_variation_at(period, repeats);
                 assert_eq!(is.rung(), was.rung(), "period {period}, {repeats} repeats");
-                assert_eq!(is.concentration(), was.concentration());
+                // **The concentration comes back within rounding, not bit for bit**: the file
+                // carries it as F, and the run reads back (1 − F) / F. The writer picks an F that
+                // reads back to exactly the fitted concentration where one exists, but not every
+                // concentration has one (`between_locus_share.rs` measures how often:
+                // `str_fit_to_calling.md` §4). 5.881212453816261 has none, and comes back as
+                // 5.88121245381626 at one of these strata. The file itself does come back byte
+                // for byte, which the test above holds.
+                let (is_held, was_held) = (is.concentration(), was.concentration());
+                assert!(
+                    (is_held - was_held).abs() <= 4.0 * f64::EPSILON * (1.0 + was_held),
+                    "period {period}, {repeats} repeats: {was_held} came back as {is_held}"
+                );
                 assert_eq!(is.fitted_weights(), was.fitted_weights());
                 *rungs
                     .entry(match was.rung() {
-                        LengthSpectrumRung::StratumsOwnFit => "its own",
-                        LengthSpectrumRung::PeriodsPooledTracts => "its period's",
-                        LengthSpectrumRung::StatedFlat => "the flat one",
+                        AlleleLengthVariationRung::StratumsOwnFit => "its own",
+                        AlleleLengthVariationRung::StratumsOwnSharesStatedSpread => {
+                            "its own shares at the stated spread"
+                        }
+                        AlleleLengthVariationRung::PeriodsPooledTracts => "its period's",
+                        AlleleLengthVariationRung::StatedFlat => "the flat one",
                     })
                     .or_default() += 1;
             }
         }
-        // **All three rungs of the ladder are walked**, which is what stops this comparing one
-        // rung with itself thirty-six times. Measured rather than reasoned about: the 16 strata
-        // fitted on their own tracts take the top rung; the 16 of the two curved periods that
-        // were not — 8 derived and 8 refused — take their period's pool; and the 4 refused strata
-        // of the period that has no curves, and so no pool, fall to the flat one.
+        // **All four rungs a format-3 file can carry are walked**, which is what stops this
+        // comparing one rung with itself thirty-six times. Measured rather than reasoned about:
+        // of the 16 strata fitted on their own tracts, the 12 with a concentration take the top
+        // rung and the 4 without — all in the period that has no curves — keep their own shares
+        // at the stated concentration; the 16 of the two curved periods that were not fitted —
+        // 8 derived and 8 refused — take their period's pool; and the 4 refused strata of the
+        // period that has no curves, and so no pool, fall to the flat one.
         assert_eq!(
             rungs,
-            BTreeMap::from([("its own", 16), ("its period's", 16), ("the flat one", 4)])
+            BTreeMap::from([
+                ("its own", 12),
+                ("its own shares at the stated spread", 4),
+                ("its period's", 16),
+                ("the flat one", 4)
+            ])
         );
         // **The counts are asserted so that a lookup answering *absent* everywhere cannot pass.**
         // Measured on this fixture rather than reasoned about: 6 read groups × 3 periods × 14
@@ -2031,7 +2096,9 @@ mod the_north_star_round_trip {
         assert_eq!(
             (
                 before.ssr_slippage_fits().strata(),
-                before.ssr_slippage_fits().strata_with_a_length_spectrum(),
+                before
+                    .ssr_slippage_fits()
+                    .strata_with_a_allele_length_variation(),
             ),
             (24, 16),
             "a third of the 36 strata were refused and contribute no row; of the 24 that remain, \
@@ -2123,17 +2190,22 @@ mod the_north_star_round_trip {
             small.inbreeding.by_sample.truncate(1);
             small.repeat_tracts.slippage_group_by_read_group.clear();
             small.repeat_tracts.slippage_by_stratum_and_group.clear();
-            small.repeat_tracts.length_spectrum_by_stratum.clear();
-            small.repeat_tracts.length_spectrum_by_period.clear();
+            small
+                .repeat_tracts
+                .allele_length_variation_by_stratum
+                .clear();
+            small
+                .repeat_tracts
+                .allele_length_variation_by_period
+                .clear();
             small.repeat_tracts.substitution_rate_by_stratum.clear();
             // A run that fitted no stratum states the flat constant, marked `defaulted`.
-            small.repeat_tracts.fallback_length_spectrum_concentration =
-                super::super::WarrantedValue {
-                    value: STATED_FLAT_CONCENTRATION,
-                    warrant: super::super::Warrant::Defaulted,
-                    observations: None,
-                    standard_error: None,
-                };
+            small.repeat_tracts.fallback_between_locus_share = super::super::WarrantedValue {
+                value: the_built_in_fallback_share(),
+                warrant: super::super::Warrant::Defaulted,
+                observations: None,
+                standard_error: None,
+            };
             small
         };
         let read_groups = ReadGroups::of_lanes(&[(
@@ -2177,7 +2249,7 @@ mod the_five_states_survive_the_round_trip {
     //! point
     //!
     //! **Two of the five change a number a locus is scored against**, and those are the expensive
-    //! ones: a stratum's length spectrum is the prior every tract of it is seeded from, and a
+    //! ones: a stratum's allele length variation is the prior every tract of it is seeded from, and a
     //! `(stratum × slippage group)` with no row sends the caller to a shipped stutter model where
     //! a zero slip rate would tell it no read of that stratum can ever report a neighbouring
     //! length.
@@ -2204,7 +2276,7 @@ mod the_five_states_survive_the_round_trip {
     use super::super::tests::a_file_using_every_shape;
     use super::super::{
         ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, ParametersFile,
-        StratumLengthSpectrumRow, Warrant,
+        StratumAlleleLengthVariationRow, Warrant,
     };
     use super::*;
     // **The one helper both test modules need**, rather than a second copy of it.
@@ -2213,7 +2285,7 @@ mod the_five_states_survive_the_round_trip {
     use crate::calling::likelihood::stutter_rates::stutter_model_for;
     use crate::calling::run_report::ContaminationUsed;
     use crate::parameter_estimation::joint::ssr_fit::Slippage;
-    use crate::parameter_estimation::joint::stratum_fits::{LengthSpectrumRung, NoSlippage};
+    use crate::parameter_estimation::joint::stratum_fits::{AlleleLengthVariationRung, NoSlippage};
 
     fn a_run_from(file: &ParametersFile) -> RunParameters {
         file.to_run_parameters()
@@ -2430,10 +2502,10 @@ mod the_five_states_survive_the_round_trip {
         );
     }
 
-    /// **Row 4. A stratum with no length spectrum of its own was furnished from its period's
+    /// **Row 4. A stratum with no allele length variation of its own was furnished from its period's
     /// curves**, and giving it one changes the prior every tract of it is seeded from.
     ///
-    /// **This row changes a number.** The length spectrum is the shape a repeat tract's genotype
+    /// **This row changes a number.** The allele length variation is the shape a repeat tract's genotype
     /// prior starts from, and the concentration is how many chromosomes' worth of belief it is
     /// held with — so a reader that invented a spectrum for a stratum that has none would seed
     /// every tract of that class from a distribution the fit never produced, at a strength it
@@ -2448,23 +2520,27 @@ mod the_five_states_survive_the_round_trip {
         let run = a_run_from(&file);
         let fell_back = run
             .ssr_slippage_fits()
-            .length_spectrum_at(period, furnished);
-        assert_eq!(fell_back.rung(), LengthSpectrumRung::PeriodsPooledTracts);
+            .allele_length_variation_at(period, furnished);
+        assert_eq!(
+            fell_back.rung(),
+            AlleleLengthVariationRung::PeriodsPooledTracts
+        );
 
         let mut collapsed = a_file_using_every_shape();
-        let its_own = StratumLengthSpectrumRow {
+        let its_own = StratumAlleleLengthVariationRow {
             period,
             reference_repeats: furnished,
-            concentration: 9.5,
-            shares_by_repeat_offset: vec![0.25, 0.5, 0.25],
+            between_locus_share: crate::calling::parameters_file::between_locus_share_of(9.5),
+            between_locus_share_standard_error: None,
+            share_of_chromosomes_by_repeat_offset: vec![0.25, 0.5, 0.25],
         };
         collapsed
             .repeat_tracts
-            .length_spectrum_by_stratum
+            .allele_length_variation_by_stratum
             .push(its_own);
         collapsed
             .repeat_tracts
-            .length_spectrum_by_stratum
+            .allele_length_variation_by_stratum
             .sort_by_key(|row| (row.period, row.reference_repeats));
         // **The fallback concentration is left where it was**, and with two fitted strata beside
         // it the median it claims is no longer theirs. Nothing here reads the bottom rung, and
@@ -2474,9 +2550,9 @@ mod the_five_states_survive_the_round_trip {
         let collapsed_run = a_run_from(&collapsed);
         let invented = collapsed_run
             .ssr_slippage_fits()
-            .length_spectrum_at(period, furnished);
+            .allele_length_variation_at(period, furnished);
 
-        assert_eq!(invented.rung(), LengthSpectrumRung::StratumsOwnFit);
+        assert_eq!(invented.rung(), AlleleLengthVariationRung::StratumsOwnFit);
         assert_ne!(
             invented.concentration(),
             fell_back.concentration(),
@@ -2490,10 +2566,10 @@ mod the_five_states_survive_the_round_trip {
         assert_eq!(
             collapsed_run
                 .ssr_slippage_fits()
-                .length_spectrum_at(period, fitted)
+                .allele_length_variation_at(period, fitted)
                 .concentration(),
             run.ssr_slippage_fits()
-                .length_spectrum_at(period, fitted)
+                .allele_length_variation_at(period, fitted)
                 .concentration()
         );
     }

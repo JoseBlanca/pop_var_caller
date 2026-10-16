@@ -962,7 +962,7 @@ impl RepeatGeneDiversity {
     /// scaled a constructed geometric shape to reproduce this measurement, which was
     /// possible only below a ceiling the shape itself set — at one outbred sample, below
     /// every measurement — and the builder refused above it. The prior is now seeded from
-    /// the length spectrum the joint repeat fit produces per stratum
+    /// the allele length variation the joint repeat fit produces per stratum
     /// (`doc/devel/ng/spec/population_diversity.md` §4.2), which asserts no such scaling,
     /// so nothing reads this value today.
     ///

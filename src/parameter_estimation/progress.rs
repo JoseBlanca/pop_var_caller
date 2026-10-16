@@ -85,9 +85,13 @@ impl StageProgress {
 /// every stage boundary says which stage grew. Reading the file costs microseconds and happens
 /// only when a line is printed.
 fn memory() -> String {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return String::new();
-    };
+    std::fs::read_to_string("/proc/self/status")
+        .map_or_else(|_| String::new(), |status| memory_in_status(&status))
+}
+
+/// [`memory`] as read from the text of `/proc/self/status`: the suffix when both `VmRSS` and
+/// `VmHWM` are there, nothing otherwise.
+fn memory_in_status(status: &str) -> String {
     let field = |name: &str| {
         status
             .lines()
@@ -114,6 +118,12 @@ fn memory() -> String {
 /// as what contamination kept.
 pub(crate) fn note(line: impl std::fmt::Display) {
     eprintln!("estimating: {line}{}", memory());
+}
+
+/// Say one thing as it is, with neither time nor memory — for a detail of a step whose own line
+/// already carries both, such as one repeat class's row counts after its motif length's line.
+pub(crate) fn detail(line: impl std::fmt::Display) {
+    eprintln!("estimating: {line}");
 }
 
 /// A size in bytes as the progress lines print it: whole mebibytes below one gibibyte, where one
@@ -167,6 +177,36 @@ mod tests {
         assert_eq!(duration(Duration::from_secs(42)), "42s");
         assert_eq!(duration(Duration::from_secs(12 * 60 + 5)), "12m05s");
         assert_eq!(duration(Duration::from_secs(3600 + 12 * 60 + 59)), "1h12m");
+    }
+
+    /// **The memory suffix reads `VmRSS` and `VmHWM` from the status text**, in gibibytes, and is
+    /// empty when either is missing.
+    #[test]
+    fn memory_is_read_from_the_status_text() {
+        let status = "Name:\tpvc\nVmPeak:\t 9999999 kB\nVmHWM:\t 9542041 kB\nVmRSS:\t 7864320 kB\n";
+        assert_eq!(
+            memory_in_status(status),
+            "; memory 7.5 GiB, at most 9.1 GiB so far"
+        );
+        assert_eq!(memory_in_status("Name:\tpvc\nVmRSS:\t 7864320 kB\n"), "");
+        assert_eq!(memory_in_status(""), "");
+    }
+
+    /// **Where the system has no `/proc/self/status`, as on macOS, no memory is printed**: not a
+    /// zero, nothing.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn no_memory_is_printed_without_proc() {
+        assert_eq!(memory(), "");
+    }
+
+    /// On Linux every line carries the memory now and the most so far.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_lines_carry_the_memory() {
+        let memory = memory();
+        assert!(memory.starts_with("; memory "), "{memory}");
+        assert!(memory.contains(" GiB so far"), "{memory}");
     }
 
     /// A stage that has only just begun prints no "where it is" line: the minute runs from its

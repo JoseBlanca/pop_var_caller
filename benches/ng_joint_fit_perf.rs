@@ -8,9 +8,11 @@
 //! 2026-08-15 performance review named this the single highest-value missing measurement
 //! (`doc/devel/reports/reviews/perf_ng-census-joint-fit_2026-08-15.md` §3, item 1).
 //!
-//! Every benchmark here calls the **production** function — `fit_stratum`, `fit_strata`,
-//! `fit_jointly` — on evidence drawn in memory. No line of `src/` changed to make that
-//! possible: all three were already `pub` on a `pub mod` path and take plain data.
+//! Every benchmark here calls the **production** function, `fit_jointly`, on evidence drawn in
+//! memory. **Only the ordinary-position half is timed now**: the repeat-tract benchmarks timed
+//! the climb (`fit_stratum`, `fit_strata`), which was deleted on 2026-10-16
+//! (`doc/devel/ng/arch/str_penalised_fit.md` §4.1). The penalised fit that replaced it is timed by
+//! the research bench (`examples/ng_str_fit_bench.rs`, `examples/str_fit_cost_probe.rs`).
 //!
 //! ```text
 //! cargo bench --features bench-fixtures --bench ng_joint_fit_perf
@@ -22,24 +24,22 @@
 //!
 //! # What the fixtures are
 //!
-//! The drawn-evidence generators are the ones the two modules' own positive controls use,
-//! moved out of `#[cfg(test)]` and behind the `bench-fixtures` feature:
-//! `ssr_fit::bench_fixtures::draw_stratum` (a stratum drawn at a known slippage) and
-//! `fit::bench_fixtures::draw_cohort` (a cohort drawn at a known error rate, heterozygosity
-//! and inbreeding). **One generator, two callers** — a benchmark drawn differently from the
-//! oracle would be timing a workload no test has ever checked.
+//! The drawn-evidence generator is the one the module's own positive control uses, moved out of
+//! `#[cfg(test)]` and behind the `bench-fixtures` feature: `fit::bench_fixtures::draw_cohort` (a
+//! cohort drawn at a known error rate, heterozygosity and inbreeding). **One generator, two
+//! callers** — a benchmark drawn differently from the oracle would be timing a workload no test
+//! has ever checked.
 //!
 //! # The two axes, and why both are here
 //!
 //! `CLAUDE.md` §0 commits this caller to degrading gracefully from **one sample to several
-//! thousand** and from **three reads a position to several hundred**. Both halves are
-//! therefore swept over sample count as well as over their own size axis (tracts for the
-//! repeat-tract half, kept positions for the ordinary-position half), because a change that
-//! pays at eight samples and loses at one is a change this project has to be able to see.
+//! thousand** and from **three reads a position to several hundred**. The fit is therefore swept
+//! over sample count as well as over kept positions, because a change that pays at eight samples
+//! and loses at one is a change this project has to be able to see.
 //!
 //! # Threads
 //!
-//! Both halves parallelise over the global rayon pool, so a number taken on an 18-core laptop
+//! The fit parallelises over the global rayon pool, so a number taken on an 18-core laptop
 //! and one taken in the 8-core container are not comparable. Every timed body therefore runs
 //! inside a pool of a **fixed** size — four threads, matching every other measurement in the
 //! review — overridable with `NG_JOINT_FIT_BENCH_THREADS`. Sweeping that variable over
@@ -48,14 +48,8 @@
 //! # Sizes: why these, and why they are small
 //!
 //! One whole run of this file is minutes. That is bought by cutting the *number of times* the
-//! estimators evaluate their objective — one starting point instead of three, one round or
-//! eight passes instead of five rounds or two hundred — while leaving every inner loop at
-//! production's own shape: 256 quadrature points, thirteen allele classes, ninety-one
-//! genotypes, sixteen frequency nodes. The report's own law says the repeat-tract fit is
-//! **linear in tracts fitted** (0.157, 0.134, 0.151 and 0.133 seconds a tract over four runs
-//! spanning 299 to 7,824 tracts), so a 32-tract stratum is a faithful and much cheaper proxy
-//! for a 1,000-tract one — and the two tract sizes exist precisely so that a change can be
-//! checked for having broken that linearity.
+//! estimator evaluates its objective — eight passes instead of two hundred — while leaving every
+//! inner loop at production's own shape, sixteen frequency nodes included.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -67,23 +61,12 @@ use std::hint::black_box;
 use std::time::Duration;
 
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::parameter_estimation::joint::census::Stratum;
-#[cfg(feature = "bench-fixtures")]
 use pop_var_caller::parameter_estimation::joint::fit::bench_fixtures::{
     DrawnCohort, as_cohort, draw_cohort,
 };
 #[cfg(feature = "bench-fixtures")]
 use pop_var_caller::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, StartingPoint as GenericStart, fit_jointly,
-};
-#[cfg(feature = "bench-fixtures")]
-use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::{
-    draw_stratum, spectrum_of,
-};
-#[cfg(feature = "bench-fixtures")]
-use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    Slippage, SsrFitConfig, StartingPoint as SsrStart, StratumEvidence, StratumOutcome, fit_strata,
-    fit_stratum,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,7 +82,7 @@ const DEFAULT_THREADS: usize = 4;
 
 /// A pool of a fixed width, built once per benchmark group.
 ///
-/// **Not the global pool.** `fit_stratum` and `fit_jointly` both parallelise over
+/// **Not the global pool.** `fit_jointly` parallelises over
 /// `rayon::current_num_threads()`, which is the machine's core count unless something says
 /// otherwise — so the same commit measured on the 18-core macOS host and in the container
 /// would produce two numbers that differ for a reason that is not the code.
@@ -114,288 +97,6 @@ fn fixed_pool() -> rayon::ThreadPool {
         .num_threads(threads)
         .build()
         .expect("a rayon pool of the requested width")
-}
-
-// ---------------------------------------------------------------------------
-// The repeat-tract half
-// ---------------------------------------------------------------------------
-
-/// The truth every drawn stratum here carries: tomato's own dinucleotide numbers — a read
-/// slips about eight times in a hundred, and a slipped read shows a shorter tract five times
-/// as often as a longer one.
-#[cfg(feature = "bench-fixtures")]
-const SLIPPAGE: Slippage = Slippage {
-    level: 0.08,
-    shorter_share: 0.83,
-    fall_off: 0.25,
-};
-
-/// How far either side of the reference length the draw spreads allele mass, **and** the read
-/// span it records in.
-///
-/// Six, which is `ALLELE_SPAN` — the production value — so a drawn tract is fitted over
-/// thirteen allele classes and the ninety-one genotypes of a diploid over them. That number is
-/// the trip count of the innermost loop the profile puts 35.2% of busy CPU in, so it is the
-/// one thing here that must not be shrunk to make the bench cheap.
-#[cfg(feature = "bench-fixtures")]
-const SPAN: i32 = 6;
-
-/// Reads a sample puts on a tract. Six is the middle of the range this caller is for: the
-/// tomato cohort sits near three and the GIAB trio near thirty.
-#[cfg(feature = "bench-fixtures")]
-const DEPTH: u32 = 6;
-
-/// How monomorphic a drawn stratum's tracts are, and how far each drawn sample falls short of
-/// the heterozygote proportions. Both are the positive control's values.
-#[cfg(feature = "bench-fixtures")]
-const CONCENTRATION: f64 = 0.5;
-#[cfg(feature = "bench-fixtures")]
-const HOM_EXCESS: f64 = 0.4;
-
-/// The repeat-tract fit as the bench asks for it: **one starting point and one round**.
-///
-/// Production climbs from three starts for up to five rounds, and each round is a few hundred
-/// evaluations of the same objective. Cutting to one and one divides the wall time by roughly
-/// fifteen and changes nothing about the loop being measured — the objective, its quadrature,
-/// its allele classes and its genotypes are all production's.
-///
-/// **The strata are fitted one at a time**, the default since 2026-09-26
-/// (`SsrFitConfig::strata_at_once`); results saved before that date timed every stratum at once
-/// over the whole pool, and do not compare with these.
-#[cfg(feature = "bench-fixtures")]
-fn ssr_config() -> SsrFitConfig {
-    SsrFitConfig {
-        starting_points: vec![SsrStart {
-            slippage_level: 0.10,
-            concentration: 3.0,
-        }],
-        max_rounds: 1,
-        // **Four and not the production fifty**, because these strata are deliberately far
-        // thinner than a real one: at the default every drawn stratum here would come back
-        // `Refused` and the benchmark would time the refusal.
-        refusal_floor: 4,
-        ..SsrFitConfig::default()
-    }
-}
-
-/// One drawn stratum, at a given repeat count so a set of them can borrow from each other.
-#[cfg(feature = "bench-fixtures")]
-fn stratum(tracts: usize, samples: usize, reference_repeats: u64, seed: u64) -> StratumEvidence {
-    let spectrum = spectrum_of((2 * SPAN + 1) as usize);
-    let mut evidence = draw_stratum(
-        SLIPPAGE,
-        &spectrum,
-        CONCENTRATION,
-        HOM_EXCESS,
-        tracts,
-        samples,
-        DEPTH,
-        SPAN,
-        seed,
-    );
-    evidence.stratum = Stratum {
-        period: 2,
-        reference_repeats,
-    };
-    evidence
-}
-
-/// **The guard against timing a fit that fitted nothing.**
-///
-/// A `fit_stratum` that refuses — because no group has reads, or because the draw produced no
-/// tracts — returns `None` in microseconds, and criterion would report that as a very fast
-/// fit. Three things are pinned, each of which can fail on its own: the fit happened, it read
-/// every tract it was given, and it returned a number rather than an infinity.
-#[cfg(feature = "bench-fixtures")]
-fn check_the_stratum_was_fitted(evidence: &StratumEvidence, excess: &[f64], config: &SsrFitConfig) {
-    let fitted = fit_stratum(evidence, excess, config)
-        .expect("a drawn stratum has reads in its one slippage group");
-    assert_eq!(
-        fitted.tracts_fitted,
-        evidence.tracts.len(),
-        "the fit must read every drawn tract, not a prefix of them"
-    );
-    assert!(
-        fitted.log_likelihood_a_tract.is_finite(),
-        "the mean log-likelihood a tract came back as {}, so the timed body is not doing the \
-         arithmetic this bench claims",
-        fitted.log_likelihood_a_tract
-    );
-    assert!(
-        fitted.slippage[0].is_some(),
-        "the one slippage group put reads in this stratum and must be fitted"
-    );
-}
-
-/// **Tract count at a fixed eight samples.** The axis the review's own law is stated on, and
-/// the one a change to the per-tract likelihood loop moves.
-#[cfg(feature = "bench-fixtures")]
-fn stratum_by_tracts(c: &mut Criterion) {
-    const SAMPLES: usize = 8;
-    let pool = fixed_pool();
-    let excess = vec![HOM_EXCESS; SAMPLES];
-    let config = ssr_config();
-
-    let mut group = c.benchmark_group("ng_joint_fit/stratum_by_tracts");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    for &tracts in &[32_usize, 128] {
-        let evidence = stratum(tracts, SAMPLES, 10, 0x5EED_0001);
-        check_the_stratum_was_fitted(&evidence, &excess, &config);
-        group.bench_with_input(BenchmarkId::from_parameter(tracts), &tracts, |b, _| {
-            b.iter(|| {
-                pool.install(|| {
-                    black_box(fit_stratum(
-                        black_box(&evidence),
-                        black_box(&excess),
-                        black_box(&config),
-                    ))
-                })
-            });
-        });
-    }
-    group.finish();
-}
-
-/// **Sample count at a fixed thirty-two tracts** — the first of the two axes `CLAUDE.md` §0
-/// commits to.
-///
-/// One sample is included because it is the case a cohort method is most likely to get wrong,
-/// and because the per-tract cost the review measured (`0.043 + 0.014 × samples` seconds) has
-/// a constant term worth a third of the cost at eight samples: whether that constant is still
-/// there after a change is a question only this axis can answer.
-#[cfg(feature = "bench-fixtures")]
-fn stratum_by_samples(c: &mut Criterion) {
-    const TRACTS: usize = 32;
-    let pool = fixed_pool();
-    let config = ssr_config();
-
-    let mut group = c.benchmark_group("ng_joint_fit/stratum_by_samples");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    for &samples in &[1_usize, 8, 32] {
-        let evidence = stratum(TRACTS, samples, 10, 0x5EED_0002);
-        let excess = vec![HOM_EXCESS; samples];
-        check_the_stratum_was_fitted(&evidence, &excess, &config);
-        group.bench_with_input(BenchmarkId::from_parameter(samples), &samples, |b, _| {
-            b.iter(|| {
-                pool.install(|| {
-                    black_box(fit_stratum(
-                        black_box(&evidence),
-                        black_box(&excess),
-                        black_box(&config),
-                    ))
-                })
-            });
-        });
-    }
-    group.finish();
-}
-
-/// How many strata the borrowing benchmark holds, and how many tracts each holds.
-///
-/// Six thin strata of sixteen tracts. **The product is the same on both sides of the
-/// comparison below** — ninety-six tracts fitted either way — which is what makes the pair
-/// readable.
-#[cfg(feature = "bench-fixtures")]
-const STRATA: usize = 6;
-#[cfg(feature = "bench-fixtures")]
-const TRACTS_A_STRATUM: usize = 16;
-
-/// **Six strata, each fitted on its own tracts.**
-///
-/// **Halved on 2026-08-21, and what went was the other half of a trade that no longer exists.**
-/// This measured two cases against each other: six fits of sixteen tracts, against one fit of
-/// ninety-six after every stratum took in its five neighbours and the dedup collapsed them. That
-/// second case priced pooling — six quadrature rebuilds against one, against six clones of the
-/// pooled evidence — and `fit_strata` stopped pooling in Milestone D of
-/// `doc/devel/ng/impl_plan/str_slippage_level_curve.md`. It has not compiled since. **What
-/// replaced pooling is a curve drawn once a motif period through the strata that measured
-/// themselves, which costs one line fit rather than a second pass over the evidence**: the same
-/// cohort went from 1,036.8 s with pooling to 155.5 s without, and 421.0 s with the curves and
-/// the lower floor of Milestone E.
-#[cfg(feature = "bench-fixtures")]
-fn strata_borrowing(c: &mut Criterion) {
-    const SAMPLES: usize = 8;
-    let pool = fixed_pool();
-    let excess = vec![HOM_EXCESS; SAMPLES];
-
-    // Six neighbouring repeat counts of one motif length, so every stratum can borrow from
-    // every other. Same period throughout: `fit_strata` never pools across motif lengths.
-    let strata: Vec<StratumEvidence> = (0..STRATA)
-        .map(|which| {
-            stratum(
-                TRACTS_A_STRATUM,
-                SAMPLES,
-                8 + which as u64,
-                0x5EED_0100 + which as u64,
-            )
-        })
-        .collect();
-
-    let mut group = c.benchmark_group("ng_joint_fit/strata");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_secs(1));
-    #[allow(
-        clippy::single_element_loop,
-        reason = "one row today; the table is the shape, and a second stratum drops straight in"
-    )]
-    for (name, tracts_each) in [("stands_alone", TRACTS_A_STRATUM)] {
-        let config = ssr_config();
-        check_the_strata_took_the_route_they_were_named_for(&strata, &excess, &config, tracts_each);
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                pool.install(|| {
-                    black_box(fit_strata(
-                        black_box(&strata),
-                        black_box(&excess),
-                        black_box(&config),
-                    ))
-                })
-            });
-        });
-    }
-    group.finish();
-}
-
-/// **The guard that says which route `fit_strata` actually took.**
-///
-/// The floor is the only difference between the two cases, and a floor that stopped working
-/// would leave both timing the same route while both still returned a plausible number.
-/// Nothing else in the bench would notice. So each case asserts the shape it is named for:
-/// how many neighbours each stratum borrowed, and how many tracts its answer was fitted from.
-#[cfg(feature = "bench-fixtures")]
-fn check_the_strata_took_the_route_they_were_named_for(
-    strata: &[StratumEvidence],
-    excess: &[f64],
-    config: &SsrFitConfig,
-    tracts_each: usize,
-) {
-    let outcomes = fit_strata(strata, excess, config);
-    assert_eq!(outcomes.len(), STRATA);
-    for outcome in &outcomes {
-        match outcome {
-            StratumOutcome::Fitted(fit) => {
-                assert!(
-                    fit.borrowed.is_empty(),
-                    "nothing pools tracts any more, so no stratum may report borrowing from {:?}",
-                    fit.borrowed
-                );
-                assert_eq!(
-                    fit.tracts_fitted, tracts_each,
-                    "the answer was fitted from {} tracts, not the {tracts_each} this case names",
-                    fit.tracts_fitted
-                );
-            }
-            StratumOutcome::Refused { reason, .. } => {
-                panic!("a drawn stratum was refused ({reason:?}), so nothing was timed")
-            }
-            StratumOutcome::Derived(_) => panic!(
-                "a drawn stratum was furnished from its period's curves rather than fitted, so \
-                 the fit this benchmark times did not run"
-            ),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -593,9 +294,6 @@ fn every_bench(c: &mut Criterion) {
     }
     #[cfg(feature = "bench-fixtures")]
     {
-        stratum_by_tracts(c);
-        stratum_by_samples(c);
-        strata_borrowing(c);
         generic_by_positions(c);
         generic_by_samples(c);
     }

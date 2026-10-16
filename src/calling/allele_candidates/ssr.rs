@@ -49,7 +49,7 @@ use crate::types::{AlleleId, GenomeRegion, Motif, Ploidy};
 /// **One locus's observed tract sequences, grouped by how many repeats they carry.**
 ///
 /// The key is `bases.len() / motif.period()`, floored — **the same integer the genotype prior
-/// indexes its length spectrum by** (`doc/devel/ng/spec/candidate_alleles_ssr.md` §3), which is
+/// indexes its allele length variation by** (`doc/devel/ng/spec/candidate_alleles_ssr.md` §3), which is
 /// the reason the grouping exists at all and the reason both must compute it one way. Production
 /// keys its own ladder exactly so (`src/ssr/cohort/rung_ladder.rs:291-320`) and ng keeps that.
 ///
@@ -1387,7 +1387,7 @@ fn bases_off_the_motif(bases: &[u8], motif: &Motif) -> usize {
 ///
 /// **The one producer of this integer in ng's calling path, and that is the point.** The ladder
 /// keys its rungs by it, [`SsrLocusSelection::repeat_counts`] hands it to the genotype prior, and
-/// the prior's length spectrum is indexed by it (`doc/devel/ng/spec/candidate_alleles_ssr.md` §3).
+/// the prior's allele length variation is indexed by it (`doc/devel/ng/spec/candidate_alleles_ssr.md` §3).
 /// Two spellings of a floor division is how two modules come to disagree about which rung an
 /// allele is on, and a disagreement there puts a candidate's prior mass on the wrong length with
 /// nothing failing.

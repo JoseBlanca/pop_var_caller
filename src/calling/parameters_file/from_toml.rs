@@ -38,7 +38,7 @@
 //! # What this module does not do, and where its diagnostics stop
 //!
 //! **It does not judge what the file says.** A document that parses and means nothing — an
-//! inbreeding coefficient of 1.7, a length spectrum whose shares do not sum to one, a
+//! inbreeding coefficient of 1.7, an allele length variation whose shares do not sum to one, a
 //! contamination table in which no row was measured — is accepted here and refused by step C2's
 //! `validate`, which runs after this and before the projection back to `RunParameters`.
 //!
@@ -57,6 +57,10 @@
 //! ([`a_value_the_key_cannot_hold_in_the_files_words`]). **The second is a hand-written reader**
 //! for [`EvidenceCount`] alone. Everything else the crate says is left exactly as it is.
 //!
+//! **A file written before format 3 gets one more sentence**, the same for every failure: that
+//! its keys were read under format 3's names, with each renamed key beside its old one
+//! ([`an_old_files_failure_in_its_words`]). It adds to the crate's message; it translates nothing.
+//!
 //! # One naming rule
 //!
 //! **A helper whose name starts with an article returns a value; a helper named for a claim
@@ -64,7 +68,11 @@
 //! `the_failure_is_on_line` is a claim about an error and panics when it is false. The sibling
 //! files each state their own rule and none of them is the crate's (`to_toml.rs` header).
 
-use super::{EvidenceCount, ParametersFile, ParametersFileError};
+use super::validate::refuse;
+use super::{
+    BetweenLocusShare, EvidenceCount, ParametersFile, ParametersFileError,
+    between_locus_share_error_of, between_locus_share_of,
+};
 use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 
@@ -87,7 +95,33 @@ impl ParametersFile {
     /// byte of the document, which is line 1. In a file this writer produced line 1 is a comment,
     /// so that one case names a line a reader cannot act on. See
     /// `a_missing_key_is_reported_at_the_thing_that_should_have_held_it`.
+    ///
+    /// **A file written before format 3 is the exception: its failures name a key, not a line.**
+    /// Such a file is rewritten into format 3 before it is read (`migrate_to_format_3`, below), and the
+    /// rewritten file is a parsed value that no longer remembers where anything was written. So
+    /// [`ParametersFileError::Malformed`] carries no line for it. The key path is named by the
+    /// `toml` crate's own message, the error's source, which ends ``in `<path>` `` when it has no
+    /// line to show. That path is in format 3's spelling, so this module's message adds one fixed
+    /// sentence listing each key format 3 renamed beside its old name, which is the name the file
+    /// holds. A concentration the rewrite cannot turn into a between-locus share is refused as
+    /// [`ParametersFileError::Meaningless`], under the key the old file wrote it at.
     pub fn from_toml(text: &str) -> Result<Self, ParametersFileError> {
+        // **Parsed once to read the version, and the parse is thrown away for a format-3 file**,
+        // which is then read from its own text exactly as before, so its failures keep their
+        // lines. Text that does not parse at all takes the same path, and is refused there with
+        // the line the parser stopped on.
+        if let Ok(mut parsed) = toml::from_str::<toml::Value>(text)
+            && the_version_needs_migrating(&parsed)
+        {
+            migrate_to_format_3(&mut parsed)?;
+            return Self::deserialize(parsed).map_err(|source| ParametersFileError::Malformed {
+                line: None,
+                in_the_files_words: Some(an_old_files_failure_in_its_words(
+                    a_value_the_key_cannot_hold_in_the_files_words(source.message(), None),
+                )),
+                source,
+            });
+        }
         toml::from_str(text).map_err(|source| {
             let line = source
                 .span()
@@ -101,6 +135,302 @@ impl ParametersFile {
                 source,
             }
         })
+    }
+}
+
+/// **The format a migrated file is rewritten into.** Not [`FORMAT_VERSION`](super::FORMAT_VERSION):
+/// the rewrite produces format 3's keys, and a later format would need a step of its own after
+/// this one.
+const FORMAT_THIS_MIGRATION_WRITES: i64 = 3;
+
+/// Whether `file` says it was written in format 1 or 2, whose repeat-tract keys format 3 renamed.
+///
+/// Any other version, and a file with none, is read from its own text, where a version this build
+/// does not read is refused by validation and a missing one by the parser.
+fn the_version_needs_migrating(file: &toml::Value) -> bool {
+    matches!(
+        file.get("format_version").and_then(toml::Value::as_integer),
+        Some(1 | 2)
+    )
+}
+
+/// **Rewrite a format-1 or format-2 file's parsed TOML into format 3**, so that this build reads
+/// a file an earlier build wrote (`doc/devel/ng/spec/str_fit_to_calling.md` §2.2).
+///
+/// Format 3 renamed the repeat-tract keys and reports how widely a class's loci differ as the
+/// between-locus share F = 1 / (1 + concentration) where formats 1 and 2 wrote the concentration
+/// itself. The rewrite, key by key under `[repeat_tracts]`:
+///
+/// | formats 1 and 2 | format 3 |
+/// |---|---|
+/// | `fallback_length_spectrum_concentration` | `fallback_between_locus_share`: its value and any standard error converted to F's scale, its warrant and observations kept |
+/// | `length_spectrum_by_stratum`, `length_spectrum_by_period` | `allele_length_variation_by_stratum`, `allele_length_variation_by_period` |
+/// | a row's `concentration` | the row's `between_locus_share` |
+/// | a row's `shares_by_repeat_offset` | the row's `share_of_chromosomes_by_repeat_offset`, the numbers unchanged |
+///
+/// **Format 2 has two spellings, and both are read.** Main's builds wrote the tables as
+/// `length_spectrum_by_*`; builds of the branch that renamed them wrote
+/// `allele_length_variation_by_*` with the rows still holding `concentration` and
+/// `shares_by_repeat_offset`. Each row is converted whichever name its table has.
+///
+/// `format_version` becomes 3, so the file read back and written out again carries format 3's
+/// keys under format 3's number. Every other key is left as it is: nothing else changed between
+/// the formats.
+///
+/// **Every conversion goes through [`between_locus_share_of`] and
+/// [`between_locus_share_error_of`]**, which pick the F a format-3 build would have written for
+/// the same concentration, so a migrated file says what that build's file would have said.
+///
+/// # Errors
+///
+/// [`ParametersFileError::Meaningless`], naming the key as the old file wrote it, for a
+/// concentration that is missing, is not a number, or has no between-locus share (not finite and
+/// above 0, or so small that F rounds to 1); for a standard error that is not a number; and for a
+/// table or row that holds both a key and the name format 3 gives it, which no build wrote.
+/// Anything else wrong with the file is left to the reader, which refuses it naming the key path.
+fn migrate_to_format_3(file: &mut toml::Value) -> Result<(), ParametersFileError> {
+    let Some(file) = file.as_table_mut() else {
+        // A parsed TOML document is always a table; this is that type's other cases.
+        return Ok(());
+    };
+    file.insert(
+        "format_version".to_owned(),
+        toml::Value::Integer(FORMAT_THIS_MIGRATION_WRITES),
+    );
+    let Some(tracts) = file
+        .get_mut("repeat_tracts")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        // A file without the section, or with something else under its name, is refused by the
+        // reader, which knows the section is required.
+        return Ok(());
+    };
+
+    let fallback_written_as = "repeat_tracts.fallback_length_spectrum_concentration";
+    if let Some(fallback) = renamed(
+        tracts,
+        "fallback_length_spectrum_concentration",
+        "fallback_between_locus_share",
+        "repeat_tracts",
+    )?
+    .and_then(toml::Value::as_table_mut)
+    {
+        let concentration = a_concentration_with_a_share(
+            fallback.get("value"),
+            &format!("{fallback_written_as}.value"),
+        )?;
+        fallback.insert(
+            "value".to_owned(),
+            toml::Value::Float(concentration.share.get()),
+        );
+        // **The validator refuses an error beside the fallback** — a median over classes has no
+        // standard error — but a file carrying one is refused for that, at the right scale,
+        // rather than for a number this rewrite left on the concentration's.
+        if let Some(error) = fallback.get("standard_error") {
+            let error = a_number(error, &format!("{fallback_written_as}.standard_error"))?;
+            fallback.insert(
+                "standard_error".to_owned(),
+                toml::Value::Float(between_locus_share_error_of(concentration.value, error)),
+            );
+        }
+    }
+
+    for (old_name, new_name, row_is_keyed_by) in [
+        (
+            "length_spectrum_by_stratum",
+            "allele_length_variation_by_stratum",
+            &["period", "reference_repeats"][..],
+        ),
+        (
+            "length_spectrum_by_period",
+            "allele_length_variation_by_period",
+            &["period"][..],
+        ),
+    ] {
+        // The old file's own name for the table, which is what an error names.
+        let written_as = if tracts.contains_key(old_name) {
+            old_name
+        } else {
+            new_name
+        };
+        let Some(rows) = renamed(tracts, old_name, new_name, "repeat_tracts")?
+            .and_then(toml::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for (index, row) in rows.iter_mut().enumerate() {
+            let Some(row) = row.as_table_mut() else {
+                continue; // Not a row; the reader refuses it.
+            };
+            let at = format!(
+                "repeat_tracts.{written_as}{}",
+                the_rows_key(row, row_is_keyed_by, index)
+            );
+            migrate_a_row(row, &at)?;
+        }
+    }
+    Ok(())
+}
+
+/// One allele-length-variation row of a format-1 or format-2 file rewritten into format 3: its
+/// `concentration` becomes `between_locus_share`, and its `shares_by_repeat_offset` is renamed.
+/// `at` is the row's path as the old file wrote it.
+///
+/// **F and F's error are refused in an old row; the shares under their format-3 name are not.**
+/// F and its error are on a different scale from the concentration the old row holds, so a row
+/// carrying both cannot say which is meant. The shares are the same numbers under either name,
+/// so a row that spells them the new way says nothing ambiguous; one that spells them both ways
+/// is refused by the rename.
+fn migrate_a_row(row: &mut toml::Table, at: &str) -> Result<(), ParametersFileError> {
+    renamed(
+        row,
+        "shares_by_repeat_offset",
+        "share_of_chromosomes_by_repeat_offset",
+        at,
+    )?;
+    for format_3_key in ["between_locus_share", "between_locus_share_standard_error"] {
+        if row.contains_key(format_3_key) {
+            return Err(refuse(
+                format!("{at}.{format_3_key}"),
+                "is a format-3 key in a file whose `format_version` says it was written before \
+                 format 3, so it is not clear which of this row's numbers is meant; set \
+                 `format_version` to the format the row was written in",
+            ));
+        }
+    }
+    let concentration = a_concentration_with_a_share(
+        row.remove("concentration").as_ref(),
+        &format!("{at}.concentration"),
+    )?;
+    row.insert(
+        "between_locus_share".to_owned(),
+        toml::Value::Float(concentration.share.get()),
+    );
+    Ok(())
+}
+
+/// **Renames `old_name` to `new_name` in `table`** and hands back the value now under
+/// `new_name`, whichever of the two it was written under; `None` where the table has neither.
+/// A table holding both is refused, since no build wrote both and either could be the one meant.
+/// `at` is the table's own path.
+fn renamed<'table>(
+    table: &'table mut toml::Table,
+    old_name: &str,
+    new_name: &str,
+    at: &str,
+) -> Result<Option<&'table mut toml::Value>, ParametersFileError> {
+    if let Some(value) = table.remove(old_name) {
+        if table.contains_key(new_name) {
+            return Err(refuse(
+                format!("{at}.{old_name}"),
+                format!(
+                    "is written beside `{new_name}`, which is the same key under the name format \
+                     3 gives it; delete one of the two"
+                ),
+            ));
+        }
+        table.insert(new_name.to_owned(), value);
+    }
+    Ok(table.get_mut(new_name))
+}
+
+/// A concentration from a file written before format 3, with the between-locus share format 3
+/// writes for it.
+struct ConcentrationAndItsShare {
+    value: f64,
+    share: BetweenLocusShare,
+}
+
+/// **The concentration at `at`, which has to be there, be a number, and have a between-locus
+/// share.**
+fn a_concentration_with_a_share(
+    written: Option<&toml::Value>,
+    at: &str,
+) -> Result<ConcentrationAndItsShare, ParametersFileError> {
+    let Some(written) = written else {
+        return Err(refuse(
+            at,
+            "is missing, and a file written before format 3 carries it here; this build reads \
+             it as the between-locus share F = 1 / (1 + concentration)",
+        ));
+    };
+    let value = a_number(written, at)?;
+    let share = between_locus_share_of(value).ok_or_else(|| {
+        refuse(
+            at,
+            format!(
+                "is {value:?}, and this build reads a concentration as the between-locus share \
+                 F = 1 / (1 + concentration), which exists only for a finite concentration above \
+                 about 1.1e-16 (the F of a smaller one rounds to 1, which stands for a \
+                 concentration of zero) and below about 1.8e308"
+            ),
+        )
+    })?;
+    Ok(ConcentrationAndItsShare { value, share })
+}
+
+/// The number at `at`, written as a whole number or with a decimal point; refused otherwise.
+fn a_number(written: &toml::Value, at: &str) -> Result<f64, ParametersFileError> {
+    match written {
+        toml::Value::Float(number) => Ok(*number),
+        // The reader takes a whole number where a number belongs, so the rewrite does too. Every
+        // concentration a file could hold converts exactly or to the nearest `f64`.
+        #[allow(clippy::cast_precision_loss)]
+        toml::Value::Integer(number) => Ok(*number as f64),
+        other => {
+            let what_was_there = match other {
+                toml::Value::String(_) => "text",
+                toml::Value::Boolean(_) => "true or false",
+                toml::Value::Datetime(_) => "a date",
+                toml::Value::Array(_) => "a list",
+                _ => "a table",
+            };
+            Err(refuse(
+                at,
+                format!("holds {what_was_there}, where a number belongs"),
+            ))
+        }
+    }
+}
+
+/// **How an error names one row of an old file's table**: by the keys that identify it, as
+/// validation names a row — `[period = 2, reference_repeats = 6]` — or, where one of those is not a
+/// whole number, by its position in the table counted from 0, `[3]`.
+fn the_rows_key(row: &toml::Table, keyed_by: &[&str], index: usize) -> String {
+    let identity: Option<Vec<String>> = keyed_by
+        .iter()
+        .map(|key| {
+            row.get(*key)
+                .and_then(toml::Value::as_integer)
+                .map(|number| format!("{key} = {number}"))
+        })
+        .collect();
+    match identity {
+        Some(identity) => format!("[{}]", identity.join(", ")),
+        None => format!("[{index}]"),
+    }
+}
+
+/// **Why a key the parser names may not be in an old file**, as one sentence after
+/// `what_went_wrong`, the clause [`a_value_the_key_cannot_hold_in_the_files_words`] made, where it
+/// made one.
+///
+/// The parser read the file after it was rewritten into format 3, so the key path in its message
+/// is in format 3's spelling. The sentence lists every key format 3 renamed beside the name a file
+/// written before format 3 gives it, so a person can find the key in their own file. It is the
+/// same sentence for every failure: which key failed is in the parser's message, and this module
+/// does not read that message apart.
+fn an_old_files_failure_in_its_words(what_went_wrong: Option<String>) -> String {
+    const RENAMED_KEYS: &str = "this file was written before format 3 and was read under \
+        format 3's key names, so a key named below may have its old name in the file: \
+        `allele_length_variation_by_stratum` and `allele_length_variation_by_period` were \
+        `length_spectrum_by_stratum` and `length_spectrum_by_period`, a row's \
+        `between_locus_share` was its `concentration` and its \
+        `share_of_chromosomes_by_repeat_offset` was its `shares_by_repeat_offset`, and \
+        `fallback_between_locus_share` was `fallback_length_spectrum_concentration`";
+    match what_went_wrong {
+        Some(what_went_wrong) => format!("{what_went_wrong}; {RENAMED_KEYS}"),
+        None => RENAMED_KEYS.to_owned(),
     }
 }
 
@@ -122,6 +452,8 @@ impl ParametersFile {
 /// **It names the line and never the key.** The failing key is not in `serde`'s message, and a
 /// wrongly-typed *element* of a list — a sample name written as a number — sits on a line with no
 /// key on it at all, so a sentence saying *this key* would be contradicted by the caret under it.
+/// A file written before format 3 has no lines, and its sentence names neither; the key path is
+/// left to the `toml` crate's own message, which records keys and not list positions.
 ///
 /// **Every unrecognised half gives `None` for the whole sentence**, so a message this function
 /// has not met reaches the reader as `serde`'s own rather than as a half-translation. Both halves
@@ -357,23 +689,29 @@ mod tests {
     /// **A file written by a version-1 build still reads, as the same numbers with no errors.**
     ///
     /// `testdata/version_1_as_written.toml` is the fixture as the last version-1 build wrote it,
-    /// kept unregenerated. Every key version 2 added is optional, so it reads back as today's
-    /// fixture with those keys absent and the version it was written under; and it passes the
-    /// checks a run applies before using a file.
+    /// kept unregenerated: its repeat-tract keys are the old ones and its rows hold
+    /// concentrations. It is rewritten into format 3 as it is read, so it reads back as today's
+    /// fixture with every key added since version 1 absent, each concentration as the F written
+    /// for it, and version 3; and it passes the checks a run applies before using a file.
     #[test]
     fn a_file_a_version_one_build_wrote_reads_back_without_the_new_keys() {
         let read = ParametersFile::from_toml(include_str!("testdata/version_1_as_written.toml"))
             .expect("a version-1 file is a parameters file");
-        assert_eq!(read.format_version, 1);
+        assert_eq!(read.format_version, 3);
         read.validate()
             .expect("a version-1 file passes the checks a run applies");
-        assert_eq!(read, the_fixture_without_what_version_two_added());
+        assert_eq!(
+            read,
+            the_fixture_without_what_versions_two_and_three_added()
+        );
     }
 
-    /// Today's fixture with every key version 2 added taken out, and marked version 1.
-    fn the_fixture_without_what_version_two_added() -> ParametersFile {
+    /// Today's fixture with every key added since version 1 taken out — the keys version 2 added,
+    /// and F's standard error and the row on penalised curves, which version 3 added — as a file
+    /// written before format 3 reads back. It says version 3, which is what reading such a file
+    /// stamps on it.
+    pub(super) fn the_fixture_without_what_versions_two_and_three_added() -> ParametersFile {
         let mut file = a_file_using_every_shape();
-        file.format_version = 1;
         file.fitted_from.snp_indel_fit_starts = None;
         for row in &mut file.base_quality_calibration.by_read_group {
             row.error_probability_multiplier.standard_error = None;
@@ -382,7 +720,10 @@ mod tests {
             row.inbreeding_coefficient.standard_error = None;
         }
         let tracts = &mut file.repeat_tracts;
-        tracts.fallback_length_spectrum_concentration.standard_error = None;
+        tracts.fallback_between_locus_share.standard_error = None;
+        for row in &mut tracts.allele_length_variation_by_stratum {
+            row.between_locus_share_standard_error = None;
+        }
         for row in &mut tracts.substitution_rate_by_stratum {
             row.rate.standard_error = None;
         }
@@ -401,6 +742,11 @@ mod tests {
         if let Some(routing) = &mut file.repeat_routing {
             routing.max_str_bundle_len = None;
         }
+        // And the row on penalised curves: format 3 added that smoothing, so no older file
+        // carries the row.
+        file.repeat_tracts
+            .slippage_by_stratum_and_group
+            .remove(super::super::tests::THE_ROW_ON_PENALISED_CURVES);
         file
     }
 
@@ -881,5 +1227,498 @@ mod the_two_messages_written_for_a_programmer {
             ParametersFile::from_toml(&serdes).expect("and reads back"),
             file
         );
+    }
+}
+
+/// **A file written before format 3 is rewritten into format 3 as it is read**
+/// (`doc/devel/ng/spec/str_fit_to_calling.md` §2.2), and these are the rules of that rewrite:
+/// which files it reads, what it turns each old number into, and what it refuses.
+#[cfg(test)]
+mod files_written_before_format_3 {
+    use super::super::{
+        Warrant, between_locus_share_error_of, between_locus_share_of, concentration_of,
+    };
+    use super::tests::the_fixture_without_what_versions_two_and_three_added;
+    use super::*;
+
+    /// The fixture as the last version-1 build wrote it.
+    const VERSION_1: &str = include_str!("testdata/version_1_as_written.toml");
+
+    /// `text` with the first `find` replaced by `replace_with`, which has to be there to replace.
+    fn with(text: &str, find: &str, replace_with: &str) -> String {
+        assert!(text.contains(find), "the file contains {find:?}");
+        text.replacen(find, replace_with, 1)
+    }
+
+    /// **Version 2 as main's builds wrote it**: the tables still `length_spectrum_by_*`. Every key
+    /// version 2 added is optional, so the version-1 fixture marked version 2 is such a file.
+    fn version_2_as_main_spelled_it() -> String {
+        with(VERSION_1, "format_version = 1\n", "format_version = 2\n")
+    }
+
+    /// **Version 2 as the branch that renamed the tables wrote it**: `allele_length_variation_by_*`,
+    /// with each row still holding `concentration` and `shares_by_repeat_offset`.
+    fn version_2_as_the_renaming_branch_spelled_it() -> String {
+        let text = with(
+            &version_2_as_main_spelled_it(),
+            "length_spectrum_by_stratum = [",
+            "allele_length_variation_by_stratum = [",
+        );
+        with(
+            &text,
+            "length_spectrum_by_period = [",
+            "allele_length_variation_by_period = [",
+        )
+    }
+
+    /// Every spelling a file written before format 3 can have, each with the name its stratum
+    /// table has in it — which is the name an error about one of its rows uses.
+    fn every_old_spelling() -> [(&'static str, String, &'static str); 3] {
+        [
+            ("version 1", VERSION_1.to_owned(), "length_spectrum_by"),
+            (
+                "version 2, main's spelling",
+                version_2_as_main_spelled_it(),
+                "length_spectrum_by",
+            ),
+            (
+                "version 2, the renaming branch's spelling",
+                version_2_as_the_renaming_branch_spelled_it(),
+                "allele_length_variation_by",
+            ),
+        ]
+    }
+
+    /// The F the fixture's old concentration `concentration` is read back as.
+    fn f_of(concentration: f64) -> BetweenLocusShare {
+        between_locus_share_of(concentration).expect("the fixture's concentrations have an F")
+    }
+
+    fn refused_by_the_rewrite(text: &str) -> (String, String) {
+        match ParametersFile::from_toml(text) {
+            Err(ParametersFileError::Meaningless { field, problem }) => {
+                assert!(!problem.contains("  "), "a run of spaces in: {problem}");
+                (field, problem)
+            }
+            other => panic!("expected the rewrite to refuse the file, got {other:?}"),
+        }
+    }
+
+    /// **A version-1 file and both spellings of a version-2 file read back as version 3, each
+    /// concentration as F = 1 / (1 + concentration), and every other number unchanged.**
+    ///
+    /// The F is the one [`between_locus_share_of`] picks, which a format-3 build would have
+    /// written for the same concentration; it lies within a few `f64` steps of the plain
+    /// `1 / (1 + c)`. The fixture holds the stratum at a concentration of 3.5, the pool at 2.75
+    /// and the fallback at 3.5, `fitted_here`.
+    #[test]
+    fn every_old_spelling_reads_back_with_f_in_place_of_each_concentration() {
+        for (spelling, text, _) in every_old_spelling() {
+            let read = ParametersFile::from_toml(&text)
+                .unwrap_or_else(|error| panic!("{spelling} is a parameters file: {error}"));
+            assert_eq!(read.format_version, 3, "{spelling}");
+            let tracts = &read.repeat_tracts;
+            for (share, concentration) in [
+                (
+                    tracts.allele_length_variation_by_stratum[0].between_locus_share,
+                    3.5,
+                ),
+                (
+                    tracts.allele_length_variation_by_period[0].between_locus_share,
+                    2.75,
+                ),
+                (
+                    BetweenLocusShare::new(tracts.fallback_between_locus_share.value),
+                    3.5,
+                ),
+            ] {
+                let share = share.unwrap_or_else(|| panic!("{spelling}: every old row has an F"));
+                assert_eq!(share, f_of(concentration), "{spelling}");
+                let plain = 1.0 / (1.0 + concentration);
+                assert!(
+                    (share.get() - plain).abs() <= 8.0 * f64::EPSILON * plain,
+                    "{spelling}: F {} is 1 / (1 + {concentration}) = {plain}",
+                    share.get()
+                );
+            }
+            assert_eq!(
+                tracts.fallback_between_locus_share.warrant,
+                Warrant::FittedHere,
+                "{spelling}: the fallback's warrant is kept"
+            );
+            assert_eq!(
+                read,
+                the_fixture_without_what_versions_two_and_three_added(),
+                "{spelling}: every other number is the fixture's own"
+            );
+            read.validate()
+                .unwrap_or_else(|error| panic!("{spelling} passes validation: {error}"));
+        }
+    }
+
+    /// **The migrated file reaches calling holding, for each class, the concentration its F
+    /// stands for** — `concentration_of(F)` for the stratum, the pool and the fallback — and that
+    /// is within rounding of the concentration the old file wrote.
+    #[test]
+    fn a_migrated_file_reads_into_calling_with_the_concentration_of_each_f() {
+        for (spelling, text, _) in every_old_spelling() {
+            let read = ParametersFile::from_toml(&text).expect("a parameters file");
+            let run = read
+                .to_run_parameters()
+                .unwrap_or_else(|error| panic!("{spelling} is usable: {error}"))
+                .parameters;
+            let fits = run.ssr_slippage_fits();
+
+            let strata: Vec<_> = fits
+                .fitted_allele_length_variation_of_each_stratum()
+                .map(|(stratum, fitted)| {
+                    (
+                        stratum.period,
+                        stratum.reference_repeats,
+                        fitted.weights.clone(),
+                        fitted.concentration,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                strata,
+                vec![(2, 6, vec![0.1, 0.8, 0.1], Some(concentration_of(f_of(3.5))))],
+                "{spelling}"
+            );
+            let periods: Vec<_> = fits
+                .pooled_allele_length_variation_of_each_period()
+                .map(|(period, shares, concentration)| (period, shares.to_vec(), concentration))
+                .collect();
+            assert_eq!(
+                periods,
+                vec![(2, vec![0.15, 0.7, 0.15], concentration_of(f_of(2.75)))],
+                "{spelling}"
+            );
+            assert_eq!(
+                fits.stated_concentration(),
+                concentration_of(f_of(3.5)),
+                "{spelling}"
+            );
+
+            for concentration in [3.5, 2.75] {
+                let back = concentration_of(f_of(concentration));
+                assert!(
+                    (back - concentration).abs() <= 4.0 * f64::EPSILON * (1.0 + concentration),
+                    "{concentration} reaches calling as {back}"
+                );
+            }
+        }
+    }
+
+    /// **A migrated file written back out is a format-3 file**: version 3, none of the old keys,
+    /// read from its own text as the same file, and valid.
+    #[test]
+    fn a_migrated_file_written_back_out_is_a_format_3_file() {
+        for (spelling, text, _) in every_old_spelling() {
+            let read = ParametersFile::from_toml(&text).expect("a parameters file");
+            let written = read.to_toml();
+            assert!(written.contains("\nformat_version = 3\n"), "{spelling}");
+            for old_key in [
+                "length_spectrum_by_",
+                "fallback_length_spectrum_concentration",
+                ", concentration = ",
+                "shares_by_repeat_offset",
+            ] {
+                assert!(
+                    !written.contains(old_key),
+                    "{spelling}: the written file still says {old_key:?}"
+                );
+            }
+            let again = ParametersFile::from_toml(&written).expect("the written file reads back");
+            assert_eq!(again, read, "{spelling}");
+            again
+                .validate()
+                .unwrap_or_else(|error| panic!("{spelling}, written back, is valid: {error}"));
+        }
+    }
+
+    /// **A file main's build wrote survives a calling run byte for byte**: read and migrated,
+    /// projected into a run's parameters, written back as the run writes the file it scored
+    /// with, and written back again from that.
+    ///
+    /// The first write is format 3 and is the migrated file itself, so the F the migration
+    /// picked for each concentration is the F a format-3 build writes for the concentration
+    /// calling then holds. The second write shows the run's parameters do not drift a second
+    /// time.
+    #[test]
+    fn a_file_mains_build_wrote_survives_a_calling_run_byte_for_byte() {
+        use super::super::tests::THE_REFERENCE_A_RUN_FITTED_AGAINST;
+        use super::super::to_run_parameters::tests::{
+            the_counts_the_projection_out_reads, the_files_read_groups,
+        };
+        use crate::repeat_catalog::StrRepeatCriteria;
+
+        let written_back = |file: &ParametersFile| {
+            let projected = file
+                .to_run_parameters()
+                .expect("a file main's build wrote is usable");
+            let mut written = ParametersFile::of_run(
+                &projected.parameters,
+                &the_files_read_groups(file),
+                &the_counts_the_projection_out_reads(&projected),
+                &projected.inbreeding_by_sample,
+                &THE_REFERENCE_A_RUN_FITTED_AGAINST,
+                file.fitted_from.census.clone(),
+                &StrRepeatCriteria::default(),
+            )
+            .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
+            // **The routing is the run's own, not something the file projects**, as the
+            // identity block is; main's file predates `max_str_bundle_len`, so it is fed back.
+            written.repeat_routing.clone_from(&file.repeat_routing);
+            written
+        };
+
+        let read = ParametersFile::from_toml(&version_2_as_main_spelled_it())
+            .expect("a file main's build wrote reads");
+        let once = written_back(&read);
+        assert_eq!(once, read, "the run writes the migrated file");
+        assert_eq!(once.to_toml(), read.to_toml(), "byte for byte");
+        let twice = written_back(&once);
+        assert_eq!(twice.to_toml(), once.to_toml(), "and again");
+    }
+
+    /// **A whole number is read as a concentration**, as the reader reads one wherever a number
+    /// belongs, and the smallest concentrations that have an F are kept.
+    #[test]
+    fn a_concentration_written_as_a_whole_number_or_near_the_bound_is_converted() {
+        for (written, concentration) in [("3", 3.0), ("2e-16", 2e-16)] {
+            let text = with(
+                VERSION_1,
+                "concentration = 3.5,",
+                &format!("concentration = {written},"),
+            );
+            let read = ParametersFile::from_toml(&text).expect("a parameters file");
+            assert_eq!(
+                read.repeat_tracts.allele_length_variation_by_stratum[0].between_locus_share,
+                between_locus_share_of(concentration),
+                "{written}"
+            );
+        }
+    }
+
+    /// **An old concentration that cannot become an F is refused, under the key the old file
+    /// wrote it at** — not converted into an F that stands for a different number. Run on every
+    /// spelling, because the key named is the old file's own: a reader searches the file they hold
+    /// for it.
+    #[test]
+    fn an_old_concentration_with_no_between_locus_share_is_refused_at_its_key() {
+        for (spelling, text, table) in every_old_spelling() {
+            let stratum =
+                format!("repeat_tracts.{table}_stratum[period = 2, reference_repeats = 6]");
+            let period = format!("repeat_tracts.{table}_period[period = 2]");
+            let fallback = "repeat_tracts.fallback_length_spectrum_concentration.value";
+            for (find, replace_with, field, says) in [
+                (
+                    "concentration = 3.5,",
+                    "concentration = 0.0,",
+                    &stratum,
+                    "1.1e-16",
+                ),
+                (
+                    "concentration = 3.5,",
+                    "concentration = -1.0,",
+                    &stratum,
+                    "1.1e-16",
+                ),
+                // F of this one rounds to exactly 1, a concentration of zero.
+                (
+                    "concentration = 3.5,",
+                    "concentration = 1e-17,",
+                    &stratum,
+                    "1e-17",
+                ),
+                (
+                    "concentration = 3.5,",
+                    "concentration = inf,",
+                    &stratum,
+                    "inf",
+                ),
+                (
+                    "concentration = 3.5,",
+                    "concentration = nan,",
+                    &stratum,
+                    "NaN",
+                ),
+                (
+                    "concentration = 3.5,",
+                    "concentration = \"3.5\",",
+                    &stratum,
+                    "holds text, where a number belongs",
+                ),
+                ("concentration = 3.5, ", "", &stratum, "is missing"),
+                (
+                    "concentration = 2.75,",
+                    "concentration = 0.0,",
+                    &period,
+                    "1.1e-16",
+                ),
+            ] {
+                let (refused_at, problem) =
+                    refused_by_the_rewrite(&with(&text, find, replace_with));
+                assert_eq!(refused_at, format!("{field}.concentration"), "{spelling}");
+                assert!(problem.contains(says), "{spelling}: {problem}");
+            }
+            let (refused_at, problem) = refused_by_the_rewrite(&with(
+                &text,
+                "{ value = 3.5, warrant",
+                "{ value = 0.0, warrant",
+            ));
+            assert_eq!(refused_at, fallback, "{spelling}");
+            assert!(problem.contains("is 0.0"), "{problem}");
+        }
+    }
+
+    /// **An old fallback's standard error is moved to F's scale with its value**, so that the
+    /// validator's refusal of an error beside the fallback names the file's number on the scale
+    /// the key now has.
+    #[test]
+    fn an_old_fallbacks_standard_error_is_converted_to_fs_scale() {
+        let text = with(
+            &version_2_as_main_spelled_it(),
+            "{ value = 3.5, warrant = \"fitted_here\" }",
+            "{ value = 3.5, warrant = \"fitted_here\", standard_error = 0.2 }",
+        );
+        let read = ParametersFile::from_toml(&text).expect("a parameters file");
+        assert_eq!(
+            read.repeat_tracts
+                .fallback_between_locus_share
+                .standard_error,
+            Some(between_locus_share_error_of(3.5, 0.2))
+        );
+        match read.validate() {
+            Err(ParametersFileError::Meaningless { field, .. }) => assert_eq!(
+                field,
+                "repeat_tracts.fallback_between_locus_share.standard_error"
+            ),
+            other => panic!("a median has no standard error, and validation says so: {other:?}"),
+        }
+    }
+
+    /// **A key written under its old name and its format-3 name at once is refused**, naming the
+    /// old one: no build wrote both, and either could be the one meant.
+    #[test]
+    fn a_key_written_under_both_of_its_names_is_refused() {
+        let main = version_2_as_main_spelled_it();
+        let (field, _) = refused_by_the_rewrite(&with(
+            &main,
+            "length_spectrum_by_period = [",
+            "allele_length_variation_by_period = []\nlength_spectrum_by_period = [",
+        ));
+        assert_eq!(field, "repeat_tracts.length_spectrum_by_period");
+
+        let row = "repeat_tracts.length_spectrum_by_stratum[period = 2, reference_repeats = 6]";
+        let (field, _) = refused_by_the_rewrite(&with(
+            &main,
+            "shares_by_repeat_offset = [0.1, 0.8, 0.1]",
+            "shares_by_repeat_offset = [0.1, 0.8, 0.1], share_of_chromosomes_by_repeat_offset = [0.1, 0.8, 0.1]",
+        ));
+        assert_eq!(field, format!("{row}.shares_by_repeat_offset"));
+
+        let (field, _) = refused_by_the_rewrite(&with(
+            &main,
+            "concentration = 3.5,",
+            "concentration = 3.5, between_locus_share = 0.2,",
+        ));
+        assert_eq!(field, format!("{row}.between_locus_share"));
+
+        // **F's error, too**: taken silently, it would be read as an error on a number the row
+        // does not hold until the migration writes it.
+        let (field, _) = refused_by_the_rewrite(&with(
+            &main,
+            "concentration = 3.5,",
+            "concentration = 3.5, between_locus_share_standard_error = 0.01,",
+        ));
+        assert_eq!(field, format!("{row}.between_locus_share_standard_error"));
+    }
+
+    /// **What the reader refuses in an old file is named by key path and not by line**: the file
+    /// was read from its rewritten, parsed form, which has no lines.
+    ///
+    /// **Both halves pin the `toml` crate's behaviour that an old file's error relies on**: the
+    /// crate's own message, the error's source, ends with the key path when it has no line to
+    /// show. This module's sentence names no key, so without that line the error would not say
+    /// where the file is wrong. The path uses format 3's names, since that is the form the reader
+    /// saw.
+    #[test]
+    fn an_old_file_the_reader_refuses_names_the_key_path_and_no_line() {
+        let error =
+            ParametersFile::from_toml(&with(VERSION_1, "ploidy = 2\n", "ploidy = \"two\"\n"))
+                .expect_err("a ploidy is not text");
+        assert_eq!(error.line(), None);
+        let said = error.rendered_by_the_parser();
+        assert!(said.contains("in `ploidy`"), "{said}");
+
+        let error = ParametersFile::from_toml(&with(
+            VERSION_1,
+            "reference_repeats = 6, concentration = 3.5",
+            "reference_repeat = 6, concentration = 3.5",
+        ))
+        .expect_err("a row with a mistyped key");
+        assert_eq!(error.line(), None);
+        let said = error.rendered_by_the_parser();
+        assert!(said.contains("`reference_repeat`"), "{said}");
+        assert!(
+            said.contains("in `repeat_tracts.allele_length_variation_by_stratum`"),
+            "{said}"
+        );
+    }
+
+    /// **What the reader refuses in an old file says the file's keys were renamed, and how**, so a
+    /// person can find in their own file the key the parser named in format 3's spelling. The
+    /// sentence follows the clause for a value the key cannot hold where there is one, and stands
+    /// alone where there is not; the name of the key that failed is never in it. A format-3 file
+    /// never carries it: `a_wrong_type_is_reported_in_the_files_own_words` pins that message whole.
+    #[test]
+    fn an_old_file_the_reader_refuses_lists_the_renamed_keys() {
+        let renamed_keys = "this file was written before format 3 and was read under format \
+            3's key names, so a key named below may have its old name in the file: \
+            `allele_length_variation_by_stratum` and `allele_length_variation_by_period` were \
+            `length_spectrum_by_stratum` and `length_spectrum_by_period`, a row's \
+            `between_locus_share` was its `concentration` and its \
+            `share_of_chromosomes_by_repeat_offset` was its `shares_by_repeat_offset`, and \
+            `fallback_between_locus_share` was `fallback_length_spectrum_concentration`";
+        for (spelling, old_file, _) in every_old_spelling() {
+            let error =
+                ParametersFile::from_toml(&with(&old_file, "ploidy = 2\n", "ploidy = \"two\"\n"))
+                    .expect_err("a ploidy is not text");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "the parameters file could not be read: one of this file's values is text, \
+                     where a whole number, zero or more belongs; {renamed_keys}"
+                ),
+                "{spelling}"
+            );
+
+            let error = ParametersFile::from_toml(&with(
+                &old_file,
+                "reference_repeats = 6, concentration = 3.5",
+                "reference_repeat = 6, concentration = 3.5",
+            ))
+            .expect_err("a row with a mistyped key");
+            assert_eq!(
+                error.to_string(),
+                format!("the parameters file could not be read: {renamed_keys}"),
+                "{spelling}"
+            );
+        }
+    }
+
+    /// **An old file that is not TOML at all is refused at its line**, as any file is: the rewrite
+    /// needs a parsed file, so text that does not parse never reaches it.
+    #[test]
+    fn an_old_file_that_is_not_toml_still_fails_at_its_line() {
+        let text = with(VERSION_1, "ploidy = 2\n", "ploidy =\n");
+        let line = text[..text.find("ploidy =").expect("there")]
+            .matches('\n')
+            .count()
+            + 1;
+        let error = ParametersFile::from_toml(&text).expect_err("not TOML");
+        super::tests::the_failure_is_on_line(&error, line);
     }
 }

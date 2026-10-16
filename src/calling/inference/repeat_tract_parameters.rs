@@ -65,7 +65,7 @@
 //! **Spec §4.5.1's third term is built here**, on every run whose fit found a fraction: how
 //! common each of this tract's reachable lengths is in the contaminating population. It is the
 //! genotype prior's own belief about which lengths this tract can be — the stratum's fitted
-//! **length spectrum** — converted from the per-candidate shape the prior builds into a
+//! **allele length variation** — converted from the per-candidate shape the prior builds into a
 //! distribution over lengths, which is what `c · seed(o)` asks for.
 //!
 //! **The cohort's own fitted frequencies at the locus would be the natural source and are
@@ -96,9 +96,11 @@ use crate::calling::likelihood::stutter_rates::stutter_model_for;
 use crate::calling::{CandidateAlleles, ContaminationView, FrozenParameters};
 use crate::locus_generation::{LocusKind, SsrBundleDetail};
 use crate::parameter_estimation::Provenance;
+use crate::parameter_estimation::joint::share_curve::ShareSource;
+use crate::parameter_estimation::joint::slippage_curve::LevelSource;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::joint::stratum_fits::{
-    FittedSlippage, LengthSpectrum, NoSlippage,
+    AlleleLengthVariation, FittedSlippage, NoSlippage,
 };
 use crate::parameter_estimation::repeat_strata::RepeatCount;
 use crate::region_typing::run_parse::RunParse;
@@ -317,7 +319,7 @@ impl TractScoringFits {
         // this is what stops the two coming apart.** The reference allele is id 0 of every
         // candidate table and these candidates are in that order, so the caller has the number
         // already; it is taken as an argument because *which* repeat count keys the prior's
-        // length spectrum is the one thing at a tract that is easy to get wrong, and naming it
+        // allele length variation is the one thing at a tract that is easy to get wrong, and naming it
         // makes the wrong one something somebody has to type. A candidate's count passed here
         // re-centres the spectrum on that candidate and flattens the prior, and the seed still
         // sums to one — which is why `fill_seed_share_per_candidate`'s own documentation lists
@@ -327,7 +329,7 @@ impl TractScoringFits {
             candidates[0].repeat_count.get(),
             "this tract's reference allele holds {} whole repeats and the prior was asked to \
              centre on {}: a candidate's count passed as the reference tract's re-centres the \
-             fitted length spectrum on that candidate",
+             fitted allele length variation on that candidate",
             candidates[0].repeat_count.get(),
             reference_repeats.get()
         );
@@ -643,7 +645,7 @@ impl TractScoringFits {
     ///
     /// # The two halves speak different units, and this is where they meet
     ///
-    /// **The prior speaks in whole repeats.** Its length spectrum is indexed by offset from the
+    /// **The prior speaks in whole repeats.** Its allele length variation is indexed by offset from the
     /// reference tract's repeat count, so what it hands back is one share per *candidate*, each
     /// candidate placed by the repeat count the locus generator measured for it.
     ///
@@ -693,7 +695,7 @@ impl TractScoringFits {
     ///
     /// The cohort's fitted frequencies at this locus are the natural answer to *how common is
     /// each length here*, and they are refused: contamination is frozen before calling, and
-    /// those are what the loop rewrites at every pass (spec §4.5.1). The fitted length spectrum
+    /// those are what the loop rewrites at every pass (spec §4.5.1). The fitted allele length variation
     /// is specific to this locus — it is indexed from this tract's own reference length — and it
     /// does not move while the loop iterates. **So a repeat tract's whole row is frequency-free
     /// even under contamination**, which is the opposite of the SNP/indel path, where `q(o)` is
@@ -736,7 +738,7 @@ impl TractScoringFits {
         fill_seed_share_per_candidate(
             &self.candidate_repeat_counts,
             tract_prior.reference_repeats.get(),
-            tract_prior.length_spectrum,
+            tract_prior.allele_length_variation,
             &mut self.share_of_each_candidate,
         );
 
@@ -1108,7 +1110,7 @@ impl TractScoringFits {
 ///
 /// The prior's belief is used twice at each tract: the genotype prior's own seed, and the third
 /// term of the read-likelihood mixture, which asks how common each length is in the
-/// contaminating population. Both read the same fitted **length spectrum**, and both must read
+/// contaminating population. Both read the same fitted **allele length variation**, and both must read
 /// the *same* one — the run reports which rung of the tract ladder answered, and a run that
 /// reported one rung while scoring against another would be saying something false about its own
 /// calls.
@@ -1123,19 +1125,27 @@ pub struct TractPrior<'a> {
     pub reference_repeats: RepeatCount,
     /// How that stratum's chromosomes are spread over tract lengths, and how strongly the fit
     /// holds them — with the rung of the tract ladder it came from on it.
-    pub length_spectrum: LengthSpectrum<'a>,
+    pub allele_length_variation: AlleleLengthVariation<'a>,
 }
 
 /// **What one cell's slippage numbers are entitled to claim**, from where the fit says they
 /// came.
 ///
-/// The fit reports three sources per number — the cell's own fit, its period's curve, or a
-/// blend of the two — and each carries the share the curve took
+/// The penalised fit gives every number one source, a point on its motif length's penalised
+/// curve (below). A file written by the fit before it (the climb, deleted 2026-10-16) may carry
+/// any of three others: the cell's own fit, its period's curve, or a blend of the two, each with
+/// the share the curve took
 /// ([`LevelSource::curve_weight`](crate::parameter_estimation::joint::slippage_curve::LevelSource::curve_weight)).
 /// **A number the curve entered at all is [`Provenance::Borrowed`]**: the curve is drawn
 /// through other strata, so a cell reading off it is reading a neighbouring grain's
 /// measurement, which is exactly what that rung means. Only a cell whose level and both shares
 /// are wholly its own is [`Provenance::FittedHere`].
+///
+/// **A point on a penalised curve counts as the cell's own** (`str_fit_to_calling.md` §2.3). The
+/// penalised fit pulls each repeat count toward its neighbours, but it reports only classes with
+/// reads of their own, so none of its numbers is read across a stretch of repeat counts without
+/// reads. It has no curve weight, so the
+/// source is matched variant by variant: a source added later must say which side it is on.
 ///
 /// **The threshold is zero rather than a share**, deliberately: any cut-off between "mostly its
 /// own" and "mostly the curve's" would be a number invented here, and the share itself is not
@@ -1152,10 +1162,18 @@ pub struct TractPrior<'a> {
 /// are still the fit's, so `Defaulted` would be wrong, and the cell cannot claim its shares
 /// were fitted here.
 fn warrant_of(fitted: &FittedSlippage) -> Provenance {
-    let level_is_its_own = fitted.level.source.curve_weight() == 0.0;
+    let level_is_its_own = match fitted.level.source {
+        LevelSource::Cell | LevelSource::PenalisedCurve(_) => true,
+        LevelSource::Curve => false,
+        LevelSource::Blend { curve_weight } => curve_weight == 0.0,
+    };
+    let share_is_its_own = |source: ShareSource| match source {
+        ShareSource::Stratum | ShareSource::PenalisedCurve(_) => true,
+        ShareSource::Curve => false,
+        ShareSource::Blend { curve_weight } => curve_weight == 0.0,
+    };
     let shares_are_its_own = fitted.shares.is_some_and(|shares| {
-        shares.shorter_share.source.curve_weight() == 0.0
-            && shares.fall_off.source.curve_weight() == 0.0
+        share_is_its_own(shares.shorter_share.source) && share_is_its_own(shares.fall_off.source)
     });
     if level_is_its_own && shares_are_its_own {
         Provenance::FittedHere
@@ -1308,10 +1326,9 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
-        StratumOutcome,
+        LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumOutcome,
     };
-    use crate::parameter_estimation::joint::stratum_fits::StratumFits;
+    use crate::parameter_estimation::joint::stratum_fits::{StratumFits, StratumRowsOfAFile};
     use crate::parameter_estimation::repeat_strata::{Stratum as SsrStratum, StratumKey};
     use crate::types::{InbreedingF, LogProb, Ploidy, SsrPeriod, SummedLogError};
 
@@ -1364,8 +1381,8 @@ mod tests {
     ) -> TractPrior<'a> {
         TractPrior {
             reference_repeats,
-            length_spectrum: parameters
-                .ssr_length_spectrum_at(motif().ssr_period(), reference_repeats),
+            allele_length_variation: parameters
+                .ssr_allele_length_variation_at(motif().ssr_period(), reference_repeats),
         }
     }
 
@@ -1470,7 +1487,7 @@ mod tests {
         repeat_count: u32,
         groups: usize,
         level: impl Fn(u32) -> LevelProvenance,
-    ) -> StratumOutcome {
+    ) -> StratumRowsOfAFile {
         stratum_row_at(
             MOTIF.len() as u8,
             repeat_count,
@@ -1491,14 +1508,14 @@ mod tests {
         level: impl Fn(u32) -> LevelProvenance,
         shorter: ShareSource,
         fall_off: ShareSource,
-    ) -> StratumOutcome {
+    ) -> StratumRowsOfAFile {
         let slippage: Vec<Option<Slippage>> = (0..groups as u32)
             .map(|group| Some(slippage_at(group, repeat_count)))
             .collect();
         let level_provenance: Vec<Option<LevelProvenance>> =
             (0..groups as u32).map(|group| Some(level(group))).collect();
         let shares_provenance = vec![Some(shares_from(shorter, fall_off)); groups];
-        StratumOutcome::Derived(Box::new(DerivedStratum {
+        StratumRowsOfAFile {
             stratum: FitStratum {
                 period,
                 reference_repeats: u64::from(repeat_count),
@@ -1506,9 +1523,7 @@ mod tests {
             slippage,
             level_provenance,
             shares_provenance,
-            tracts_of_its_own: 4,
-            reads_crossing: 40,
-        }))
+        }
     }
 
     /// **Every read group in its own slippage group**, which is the specified grain — so the
@@ -1520,10 +1535,20 @@ mod tests {
             .collect()
     }
 
+    /// The fits a parameters file holding only these rows reads into — the slippage numbers and
+    /// their provenance, with no allele length variation, so every tract is seeded from the
+    /// ladder's bottom rung.
+    fn of_rows(
+        rows: impl IntoIterator<Item = StratumRowsOfAFile>,
+        slippage_group_of: BTreeMap<ReadGroupId, u32>,
+    ) -> StratumFits {
+        StratumFits::over(&[], slippage_group_of).with_rows_of_a_file(rows, BTreeMap::new())
+    }
+
     /// The whole fit: both candidates' strata, every group fitted on its own reads.
     fn fits_for_both_candidates() -> StratumFits {
-        StratumFits::over(
-            &[
+        of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -1696,7 +1721,9 @@ mod tests {
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
         let prior = BundlePrior {
             reference_run_counts: vec![CANDIDATE_REPEATS[0]],
-            run_spectra: vec![tract_prior(reference_repeats(), &parameters).length_spectrum],
+            run_spectra: vec![
+                tract_prior(reference_repeats(), &parameters).allele_length_variation,
+            ],
             stated_concentration: 1.0,
         };
 
@@ -1772,8 +1799,8 @@ mod tests {
     fn a_candidate_the_fit_never_reached_takes_the_stated_constant_and_says_so() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
+        let fits = of_rows(
+            [stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                 fitted_level(400.0 + f64::from(group))
             })],
             one_group_each(READ_GROUPS),
@@ -1824,8 +1851,8 @@ mod tests {
         let alleles = candidates(&bases);
         // Two of the run's three read groups are in the fit's map; the third is a library the
         // pre-pass did not know existed.
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], 2, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -1935,8 +1962,8 @@ mod tests {
     fn a_level_read_off_the_curve_is_borrowed_rather_than_fitted_here() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -1993,8 +2020,8 @@ mod tests {
     fn a_cell_that_borrowed_only_its_shares_is_borrowed() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row_at(
                     MOTIF.len() as u8,
                     CANDIDATE_REPEATS[0],
@@ -2299,8 +2326,8 @@ mod tests {
         // The same table with the longer candidate's stratum carrying the shorter one's
         // numbers — what a lookup keyed by the reference tract rather than by the candidate
         // would produce.
-        let flattened = StratumFits::over(
-            &[
+        let flattened = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -2308,10 +2335,8 @@ mod tests {
                     let mut row = stratum_row(CANDIDATE_REPEATS[1], READ_GROUPS, |group| {
                         fitted_level(800.0 + f64::from(group))
                     });
-                    if let StratumOutcome::Derived(derived) = &mut row {
-                        for (group, slot) in derived.slippage.iter_mut().enumerate() {
-                            *slot = Some(slippage_at(group as u32, CANDIDATE_REPEATS[0]));
-                        }
+                    for (group, slot) in row.slippage.iter_mut().enumerate() {
+                        *slot = Some(slippage_at(group as u32, CANDIDATE_REPEATS[0]));
                     }
                     row
                 },
@@ -2435,8 +2460,8 @@ mod tests {
             })
             .collect();
 
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row_at(
                     3,
                     CANDIDATE_REPEATS[0],
@@ -2515,8 +2540,8 @@ mod tests {
     fn a_cell_that_fitted_one_share_and_borrowed_the_other_is_borrowed() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row_at(
                     MOTIF.len() as u8,
                     CANDIDATE_REPEATS[0],
@@ -2588,6 +2613,187 @@ mod tests {
         assert_eq!(warrant_of(&no_shares), Provenance::Borrowed);
     }
 
+    /// **A number on a penalised curve is the cell's own**, because the penalised fit reports
+    /// only classes with reads of their own (`str_fit_to_calling.md` §2.3). It has no curve
+    /// weight, so this pins the variant-by-variant match: each of the level and the two shares
+    /// on a penalised curve is fitted here, and one of them read off a parametric curve still
+    /// borrows the cell's warrant, whichever it is.
+    #[test]
+    fn a_cell_on_a_penalised_curve_is_fitted_here() {
+        use crate::parameter_estimation::joint::slippage_curve::{CurveReach, PenalisedPoint};
+        let penalised_share = ShareSource::PenalisedCurve(PenalisedPoint {
+            strength: 5.0,
+            eased_here: true,
+        });
+        let on_the_curve = FittedSlippage {
+            slippage: slippage_at(0, CANDIDATE_REPEATS[0]),
+            level: LevelProvenance {
+                source: LevelSource::PenalisedCurve(PenalisedPoint {
+                    strength: 20.0,
+                    eased_here: false,
+                }),
+                curve: None,
+                reach: Some(CurveReach::Inside),
+                slipped_reads: Some(400.0),
+            },
+            shares: Some(shares_from(penalised_share, penalised_share)),
+            own_fit_standard_errors:
+                crate::parameter_estimation::joint::stratum_fits::OwnFitStandardErrors::default(),
+            samples_fitted_on: None,
+        };
+        assert_eq!(warrant_of(&on_the_curve), Provenance::FittedHere);
+
+        let level_off_a_curve = FittedSlippage {
+            level: level_off_the_curve(),
+            ..on_the_curve
+        };
+        assert_eq!(warrant_of(&level_off_a_curve), Provenance::Borrowed);
+        for (shorter, fall_off) in [
+            (ShareSource::Curve, penalised_share),
+            (penalised_share, ShareSource::Blend { curve_weight: 0.3 }),
+        ] {
+            let a_share_off_a_curve = FittedSlippage {
+                shares: Some(shares_from(shorter, fall_off)),
+                ..on_the_curve
+            };
+            assert_eq!(
+                warrant_of(&a_share_off_a_curve),
+                Provenance::Borrowed,
+                "shorter {shorter:?}, fall-off {fall_off:?}"
+            );
+        }
+    }
+
+    /// One class as the penalised fit returns it at one sample (arch
+    /// `str_penalised_fit.md` §1.2–1.4): fitted, with one slippage group, shares and no
+    /// concentration, and no sample count; the level and both shares read off
+    /// the penalised curve inside the range it was fitted over; the concentration's error
+    /// `NotPlaced` because there is no concentration; the level's and the shorter share's errors
+    /// estimated, every other error withheld for too few loci.
+    fn as_the_penalised_fit_returns_it(repeat_count: u32) -> StratumOutcome {
+        use crate::parameter_estimation::joint::slippage_curve::{CurveReach, PenalisedPoint};
+        use crate::parameter_estimation::joint::ssr_fit::{
+            SlippageErrors, StratumError, StratumErrors, StratumFit,
+        };
+        let point = PenalisedPoint {
+            strength: 20.0,
+            eased_here: false,
+        };
+        let on_the_curve = ShareProvenance {
+            source: ShareSource::PenalisedCurve(point),
+            curve: None,
+            reach: Some(CurveReach::Inside),
+        };
+        StratumOutcome::Fitted(Box::new(StratumFit {
+            stratum: FitStratum {
+                period: MOTIF.len() as u8,
+                reference_repeats: u64::from(repeat_count),
+            },
+            slippage: vec![Some(slippage_at(0, repeat_count))],
+            allele_length_variation: vec![0.1, 0.8, 0.1],
+            concentration: None,
+            standard_errors: Some(StratumErrors {
+                slippage: vec![Some(SlippageErrors {
+                    level: StratumError::Estimated(0.0043),
+                    shorter_share: StratumError::Estimated(0.021),
+                    fall_off: StratumError::TooFewLoci,
+                })],
+                allele_length_variation: vec![StratumError::TooFewLoci; 3],
+                concentration: StratumError::NotPlaced,
+            }),
+            samples_fitted_on: None,
+            tracts_of_its_own: 40,
+            reads_crossing: 400,
+            level_provenance: vec![Some(LevelProvenance {
+                source: LevelSource::PenalisedCurve(point),
+                curve: None,
+                reach: Some(CurveReach::Inside),
+                slipped_reads: Some(400.0),
+            })],
+            shares_provenance: vec![Some(SharesProvenance {
+                slipped_reads: Some(400.0),
+                shorter_share: on_the_curve,
+                fall_off: on_the_curve,
+            })],
+        }))
+    }
+
+    /// **The outcome the penalised fit produces reaches every calling lookup in one piece**,
+    /// through [`StratumFits::over`] and not hand-built past it: a match that does not know the
+    /// penalised sources, or a warrant or rung that regresses, fails here rather than in a run.
+    ///
+    /// At one sample no class has a concentration, so each class keeps its own shares at the
+    /// stated concentration, which is the constant and says it was defaulted; the slippage is the
+    /// class's own and its warrant is `FittedHere`. The errors the fit estimated beside the
+    /// penalised level and shorter share are kept, and the fall-off's, withheld, stays absent.
+    #[test]
+    fn the_penalised_fits_outcome_at_one_sample_reaches_every_calling_lookup() {
+        use crate::parameter_estimation::joint::stratum_fits::{
+            AlleleLengthVariationRung, OwnFitStandardErrors, STATED_FLAT_CONCENTRATION,
+        };
+        let fits = StratumFits::over(
+            &[
+                as_the_penalised_fit_returns_it(CANDIDATE_REPEATS[0]),
+                as_the_penalised_fit_returns_it(CANDIDATE_REPEATS[1]),
+            ],
+            one_group_each(1),
+        );
+        assert_eq!(fits.stated_concentration(), STATED_FLAT_CONCENTRATION);
+        assert_eq!(fits.stated_concentration_warrant(), Provenance::Defaulted);
+
+        let period = MOTIF.len() as u8;
+        for repeat_count in CANDIDATE_REPEATS {
+            let spectrum = fits.allele_length_variation_at(period, u64::from(repeat_count));
+            assert_eq!(
+                spectrum.rung(),
+                AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+            );
+            assert_eq!(spectrum.fitted_weights(), Some(&[0.1, 0.8, 0.1][..]));
+            assert_eq!(spectrum.concentration(), STATED_FLAT_CONCENTRATION);
+
+            let cell = fits
+                .at(ReadGroupId(0), period, u64::from(repeat_count))
+                .expect("the class was fitted for its one slippage group");
+            assert_eq!(cell.slippage, slippage_at(0, repeat_count));
+            assert!(matches!(cell.level.source, LevelSource::PenalisedCurve(_)));
+            assert_eq!(
+                cell.own_fit_standard_errors,
+                OwnFitStandardErrors {
+                    level: Some(0.0043),
+                    shorter_share: Some(0.021),
+                    fall_off: None,
+                }
+            );
+            assert_eq!(warrant_of(&cell), Provenance::FittedHere);
+        }
+
+        // And through the driver's own path: the prior's lookup, the slippage table, the row.
+        let bases = candidate_bases();
+        let alleles = candidates(&bases);
+        let rates = all_substitution_rates();
+        let calibration = vec![ReadGroupCalibration::defaulted()];
+        let inbreeding = outbred(1);
+        let parameters = run(&calibration, &inbreeding, &fits, &rates);
+        let prior = tract_prior(reference_repeats(), &parameters);
+        assert_eq!(
+            prior.allele_length_variation.rung(),
+            AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
+        );
+        let mut gathered = TractScoringFits::default();
+        gathered.gather_for_locus(motif(), &alleles, prior, &parameters);
+        let contexts = gathered.scoring_contexts(&alleles);
+        let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
+        for (candidate, repeat_count) in CANDIDATE_REPEATS.iter().copied().enumerate() {
+            let cell = locus.contexts.of(ReadGroupId(0), candidate);
+            assert_eq!(
+                *cell.stutter,
+                stutter_model_for(&slippage_at(0, repeat_count))
+            );
+        }
+        assert_eq!(gathered.cells_with_no_fitted_slippage(), 0);
+        assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
+    }
+
     /// **A substitution rate the fit did not measure here carries its own warrant through.**
     ///
     /// The pre-pass emits this rate as `FittedHere` or not at all today, so no run can reach
@@ -2651,8 +2857,8 @@ mod tests {
     fn a_run_of_one_library_is_gathered_like_any_other() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], 1, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -2699,8 +2905,8 @@ mod tests {
         // reported the right number.** The fit here names one of the run's three libraries and
         // holds one of the two candidates' strata, which gives **four** cells lost to an
         // unknown library against **one** lost to a stratum with no numbers.
-        let fits = StratumFits::over(
-            &[stratum_row(CANDIDATE_REPEATS[0], 1, |group| {
+        let fits = of_rows(
+            [stratum_row(CANDIDATE_REPEATS[0], 1, |group| {
                 fitted_level(400.0 + f64::from(group))
             })],
             one_group_each(1),
@@ -2745,7 +2951,7 @@ mod tests {
     /// contaminating read at a length no candidate carries falls to the outlier floor, which is
     /// where §4.5.1 puts it.
     ///
-    /// The fit behind this fixture carries no length spectrum, so the prior answers from the
+    /// The fit behind this fixture carries no allele length variation, so the prior answers from the
     /// ladder's bottom rung — a flat shape — and the two candidates take **half each**. A fit
     /// with a spectrum would divide it unevenly; what would not change is the width or the
     /// total.
@@ -2817,14 +3023,14 @@ mod tests {
     /// **A reference repeat count that is not the reference allele's is refused**, and this is
     /// the one mistake at a tract that would otherwise come back as a plausible number.
     ///
-    /// The prior's length spectrum is indexed by offset from the tract's *reference* length, so
+    /// The prior's allele length variation is indexed by offset from the tract's *reference* length, so
     /// a candidate's count passed in its place re-centres the whole shape on that candidate: the
     /// seed still sums to one, every genotype still gets a prior, and the locus is called under
     /// a belief about which lengths are common that the fit never expressed.
     /// `fill_seed_share_per_candidate`'s own documentation lists it among the mistakes nothing
     /// inside it can catch. Here the candidate table is in hand and it is catchable.
     #[test]
-    #[should_panic(expected = "re-centres the fitted length spectrum")]
+    #[should_panic(expected = "re-centres the fitted allele length variation")]
     fn a_reference_count_that_is_not_the_reference_alleles_is_refused() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);

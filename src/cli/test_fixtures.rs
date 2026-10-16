@@ -258,7 +258,7 @@ fn a_base_that_is_not(reference: u8) -> u8 {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0)
+    a_varying_cohort_built(false, 0, false)
 }
 
 /// **The same cohort with a sequencing error in about one read in four**, at an offset and to a base
@@ -272,7 +272,7 @@ pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
 /// error, and the tract's substitution count is no longer zero
 /// (`cli::cross_platform_digests`, plan `fit_precision.md`, checkpoint E).
 pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0)
+    a_varying_cohort_built(true, 0, false)
 }
 
 /// **The same, with `further_samples` samples beside the first two**, each read from one library
@@ -283,10 +283,25 @@ pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohor
 pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
     further_samples: usize,
 ) -> AVaryingCohort {
-    a_varying_cohort_built(true, further_samples)
+    a_varying_cohort_built(true, further_samples, false)
 }
 
-fn a_varying_cohort_built(with_sequencing_errors: bool, further_samples: usize) -> AVaryingCohort {
+/// **The cohort with sequencing errors, whose first sample's header lists its read groups in the
+/// reverse of their ID order**: `rg-one-b` before `rg-one-a`. Each read carries the same group as
+/// in [`a_varying_cohort_with_sequencing_errors_on_disk`]; only the header's order differs.
+///
+/// Every other fixture declares a sample's groups already in ID order, so no fit over them can
+/// tell a run that sorts a sample's read groups by declared ID from one that keeps the header's
+/// order. A walk numbers groups in header order, so this one gives `rg-one-b` the first number.
+pub(crate) fn a_varying_cohort_declaring_read_groups_out_of_order_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(true, 0, true)
+}
+
+fn a_varying_cohort_built(
+    with_sequencing_errors: bool,
+    further_samples: usize,
+    first_samples_header_reversed: bool,
+) -> AVaryingCohort {
     use crate::read::input::test_fixtures::{
         FixtureReadGroup, header_with_read_groups, indexed_named_bam,
     };
@@ -459,11 +474,16 @@ fn a_varying_cohort_built(with_sequencing_errors: bool, further_samples: usize) 
                    file: &str,
                    substitution: usize,
                    shortens_the_tract: bool,
-                   read_groups: &[String]| {
-        let declared: Vec<FixtureReadGroup<'_>> = read_groups
+                   read_groups: &[String],
+                   header_reversed: bool| {
+        // The header's order only; the reads are assigned from `read_groups` as given.
+        let mut declared: Vec<FixtureReadGroup<'_>> = read_groups
             .iter()
             .map(|id| FixtureReadGroup::new(id, Some(sample)))
             .collect();
+        if header_reversed {
+            declared.reverse();
+        }
         indexed_named_bam(
             &header_with_read_groups(Some("coordinate"), &[(name, length, None)], &declared),
             &reads_of(sample, substitution, shortens_the_tract, read_groups),
@@ -480,6 +500,7 @@ fn a_varying_cohort_built(with_sequencing_errors: bool, further_samples: usize) 
         FIRST_SAMPLES_SUBSTITUTION,
         true,
         &first_groups,
+        first_samples_header_reversed,
     );
     let (second, second_bam) = file_of(
         "two",
@@ -487,6 +508,7 @@ fn a_varying_cohort_built(with_sequencing_errors: bool, further_samples: usize) 
         SECOND_SAMPLES_SUBSTITUTION,
         false,
         &second_groups,
+        false,
     );
 
     let mut samples = vec!["one".to_owned(), "two".to_owned()];
@@ -512,6 +534,7 @@ fn a_varying_cohort_built(with_sequencing_errors: bool, further_samples: usize) 
             site,
             false,
             &[format!("rg-{sample}")],
+            false,
         );
         samples.push(sample);
         alignments.push(bam);

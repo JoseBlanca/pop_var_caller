@@ -774,6 +774,26 @@ nothing to buy* ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.
 
 ### 6.2 The file is read in sections, because the parameters fit is — DECIDED 2026-08-13
 
+> **Amended, 2026-10-16: a repeat-tract stratum is no longer fitted on its own.** This section's
+> second fact, and its reason for lending a *band* of strata, describe the fit that ran when it was
+> decided: each stratum fitted alone by an alternating climb, the thin ones borrowing from their
+> neighbouring repeat counts. Penalised expectation maximisation (EM),
+> [`str_penalised_fit.md`](str_penalised_fit.md), replaced that fit, and commit `3198d55d` deleted
+> the climb. The new fit fits every stratum of one motif length together, because each number it
+> estimates is a smoothed curve along the reference repeat count (its §2.2), and nothing borrows. So
+> within one motif length more than sums crosses strata: the fit needs all of that length's strata at
+> once. Strata of different motif lengths are still fitted independently. The run today gathers every
+> stratum's evidence before it fits; reading one motif length at a time is deferred
+> (`str_penalised_fit.md` §6).
+>
+> **Still true:** the layout — a directory of byte extents, the generic records per read group and the
+> tracts per (read group × stratum); the first fact, that the generic half is fitted first and can be
+> dropped before any tract is read; a section lent for the length of a call and never returned; and
+> what §6.3 asks of the file and the reader. **Changed:** the unit a fit reading by section would ask
+> for is one motif length's strata, not a band of three; and the new fit runs one motif length at a
+> time with its threads inside a stratum (its §2.2), not a worker per band as §6.3 imagines. The
+> per-stratum cap's floor below was measured on strata fitted alone; the new spec does not revisit it.
+
 **Decision (owner): the file is laid out so that the generic half and each repeat-tract stratum can be
 read on their own, and the reader decodes only what it is asked for.** Nothing about a records file
 should require a program to hold a whole sample's evidence to use any of it.

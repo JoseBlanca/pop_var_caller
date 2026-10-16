@@ -1,5 +1,17 @@
 # ng — the slippage level as a curve across repeat count: implementation plan
 
+> **Replaced, 2026-10-16.** What this plan built — curves drawn through per-cell climb answers, and
+> each cell blended with its curve — was replaced by penalised expectation maximisation (EM),
+> [`../spec/str_penalised_fit.md`](../spec/str_penalised_fit.md), built under
+> [`str_penalised_fit.md`](str_penalised_fit.md). Commit `3198d55d` deleted the climb, the curve
+> drawing after it, the share curves' blend, the borrowing it narrowed (B4) and the walk's cell table;
+> the links below to that code now name the commit. Kept, so that parameters files this plan's code
+> wrote still load and call as before: the curve types and their provenance in the file. The code
+> that fitted the curves and blended each cell with them, kept at first for its own tests, was
+> deleted on 2026-10-16 with the tests that read the real-cell tables (`tests/*_on_real_cells.rs`)
+> and the tables themselves (`tests/data/slippage_cells/`). The steps stay as the record of how the
+> curves were built and measured.
+
 **Status:** draft, 2026-08-20. The build order for the design settled in
 [`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md): the slippage level
 stops being an independent per-cell number that thin cells borrow, and becomes a curve in repeat
@@ -71,7 +83,7 @@ architecture sibling.
   ([`ssr_fit.rs:169`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L169)).
 - **The walk writes a per-cell table** under `SSR_CELL_TABLE`, and a second one under
   `SSR_CELL_TABLE_BORROWED`
-  ([`ng_joint_records_walk.rs`](../../../../examples/ng_joint_records_walk.rs)).
+  (`examples/ng_joint_records_walk.rs`; its repeat-tract half and both tables deleted in commit `3198d55d`).
 - **Both cohorts' independent-fit tables exist** and are the parity oracle:
   `tmp/slippage_curve/tomato_a1_noborrow.csv` (6 fitted cells) and
   `hg002_a1_noborrow.csv` (55 fitted cells). **A5 copies them under `tests/data/` so the oracle
@@ -158,7 +170,7 @@ with the curve disabled by config, both cohorts' cell tables must come back iden
 
 **B4. Narrow borrowing to the two shares.**  ✅
 `borrow_up_to_the_floor`
-([`ssr_fit.rs:711`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711)) stops
+(`ssr_fit.rs:711`, deleted in commit `3198d55d`) stops
 supplying the level and keeps supplying the direction split and the fall-off, as
 [`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) §4.5 already specifies.
 **Leave the pooled-set dedup in place** — with borrowing off every set is a singleton and it looks
@@ -286,7 +298,8 @@ precision. **Gated on spec §11's open question** — fit drawn strata down to a
 first and report how often the climb converges and how often the level returns exactly zero. If
 that measurement says the thin fits are unusable, this step does not happen and the floor stays.
 ***Depends:*** E3. ***Source:*** spec §5.1, §11.
-***The gate measurement, and what it settled*** ([`examples/ng_ssr_thin_stratum_gate.rs`](../../../../examples/ng_ssr_thin_stratum_gate.rs),
+***The gate measurement, and what it settled*** (`examples/ng_ssr_thin_stratum_gate.rs`, deleted
+with the climb on 2026-10-16 and still in git history,
 30 drawn strata a row at both ends of the range): the level comes back below a tenth of the truth
 in **27%** of a single deep sample's 3-tract fits and **20%** of its 5-tract ones, against **3%**
 at 8 tracts and none from 12 up; on a 63-sample cohort at three reads it collapses in 3% of
