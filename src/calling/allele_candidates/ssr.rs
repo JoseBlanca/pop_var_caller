@@ -1782,15 +1782,24 @@ pub fn select_ssr_bundle(
         .collect();
     run_count_vectors.sort_unstable();
     run_count_vectors.dedup();
-    let key_of = |table_index: u32| -> u32 {
-        let counts: Vec<u32> = parses[table_index as usize].copies().collect();
-        run_count_vectors
-            .binary_search_by(|vector| (**vector).cmp(&counts[..]))
-            .expect("every allele's run counts are among the vectors numbered") as u32
-    };
+    // Each allele's rung key, its vector's place in that numbering, looked up once: the ladder's
+    // sort asks for an allele's key at every comparison it makes.
+    let rung_keys: Vec<u32> = parses
+        .iter()
+        .map(|parse| {
+            run_count_vectors
+                .binary_search_by(|vector| vector.iter().copied().cmp(parse.copies()))
+                .expect("every allele's run counts are among the vectors numbered")
+                as u32
+        })
+        .collect();
 
     summarise_alleles(observation, config.shared.min_allele_support, scratch);
-    build_ladder_keyed(observation, key_of, scratch);
+    build_ladder_keyed(
+        observation,
+        |table_index| rung_keys[table_index as usize],
+        scratch,
+    );
     promote_rungs_for_cohort_by(
         observation,
         config,

@@ -202,6 +202,30 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-10-15 — a mechanism stated for one input format as if it held for all, in a decision paragraph
+
+Asking the owner to keep a change that shares one BAM reader between STR segments and bundles:
+
+> ❌ "today the bundle code opens its own reader on each BAM, which decompresses every record a
+> third time."
+>
+> Owner: *"does the str and generic callers already share a cursor? … I thought we had a cache
+> to avoid that."*
+
+True for BAM, and the measurements were all BAM, but the reply never said that the CRAM path
+already shares decoded blocks between a sample's readers. That cache is the one fact the owner
+needed to see a third option, giving BAM the same cache, which would remove both the bundles'
+extra pass and the second pass the STR and generic paths already make. The reader recalled a
+mechanism the reply's claim seemed to contradict, and had to ask instead of decide.
+
+> ✅ "On BAM input, yes: each of a sample's readers decompresses the file itself. CRAM input
+> already avoids this, with one cache of decoded blocks per file that every reader shares; BAM
+> has no such cache."
+
+**The check:** when a claim's measurements come from one input kind (BAM, one cohort, one
+depth), say so in the claim, and name what is different for the other kinds. That is the same
+rule as quoting which benchmark a figure was measured on (CLAUDE.md), applied to mechanisms.
+
 ### 2026-10-04 — a recommendation about a knob that never said what the knob is, and a table of unexplained percentages
 
 Recommending a new default for `--max-cohort-locus-span` after a tomato measurement:

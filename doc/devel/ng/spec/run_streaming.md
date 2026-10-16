@@ -564,7 +564,10 @@ genome order.
 **What it holds for the whole run:** one open `SampleReads` per sample — about 11 to 15 MiB of
 live heap per open alignment file (measured slope 12.0 MiB per file, 10.8 under a different
 allocator — [`examples/dhat_ng_open_files.rs`](../../../../examples/dhat_ng_open_files.rs)) —
-plus the shared read-only state (§9).
+plus the shared read-only state (§9). *(2026-10-15: that slope was measured on CRAM. An open BAM
+now holds a cache of up to 32 inflated BGZF blocks, at most 2 MiB, which it fills within its first
+few dozen blocks of walking — so 2 GiB across a thousand BAMs, against about 0.4 GiB for the
+per-cursor block buffers it replaced; `aligned_reads_reader/bgzf_blocks.rs`.)*
 
 **How it parallelises:** the merge runs on one thread and its cohort loci go to a pool of callers
 (§3.5). Every sample's walker advances at the merge frontier, in one place; the walkers are not a

@@ -1411,8 +1411,9 @@ mod tests {
     /// one can actually fail.
     ///
     /// It falsifies any sharing of a file position, a record buffer or a reference reader
-    /// between two live cursors on one file: each opens its own descriptor and owns its own
-    /// accessor, which is exactly what the parallel fan-out will rely on. The threaded case
+    /// between two live cursors on one file: each keeps its own place in the file and owns its
+    /// own accessor, which is exactly what the parallel fan-out will rely on. (What two BAM
+    /// cursors do share is the file's inflated blocks, which carry no position.) The threaded case
     /// is covered at the file level
     /// (`open_bam::tests::cursors_on_one_file_read_the_same_thing_from_many_threads`); this
     /// is the single-threaded interleaving.

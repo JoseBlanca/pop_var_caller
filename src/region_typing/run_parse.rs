@@ -113,6 +113,7 @@ struct Template {
 }
 
 impl Template {
+    /// The start state alone, which no edge reaches.
     fn new() -> Self {
         Self {
             edges_into: vec![Vec::new()],
@@ -121,8 +122,12 @@ impl Template {
         }
     }
 
+    fn states(&self) -> usize {
+        self.edges_into.len()
+    }
+
     fn last_state(&self) -> u32 {
-        (self.edges_into.len() - 1) as u32
+        (self.states() - 1) as u32
     }
 
     /// A new state reached from `from` by spelling `base`.
@@ -136,8 +141,8 @@ impl Template {
     }
 }
 
-/// Build the template of `hull`'s fixed pieces and `runs`, allowing each run up to `most_copies`
-/// whole copies.
+/// Build the template of `hull`'s fixed pieces and `runs`, allowing each run as many whole copies
+/// as an allele of `allele_len` bases could use.
 fn build_template(hull: &[u8], runs: &[ReferenceRun], allele_len: usize) -> Template {
     let mut template = Template::new();
     let mut at = 0u32;
@@ -200,9 +205,33 @@ fn build_template(hull: &[u8], runs: &[ReferenceRun], allele_len: usize) -> Temp
     template
 }
 
-/// What the alignment keeps per cell: edited bases, then distance of the counts from the
-/// reference's, compared in that order.
-type Cost = (u32, u32);
+/// What the alignment keeps per cell: edited bases in the high 32 bits, distance of the counts
+/// from the reference's in the low 32, so comparing two costs as integers compares edited bases
+/// first and distance second.
+///
+/// Neither half can carry into the other: a parse edits at most every allele base and every
+/// template state, and its distance is at most the sum over runs of the most copies a run allows —
+/// each a few hundred for a 100-base hull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Cost(u64);
+
+impl Cost {
+    const NOTHING: Cost = Cost(0);
+    /// Worse than every cost a cell can have: what a cell holds before any move is offered.
+    const UNREACHED: Cost = Cost(u64::MAX);
+
+    fn plus_edits(self, edits: u32) -> Cost {
+        Cost(self.0 + (u64::from(edits) << 32))
+    }
+
+    fn plus_distance(self, distance: u32) -> Cost {
+        Cost(self.0 + u64::from(distance))
+    }
+
+    fn edited_bases(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+}
 
 /// How a cell was reached, for the walk back.
 #[derive(Debug, Clone, Copy)]
@@ -244,17 +273,35 @@ pub fn parse_into_runs(allele: &[u8], hull: &[u8], runs: &[ReferenceRun]) -> Run
         };
     }
     let template = build_template(hull, runs, allele.len());
-    let states = template.edges_into.len();
-    let columns = allele.len() + 1;
-    let mut cost: Vec<Cost> = vec![(u32::MAX, u32::MAX); states * columns];
-    let mut how: Vec<Move> = vec![Move::Start; states * columns];
-    let cell = |state: usize, column: usize| state * columns + column;
-    cost[cell(0, 0)] = (0, 0);
+    let (edited_bases, moves) = align(allele, &template);
+    RunParse {
+        runs: walk_back(&template, &moves, allele.len(), runs.len()),
+        edited_bases,
+    }
+}
 
-    for column in 0..columns {
+/// Align `allele` against `template`, one allele position after another: the edited bases of the
+/// best parse, and how each cell was reached — every state at one allele position together, so
+/// the cell of `state` at `column` is `moves[column × states + state]`.
+///
+/// Only two columns of costs are kept, the one being filled and the one before: every move reads
+/// one of those, and the walk back reads only the moves.
+///
+/// Every cell is reached: state 0 by inserting each allele base, every later state from an earlier
+/// one at the same position by a deletion or an exit. So no cell a move reads is ever unreached.
+fn align(allele: &[u8], template: &Template) -> (u32, Vec<Move>) {
+    let states = template.states();
+    let mut moves = Vec::with_capacity(states * (allele.len() + 1));
+    let mut previous_costs: Vec<Cost> = Vec::with_capacity(states);
+    let mut current_costs: Vec<Cost> = Vec::with_capacity(states);
+    for column in 0..=allele.len() {
+        current_costs.clear();
         for state in 0..states {
-            let mut best = cost[cell(state, column)];
-            let mut best_move = how[cell(state, column)];
+            let (mut best, mut best_move) = if column == 0 && state == 0 {
+                (Cost::NOTHING, Move::Start)
+            } else {
+                (Cost::UNREACHED, Move::Start)
+            };
             let mut offer = |candidate: Cost, candidate_move: Move| {
                 if candidate < best {
                     best = candidate;
@@ -262,59 +309,63 @@ pub fn parse_into_runs(allele: &[u8], hull: &[u8], runs: &[ReferenceRun]) -> Run
                 }
             };
             for (index, edge) in template.edges_into[state].iter().enumerate() {
+                let index = index as u32;
                 let from = edge.from as usize;
                 match edge.base {
                     Some(base) => {
                         if column > 0 {
-                            let (edits, distance) = cost[cell(from, column - 1)];
-                            if edits != u32::MAX {
-                                let mismatch = u32::from(allele[column - 1] != base);
-                                offer((edits + mismatch, distance), Move::Spelled(index as u32));
-                            }
+                            let mismatch = u32::from(allele[column - 1] != base);
+                            offer(
+                                previous_costs[from].plus_edits(mismatch),
+                                Move::Spelled(index),
+                            );
                         }
-                        let (edits, distance) = cost[cell(from, column)];
-                        if edits != u32::MAX {
-                            offer((edits + 1, distance), Move::Deleted(index as u32));
-                        }
+                        offer(current_costs[from].plus_edits(1), Move::Deleted(index));
                     }
                     None => {
-                        let (edits, distance) = cost[cell(from, column)];
-                        if edits != u32::MAX {
-                            let added = edge.exit.map_or(0, |exit| exit.distance_from_reference);
-                            offer((edits, distance + added), Move::Exited(index as u32));
-                        }
+                        let added = edge.exit.map_or(0, |exit| exit.distance_from_reference);
+                        offer(
+                            current_costs[from].plus_distance(added),
+                            Move::Exited(index),
+                        );
                     }
                 }
             }
             if column > 0 {
-                let (edits, distance) = cost[cell(state, column - 1)];
-                if edits != u32::MAX {
-                    offer((edits + 1, distance), Move::Inserted);
-                }
+                offer(previous_costs[state].plus_edits(1), Move::Inserted);
             }
-            cost[cell(state, column)] = best;
-            how[cell(state, column)] = best_move;
+            current_costs.push(best);
+            moves.push(best_move);
         }
+        std::mem::swap(&mut previous_costs, &mut current_costs);
     }
+    (previous_costs[states - 1].edited_bases(), moves)
+}
 
-    // Walk back from the last state at the allele's end, noting each run's count and the
-    // allele positions at which the walk stood on each run's entry and exit states.
+/// Walk back from the last state at the allele's end, noting each run's count and the allele
+/// positions at which the walk stood on each run's entry and exit states.
+fn walk_back(
+    template: &Template,
+    moves: &[Move],
+    allele_len: usize,
+    run_count: usize,
+) -> Box<[RunInAllele]> {
+    let states = template.states();
     let mut placed = vec![
         RunInAllele {
             start: 0,
             end: 0,
             copies: 0,
         };
-        runs.len()
+        run_count
     ];
     let mut first_column_at = vec![u32::MAX; states];
     let mut last_column_at = vec![0u32; states];
-    let (mut state, mut column) = (states - 1, allele.len());
-    let edited_bases = cost[cell(state, column)].0;
+    let (mut state, mut column) = (states - 1, allele_len);
     loop {
         first_column_at[state] = first_column_at[state].min(column as u32);
         last_column_at[state] = last_column_at[state].max(column as u32);
-        match how[cell(state, column)] {
+        match moves[column * states + state] {
             Move::Start => break,
             Move::Inserted => column -= 1,
             Move::Spelled(index) => {
@@ -343,10 +394,7 @@ pub fn parse_into_runs(allele: &[u8], hull: &[u8], runs: &[ReferenceRun]) -> Run
         };
         placed[run].end = last_column_at[exit as usize];
     }
-    RunParse {
-        runs: placed.into_boxed_slice(),
-        edited_bases,
-    }
+    placed.into_boxed_slice()
 }
 
 /// Edited bases between two sequences: substitutions, insertions and deletions, one each.

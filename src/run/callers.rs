@@ -2128,6 +2128,12 @@ pub(super) fn refuse_parameters_assembled_for_another_cohort(
 ///   file's own reader, and one for the reference reader [`AlignmentFile::cursor`] mints for the
 ///   mismatch filter, which opens the FASTA. A run holds one cursor per file for the whole walk
 ///   (spec §5.1), so this is the shape the refusal has to size for.
+/// - *(2026-10-15, arithmetic, not re-measured.)* A BAM's own descriptor has moved from the
+///   cursor to the open file: [`AlignmentFile::open`] opens it once, and every cursor on the
+///   file inflates through it, by way of one shared block cache
+///   (`aligned_reads_reader/bgzf_blocks.rs`). So the first bullet no longer holds for a BAM —
+///   an open BAM keeps one handle — but the total is still 2 a file with one cursor, and each
+///   cursor beyond the first now costs one descriptor rather than two.
 ///
 /// **Milestone E can move it**: spec §11's question 2 puts several callers in flight, and nobody
 /// has counted what that opens. Re-run the probe there.

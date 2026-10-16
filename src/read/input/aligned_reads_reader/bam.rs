@@ -1,6 +1,5 @@
 //! Records from a BAM: the index says where to start, and reading carries on from there.
 
-use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +14,8 @@ use crate::bam::index_preflight::AlignmentIndex;
 use crate::read::aligned_read::NoodlesRawAlignedRead;
 use crate::read::input::AlignmentFileError;
 use crate::types::GenomeRegion;
+
+use super::bgzf_blocks::{SharedBgzfBlocks, SharedBgzfReader};
 
 /// A BAM reader that stays where it is between regions.
 ///
@@ -38,8 +39,13 @@ use crate::types::GenomeRegion;
 /// with are scanned in order. On a coordinate-sorted file that costs almost nothing extra: a
 /// contig's records are contiguous, so the bins covering a suffix merge into a short run of
 /// chunks rather than one per region.
+///
+/// **Its blocks are the file's, not its own.** It reads through a [`SharedBgzfReader`], which
+/// keeps this reader's place but takes each inflated block from the [`SharedBgzfBlocks`] every
+/// reader of the file shares — so a block another reader of the same sample has just passed
+/// through is not inflated again.
 pub(crate) struct BamAlignedReadsReader {
-    reader: bam::io::Reader<bgzf::io::Reader<File>>,
+    reader: bam::io::Reader<SharedBgzfReader>,
     /// Parsed once at open and shared, never re-read per region.
     header: Arc<sam::Header>,
     /// Also parsed once at open. Every variant is an `Arc` inside, so holding one here is a
@@ -69,14 +75,19 @@ impl std::fmt::Debug for BamAlignedReadsReader {
 }
 
 impl BamAlignedReadsReader {
+    /// A reader over `blocks`, positioned nowhere until the first
+    /// [`begin_region`](Self::begin_region).
+    ///
+    /// **No header is read here.** Every read starts at a seek to a position the index names,
+    /// and the header was parsed once, when the file was opened, and is shared as `header`.
     pub(crate) fn new(
-        reader: bam::io::Reader<bgzf::io::Reader<File>>,
+        blocks: Arc<SharedBgzfBlocks>,
         header: Arc<sam::Header>,
         index: AlignmentIndex,
         path: Arc<Path>,
     ) -> Self {
         Self {
-            reader,
+            reader: bam::io::Reader::from(SharedBgzfReader::new(blocks)),
             header,
             index,
             path,
@@ -257,12 +268,8 @@ mod tests {
     }
 
     fn reader_over(path: &std::path::Path, header: &sam::Header) -> BamAlignedReadsReader {
-        let mut reader = bam::io::reader::Builder
-            .build_from_path(path)
-            .expect("open bam");
-        reader.read_header().expect("read header");
         BamAlignedReadsReader::new(
-            reader,
+            Arc::new(SharedBgzfBlocks::open(path).expect("open bam")),
             Arc::new(header.clone()),
             load_alignment_index(path).expect("the fixture is indexed"),
             Arc::from(path),
