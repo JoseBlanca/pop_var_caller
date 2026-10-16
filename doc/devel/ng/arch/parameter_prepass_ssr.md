@@ -5,6 +5,15 @@
 > which moved to `parameter_estimation::repeat_strata`. The cohort fit that replaced it is
 > `joint::ssr_fit`. See
 > [`impl_plan/remove_histogram_route.md`](../impl_plan/remove_histogram_route.md).
+>
+> **And replaced in turn, 2026-10-16.** The cohort fit the note above points to — each stratum fitted
+> on its own by the spec's §4.2 alternating climb, then blended with curves across repeat count as
+> §4.1's 2026-08-20 note below describes — was replaced by penalised expectation maximisation (EM),
+> [`../spec/str_penalised_fit.md`](../spec/str_penalised_fit.md), with what it hands calling in
+> [`../spec/str_fit_to_calling.md`](../spec/str_fit_to_calling.md). Commit `3198d55d` deleted the
+> climb and the curve drawing after it. **Still true:** the stratum vocabulary
+> (`parameter_estimation::repeat_strata`), which the new fit groups loci by. Nothing else here
+> describes code that runs.
 
 
 *Status: architecture draft (2026-08-06, revised 2026-08-09 for spec §4.5 — the second floor on

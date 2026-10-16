@@ -8,6 +8,26 @@ curves across repeat count only in what they are fitted to
 ([`read_likelihoods.md`](read_likelihoods.md) §4.4) and the parameters file
 ([`parameters_file.md`](parameters_file.md), format version 3).
 
+> **The fit this design sits on was replaced, 2026-10-16; the design waits to be rebuilt on its
+> successor.** §3 is written around the climb: each repeat class fitted on its own by an alternating
+> climb, restarted from its last answer every round (§3.1); a sample's genotype taken from that
+> climb's likelihood, `ln_tract` (§3.2); a class read from a subset of samples (§3.5); and the curves
+> drawn through the classes' answers, then blended with them (§3.6). Penalised expectation
+> maximisation (EM), [`str_penalised_fit.md`](str_penalised_fit.md), replaced that fit; it fits
+> every class of one motif length together with each number a smoothed curve along the repeat count,
+> and has no subsets and no blend. Commit `3198d55d` deleted the climb, `ln_tract`, the subsets, the
+> blend and this design's prototype (`ssr_fit/library_stutter.rs`). The new spec defers library
+> multipliers to this document, to be rebuilt on the new fit (its §1.4 and §6).
+>
+> **Still true:** the problem and its measurements (§1.1), the owner's three decisions (§1.3), the
+> model — a library's level is its class rate times its multiplier, scaled so the multipliers'
+> weighted geometric mean is one (§2) — the pull toward one (§3.3), and how calling uses a
+> multiplier (§4). **Still in the code:** each read group kept apart as a library in the evidence, at
+> a multiplier of one (`gather_strata`), and `library_level` with its ceiling. **No longer right:**
+> §3.1, §3.2's source of the genotype, §3.5 and §3.6, which name code that is gone; and §5's format
+> version, since version 3 of the parameters file was taken by the new fit's companion,
+> [`str_fit_to_calling.md`](str_fit_to_calling.md), without this table.
+
 ---
 
 ## 1. What this is

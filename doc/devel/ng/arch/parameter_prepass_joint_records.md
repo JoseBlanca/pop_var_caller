@@ -449,6 +449,16 @@ impl CohortCensusEvidence {
 }
 ```
 
+> **Amended, 2026-10-16: the band's reason below is gone; the interface stays.** The paragraph
+> explains the band by the fit that ran in 2026-08: each stratum fitted alone by an alternating climb,
+> the thin ones borrowing from neighbouring repeat counts. Penalised expectation maximisation (EM),
+> [`../spec/str_penalised_fit.md`](../spec/str_penalised_fit.md), replaced that fit, and commit
+> `3198d55d` deleted the climb. The new fit fits every stratum of one motif length together (its
+> §2.2), so the band it would ask for is one motif length's strata, not a stratum and its neighbours.
+> `with_strata` taking a slice of strata serves that unchanged. The run today gathers every stratum's
+> evidence before fitting; reading one motif length at a time is deferred (the new spec's §6). The
+> contract, the memory arithmetic and the per-stratum storage below still hold.
+
 **Why a band and not one stratum.** Of tomato's 141 strata, 68 hold fewer than a hundred tracts each
 and are fitted by borrowing from their neighbouring repeat counts rather than alone
 ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3.6), so the fit will sometimes
