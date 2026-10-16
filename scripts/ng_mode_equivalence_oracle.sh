@@ -64,9 +64,13 @@ echo "=== direct mode ==="
 NG_WINDOW_COVERAGE_FILE="$out/from_alignments.windows" "$bin" call-from-alignments \
   --reference "$reference" --catalog "$catalog" $alignments \
   --regions "$regions" \
-  --defaults --threads 4 --output "$out/run.vcf" > "$out/alignments.log" 2>&1
+  --defaults --threads 4 --output "$out/run.vcf" --force --log "$out/alignments.pvc.log" \
+  > "$out/alignments.log" 2>&1
 mv "$out/run.vcf" "$out/from_alignments.vcf"
-mv "$out/run.parameters.toml" "$out/from_alignments.parameters.toml"
+# **The numbers each run scored with are in its log**, as a parameters file between two marker
+# lines (doc/devel/ng/spec/command_line.md §7.3); the markers are TOML comments, so the range is
+# a parameters file as it stands.
+sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/alignments.pvc.log" > "$out/from_alignments.parameters.toml"
 
 echo "=== the walk, stored ==="
 # shellcheck disable=SC2086
@@ -86,9 +90,10 @@ done
 # shellcheck disable=SC2086
 NG_WINDOW_COVERAGE_FILE="$out/from_psps.windows" "$bin" call-from-psps \
   --reference "$reference" --catalog "$catalog" $stored \
-  --defaults --threads 4 --output "$out/run.vcf" > "$out/psps.log" 2>&1
+  --defaults --threads 4 --output "$out/run.vcf" --force --log "$out/psps.pvc.log" \
+  > "$out/psps.log" 2>&1
 mv "$out/run.vcf" "$out/from_psps.vcf"
-mv "$out/run.parameters.toml" "$out/from_psps.parameters.toml"
+sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/psps.pvc.log" > "$out/from_psps.parameters.toml"
 
 echo "=== the comparison ==="
 # **`##commandline` is the one line that cannot match and must not**: it records which command

@@ -6391,7 +6391,8 @@ mod records_handed_over_as_the_run_finishes_them {
             sample_names.clone(),
             "pvc call-from-alignments".to_owned(),
             "reference.fa".to_owned(),
-            String::new(),
+            "pvc_calls.log".to_owned(),
+            "defaults".to_owned(),
         )
         .expect("a header this run can state");
 
@@ -6625,7 +6626,8 @@ mod records_handed_over_as_the_run_finishes_them {
                 sample_names,
                 "pvc call-from-alignments".to_owned(),
                 "reference.fa".to_owned(),
-                String::new(),
+                "pvc_calls.log".to_owned(),
+                "defaults".to_owned(),
             )
             .expect("a header this run can state");
             let out = tempfile::tempdir().expect("a temporary directory");

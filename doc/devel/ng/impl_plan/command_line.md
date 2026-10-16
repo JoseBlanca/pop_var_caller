@@ -124,6 +124,22 @@ Spec §7 opening, §7.3 and §7.6.
 - Logs for the other user subcommands: `pvc_call_parameters.log`, `<sample>.psp.log`,
   `<catalogue>.log`.
 
+**Calling part done (2026-10-16).** `run_output::open_log` returns a handle to the run's own file,
+which `record_parameters` writes the block through — so tests running in parallel, which share
+the global log slot, never write into each other's logs. The block is written at startup, before
+a read is decoded; `close_log(exit_status)` ends every log with the status, the elapsed time and
+`VmHWM` (Linux; "not measured" elsewhere). `##parametersFile` became `##pvcLog` and
+`##pvcParameters` (`defaults`, or the file's name and MD5); `##source` reads `pvc <version>` —
+**no commit**: a build script recording it recompiles the whole crate at every commit. The
+module that wrote the file beside the VCF is deleted, with the refusal that protected it and its
+seven tests; the tests that reused a run's file read the block out of its log instead, and one new
+test passes a run's logged block back with `--parameters` and gets the same VCF. The scripts that
+moved `run.parameters.toml` copy the block out of the log (`sed` between the markers, which are
+TOML comments). Checked on four tomato1 accessions over three regions against `main` at 51b7be99:
+both modes' records are identical, and each log's block is byte-identical to the file `main`
+writes. The three VCF checksums are re-recorded: putting `##source=ng` and `##parametersFile` back
+reproduces the old ones.
+
 ## Step 4 — `--output -` and `--tmp-dir` (now, after step 1)
 
 Spec §7.4 and §7.5.

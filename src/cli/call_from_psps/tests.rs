@@ -242,16 +242,17 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
 /// wiring from being proved only in pieces: direct mode's own review measured that gap and
 /// found nine of fourteen mutations survived while every test called the helpers directly.
 #[test]
-fn the_command_writes_a_vcf_and_the_parameters_beside_it() {
+fn the_command_writes_a_vcf_and_logs_its_parameters() {
     let (_cohort, args) = a_cohort_of_psps();
 
     run_call_from_psps(&args).expect("a cohort of stored samples calls");
 
     assert!(args.output.is_file(), "the VCF is at {:?}", args.output);
-    let parameters = beside_the_vcf(&args.output);
+    let parameters =
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref());
     assert!(
         parameters.is_file(),
-        "the parameters file is at {parameters:?}",
+        "the run's log holds its parameters, copied out to {parameters:?}",
     );
     let vcf = std::fs::read_to_string(&args.output).expect("the VCF reads");
     let columns = vcf
@@ -427,26 +428,6 @@ fn an_output_in_a_missing_directory_is_refused_by_the_command() {
     );
 }
 
-/// **A run may not write its parameters file over the one it was handed** (spec §7 invites the
-/// collision: copy the file your run wrote, change a line, re-run). What it would destroy is
-/// the edit, and the numbers that came back would look ordinary.
-#[test]
-fn a_run_whose_output_would_overwrite_its_own_parameters_file_is_refused_by_the_command() {
-    let (_cohort, mut args) = a_cohort_of_psps();
-    run_call_from_psps(&args).expect("the first run writes both files");
-
-    args.parameters = Some(beside_the_vcf(&args.output));
-    args.defaults = false;
-
-    let refused = run_call_from_psps(&args).expect_err("this run would write over its own input");
-
-    let rendered = crate::error_render::format_error_chain(&refused);
-    assert!(
-        rendered.contains("calls.parameters.toml"),
-        "the message names the file that would be lost, and got: {rendered}",
-    );
-}
-
 /// **A `--ploidy` that disagrees with the parameters file is refused** — a file's numbers were
 /// fitted at one ploidy and mean nothing at another, so a run that wants the other number wants
 /// a different fit. Provoked through the command, because the flag has to reach the check.
@@ -457,7 +438,11 @@ fn a_ploidy_that_is_not_the_parameters_files_is_refused_by_the_command() {
 
     // The file the first run wrote, moved out of the way so the second run may read it.
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
-    std::fs::rename(beside_the_vcf(&args.output), &supplied).expect("the file moves");
+    std::fs::rename(
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref()),
+        &supplied,
+    )
+    .expect("the file moves");
     args.parameters = Some(supplied);
     args.defaults = false;
     args.ploidy = Some(4);
@@ -480,7 +465,11 @@ fn the_parameters_a_previous_run_wrote_bind_to_this_cohort() {
     let (cohort, mut args) = a_cohort_of_psps();
     run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
-    std::fs::rename(beside_the_vcf(&args.output), &supplied).expect("the file moves");
+    std::fs::rename(
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref()),
+        &supplied,
+    )
+    .expect("the file moves");
 
     args.parameters = Some(supplied);
     args.defaults = false;
@@ -496,7 +485,11 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
     let (cohort, mut args) = a_cohort_of_psps();
     run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
-    std::fs::rename(beside_the_vcf(&args.output), &supplied).expect("the file moves");
+    std::fs::rename(
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref()),
+        &supplied,
+    )
+    .expect("the file moves");
     let text = std::fs::read_to_string(&supplied).expect("the file reads");
     std::fs::write(&supplied, text.replace("zeta", "someone-else")).expect("the file rewrites");
 
@@ -602,7 +595,11 @@ fn a_run_writes_back_the_starts_its_file_carried() {
     run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
     let mut file = ParametersFile::from_toml(
-        &std::fs::read_to_string(beside_the_vcf(&args.output)).expect("the run wrote its file"),
+        &std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+            &args.output,
+            args.log.as_deref(),
+        ))
+        .expect("the run wrote its file"),
     )
     .expect("and it parses");
     assert_eq!(
@@ -625,12 +622,20 @@ fn a_run_writes_back_the_starts_its_file_carried() {
     ];
     file.fitted_from.snp_indel_fit_starts = Some(starts.clone());
     std::fs::write(&supplied, file.to_toml()).expect("the supplied file is written");
-    std::fs::remove_file(beside_the_vcf(&args.output)).expect("the first run's file is removed");
+    std::fs::remove_file(crate::cli::calling_run::parameters_the_run_logged(
+        &args.output,
+        args.log.as_deref(),
+    ))
+    .expect("the first run's file is removed");
     args.parameters = Some(supplied);
     args.defaults = false;
     run_call_from_psps(&args).expect("a run handed its own kind of file binds it");
     let written = ParametersFile::from_toml(
-        &std::fs::read_to_string(beside_the_vcf(&args.output)).expect("the run wrote its file"),
+        &std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+            &args.output,
+            args.log.as_deref(),
+        ))
+        .expect("the run wrote its file"),
     )
     .expect("and it parses");
     assert_eq!(written.fitted_from.snp_indel_fit_starts, Some(starts));
@@ -659,9 +664,7 @@ fn explaining_loci_writes_the_explanation_and_the_same_vcf() {
 
     let comparable = |vcf: &str| -> Vec<String> {
         vcf.lines()
-            .filter(|line| {
-                !line.starts_with("##commandline") && !line.starts_with("##parametersFile")
-            })
+            .filter(|line| !line.starts_with("##commandline") && !line.starts_with("##pvcLog"))
             .map(str::to_owned)
             .collect()
     };

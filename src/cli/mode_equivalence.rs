@@ -77,7 +77,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
-    use crate::calling::parameters_file::beside_the_vcf;
     use crate::cli::call_from_alignments::{CallFromAlignmentsArgs, run_call_from_alignments};
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
@@ -618,7 +617,14 @@ mod tests {
         // the only way to get a parameters file naming exactly this cohort's read groups.
         called_from_alignments(&cohort, &output);
         let parameters = cohort.directory.path().join("differing.parameters.toml");
-        std::fs::rename(beside_the_vcf(&output), &parameters).expect("the file moves");
+        std::fs::rename(
+            crate::cli::calling_run::parameters_the_run_logged(
+                &output,
+                Some(&output.with_extension("log")),
+            ),
+            &parameters,
+        )
+        .expect("the file moves");
         make_the_read_groups_score_differently(&parameters);
 
         let from_alignments = called_from_alignments_under(&cohort, &output, &parameters);

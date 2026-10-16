@@ -27,8 +27,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 use tracing::field::{Field, Visit};
@@ -44,7 +44,7 @@ use super::provenance::{current_command_line, rfc3339_now};
 pub const PROGRESS: &str = "pvc::progress";
 
 /// The run's log, while one is open.
-static LOG: Mutex<Option<OpenLog>> = Mutex::new(None);
+static LOG: Mutex<Option<RunLog>> = Mutex::new(None);
 
 /// Every option of the subcommand that was run, as [`install`] was handed them.
 static SETTINGS: OnceLock<Vec<Setting>> = OnceLock::new();
@@ -141,10 +141,14 @@ pub enum LogFileError {
 /// An existing file is refused unless `replace`, which a subcommand passes as its `--force`: the
 /// log belongs to the output it sits beside and is replaced together with it.
 ///
+/// **The returned handle writes to this file and no other**, which is what a run uses for what it
+/// writes itself — the parameters block. Events from anywhere in the crate go to whichever log is
+/// open, which in the binary is only ever this one.
+///
 /// # Errors
 ///
 /// [`LogFileError::AlreadyThere`] and [`LogFileError::NotCreated`].
-pub fn open_log(path: &Path, replace: bool) -> Result<(), LogFileError> {
+pub fn open_log(path: &Path, replace: bool) -> Result<RunLog, LogFileError> {
     let mut options = OpenOptions::new();
     options.write(true);
     if replace {
@@ -166,12 +170,14 @@ pub fn open_log(path: &Path, replace: bool) -> Result<(), LogFileError> {
             }
         }
     })?;
-    *lock_the_log() = Some(OpenLog {
-        file,
+    let log = RunLog {
+        file: Arc::new(Mutex::new(file)),
         path: path.to_path_buf(),
-    });
+        opened: Instant::now(),
+    };
+    *lock_the_log() = Some(log.clone());
     write_the_header();
-    Ok(())
+    Ok(log)
 }
 
 /// The path of the log this run is writing, while one is open.
@@ -180,24 +186,46 @@ pub fn log_path() -> Option<PathBuf> {
     lock_the_log().as_ref().map(|log| log.path.clone())
 }
 
-/// **Close the run's log**, after the run's last word. Nothing is lost if this is never called:
-/// every line is written to the file as it is logged.
-pub fn close_log() {
-    if let Some(mut log) = lock_the_log().take() {
-        let _ = log.file.flush();
-    }
+/// **Close the run's log with how the run ended**: the exit status, how long it took, and the
+/// process's peak memory. Called by the binary after the run's last word — on a failure, after
+/// the error, so the error is in the log too.
+///
+/// Nothing is lost if this is never called: every line is written to the file as it is logged.
+pub fn close_log(exit_status: i32) {
+    let Some(log) = lock_the_log().take() else {
+        return;
+    };
+    let memory = match peak_resident_bytes() {
+        Some(bytes) => format!("peak memory {}", size_in_bytes(bytes)),
+        None => "peak memory not measured on this platform".to_owned(),
+    };
+    log.write_line(&format!(
+        "{} DEBUG finished: exit status {exit_status}, after {}, {memory}\n",
+        rfc3339_now(),
+        elapsed_text(log.opened.elapsed()),
+    ));
 }
 
 /// The log's lock. **A panic while it was held does not stop logging**: a line half-written by a
 /// panicking thread is worth less than every line after it.
-fn lock_the_log() -> std::sync::MutexGuard<'static, Option<OpenLog>> {
+fn lock_the_log() -> std::sync::MutexGuard<'static, Option<RunLog>> {
     LOG.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// What ran, where and when, then every setting — the first lines of every log.
 fn write_the_header() {
-    tracing::debug!("pvc {}", env!("CARGO_PKG_VERSION"));
+    // **The binary's path, beside the version**, because the version alone does not tell two
+    // development builds apart. A git commit would, but a build script that recorded it would make
+    // every commit recompile the whole crate.
+    match std::env::current_exe() {
+        Ok(binary) => tracing::debug!(
+            "pvc {}, the binary {}",
+            env!("CARGO_PKG_VERSION"),
+            binary.display()
+        ),
+        Err(_) => tracing::debug!("pvc {}", env!("CARGO_PKG_VERSION")),
+    }
     tracing::debug!("command line: {}", current_command_line());
     match std::env::current_dir() {
         Ok(directory) => tracing::debug!("working directory: {}", directory.display()),
@@ -219,10 +247,101 @@ fn write_the_header() {
     }
 }
 
-/// An open log file and where it is.
-struct OpenLog {
-    file: File,
+/// The first line of the parameters block in a log: a TOML comment, so the block from this line to
+/// [`PARAMETERS_BLOCK_ENDS`] is a parameters file as it stands.
+pub const PARAMETERS_BLOCK_BEGINS: &str = "# ---- parameters file begins ----";
+
+/// The last line of the parameters block in a log.
+pub const PARAMETERS_BLOCK_ENDS: &str = "# ---- parameters file ends ----";
+
+/// **A run's log: the file, its path, and when it was opened.** Cloned into the global slot the
+/// log destination writes events to, and held by the run for what it writes itself.
+#[derive(Clone)]
+pub struct RunLog {
+    file: Arc<Mutex<File>>,
     path: PathBuf,
+    opened: Instant,
+}
+
+impl RunLog {
+    /// Where the log is.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// **The numbers the run scores with, as a parameters file**, between two marker lines that
+    /// are TOML comments (`doc/devel/ng/spec/command_line.md` §7.3). Copied out of the log, the
+    /// block is a file `--parameters` reads; [`parameters_in`] does the copying.
+    pub fn record_parameters(&self, parameters_file_text: &str) {
+        let mut block = format!(
+            "{} DEBUG parameters: the numbers this run scores with, as a parameters file between \
+             the two marker lines below; copy them out to pass them back with --parameters\n\
+             {PARAMETERS_BLOCK_BEGINS}\n",
+            rfc3339_now()
+        );
+        block.push_str(parameters_file_text);
+        if !parameters_file_text.ends_with('\n') {
+            block.push('\n');
+        }
+        block.push_str(PARAMETERS_BLOCK_ENDS);
+        block.push('\n');
+        self.write_line(&block);
+    }
+
+    /// Append `text` as it is. **One write**, so a run killed part-way leaves whole lines.
+    fn write_line(&self, text: &str) {
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = file.write_all(text.as_bytes());
+    }
+}
+
+/// **The parameters block of a log, as a parameters file's text**: the lines between
+/// [`PARAMETERS_BLOCK_BEGINS`] and [`PARAMETERS_BLOCK_ENDS`], or `None` when the log holds none.
+#[must_use]
+pub fn parameters_in(log_text: &str) -> Option<String> {
+    // **Whole lines only**: the line that introduces the block may name it, and a marker matched
+    // inside a sentence would start the block there.
+    let mut lines = log_text.split_inclusive('\n');
+    lines.find(|line| line.trim_end() == PARAMETERS_BLOCK_BEGINS)?;
+    let mut block = String::new();
+    for line in lines {
+        if line.trim_end() == PARAMETERS_BLOCK_ENDS {
+            return Some(block);
+        }
+        block.push_str(line);
+    }
+    None
+}
+
+/// The process's peak resident memory, in bytes — Linux's `VmHWM`, the high-water mark for the
+/// life of the process; `None` elsewhere.
+fn peak_resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kib * 1024)
+}
+
+/// A size in bytes as a person reads it: `3.2 GiB`, `850 MiB`.
+fn size_in_bytes(bytes: u64) -> String {
+    // Precision loss is irrelevant: a size to read, to one decimal.
+    #[allow(clippy::cast_precision_loss)]
+    let as_float = bytes as f64;
+    if bytes >= 1 << 30 {
+        format!("{:.1} GiB", as_float / f64::from(1u32 << 30))
+    } else {
+        format!("{:.0} MiB", as_float / f64::from(1u32 << 20))
+    }
 }
 
 /// The terminal's destination: stderr, short.
@@ -278,18 +397,16 @@ impl<S: Subscriber> Layer<S> for LogLayer {
         if *metadata.level() > self.most_detailed {
             return;
         }
-        let mut log = lock_the_log();
-        let Some(open) = log.as_mut() else {
+        let Some(log) = lock_the_log().clone() else {
             return;
         };
-        let line = format!(
+        // **One write a line, unbuffered**, so a run that is killed leaves every line it logged.
+        log.write_line(&format!(
             "{} {:<5} {}\n",
             rfc3339_now(),
             metadata.level(),
             message_of(event)
-        );
-        // **One write a line, unbuffered**, so a run that is killed leaves every line it logged.
-        let _ = open.file.write_all(line.as_bytes());
+        ));
     }
 }
 
@@ -413,5 +530,26 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "an earlier run's log\n"
         );
+    }
+
+    /// **The block a run writes is the text it was handed**, found again between its markers.
+    #[test]
+    fn the_parameters_block_reads_back_as_written() {
+        std::fs::create_dir_all("tmp").unwrap();
+        let directory = tempfile::tempdir_in("tmp").unwrap();
+        let path = directory.path().join("pvc_calls.log");
+        let log = open_log(&path, false).expect("a new log");
+        let toml = "format = 3\n[reference]\nname = \"x\"\n";
+        log.record_parameters(toml);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(parameters_in(&text).as_deref(), Some(toml));
+        assert_eq!(parameters_in("a log with no block\n"), None);
+    }
+
+    #[test]
+    fn sizes_are_read_in_mib_and_gib() {
+        assert_eq!(size_in_bytes(850 << 20), "850 MiB");
+        assert_eq!(size_in_bytes(3 << 30), "3.0 GiB");
     }
 }

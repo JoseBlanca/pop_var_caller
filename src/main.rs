@@ -64,8 +64,8 @@ fn main() {
     // closed here and not when the subcommand returns.
     if let Err(msg) = result {
         tracing::error!("{msg}");
-        run_output::close_log();
+        run_output::close_log(1);
         process::exit(1);
     }
-    run_output::close_log();
+    run_output::close_log(0);
 }

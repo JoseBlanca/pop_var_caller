@@ -251,7 +251,13 @@ mod tests {
     /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
     /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `dae7e77c280d7f240349cc8433207a81`, the value `main` recorded for the fit above.
     /// Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "eb43b6968066b5d22525aaaeaed2f736";
+    ///
+    /// **Re-recorded 2026-10-16** when a calling run stopped writing a parameters file beside its
+    /// VCF (`doc/devel/ng/spec/command_line.md` §7): `##source` reads `pvc` where it read `ng`, and
+    /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
+    /// header lines are all that moved — putting the old two back reproduces the old checksum
+    /// exactly. It was `eb43b6968066b5d22525aaaeaed2f736`. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "e9738457fb6b4e36f33e5fa008b935f0";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -331,7 +337,13 @@ mod tests {
     /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
     /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `d315b4e4d0de2f21fd34cd673bbdfa8b`, the value `main` recorded for the fit above.
     /// Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "3a2e830acc6991ee3b2285a80abbb89e";
+    ///
+    /// **Re-recorded 2026-10-16** when a calling run stopped writing a parameters file beside its
+    /// VCF (`doc/devel/ng/spec/command_line.md` §7): `##source` reads `pvc` where it read `ng`, and
+    /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
+    /// header lines are all that moved — putting the old two back reproduces the old checksum
+    /// exactly. It was `3a2e830acc6991ee3b2285a80abbb89e`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "973688dbec909bb94ee73cfd2941401c";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -394,7 +406,13 @@ mod tests {
     /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
     /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `b23487bd69f9d39f1943fbe9350a7a3f`, the value `main` recorded for the fit above.
     /// Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "45a981f5c11fde06848374dcdfe574a3";
+    ///
+    /// **Re-recorded 2026-10-16** when a calling run stopped writing a parameters file beside its
+    /// VCF (`doc/devel/ng/spec/command_line.md` §7): `##source` reads `pvc` where it read `ng`, and
+    /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
+    /// header lines are all that moved — putting the old two back reproduces the old checksum
+    /// exactly. It was `45a981f5c11fde06848374dcdfe574a3`. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "23fb1a94c44118ecf249a68afaa67979";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

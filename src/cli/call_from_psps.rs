@@ -37,7 +37,6 @@ use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run::{self, CallingRunError};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
@@ -378,30 +377,6 @@ pub enum CallFromPspsCliError {
         source: VcfWriteError,
     },
 
-    /// The parameters file could not be written beside the output.
-    ///
-    /// **The VCF is already whole when this can happen**, since the parameters go to disk after
-    /// the last record is renamed into place — so a run that reaches this has its calls and not
-    /// its provenance, which is what the message has to let an operator work out. **The same
-    /// sentence direct mode writes**, because the loss and the repair are the same: a `set -e`
-    /// pipeline that read only *could not be written* would throw away a complete,
-    /// correctly-headed file.
-    #[error(
-        "the calls are complete and written to {}, but the parameters that produced them could \
-         not be saved to {} — keep the VCF and re-run to recover its parameters",
-        calls.display(),
-        path.display()
-    )]
-    ParametersNotWritten {
-        /// Where it would have gone.
-        path: PathBuf,
-        /// The VCF that is on disk.
-        calls: PathBuf,
-        /// What the write said.
-        #[source]
-        source: std::io::Error,
-    },
-
     /// The VCF is already there, and the run was not asked to replace it.
     #[error(
         "{} is already there — give --force to replace it, or another --output",
@@ -466,10 +441,6 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
-    calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-        &args.output,
-        args.parameters.as_deref(),
-    )?;
     if !is_standard_output(&args.output) && args.output.exists() && !args.force {
         return Err(CallFromPspsCliError::OutputAlreadyThere {
             path: args.output.clone(),
@@ -483,7 +454,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         .log
         .clone()
         .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
-    run_output::open_log(&log, args.force)?;
+    let run_log = run_output::open_log(&log, args.force)?;
     // **The round width comes from the cohort's size**, and the cohort is the psps — so this
     // waits for the directories to be expanded, where direct mode can count its `--alignment`
     // flags straight away.
@@ -578,6 +549,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &digest,
         &segmentation.inputs().repeat_tract_criteria,
     );
+    // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
+    // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).
+    run_log.record_parameters(&parameters_file.to_toml());
 
     let caller = PspVariantCaller::open(
         cohort,
@@ -607,7 +581,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
 
     let read_groups = caller.read_groups().clone();
     let metadata = calling_run::header_for(
-        &args.output,
+        &log,
+        args.parameters.as_deref(),
         &args.reference,
         &contigs,
         &with_checksums,
@@ -711,24 +686,6 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         None => None,
     };
 
-    // **After the VCF is on disk, not before** — direct mode's rule and its reasons: a
-    // parameters file standing beside a VCF that does not exist answers none of spec §7's three
-    // purposes.
-    let would_write = beside_the_vcf(&args.output);
-    if would_write.exists() {
-        eprintln!(
-            "note: replacing the parameters file already at {}",
-            would_write.display()
-        );
-    }
-    let parameters_at = parameters_file
-        .write_beside_the_vcf(&args.output)
-        .map_err(|source| CallFromPspsCliError::ParametersNotWritten {
-            path: would_write,
-            calls: args.output.clone(),
-            source,
-        })?;
-
     if let Some(verdicts) = paralog_explanations {
         verdicts.add_to(&mut calling.explanations);
     }
@@ -753,7 +710,6 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         .unwrap_or_default();
     calling_run::log_the_report(
         &args.output,
-        &parameters_at,
         &RunReport::of_a_stored_cohort(
             &calling,
             &stored,

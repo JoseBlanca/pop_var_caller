@@ -55,7 +55,6 @@ use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run;
 use crate::cli::run_ground::{self, GroundError};
 use crate::cli::run_output::{self, LogFileError};
@@ -411,29 +410,6 @@ pub enum CallFromAlignmentsCliError {
         source: ReferenceInfoError,
     },
 
-    /// The parameters file could not be written beside the output.
-    ///
-    /// **The VCF is already whole when this can happen**, since the parameters go to disk after
-    /// the last record is renamed into place — so a run that reaches this has its calls and not
-    /// its provenance, which is what the message has to let an operator work out.
-    #[error(
-        "the calls are complete and written to {}, but the parameters that produced them could \
-         not be saved to {} — keep the VCF and re-run to recover its parameters",
-        calls.display(),
-        path.display()
-    )]
-    ParametersNotWritten {
-        /// Where they would have gone.
-        path: PathBuf,
-        /// The VCF that is finished and on disk. **Named because the run still fails**: a
-        /// `set -e` pipeline would otherwise throw away a complete, correctly-headed file, and
-        /// nothing else in the message says it is there.
-        calls: PathBuf,
-        /// What the write said.
-        #[source]
-        source: std::io::Error,
-    },
-
     /// The ground this run would walk could not be worked out — the reference's contigs, the
     /// BED, the catalog, or what this run counts as a repeat.
     ///
@@ -559,10 +535,6 @@ pub fn run_call_from_alignments(
             path: args.output.clone(),
         });
     }
-    calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-        &args.output,
-        args.parameters.as_deref(),
-    )?;
     // **The log opens once the command line has been judged**, so a typing mistake leaves no log
     // behind, and before the reference is read, so everything that takes time is in it.
     let started = Instant::now();
@@ -570,7 +542,7 @@ pub fn run_call_from_alignments(
         .log
         .clone()
         .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
-    run_output::open_log(&log, args.force)?;
+    let run_log = run_output::open_log(&log, args.force)?;
 
     // **The FASTA is read to the end before a file is opened.** Two of the run's construction
     // checks compare per-contig checksums — that each sample was aligned to this reference, and
@@ -665,6 +637,9 @@ pub fn run_call_from_alignments(
         &digest,
         &segmentation.inputs().repeat_tract_criteria,
     );
+    // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
+    // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).
+    run_log.record_parameters(&parameters_file.to_toml());
 
     let caller = AlignedFilesVariantCaller::open(
         AlignmentInputs {
@@ -696,7 +671,8 @@ pub fn run_call_from_alignments(
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let metadata = calling_run::header_for(
-        &args.output,
+        &log,
+        args.parameters.as_deref(),
         &args.reference,
         &contigs,
         &with_checksums,
@@ -796,32 +772,6 @@ pub fn run_call_from_alignments(
         None => None,
     };
 
-    // **After the VCF is on disk, not before.** Spec §7's three purposes — a run reproducible
-    // from its own output, a defaults run auditable, an edit that starts from something — are
-    // all about a run that finished, and a parameters file standing beside a VCF that does not
-    // exist would answer none of them. The file goes to a temporary in the same directory and is
-    // renamed over its destination, so what lands is whole or is not there at all.
-    // **A file already there is replaced, and the run says so.** Spec §7 makes writing
-    // unconditional, so this is not a refusal — but a person who edited the parameters in place
-    // and then re-ran to compare has just lost the edit, and a run that did that in silence was
-    // measured doing exactly that. The `--parameters` route is refused outright
-    // (`refuse_an_output_whose_parameters_file_is_this_run_s_input`); this is the other route to
-    // the same loss, where no flag names the file.
-    let would_write = beside_the_vcf(&args.output);
-    if would_write.exists() {
-        eprintln!(
-            "note: replacing the parameters file already at {}",
-            would_write.display()
-        );
-    }
-    let parameters_at = parameters_file
-        .write_beside_the_vcf(&args.output)
-        .map_err(|source| CallFromAlignmentsCliError::ParametersNotWritten {
-            path: would_write,
-            calls: args.output.clone(),
-            source,
-        })?;
-
     if let Some(verdicts) = paralog_explanations {
         verdicts.add_to(&mut written.calling.explanations);
     }
@@ -846,7 +796,6 @@ pub fn run_call_from_alignments(
         .unwrap_or_default();
     calling_run::log_the_report(
         &args.output,
-        &parameters_at,
         &RunReport::of(
             &written,
             &contigs,

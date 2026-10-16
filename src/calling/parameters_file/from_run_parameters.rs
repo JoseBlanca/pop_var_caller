@@ -322,13 +322,10 @@ impl ParametersFile {
     /// **Panics rather than a `Result`, and this is the open half of that choice.** These are
     /// wiring bugs in whoever assembles the six arguments, not states any input data can reach,
     /// and the alternative to refusing is writing a false provenance. What a panic costs here is
-    /// larger than at assembly, though: this runs *after* the last locus, so it discards a
-    /// cohort's calling work where
-    /// [`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble)'s
-    /// equivalent checks discard a startup. **Still open, and it is the run driver's**: whether
-    /// a driver should instead log and keep its VCF is a choice about the order of the two
-    /// writes, which no run in this tree makes yet — [`Self::write_beside_the_vcf`] is where it
-    /// will be made.
+    /// the same as at assembly
+    /// ([`RunParameters::assemble`](crate::calling::run_parameters::RunParameters::assemble)):
+    /// both calling commands build this file at startup, to write it into the run's log before a
+    /// read is decoded, so a panic here discards a startup and never a cohort's calling work.
     #[must_use]
     pub fn of_run(
         run: &RunParameters,

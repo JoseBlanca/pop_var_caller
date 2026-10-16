@@ -521,9 +521,11 @@ log that shows how far it got.
 
 What it holds, in this order:
 
-1. **What ran.** `pvc` version and the git commit it was built from (the version alone does not
-   tell two development builds apart), the command line exactly as typed, the working directory,
-   the start time with its time zone, the host name, the thread count.
+1. **What ran.** `pvc` version and the full path of the binary (the version alone does not tell
+   two development builds apart), the command line exactly as typed, the working directory, the
+   start time with its time zone, the host name, the thread count. *(The git commit was first
+   proposed here. Dropped in step 3: a build script that records it changes the crate's build
+   inputs at every commit, and Cargo then recompiles the whole crate, minutes each time.)*
 2. **The inputs, by name.** The reference, with its digest; the repeat catalogue, with its
    digest; each alignment or psp file with the sample it holds and its read groups; the regions
    BED, with the total ground it names.
@@ -597,7 +599,9 @@ next run.
 The VCF already records `##source` and `##commandline`. **It also names its log and the
 parameters' source** (`##pvcLog=pvc_calls.log`, `##pvcParameters=defaults` or the file and its
 digest), so a VCF separated from its log still says how its numbers were chosen. `##source` reads
-`ng <version>` today; it becomes `pvc <version> (<commit>)`.
+`pvc <version>` (it read `ng <version>`). It carries no commit, for §7.3's reason, and because a
+header that changed at every commit would move the cross-platform checksums and the identity
+oracle's at every commit too.
 
 ### 7.7 Logging in the code
 

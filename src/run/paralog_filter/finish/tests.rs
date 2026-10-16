@@ -118,7 +118,8 @@ fn metadata_over(samples: usize) -> VcfHeaderMetadata {
         (0..samples).map(|i| format!("SRR72794{i:02}")).collect(),
         String::new(),
         String::new(),
-        String::new(),
+        "pvc_calls.log".to_owned(),
+        "defaults".to_owned(),
     )
     .expect("a header")
 }

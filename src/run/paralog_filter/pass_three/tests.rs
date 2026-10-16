@@ -155,7 +155,8 @@ fn a_writer(output: &std::path::Path) -> VcfWriter {
         vec!["one".to_string()],
         String::new(),
         String::new(),
-        String::new(),
+        "pvc_calls.log".to_owned(),
+        "defaults".to_owned(),
     )
     .expect("a header");
     VcfWriter::create(output, metadata, Ploidy::try_new(2).expect("two copies")).expect("a writer")
