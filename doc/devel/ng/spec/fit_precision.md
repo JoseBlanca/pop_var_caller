@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02).
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02); on 2026-10-16 (owner) §2's per-parameter stopping test is replaced by one on the Newton decrement, §3.3 gains the Newton step the SNP/indel fit takes ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3.1), and §3.5, §3.6 and §8 follow. Not built yet; build order [`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md).
 Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
@@ -217,6 +217,108 @@ an error of the 600-pass fit; the ones still crawling run to the pass limit and 
 cohorts and two of the three 4-sample ones with the duplicated class). On the oracle no start converges within 200 passes, and none
 claims to. Part B's climb (§4.3) keeps its projection of the log-likelihood gain.
 
+**Amended 2026-10-16 (owner): for the SNP/indel fit, a start stops when the remaining Newton step is
+worth less than `DECREMENT_THRESHOLD` = 0.001 log-likelihood units.** Proposed by the lead after the
+owner asked what the fit should do on a plateau, measured in
+[`../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md`](../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md),
+and decided by the owner the same day at the threshold that measurement supports. It replaces the
+per-parameter test above ("a parameter is settled when …"); everything else in the amendment of plan
+step B1 stays — the judging pass, its information and scores, the bounded step `d`, the trigger.
+
+- **The quantity.** The **Newton decrement** is the log-likelihood the quadratic model says the
+  bounded step would gain: `λ = g·d − ½ dᵀ I d`, with `g`, `I` and `d` exactly as above. Without
+  bounds it is `½ gᵀ I⁻¹ g`.
+- **Where it is computed.** By `newton_step`
+  ([`fit/standard_errors.rs:583`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L583)),
+  which already holds `g`, `I` and `d`: it returns the decrement beside the distances, from the flat
+  step `bounded_step` gives with each parameter not solved for moving 0, as
+  `Σⱼ gⱼ dⱼ − ½ Σⱼ dⱼ (I d)ⱼ`, the product `I d` from `information_times` (the same file). One box
+  solve a judging pass; the prototype solved twice, once for the distances and once for `λ`.
+- **The rule, and the order of a judging pass.** At each judging pass, at the parameters `θ` it
+  judged:
+  1. if `0 ≤ λ < DECREMENT_THRESHOLD` the start has **converged**. It stops **at `θ`**: the rest of
+     the cycle, and the Newton step of
+     [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3.1, are not run. The
+     final pass follows at `θ` as today; it is still needed, because only the final pass keeps each
+     position's posteriors. *Until now a converged start finished its cycle first.*
+  2. otherwise, for a later start, the agreement test of §3.4, unchanged, on the same `d`. **A start
+     that has converged is never stopped by agreement**, as before: it competes to be the answer.
+  3. otherwise the Newton step (§3.3.1 of the joint-fit spec), and, if none of its tries rises, the
+     usual SQUAREM cycle from `θ`.
+- **What it guarantees, in the model.** For any quantity `h` computed from the parameters — one
+  parameter, or a derived number such as the share segregating above 1% or `Hexp` — the step moves
+  it by at most `√(2λ)` of its own standard error (Cauchy–Schwarz on `I`). So one number bounds every
+  parameter and every derived quantity at once: `λ` below 0.005 means all of them within 0.1 of their
+  errors, which implies the per-parameter test; below 0.1, within 0.45. The per-parameter test,
+  by contrast, does not bound a combination, and with 185 parameters each a tenth of an error from
+  the maximum the remaining step can still be worth almost a unit.
+- **Why it should stop on a plateau** (the lead's rationale, accepted by the owner). Along a direction
+  the data barely determine, the information is small, so a long step there is worth little; `λ`
+  weighs each direction by what moving along it is worth in likelihood rather than by how far it moves
+  a parameter. *Not tested by the measurement:* on 59 samples the ridge between the invariant share
+  and the Beta's shape `a` was not flat — `λ` was 26 to 45 units along it and 68 units were still to
+  gain — and the fit stopped only after `a` reached its lower bound. No input measured has a ridge
+  that is flat without a bound.
+
+**Traps.**
+
+- **A negative `λ` is not convergence.** The quadratic model's maximum within the box is never below
+  zero, since staying put is in the box, so a negative value means the active-set solve ended at its
+  round limit without reaching that maximum (`bounded_step`,
+  [`fit/standard_errors.rs:603`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L603),
+  `3 × side + 3` rounds). It happened on the 4 oracle samples read one chunk in eight: starts 2 and 3
+  reached pass 30 with `λ` = −2,959 and −2,804, while several error rates and the carrier shapes were
+  being sent to their bounds. Read as below the threshold, it stopped both 13 to 14 log-likelihood
+  units below start 1. A start at a negative `λ` goes on to step 2 and 3 above, like any start not
+  converged. **A `λ` that is not a number** (NaN, from a degenerate solve) is not convergence either:
+  the test is written `λ >= 0.0 && λ < threshold`, which a NaN fails.
+- **`λ` understates what is left, by a factor of two and a half to six near the maximum.** Measured
+  on the converged references, the log-likelihood still to gain was 2.5 to 4.2 times `λ` once `λ` was
+  below 0.1 on 1 and 4 samples, 3.0 to 5.9 times on 59, and up to 10 times in the middle of the climb
+  on the subsampled oracle. Each full step is accepted and the decrement shrinks by 0.4 to 0.7 a
+  pass, not quadratically: along the slowest direction the outer-product information is that much
+  sharper than the likelihood (§8 question 3).
+  **The per-parameter test has the same blind spot**, because its distances are the same `d`: where
+  it first held, the mismapped share was still 0.23 (1 sample), 0.13 (4, subsampled), 0.27
+  (4 samples), 0.47 (59, subsampled) and 0.25 (59 samples) of its error from the converged value. So
+  the threshold is chosen from the measurement, not from `√(2λ)`.
+- **A looser threshold can cost time.** A later start stops by agreeing with the first start's answer
+  (§3.4); the less settled that answer, the likelier a later start is to miss it and climb to its own
+  end. On the 4 oracle samples at 0.1, start 3 missed it and climbed 44 passes on its own, where at
+  0.01 it agreed after 37: the looser threshold saved start 1 five passes and cost start 3 seven.
+- **The constant is a config field, as `SETTLED_FRACTION` is.** `DECREMENT_THRESHOLD` lives beside
+  `SETTLED_FRACTION` in [`fit/settled.rs`](../../../../src/parameter_estimation/joint/fit/settled.rs)
+  and reaches `maximise` as `JointFitConfig::decrement_threshold`, defaulted to it, so a test can run
+  a fit to `10⁻⁴` the way the measurement's references were.
+
+**`DECREMENT_THRESHOLD` = 0.001 — decided 2026-10-16 (owner), measured.** Where each threshold
+would have stopped the first start, against a run to 10⁻⁴, largest distance in errors over the
+determined quantities (the mismapped share, except at 1 on 59 samples read one chunk in four: the
+mean alternative frequency) and the log-likelihood short:
+
+| input | 1 | 0.1 | 0.01 | **0.001** | the per-parameter test |
+|---|---|---|---|---|---|
+| 1 sample | 1.13; 0.27 | 1.13; 0.27 | 0.32; 0.027 | **0.075; 0.002** | 0.23; 0.015 |
+| 4 oracle samples, one chunk in 8 | 11; 4.0 | 0.55; 0.24 | 0.13; 0.022 | **0.021; 0.001** | 0.13; 0.022 |
+| 4 oracle samples | 2.7; 2.3 | 1.17; 0.42 | 0.27; 0.028 | **0.069; 0.003** | 0.27; 0.028 |
+| 59 tomato2 samples, one chunk in 4 | 1.6; 2.5 | 0.70; 0.31 | 0.32; 0.049 | **0.085; 0.005** | 0.47; 0.11 |
+| 59 tomato2 samples | 1.9; 2.4 | 0.72; 0.24 | 0.25; 0.031 | **0.047; 0.002** | 0.25; 0.031 |
+
+0.001 is the only threshold measured that meets the tenth of an error the per-parameter test was
+meant to give. It costs the first start three to six passes beyond 0.01 and three to eight beyond the
+per-parameter test (19 → 22, 43 → 46, 49 → 53, 37 → 45 and 41 → 45 on the five inputs); in whole
+fits, two to three passes. *Rejected:* **0.01**, which left the mismapped share a quarter to a third
+of an error away (the numbers calling reads were within 0.22 of their errors at one sample and 0.11
+elsewhere); **0.1, first proposed**, which left the mismapped share 0.55 to 1.17 of its error away on
+the 4- and 59-sample inputs, and on 59 samples read one chunk in four `Hexp` 0.21 and the mean
+alternative frequency 0.29. The threshold is in log-likelihood units and the errors scale with the
+data, so nothing in it depends on the cohort's size. Every input measured was tomato accessions: no
+cohort above 59 samples, and no other depth, was measured.
+
+The per-parameter test survives in two places: the progress line and a non-converged start's report
+still name the parameter furthest from settled, in errors (§3.5), and `SETTLED_FRACTION` keeps that
+meaning there. **It no longer stops anything.**
+
 ---
 
 ## 3. Part A — the SNP/indel fit
@@ -354,6 +456,12 @@ came to judge the oracle's plateau by the plateau's much wider errors. The cost 
 pass a cycle, at 1.48 to 1.80 times a plain pass (4 to 64 samples, one thread, measured in B1's
 review), in cycles of three or more passes: about 11 to 13% more time on a small cohort's fit.
 
+**Amended 2026-10-16 (owner): a judging pass's Newton step is also taken**, kept only if the
+log-likelihood rises and halved otherwise
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3.1). An accepted step's pass
+sums the information, so it is the next cycle's judging pass: from the first acceptance on, most
+cycles are one judging pass long, and the information is summed on nearly every pass.
+
 ### 3.4 Stopping a starting point that is heading where another arrived
 
 The three starting points exist because a start that puts the ordinary and the mismapped class close
@@ -389,6 +497,25 @@ starts agree, which is exactly when running them all to the end was wasted.
   each estimate's standard error through `Estimate` (§5.1), and a record per start. `converged` has no
   consumer outside `fit.rs` today; the parameters file records each start's outcome (§5.2).
 
+*Amended 2026-10-16, with §2's decrement rule:*
+
+- **The progress line** of a cycle that judged also prints the decrement and the threshold, before
+  the count of parameters not yet settled: `the remaining Newton step is worth 3.1e-2
+  log-likelihood units (stops below 1e-3); 4 of 185 parameter(s) still more than 0.1 standard
+  errors …`. The per-pass trace (`PassSummary`,
+  [`fit.rs:1631`](../../../../src/parameter_estimation/joint/fit.rs#L1631)) gains `decrement:
+  Option<f64>` beside `not_settled`, `None` on a pass that did not judge.
+- **What *converged* means changes, and three texts say the old meaning**: the parameters file's
+  note on `snp_indel_fit_starts`
+  ([`to_toml.rs:159`](../../../../src/calling/parameters_file/to_toml.rs#L159), and the golden file
+  `testdata/every_shape_as_written.toml:106` that pins it), the doc comment of the file's
+  `converged` outcome ([`parameters_file/mod.rs:714`](../../../../src/calling/parameters_file/mod.rs#L714)),
+  and the module doc of [`fit/settled.rs`](../../../../src/parameter_estimation/joint/fit/settled.rs).
+  The note says instead: *`converged` means the step still left to the best value the data allow was
+  worth less than a thousandth of a log-likelihood unit, which on every cohort measured put every
+  number within about a tenth of its standard error of that value.* The key and its values do not
+  change, so this is not a format change.
+
 ### 3.6 How we know Part A works
 
 1. **Scores against finite differences.** On a small drawn cohort, each parameter's summed score
@@ -403,6 +530,14 @@ starts agree, which is exactly when running them all to the end was wasted.
    (`scripts/promote_ng_oracle.sh`) and, where available, the 63-accession cohort, once with the new
    rule and once run to 1,000 passes; every parameter differs by less than `SETTLED_FRACTION` of its
    error, and the passes saved are reported.
+   *Amended 2026-10-16:* under the decrement rule (§2), every determined quantity — each parameter
+   with an error, and the share segregating above 1%, `Hexp` and the mean alternative frequency —
+   within `SETTLED_FRACTION` of its error of a run to a decrement of 10⁻⁴, on 1 sample, the 4
+   oracle samples and the 59 tomato2 samples. Unit tests: on a small information matrix with no
+   bound binding, the decrement equals `½ gᵀ I⁻¹ g`; with one bound binding it equals
+   `g·d − ½ dᵀ I d` for the box step `d`, and is smaller than the unbounded value. The verdict is a
+   function of the decrement and the threshold alone, in `fit/settled.rs`, tested at −2,959, at NaN
+   (neither converged), at 0 and just below the threshold (converged) and at the threshold (not).
 5. **Determinism.** The same bits at 1, 4 and 8 threads; the new sums follow the fit's fixed chunk
    order ([`fit.rs:2235-2352`](../../../../src/parameter_estimation/joint/fit.rs#L2235)).
 
@@ -706,10 +841,28 @@ a write and a read.
    *Amended at plan step B1 (2026-09-29): `SETTLED_FRACTION` was kept at 0.1 at checkpoint A;
    `MAX_CONTRACTION` and `ERROR_REFRESH_CYCLES` belonged to the projection §2's amendment replaced and
    are no longer used.*
+   *Decided 2026-10-16 (owner):* `DECREMENT_THRESHOLD` (§2) = 0.001, measured rather than a
+   starting value: the only threshold measured that leaves every determined quantity within
+   `SETTLED_FRACTION` of its error on every input tried (1, 4 and 59 tomato samples). It replaces
+   `SETTLED_FRACTION` as what stops the SNP/indel fit; `SETTLED_FRACTION` keeps only its reporting
+   role (§3.5).
 3. **Is the outer-product estimator close enough to the observed information here?** — OPEN.
    *Leaning:* yes for the well-determined parameters, possibly not for the Beta shapes at three reads.
    **Settled by:** §3.6 items 2 and 3; if it is not, Louis's method replaces it for the cohort-level
    block only (eight parameters, affordable).
+   *Evidence, 2026-10-16 — a finding for later, not acted on by the 2026-10-16 changes*
+   ([`../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md`](../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md)
+   §3.2): near the maximum every whole Newton step solved with the outer-product information is
+   accepted, yet the log-likelihood still to gain shrinks only by a factor of 0.4 to 0.6 a pass on 1
+   and 4 samples and 0.68 on 59, where an exact Newton step would shrink it quadratically. So along
+   the slowest direction the outer-product information looks three to six times sharper than the
+   likelihood's own curvature. If the observed information is the right one there, the reported
+   errors along that direction are a half to two-fifths of what they should be. Two things already
+   rest on it: the decrement understates what is left (§2's traps; the threshold was chosen from the
+   measurement for that reason), and the trade cost of
+   [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.1.3 would be lower, not
+   higher, so a pair that test marks stays marked. Not measured against the observed information
+   itself; §3.6 items 2 and 3, or Louis's method on the cohort's eight, would.
 4. **One subset order for all strata, or one per stratum?** — decided one for all (§4.4); revisit if
    Part B's validation finds a stratum whose error the fixed subset leaves much larger than a
    per-stratum draw would.

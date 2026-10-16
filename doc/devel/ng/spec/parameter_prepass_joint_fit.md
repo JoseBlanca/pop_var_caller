@@ -1,5 +1,11 @@
 # ng — the joint parameters fit: every parameter estimated once, over every sample at the same loci
 
+*Amended 2026-10-16 (owner): §2.1.3 (what the data determine about the frequency density and the
+duplicated class, and what is reported), §3.3.1 (the Newton step the fit takes), §11 question 13
+(the decisions, with the stopping rule of [`fit_precision.md`](fit_precision.md) §2), §12 tests 11
+and 12. Not built yet; build order
+[`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md).*
+
 *Design spec, 2026-08-10. **No code yet — this settles the design.** **Read this one first.** It says
 what the route is, what it produces, why it exists, and how the estimate is computed. Two companion
 documents settle the two things it stands on, and each maps to a module someone can build on its own:*
@@ -228,6 +234,275 @@ route's required outputs. *Open, and §12 measures it:* whether the four-number 
 enough for the tomato panel, checked by fitting a drawn cohort whose true density is deliberately not
 a Beta — a two-subpopulation panel, whose frequency density is bimodal — and reporting what the
 fitted `Hexp` and `spectrum(c)` cost. **Settled by:** §12.9.
+
+*Since 2026-08-27 the caller's prior is built from two integrals of the density, `Hexp` and the mean
+alternative frequency, not from `spectrum(c)`
+([`ordinary_site_prior_moments.md`](ordinary_site_prior_moments.md) §2); §2.1.3 says what is emitted
+now.*
+
+#### 2.1.3 What the data determine about the density and the duplicated class, and what is reported — added 2026-10-16
+
+**The data determine how many positions carry an allele at a frequency they can see, not how many
+carry one at all.** A position segregating at one in a million looks like an invariant one in any
+cohort we can sequence. So the fit can trade a larger invariant share `p_invariant` for more Beta
+mass near zero (a smaller shape `a`) at almost no cost in likelihood. Run to convergence on 59
+tomato2 samples (§3.3.1), it puts `a` on its lower bound of 0.02
+([`fit.rs:2937`](../../../../src/parameter_estimation/joint/fit.rs#L2937)) and `p_invariant` at 0.842,
+where the fit that stopped at 200 passes had reported 0.939. Across that move, the quantities the
+reads constrain stayed the same to three figures
+([diagnosis](../../reports/implementations/snp_fit_convergence_diagnosis_2026-10-16.md) §3.1):
+
+| fit, 59 samples | `p_invariant` | `a` | share segregating at all | share segregating above 1% | `Hexp` |
+|---|---|---|---|---|---|
+| stopped at pass 199 | 0.939 | 0.056 | 0.061 | 0.0084 | 0.00119 |
+| converged | 0.842 | 0.020 | 0.158 | 0.0084 | 0.00119 |
+
+**The duplicated class (§2.2) has the same kind of pair.** Its share `δ` is the share of positions
+some sample carries an extra copy of, and the carrier Beta `Beta(carrier_a, carrier_b)` is the
+share of the panel carrying a given duplication
+([`DuplicatedPositions`, `fit.rs:218`](../../../../src/parameter_estimation/joint/fit.rs#L218)). A
+duplication carried by one plant in a thousand has no carrier among four samples, and reads like an
+ordinary position. So `δ` trades against `carrier_a` the way `p_invariant` trades against `a`. On
+the 4 oracle samples (diagnosis §4.1; the converged fit's numbers from the stopping-rule report's
+reference run, `tmp/snp_stop/runs/o4_d1e-4.judge.tsv`):
+
+| fit, 4 oracle samples | `δ` | `carrier_a` | share duplicated with carriers above 1% of the panel |
+|---|---|---|---|
+| stopped at pass 200 | 0.0021 | 0.158 | 0.00088 |
+| converged | 0.0139 | 0.020 (bound) | 0.00096 |
+
+`δ` moved by a factor of 6.7; the share the reads see moved by 9%. On 59 samples `δ` moved from
+0.0085 to 0.0154 with `carrier_a` on the same bound.
+
+**Calling reads only determined quantities, and does not change.** The prior's seed is built from
+`Hexp` and the mean alternative frequency `E[f] = p_fixed_alt + (1 − p_invariant − p_fixed_alt)·a/(a+b)`
+([`census_fit.rs:452`](../../../../src/run/census_fit.rs#L452),
+[`seed_generic.rs:250`](../../../../src/calling/genotype_prior/seed_generic.rs#L250)); the
+parameters file stores the seed, never the density
+([`parameters_file.md`](parameters_file.md) §3.6). On 59 samples the 10-point move in `p_invariant`
+moved the seed by 2% (diagnosis §5.2). No number of the duplicated class reaches calling or the
+parameters file today.
+
+**Decision (owner, 2026-10-16): report the determined share of each pair beside the pair's numbers,
+and mark the pair's two numbers as not separately determined when the data do not separate them.**
+Nothing is refitted and nothing calling reads changes. The model stays as it is. The alternatives were
+to reparameterise the density around the determined share, or to raise the shapes' lower bound, which
+would only move the arbitrary point the fit stops at (diagnosis §6).
+
+**The two pairs.** In each, `σ` is the share the trade moves and `S` the share of it the data see:
+
+| pair | the two numbers marked | `σ` | the Beta | the determined share |
+|---|---|---|---|---|
+| frequency density | `p_invariant`, `a` | `1 − p_invariant − p_fixed_alt`, the share of positions that segregate | `Beta(a, b)`, the population frequency of the non-reference allele | `σ · P(f > STATED_FREQUENCY)` |
+| duplicated class | `δ`, `carrier_a` | `δ`, the share of positions duplicated | `Beta(carrier_a, carrier_b)`, the share of the panel carrying the duplication | `δ · P(c > STATED_FREQUENCY)` |
+
+```text
+STATED_FREQUENCY = 0.01
+S = σ · (1 − I_0.01(shape_a, shape_b))        I_x(a, b): the regularised incomplete Beta function
+```
+
+For the density, `S` is the share of positions where the population carries a non-reference allele
+at a frequency above 1%, positions fixed for a non-reference base excluded. For the duplicated class
+it is the share of positions duplicated in more than 1% of the panel. **`STATED_FREQUENCY` = 0.01 is
+the owner's choice for the density (2026-10-16) and soft**: on 59 samples one copy among 118
+chromosomes is a frequency of 0.85%. It is a stated constant, not `1/(2N)`, so the number means the
+same thing at every cohort size and two runs can be compared. **The duplicated class uses the same
+constant** — decided while writing this amendment, on the owner's instruction that the class gets
+"the analogous test": a carrier share is a frequency in the panel as `f` is in the population, and
+one constant keeps the two verdicts comparable. Not measured against any other value.
+
+**The test: what halving or doubling `σ` costs along the trade.** In words: hold `S` fixed, let
+every other number refit, and ask how much log-likelihood is lost by halving or doubling `σ`. If the
+answer is under two units, the data cannot tell those apart, and the pair's two numbers are not
+separately determined. Precisely, with `C` the covariance of the cohort's eight numbers (below) and
+`∇` a gradient over them,
+
+```text
+Var(x)      = ∇xᵀ C ∇x,   Cov(x, y) = ∇xᵀ C ∇y
+V_trade     = Var(σ) − Cov(σ, S)² / Var(S)          how far σ can move with S held
+trade_cost  = ½ · (ln 2)² · σ² / V_trade            log-likelihood lost halving or doubling σ
+              (V_trade ≤ 0: no trade, trade_cost = +∞)
+not separately determined  ⟺  trade_cost < SEPARATION_LOG_LIKELIHOOD = 2
+                              or a number of the pair's group has no covariance (below)
+                              or Var(S) is not a positive finite number
+```
+
+The pair's **group** is the numbers `σ` and `S` are computed from: `p_invariant`, `p_fixed_alt`,
+`a`, `b` for the density; `δ`, `carrier_a`, `carrier_b` for the duplicated class.
+
+- **Why along the trade, and not `σ`'s own error.** On the 4 oracle samples read one chunk in eight,
+  the density's `σ` itself is poorly measured (relative error 0.40; halving it costs 1.5 units), but
+  every segregating position there is above 1% (`a` = 17.9), so `σ` *is* the determined share and
+  there is no trade: `V_trade` is 0. A test on `σ`'s own error would mark that fit; this one does not.
+  It measures only the uncertainty that the determined share leaves.
+- **Two units** is soft: about the half-width of a 95% likelihood interval for one number (1.92).
+- **A number with no covariance** is one dropped from the inversion as not identified
+  ([`fit_precision.md`](fit_precision.md) §3.2): the density's at one sample, the duplicated class's
+  at one and two samples. The pair is then marked. A number whose error came out wider than its
+  range still has a covariance and goes through the test. Marking is also the fix for a defect the
+  diagnosis found (§4.1, §6): with the shapes dropped, `p_invariant`'s error is computed with them
+  held where they were fitted, which understates it — at one sample `p_invariant` differed by 4.7 of
+  that error between two fits of equal likelihood. Marked, it is written without an error.
+
+Measured at the converged fits (the stopping-rule report's reference runs; `tmp/snp_plan/dup_trade.py`
+for the duplicated class):
+
+| input | density: `σ` | `S / σ` | `trade_cost` | marked | duplicated: `δ` | `S / δ` | `trade_cost` | marked |
+|---|---|---|---|---|---|---|---|---|
+| 1 oracle sample | 0.0057 | 0.41 | — (shapes not identified) | yes | 0.00037 | 0.86 | — (not identified) | yes |
+| 4 oracle samples, one chunk in 8 | 0.0014 | 1.00 | no trade | no | 0.0097 | 0.081 | 0.0007 | yes |
+| 4 oracle samples | 0.0016 | 1.00 | no trade | no | 0.0139 | 0.069 | 0.0055 | yes |
+| 59 tomato2 samples, one chunk in 4 | 0.155 | 0.059 | 0.36 | yes | 0.0022 | 0.56 | 5.3 | no |
+| 59 tomato2 samples | 0.158 | 0.053 | 1.35 | yes | 0.0154 | 0.079 | 0.12 | yes |
+
+On 59 samples read one chunk in four, `carrier_a` stopped at 0.24, off its bound, and the duplicated
+pair passes; on all positions it went to the bound and does not. The verdict is the data's, input by
+input, not a property of the cohort's size.
+
+**How each number is computed, and where it lives.**
+
+- **`C`, the cohort's covariance**: the inverse information restricted to the cohort's eight numbers,
+  every other parameter accounted for, from the final pass's information at the returned parameters
+  (the information `StandardErrors::of` reads, [`fit.rs:2059`](../../../../src/parameter_estimation/joint/fit.rs#L2059)).
+  Column `k` is the solve against a unit slope on number `k`, by the same solve `newton_step` uses —
+  `whole_matrix_solve` for a cohort that keeps the whole matrix, `arrow_solve` otherwise
+  ([`fit/standard_errors.rs:796`, `:838`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L796)),
+  nothing held — so the same numbers are left out as for the errors. A new function
+  `cohort_covariance` beside `newton_step`, returning `None` for a row or column not solved for.
+- **The gradients.** `σ` is linear in its group; `S`, `Hexp` and `E[f]` are differentiated by
+  central differences, step `10⁻⁵ × |value|` on each number of the group, through the same functions
+  that compute their values (`FrequencyDensity::expected_heterozygosity` and
+  `expected_alternative_frequency`, [`fit.rs:145`, `:176`](../../../../src/parameter_estimation/joint/fit.rs#L145)).
+- **The errors of `S`, `Hexp` and `E[f]`** are `√Var` from the same `C` (the delta method). Where a
+  number of the group has no covariance, they have no error.
+- **The test and the report** in a new module `src/parameter_estimation/joint/fit/determined.rs`,
+  with `STATED_FREQUENCY` and `SEPARATION_LOG_LIKELIHOOD`; computed once, after the winning start's
+  final pass, and carried on `JointFit`:
+
+```rust
+/// One number as the fit reports it: its value, and its standard error where it has one —
+/// none when the number is marked not separately determined.
+pub struct ReportedNumber { pub value: f64, pub standard_error: Option<f64> }
+
+/// What the data determine about one of the two pairs (§2.1.3).
+pub struct DeterminedShare {
+    /// S: the share above STATED_FREQUENCY.
+    pub share_above: ReportedNumber,
+    /// Log-likelihood lost halving or doubling σ with S held; None when a number of the group has
+    /// no covariance, +∞ when there is no trade.
+    pub trade_cost: Option<f64>,
+    /// false: the pair's two numbers are written without errors and with the mark.
+    pub separately_determined: bool,
+}
+
+pub struct DensityReport {           // JointFit::density_report
+    pub invariant_share: ReportedNumber,
+    pub fixed_non_reference_share: ReportedNumber,
+    pub segregating_shape_a: ReportedNumber,
+    pub segregating_shape_b: ReportedNumber,
+    pub expected_heterozygosity: ReportedNumber,
+    pub expected_alternative_frequency: ReportedNumber,
+    pub determined: DeterminedShare,
+}
+
+pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>, None when the class is off
+    pub duplicated_share: ReportedNumber,
+    pub carrier_shape_a: ReportedNumber,
+    pub carrier_shape_b: ReportedNumber,
+    pub determined: DeterminedShare,
+}
+```
+
+**What is reported.**
+
+- **The parameters file** gains two informational tables, which no run reads
+  ([`parameters_file.md`](parameters_file.md) §3.6 allows the moments "beside it for a human, marked as
+  informational"). Beside the seed, what the seed was read off:
+
+  ```toml
+  [ordinary_site_prior.fitted_density]
+  # What the seed above was read off. Informational: a calling run reads none of it.
+  stated_frequency = 0.01
+  invariant_share = { value = 0.8416, separately_determined = false }
+  fixed_non_reference_share = { value = 2.960e-5, standard_error = 4.05e-6 }
+  segregating_shape_a = { value = 0.02, separately_determined = false }
+  segregating_shape_b = { value = 4.280, standard_error = 0.0605 }
+  share_segregating_above_stated_frequency = { value = 8.447e-3, standard_error = 2.04e-4 }
+  expected_heterozygosity = { value = 1.1895e-3, standard_error = 3.03e-5 }
+  expected_alternative_frequency = { value = 7.661e-4, standard_error = 2.02e-5 }
+  ```
+
+  and, when the run fitted the duplicated class, a section of its own, since nothing in the prior
+  comes from it:
+
+  ```toml
+  [duplicated_positions]
+  # The duplicated class's numbers. Informational: a calling run reads none of it.
+  stated_frequency = 0.01
+  duplicated_share = { value = 1.543e-2, separately_determined = false }
+  carrier_shape_a = { value = 0.02, separately_determined = false }
+  carrier_shape_b = { value = 1.408, standard_error = 0.0466 }
+  share_with_carriers_above_stated_frequency = { value = 1.212e-3, standard_error = 3.4e-5 }
+  ```
+
+  (the 59-sample fit run to convergence; the curvature errors the four marked numbers would otherwise
+  carry are 0.068, 0.0089, 0.023 and 0.031.) **The pair's two numbers always carry
+  `separately_determined`**, `true` or `false`; the others never do. A number marked `false` carries
+  **no** `standard_error`: its curvature error describes where the trade and the bound left it, not
+  the population. Every other number carries its error where it has one, and an absent error means
+  what it means elsewhere in the file. Each table's comment says, in words, that the two marked
+  numbers trade against each other and that the determined share is the one to quote.
+- **The run log's** line of errors at the returned values
+  (`StandardErrors::described`, [`fit/standard_errors.rs:479`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L479))
+  takes the two reports, prints the verdict beside each marked number in place of its error, and adds
+  each determined share and the trade costs:
+  `invariant share 8.4159e-1 (not separately determined from shape a: the data fix the share
+  segregating above 1%, 8.45e-3 ± 2.0e-4, not how much lies below it; halving or doubling the
+  segregating share costs 1.35 log-likelihood units)`, and for the class `duplicated share
+  1.5427e-2 (not separately determined from carrier-frequency shape a: the data fix the share of
+  positions duplicated in more than 1% of the panel, 1.21e-3 ± 3.4e-5, …)`.
+- **The format version goes from 3 to 4**
+  ([`parameters_file/mod.rs:217`](../../../../src/calling/parameters_file/mod.rs#L217)): every
+  table refuses unknown keys, so a version-3 build must refuse a version-4 file rather than misread
+  it. A version-4 build reads a version-3 file, whose tables are absent. Absent also means the run
+  fitted no density (every rung of the seed other than `fitted_curve`) or, for `[duplicated_positions]`,
+  that the run did not fit the class.
+- **Validation on read** (`validate.rs`): each value finite; each standard error finite and above
+  zero; a number marked `separately_determined = false` that carries a `standard_error` is refused,
+  naming its key. Nothing else is checked, since no run reads the tables. They round-trip: a file read
+  and written back holds the same tables.
+
+**Traps.**
+
+- **The covariance is not the errors.** The errors are the inverse information's diagonal; the test
+  needs its off-diagonal entries over each group. They come from the solves above, not from a second
+  inversion that could leave different parameters out.
+- **`V_trade` cancels where `σ` and `S` move together.** On the 4 oracle samples their correlation is
+  1.0000 and `V_trade` comes out at rounding level, either sign. A `V_trade` at or below zero is *no
+  trade* (cost +∞, not marked), never a negative cost.
+- **`P(f > 0.01)` needs the regularised incomplete Beta function, which the crate does not have.**
+  `libm` gives `lgamma` (`genetics::lgamma`, [`genetics.rs:55`](../../../../src/genetics.rs#L55)); the
+  continued-fraction evaluation is about forty lines, beside it, through `crate::float` for `ln` and
+  `exp` (clippy refuses std's), and must be tested against known values, including at shape 0.02
+  and at 50, the two bounds. The central difference at a shape on its lower bound evaluates it just
+  below 0.02, where it is still defined.
+- **A number on its bound keeps its value.** On 59 samples `a` is reported as 0.02, the bound; the
+  mark says why that is not a measurement.
+- **The per-pass trace keeps the raw errors.** `PVC_JOINT_FIT_TRACE`'s `standard_error:` rows
+  ([`trace_the_returned_fit`, `fit.rs:2660`](../../../../src/parameter_estimation/joint/fit.rs#L2660))
+  are a diagnostic, not a report, and are not filtered by the mark.
+- **A calling run writes the file back**, beside its VCF, from the file it read
+  (`snp_indel_fit_starts` is carried the same way, [`cli/calling_run.rs:613`](../../../../src/cli/calling_run.rs#L613));
+  the two tables must be carried too, or a calling run silently drops them.
+- **The tables are not groups of fitted numbers.** `what_was_fitted.rs` counts the groups a run
+  fitted; informational tables must not enter its count.
+
+**Across the range.** At **one sample** the density's shapes are not identified and its pair is
+always marked; so is the duplicated class at one and two samples. **As the cohort grows** rare
+alleles and rare duplications become visible and the trade's cost rises with them, so the mark goes
+away without any test of the cohort's size. At **thousands of samples** the test costs eight solves
+of the arrow, on a matrix the errors already need — less than one pass. At **low depth** every error
+widens, which makes the trade cheaper and the mark likelier; that is the intended reading.
 
 ### 2.2 A noisy locus is noisy in every sample, and no per-sample marginal can see that
 
@@ -694,6 +969,108 @@ model: a start that puts the two classes close together empties one of them and 
 *Open, and it is the one that could change this: whether the profile curve over `ε` has one hump*
 ([`parameter_prepass.md`](parameter_prepass.md) §9.3). A scan does not care and a climb does. §10
 carries it.
+
+#### 3.3.1 The climb as built, and the Newton step it takes — amended 2026-10-16
+
+**What is built.** Each pass over the kept positions computes every position's posteriors and then
+updates the three blocks above from them (expectation–maximisation); SQUAREM, a method that
+extrapolates along the direction the last two updates took, accelerates the loop
+(`maximise`, [`fit.rs:2341`](../../../../src/parameter_estimation/joint/fit.rs#L2341)). Once a cycle
+gains less than 10⁻⁴ log-likelihood units a position, every cycle's first pass also sums the
+information and each parameter's score — a **judging pass** — and **solved against each other they
+give a Newton step**: the move to the maximum of the quadratic model of the likelihood, kept inside
+each parameter's interval (`newton_step`,
+[`fit/standard_errors.rs:583`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L583)).
+Until this amendment that step was only used to judge convergence
+([`fit_precision.md`](fit_precision.md) §2, §3.3).
+
+**Why that was too slow.** On 59 tomato2 samples every start ran to the 200-pass limit, and the
+SNP/indel fit took 60 of `estimate-parameters`' 61 minutes
+([`../../reports/implementations/snp_fit_convergence_diagnosis_2026-10-16.md`](../../reports/implementations/snp_fit_convergence_diagnosis_2026-10-16.md)).
+The cause is a ridge: the invariant share `p_invariant` and the Beta's first shape `a` trade against
+each other at almost no cost in likelihood (§2.1.3), and expectation–maximisation crawls along such
+a ridge. From pass 26 to pass 400 the 59-sample fit read one chunk in four gained 47 log-likelihood
+units while `p_invariant` fell from 0.973 to 0.916.
+
+**Decision (owner, 2026-10-16): each judging pass's Newton step is tried, kept only if the
+log-likelihood rises, and halved when it does not.** A judging pass first decides whether the start
+stops — converged, or heading where an earlier start arrived ([`fit_precision.md`](fit_precision.md)
+§2, the order of a judging pass). If it does not stop:
+
+1. **The step.** `d` is the distances `newton_step` already returned for that verdict — one solve,
+   not two — at the judged parameters `θ`. The target `θ*` is `θ + d`, each coordinate clamped into
+   its interval, in the order `Parameters::coordinates` lists them
+   ([`fit.rs:2837`](../../../../src/parameter_estimation/joint/fit.rs#L2837)); a parameter not solved
+   for moves 0. A try at fraction `f` is `θ + f·(θ* − θ)`, coordinate by coordinate, read back by
+   `Parameters::with_coordinates` ([`fit.rs:2863`](../../../../src/parameter_estimation/joint/fit.rs#L2863)).
+   A coordinate the step does not move keeps its exact bits, as SQUAREM's jump keeps them
+   ([`fit.rs:2894`](../../../../src/parameter_estimation/joint/fit.rs#L2894)): that is how the
+   homozygote excess the fit holds at zero at one sample stays zero.
+2. **The first fraction tried** is `f = min(1, 2·f_last)`, where `f_last` is the fraction the start
+   last accepted, 0.5 before any; so the first try of a start is the whole step. `f_last` belongs to
+   the start: each start begins at 0.5.
+3. **A try costs one pass, and that pass sums the information** (`Alternation::step` with the
+   information kept). The try is kept when its log-likelihood is **strictly higher** than the judged
+   point's. A kept try's pass, and the maximisation step it ran, are the next cycle's judging pass and
+   first step, so an accepted step costs one pass in all; `f_last` becomes `f`.
+4. **A try that does not rise is halved**, up to `NEWTON_TRIES` = 4 tries in all (`f`, `f/2`, `f/4`,
+   `f/8`). A try whose invariant and fixed-non-reference shares together reach their upper bound
+   (`p_invariant + p_fixed_alt ≥ 1 − 10⁻⁹`, the test SQUAREM's jump makes) is halved without a pass,
+   and counts as one of the four.
+5. **When no try rises**, the usual SQUAREM cycle runs from `θ`, unchanged, from the maximisation
+   step the judging pass already ran.
+
+**Why the halving is not optional.** The information summed from per-position slopes (the "outer
+product of gradients", [`fit_precision.md`](fit_precision.md) §3.2) describes the curved ridge as
+straight, so the whole step overshoots it: on 59 samples the first whole steps lost 3,556, 2,901 and
+2,299 log-likelihood units, where a quarter of the step gained 29, 11 and 4. Without the halving the
+prototype rejected every step on the 4-sample oracle and gained nothing. Near the maximum the whole
+step is accepted every time.
+
+**Measured** (diagnosis §4.1; the prototype with the per-parameter stopping test it replaced):
+
+| input | passes, all starts: before → with the step | SNP/indel stage | log-likelihood |
+|---|---|---|---|
+| tomato2, 59 samples, 18 threads | 597 (none converged) → 133 | 60 min → 15 min 51 s | +37 units |
+| oracle, 4 samples, 4 threads | 599 (none converged) → 133 | 18 min 55 s → 3 min 48 s | +2.3 units |
+| 1 oracle sample, 4 threads | 229 → 61 | 192 s → 58 s (whole command) | −0.01 units |
+
+With the decrement rule at 0.001 the whole fits took 63, 136 and, on 59 samples read one chunk in
+four, 128 passes (stopping-rule report §4.1). On the 4 oracle samples the calls moved by 2 records
+added (QUAL 9.4 each) to 6,680, and 5 sample genotypes of 26,720, all at one locus (diagnosis §5).
+
+**What does not change.** Every pass before a start's first judging pass is the same pass as today,
+on the same parameters, so a start that never reaches the trigger returns the same bits. A run that
+fits nothing (`--defaults`) is untouched.
+
+**Traps.**
+
+- **A try is a judging pass, not a plain one.** It must sum the information, or an accepted step
+  leaves the next cycle with nothing to judge or step from.
+- **Tries count against `max_passes`**, and a try is not started once the passes are spent.
+- **No slack.** A try is kept only if it rises. SQUAREM's jumps keep their own one-unit allowance
+  (`JUMP_SLACK`, [`fit.rs:2926`](../../../../src/parameter_estimation/joint/fit.rs#L2926)); the Newton
+  step must not inherit it, since a step that lost a unit could be retried from the same point
+  forever.
+- **The progress line is printed for every cycle**, including one that ends in an accepted step;
+  the prototype skipped it there, which left a fit that converged by Newton steps silent. It says
+  which way the cycle went (`Newton step at 1/4 accepted` or `rejected four times; SQUAREM`).
+- **Determinism is kept**: the step uses only sums an existing pass already makes, in the fit's
+  fixed chunk order, so the result does not depend on the thread count.
+
+**Soft:** `NEWTON_TRIES` = 4, the doubling of `f_last` and its starting 0.5 are what the prototype
+used; none was tuned.
+
+**Alternatives measured and not adopted** (diagnosis §4.2, §4.3). *Letting a start agree with an
+earlier start that ran to the limit* cut the 4-sample stage to 12 min 26 s, returned the same
+unconverged answer, and needs the parameters file to accept a start recorded as agreeing with one
+that never converged; with the Newton step start 1 converges and the existing rule stops the others.
+*Judging only every third cycle* cut it to 12 min 52 s with identical output, and conflicts with the
+step, which needs the information every cycle.
+
+**When the climb stops** is [`fit_precision.md`](fit_precision.md) §2, amended the same day (owner):
+a start stops when the log-likelihood the remaining bounded Newton step is worth — the Newton
+decrement — falls below `DECREMENT_THRESHOLD` = 0.001 units.
 
 ### 3.4 Contamination — a per-sample number this path fits, and only this path can
 
@@ -1980,6 +2357,38 @@ holds, and where the generic budget starts to matter — are
     and 6.6× → 5.5× at the shallow end, so it needs a depth-conditional rule the fit does not have.
     **Settled by**, if it is ever wanted: the change in fitted heterozygosity on a drawn panel, not the
     enrichment — enrichment does not say whether a discriminator reaches anything the caller emits.
+13. **How the SNP/indel fit reaches its maximum, when it stops, and what it says about the shares the
+    data do not separate** — **DECIDED 2026-10-16 (owner), all four parts as the lead recommended.**
+    Taken after the 59-sample tomato2 run spent 60 of its 61 minutes in this fit without converging
+    ([diagnosis](../../reports/implementations/snp_fit_convergence_diagnosis_2026-10-16.md)). Build
+    order: [`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md).
+
+    1. **The Newton step with halving.** Each judging pass's bounded Newton step is tried, kept only
+       if the log-likelihood rises, halved up to four times otherwise, then the usual SQUAREM cycle;
+       the last fraction that worked is remembered (§3.3.1). Measured 3.8 to 4.5 times fewer passes
+       and a log-likelihood never lower. *Rejected:* letting a start agree with one that ran to the
+       limit, and judging every third cycle (§3.3.1).
+    2. **Report the density's determined share.** The parameters file reports the share of positions
+       segregating above 1% beside the density's four numbers, in a new informational table (file
+       format 4), and marks `p_invariant` and `a` as not separately determined when halving or
+       doubling the segregating share costs under two log-likelihood units with that share held, or
+       when a number of the density is not identified; a marked number is written without a standard
+       error (§2.1.3). Calling reads nothing new. *Rejected for now:* reparameterising the density
+       around the determined share, and raising the shapes' lower bound.
+    3. **The same mark for the duplicated class's share and its carrier shape `a`**, by the
+       analogous test — the share of positions duplicated in more than 1% of the panel held — and
+       reported in a table of its own (§2.1.3). On the 4 oracle samples the pair trades: its share
+       moved 6.7-fold between the fit stopped at 200 passes and the converged one while the
+       determined share moved 9%. *Decided in writing it, under the owner's instruction:* the same
+       `STATED_FREQUENCY` as the density.
+    4. **Stop on the Newton decrement.** A start stops when the log-likelihood the remaining bounded
+       Newton step is worth falls below `DECREMENT_THRESHOLD` = 0.001, replacing "every parameter
+       within a tenth of its error"; a negative decrement — a box solve that did not finish — never
+       counts as converged ([`fit_precision.md`](fit_precision.md) §2, amendment of 2026-10-16).
+       Measured at 1, 4 and 59 samples
+       ([report](../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md)); 0.1, first
+       proposed, and 0.01 were rejected as leaving the mismapped share 0.55 to 1.17 and a quarter to
+       a third of its error short.
 
 ---
 
@@ -2088,3 +2497,24 @@ These are the estimator's.*
     alternative allele as the observed largest of three fails this and passes every other test in
     this list**, because the bias it introduces is small per site, one-directional, and lands only on
     the classes this test isolates.
+11. **The Newton step only climbs, and the fit's answer does not get worse** (§3.3.1, added
+    2026-10-16). A unit test where the whole step overshoots — a drawn cohort started on the far side
+    of the ridge, or a log-likelihood stubbed to fall at fraction 1 — must show the step halved, a
+    halved try kept, and the remembered fraction used next; one where every try falls must show the
+    SQUAREM cycle run from the judged point, and one where the shares' upper bound is crossed must
+    show a try halved without a pass. On the 4-sample oracle and on a drawn cohort at 3 and at 30
+    reads, the fit with the step must reach a log-likelihood no lower than the fit without it run to
+    1,000 passes, in fewer passes; and the same bits at 1, 4 and 8 threads. A start that never reaches
+    a judging pass returns the same bits as before the step was built.
+12. **The verdicts are right on both sides** (§2.1.3, added 2026-10-16). *The density:* on a drawn
+    cohort whose segregating positions are all above 1% (a Beta with `a` well above 1), the pair must
+    not be marked; on one whose density piles up below 1% (`a` = 0.05, 50 samples, 3 reads), it must
+    be, and the reported share above 1% must lie within two of its errors of the drawn one in both.
+    *The duplicated class:* on a drawn 50-sample cohort whose duplications are carried by about a
+    third of the panel (carrier `Beta(3, 6)`), the pair must not be marked; on a 4-sample one whose
+    duplications are rarely carried (carrier `Beta(0.05, 2)`), it must be. At one sample both pairs
+    are always marked and the derived numbers carry no error. Unit tests on a hand-built covariance:
+    `V_trade` at or below zero gives no trade; a dropped number marks the pair; `trade_cost` just
+    under and at 2. The incomplete Beta against known values at both shape bounds. A golden
+    parameters file gains both tables; a version-3 file still reads; a version-5 file is refused; a
+    marked number with a `standard_error` is refused; a calling run writes both tables back.

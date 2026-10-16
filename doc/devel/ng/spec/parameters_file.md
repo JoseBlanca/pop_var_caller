@@ -248,6 +248,12 @@ varies per locus is only how it is spread across that locus's alleles
 re-deriving the seed, and any change to that derivation would silently re-interpret every existing
 file. The moments may be written *beside* it for a human, marked as informational.
 
+*Amended 2026-10-16 (owner), format 4:* they are, in `[ordinary_site_prior.fitted_density]` — the
+density's four numbers, the share segregating above 1%, `Hexp` and the mean alternative frequency,
+with errors and a mark on the numbers the data do not separate — and the duplicated class's numbers
+in `[duplicated_positions]`. No run reads either; what they hold and how they are validated is
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.1.3.
+
 **An alternative total of exactly zero is a real answer** — a fully invariant cohort — and is not
 floored on the way in or out; the flooring belongs to the per-locus expansion.
 
@@ -610,6 +616,8 @@ memory and in direct mode from the file that fit wrote, must give the same VCF.
    the seed because it is what calling reads. The moments are what a human can interpret.
    **Leaning: write both, with the moments marked informational and ignored on read.** The risk is
    a user editing the moments and expecting the seed to follow. Confirm before code.
+   **Resolved 2026-10-16 (owner): both**, as the leaning said — the informational table of §3.6's
+   amendment, whose comment says a calling run reads none of it.
 3. **Whether the read-group table belongs in this file at all — OPEN.** It is not a fitted number;
    it is run identity, and the alignment files already carry it. It is here because §6 needs
    something to check the dense read-group axis against. **Leaning: keep it, as identity rather
