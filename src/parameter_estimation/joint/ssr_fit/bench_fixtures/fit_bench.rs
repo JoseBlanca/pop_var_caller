@@ -59,6 +59,9 @@ use std::time::Instant;
 
 use super::cohort_draw::ClassTruth;
 use super::*;
+use crate::parameter_estimation::joint::ssr_fit::expected_counts::{
+    DistinctRows, ScoredDistinctRows,
+};
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, PenalisedPeriodFit, fit_period_by_penalised_counting,
 };
@@ -1823,6 +1826,136 @@ fn ln_mean_and_variance(ln_weights: &[f64]) -> (f64, f64) {
     (float::ln(mean) + largest, variance / count / (mean * mean))
 }
 
+// ---------------------------------------------------------------------
+// Genotype calls under two sets of numbers (plan step D6)
+// ---------------------------------------------------------------------
+
+/// **A class's samples, ready to be called under any set of numbers**: each (locus, sample) with
+/// reads given the genotype its weights put highest ([`Self::under`]). A proxy for calling, for the
+/// question of spec `str_penalised_fit.md` §5.1 — whether a slip rate a little off changes calls —
+/// on cohorts too large for the project to simulate reads for.
+///
+/// **The weights are the fit's own**, the expectation step's: a genotype's prior from the class's
+/// shares and spread and the sample's homozygote excess, times how well it explains the sample's
+/// reads. Calling also borrows from the other samples at the locus; this does not.
+pub struct ClassCaller<'a> {
+    evidence: &'a StratumEvidence,
+    distinct: DistinctRows,
+}
+
+impl<'a> ClassCaller<'a> {
+    /// `evidence`'s distinct rows of reads, gathered once for every set of numbers.
+    #[must_use]
+    pub fn of(evidence: &'a StratumEvidence, homozygote_excess: &[f64]) -> Self {
+        Self {
+            evidence,
+            distinct: DistinctRows::of(evidence, homozygote_excess),
+        }
+    }
+
+    /// **Each (locus, sample) with reads called under `numbers`**, in the order of the class's
+    /// loci then each locus's samples: the genotype as its two allele classes over the shares'
+    /// window (`0` is `-allele_span`), the first not above the second, or `None` where no genotype
+    /// explains the reads.
+    #[must_use]
+    pub fn under(&self, numbers: &ClassNumbers) -> Vec<Option<(usize, usize)>> {
+        let allele_span = (numbers.allele_length_variation.len() / 2) as i32;
+        ScoredDistinctRows::of(self.evidence, &self.distinct, numbers.slippage, allele_span)
+            .genotypes_weighted_highest(&numbers.allele_length_variation, numbers.concentration)
+    }
+}
+
+/// **The genotypes a class's samples drew, as [`ClassCaller::under`] names genotypes**: per locus,
+/// per sample listed at it (`DrawnPeriod::genotypes` of one class), each copy's offset folded into
+/// `-allele_span ..= +allele_span` (the outermost classes meaning "this far or further") and the
+/// pair put in order, flattened in the order of the class's loci then each locus's samples.
+#[must_use]
+pub fn drawn_genotypes_in_window(
+    genotypes: &[Vec<(i8, i8)>],
+    allele_span: i32,
+) -> Vec<(usize, usize)> {
+    let class =
+        |offset: i8| (i32::from(offset).clamp(-allele_span, allele_span) + allele_span) as usize;
+    genotypes
+        .iter()
+        .flatten()
+        .map(|(first, second)| {
+            let (first, second) = (class(*first), class(*second));
+            (first.min(second), first.max(second))
+        })
+        .collect()
+}
+
+/// **How the calls under one set of numbers differ from the calls under another**, the
+/// *reference*, each held against the genotype drawn. A missing call is a wrong one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CallChanges {
+    /// (locus, sample) pairs with reads.
+    pub pairs: usize,
+    /// Pairs whose call under the reference is not the drawn genotype: the error already there.
+    pub wrong_under_reference: usize,
+    /// Pairs whose call differs between the two.
+    pub changed: usize,
+    /// Changed pairs the reference called right.
+    pub right_to_wrong: usize,
+    /// Changed pairs the other numbers called right.
+    pub wrong_to_right: usize,
+}
+
+impl CallChanges {
+    /// Changed pairs that both called wrong, each differently.
+    #[must_use]
+    pub fn wrong_to_wrong(&self) -> usize {
+        self.changed - self.right_to_wrong - self.wrong_to_right
+    }
+
+    /// Adds `other`'s pairs to these.
+    pub fn add(&mut self, other: &Self) {
+        self.pairs += other.pairs;
+        self.wrong_under_reference += other.wrong_under_reference;
+        self.changed += other.changed;
+        self.right_to_wrong += other.right_to_wrong;
+        self.wrong_to_right += other.wrong_to_right;
+    }
+}
+
+/// **`other`'s calls against `reference`'s**, pair by pair, with `drawn` the genotypes drawn, all
+/// three in the same order ([`ClassCaller::under`], [`drawn_genotypes_in_window`]).
+///
+/// # Panics
+///
+/// When the three are not the same length.
+#[must_use]
+pub fn call_changes(
+    reference: &[Option<(usize, usize)>],
+    other: &[Option<(usize, usize)>],
+    drawn: &[(usize, usize)],
+) -> CallChanges {
+    assert!(
+        reference.len() == other.len() && other.len() == drawn.len(),
+        "one call under each set of numbers and one drawn genotype a pair"
+    );
+    let mut changes = CallChanges {
+        pairs: drawn.len(),
+        ..CallChanges::default()
+    };
+    for ((reference, other), drawn) in reference.iter().zip(other).zip(drawn) {
+        let reference_right = *reference == Some(*drawn);
+        if !reference_right {
+            changes.wrong_under_reference += 1;
+        }
+        if reference != other {
+            changes.changed += 1;
+            if reference_right {
+                changes.right_to_wrong += 1;
+            } else if *other == Some(*drawn) {
+                changes.wrong_to_right += 1;
+            }
+        }
+    }
+    changes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2520,5 +2653,97 @@ mod tests {
         );
         assert_eq!(fallback.numbers.concentration, 2.0);
         assert_eq!(kept[1].as_ref().map(|s| s.numbers.concentration), Some(0.4));
+    }
+
+    /// **The same stutter changes no call; a grossly wrong one changes some.** Two drawn two-base
+    /// classes, 40 samples at 3 reads: called under the truth twice, from two separate scorings,
+    /// no call moves; called with the slip rate five times the truth's, some do, and more of the
+    /// moved calls go from right to wrong than back.
+    ///
+    /// **The pairing of calls with drawn genotypes.** Most samples here are homozygous for the
+    /// reference, so a call held against another sample's genotype is still often right; "most
+    /// calls are right" alone would pass with the pairing broken (measured: 1,743 of 2,293 right
+    /// with every locus's genotypes shifted by one sample). So the test holds the same calls
+    /// against the drawn genotypes shifted that way too, and asks the shifted pairing for more
+    /// than twice the wrong calls (measured: 550 against 142).
+    #[test]
+    fn the_same_stutter_changes_no_call_and_a_wrong_one_changes_some() {
+        use super::super::cohort_draw::{CohortModel, LociPerClass, StutterRegime, draw_period};
+        let mut model = CohortModel::tomato_like(2, StutterRegime::Pcr);
+        model.samples = 40;
+        model.depth = 3.0;
+        model.loci = LociPerClass::Each(30);
+        model.repeat_counts = Some(vec![10, 16]);
+        let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
+        let mut same = CallChanges::default();
+        let mut wrong = CallChanges::default();
+        let mut shifted = CallChanges::default();
+        for ((evidence, truth), drawn_genotypes) in
+            drawn.strata.iter().zip(&drawn.truth).zip(&drawn.genotypes)
+        {
+            let caller = ClassCaller::of(evidence, &drawn.homozygote_excess);
+            let numbers = ClassNumbers::of_truth(truth, ALLELE_SPAN);
+            let genotypes = drawn_genotypes_in_window(drawn_genotypes, ALLELE_SPAN);
+            let under_truth = caller.under(&numbers);
+            // Each locus's genotypes moved one sample along: every call paired with its
+            // neighbour's genotype.
+            let shifted_genotypes: Vec<Vec<(i8, i8)>> = drawn_genotypes
+                .iter()
+                .map(|locus| {
+                    let mut locus = locus.clone();
+                    if !locus.is_empty() {
+                        locus.rotate_left(1);
+                    }
+                    locus
+                })
+                .collect();
+            shifted.add(&call_changes(
+                &under_truth,
+                &under_truth,
+                &drawn_genotypes_in_window(&shifted_genotypes, ALLELE_SPAN),
+            ));
+            same.add(&call_changes(
+                &under_truth,
+                &caller.under(&numbers.clone()),
+                &genotypes,
+            ));
+            let too_much_stutter = ClassNumbers {
+                slippage: Slippage {
+                    level: 5.0 * numbers.slippage.level,
+                    ..numbers.slippage
+                },
+                ..numbers.clone()
+            };
+            wrong.add(&call_changes(
+                &under_truth,
+                &caller.under(&too_much_stutter),
+                &genotypes,
+            ));
+        }
+        assert!(same.pairs > 1_000, "{same:?}");
+        assert_eq!(same.changed, 0, "{same:?}");
+        assert!(
+            2 * same.wrong_under_reference < shifted.wrong_under_reference,
+            "calls paired with the drawn genotypes are wrong far less often than with each \
+             locus's genotypes shifted by one sample: {same:?} against {shifted:?}"
+        );
+        assert!(wrong.changed > 0, "{wrong:?}");
+        assert!(wrong.right_to_wrong > wrong.wrong_to_right, "{wrong:?}");
+        assert_eq!(
+            wrong.right_to_wrong + wrong.wrong_to_right + wrong.wrong_to_wrong(),
+            wrong.changed
+        );
+    }
+
+    /// **A drawn copy past the window counts at the window's end, and a pair is put in order**,
+    /// as [`ClassCaller::under`] names genotypes: at span 9, -12 is class 0 and 10 is class 18,
+    /// and (5, -1) becomes (8, 14). Loci are flattened in order, an empty locus adding nothing.
+    #[test]
+    fn drawn_genotypes_in_window_folds_far_copies_to_the_end_classes_and_orders_the_pair() {
+        let drawn = vec![vec![(-12, 3), (5, -1), (10, 10)], vec![], vec![(0, 0)]];
+        assert_eq!(
+            drawn_genotypes_in_window(&drawn, 9),
+            vec![(0, 12), (8, 14), (18, 18), (9, 9)]
+        );
     }
 }

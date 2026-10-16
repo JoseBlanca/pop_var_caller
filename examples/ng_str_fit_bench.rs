@@ -82,6 +82,33 @@
 //!   unscored. `--locus-out` writes every scored locus, with its motif length in the last column,
 //!   so the comparison can be paired by locus. The process's `peak_rss_mib` covers every motif
 //!   length and is written with `period` `all`.
+//!
+//! # The proxy for calling
+//!
+//! `--calls-out` asks whether a fit's small errors change genotype calls (spec
+//! `str_penalised_fit.md` §5.1, plan step D6), on cohorts too large to simulate reads for. Each
+//! (locus, sample) with reads is called: the genotype its weights put highest, the weights being
+//! the fit's own expectation step (`fit_bench::ClassCaller`) — a genotype's prior from the class's
+//! allele-length shares, its spread and the sample's homozygote excess, times how well it explains
+//! the sample's reads. The **reference** calls are made under the truth's numbers, and each of
+//! these sets of numbers is compared with them:
+//!
+//! | `arm` | stutter | shares and spread |
+//! |---|---|---|
+//! | `level_0.995` | the truth's, slip rate 0.5% of its value low | the truth's |
+//! | `fitted_level` | the truth's, slip rate the method's | the truth's |
+//! | `fitted_stutter` | the method's three numbers | the truth's |
+//! | `fitted_all` | the method's | the method's, at the held-out score's fallback where absent |
+//!
+//! The method is fitted once on every locus, as the rows' own estimates are. Columns: the cell's
+//! six, then `method`, `arm`, `repeats` (or `all`), `true_level` and `arm_level` (`NA` on `all`
+//! rows), `pairs` ((locus, sample) pairs with reads), `wrong_under_truth` (reference calls that
+//! are not the genotype drawn, the error already there), `changed` (calls that differ from the
+//! reference), and of those `right_to_wrong`, `wrong_to_right` and `wrong_to_wrong`. A genotype is
+//! read over the fit's window, each copy past ±9 counted at ±9. A class a method gave no stutter
+//! has no row for the arms that need it. **So an arm's `all` row sums only the classes that arm has
+//! rows for**, and two arms' `all` rows can cover different classes: compare their `pairs` before
+//! comparing their `changed`.
 
 // The allocator `pvc` ships (`src/main.rs`), so that the bench's times and peak memory describe
 // what `estimate-parameters` runs. A `#[global_allocator]` is per binary: without this line the
@@ -98,7 +125,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use clap::Parser;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
 use rayon::prelude::*;
 
 use pop_var_caller::calling::parameters_file::{ParametersFile, Warrant};
@@ -108,20 +136,21 @@ use pop_var_caller::cli::estimate_parameters::{
 use pop_var_caller::parameter_estimation::joint::census::RECORDED_OFFSET_RANGE;
 use pop_var_caller::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort_draw::{
-    ClassTruth, CohortModel, HomozygoteExcessTruth, LociPerClass, ParameterCurve, StutterRegime,
-    draw_period, write_truth_tsv,
+    ClassTruth, CohortModel, DrawnPeriod, HomozygoteExcessTruth, LociPerClass, ParameterCurve,
+    StutterRegime, draw_period, write_truth_tsv,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
-    ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan, HeldOutClasses, HeldOutRun,
-    HeldOutSettings, HeldOutSums, PeriodFit, Sampler, ScoringFallback, TheClimb, TheCountingFit,
-    ThePenalisedFit, class_seed_across_motif_lengths, fold_plans_across_motif_lengths,
-    held_out_run, variants_of,
+    CallChanges, ClassCaller, ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan,
+    HeldOutClasses, HeldOutRun, HeldOutSettings, HeldOutSums, PeriodFit, Sampler, ScoringFallback,
+    TheClimb, TheCountingFit, ThePenalisedFit, call_changes, class_seed_across_motif_lengths,
+    drawn_genotypes_in_window, fold_plans_across_motif_lengths, held_out_run, numbers_for_scoring,
+    variants_of,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     ParameterCurve as FittedCurve, PenalisedPeriodFit, stutter_prior_weight_problem,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    ALLELE_SPAN, SsrFitConfig, StratumEvidence,
+    ALLELE_SPAN, Slippage, SsrFitConfig, StratumEvidence,
 };
 use pop_var_caller::run::{
     CohortTractStrata, every_read_group_pooled, homozygote_excess_in_cohort_order,
@@ -261,7 +290,8 @@ struct Cli {
     /// period's median (or one where no class has one). For measurement only.
     #[arg(long)]
     stated_concentration: Option<f64>,
-    /// How far either side of the reference alleles are drawn, in place of the truth's (14).
+    /// How far either side of the reference alleles are drawn, in place of the truth's (14). At
+    /// most 127 repeats: the draw keeps each sample's genotype as offsets of one byte.
     #[arg(long)]
     allele_reach: Option<i32>,
     /// One between-locus share F for every class, in place of the truth's curve.
@@ -274,6 +304,13 @@ struct Cli {
     /// refused.
     #[arg(long, value_parser = a_stutter_prior_weight)]
     stutter_prior_reads: Option<f64>,
+    /// **The proxy for calling** (spec `str_penalised_fit.md` §5.1; plan step D6): every sample
+    /// at every locus called from its genotype weights under the truth's numbers and under each
+    /// of a few others built from each method's full fit, and the calls compared. One row a
+    /// method, set of numbers and class, then one over every class; see "The proxy for calling"
+    /// in the module documentation. Drawn mode only, at one stutter multiplier.
+    #[arg(long, conflicts_with_all = ["psps", "fixture_out"])]
+    calls_out: Option<PathBuf>,
 }
 
 /// `--stutter-prior-reads` read as a number, refused unless it is a weight the fit can use
@@ -1114,6 +1151,115 @@ fn run_on_psps(cli: &Cli) {
     write_rows(&out_path, &rows);
 }
 
+/// The header of the `--calls-out` file.
+const CALL_COLUMNS: &str = "cell\tperiod\tsamples\tdepth\ttruth_variant\tseed\tmethod\tarm\trepeats\t\
+                            true_level\tarm_level\tpairs\twrong_under_truth\tchanged\tright_to_wrong\t\
+                            wrong_to_right\twrong_to_wrong";
+
+/// One `--calls-out` line.
+fn call_line(
+    cell_columns: &str,
+    method: &str,
+    arm: &str,
+    repeats: &str,
+    levels: Option<(f64, f64)>,
+    changes: &CallChanges,
+) -> String {
+    format!(
+        "{cell_columns}\t{method}\t{arm}\t{repeats}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        number(levels.map(|(truth, _)| truth)),
+        number(levels.map(|(_, arm)| arm)),
+        changes.pairs,
+        changes.wrong_under_reference,
+        changes.changed,
+        changes.right_to_wrong,
+        changes.wrong_to_right,
+        changes.wrong_to_wrong()
+    )
+}
+
+/// **The proxy for calling, for one method's full fit** (`estimates`, one a class): each class's
+/// calls under the truth, against its calls under each arm of the module documentation's table,
+/// as `--calls-out` lines: one line for each class and arm, then, for each arm, one line over
+/// the classes that arm has lines for.
+fn call_lines(
+    lines: &mut Vec<String>,
+    cell_columns: &str,
+    method: &str,
+    estimates: &[ClassEstimate],
+    drawn: &DrawnPeriod,
+) {
+    const ARMS: [&str; 4] = [
+        "level_0.995",
+        "fitted_level",
+        "fitted_stutter",
+        "fitted_all",
+    ];
+    let scored = numbers_for_scoring(estimates, ScoringFallback::default());
+    let mut over_all = [CallChanges::default(); ARMS.len()];
+    for (class, evidence) in drawn.strata.iter().enumerate() {
+        if evidence.rows_with_reads() == 0 {
+            continue;
+        }
+        let truth = ClassNumbers::of_truth(&drawn.truth[class], ALLELE_SPAN);
+        let fitted = estimates[class].slippage;
+        let with_stutter = |slippage: Slippage| ClassNumbers {
+            slippage,
+            ..truth.clone()
+        };
+        let arms: [Option<ClassNumbers>; ARMS.len()] = [
+            Some(with_stutter(Slippage {
+                level: 0.995 * truth.slippage.level,
+                ..truth.slippage
+            })),
+            fitted.map(|fitted| {
+                with_stutter(Slippage {
+                    level: fitted.level,
+                    ..truth.slippage
+                })
+            }),
+            fitted.map(with_stutter),
+            scored[class].as_ref().map(|scored| scored.numbers.clone()),
+        ];
+        let caller = ClassCaller::of(evidence, &drawn.homozygote_excess);
+        let genotypes = drawn_genotypes_in_window(&drawn.genotypes[class], ALLELE_SPAN);
+        let under_truth = caller.under(&truth);
+        let repeats = evidence.stratum.reference_repeats.to_string();
+        for ((name, numbers), sum) in ARMS.iter().zip(&arms).zip(&mut over_all) {
+            let Some(numbers) = numbers else { continue };
+            let changes = call_changes(&under_truth, &caller.under(numbers), &genotypes);
+            sum.add(&changes);
+            lines.push(call_line(
+                cell_columns,
+                method,
+                name,
+                &repeats,
+                Some((truth.slippage.level, numbers.slippage.level)),
+                &changes,
+            ));
+        }
+    }
+    for (name, sum) in ARMS.iter().zip(&over_all) {
+        lines.push(call_line(cell_columns, method, name, "all", None, sum));
+    }
+}
+
+/// The `--calls-out` file, if asked for, written beside its final name and moved into place.
+fn write_call_lines(cli: &Cli, lines: &[String]) {
+    if let Some(path) = &cli.calls_out {
+        let partial = path.with_extension("partial");
+        {
+            let mut out = BufWriter::new(File::create(&partial).expect("the calls file opens"));
+            writeln!(out, "{CALL_COLUMNS}").expect("the calls file writes");
+            for line in lines {
+                writeln!(out, "{line}").expect("the calls file writes");
+            }
+            out.flush().expect("the calls file writes");
+        }
+        std::fs::rename(&partial, path).expect("the calls file moves into place");
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     if !cli.psps.is_empty() {
@@ -1121,6 +1267,30 @@ fn main() {
         return;
     }
     let model = model_of(&cli);
+    // Checked on the model, not the flags, so that a truth file's numbers are refused too.
+    if model.true_allele_reach > i32::from(i8::MAX) {
+        Cli::command()
+            .error(
+                ErrorKind::ValueValidation,
+                format!(
+                    "the allele reach is {}, above the 127 repeats the draw can record \
+                     (--allele-reach or the truth file's true_allele_reach)",
+                    model.true_allele_reach
+                ),
+            )
+            .exit();
+    }
+    // The reference calls are made at the truth's one stutter, which every sample's reads were
+    // drawn through only when every library's multiplier is one.
+    if cli.calls_out.is_some() && model.library_multipliers.iter().any(|m| *m != 1.0) {
+        Cli::command()
+            .error(
+                ErrorKind::ArgumentConflict,
+                "--calls-out compares calls at one stutter, so every library's multiplier must \
+                 be 1 (--library-multipliers or the truth file's library_multipliers)",
+            )
+            .exit();
+    }
     let mut truth_variant = match cli.truth.as_str() {
         "pcr" | "pcr_free" => cli.truth.clone(),
         path => PathBuf::from(path).file_stem().map_or_else(
@@ -1316,6 +1486,7 @@ fn main() {
     let fallbacks = fallbacks_asked(&cli);
 
     let mut locus_lines: Vec<String> = Vec::new();
+    let mut calls: Vec<String> = Vec::new();
     // An empty name is no method: a run that only draws, to measure the draw's own memory.
     for name in cli.methods.iter().filter(|name| !name.is_empty()) {
         let method = method_named(name, &cli);
@@ -1328,6 +1499,16 @@ fn main() {
         let full = variants_of(method.as_ref(), raw, &drawn.strata, &curve_config);
         for (variant, estimates) in &full {
             recovery_rows(&mut rows, variant, estimates, &drawn.truth);
+        }
+        if cli.calls_out.is_some() {
+            let started = Instant::now();
+            for (variant, estimates) in &full {
+                call_lines(&mut calls, &rows.cell_columns, variant, estimates, &drawn);
+            }
+            eprintln!(
+                "{cell}: {base} calls compared in {:.1} s",
+                started.elapsed().as_secs_f64()
+            );
         }
 
         if settings.folds > 0 {
@@ -1348,6 +1529,7 @@ fn main() {
         }
     }
     write_locus_lines(&cli, &locus_lines);
+    write_call_lines(&cli, &calls);
     rows.push("process", "all", "peak_rss_mib", None, peak_rss_mib(), None);
     write_rows(&out_path, &rows);
 }

@@ -36,8 +36,8 @@
 //! # What comes back
 //!
 //! [`DrawnPeriod`]: one [`StratumEvidence`] per class, exactly as the census would build it, the
-//! per-sample homozygote excess, and the truth per class ([`ClassTruth`]), which
-//! [`write_truth_tsv`] writes out.
+//! per-sample homozygote excess, the truth per class ([`ClassTruth`]), which
+//! [`write_truth_tsv`] writes out, and the genotype every sample drew at every locus.
 //!
 //! **The draw is deterministic.** Each class is drawn from its own random stream, seeded from the
 //! model's seed and the class's repeat count, so a class's draw does not change when other classes
@@ -644,6 +644,13 @@ pub struct DrawnPeriod {
     pub truth: Vec<ClassTruth>,
     /// Each sample's homozygote excess, as drawn; the fit takes it as given.
     pub homozygote_excess: Vec<f64>,
+    /// **The genotype every sample drew**: per class, per locus, per sample listed at the locus
+    /// (in the order of the locus's samples in `strata`), its two copies as repeat offsets from the
+    /// reference, `-true_allele_reach ..= +true_allele_reach`, in the order drawn. What the fit
+    /// never sees; the bench's proxy for calling scores calls against it. An offset is one byte,
+    /// so [`draw_period`] panics if it draws an allele more than 127 repeats out (the default
+    /// reach is 14).
+    pub genotypes: Vec<Vec<Vec<(i8, i8)>>>,
 }
 
 // ---------------------------------------------------------------------
@@ -682,7 +689,18 @@ pub(super) fn draw_locus(
     frequencies: &[f64],
     drawing: &LocusDrawing<'_>,
 ) -> TractReads {
+    draw_locus_and_genotypes(rng, frequencies, drawing).0
+}
+
+/// [`draw_locus`], and the genotype each sample listed at the locus drew, in the order of the
+/// locus's samples: its two copies as indices into `frequencies`. The random numbers are the same.
+pub(super) fn draw_locus_and_genotypes(
+    rng: &mut Rng,
+    frequencies: &[f64],
+    drawing: &LocusDrawing<'_>,
+) -> (TractReads, Vec<(usize, usize)>) {
     let mut reads = TractReads::default();
+    let mut genotypes = Vec::new();
     for sample in 0..drawing.homozygote_excess.len() {
         let (depth, listed_without_reads) = match drawing.depth {
             Depth::Fixed(depth) => (depth, true),
@@ -708,8 +726,9 @@ pub(super) fn draw_locus(
             sample: sample as u32,
             by_library: vec![(LibraryIndex(library as u32), counts)],
         });
+        genotypes.push((first, second));
     }
-    reads
+    (reads, genotypes)
 }
 
 /// A locus's allele frequencies: one Dirichlet draw with the given weights (`concentration ×
@@ -771,7 +790,8 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
         .collect();
 
     let classes = model.classes();
-    let drawn: Vec<(StratumEvidence, ClassTruth)> = classes
+    type DrawnClass = (StratumEvidence, ClassTruth, Vec<Vec<(i8, i8)>>);
+    let drawn: Vec<DrawnClass> = classes
         .par_iter()
         .map(|(repeats, loci)| {
             let truth = model.truth_at(*repeats, *loci);
@@ -805,12 +825,21 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
                 model.seed,
                 (u64::from(model.period) << 32) | repeats,
             ));
-            let tracts: Vec<TractReads> = (0..*loci)
+            let offset = |index: usize| {
+                i8::try_from(index as i32 - reach).expect("an allele within 127 repeats")
+            };
+            let (tracts, genotypes): (Vec<TractReads>, Vec<Vec<(i8, i8)>>) = (0..*loci)
                 .map(|_| {
                     let frequencies = draw_locus_frequencies(&mut rng, &weights);
-                    draw_locus(&mut rng, &frequencies, &drawing)
+                    let (reads, genotypes) =
+                        draw_locus_and_genotypes(&mut rng, &frequencies, &drawing);
+                    let genotypes = genotypes
+                        .into_iter()
+                        .map(|(first, second)| (offset(first), offset(second)))
+                        .collect();
+                    (reads, genotypes)
                 })
-                .collect();
+                .unzip();
             let evidence = StratumEvidence {
                 stratum: truth.stratum,
                 tracts,
@@ -823,14 +852,22 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
                 bases_compared: 0,
                 mismatching_bases: 0,
             };
-            (evidence, truth)
+            (evidence, truth, genotypes)
         })
         .collect();
-    let (strata, truth) = drawn.into_iter().unzip();
+    let mut strata = Vec::with_capacity(drawn.len());
+    let mut truth = Vec::with_capacity(drawn.len());
+    let mut genotypes = Vec::with_capacity(drawn.len());
+    for (evidence, class_truth, class_genotypes) in drawn {
+        strata.push(evidence);
+        truth.push(class_truth);
+        genotypes.push(class_genotypes);
+    }
     DrawnPeriod {
         strata,
         truth,
         homozygote_excess,
+        genotypes,
     }
 }
 

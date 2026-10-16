@@ -985,6 +985,47 @@ impl<'a> ScoredDistinctRows<'a> {
     }
 }
 
+/// For the fitting bench's proxy for calling (plan step D6), not for a run.
+#[cfg(any(test, feature = "bench-fixtures"))]
+impl ScoredDistinctRows<'_> {
+    /// **The genotype each sample's weights put highest**: for every (tract, sample) with reads,
+    /// in the order of `evidence.tracts` then each tract's samples, the genotype with the largest
+    /// weight at the scored stutter, the shares `shares` and the spread `concentration`.
+    ///
+    /// The weights are the expectation step's own ([`ReadModel::counts_of`]): the row's
+    /// likelihood times the genotype's prior, its one-draw and two-draw parts mixed by the
+    /// sample's homozygote excess ([`GenotypePrior::add_sample`]). A genotype is its two allele
+    /// classes, the first not above the second; a tie goes to the genotype first in
+    /// [`genotype_pairs`] order. `None` for a sample whose reads no genotype explains.
+    pub(super) fn genotypes_weighted_highest(
+        &self,
+        shares: &[f64],
+        concentration: f64,
+    ) -> Vec<Option<(usize, usize)>> {
+        let model = &self.model;
+        let prior = GenotypePrior::of(&model.genotypes, shares, concentration);
+        self.distinct
+            .rows
+            .par_iter()
+            .map(|(index, excess)| {
+                let row = &self.scored[*index as usize];
+                let mut weights = RowWeights::default();
+                prior.add_sample(row.largest, prior.totals(row), *excess, &mut weights)?;
+                let mut highest: Option<(usize, f64)> = None;
+                for (genotype, scaled) in row.scaled.iter().enumerate() {
+                    let weight = scaled
+                        * (prior.one_draw[genotype] * weights.as_one
+                            + prior.two_draws[genotype] * weights.as_two);
+                    if highest.is_none_or(|(_, top)| weight > top) {
+                        highest = Some((genotype, weight));
+                    }
+                }
+                highest.map(|(genotype, _)| model.genotypes[genotype])
+            })
+            .collect()
+    }
+}
+
 /// **One round's expected counts over the whole class**, at the stutter `slippage`, the
 /// allele-length shares `shares` and the spread `concentration`: the counts of
 /// [`expected_counts_by_tract`] summed, with every distinct row of reads scored once however many
@@ -2029,6 +2070,96 @@ mod tests {
             config.allele_span,
         );
         assert!(same(&class, &summed), "{class:?} against {summed:?}");
+    }
+
+    /// **A sample's call is the genotype its posterior puts highest**, the posterior computed here
+    /// sample by sample as the row-by-row expected counts compute it: each genotype's read
+    /// likelihood times its prior, the prior mixing "the two copies are one draw" and "two draws"
+    /// by the sample's homozygote excess and the spread. The 20 samples carry excesses from 0 to
+    /// 0.98, so a call that dropped either part of the prior, or swapped them, would put some
+    /// samples' weight on another genotype. A tie may go either way: the call's posterior must be
+    /// the largest to within rounding.
+    #[test]
+    fn genotypes_weighted_highest_matches_the_argmax_of_a_brute_force_posterior() {
+        let truth = Slippage {
+            level: 0.08,
+            shorter_share: 0.8,
+            fall_off: 0.25,
+        };
+        let allele_span = 2;
+        let samples = 20;
+        let evidence = draw_stratum(truth, &spectrum_of(5), 0.5, 0.9, 300, samples, 3, 2, 23);
+        let excess: Vec<f64> = (0..samples).map(|s| 0.98 * s as f64 / 19.0).collect();
+        let at = Slippage {
+            level: 0.12,
+            shorter_share: 0.6,
+            fall_off: 0.4,
+        };
+        let shares = [0.1, 0.15, 0.4, 0.2, 0.15];
+        let concentration = 0.7;
+
+        let distinct = DistinctRows::of(&evidence, &excess);
+        let calls = ScoredDistinctRows::of(&evidence, &distinct, at, allele_span)
+            .genotypes_weighted_highest(&shares, concentration);
+
+        let classes = allele_classes_in(allele_span);
+        let genotypes = genotype_pairs(classes);
+        let read_span = evidence.read_span;
+        let libraries = one_stutter_for_every_library(&evidence);
+        let distributions = ReadDistributionsByLevel::of(&[at], &libraries, allele_span, read_span);
+        let per_allele = &distributions.read_distribution_by_allele[0];
+        let mut posteriors: Vec<Vec<f64>> = Vec::new();
+        for tract in &evidence.tracts {
+            for sample in &tract.samples {
+                let excess = excess[sample.sample as usize];
+                let reads = pooled_reads(sample, (2 * read_span + 1) as usize);
+                let one_draw_chance = excess + (1.0 - excess) / (1.0 + concentration);
+                let two_draw_chance = (1.0 - excess) * concentration / (1.0 + concentration);
+                let posterior: Vec<f64> = genotypes
+                    .iter()
+                    .map(|(a, b)| {
+                        let mut ln_likelihood = 0.0;
+                        add_ln_reads(&mut ln_likelihood, per_allele, &reads, *a, *b);
+                        let prior = if a == b {
+                            one_draw_chance * shares[*a] + two_draw_chance * shares[*a] * shares[*a]
+                        } else {
+                            two_draw_chance * 2.0 * shares[*a] * shares[*b]
+                        };
+                        prior * float::exp(ln_likelihood)
+                    })
+                    .collect();
+                posteriors.push(posterior);
+            }
+        }
+
+        assert_eq!(calls.len(), posteriors.len());
+        let mut heterozygous = 0;
+        for (index, (call, posterior)) in calls.iter().zip(&posteriors).enumerate() {
+            let highest = posterior.iter().copied().fold(0.0, f64::max);
+            assert!(
+                highest > 0.0,
+                "sample row {index}: no genotype explains the reads"
+            );
+            let call = call.expect("every sample's reads are explained");
+            let called = genotypes
+                .iter()
+                .position(|genotype| *genotype == call)
+                .expect("the call is a genotype");
+            assert!(
+                posterior[called] >= highest * (1.0 - 1e-9),
+                "sample row {index}: called {call:?} at {}, the highest is {highest}",
+                posterior[called]
+            );
+            if call.0 != call.1 {
+                heterozygous += 1;
+            }
+        }
+        // Both kinds of call are made, so both parts of the prior were weighed.
+        assert!(
+            heterozygous > 0 && heterozygous < calls.len(),
+            "{heterozygous} of {} calls heterozygous",
+            calls.len()
+        );
     }
 
     /// **The table of distinct rows does not depend on the size of a block**: built in blocks of
