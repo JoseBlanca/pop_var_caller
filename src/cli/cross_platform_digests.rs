@@ -458,6 +458,7 @@ mod tests {
             inbreeding: None,
             str_param_estimates_at_once: None,
             skip_contamination: false,
+            threads: 0,
         })
         .expect("the cohort fits");
 

@@ -10,7 +10,6 @@ use super::estimate_contamination::EstimateContaminationArgs;
 use super::estimate_parameters::EstimateParametersArgs;
 use super::generate_psps::GeneratePspsArgs;
 use super::inspect_psp::InspectPspArgs;
-use super::regenerate_census::RegenerateCensusArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
@@ -89,9 +88,6 @@ pub enum PopVarCallerCommand {
     /// parameters, read from the psps instead of the alignments. The ground called and what
     /// counts as a repeat are the ones the psps were written with.
     CallFromPsps(CallFromPspsArgs),
-
-    /// Rebuild the parameter-fitting data in psps written by older builds.
-    RegenerateCensus(RegenerateCensusArgs),
 
     /// Tools for developing and debugging the caller.
     #[command(subcommand)]

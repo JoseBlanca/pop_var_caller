@@ -147,13 +147,15 @@ run_one() {
     measure "$out/$side.log" \
       "$bin" call-from-psps \
       --reference "$reference" --catalog "$catalog" "${stored[@]}" \
-      --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
+      --defaults --threads "$threads" "$@" --output "$out/run.vcf" \
+      --force --log "$out/$side.pvc.log" || {
         echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
   else
     measure "$out/$side.log" \
       "$bin" call-from-alignments \
       --reference "$reference" --catalog "$catalog" "${alignments[@]}" --regions "$regions" \
-      --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
+      --defaults --threads "$threads" "$@" --output "$out/run.vcf" \
+      --force --log "$out/$side.pvc.log" || {
         echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
   fi
   mv "$out/run.vcf" "$out/$side.vcf"
@@ -200,7 +202,8 @@ for side in drop tag; do
   # **An empty report is a failure, not a quiet section.** `sed` prints nothing and exits 0 when
   # the marker is absent, so a reworded first line would silently take π, the cut, the
   # convergence flag and the drop count out of every report written from this output.
-  report=$(sed -n '/^hidden-duplication filter:/,$p' "$out/$side.log")
+  # The run report is in the run's log, one `report:` line each.
+  report=$(sed -n 's/^[^ ]* DEBUG report: //p' "$out/$side.pvc.log" | sed -n '/^hidden-duplication filter:/,$p')
   if [[ -z $report ]]; then
     echo "the $side run printed no filter report — has the report's first line been reworded?" >&2
     exit 1

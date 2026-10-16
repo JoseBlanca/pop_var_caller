@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 #
-# **Psp mode's three commands and its repair, run end to end on real reads** — plan step E1 of
+# **Psp mode's three commands, run end to end on real reads** — plan step E1 of
 # doc/devel/ng/impl_plan/psp_census_pair.md.
 #
 #   generate-psps        alignments        ->  <sample>.psp, census sealed inside it
 #   estimate-parameters  psps              ->  cohort.parameters.toml
 #   call-from-psps       psps + that file  ->  the VCF
-#   regenerate-census    a copied psp      ->  its trailer rebuilt, and the file whole again
 #
 # and then the question the calling stage exists to answer: **what do the fitted numbers change?**
 # The same cohort is called twice, once with --defaults and once with the file the fit wrote,
@@ -22,11 +21,8 @@
 #
 # **There is no census file anywhere in this run**, and no step that writes one: since
 # psp_census_pair.md §3 a sample is one file, and the census the fit reads is in that file's
-# trailer. What replaced the old walk-versus-rebuild `cmp` over two census files is stronger and
-# is the last step here — a walked psp copied, the copy's census dropped, `regenerate-census` run
-# on it, and the copy identical to the walked file **byte for byte, whole**: header, blocks,
-# index, trailer, footer. The same oracle on fixtures is
-# `a_regenerated_psp_is_the_walked_one_byte_for_byte`.
+# trailer. The step that rebuilt a dropped census with `regenerate-census` went with that
+# subcommand (doc/devel/ng/spec/command_line.md §5.3); a stale psp is now written again.
 set -uo pipefail
 
 if (( $# < 5 )); then
@@ -58,15 +54,6 @@ if [[ -z "$bin" ]]; then
     echo "  ./scripts/dev.sh cargo build --release --bin pvc" >&2
     exit 1
 fi
-# **The last step's oracle needs a psp owed a rebuild**, and nothing that ships empties a psp's
-# trailer — see the block at the head of this file.
-drop_census=$(newest_release_build_of examples/ng_psp_drop_census)
-if [[ -z "$drop_census" ]]; then
-    echo "no release build of the ng_psp_drop_census example, which the last step needs; build it with" >&2
-    echo "  ./scripts/dev.sh cargo build --release --example ng_psp_drop_census" >&2
-    exit 1
-fi
-
 rm -rf "$out"
 mkdir -p "$out/psps"
 
@@ -165,11 +152,12 @@ for how in defaults fitted; do
     fi
     "$bin" call-from-psps \
         --reference "$reference" --catalog "$catalog" --psp "$out/psps" \
-        "${numbers[@]}" --threads 4 --output "$out/$how.vcf" \
+        "${numbers[@]}" --threads 4 --output "$out/$how.vcf" --log "$out/call-$how.pvc.log" \
         > "$out/call-$how.log" 2>&1 || {
         echo "call-from-psps --$how failed:" >&2; cat "$out/call-$how.log" >&2; exit 1; }
-    fitted_groups=$(sed -n 's/^numbers behind the calls: \([0-9][0-9]*\) of [0-9][0-9]* groups.*/\1/p' \
-        "$out/call-$how.log")
+    # The run report is in the run's log, one `report:` line each.
+    fitted_groups=$(sed -n 's/^[^ ]* DEBUG report: numbers behind the calls: \([0-9][0-9]*\) of [0-9][0-9]* groups.*/\1/p' \
+        "$out/call-$how.pvc.log")
     if [[ $(printf '%s\n' "$fitted_groups" | grep -c '^[0-9][0-9]*$') != 1 ]]; then
         echo "call-from-psps' report line has changed shape; the $how pass cannot be told from the other" >&2
         exit 1
@@ -237,75 +225,3 @@ awk '
 say "what the parameters file says it fitted"
 grep -m 1 -A 4 "groups of numbers in this file" "$out/cohort.parameters.toml" || true
 
-say "4. regenerate-census, and the psp it rebuilds is the walked one byte for byte"
-# **The whole-file oracle on real reads** (plan step D4). Each walked psp is copied, the copy's
-# census is dropped, `regenerate-census` rebuilds it from the copy's own records, and the copy has
-# to be the walked file again — header, blocks, index, trailer and footer, every byte.
-#
-# **Dropping the census first is what makes the comparison mean anything.** A psp whose census is
-# the one this run would write is skipped and its records are never read (psp_census_pair.md §8),
-# so a copy handed straight to the command comes back untouched and `cmp` passes without a rebuild
-# having happened. The two comparisons below are therefore a pair: **before** the rebuild each
-# copy must differ from its original, and **after** it each must match.
-#
-# The originals are left alone — the command is pointed at the copies' directory — so nothing
-# above this line is disturbed by it.
-copies="$out/copies"
-mkdir -p "$copies"
-copied=0
-for psp in "$out/psps"/*.psp; do
-    cp "$psp" "$copies/$(basename "$psp")" || {
-        echo "copying $(basename "$psp") failed" >&2; exit 1; }
-    copied=$(( copied + 1 ))
-done
-if (( copied != psps )); then
-    echo "$copied of the $psps psps were copied; the comparison below would be against a file that is not there" >&2
-    exit 1
-fi
-
-# **Both comparisons address the same pair, through one function**, so that they cannot come to
-# compare different things — a second loop naming its own two paths is one edit away from
-# comparing a copy with itself and passing.
-walked_and_its_copy_differ() {
-    ! cmp -s "$out/psps/$1" "$copies/$1"
-}
-
-"$drop_census" "$copies"/*.psp > "$out/drop-census.log" 2>&1 || {
-    echo "dropping the copies' censuses failed:" >&2; cat "$out/drop-census.log" >&2; exit 1; }
-armed=0
-for psp in "$out/psps"/*.psp; do
-    if ! walked_and_its_copy_differ "$(basename "$psp")"; then
-        echo "  $(basename "$psp"): the copy is already identical, so the rebuild below proves nothing" >&2
-        armed=$(( armed + 1 ))
-    fi
-done
-if (( armed != 0 )); then
-    echo "$armed of the $psps copies were not armed; nothing below is worth reading" >&2
-    exit 1
-fi
-
-"$bin" regenerate-census \
-    --reference "$reference" --catalog "$catalog" --psp "$copies" \
-    > "$out/regenerate-census.log" 2>&1 || {
-    echo "regenerate-census failed:" >&2; cat "$out/regenerate-census.log" >&2; exit 1; }
-# **Named, not positional.** This log holds both streams: every sample's line goes to stderr as
-# the sample is decided, and the report then goes to stdout with its summary ahead of its own
-# per-sample lines. So the summary sits in the middle, and `head -1` and `tail -1` would each
-# show a sample instead — which is what the two commands above use, because their summary is
-# their last line.
-grep -m 1 "^regenerated " "$out/regenerate-census.log" || {
-    echo "regenerate-census returned 0 and printed no summary line" >&2; exit 1; }
-
-differing=0
-for psp in "$out/psps"/*.psp; do
-    if walked_and_its_copy_differ "$(basename "$psp")"; then
-        echo "  $(basename "$psp"): DIFFERS from the walked file after being rebuilt"
-        differing=$(( differing + 1 ))
-    else
-        echo "  $(basename "$psp"): identical to the walked file, whole"
-    fi
-done
-if (( differing != 0 )); then
-    echo "  $differing of the $psps rebuilt psps are not the walked file"
-    exit 1
-fi

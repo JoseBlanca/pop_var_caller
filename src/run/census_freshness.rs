@@ -28,27 +28,24 @@ use crate::psp::{PspReadError, PspReader};
 
 use super::psp_caller::OpenPspCohort;
 
-/// **The command that rebuilds a psp's census**, named in the two places a run tells someone to
+/// **The command that writes a stale psp again**, named in the two places a run tells someone to
 /// run it: this module's report (spec §4.3) and the fit's own refusal when the selection does not
 /// match (spec §4.2, third row).
 ///
-/// **One constant, so the two messages and the command cannot drift apart** — the report
-/// `estimate-parameters` refuses a stale cohort with, the fit's own backstop
-/// ([`CohortFitError::AnotherSelection`](super::CohortFitError::AnotherSelection)), and the
-/// subcommand itself, whose `SUBCOMMAND` is *defined as* this constant (plan step D1).
+/// **A psp's census is mended by writing the psp again from the sample's alignments**: the
+/// subcommand that rebuilt a census from a psp's own records, `regenerate-census`, was removed
+/// before the first release, since no user holds a psp written by an earlier build
+/// (`doc/devel/ng/spec/command_line.md` §5.3).
 ///
-/// **That direction is the one that keeps the layering.** `ng` does not import from the
-/// command-line module outside its tests, so pointing this at `regenerate_census::SUBCOMMAND`
-/// would be the first place it did — and a literal repeated in three files is how a renamed
-/// command comes to be advertised under its old name.
-pub const THE_COMMAND_THAT_REBUILDS_A_CENSUS: &str = "regenerate-census";
+/// **One constant, so the two messages cannot drift apart from each other or from the
+/// subcommand**, which `estimate-parameters`' tests parse the report's command line against.
+pub const THE_COMMAND_THAT_REWRITES_A_PSP: &str = "generate-psps";
 
 /// **What a run should do with the census in one psp**, in the words spec §4.2 uses.
 ///
-/// **A verdict and not an action**: the same answers serve a command that refuses
-/// ([`estimate-parameters`](crate::cli::estimate_parameters)) and one that
-/// rebuilds ([`regenerate-census`](crate::cli::regenerate_census)), and which of
-/// those happens is the command's business.
+/// **A verdict and not an action**: what happens is the command's business — today the one that
+/// reads them, [`estimate-parameters`](crate::cli::estimate_parameters), refuses and names the
+/// psps to write again.
 ///
 /// **The four causes cost three different reads to reach.** [`NoCensus`](Self::NoCensus) is in
 /// the psp's footer, which was read when the file was opened. [`AnotherFormat`](Self::AnotherFormat)
@@ -536,8 +533,8 @@ impl std::fmt::Display for CensusesToRegenerate {
         if !self.unreadable.is_empty() {
             writeln!(
                 out,
-                "{} psp{} above could not be read at all, and rebuilding a census will not mend \
-                 {}.",
+                "{} psp{} above could not be read at all, and writing the others again will not \
+                 mend {}.",
                 self.unreadable.len(),
                 plural(self.unreadable.len()),
                 match self.unreadable.len() == 1 {
@@ -549,12 +546,14 @@ impl std::fmt::Display for CensusesToRegenerate {
         match &self.command {
             None => write!(
                 out,
-                "There is no census here to rebuild; those files need looking at."
+                "There is no census here to mend by writing a psp again; those files need \
+                 looking at."
             ),
             Some(command) => write!(
                 out,
-                "Rebuild the {} sample{} whose census is named above, then run this fit \
-                 again:\n  {command}",
+                "Write the {} sample{} whose census is named above again from the \
+                 alignment files, over the ground they were first written over, then run this \
+                 fit again:\n  {command}",
                 self.stale.len(),
                 plural(self.stale.len()),
             ),
@@ -1237,9 +1236,10 @@ mod tests {
             ),
         ];
 
-        let report =
-            CensusesToRegenerate::of(judged, || "regenerate-census --psp /psps".to_string())
-                .expect("two of them are stale");
+        let report = CensusesToRegenerate::of(judged, || {
+            "pvc generate-psps --output-dir /psps".to_string()
+        })
+        .expect("two of them are stale");
 
         assert_eq!(report.stale_count(), 2);
         let said = report.to_string();
@@ -1265,8 +1265,9 @@ mod tests {
         );
         assert!(
             said.ends_with(
-                "Rebuild the 2 samples whose census is named above, then run this fit \
-                 again:\n  regenerate-census --psp /psps"
+                "Write the 2 samples whose census is named above again from the \
+                 alignment files, over the ground they were first written over, then run this \
+                 fit again:\n  pvc generate-psps --output-dir /psps"
             ),
             "the command is the last thing, so it can be copied: {said}",
         );
@@ -1289,7 +1290,7 @@ mod tests {
             a_row("delta", Ok(older)),
         ];
 
-        let report = CensusesToRegenerate::of(judged, || "regenerate-census".to_string())
+        let report = CensusesToRegenerate::of(judged, || "pvc generate-psps".to_string())
             .expect("all stale");
 
         let said = report.to_string();
@@ -1315,7 +1316,7 @@ mod tests {
         let judged = vec![a_row("alpha", Ok(CensusVerdict::NoCensus))];
 
         let report =
-            CensusesToRegenerate::of(judged, || "regenerate-census".to_string()).expect("stale");
+            CensusesToRegenerate::of(judged, || "pvc generate-psps".to_string()).expect("stale");
 
         let said = report.to_string();
         assert!(
@@ -1323,7 +1324,7 @@ mod tests {
             "{said}",
         );
         assert!(
-            said.contains("Rebuild the 1 sample whose census is named above"),
+            said.contains("Write the 1 sample whose census is named above again"),
             "{said}",
         );
         assert!(
@@ -1377,19 +1378,19 @@ mod tests {
         ];
 
         let report =
-            CensusesToRegenerate::of(judged, || "regenerate-census".to_string()).expect("both");
+            CensusesToRegenerate::of(judged, || "pvc generate-psps".to_string()).expect("both");
 
         let said = report.to_string();
         assert_eq!((report.stale_count(), report.unreadable_count()), (1, 1));
         assert!(
             said.contains(
-                "1 psp above could not be read at all, and rebuilding a census will \
+                "1 psp above could not be read at all, and writing the others again will \
                  not mend it."
             ),
             "the files nothing can rebuild are named as such: {said}",
         );
         assert!(
-            said.contains("Rebuild the 1 sample whose census is named above"),
+            said.contains("Write the 1 sample whose census is named above again"),
             "and the command is for the other one: {said}",
         );
     }

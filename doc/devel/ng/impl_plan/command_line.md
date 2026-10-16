@@ -92,16 +92,21 @@ Spec §4, §5.3, §5.4 and §6.
 are identical to `main`'s apart from `##commandline` and the filter's name
 (`tmp/step2/run_both_modes.sh`).
 
-**After the merge:**
+**Done after the merge (2026-10-16)**, on `main` merged in at d61ced59:
 
-- `regenerate-census` deleted, with its CLI module and tests, and `estimate-parameters`' refusal
-  rewritten to tell the user to write old psps again with `generate-psps`. **Moved here from the
-  first half** because that refusal builds a `regenerate-census` command line
-  (`the_command_that_regenerates`, `THE_COMMAND_THAT_REBUILDS_A_CENSUS`), and both live in files
-  the fit branch rewrites. The library's `census_from_psp` stays: three tests and an example use it
-  to check the walk's census.
-- `--threads` on `estimate-parameters`; `--str-strata-at-once`; its description's inbreeding
-  sentence corrected; its help rewritten like the others'.
+- `regenerate-census` deleted, with its CLI module, its tests, the `ng_psp_drop_census` example
+  that armed it, and the end-to-end script's rebuild step. A stale psp is now written again:
+  `estimate-parameters`' refusal and the fit's own backstop name `pvc generate-psps`, and the
+  report ends with a `generate-psps` command line whose reference, catalogue and psp directory are
+  the run's, with placeholders for the alignment files and the BED. The library's
+  `census_from_psp` stays: tests and an example use it to check the walk's census.
+- `--threads` on `estimate-parameters`; its help rewritten like the others', with
+  `--skip-contamination` under *Advanced*. `--str-param-estimates-at-once` had already been
+  retired by the fit branch (hidden, refused with its reason), so `--str-strata-at-once` was not
+  needed.
+- Three scripts that read the calling report from the terminal now read it from the run's log
+  (`ng_fit_stage_end_to_end.sh`, `ng_paralog_filter_runs.sh`, `ng_missed_sites_probe.sh`), each
+  giving its runs their own `--log`.
 
 ## Step 3 — what a run writes beside its output (after the merge)
 

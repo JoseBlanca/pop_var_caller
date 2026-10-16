@@ -66,7 +66,7 @@ use crate::reference_info::{
 use crate::repeat_catalog::RepeatCatalogHeader;
 use crate::run::{
     CensusCohortError, CensusPlan, CensusSelection, CensusesToRegenerate, CohortFitError,
-    OpenPspCohort, RunError, Segmentation, THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+    OpenPspCohort, RunError, Segmentation, THE_COMMAND_THAT_REWRITES_A_PSP,
     each_census_in_the_cohorts_psps, every_read_group_pooled, fit_a_cohort, fitted_inbreeding_of,
     parameters_file_of, parameters_from_the_fit, read_groups_of, the_censuses_as_one_cohort,
     what_the_heads_say_about_every_census_in_a_cohort,
@@ -83,48 +83,54 @@ pub const SUBCOMMAND: &str = "estimate-parameters";
 /// Fit a cohort's parameters from its censuses and write them as a parameters file.
 #[derive(Debug, Args)]
 pub struct EstimateParametersArgs {
-    /// Reference FASTA — the one every census's samples were aligned to.
+    /// The reference FASTA the psps' samples were aligned to.
     #[arg(long)]
     pub reference: PathBuf,
 
-    /// The tandem-repeat catalog the psps were walked against. Defaults to
+    /// The repeat catalogue the psps were written with. Defaults to
     /// `<reference>.repeats.parquet`.
     #[arg(long)]
     pub catalog: Option<PathBuf>,
 
-    /// One psp per sample, or a directory holding them. Repeat the flag.
+    /// A psp file, or a directory whose `.psp` files are all read. Repeat the option.
     ///
-    /// **Its records are not read.** What the fit reads is the census in each file's trailer, and
-    /// what it reads from each header is the ground the walk covered and the criteria it cut that
-    /// ground with (`psp_census_pair.md` §5, §6).
+    /// Only the fitting data stored at the end of each psp is read, not its records, so a fit is
+    /// much quicker than a call.
     #[arg(long = "psp", required = true, num_args = 1..)]
     pub psps: Vec<PathBuf>,
 
-    /// Where to write the parameters file.
+    /// Where to write the parameters file, which `call-from-psps --parameters` reads.
     #[arg(long)]
     pub output: PathBuf,
 
-    /// Overwrite the output if it is already there.
+    /// Replace the parameters file if it is already there.
     #[arg(long)]
     pub force: bool,
 
-    /// How many copies of each chromosome every sample carries.
+    /// Copies of each chromosome in every sample.
     #[arg(long, default_value_t = 2)]
     pub ploidy: u8,
 
-    /// The inbreeding coefficient to record for every sample, **overriding the fitted one**.
+    /// The inbreeding coefficient of every sample, from 0 to 1, instead of fitting each sample's.
     ///
-    /// **Omit it and the fit's own number is written**: each sample's homozygote excess, how much
-    /// less heterozygous it is than the allele frequencies this cohort's own fit predicts. The
-    /// file marks that `fitted_here`, and marks what is stated here `supplied`, so a reader can
-    /// tell them apart.
-    ///
-    /// **A stated coefficient wins, and that is a ruling** (owner, 2026-08-27): a user who knows
-    /// how their material was bred knows it whatever the cohort size. **It is also why this is an
-    /// option and not a default of zero** — `--inbreeding 0` is *these plants are not inbred*,
-    /// which is a claim, and saying nothing is *use what you measured*, which is a different one.
+    /// Without it, each sample's coefficient is fitted from how much less heterozygous it is
+    /// than the cohort's allele frequencies predict. Give it when you know how the material was
+    /// bred: `--inbreeding 0` states that no sample is inbred, which is a claim, where leaving it
+    /// out asks for the measured value. The file marks which it holds.
     #[arg(long)]
     pub inbreeding: Option<f64>,
+
+    /// Threads to use; 0 uses every core. The fitted numbers are the same at any number.
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
+
+    /// Do not estimate contamination: every read group is taken as uncontaminated.
+    ///
+    /// Contamination is the share of a library's reads that came from another individual. Use
+    /// this when the samples are known to be clean, or when contamination would not change the
+    /// calls you need; the parameters file then holds no contamination table.
+    #[arg(long, help_heading = "Advanced")]
+    pub skip_contamination: bool,
 
     /// **Removed; a run that gives it is refused** with
     /// [`EstimateParametersCliError::RemovedOption`]. It chose how many repeat-tract strata the
@@ -135,19 +141,6 @@ pub struct EstimateParametersArgs {
     /// passing it is told why rather than told the option does not exist.
     #[arg(long, value_name = "N", hide = true)]
     pub str_param_estimates_at_once: Option<String>,
-
-    /// Do not estimate contamination: every read group is taken as uncontaminated.
-    ///
-    /// Contamination is the share of a library's reads that came from another individual.
-    /// Estimating it holds, at each position where the cohort varies, an expected allele count for
-    /// every sample and four read counts for every read group; a run that estimates it prints what
-    /// that takes on its `contamination:` progress line. With this option the parameters file
-    /// carries no contamination table, which a calling run reads as "no read group is
-    /// contaminated" — the same model it uses when nothing was found, not a fraction measured at
-    /// zero. Use it when the samples are known to be clean or when contamination would not change
-    /// the calls you need.
-    #[arg(long)]
-    pub skip_contamination: bool,
 }
 
 /// Everything that can stop an `estimate-parameters` run.
@@ -351,6 +344,13 @@ pub enum EstimateParametersCliError {
 pub fn run_estimate_parameters(
     args: &EstimateParametersArgs,
 ) -> Result<(), EstimateParametersCliError> {
+    if args.threads > 0 {
+        // A pool already built means a second call in one process; the fit is the same at any
+        // width, so that is not worth an error. The same line as the calling commands'.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global();
+    }
     let (file, samples) = fit_and_assemble(args)?;
 
     let toml = file.to_toml();
@@ -551,7 +551,7 @@ pub fn open_the_censuses(
     // rebuilt.
     if let Some(report) = CensusesToRegenerate::of(
         what_the_heads_say_about_every_census_in_a_cohort(&mut cohort),
-        || the_command_that_regenerates(args),
+        || the_command_that_rewrites(args),
     ) {
         return Err(EstimateParametersCliError::CohortCannotBeFitted {
             report: Box::new(report),
@@ -686,7 +686,7 @@ pub fn open_the_censuses(
             &censuses,
             &plan.recording_terms(),
         ),
-        || the_command_that_regenerates(args),
+        || the_command_that_rewrites(args),
     ) {
         return Err(EstimateParametersCliError::CohortCannotBeFitted {
             report: Box::new(report),
@@ -755,17 +755,25 @@ pub fn contig_id_of(plan: &CensusPlan) -> impl Fn(&str) -> Option<ContigId> + us
 /// stores a repeat tract by its index within its stratum, so the selection has to be built again,
 /// and that reads the reference and the catalog (spec §8). `--catalog` is left out when this run
 /// was not given one, since the command finds the same file beside the reference the same way.
-fn the_command_that_regenerates(args: &EstimateParametersArgs) -> String {
+fn the_command_that_rewrites(args: &EstimateParametersArgs) -> String {
     use std::fmt::Write as _;
 
-    let mut line = String::from(THE_COMMAND_THAT_REBUILDS_A_CENSUS);
+    let mut line = format!("pvc {THE_COMMAND_THAT_REWRITES_A_PSP}");
     let _ = write!(line, " --reference {}", as_typed(&args.reference));
     if let Some(catalog) = &args.catalog {
         let _ = write!(line, " --catalog {}", as_typed(catalog));
     }
-    for psp in &args.psps {
-        let _ = write!(line, " --psp {}", as_typed(psp));
-    }
+    // **What this run cannot know is a placeholder a person fills in**: the alignment files and
+    // the regions were the walk's, and a psp records the ground it covered but not the BED it
+    // was handed.
+    line.push_str(
+        " --alignment <each sample's BAM or CRAM> --regions <the BED they were written over>",
+    );
+    let directory = match args.psps.as_slice() {
+        [one] if one.is_dir() => as_typed(one),
+        _ => "<the psps' directory>".to_owned(),
+    };
+    let _ = write!(line, " --output-dir {directory} --force");
     line
 }
 
