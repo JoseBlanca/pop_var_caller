@@ -339,8 +339,11 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   bit-identical to the oracle's fitted slip numbers on its 4 psps. The held-out loop moved into
   `fit_bench.rs` with a test that every locus is scored by the fit made without it. No full-cohort
   fit in this mode (no truth). Review: `reports/reviews/str_penalised_fit_D2a_2026-10-16.md`.
-- ☐ **D2** tomato2, held-out by whole locus: the production fit against the counting fit, with D2a's
+- ✅ **D2** tomato2, held-out by whole locus: the production fit against the counting fit, with D2a's
   mode. *Depends:* D2a. *Source:* spec §4.4.
+  *Done (2026-10-16), for the owner to judge:* `reports/implementations/str_penalised_fit_D2_2026-10-16.md`.
+  59 tomato2 accessions: the production fit predicts held-out loci better by 0.136 ± 0.053 log units a
+  locus (2,349 loci) than the counting fit with curves, 0.213 ± 0.062 without.
 - ✅ **D3** Full scale, simulated: 2,169 samples with kimura's loci per class (about 66 million
   pairs with reads), the production fit's wall time, thread scaling and peak memory on this Mac.
   Within one hour, with a memory watchdog. *Depends:* C7. *Source:* spec §2.2, §4.5 (kimura's real
