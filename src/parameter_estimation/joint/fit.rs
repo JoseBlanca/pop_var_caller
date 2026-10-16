@@ -68,8 +68,8 @@ mod standard_errors;
 
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
 use settled::{
-    AGREEMENT_FRACTION, EarlierAnswer, SETTLED_FRACTION, agrees, describe_short_of_settled,
-    furthest, is_the_new_best, is_the_new_yardstick, not_settled,
+    AGREEMENT_FRACTION, DECREMENT_THRESHOLD, EarlierAnswer, SETTLED_FRACTION, agrees,
+    describe_short_of_settled, furthest, is_the_new_best, is_the_new_yardstick, not_settled,
 };
 pub use settled::{FurthestFromSettled, StartEnding};
 use standard_errors::{StandardError, StandardErrors, newton_step};
@@ -679,6 +679,11 @@ pub struct JointFitConfig {
     /// zero — or below it, or not a number — the fit never stops before `max_passes`, unless no
     /// parameter has both an error and a distance.
     pub settled_fraction: f64,
+    /// **A start converges once the remaining Newton step is worth less than this much
+    /// log-likelihood** — the Newton decrement's threshold, 0.001 units by default ([`settled`]'s
+    /// `DECREMENT_THRESHOLD`, `fit_precision.md` §2). A field so a test can run a fit further, to
+    /// 10⁻⁴, the way the measurement that chose the default ran its references.
+    pub decrement_threshold: f64,
     /// **A later start stops once it is heading where an earlier one converged**: when its projected
     /// endpoint lies within this share of the earlier answer's standard error of that answer, on
     /// every parameter the earlier answer gives an error — a half by default ([`settled`]'s
@@ -759,6 +764,7 @@ impl Default for JointFitConfig {
             starting_points: StartingPoint::spanning_the_class_separation(),
             max_passes: 200,
             settled_fraction: SETTLED_FRACTION,
+            decrement_threshold: DECREMENT_THRESHOLD,
             agreement_fraction: AGREEMENT_FRACTION,
             log_likelihood_stillness: 1e-4,
             // **The census ladder and not the histogram one.** This fit reads census codes and
@@ -2394,7 +2400,7 @@ fn maximise(
         // heading towards, if any; `None` before the fit judges them.
         let judged_here = entering.information.as_ref().map(|information| {
             let errors = StandardErrors::of(information).by_coordinate(&parameters, group_index);
-            let distances = newton_step(information, &parameters, group_index);
+            let distances = newton_step(information, &parameters, group_index).distances;
             let not_settled = not_settled(&errors, &distances, config.settled_fraction);
             // A start that is settled finishes its cycle, converges and competes: agreement stops
             // only a start still on its way.
@@ -2574,7 +2580,7 @@ fn how_far_from_settled(
     fraction: f64,
 ) -> Option<FurthestFromSettled> {
     let errors = StandardErrors::of(information).by_coordinate(parameters, group_index);
-    let distances = newton_step(information, parameters, group_index);
+    let distances = newton_step(information, parameters, group_index).distances;
     let names = parameters.plain_names(sample_names, group_index);
     assert_eq!(
         names.len(),

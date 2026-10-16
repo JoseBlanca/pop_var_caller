@@ -73,7 +73,7 @@ what moves, and how the move is checked.
 
 ### Milestone A — stop on the Newton decrement
 
-- ☐ **A1** `newton_step` returns the decrement beside the distances (one `bounded_step`, one
+- ✅ **A1** `newton_step` returns the decrement beside the distances (one `bounded_step`, one
   `information_times`); `DECREMENT_THRESHOLD` = 0.001 and the verdict `has_converged(decrement,
   threshold)` in `fit/settled.rs`; `JointFitConfig::decrement_threshold`, defaulted to it. Callers of
   `newton_step` take the distances; nothing reads the decrement yet.
@@ -82,6 +82,9 @@ what moves, and how the move is checked.
   on the whole matrix and on the arrow; the verdict at −2,959, NaN, 0, just below and at 0.001.
   *Identity:* every output bit-identical; the touched tests and the digests pass.
   *Depends:* —. *Source:* `fit_precision.md` §2 (where it is computed; traps), §3.6 item 4.
+  *Done 2026-10-16:* `newton_step` returns a `NewtonStep { distances, decrement }`; the decrement and
+  `has_converged` are marked `expect(dead_code)` until A2 reads them. The precondition oracle matched
+  the baseline on every line; the fit module's 122 release tests and the four digest tests pass.
 - ☐ **A2** **Own commit, do not bundle.** `maximise` stops on the decrement, in the order of a
   judging pass: converged → stop at the judged point, the rest of the cycle not run; else agreement;
   else the SQUAREM cycle as today. The progress line prints the decrement; `PassSummary` gains

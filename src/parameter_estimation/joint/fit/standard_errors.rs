@@ -580,17 +580,54 @@ fn in_coordinate_order<T: Copy>(
 ///
 /// The same matrix the errors come from ([`StandardErrors::of`]): the whole one where the pass kept
 /// it, the arrow of blocks otherwise, and the same parameters left out of it.
+///
+/// **It also says what the step is worth** ([`NewtonStep::decrement`]), from the same solve: the
+/// stopping rule reads that, and the distances are what the step moves.
 pub(super) fn newton_step(
     sums: &InformationSums,
     parameters: &Parameters,
     group_index: &[Vec<usize>],
-) -> Vec<Option<f64>> {
+) -> NewtonStep {
     let layout = Layout::of(sums);
     let values = layout.values_of(parameters, group_index);
     let bounds = layout.bounds();
     let step = bounded_step(sums, &layout, &values, &bounds);
+    let decrement = decrement_of(sums, &layout, &step);
     let (cohort, samples) = layout.split(&step);
-    in_coordinate_order(&cohort, &samples, parameters, group_index, None)
+    NewtonStep {
+        distances: in_coordinate_order(&cohort, &samples, parameters, group_index, None),
+        decrement,
+    }
+}
+
+/// **One judging pass's Newton step**: how far each parameter is from the maximum, and how much
+/// log-likelihood the quadratic model says the whole step would gain.
+pub(super) struct NewtonStep {
+    /// Each parameter's distance to the maximum of the quadratic model within the bounds, in the
+    /// order the fit's vector lists them ([`Parameters::coordinates`]); `None` where the parameter is
+    /// not solved for.
+    pub(super) distances: Vec<Option<f64>>,
+    /// **The Newton decrement**: the log-likelihood the step would gain under the quadratic model,
+    /// `g·d − ½ dᵀ I d` for the slope `g`, the information `I` and the step `d` with each parameter
+    /// not solved for moving 0 — `½ gᵀ I⁻¹ g` when no bound binds. Never below zero when the
+    /// active-set solve reached its maximum, since staying put is inside the box; a negative value,
+    /// or one that is not a number, means it did not (`fit_precision.md` §2, traps).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "maximise stops on it from plan step A2")
+    )]
+    pub(super) decrement: f64,
+}
+
+/// **What the bounded step `step` is worth under the quadratic model**, `g·d − ½ dᵀ I d`, in the
+/// flat layout, a parameter not solved for moving 0.
+fn decrement_of(sums: &InformationSums, layout: &Layout, step: &[Option<f64>]) -> f64 {
+    let moved: Vec<f64> = step.iter().map(|moved| moved.unwrap_or(0.0)).collect();
+    let slope = layout.slope_of(sums);
+    let curved = information_times(sums, layout, &moved);
+    let gained: f64 = slope.iter().zip(&moved).map(|(g, d)| g * d).sum();
+    let lost: f64 = moved.iter().zip(&curved).map(|(d, c)| d * c).sum();
+    gained - 0.5 * lost
 }
 
 /// **The Newton step to the maximum of the quadratic model within the bounds**, by the active-set
@@ -2260,7 +2297,7 @@ mod tests {
         let (slope, flat) = a_slope_of(&libraries, 92);
         sums.slope = slope;
         let parameters = parameters_inside(&libraries);
-        let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+        let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
         let expected = in_the_fits_order(
             &dense_step(&dense, &flat, |_| true),
             &libraries,
@@ -2281,7 +2318,7 @@ mod tests {
         let (slope, flat) = a_slope_of(&libraries, 94);
         sums.slope = slope;
         let parameters = parameters_inside(&libraries);
-        let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+        let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
         let expected = in_the_fits_order(
             &dense_step(&dense, &flat, |_| true),
             &libraries,
@@ -2355,7 +2392,7 @@ mod tests {
                         let mut expected = dense_step(&dense, &slope_left, |i| i != row);
                         expected[row] = Some(moved);
                         let expected = in_the_fits_order(&expected, &libraries, &parameters);
-                        let got = newton_step(&sums, &parameters, &group_index);
+                        let got = newton_step(&sums, &parameters, &group_index).distances;
                         assert_steps_match(
                             &got,
                             &expected,
@@ -2391,7 +2428,7 @@ mod tests {
             };
             let mut parameters = parameters_inside(&libraries);
             set_at(&mut parameters, row, end);
-            let got = newton_step(&sums, &parameters, &group_index);
+            let got = newton_step(&sums, &parameters, &group_index).distances;
             assert_steps_match(
                 &got,
                 &in_the_fits_order(&free, &libraries, &parameters),
@@ -2433,7 +2470,7 @@ mod tests {
             let free = dense_step(&dense, &flat, |_| true)[row].expect("solved");
             let mut parameters = parameters_inside(&libraries);
             parameters.clean[0] = if free < 0.0 { beside[0] } else { beside[1] };
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
             // In the fit's order: the cohort's eight, then read group 0's clean rate.
             let distance = got[COHORT_PARAMETERS].expect("solved");
             assert!(
@@ -2459,7 +2496,7 @@ mod tests {
             sums.slope = slope;
             let mut parameters = parameters_inside(&libraries);
             parameters.hom_excess[0] = 0.5;
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
             let expected = in_the_fits_order(
                 &dense_step(&dense, &flat, |i| i != excess),
                 &libraries,
@@ -2519,7 +2556,7 @@ mod tests {
                 "{label}"
             );
             let parameters = parameters_inside(&libraries);
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries));
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
             let in_layout = dense_step(&dense, &flat, |i| i != uninformed && i != copied);
             let expected = in_the_fits_order(&in_layout, &libraries, &parameters);
             assert_eq!(
@@ -2528,6 +2565,98 @@ mod tests {
                 "{label}: the two left out"
             );
             assert_steps_match(&got, &expected, label);
+        }
+    }
+
+    /// What a step in the errors' layout is worth under the quadratic model of `matrix` and
+    /// `slope`, `g·d − ½ dᵀ M d`, densely; a parameter without a step moves 0.
+    fn dense_decrement(matrix: &[f64], slope: &[f64], step: &[Option<f64>]) -> f64 {
+        let n = slope.len();
+        let moved: Vec<f64> = step.iter().map(|moved| moved.unwrap_or(0.0)).collect();
+        let gained: f64 = (0..n).map(|i| slope[i] * moved[i]).sum();
+        let lost: f64 = (0..n)
+            .map(|i| moved[i] * (0..n).map(|j| matrix[i * n + j] * moved[j]).sum::<f64>())
+            .sum();
+        gained - 0.5 * lost
+    }
+
+    /// **With no bound binding, the decrement is `½ gᵀ I⁻¹ g`**, on the whole matrix and on the
+    /// arrow: the inputs of the two dense-solve tests above, whose steps no bound stops.
+    #[test]
+    fn with_no_bound_binding_the_decrement_is_half_the_slope_through_the_inverse() {
+        let libraries = [1, 2, 3, 1];
+        for (label, (mut sums, dense), slope_seed) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 91), 92),
+            ("arrow", an_arrow_of(&libraries, 93), 94),
+        ] {
+            let (slope, flat) = a_slope_of(&libraries, slope_seed);
+            sums.slope = slope;
+            let parameters = parameters_inside(&libraries);
+            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).decrement;
+            let free = dense_step(&dense, &flat, |_| true);
+            let half_slope_through_inverse = 0.5
+                * flat
+                    .iter()
+                    .zip(&free)
+                    .map(|(g, d)| g * d.expect("solved"))
+                    .sum::<f64>();
+            assert!(half_slope_through_inverse > 0.0, "{label}");
+            assert!(
+                (got - half_slope_through_inverse).abs() <= 1e-9 * half_slope_through_inverse,
+                "{label}: {got} against {half_slope_through_inverse}"
+            );
+        }
+    }
+
+    /// **With a bound binding, the decrement is `g·d − ½ dᵀ I d` for the box step `d`, and below the
+    /// unbounded `½ gᵀ I⁻¹ g`**, on both matrices: the density's second shape placed a quarter of
+    /// its free step inside the end that step points to, so the box stops it there (the case
+    /// `a_parameter_carried_past_an_end_stops_there` checks the distances of).
+    #[test]
+    fn with_a_bound_binding_the_decrement_is_the_box_steps_worth() {
+        let libraries = [1, 2, 1];
+        let group_index = group_index_of(&libraries);
+        let row = cohort::DENSITY_B;
+        for (label, (mut sums, dense)) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 95)),
+            ("arrow", an_arrow_of(&libraries, 97)),
+        ] {
+            let (slope, flat) = a_slope_of(&libraries, 96);
+            sums.slope = slope;
+            let n = flat.len();
+            let free_step = dense_step(&dense, &flat, |_| true);
+            let free = free_step[row].expect("solved");
+            let end = if free < 0.0 {
+                COHORT_BOUNDS[row].0
+            } else {
+                COHORT_BOUNDS[row].1
+            };
+            let value = end - 0.25 * free;
+            let mut parameters = parameters_inside(&libraries);
+            set_at(&mut parameters, row, value);
+            let moved = end - value;
+            let slope_left: Vec<f64> = (0..n)
+                .map(|i| flat[i] - dense[i * n + row] * moved)
+                .collect();
+            let mut box_step = dense_step(&dense, &slope_left, |i| i != row);
+            box_step[row] = Some(moved);
+            let step = newton_step(&sums, &parameters, &group_index);
+            assert_steps_match(
+                &step.distances,
+                &in_the_fits_order(&box_step, &libraries, &parameters),
+                label,
+            );
+            let expected = dense_decrement(&dense, &flat, &box_step);
+            let unbounded = dense_decrement(&dense, &flat, &free_step);
+            assert!(
+                (step.decrement - expected).abs() <= 1e-9 * expected.abs(),
+                "{label}: {} against {expected}",
+                step.decrement
+            );
+            assert!(
+                expected > 0.0 && expected < unbounded,
+                "{label}: the box step's {expected} against the unbounded {unbounded}"
+            );
         }
     }
 }

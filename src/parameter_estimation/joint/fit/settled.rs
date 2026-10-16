@@ -44,6 +44,25 @@ use super::standard_errors::StandardError;
 /// 2026-09-28).
 pub(in crate::parameter_estimation::joint) const SETTLED_FRACTION: f64 = 0.1;
 
+/// **The log-likelihood the remaining Newton step must be worth less than for a start to have
+/// converged** — the Newton decrement's threshold, decided by the owner on 2026-10-16 from the
+/// measurement in `fit_precision.md` §2: on every input measured (1, 4 and 59 tomato samples) it
+/// stopped each determined quantity within a tenth of its standard error of a fit run to 10⁻⁴.
+pub(in crate::parameter_estimation::joint) const DECREMENT_THRESHOLD: f64 = 0.001;
+
+/// **Whether a start whose remaining Newton step is worth `decrement` has converged**, at
+/// `threshold`: when the decrement is at least zero and below the threshold. A negative decrement
+/// means the bounded solve stopped at its round limit short of the quadratic model's maximum, and a
+/// decrement that is not a number came from a degenerate solve; neither is convergence
+/// (`fit_precision.md` §2, traps).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "maximise stops on it from plan step A2")
+)]
+pub(super) fn has_converged(decrement: f64, threshold: f64) -> bool {
+    decrement >= 0.0 && decrement < threshold
+}
+
 /// **How many parameters are not yet settled**: those whose distance to the maximum (`distances`, a
 /// Newton step's) is not below `fraction` of their standard error (`errors`), both in the order the
 /// fit's vector lists them. A parameter missing either is settled.
@@ -235,6 +254,22 @@ pub(super) fn is_the_new_best(ended: StartEnding, score: f64, current: Option<f6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The verdict at the decrements `fit_precision.md` §3.6 item 4 names: −2,959 (measured on the
+    /// subsampled oracle, a bounded solve ended at its round limit) and NaN are not convergence; 0 and
+    /// just below the threshold are; the threshold itself is not.
+    #[test]
+    fn a_start_has_converged_below_the_threshold_and_never_at_a_negative_or_nan_decrement() {
+        assert!(!has_converged(-2_959.0, DECREMENT_THRESHOLD));
+        assert!(!has_converged(f64::NAN, DECREMENT_THRESHOLD));
+        assert!(has_converged(0.0, DECREMENT_THRESHOLD));
+        assert!(has_converged(
+            DECREMENT_THRESHOLD.next_down(),
+            DECREMENT_THRESHOLD
+        ));
+        assert!(!has_converged(DECREMENT_THRESHOLD, DECREMENT_THRESHOLD));
+        assert_eq!(DECREMENT_THRESHOLD, 0.001);
+    }
 
     #[test]
     fn a_parameter_is_settled_below_its_share_of_its_error() {
