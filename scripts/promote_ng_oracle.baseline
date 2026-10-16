@@ -108,12 +108,22 @@
 # Both parameters-file lines re-recorded 2026-10-15 (str_penalised_fit.md, plan step B4): the file's notes on the
 # repeat-tract rows were reworded for the penalised-curve smoothing; every line that is not a comment is identical, and no
 # VCF moved. They were 73d8d5c8… / 122b72df….
+# Three lines re-recorded 2026-10-16 (macOS, arm64; str_penalised_fit.md, plan step D4) at 932fc9b0: the repeat-tract fit
+# is the penalised fit (C7), with a weak prior on stutter (C8), the stated F the median over strata of 8 or more loci (C9),
+# and the cohort fitted in sample-name order (C10). The default-parameter VCFs, windows and histograms do not move. The
+# defaults run's parameters file moves in notes only (C8, C9, 7265efd0). The fitted file: repeat-tract rows 37 → 49
+# slippage and 15 → 49 allele-length rows, fallback F 0.526 → 0.613 (C7–C9); samples and read groups listed in name
+# order and every SNP/indel number moved in its last digits, e.g. one sample's F 0.96645 → 0.96617 (C10); notes (C8, C9,
+# 7265efd0). With it, 6,683 → 6,680 records (one homopolymer deletion gone at C7; two SNVs at the paralog filter's edge,
+# posterior 0.51, gone at C10), QUAL moves in 747 records (426 repeat tracts; −19.8 to +21.8, median −0.1), 3 records
+# change a sample genotype, all repeat tracts. Report: reports/implementations/str_penalised_fit_D4_2026-10-16.md.
+# They were 3d1719c2… / 419869a0… / e4af91bd….
 slice: 20 regions, 4 alignments
 # records: 7508
 67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
 67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
-3d1719c24f803d73546cc5770873857c  from_alignments.parameters.toml
+4f272d7ed368a743eb2295c44cc5749c  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
 0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-419869a022083b843604cbd4fb52e297  fitted.parameters.toml
-e4af91bd9bb86438c5b73a034e640091  from_fit.comparable
+5ed794a02799828688b98edbd7661be7  fitted.parameters.toml
+61b09b604ee5fb2d7196150824c2c996  from_fit.comparable

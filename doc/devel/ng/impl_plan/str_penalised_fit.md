@@ -351,8 +351,15 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   *Done (2026-10-16):* `reports/implementations/str_penalised_fit_D3_2026-10-16.md`. 83 to 173 s at
   18 threads, 151 to 252 s at 6, peak 10,801 MiB, at 66.2 million pairs; kimura's per-class spread
   assumed from the tomato catalog and kimura's totals (two variants).
-- ☐ **D4** The oracle and `cli::cross_platform_digests` re-recorded, each move explained, from
+- ✅ **D4** The oracle and `cli::cross_platform_digests` re-recorded, each move explained, from
   C10's state (the cohort in name order). *Depends:* C7, C10. *Source:* spec §4.6.
+  *Done (2026-10-16):* `reports/implementations/str_penalised_fit_D4_2026-10-16.md`. Every move is
+  pinned to a commit by the oracle runs that bracket it. Three baseline lines move (the defaults
+  run's file in notes only; the fitted file; its calls, 6,683 → 6,680 records, 3 repeat-tract
+  genotypes); the six digests move by the rename, format 3, C7, C8 and notes, only at the fixtures'
+  repeat tract (spec §3 also blamed the ±9 window, which moved nothing there). Not in C8's message:
+  six three-base classes of 1 to 5 loci lost their own F (now at the fallback). Suite in release:
+  5,362 passed, the 3 debug-only panic tests failed.
 - ✅ **D5** Calling on HG002 and the GIAB trio, **run once with a parameters file fitted by the climb
   and once with one fitted by the new fit**, on the same psps; nothing else differs.
   - HG002: `scripts/ng_str_accuracy/hg002_two_binaries.sh`, scored by

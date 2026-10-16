@@ -137,7 +137,26 @@ mod tests {
     /// hull runs to the furthest end of any repeat: restoring the earlier wording in the written
     /// file gives `4e643855f0dac8ee128f43a7a1a92095` exactly. Recorded in the Linux container (arm64, glibc) only; it was
     /// `860c3c65f27a1700e401d102833215e1`.
-    const FITTED_PARAMETERS_MD5: &str = "a5b4997bc35e77425525e25e821cf40c";
+    ///
+    /// **Re-recorded 2026-10-16** (`str_penalised_fit.md` plan step D4) after four changes, each
+    /// measured on four tomato accessions first (`scripts/promote_ng_oracle.sh`;
+    /// `doc/devel/reports/implementations/str_penalised_fit_D4_2026-10-16.md`):
+    /// - "length spectrum" renamed "allele length variation" (`aa42d629`): two keys and four note
+    ///   paragraphs. The allele window at ±9 (`38b1fe56`), merged at the same time, moved nothing
+    ///   here: the climb fitted no row for this fixture's one tract.
+    /// - file format 3 (plan steps B2, B4): `format_version = 3`, the fallback stated as the
+    ///   between-locus share F (0.5, `defaulted`) in place of a concentration, and notes.
+    /// - the repeat-tract fit is the penalised fit (C7), with a weak prior on stutter (C8): where the
+    ///   climb wrote no repeat-tract row, the file now holds one slippage row and one allele-length
+    ///   row for the two-base stratum at 10 repeats, with F 0.254, and the fallback F becomes that
+    ///   F, `fitted_here`. Its slip rate is 0.0042: 5.8 × 10⁻⁷ at C7, before the prior's one read's
+    ///   worth of default stutter.
+    /// - note text (C8, C9, `7265efd0`).
+    ///
+    /// No number outside the repeat-tract rows moved; C10's ordering moved nothing, as the cohort's
+    /// two samples were already in name order. Recorded on macOS (arm64) only; it was
+    /// `a5b4997bc35e77425525e25e821cf40c`.
+    const FITTED_PARAMETERS_MD5: &str = "b673dc9611c7126b5c35e9d7629493b3";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -198,7 +217,13 @@ mod tests {
     /// `REPCNB` is declared. Those four header lines are all that moved — putting the old four back
     /// reproduces the old checksum exactly; the fixture holds no bundle, and no record moves. It
     /// was `bc75ec4d5a3c67dcaa776f56746b2bdd`. Recorded in the Linux container (arm64, glibc) only.
-    const CALLS_MD5: &str = "b1a1a907e4e7adf22fb62c56f3305258";
+    ///
+    /// **Re-recorded 2026-10-16** with the fit above (plan step D4), which now holds a row for the
+    /// repeat tract at chrV:201: that record's QUAL 36.7 to 90.1 (98.1 at C7, before the stutter
+    /// prior), AF 0.249902 to 0.250006, the heterozygote's GQ 34 to 75 and the other sample's 45 to
+    /// 47. No genotype moved; the two SNPs did not move. Recorded on macOS (arm64) only; it was
+    /// `b1a1a907e4e7adf22fb62c56f3305258`.
+    const CALLS_MD5: &str = "dae7e77c280d7f240349cc8433207a81";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -221,7 +246,11 @@ mod tests {
     ///
     /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
     /// Recorded in the Linux container (arm64, glibc) only; it was `8c71a5a95f1196e3dd8c05abdccf7355`, then `9265d0273c5400d8a2b2554b3f7ecf0a`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "4859eacd5645e607b6f99b667d184dc0";
+    ///
+    /// **Re-recorded 2026-10-16** for the four reasons [`FITTED_PARAMETERS_MD5`] gives, with the
+    /// same repeat-tract rows to the last digit. Recorded on macOS (arm64) only; it was
+    /// `4859eacd5645e607b6f99b667d184dc0`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "3a016fb7a40bc91eb5bb9ae2adc6e286";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -261,7 +290,12 @@ mod tests {
     /// field of this fixture moves for it. It was `977f08d389bdba037ee350ab38164e1b` on str-bundles
     /// and `e9e8aee5b6714aa33ce91bd04290984e` on main. Recorded in the Linux container (arm64,
     /// glibc) only.
-    const WITH_ERRORS_CALLS_MD5: &str = "f65f586f58163d23d127d7f8c823e433";
+    ///
+    /// **Re-recorded 2026-10-16** with the fit above (plan step D4): only the repeat tract at
+    /// chrV:201 moves, QUAL 37.4 to 90.4, AF 0.249924 to 0.250010, the heterozygote's GQ 34 to 74
+    /// and the other sample's 42 to 44; no genotype. Recorded on macOS (arm64) only; it was
+    /// `f65f586f58163d23d127d7f8c823e433`.
+    const WITH_ERRORS_CALLS_MD5: &str = "d315b4e4d0de2f21fd34cd673bbdfa8b";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -274,7 +308,12 @@ mod tests {
     ///
     /// **Re-recorded 2026-10-11, twice,** for the two reasons [`FITTED_PARAMETERS_MD5`] gives.
     /// Recorded in the Linux container (arm64, glibc) only; it was `5e3dacbf558adc6787276897935dbbf8`, then `0cda09cc72a2a7bd9c46a4fe85388eff`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "0573095bb8f1ed6608ed74d62051ade1";
+    ///
+    /// **Re-recorded 2026-10-16** for the four reasons [`FITTED_PARAMETERS_MD5`] gives. Here the
+    /// tract's row has F 0.897 and a slip rate of 0.00032 (5.4 × 10⁻⁸ at C7, before the stutter
+    /// prior), and the fallback F is that F. Recorded on macOS (arm64) only; it was
+    /// `0573095bb8f1ed6608ed74d62051ade1`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "5abcd04153d5acc32463fcd751970024";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -306,7 +345,12 @@ mod tests {
     /// branch's and the repeat tract's record main's to the byte (`QUAL` 37.3, `AF=0.023718`). It
     /// was `08a675fd6ba4bc8a627fa2bd2118b415` on str-bundles and `efa3947cb4eacd394de0425ce87c40ed`
     /// on main. Recorded in the Linux container (arm64, glibc) only.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "5c2414e47ecc6748f12db076d7513de1";
+    ///
+    /// **Re-recorded 2026-10-16** with the fit above (plan step D4): only the repeat tract at
+    /// chrV:201 moves, QUAL 37.3 to 78.6, AF 0.023718 to 0.023811, the heterozygote's GQ 24 to 65
+    /// and every other sample's GQ up by 2 or 3; no genotype. Recorded on macOS (arm64) only; it
+    /// was `5c2414e47ecc6748f12db076d7513de1`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "b23487bd69f9d39f1943fbe9350a7a3f";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
