@@ -1,5 +1,21 @@
 # ng — the slippage level as a curve across repeat count
 
+> **Replaced, 2026-10-16: the curves are now drawn inside the fit, not through its answers.** This
+> design fitted each (motif period, repeat count) cell on its own by a climb, then drew a curve
+> through the cells' answers and blended each cell with it. Penalised expectation maximisation (EM),
+> specified in [`str_penalised_fit.md`](str_penalised_fit.md) (and what it hands calling in
+> [`str_fit_to_calling.md`](str_fit_to_calling.md)), replaced both stages: it fits every cell of a
+> motif length at once, with each number a curve along the repeat count that is charged for bending.
+> Commit `3198d55d` deleted the per-cell climb, the curve drawing after it, the share curves' blend,
+> and the walk's cell table; the links below to those now name that commit.
+>
+> **Still true:** the measurements of §2, and §7.2's knee of 2.5 combined errors, which the new fit
+> keeps as the point past which a bend costs less than its square (`str_penalised_fit.md` §2.3).
+> **Still in the code, only to read older files:** a parameters file this design wrote still loads
+> and calls as before, so the curve types (`SlippageCurve`, `ShareCurve`) and the provenance of §8
+> (`LevelSource`'s curve and blend) remain; the curve-fitting code in `slippage_curve.rs` and
+> `share_curve.rs` is kept for tests and research examples, and nothing in a run calls it.
+
 **Status:** design, 2026-08-20. **No code yet — this settles the design.** It amends the STR half
 of the parameter pre-pass, [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.3 and §4.5,
 and is the first piece of the research plan
@@ -27,7 +43,7 @@ neighbour the borrowing rule reached first.
 ### 1.1 Goals
 
 1. **Every populated cell gets a level**, including the ones below today's refusal floor of 50
-   tracts ([`ssr_fit.rs:438`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L438)),
+   tracts (`ssr_fit.rs:438`, deleted in commit `3198d55d`),
    without any cell's answer being one neighbour's answer.
 2. **The shape of the rise is fitted, not chosen.** The two cohorts we have prefer opposite
    shapes at the same repeat counts (§2), so a design that hard-codes either one is wrong on
@@ -152,7 +168,7 @@ what production does rather than replacing it with something unrelated.
 **A slippage group is the set of read groups a run fits one set of slippage numbers for**
 ([`ssr_fit.rs:291`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L291) — `slippage`
 is one entry per group, `None` where that group put no read in the cell). The walk builds it
-([`ng_joint_records_walk.rs:747`](../../../../examples/ng_joint_records_walk.rs#L747)): one group
+(`examples/ng_joint_records_walk.rs:747`, its repeat-tract half deleted in commit `3198d55d`): one group
 per read group, or all of them pooled.
 
 **⚠ What "per read group" can mean today is narrower than it sounds, and a coder must know
@@ -242,7 +258,7 @@ own precision. So is the repeat-count range fitted over, and how many cells stoo
 
 - **The level** at every cell of a period with a curve comes from §7 — the curve, the cell's own
   fit, or a blend of the two. The nearest-neighbour ring
-  ([`ssr_fit.rs:711`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711)) no longer
+  (`ssr_fit.rs:711`, deleted in commit `3198d55d`) no longer
   supplies it.
 - **The direction split and the fall-off are copied from the nearest stratum that measured them
   well** — §5.1, brought into scope by the owner on 2026-08-20. Until then this route pooled a
@@ -471,7 +487,7 @@ independent cell reads only its own. Stage two is 21 rungs × a two-parameter le
 over at most a few hundred cells: microseconds beside a fit measured in minutes.
 
 **⚠ Do not delete the pooled-set dedup in `fit_strata`
-([`ssr_fit.rs:653`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L653)) as dead code.**
+(`ssr_fit.rs:653`, deleted in commit `3198d55d`) as dead code.**
 With borrowing off every pooled set is a singleton and the dedup does nothing, so it looks
 removable; it is what makes the borrowing arm affordable, and that arm must stay selectable to
 re-measure what this change bought.
@@ -568,10 +584,10 @@ cells that are already fitted independently. It adds no shared state to stage on
 
 | what | existing code | how it is reused |
 |---|---|---|
-| the per-cell fit that stage one runs | [`fit_stratum` / `fit_pooled`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L482) | called unchanged, with `borrowing_floor = 0` |
+| the per-cell fit that stage one runs | `fit_stratum` / `fit_pooled` (`ssr_fit.rs`, deleted in commit `3198d55d`) | called unchanged, with `borrowing_floor = 0` |
 | the per-cell evidence the weight reads | [`StratumEvidence`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L169) | `spanning_reads()` and the fitted level give the slipped-read count |
-| borrowing, for the two shares | [`borrow_up_to_the_floor`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711) | kept, narrowed to the shares |
-| the walk that produces a cell table | [`ng_joint_records_walk.rs`](../../../../examples/ng_joint_records_walk.rs) | the measurement vehicle and the parity oracle |
+| borrowing, for the two shares | `borrow_up_to_the_floor` (`ssr_fit.rs`, deleted in commit `3198d55d`) | kept, narrowed to the shares |
+| the walk that produces a cell table | `examples/ng_joint_records_walk.rs` (its repeat-tract half deleted in commit `3198d55d`) | the measurement vehicle and the parity oracle |
 
 **The parity oracle** is the run this design was measured on: the same two cohorts, fitted with
 borrowing off, must reproduce their per-cell levels to the precision the cell table prints when

@@ -1,5 +1,14 @@
 # ng — the slippage level as a curve across repeat count: implementation plan
 
+> **Replaced, 2026-10-16.** What this plan built — curves drawn through per-cell climb answers, and
+> each cell blended with its curve — was replaced by penalised expectation maximisation (EM),
+> [`../spec/str_penalised_fit.md`](../spec/str_penalised_fit.md), built under
+> [`str_penalised_fit.md`](str_penalised_fit.md). Commit `3198d55d` deleted the climb, the curve
+> drawing after it, the share curves' blend, the borrowing it narrowed (B4) and the walk's cell table;
+> the links below to that code now name the commit. Kept, so that parameters files this plan's code
+> wrote still load and call as before: the curve types and their provenance in the file. The steps
+> stay as the record of how the curves were built and measured.
+
 **Status:** draft, 2026-08-20. The build order for the design settled in
 [`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md): the slippage level
 stops being an independent per-cell number that thin cells borrow, and becomes a curve in repeat
@@ -71,7 +80,7 @@ architecture sibling.
   ([`ssr_fit.rs:169`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L169)).
 - **The walk writes a per-cell table** under `SSR_CELL_TABLE`, and a second one under
   `SSR_CELL_TABLE_BORROWED`
-  ([`ng_joint_records_walk.rs`](../../../../examples/ng_joint_records_walk.rs)).
+  (`examples/ng_joint_records_walk.rs`; its repeat-tract half and both tables deleted in commit `3198d55d`).
 - **Both cohorts' independent-fit tables exist** and are the parity oracle:
   `tmp/slippage_curve/tomato_a1_noborrow.csv` (6 fitted cells) and
   `hg002_a1_noborrow.csv` (55 fitted cells). **A5 copies them under `tests/data/` so the oracle
@@ -158,7 +167,7 @@ with the curve disabled by config, both cohorts' cell tables must come back iden
 
 **B4. Narrow borrowing to the two shares.**  ✅
 `borrow_up_to_the_floor`
-([`ssr_fit.rs:711`](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L711)) stops
+(`ssr_fit.rs:711`, deleted in commit `3198d55d`) stops
 supplying the level and keeps supplying the direction split and the fall-off, as
 [`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) §4.5 already specifies.
 **Leave the pooled-set dedup in place** — with borrowing off every set is a singleton and it looks

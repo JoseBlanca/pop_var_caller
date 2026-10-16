@@ -430,9 +430,17 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   `BlendedShare`) and the four constants only they read deleted; the library-scoring code only the
   bench and tests use (`TractLikelihoods` and its helpers) compiled only with them. Fixture (153 runs) exact; digests and
   parameters-file tests unchanged.
-- ☐ **E2** The specs the climb built on get a dated note that the fit they describe was replaced
+- ✅ **E2** The specs the climb built on get a dated note that the fit they describe was replaced
   (`parameter_prepass_ssr.md`, `str_slippage_level_curve.md`), pointing at the new spec.
   *Depends:* E1. *Source:* spec-authoring's rule for decisions that were acted on.
+  *Done (2026-10-16):* a note at the top of `spec/parameter_prepass_ssr.md`,
+  `spec/str_slippage_level_curve.md` and `impl_plan/str_slippage_level_curve.md` says what replaced
+  the fit, that commit `3198d55d` deleted it, and what of the document still holds (the model and
+  measurements; the curve types, kept only to read older parameters files). The links in the two
+  curve documents to code E1 deleted (the climb's refusal floor, `fit_stratum`/`fit_pooled`,
+  `borrow_up_to_the_floor`, `fit_strata`'s dedup, the walk's repeat-tract half and cell tables) now
+  name the commit instead. `impl_plan/parameter_prepass_ssr.md` gets no note: it built the
+  per-sample route, removed on 2026-09-11, not the climb. Bodies unchanged.
 
 > **Checkpoint E:** full suite and code review. Pause for review before any merge into main.
 
