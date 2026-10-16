@@ -318,7 +318,7 @@ curves, yet written as estimated (finding B1, the review's blocker), and a faile
 
 Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as it will merge.
 
-- ☐ **D1** The bench reproduces `compare_D_prior_2026-10-14.md`'s `D_tract_prior` rows with the
+- ✅ **D1** The bench reproduces `compare_D_prior_2026-10-14.md`'s `D_tract_prior` rows with the
   production fit, within run-to-run noise, and adds the cells spec §1.2 names as not run: 500 × 30,
   2,000 × 10, and three seeds at every 2,000-sample cell. It measures error coverage on classes with 1
   to 7 loci, for the owner's decision on `LOCI_FOR_AN_ERROR`. **It also counts, at one sample with the
@@ -326,6 +326,11 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   truth** (spec §2.6; C8's review found 31/63, 28/126 and 21/126 against 18/62, 18/126 and 12/126
   without the prior, where honest errors miss about 1 in 22), for the owner. *Depends:* C7.
   *Source:* spec §1.2, §2.6, §4.2.
+  *Done (2026-10-16):* `reports/implementations/str_penalised_fit_D1_2026-10-15.md`. The production
+  fit predicts held-out loci better than the counting fit in all 48 cells (+0.009 to +0.162 log units
+  a locus; 167 of 168 seed-runs). Recommendation for checkpoint D: stutter-number errors from 3 loci
+  with reads, F and shares keep 8, `LOCI_FOR_A_SHARE_ERROR` from 3 to 1. The runs that lost every
+  stutter error are diagnosed separately (`str_penalised_fit_thin_errors_diagnosis_2026-10-15.md`).
 - ✅ **D2a** The bench gains a real-psp mode: it reads a psp set's censuses, folds loci by whole locus
   over the real evidence, fits on the kept folds and scores the held-out ones with `fit_bench.rs`'s
   scorer. *Depends:* C7. *Source:* spec §4.4.
