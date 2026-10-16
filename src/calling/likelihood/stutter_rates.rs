@@ -239,14 +239,14 @@ mod tests {
 
     /// **The fit's own top level, which nothing covered.**
     ///
-    /// A slippage curve may report a level as high as `LEVEL_CEILING` (0.999). Because the
-    /// part-repeat mass is added on top rather than carved out, the four direction shares
-    /// then total `1.05 × level` — **past one**, at any level above 0.9524. Every individual
+    /// A parameters file the climb wrote may carry a level read off its curve as high as
+    /// `LEVEL_CEILING` (0.999). Because the part-repeat mass is added on top rather than carved
+    /// out, the four direction shares then total `1.05 × level` — **past one**, at any level above 0.9524. Every individual
     /// share is still under one, so `StutterModel::new`'s debug assertion does not fire; the
     /// same-length share floors at `GEOM_MIN` instead, and `unreachable_mass` reports
     /// **exactly no loss** for a row that has over-allocated six parts in a hundred.
     ///
-    /// **This is a row the parameter fit is entitled to emit**, not a hostile hand-built one,
+    /// **This is a row an older parameters file is entitled to carry**, not a hostile hand-built one,
     /// which is why it is pinned here rather than left to the floored-model test in the
     /// stutter module. Whether reporting nothing there is the wanted answer is a decision for
     /// whoever owns the fit's ceiling; this test makes it visible either way.

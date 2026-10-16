@@ -14,11 +14,12 @@
 //! each stratum's own share with it (`doc/devel/ng/spec/str_slippage_level_curve.md` §5.1). The
 //! climb was deleted on 2026-10-16, and the code that fitted the curves later the same day. A
 //! parameters file the climb wrote still records the curve each share came from; this module holds
-//! what reading and calling such a file needs: [`ShareCurve`] with its [`ShareShape`] and
-//! [`ShareCurveSource`], [`ShareSource`], and the bounds [`SHARE_FLOOR`] and [`SHARE_CEILING`].
+//! what reading such a file needs: [`ShareCurve`] with its [`ShareShape`] and
+//! [`ShareCurveSource`], and [`ShareSource`]. **Nothing in a run evaluates the curve**: reading a
+//! file copies each share, its curve and whether the stratum sat inside the curve's range exactly
+//! as written, and calling uses the share.
 
 use super::slippage_curve::{CurveReach, PenalisedPoint};
-use crate::float;
 
 // ---------------------------------------------------------------------
 // The shape a share follows
@@ -132,16 +133,6 @@ pub enum ShareCurveSource {
 }
 
 impl ShareCurve {
-    /// The share this curve gives at `repeats`.
-    ///
-    /// **Inside the repeat counts it was fitted over it is the fitted curve; outside, it is held
-    /// at the nearer fitted end.** A turning shape continued past its range runs to 0 or 1 within
-    /// a few repeat counts, and neither is a share any stratum measured.
-    pub fn share_at(&self, repeats: u64) -> f64 {
-        let inside = repeats.clamp(self.fitted_from, self.fitted_to);
-        self.share_on_the_curve(inside as f64)
-    }
-
     /// Whether `repeats` sat inside the repeat counts this curve was fitted over.
     pub fn reach(&self, repeats: u64) -> CurveReach {
         if repeats < self.fitted_from {
@@ -150,22 +141,6 @@ impl ShareCurve {
             CurveReach::AboveFitted
         } else {
             CurveReach::Inside
-        }
-    }
-
-    /// The fitted curve read at any repeat count, with no regard for the fitted range.
-    /// [`ShareCurve::share_at`] holds the repeat count inside that range before calling it.
-    fn share_on_the_curve(&self, repeats: f64) -> f64 {
-        let from_centre = repeats - self.centre;
-        let logit =
-            self.intercept + self.slope * from_centre + self.bend * from_centre * from_centre;
-        let share = 1.0 / (1.0 + float::exp(-logit));
-        if share.is_finite() {
-            share.clamp(SHARE_FLOOR, SHARE_CEILING)
-        } else if logit > 0.0 {
-            SHARE_CEILING
-        } else {
-            SHARE_FLOOR
         }
     }
 }
@@ -206,22 +181,6 @@ impl ShareSource {
     }
 }
 
-// ---------------------------------------------------------------------
-// The bounds a share is held inside
-// ---------------------------------------------------------------------
-
-/// The smallest share a curve or a stratum may report, so its logit exists.
-///
-/// **A share of exactly 0 or 1 is a real fitted value, not a defect**: HG002's one fitted
-/// pentanucleotide stratum splits 1.000 — every one of its 39 slipped reads came back short. On
-/// the logit scale that is infinity, so it is pulled one part in ten thousand inside the boundary,
-/// which is far tighter than any share is measured and leaves the stratum with almost no weight —
-/// which is the right answer for a share pinned against its boundary.
-pub const SHARE_FLOOR: f64 = 1e-4;
-
-/// The largest share a curve or a stratum may report; see [`SHARE_FLOOR`].
-pub const SHARE_CEILING: f64 = 1.0 - SHARE_FLOOR;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,12 +202,7 @@ mod tests {
         assert_eq!(ShareSource::PenalisedCurve(point).curve_weight(), None);
     }
 
-    fn expit(value: f64) -> f64 {
-        1.0 / (1.0 + float::exp(-value))
-    }
-
-    /// A turning curve over 8 to 12 repeats, steep enough to leave the range of anything
-    /// measured a few repeat counts past either end.
+    /// A turning curve fitted over 8 to 12 repeats.
     fn a_turning_curve() -> ShareCurve {
         ShareCurve {
             shape: ShareShape::Turning,
@@ -264,61 +218,13 @@ mod tests {
         }
     }
 
-    /// The curve is read back as written: the logit of the share is the quadratic about the
-    /// centre.
+    /// A stratum outside the repeat counts its curve was fitted over is told apart from one inside.
     #[test]
-    fn inside_the_fitted_range_the_share_is_the_curve_as_written() {
+    fn a_stratum_knows_whether_it_sat_inside_the_curves_range() {
         let curve = a_turning_curve();
-        assert!((curve.share_at(10) - expit(0.5)).abs() < 1e-12);
-        assert!((curve.share_at(9) - expit(0.5 + 0.6)).abs() < 1e-12);
-        assert!((curve.share_at(12) - expit(0.5 + 0.6 * 4.0)).abs() < 1e-12);
-    }
-
-    /// Outside the repeat counts a curve was fitted over, the share is held at the nearer end
-    /// rather than continued — a turning shape continued a few counts past its range runs to 0
-    /// or 1, and neither is a share any stratum measured.
-    #[test]
-    fn outside_the_fitted_range_the_share_is_held_at_the_nearer_end() {
-        let curve = a_turning_curve();
-        assert_eq!(curve.share_at(3), curve.share_at(8));
-        assert_eq!(curve.share_at(60), curve.share_at(12));
         assert_eq!(curve.reach(3), CurveReach::BelowFitted);
-        assert_eq!(curve.reach(10), CurveReach::Inside);
+        assert_eq!(curve.reach(8), CurveReach::Inside);
+        assert_eq!(curve.reach(12), CurveReach::Inside);
         assert_eq!(curve.reach(60), CurveReach::AboveFitted);
-
-        // Continued instead of held, the same curve leaves the range of anything measured.
-        assert!(curve.share_on_the_curve(60.0) > SHARE_CEILING - 1e-12);
-    }
-
-    /// Every share a curve reports is a proportion, at every repeat count, for every shape — even
-    /// read off the curve itself far from its centre, where the logit runs to thousands.
-    #[test]
-    fn an_emitted_share_is_always_a_proportion() {
-        let shapes = [
-            (ShareShape::Flat, 0.0, 0.0),
-            (ShareShape::Sloping, -3.0, 0.0),
-            (ShareShape::Turning, -3.0, 0.8),
-        ];
-        for (shape, slope, bend) in shapes {
-            let curve = ShareCurve {
-                shape,
-                intercept: 0.2,
-                slope,
-                bend,
-                centre: 9.0,
-                fitted_from: 1,
-                fitted_to: 200,
-                held_out_error: 0.3,
-                strata: 6,
-                source: ShareCurveSource::ThisPeriod,
-            };
-            for repeats in 1..200 {
-                let share = curve.share_at(repeats);
-                assert!(
-                    (SHARE_FLOOR..=SHARE_CEILING).contains(&share),
-                    "{shape:?} gave {share} at {repeats} repeats"
-                );
-            }
-        }
     }
 }

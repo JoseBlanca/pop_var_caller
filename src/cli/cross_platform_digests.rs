@@ -169,7 +169,17 @@ mod tests {
     /// checksums pins a repeat-tract error**, not even the two "with standard errors" pairs: their
     /// repeat-tract half pins values only. A cohort with at least 3 tracts of one class (8 for the
     /// slip rate) would be needed to put one in the file. Recorded on macOS (arm64) only.
-    const FITTED_PARAMETERS_MD5: &str = "168e7f326230e988286ef16b4c4fc5cd";
+    ///
+    /// **Re-recorded 2026-10-16 a third time** (checkpoint E review, its nit on the notes): the
+    /// repeat-tract section's notes explain a subset of samples (`samples_fitted_on`), numbers taken
+    /// from a parametric curve or blended with one, and `curve_fitted_on` only when a row of the file
+    /// holds one, which only a file written by the climb can. This file's one repeat-tract row is a
+    /// point on a penalised curve, so its section note shrinks from 93 lines to 69. Note text
+    /// alone: putting the old note block back into the new file gives the previous checksum
+    /// exactly, for this and the next two fitted checksums
+    /// (`tmp/review_E/fixes/digests/swap_notes.py`). Recorded on macOS (arm64) only; it was
+    /// `168e7f326230e988286ef16b4c4fc5cd`.
+    const FITTED_PARAMETERS_MD5: &str = "66d72ee84c4a49d4b6271d3e5b68437c";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -264,7 +274,9 @@ mod tests {
     /// same repeat-tract rows to the last digit. Recorded on macOS (arm64) only; it was
     /// `4859eacd5645e607b6f99b667d184dc0`. **Again the same day** for the note text of plan step
     /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says; it was `3a016fb7a40bc91eb5bb9ae2adc6e286`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "a48841ff7b0d8ca924b758dc7a33fcbf";
+    /// **A third time** for the conditional notes alone, as [`FITTED_PARAMETERS_MD5`] says; it was
+    /// `a48841ff7b0d8ca924b758dc7a33fcbf`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "0586cd65f3dcbd192f0f8cf19e223ca9";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -328,8 +340,9 @@ mod tests {
     /// prior), and the fallback F is that F. Recorded on macOS (arm64) only; it was
     /// `0573095bb8f1ed6608ed74d62051ade1`. **Again the same day** for the note text of plan step
     /// D8 alone, as [`FITTED_PARAMETERS_MD5`] says (the tract is again a class of 1 locus); it was
-    /// `5abcd04153d5acc32463fcd751970024`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "33eab2535f49967c6459db376a745d01";
+    /// `5abcd04153d5acc32463fcd751970024`. **A third time** for the conditional notes alone, as
+    /// [`FITTED_PARAMETERS_MD5`] says; it was `33eab2535f49967c6459db376a745d01`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "e0902dab0b2d64082d42a40b134f6721";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.

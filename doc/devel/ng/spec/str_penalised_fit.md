@@ -2,7 +2,8 @@
 
 **Status:** approved by the owner, 2026-10-14. The method is chosen
 (`doc/devel/ng/research/str_fit/recommendation_2026-10-14.md`, adopted by the owner the same day); this
-settles what is built. A research prototype exists and is measured; nothing is wired into production.
+settles what is built. **Built:** `estimate-parameters` has run the penalised fit since plan step C7,
+and since step E1 (2026-10-16) it is the only repeat-tract fit — the climb it replaced is deleted.
 Companion spec: [`str_fit_to_calling.md`](str_fit_to_calling.md), what the fit hands to calling. It
 replaces the unbuilt draft `str_counting_fit.md`, whose one settled requirement (§2.1, standard errors
 that allow for samples sharing a locus) is §2.6 here. Architecture:
@@ -280,7 +281,10 @@ Rare lengths get no error: a share expected at less than one locus, share × loc
 | slip rate, F, the allele-length shares | 8 loci with reads | `LOCI_FOR_AN_ERROR` |
 
 Measured on drawn cohorts of 2,000 samples, at 3 to 7 loci the truth lay within two of the shorter
-share's and the fall-off's errors 89 to 93 times in 100, against 95 for an honest error; within two
+share's and the fall-off's errors 89 to 93 times in 100, against 95 for an honest error; pooled over
+every cohort size measured, 1 to 2,000 samples, 89 to 90 times in 100 (`tmp/d7/coverage_by_number.md`,
+tables (c) and (d)). The lowest single cell is lower: a shorter share at 60 samples and 5 to 7 loci, 82
+in 100, measured in plan step D1 before D7 changed the errors. Within two
 of the slip rate's only 72 to 79 times, because the rate itself comes out low there (below the truth
 in 81 to 86 classes of 100, by a median of 1.5–2.8%; §2.4's floor), not because its error is narrow.
 Below 3 loci no number gets an error. The other rules of the error table (arch §1.4) — too few

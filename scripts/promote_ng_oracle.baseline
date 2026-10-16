@@ -127,12 +127,17 @@
 # the shorter share's and fall-off's errors. Both files: two note paragraphs state the two loci lines (D8). E1, the curve
 # deletion (2276c93c) and main's STR performance commits move nothing, each checked by a fit or run on either side.
 # Report: reports/implementations/str_penalised_fit_oracle_after_D8_2026-10-16.md. They were 4f272d7e… / 5ed794a0….
+# Both parameters-file lines re-recorded 2026-10-16 again (checkpoint E review fixes): the repeat-tract notes explain a
+# subset of samples, numbers taken from a parametric curve or blended with one, and `curve_fitted_on` only when a row of
+# the file holds one, which only the climb wrote. Neither file has such a row, so each loses 24 comment lines (fitted
+# 298 -> 274, defaults run 341 -> 317); with comment lines taken out both are the previous files line for line
+# (tmp/oracle_E vs tmp/oracle_E2). No other line moved. They were bd7b9bea… / c84ce763….
 slice: 20 regions, 4 alignments
 # records: 7508
 67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
 67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
-bd7b9bea209a3c754e19deea7dcfa87d  from_alignments.parameters.toml
+920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
 0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-c84ce763024442ef439033899a57f2fd  fitted.parameters.toml
+5ea720b63c4674239720087f21a72674  fitted.parameters.toml
 61b09b604ee5fb2d7196150824c2c996  from_fit.comparable

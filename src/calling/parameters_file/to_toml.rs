@@ -336,10 +336,41 @@ impl ParametersFile {
         let fallback_share_paragraph = format!(
             "`fallback_between_locus_share` is the between-locus share a tract is held at where its stratum has none of its own. A between-locus share says how much of a stratum's variation in allele length lies between its loci rather than within one: near 0, every locus carries the stratum's whole spread of lengths; near 1, each locus is fixed at one length. A stratum row with shares and no `between_locus_share` keeps its shares, held at this one; a tract whose stratum and period have no row gets a flat shape over whatever lengths it offers, held at this one. A smaller share makes the prior harder for the reads to move. A run in which any stratum has a between-locus share states the median of those shares and marks it `fitted_here`. The median counts only the strata whose fit had at least {LOCI_FOR_AN_ERROR} loci with reads, the same count below which a stratum carries no own-fit standard error on its between-locus share or its `share_of_reads_that_slip`; where no stratum with a share has that many, it counts every stratum with a share. This file does not carry the counts, so the median cannot be recomputed from the rows below. A run in which no stratum has a between-locus share states the built-in 0.5 and marks it `defaulted`. A run handed this file writes back the warrant it found there, because a file's warrants survive being read — demoting them on every read would have the same cohort report different warrants depending on which way it was called. Mark it `supplied` yourself if you change the number. It carries no `observations` in any of those cases — a median over strata is not a measurement with a sample size."
         );
+        // **What only a file the fit before the penalised one wrote can hold** — that fit, the
+        // climb, was deleted on 2026-10-16. A row it wrote may take a number from a parametric
+        // curve, blend one in, keep the stratum's own fit, or be fitted on a subset of the
+        // samples; the penalised fit writes none of these. The paragraphs explaining them are
+        // written only when a row needs them, so a new file's notes describe the fit that wrote it.
+        let rows = &tracts.slippage_by_stratum_and_group;
+        let rows_of_the_older_fit = rows.iter().any(written_by_the_older_fit);
+        let rows_fitted_on_a_subset = rows.iter().any(|row| row.samples_fitted_on.is_some());
+        let samples_paragraph = format!(
+            "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled.{}",
+            if rows_fitted_on_a_subset {
+                " They are reads among the samples the stratum was fitted on: every sample, unless the row carries `samples_fitted_on` — then a large cohort's stratum was fitted on that many of its samples, taken in a fixed order that does not look at the data, and every count and error in the row is that subset's. A `samples_fitted_on` equal to the cohort's sample count means the subset grew to every sample."
+            } else {
+                ""
+            }
+        );
         // Built rather than written out so the loci thresholds it states are the ones the fit
         // uses.
         let own_error_paragraph = format!(
-            "Where a number was fitted with this stratum's own reads — its smoothing is `this_stratum`, or `penalised_curve` — its origin carries an own-fit standard error: `own_fit_standard_error` for the first number, `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error` for the other two. It is how far that number would typically move if the stratum's tracts were drawn again. A number taken from a parametric curve, or blended with one, has none: the blend's own error is not computed. Nor does a number fitted on too few of the stratum's loci with reads, a count this file does not carry: the first number below {LOCI_FOR_AN_ERROR} loci, the other two below {LOCI_FOR_A_DIRECTION_ERROR}. **Where the row's `samples_fitted_on` is fewer than the cohort's samples, the error describes the subset's own fit, not how far that fit sits from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further from the fit on every sample than the two fits' errors allow for — more than two standard deviations of their difference — where about one would by chance."
+            "Where a number was fitted with this stratum's own reads — its smoothing is `penalised_curve`{} — its origin carries an own-fit standard error: `own_fit_standard_error` for the first number, `shorter_share_own_fit_standard_error` and `fall_off_own_fit_standard_error` for the other two. It is how far that number would typically move if the stratum's tracts were drawn again.{} A number fitted on too few of the stratum's loci with reads, a count this file does not carry, has none: the first number below {LOCI_FOR_AN_ERROR} loci, the other two below {LOCI_FOR_A_DIRECTION_ERROR}.{}",
+            if rows_of_the_older_fit {
+                ", or `this_stratum`"
+            } else {
+                ""
+            },
+            if rows_of_the_older_fit {
+                " A number taken from a parametric curve, or blended with one, has none: the blend's own error is not computed."
+            } else {
+                ""
+            },
+            if rows_fitted_on_a_subset {
+                " **Where the row's `samples_fitted_on` is fewer than the cohort's samples, the error describes the subset's own fit, not how far that fit sits from one on every sample**: on a cohort of 2,169 samples, 7 of 12 numbers compared sat further from the fit on every sample than the two fits' errors allow for — more than two standard deviations of their difference — where about one would by chance."
+            } else {
+                ""
+            }
         );
         // Built rather than written out so the stutter prior's weight and centre it states are
         // the ones the fit uses.
@@ -355,26 +386,42 @@ impl ParametersFile {
         let centre_shorter_share = STUTTER_PRIOR_CENTRE.shorter_share;
         let centre_fall_off = STUTTER_PRIOR_CENTRE.fall_off;
         let origin_paragraph = format!(
-            "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: this stratum's own fit, its period's curve, or a blend of the two, with the curve itself written down so an interpolation can be told from a measurement; or a point on its period's penalised curve (`penalised_curve`), one value per repeat count, fitted with the reads of every stratum of that period at once and held close to its neighbours' values, the more so the larger its `strength`. `eased_here = true` says the reads insisted on a bend at this repeat count, so the curve was let bend there. A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads` where this stratum fitted a slip share of its own, and neither carries one where the number was taken whole from a parametric curve — so a row showing the same count twice is not a duplicate, and a row showing none fitted nothing of its own. A stratum on a penalised curve was fitted with {prior_worth} of evidence added to its own, evidence that behaves as calling's default stutter does (`share_of_reads_that_slip` {centre_level}, `shorter_share` {centre_shorter_share}, `fall_off` {centre_fall_off}). So a row with `expected_slipped_reads` below {prior_count} carries no error on any of its three numbers: too few of its reads slipped to say how far off they may be. Its `shorter_share` and `fall_off` lean on that default, and on its neighbours on the curve where it has any, as much as on its own reads."
+            "`share_of_reads_that_slip_origin` says where the first of the three came from and `shorter_share_and_fall_off_origin` where the other two did: a point on its period's penalised curve (`penalised_curve`), one value per repeat count, fitted with the reads of every stratum of that period at once and held close to its neighbours' values, the more so the larger its `strength`. `eased_here = true` says the reads insisted on a bend at this repeat count, so the curve was let bend there.{} A row whose two shares were not fitted here at all has no `shorter_share_and_fall_off_origin` key. Each origin carries its own `expected_slipped_reads`{} — so a row showing the same count twice is not a duplicate{}. A stratum on a penalised curve was fitted with {prior_worth} of evidence added to its own, evidence that behaves as calling's default stutter does (`share_of_reads_that_slip` {centre_level}, `shorter_share` {centre_shorter_share}, `fall_off` {centre_fall_off}). So a row with `expected_slipped_reads` below {prior_count} carries no error on any of its three numbers: too few of its reads slipped to say how far off they may be. Its `shorter_share` and `fall_off` lean on that default, and on its neighbours on the curve where it has any, as much as on its own reads.",
+            if rows_of_the_older_fit {
+                " In a file written by the fit before 2026-10-16, a number may instead be this stratum's own fit (`this_stratum`), its period's parametric curve (`this_periods_curve`), or a blend of the two (`blend`), with the curve itself written down so an interpolation can be told from a measurement."
+            } else {
+                ""
+            },
+            if rows_of_the_older_fit {
+                " where this stratum fitted a slip share of its own, and in that older fit's rows neither carries one where the number was taken whole from a parametric curve"
+            } else {
+                ""
+            },
+            if rows_of_the_older_fit {
+                ", and a row showing none fitted nothing of its own"
+            } else {
+                ""
+            },
         );
-        note(
-            &mut out,
-            &[
-                "Everything about repeat tracts. A **stratum** is a class of tract, and every row keyed by one spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries. A **slippage group** is a set of read groups whose reads are taken to slip alike; the run declares it, and `slippage_group_by_read_group` below is that declaration.",
-                "",
-                "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `allele_length_variation_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below; a stratum whose row has no `between_locus_share` keeps its own shares, held at the fallback below. Neither absence is a zero.",
-                "",
-                "Three numbers a stratum: `share_of_reads_that_slip` — how often a read reports a tract length other than its allele's; `shorter_share` — of the reads that slip, the share showing a shorter tract; `fall_off` — how fast two-repeat slips fall off against one-repeat slips. `expected_slipped_reads` is fractional because it is how many reads the fitted share says slipped, not a count anybody labelled. They are reads among the samples the stratum was fitted on: every sample, unless the row carries `samples_fitted_on` — then a large cohort's stratum was fitted on that many of its samples, taken in a fixed order that does not look at the data, and every count and error in the row is that subset's. A `samples_fitted_on` equal to the cohort's sample count means the subset grew to every sample.",
-                "",
-                &own_error_paragraph,
-                "",
-                &origin_paragraph,
+        let mut paragraphs: Vec<&str> = vec![
+            "Everything about repeat tracts. A **stratum** is a class of tract, and every row keyed by one spells it as `period` — how many bases one repeat unit is — and `reference_repeats` — how many copies of it the reference carries. A **slippage group** is a set of read groups whose reads are taken to slip alike; the run declares it, and `slippage_group_by_read_group` below is that declaration.",
+            "",
+            "`slippage_by_stratum_and_group` is keyed by a stratum **and** a slippage group, and a triple with no row means that group put no read in that stratum — so one stratum can have a row for one group and none for another. A stratum with no row in `allele_length_variation_by_stratum` was never fitted on its own tracts and falls to its period's pooled one, or to the flat shape below; a stratum whose row has no `between_locus_share` keeps its own shares, held at the fallback below. Neither absence is a zero.",
+            "",
+            &samples_paragraph,
+            "",
+            &own_error_paragraph,
+            "",
+            &origin_paragraph,
+        ];
+        if rows_of_the_older_fit {
+            paragraphs.extend([
                 "",
                 "The curves under `shorter_share_and_fall_off_origin` also record `curve_fitted_on`, which says what that curve itself was fitted on: this period's own strata (`this_period`), or those same strata where there were too few to score the shape (`this_period_unscored`), or the other periods pooled (`other_periods`), or a stated constant where no period had anything to fit (`built_in_default`). The curve under `share_of_reads_that_slip_origin` is a different fit and has no such key.",
-                "",
-                &fallback_share_paragraph,
-            ],
-        );
+            ]);
+        }
+        paragraphs.extend(["", &fallback_share_paragraph]);
+        note(&mut out, &paragraphs);
         scalar_with_note(
             &mut out,
             "fallback_between_locus_share",
@@ -724,6 +771,25 @@ fn wrapped(note: &str, room: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+/// **Whether a repeat-tract row was written by the fit before the penalised one** (the climb,
+/// deleted 2026-10-16): any of its three numbers is the stratum's own fit, its period's parametric
+/// curve, or a blend of the two, which the penalised fit never writes.
+fn written_by_the_older_fit(row: &SlippageRow) -> bool {
+    let level = !matches!(
+        row.share_of_reads_that_slip_origin.smoothing,
+        LevelSmoothing::PenalisedCurve { .. }
+    );
+    let shares = row
+        .shorter_share_and_fall_off_origin
+        .as_ref()
+        .is_some_and(|origin| {
+            [&origin.shorter_share_smoothing, &origin.fall_off_smoothing]
+                .into_iter()
+                .any(|smoothing| !matches!(smoothing, ShareSmoothing::PenalisedCurve { .. }))
+        });
+    level || shares
 }
 
 /// **A comment, one line each**, written where it stands rather than beside a value.
@@ -1604,6 +1670,57 @@ mod tests {
             "the written file no longer matches testdata/every_shape_as_written.toml; if the \
              change is intended, regenerate that file from this fixture"
         );
+    }
+
+    /// **A file only the penalised fit wrote carries no note about rows only the older fit
+    /// writes.** The fit before it (the climb, deleted 2026-10-16) could fit a stratum on a subset
+    /// of the samples and take a number from a parametric curve or blend one in; the paragraphs
+    /// explaining those are written only when a row needs them. The golden file above, whose rows
+    /// do, pins that they are written then.
+    #[test]
+    fn a_file_of_penalised_rows_alone_does_not_explain_the_older_fits_rows() {
+        let older_fit_only = [
+            "samples_fitted_on` — then a large cohort",
+            "the error describes the subset's own fit",
+            "blended with one, has none",
+            "In a file written by the fit before 2026-10-16",
+            "also record `curve_fitted_on`",
+        ];
+        let mut file = a_file_using_every_shape();
+        let reach = CurveReach::InsideTheFittedRange;
+        for row in &mut file.repeat_tracts.slippage_by_stratum_and_group {
+            row.samples_fitted_on = None;
+            row.share_of_reads_that_slip_origin.smoothing = LevelSmoothing::PenalisedCurve {
+                strength: 12.5,
+                eased_here: false,
+                reach,
+            };
+            if let Some(origin) = row.shorter_share_and_fall_off_origin.as_mut() {
+                let on_the_curve = ShareSmoothing::PenalisedCurve {
+                    strength: 3.0,
+                    eased_here: false,
+                    reach,
+                };
+                origin.shorter_share_smoothing = on_the_curve.clone();
+                origin.fall_off_smoothing = on_the_curve;
+            }
+        }
+        // The notes are wrapped, so a phrase is looked for with the line breaks taken out.
+        let unwrapped = |text: String| text.replace("\n# ", " ");
+        let text = unwrapped(file.to_toml());
+        for phrase in older_fit_only {
+            assert!(
+                !text.contains(phrase),
+                "a file of penalised rows explains an older fit's rows: {phrase:?}"
+            );
+        }
+        let golden = unwrapped(a_file_using_every_shape().to_toml());
+        for phrase in older_fit_only {
+            assert!(
+                golden.contains(phrase),
+                "{phrase:?} is not in the older rows' notes"
+            );
+        }
     }
 
     /// **Rewrite `testdata/every_shape_as_written.toml` from the fixture.**

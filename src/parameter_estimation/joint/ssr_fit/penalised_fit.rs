@@ -398,8 +398,9 @@ pub const LOCI_FOR_A_SHARE_ERROR: f64 = 1.0;
 pub const LOCI_FOR_AN_ERROR: usize = 8;
 /// **The shorter share's and the fall-off's error is withheld below this many loci with reads**
 /// (spec §2.6, §7; owner 2026-10-16). At 3 to 7 loci and 2,000 samples the truth lay within two
-/// of these direction numbers' errors 89 to 93 times in 100, against 95 for an honest error.
-/// Soft.
+/// of these direction numbers' errors 89 to 93 times in 100, against 95 for an honest error; over
+/// every cohort size measured, 1 to 2,000 samples, 89 to 90; in the lowest cell, a shorter
+/// share at 60 samples and 5 to 7 loci, 82 (measured before plan step D7). Soft.
 pub const LOCI_FOR_A_DIRECTION_ERROR: usize = 3;
 
 /// **How a curve's penalty strength is set.**
@@ -1089,7 +1090,8 @@ fn outcome_of_a_class(
 ///
 /// **Two lines of loci, not one** (spec §7, owner 2026-10-16). Measured on drawn cohorts of 2,000
 /// samples, at 3 to 7 loci with reads the shorter share's and the fall-off's errors held the truth
-/// within two errors 89 to 93 times in 100, close to the 95 of an honest error; the slip rate's
+/// within two errors 89 to 93 times in 100, close to the 95 of an honest error (89 to 90 over every
+/// cohort size from 1 to 2,000 samples, 82 in the lowest cell; spec §2.6); the slip rate's
 /// only 72 to 79, because the rate itself comes out low there. So the two direction numbers carry
 /// an error from [`LOCI_FOR_A_DIRECTION_ERROR`] loci, and the slip rate, F and the shares keep
 /// [`LOCI_FOR_AN_ERROR`].

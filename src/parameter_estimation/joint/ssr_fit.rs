@@ -201,8 +201,10 @@ pub struct Library {
     /// The slippage group whose class rates the library's reads are scored at.
     pub slippage_group: u32,
     /// The library's stutter relative to its slippage group's class rates: a read slips with
-    /// probability [`library_level`]`(class rate, stutter_multiplier)`. **Held while a stratum's
-    /// numbers are fitted**; one until the fit sets it.
+    /// probability [`library_level`]`(class rate, stutter_multiplier)`. **Nothing in a run sets it
+    /// now**: the penalised fit holds every library at one, and the fit that estimated it was
+    /// deleted with the climb on 2026-10-16. Drawn cohorts of the fitting bench set it to give
+    /// libraries a known stutter of their own.
     pub stutter_multiplier: f64,
 }
 
@@ -523,9 +525,9 @@ pub struct StratumFit {
     /// Per slippage group, where that group's emitted slippage *level* came from — `None` where
     /// the group put no read in this stratum, matching [`StratumFit::slippage`] index for index.
     ///
-    /// **The level is the only one of the four numbers a curve supplies.** The direction split
-    /// and the fall-off are still the cell's own or its neighbours', so this says nothing about
-    /// them.
+    /// **The level's only**: the direction split and the fall-off have their own provenance in
+    /// [`StratumFit::shares_provenance`]. From the penalised fit, a point on the class's motif
+    /// length's penalised curve.
     pub level_provenance: Vec<Option<LevelProvenance>>,
     /// Per slippage group, where that group's direction split and fall-off came from.
     pub shares_provenance: Vec<Option<SharesProvenance>>,
@@ -573,6 +575,11 @@ pub enum StratumError {
     Estimated(f64),
     /// **The tracts do not tell it apart from the stratum's other numbers**: once they are accounted
     /// for, the log-likelihood is not curved downwards in its direction — flat, or a saddle.
+    ///
+    /// **Only the counting fit's research errors produce it** ([`counting_fit_errors`], which the
+    /// fitting bench and two examples call). The penalised fit, the one a run uses, never does:
+    /// it reports that case as [`StratumError::NotPlaced`] (the mapping in
+    /// `doc/devel/ng/arch/str_penalised_fit.md` §1.4), so no parameters file or run log carries it.
     NotIdentified,
     /// **The tracts do not place it**: its error on the scale the number is fitted on — logit for a
     /// slippage number, log for the concentration, a log-ratio for a share — is above
@@ -591,9 +598,10 @@ pub enum StratumError {
     /// - **A class's numbers below a count of loci with reads**: its slip rate, F and
     ///   allele-length shares below 8 loci, its shorter share and fall-off below 3. Measured on
     ///   drawn cohorts of 2,000 samples at 3 to 7 loci, the truth lay within two of the direction
-    ///   numbers' errors 89 to 93 times in 100, against 95 for an honest error; within two of the
-    ///   slip rate's only 72 to 79 times in 100, because the rate itself comes out low on so few
-    ///   loci. Below 3 no number's error is reported.
+    ///   numbers' errors 89 to 93 times in 100, against 95 for an honest error (89 to 90 over
+    ///   every cohort size from 1 to 2,000 samples, 82 in the lowest cell; spec §2.6); within
+    ///   two of the slip rate's only 72 to 79 times in 100, because the rate itself comes out low
+    ///   on so few loci. Below 3 no number's error is reported.
     /// - **A share whose expected count of loci — the share times the class's loci with reads —
     ///   is below 1.** These errors were measured, and they were too small.
     TooFewLoci,
@@ -655,40 +663,43 @@ pub struct LevelProvenance {
     /// classes with reads. **A level held at a fitted end is under-stated in a known direction**
     /// (`str_slippage_level_curve.md` §6).
     pub reach: Option<CurveReach>,
-    /// How many of this stratum's own reads **its own fitted level** said slipped, and `None`
-    /// where the stratum has no level of its own because it borrowed.
+    /// How many of this stratum's own reads slipped: from the penalised fit, the class's expected
+    /// slipped reads at the fit's last E-step
+    /// ([`PenalisedClass::expected_slipped_reads`](penalised_fit::PenalisedClass::expected_slipped_reads)).
     ///
-    /// **The stratum's own level, not the emitted one**, because this is the evidence that stood
-    /// behind the cell — it is what set how precisely the stratum could determine its own answer,
-    /// and it is the weight the blend gave that answer. Computed from the emitted level it would
-    /// be partly a property of the curve, which is the thing it exists to be weighed against.
+    /// **The stratum's own reads, not the emitted level times them**, because this is the evidence
+    /// that stood behind the cell — it is what set how precisely the stratum could determine its
+    /// own answer. The emitted level is a point on a curve, so for a thin class it is mostly its
+    /// neighbours'.
     ///
-    /// **Absent is not zero.** A stratum that borrowed has reads of its own — they are in
-    /// [`StratumFit::reads_crossing`] — but no level of its own to say how many of them slipped.
+    /// **Absent is not zero.** In a file the climb wrote, `None` where the stratum borrowed its
+    /// level: it has reads of its own — they are in [`StratumFit::reads_crossing`] — but no level
+    /// of its own to say how many of them slipped.
     pub slipped_reads: Option<f64>,
 }
 
 /// Where a stratum's direction split and fall-off came from, and what stood behind them.
 ///
-/// **The two shares are smoothed exactly as the level is** — each gets its period's curve, and
-/// each stratum departs from that curve by how much evidence it has
-/// (`str_slippage_level_curve.md` §5.1). What differs between the three numbers is the shape
-/// their curve may take and how their own precision is computed, and nothing else.
+/// **From the penalised fit, each share is a point on its own penalised curve** across the
+/// motif length's repeat counts, as the level is, each curve with its own stiffness. A file the
+/// climb wrote may instead carry the stratum's own share, its period's parametric curve, or a
+/// blend of the two (`str_slippage_level_curve.md` §5.1).
 ///
-/// **This replaced a gate with a cliff.** A stratum used to keep its own two shares above 4,000
-/// slipped reads and take one named neighbour's whole below it. Across both cohorts one motif
-/// period of twelve ever cleared that floor, so 69 of HG002's strata and every one of tomato's
-/// got nothing at all.
+/// **The climb's curves replaced a gate with a cliff.** A stratum used to keep its own two shares
+/// above 4,000 slipped reads and take one named neighbour's whole below it. Across both cohorts
+/// one motif period of twelve ever cleared that floor, so 69 of HG002's strata and every one of
+/// tomato's got nothing at all.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SharesProvenance {
-    /// How many of this stratum's own reads **its own fitted level** said slipped, and `None`
+    /// How many of this stratum's own reads slipped: from the penalised fit, the class's expected
+    /// slipped reads at the fit's last E-step
+    /// ([`PenalisedClass::expected_slipped_reads`](penalised_fit::PenalisedClass::expected_slipped_reads)),
+    /// the same count as [`LevelProvenance::slipped_reads`]. In a file the climb wrote, `None`
     /// where nothing was fitted here.
     ///
     /// **Both shares are proportions over the reads that slipped**, so this one count sets how
-    /// precisely the stratum holds either of them, and it is what the blend weighed its own
-    /// answer by. It is the stratum's own level rather than the emitted one: computed from the
-    /// emitted level it would be partly a property of the curve, which is the thing it exists to
-    /// be weighed against.
+    /// precisely the stratum holds either of them. It is the stratum's own reads rather than the
+    /// emitted level times them: the emitted level is a point on a curve, partly its neighbours'.
     pub slipped_reads: Option<f64>,
     /// Where the share of slipped reads showing a *shorter* tract came from.
     pub shorter_share: ShareProvenance,

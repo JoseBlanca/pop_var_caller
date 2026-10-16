@@ -1131,8 +1131,10 @@ pub struct TractPrior<'a> {
 /// **What one cell's slippage numbers are entitled to claim**, from where the fit says they
 /// came.
 ///
-/// The climb reports three sources per number — the cell's own fit, its period's curve, or a
-/// blend of the two — and each carries the share the curve took
+/// The penalised fit gives every number one source, a point on its motif length's penalised
+/// curve (below). A file written by the fit before it (the climb, deleted 2026-10-16) may carry
+/// any of three others: the cell's own fit, its period's curve, or a blend of the two, each with
+/// the share the curve took
 /// ([`LevelSource::curve_weight`](crate::parameter_estimation::joint::slippage_curve::LevelSource::curve_weight)).
 /// **A number the curve entered at all is [`Provenance::Borrowed`]**: the curve is drawn
 /// through other strata, so a cell reading off it is reading a neighbouring grain's
@@ -2662,9 +2664,9 @@ mod tests {
         }
     }
 
-    /// One class as the penalised fit will return it at one sample (arch
+    /// One class as the penalised fit returns it at one sample (arch
     /// `str_penalised_fit.md` §1.2–1.4): fitted, with one slippage group, shares and no
-    /// concentration, no climb record and no sample count; the level and both shares read off
+    /// concentration, and no sample count; the level and both shares read off
     /// the penalised curve inside the range it was fitted over; the concentration's error
     /// `NotPlaced` because there is no concentration; the level's and the shorter share's errors
     /// estimated, every other error withheld for too few loci.
@@ -2716,10 +2718,9 @@ mod tests {
         }))
     }
 
-    /// **The outcome the penalised fit will produce reaches every calling lookup in one piece**,
-    /// through [`StratumFits::over`] and not hand-built past it: a later `expect` on the climb's
-    /// record, a match that does not know the penalised sources, or a warrant or rung that
-    /// regresses fails here rather than when the fit is wired in.
+    /// **The outcome the penalised fit produces reaches every calling lookup in one piece**,
+    /// through [`StratumFits::over`] and not hand-built past it: a match that does not know the
+    /// penalised sources, or a warrant or rung that regresses, fails here rather than in a run.
     ///
     /// At one sample no class has a concentration, so each class keeps its own shares at the
     /// stated concentration, which is the constant and says it was defaulted; the slippage is the

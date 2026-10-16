@@ -1781,23 +1781,26 @@ mod tests {
     /// **The lookup returns the level the fit emitted, not one it recomputed from the curve.**
     ///
     /// This is the property the module exists to hold, and the fixture is built so that it can
-    /// fail. The stratum's emitted level is a blend of its own fit with its period's curve, so
-    /// it sits **between** the two and equals neither — `assert_ne!` pins that, because a
+    /// fail. The stratum's emitted level is a blend of its own fit with its period's curve, as a
+    /// file the climb wrote carries it, so it sits **between** the two and equals neither — a
     /// fixture whose level happened to equal the curve's value would make every recomputation
     /// look correct and this test would prove nothing.
     ///
-    /// Measured on a small real fit: putting the emitted level back through `blend_level` moves
-    /// the five blended strata by 0.6 % to 4.1 %, and leaves the `curve_weight` in their
-    /// provenance unchanged — so the number moves and the provenance does not say so.
+    /// Measured on a small real fit when the climb still ran: putting the emitted level back
+    /// through the blend moved the five blended strata by 0.6 % to 4.1 %, and left the
+    /// `curve_weight` in their provenance unchanged — so the number moved and the provenance did
+    /// not say so.
     #[test]
     fn the_level_is_the_one_the_fit_emitted_and_not_the_curves_own() {
         let curve = a_curve();
         let repeats = 10;
-        // A cell at 0.08 weighed against this curve's 0.11: between the two, equal to neither.
+        // `a_curve` is a straight line in the level (rise shape 1): 0.01 + 0.01 × 10 = 0.11 at
+        // 10 repeats, inside its fitted 8 to 12. A cell at 0.08 weighed against that 0.11 sits
+        // between the two and equals neither.
+        let the_curves_level = 0.11;
         let emitted = 0.084_711_129_860_078_91;
-        assert_ne!(
-            emitted,
-            curve.level_at(repeats),
+        assert!(
+            0.08 < emitted && emitted < the_curves_level,
             "the fixture must not be a level the curve would also produce, or nothing it \
              asserts can fail",
         );
@@ -1825,12 +1828,8 @@ mod tests {
             "the emitted level, not the curve's own value and not a second blend of the two",
         );
         assert_eq!(
-            answer
-                .level
-                .curve
-                .expect("the curve is carried")
-                .level_at(repeats),
-            0.11,
+            answer.level.curve,
+            Some(curve),
             "and the curve travels beside it, so a consumer can see what it would have said",
         );
         assert_eq!(

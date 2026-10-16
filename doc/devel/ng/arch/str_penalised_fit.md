@@ -14,6 +14,11 @@ slip rate joins §1.4's prior row (§1.1a); and §2.4a, the cohort put in one fi
 fit. **Amended 2026-10-16, owner (spec §7):** the loci thresholds of §1.1 and §1.4 — the shorter
 share and the fall-off get an error from 3 loci with reads (`LOCI_FOR_A_DIRECTION_ERROR`), the slip
 rate, F and the shares keep 8, and a rare share's line drops from 3 loci's worth to 1.
+**Updated 2026-10-16, plan E1 and E2 done:** deleted are the climb — which was the only producer of
+`StratumError::NotIdentified` in a run — its record (`ClimbRecord`, the `climb` field of §1.2), and
+the curves' fitting and evaluation (`3198d55d`, `2276c93c`, and the checkpoint E review's fixes).
+Statements below about what exists describe the code after that; line numbers are still at
+`e0b41ad4`.
 
 ---
 
@@ -28,8 +33,8 @@ rate, F and the shares keep 8, and a rare share's line drops from 3 loci's worth
   zero-penalty oracle the tests compare against (spec §4.1).
 - **`ssr_fit/counting_fit_errors.rs`** keeps the sandwich pieces the penalised errors share.
 - **`ssr_fit.rs` keeps the shared vocabulary** (`Slippage`, `StratumEvidence`, `gather_strata`,
-  `StratumOutcome`, the provenance types). The climb's code in it is deleted at plan milestone E (§4.1
-  lists what goes).
+  `StratumOutcome`, the provenance types). The climb's code in it was deleted at plan step E1 (§4.1
+  lists what went).
 - **`calling/parameters_file/`** owns format 3, the migration and `BetweenLocusShare`;
   **`stratum_fits.rs`** owns the new ladder step.
 
@@ -162,13 +167,12 @@ pub struct StratumFit {
     pub concentration: Option<f64>,
     // … `slippage` (one entry, group 0: spec §1.4), the shares, errors and provenance, unchanged;
     // `samples_fitted_on` is `None` from the penalised fit, which reads every sample …
-    /// **The climb's own record** (`ending`, `walks`, `log_likelihood_a_tract`, `borrowed`,
-    /// `tracts_fitted`). `None` from the penalised fit; deleted with the climb (plan milestone E).
-    pub climb: Option<ClimbRecord>,
 }
 ```
 
-*The `climb` wrapper is the seam that lets both fits build one struct until the climb is deleted.*
+*Until step E1 a `climb: Option<ClimbRecord>` field held the climb's own record (`ending`, `walks`,
+`log_likelihood_a_tract`, `borrowed`, `tracts_fitted`), the seam that let both fits build one struct;
+it was deleted with the climb.*
 `StratumFits::over` reads only the fields kept above (`stratum_fits.rs:504-607`). **Outside
 `ssr_fit.rs`, four examples read the climb's fields, `StratumFit { … }` literals sit at 16 sites in 9
 files, and a bench calls the climb**; plan step A2 lists them.
@@ -226,6 +230,8 @@ cannot slip past them.
 ```rust
 pub enum StratumError {         // ssr_fit.rs:632
     Estimated(f64),
+    /// Produced only by the counting fit's research errors (`counting_fit_errors.rs`); the
+    /// penalised fit never returns it (mapping below).
     NotIdentified,
     NotPlaced,
     NoShare,
@@ -251,7 +257,7 @@ converted only at the file's edge (§2.3) *(lead, 2026-10-14)*. The prototype's 
 | *(owner, 2026-10-16)* the shorter share and the fall-off of a class with fewer than `LOCI_FOR_A_DIRECTION_ERROR` (3) loci with reads | `TooFewLoci` |
 | a share with share × loci with reads < `LOCI_FOR_A_SHARE_ERROR` (1) | `TooFewLoci` |
 | *(owner, 2026-10-15, §1.1a)* a slip rate or a fall-off whose class's expected slipped reads, or a shorter share whose slipped reads with a direction, are below `stutter_prior_reads` | `NotPlaced` |
-| an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — as the climb judges it (`ssr_fit.rs:2172`) | `NotPlaced` |
+| an error wider than `NOT_PLACED` (3, `ssr_fit.rs:683`) on the scale the number is fitted on — logit, or log for the concentration — the line the climb used | `NotPlaced` |
 | a positive, finite error | `Estimated` |
 | zero, absent or not finite | `NotPlaced` |
 
@@ -471,7 +477,7 @@ too; this change reaches main with the branch.
 | production settings | `PenalisedFitConfig::default`, `penalised_fit.rs:130-155`; bench overrides `fit_bench.rs:497-515`; `ALLELE_SPAN`, `ssr_fit.rs:950` | `production()` holds the bench's values, `ALLELE_PRIOR_LOCI` and the window |
 | step 1 and pairs | `expected_counts`, `ClassCounts`, `SamplePairs` in `composite_fit.rs` | moved to `expected_counts.rs` unchanged |
 | F's placement | `concentration_is_placed`, `composite_fit.rs:83-98` | reused |
-| outcome | `StratumOutcome`, `ssr_fit.rs:854`; `StratumFit`, `:537` | reused; `concentration: Option`, `climb: Option<ClimbRecord>` |
+| outcome | `StratumOutcome`, `ssr_fit.rs:854`; `StratumFit`, `:537` | reused; `concentration: Option`; a `climb: Option<ClimbRecord>` field until step E1 |
 | provenance | `LevelProvenance`, `ssr_fit.rs:733`; `LevelSource`, `slippage_curve.rs:519`; `ShareSource`, `share_curve.rs:580`; `CurveReach`, `slippage_curve.rs:654` | one variant each; `curve_weight()` optional |
 | error sites | `of_the_numbers_emitted`, `stratum_fits.rs:107`; `an_own_fit_error`, `validate.rs:1184`; `warrant_of`, `repeat_tract_parameters.rs:1154` | exhaustive matches accepting `PenalisedCurve` |
 | errors | `StratumErrors`, `ssr_fit.rs:611`; `StratumError`, `:632` | one variant; mapping §1.4 |
@@ -493,7 +499,8 @@ too; this change reaches main with the branch.
 | `SsrFitConfig`, `ssr_fit.rs:1046` | deleted; `allele_span` lives in `PenalisedFitConfig` (§1.1). Examples that only name it for the window are ported |
 | `StratumRefusal::BelowTheFloor`, `ssr_fit.rs:849` (only the climb produces it) | deleted; tests that build one use `NoSpanningReads` |
 | `SlippageCurve`, `ShareCurve`, `a_slippage_curve` (`to_run_parameters.rs:612-631`), `LevelSource::Curve`/`Blend`, `curve_weight()` | kept: older files' `ThisPeriodsCurve`/`Blend` still read |
-| the curve fitting and blending: in `slippage_curve.rs` `fit_line`, `choose_rise_shape`, `blend_level`, `FittedCell`, `PeriodCurves`, `BlendedLevel`, `NoCurve`, `SlippageCurveConfig` and its constants; in `share_curve.rs` `fit_share_curve`, `choose_share_shape`, `FittedShare`, `NoShareCurve`, `ShareCurveConfig` and its constants; `tests/slippage_curve_on_real_cells.rs`, `tests/share_curve_on_real_cells.rs` and their fixtures `tests/data/slippage_cells/`; the `counting+blend` arm of `examples/str_fit_penalised_em.rs` | first kept for those tests and that example, which nothing in a run calls; deleted on 2026-10-16 (owner). What reading and calling an older file needs stays: `SlippageCurve`, `RiseShape`, `ShareCurve`, `ShareShape`, `ShareCurveSource`, `LevelSource`, `ShareSource`, `PenalisedPoint`, `CurveReach` and the level and share floors and ceilings |
+| the curve fitting and blending: in `slippage_curve.rs` `fit_line`, `choose_rise_shape`, `blend_level`, `FittedCell`, `PeriodCurves`, `BlendedLevel`, `NoCurve`, `SlippageCurveConfig` and its constants; in `share_curve.rs` `fit_share_curve`, `choose_share_shape`, `FittedShare`, `NoShareCurve`, `ShareCurveConfig` and its constants; `tests/slippage_curve_on_real_cells.rs`, `tests/share_curve_on_real_cells.rs` and their fixtures `tests/data/slippage_cells/`; the `counting+blend` arm of `examples/str_fit_penalised_em.rs` | first kept for those tests and that example, which nothing in a run calls; deleted on 2026-10-16 (owner). What reading an older file needs stays: `SlippageCurve`, `RiseShape`, `ShareCurve`, `ShareShape`, `ShareCurveSource`, `LevelSource`, `ShareSource`, `PenalisedPoint`, `CurveReach`. Reading copies each curve, level, share and reach as written; nothing evaluates a curve. `reach()` on each curve stays for the tests that build such rows |
+| the curves' evaluation: `SlippageCurve::level_at`, `level_on_the_line`, `RiseShape::is_multiplying`, `LEVEL_FLOOR`; `ShareCurve::share_at`, `share_on_the_curve`, `SHARE_FLOOR`, `SHARE_CEILING`; their tests | deleted 2026-10-16 (checkpoint E review, Mi2): no file-reading or calling path evaluates a curve — the crate builds with them gone. `LEVEL_CEILING` stays, named by a calling test as the largest level an older file can carry |
 
 ## 5. Open items
 

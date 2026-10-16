@@ -388,11 +388,12 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   failed inversion on a real cohort (now `a_three_base_cohort_whose_reads_alone_curve_upward`)
   expect errors, and the fallback is tested on a matrix built to fail. Checked on the D1 coverage runs
   that lost their errors, with the diagnosis report's numbers. *Source:* spec §2.4, §2.6, §7.
-  *Implemented (2026-10-16), for review:* `Q·(diag(s) − s sᵀ)` on each class's share logits, in
+  *Done (2026-10-16), reviewed in `reviews/str_penalised_fit_D7_2026-10-16.md`:* `Q·(diag(s) − s sᵀ)` on each class's share logits, in
   `P` (so in `H` and the middle term), from one helper shared with counting. All 89 of D1's coverage
   runs that lost their errors now invert (56 at 500 samples or fewer, coverage identical to the
-  diagnosis' option (c) table; 33 at 2,000). The fixture is re-recorded: no fitted number moves;
-  59,443 of 63,000 error fields move (median ratio 1.000 for the stutter numbers, 0.990 for the
+  diagnosis' option (c) table; 33 at 2,000). The fixture is re-recorded: no fitted number moves —
+  0 of its 146,689 numeric fields outside `errors` and `seconds` (the D7 commit's 152,442 counted
+  something else and is not reproduced, checkpoint E review); 59,443 of 63,000 error fields move (median ratio 1.000 for the stutter numbers, 0.990 for the
   shares), and the one run whose errors were withheld (`p2_n60_d10_pcr_free` seed 2) has them.
   The cohort test is renamed `a_three_base_cohort_whose_reads_alone_curve_upward`; the fallback is
   tested on a curvature built to fail.
