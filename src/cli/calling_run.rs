@@ -861,6 +861,23 @@ pub fn print_report(calls: &Path, parameters_at: &Path, report: &RunReport<'_>) 
 
 /// **The run report, with what the hidden-duplication filter did appended.**
 ///
+/// **The run report, written to the run's log** rather than printed: the terminal says only how
+/// the run ended, and the counts behind that are the log's (`doc/devel/ng/spec/command_line.md`
+/// §7.2). The same lines [`print_report_with_the_filter_s_lines`] prints, each prefixed
+/// `report:` so they can be found among the log's events.
+pub fn log_the_report(
+    calls: &Path,
+    parameters_at: &Path,
+    report: &RunReport<'_>,
+    filter_lines: &[String],
+) {
+    tracing::debug!("report: calls: {}", calls.display());
+    tracing::debug!("report: parameters: {}", parameters_at.display());
+    for line in report.lines().iter().chain(filter_lines) {
+        tracing::debug!("report: {line}");
+    }
+}
+
 /// `filter_lines` is empty on a run with the filter off, which is why the two are one function
 /// rather than two: an off run's report is the report it printed before the filter existed, and
 /// the empty slice is what says so.

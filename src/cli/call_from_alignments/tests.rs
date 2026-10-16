@@ -256,6 +256,44 @@ fn an_output_that_can_be_written_is_admitted() {
     );
 }
 
+/// **A VCF already there is refused without `--force`, before anything is read** — the reference
+/// here does not exist, so a run that got as far as reading it would fail differently — and the
+/// file is left as it was.
+#[test]
+fn an_existing_vcf_is_refused_unless_the_run_is_forced() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let output = directory.path().join("calls.vcf");
+    std::fs::write(&output, "an earlier run's calls\n").expect("the earlier output is written");
+
+    let refused = run_call_from_alignments(&a_run_writing_to(output.clone()))
+        .expect_err("an existing VCF is refused");
+    assert!(
+        matches!(
+            refused,
+            CallFromAlignmentsCliError::OutputAlreadyThere { .. }
+        ),
+        "refused for the VCF, and got: {refused:?}",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&output).expect("the earlier output is still there"),
+        "an earlier run's calls\n",
+    );
+
+    let forced = CallFromAlignmentsArgs {
+        force: true,
+        log: Some(directory.path().join("forced.log")),
+        ..a_run_writing_to(output)
+    };
+    let past_the_check = run_call_from_alignments(&forced).expect_err("there is no reference");
+    assert!(
+        !matches!(
+            past_the_check,
+            CallFromAlignmentsCliError::OutputAlreadyThere { .. }
+        ),
+        "with --force the run goes on to read the reference",
+    );
+}
+
 /// A run's arguments with everything but the output fixed, so the output checks read as one
 /// question.
 fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
@@ -264,6 +302,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         catalog: None,
         alignments: vec![PathBuf::from("one.cram")],
         output,
+        force: false,
+        log: None,
         regions: None,
         parameters: None,
         defaults: true,
@@ -342,6 +382,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         catalog: None,
         alignments: vec![directory.path().join("one.cram")],
         output: directory.path().join("calls.vcf"),
+        force: false,
+        log: None,
         regions: None,
         parameters: None,
         defaults: true,
@@ -713,6 +755,8 @@ fn a_cohort_on_disk() -> (
         catalog: Some(cohort.catalog),
         alignments: cohort.alignments,
         output: cohort.directory.path().join("calls.vcf"),
+        force: false,
+        log: None,
         regions: None,
         parameters: None,
         defaults: true,
@@ -799,9 +843,11 @@ fn the_command_refuses_to_write_its_parameters_over_the_file_it_was_given() {
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
     run_call_from_alignments(&args).expect("the first run writes both files");
 
+    // `force`, so the refusal reached is the parameters file's and not the VCF's own.
     let again = CallFromAlignmentsArgs {
         parameters: Some(beside_the_vcf(&args.output)),
         defaults: false,
+        force: true,
         ..args.clone()
     };
     let refused = run_call_from_alignments(&again).expect_err("the second run is refused");

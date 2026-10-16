@@ -43,8 +43,10 @@
 //! concurrently on the rayon pool while assembling and genotyping stay on one thread — the
 //! output is identical at every thread count. Nothing is printed while it works.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use clap::Args;
 use thiserror::Error;
@@ -56,11 +58,12 @@ use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
 use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run;
 use crate::cli::run_ground::{self, GroundError};
+use crate::cli::run_output::{self, LogFileError};
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::PileupGeneratorConfig;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::read::ReadFilterConfig;
-use crate::read::input::read_groups::{ReadGroupError, build_read_groups};
+use crate::read::input::read_groups::{ReadGroupError, ReadGroups, build_read_groups};
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
@@ -69,7 +72,7 @@ use crate::reference_info::{
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN, GenomeRegions};
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
@@ -128,6 +131,16 @@ pub struct CallFromAlignmentsArgs {
     /// `.tmp` behind.
     #[arg(long)]
     pub output: PathBuf,
+
+    /// Replace the VCF and the log if they are already there. Without it, a run refuses before
+    /// reading anything.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Where to write the run's log: the inputs by name, every setting's value, and everything
+    /// the run has to report. Defaults to `pvc_calls.log` beside the VCF.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
 
     /// BED of the stretch of genome to call over. Without it, every base of every contig.
     #[arg(long)]
@@ -478,6 +491,20 @@ pub enum CallFromAlignmentsCliError {
         source: VcfWriteError,
     },
 
+    /// The VCF is already there, and the run was not asked to replace it.
+    #[error(
+        "{} is already there — give --force to replace it, or another --output",
+        path.display()
+    )]
+    OutputAlreadyThere {
+        /// The VCF.
+        path: PathBuf,
+    },
+
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] LogFileError),
+
     /// The run itself stopped.
     #[error("the run stopped")]
     Run {
@@ -548,10 +575,23 @@ pub fn run_call_from_alignments(
     )?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_candidate_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
+    if args.output.exists() && !args.force {
+        return Err(CallFromAlignmentsCliError::OutputAlreadyThere {
+            path: args.output.clone(),
+        });
+    }
     calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
         &args.output,
         args.parameters.as_deref(),
     )?;
+    // **The log opens once the command line has been judged**, so a typing mistake leaves no log
+    // behind, and before the reference is read, so everything that takes time is in it.
+    let started = Instant::now();
+    let log = args
+        .log
+        .clone()
+        .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
+    run_output::open_log(&log, args.force)?;
 
     // **The FASTA is read to the end before a file is opened.** Two of the run's construction
     // checks compare per-contig checksums — that each sample was aligned to this reference, and
@@ -604,6 +644,7 @@ pub fn run_call_from_alignments(
 
     let read_groups = build_read_groups(&args.alignments)
         .map_err(|source| CallFromAlignmentsCliError::ReadGroups { source })?;
+    say_what_this_run_does(args, &read_groups, &analysed, &log);
     let numbers = calling_run::run_parameters(
         args.parameters.as_deref(),
         args.ploidy,
@@ -816,7 +857,7 @@ pub fn run_call_from_alignments(
         .as_ref()
         .map(paralog_filter::what_to_tell_the_operator)
         .unwrap_or_default();
-    calling_run::print_report_with_the_filter_s_lines(
+    calling_run::log_the_report(
         &args.output,
         &parameters_at,
         &RunReport::of(
@@ -832,7 +873,60 @@ pub fn run_call_from_alignments(
         ),
         &filter_lines,
     );
+    let records = filtered
+        .as_ref()
+        .map_or(written.calling.records_written, |run| run.did.written);
+    tracing::info!(
+        "done: {} records written to {} in {}",
+        run_output::with_thousands(records),
+        args.output.display(),
+        run_output::elapsed_text(started.elapsed())
+    );
+    tracing::info!("log: {}", log.display());
     Ok(())
+}
+
+/// **The run's first words**: on the terminal, what it is doing and on how much; in the log, the
+/// inputs by name (`doc/devel/ng/spec/command_line.md` §7.2, §7.3).
+fn say_what_this_run_does(
+    args: &CallFromAlignmentsArgs,
+    read_groups: &ReadGroups,
+    analysed: &GenomeRegions,
+    log: &Path,
+) {
+    let samples: BTreeSet<&str> = read_groups
+        .iter()
+        .map(|(_, group)| &*group.sample)
+        .collect();
+    let bases: u64 = analysed.iter().map(|region| region.len()).sum();
+    let ground = match &args.regions {
+        Some(bed) => format!("{} ({})", bed.display(), run_output::size_of_ground(bases)),
+        None => format!("the whole genome ({})", run_output::size_of_ground(bases)),
+    };
+    let threads = rayon::current_num_threads();
+    tracing::info!(
+        "pvc call-from-alignments: calling {} sample{} over {ground}, {threads} thread{}",
+        samples.len(),
+        if samples.len() == 1 { "" } else { "s" },
+        if threads == 1 { "" } else { "s" },
+    );
+    tracing::info!("log: {}", log.display());
+
+    tracing::debug!("input: reference {}", args.reference.display());
+    let catalog = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+    tracing::debug!("input: repeat catalogue {}", catalog.display());
+    if let Some(bed) = &args.regions {
+        tracing::debug!("input: regions {} ({bases} bases)", bed.display());
+    }
+    for (_, group) in read_groups.iter() {
+        tracing::debug!(
+            "input: alignments {} — sample {}, read group {}",
+            group.file.display(),
+            group.sample,
+            group.id
+        );
+    }
+    tracing::debug!("output: {}", args.output.display());
 }
 
 #[cfg(test)]

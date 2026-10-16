@@ -37,19 +37,22 @@ changes calls and has its own check.
 
 Spec §7.1, §7.2, §7.3 (the header part) and §7.7.
 
-- Add `tracing`, `tracing-subscriber` and `indicatif` to `Cargo.toml`.
-- One module in `src/cli/` that, given the subcommand's name, the log's path and `--quiet`, installs
-  two destinations: the terminal (stderr, `info` and above, `warn` and above under `--quiet`) and
-  the log file (`debug` and above, written line by line). It knows whether stderr is a terminal,
-  and draws the progress line with `indicatif` only when it is.
-- `--quiet` and `--log` on `call-from-alignments`; the default log `pvc_calls.log` in the VCF's
-  directory, refused if it exists unless `--force` — which this step adds to the calling commands,
-  for the VCF as well.
+- Add `tracing` and `tracing-subscriber` to `Cargo.toml`.
+- One module in `src/cli/` that installs two destinations: the terminal (stderr, `info` and above,
+  `warn` and above under `--quiet`) and the log file (`debug` and above, written line by line). It
+  knows whether stderr is a terminal, and draws the progress line in place only when it is.
+- `--quiet` on every subcommand (a global option); `--log` on `call-from-alignments`; the default
+  log `pvc_calls.log` in the VCF's directory, refused if it exists unless `--force` — which this
+  step adds to `call-from-alignments`, for the VCF as well. `call-from-psps` gets both in step 2.
 - `call-from-alignments` says what it is doing (the first line of spec §7.2), shows progress
   through the new module, and ends with the `done:` line. Its log gets the header block: version,
   command line, working directory, start time, host, threads; the inputs by name; every setting's
   value.
-- The run report moves from stdout to stderr and the log.
+- The run report moves from stdout to the log.
+
+**Done (2026-10-16).** Four tomato accessions over three regions of `benchmarks/tomato1`: 3,119
+records, VCF identical to `main`'s apart from `##commandline`, parameters file identical. The
+progress percentage line and the report's wording are unchanged; rewording them is step 5's.
 
 **Done when:** a direct-mode run on the small test fixture prints the §7.2 shape on the terminal and
 writes a log with the header, and its VCF is byte-identical to `main`'s.

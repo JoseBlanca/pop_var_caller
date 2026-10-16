@@ -1,7 +1,8 @@
 //! Top-level CLI for the `pvc` binary: the `Parser` and the
 //! subcommand enum. Shape first copied from the deleted production binary's `cli` module.
 
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, Parser, Subcommand};
 
 use super::call_from_alignments::CallFromAlignmentsArgs;
 use super::call_from_psps::CallFromPspsArgs;
@@ -19,6 +20,49 @@ use super::typed_regions::TypedRegionsArgs;
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: PopVarCallerCommand,
+
+    /// Print only warnings and errors. The run's log, where a subcommand keeps one, is complete
+    /// either way.
+    #[arg(long, global = true)]
+    pub quiet: bool,
+}
+
+/// **Every option of the subcommand `matches` ran, with the value the run used** — typed, taken
+/// from its default, or neither — for the run's log
+/// (`doc/devel/ng/spec/command_line.md` §7.3).
+///
+/// Read from the parsed command line rather than from each subcommand's `Args`, so a new option
+/// is in the log without anyone remembering to add it.
+#[must_use]
+pub fn settings_of(matches: &ArgMatches) -> Vec<super::run_output::Setting> {
+    let Some((name, ran)) = matches.subcommand() else {
+        return Vec::new();
+    };
+    let command = Cli::command();
+    let Some(subcommand) = command.find_subcommand(name) else {
+        return Vec::new();
+    };
+    subcommand
+        .get_arguments()
+        .filter(|argument| !matches!(argument.get_id().as_str(), "help" | "version"))
+        .map(|argument| {
+            let id = argument.get_id().as_str();
+            let source = ran.value_source(id);
+            let value = source.and_then(|_| {
+                ran.get_raw(id).map(|values| {
+                    values
+                        .map(|value| value.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            });
+            super::run_output::Setting {
+                name: argument.get_long().unwrap_or(id).to_owned(),
+                value,
+                typed: source == Some(ValueSource::CommandLine),
+            }
+        })
+        .collect()
 }
 
 /// The binary's subcommands. Each kebab-cases to its command name, as
@@ -149,4 +193,49 @@ pub enum PopVarCallerCommand {
     /// run decides afterwards is not here. The column names are stable, and the header names
     /// the psp format version and the column layout version.
     InspectPsp(InspectPspArgs),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The log tells a typed value from a default, and records an option given neither** — the
+    /// three cases a person reading it needs apart to reproduce the run.
+    #[test]
+    fn every_option_is_recorded_typed_defaulted_or_not_given() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "pvc",
+                "call-from-alignments",
+                "--reference",
+                "ref.fa",
+                "--alignment",
+                "one.cram",
+                "--output",
+                "calls.vcf",
+                "--defaults",
+                "--max-candidate-alleles",
+                "4",
+            ])
+            .expect("the command line parses");
+        let settings = settings_of(&matches);
+        let named = |name: &str| {
+            settings
+                .iter()
+                .find(|setting| setting.name == name)
+                .unwrap_or_else(|| panic!("{name} is recorded"))
+                .clone()
+        };
+
+        let typed = named("max-candidate-alleles");
+        assert_eq!((typed.value.as_deref(), typed.typed), (Some("4"), true));
+        let defaulted = named("max-reads-per-position");
+        assert_eq!(
+            (defaulted.value.as_deref(), defaulted.typed),
+            (Some("1000"), false)
+        );
+        let not_given = named("regions");
+        assert_eq!((not_given.value, not_given.typed), (None, false));
+        assert!(settings.iter().all(|setting| setting.name != "help"));
+    }
 }

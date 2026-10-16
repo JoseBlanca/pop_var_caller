@@ -626,9 +626,13 @@ The binary, at start-up, installs two destinations, each with its own threshold 
   `src/` outside `src/main.rs` and `src/cli/` is a defect, and a test can check for it.
 - **One event, one message.** The terminal line and the log line come from the same event; there
   is never a separate "log version" of a message to keep in step.
-- **The progress line is not a log event.** On a terminal it is drawn and redrawn in place by
-  `indicatif`, coordinated with `tracing` so a warning does not tear through it; the log gets a
-  progress event at a fixed interval instead.
+- **A progress update is an ordinary event with its own target**, `pvc::progress`. The terminal
+  destination draws it in place when stderr is a terminal, each update over the last, and lets
+  the next ordinary message leave the last update standing and start below it; redirected, each
+  update is a line. The log records each update as a line. *(Built this way in step 1 rather than
+  with `indicatif`, as first proposed: drawing one line in place is a few lines of the terminal
+  destination, and `indicatif` would add a dependency and the coordination with `tracing` it
+  needs.)*
 
 **Why `tracing` and not the older `log` crate.** Both would do the two-destination arrangement.
 `tracing` also has *spans*: a stage such as "fit contamination" is opened and closed once, and

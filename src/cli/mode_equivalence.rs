@@ -126,6 +126,11 @@ mod tests {
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output: output.to_path_buf(),
+            // **Several runs share one directory here**, as they would for a person comparing
+            // them, so each is given its own log and replaces what an earlier run of the same
+            // name left.
+            force: true,
+            log: Some(output.with_extension("log")),
             regions: None,
             parameters: None,
             defaults: true,

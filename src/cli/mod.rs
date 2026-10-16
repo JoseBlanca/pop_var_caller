@@ -23,6 +23,7 @@ pub mod psp_inputs;
 pub mod regenerate_census;
 pub mod repeat_catalog;
 pub mod run_ground;
+pub mod run_output;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod typed_regions;
