@@ -6,8 +6,11 @@
 > [`str_penalised_fit.md`](str_penalised_fit.md). Commit `3198d55d` deleted the climb, the curve
 > drawing after it, the share curves' blend, the borrowing it narrowed (B4) and the walk's cell table;
 > the links below to that code now name the commit. Kept, so that parameters files this plan's code
-> wrote still load and call as before: the curve types and their provenance in the file. The steps
-> stay as the record of how the curves were built and measured.
+> wrote still load and call as before: the curve types and their provenance in the file. The code
+> that fitted the curves and blended each cell with them, kept at first for its own tests, was
+> deleted on 2026-10-16 with the tests that read the real-cell tables (`tests/*_on_real_cells.rs`)
+> and the tables themselves (`tests/data/slippage_cells/`). The steps stay as the record of how the
+> curves were built and measured.
 
 **Status:** draft, 2026-08-20. The build order for the design settled in
 [`../spec/str_slippage_level_curve.md`](../spec/str_slippage_level_curve.md): the slippage level

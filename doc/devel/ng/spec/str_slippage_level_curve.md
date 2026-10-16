@@ -13,8 +13,11 @@
 > keeps as the point past which a bend costs less than its square (`str_penalised_fit.md` §2.3).
 > **Still in the code, only to read older files:** a parameters file this design wrote still loads
 > and calls as before, so the curve types (`SlippageCurve`, `ShareCurve`) and the provenance of §8
-> (`LevelSource`'s curve and blend) remain; the curve-fitting code in `slippage_curve.rs` and
-> `share_curve.rs` is kept for tests and research examples, and nothing in a run calls it.
+> (`LevelSource`'s curve and blend) remain. The code that fitted the curves and blended each cell
+> with them (`fit_line`, `choose_rise_shape`, `blend_level`, `fit_share_curve`,
+> `choose_share_shape`), kept at first for its own tests and one research example, was deleted on
+> 2026-10-16, with the two tests that ran it on real cells and their fixtures under
+> `tests/data/slippage_cells/`.
 
 **Status:** design, 2026-08-20. **No code yet — this settles the design.** It amends the STR half
 of the parameter pre-pass, [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.3 and §4.5,

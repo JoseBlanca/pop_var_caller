@@ -878,8 +878,9 @@ fn level_origin_of(
     LevelOrigin {
         smoothing: match provenance.source {
             // **The curve is not read on this arm, and cannot be lost by not reading it.** This
-            // source means the stratum's period had no curve at all — it is what `blend_level`
-            // returns for a fitted cell with no curve beside it — so there is nothing to record.
+            // source means the stratum's period had no curve at all — it is what the climb's
+            // `blend_level` (deleted 2026-10-16) returned for a fitted cell with no curve beside
+            // it — so there is nothing to record.
             LevelSource::Cell => LevelSmoothing::ThisStratum,
             LevelSource::Curve => LevelSmoothing::ThisPeriodsCurve {
                 curve: the_recorded_curve(provenance.curve, stratum, slippage_group, "the level")

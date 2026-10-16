@@ -493,6 +493,7 @@ too; this change reaches main with the branch.
 | `SsrFitConfig`, `ssr_fit.rs:1046` | deleted; `allele_span` lives in `PenalisedFitConfig` (§1.1). Examples that only name it for the window are ported |
 | `StratumRefusal::BelowTheFloor`, `ssr_fit.rs:849` (only the climb produces it) | deleted; tests that build one use `NoSpanningReads` |
 | `SlippageCurve`, `ShareCurve`, `a_slippage_curve` (`to_run_parameters.rs:612-631`), `LevelSource::Curve`/`Blend`, `curve_weight()` | kept: older files' `ThisPeriodsCurve`/`Blend` still read |
+| the curve fitting and blending: in `slippage_curve.rs` `fit_line`, `choose_rise_shape`, `blend_level`, `FittedCell`, `PeriodCurves`, `BlendedLevel`, `NoCurve`, `SlippageCurveConfig` and its constants; in `share_curve.rs` `fit_share_curve`, `choose_share_shape`, `FittedShare`, `NoShareCurve`, `ShareCurveConfig` and its constants; `tests/slippage_curve_on_real_cells.rs`, `tests/share_curve_on_real_cells.rs` and their fixtures `tests/data/slippage_cells/`; the `counting+blend` arm of `examples/str_fit_penalised_em.rs` | first kept for those tests and that example, which nothing in a run calls; deleted on 2026-10-16 (owner). What reading and calling an older file needs stays: `SlippageCurve`, `RiseShape`, `ShareCurve`, `ShareShape`, `ShareCurveSource`, `LevelSource`, `ShareSource`, `PenalisedPoint`, `CurveReach` and the level and share floors and ceilings |
 
 ## 5. Open items
 

@@ -45,7 +45,8 @@
 //!
 //! **The fit before it, the climb, was deleted on 2026-10-16** (`arch/str_penalised_fit.md`
 //! §4.1): a coordinate climb per stratum over a 256-point average of each tract's likelihood,
-//! with curves drawn across repeat count afterwards. What older parameters files carry from it —
+//! with curves drawn across repeat count afterwards; the code that drew and blended those curves
+//! went later the same day. What older parameters files carry from it —
 //! curve-sourced and blended numbers ([`SlippageCurve`], [`ShareCurve`]), strata whose numbers
 //! all came from those curves, and period-pooled allele length variations — is still read, by
 //! [`StratumFits::of_gathered_rows`](super::stratum_fits::StratumFits::of_gathered_rows), which
@@ -142,13 +143,8 @@ impl Slippage {
 /// locus — and re-exported here, where the fit reads it, so a consumer of either module names
 /// one type.
 pub use super::census::Stratum;
-pub use super::share_curve::{
-    FittedShare, ShareCurve, ShareCurveConfig, ShareCurveSource, ShareShape, ShareSource,
-};
-pub use super::slippage_curve::{
-    CurveReach, FittedCell, LevelSource, PeriodCurves, SlippageCurve, SlippageCurveConfig,
-    blend_level, choose_rise_shape,
-};
+pub use super::share_curve::{ShareCurve, ShareCurveSource, ShareShape, ShareSource};
+pub use super::slippage_curve::{CurveReach, LevelSource, SlippageCurve};
 
 /// **The highest slippage level a library's multiplier may lift a read to**
 /// (`str_library_stutter.md` §2.1). A level of one would say no read reports its allele.

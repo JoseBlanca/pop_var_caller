@@ -15,8 +15,8 @@
 //! parameters files are still read, emitted one of three:
 //!
 //! - a stratum fitted on its own tracts had its level weighed against its period's curve — the
-//!   curves were drawn after every stratum had its own answer, then
-//!   [`blend_level`](super::slippage_curve::blend_level) applied in place;
+//!   curves were drawn after every stratum had its own answer, then `blend_level` (deleted with
+//!   the rest of the curve fitting on 2026-10-16) applied in place;
 //! - a stratum too thin to be fitted took its period's curve whole, never through `blend_level`;
 //! - a run with curves switched off kept every cell's own answer.
 //!

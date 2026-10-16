@@ -430,7 +430,9 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
   `expected_counts::COUNTING_FIT_FLOOR` (8, the climb's). The bench reports the counting fit as `B`
   (was `B_raw`). Kept, as the arch says: the curve types, and the curve-fitting code in
   `slippage_curve.rs` / `share_curve.rs`, which production no longer calls but
-  `tests/*_on_real_cells.rs` and `str_fit_penalised_em` do. After the E1 review
+  `tests/*_on_real_cells.rs` and `str_fit_penalised_em` do — until later on 2026-10-16, when the
+  owner had that code deleted too, with those two tests, their fixtures and the example's
+  `counting+blend` arm (arch §4.1's last row). After the E1 review
   (`doc/devel/reports/reviews/str_penalised_fit_E1_2026-10-16.md`): `StratumOutcome::Derived`,
   `DerivedStratum`, `PeriodAlleleLengthVariation` and `with_period_allele_length_variations` deleted
   too — the tests that built older-file shapes with them pass the same rows through

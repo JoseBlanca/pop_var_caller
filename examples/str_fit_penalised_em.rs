@@ -6,13 +6,14 @@
 //! scale, which is the shape the penalty leaves alone, and the fall-off dips and rises again. One
 //! deliberate kink: the slip rate at 9 repeats is drawn at
 //! 0.53 of its curve, as HG002's 9-repeat homopolymers sit. Loci per class fall from 2,000 at 8
-//! repeats to 5 at 20, and 17 repeats has none. Then fits it three ways:
+//! repeats to 5 at 20, and 17 repeats has none. Then fits it two ways:
 //!
 //! - `counting`: each class on its own by the counting fit;
-//! - `counting+blend`: the same, then the slip rate drawn across repeat count by the existing curve
-//!   and blended with each class's own (`str_slippage_level_curve.md` §4 and §7); only the slip
-//!   rate has this arm;
 //! - `penalised`: every class at once by penalised counting.
+//!
+//! Track 2's report also has a third arm, `counting+blend`: the counting fit's slip rates drawn
+//! across repeat count by the old level curve and blended with each class's own. That curve code
+//! was deleted on 2026-10-16, and the arm with it.
 //!
 //! Prints one row per (setting, draw, method, class, number): the estimate and the truth, and one
 //! cost row per (setting, draw, method).
@@ -40,10 +41,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, Smoothing, fit_period_by_penalised_counting,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    FittedCell, Slippage, SlippageCurveConfig, Stratum, StratumEvidence, blend_level,
-    choose_rise_shape,
-};
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{Slippage, Stratum, StratumEvidence};
 
 const REPEATS: std::ops::RangeInclusive<u64> = 8..=20;
 const KINK_AT: u64 = 9;
@@ -257,7 +255,6 @@ fn main() {
             // Each class on its own.
             let started = Instant::now();
             let mut rounds = Vec::new();
-            let mut cells = Vec::new();
             let mut alone = Vec::new();
             for evidence in &classes {
                 if evidence.rows_with_reads() == 0 {
@@ -285,13 +282,6 @@ fn main() {
                     )
                 };
                 rounds.push(counted.rounds);
-                if counted.slippage.level > 0.0 {
-                    cells.push(FittedCell {
-                        repeats: evidence.stratum.reference_repeats,
-                        level: counted.slippage.level,
-                        slipped_reads: counted.slippage.level * evidence.spanning_reads() as f64,
-                    });
-                }
                 alone.push(Some(counted));
             }
             let counting_seconds = started.elapsed().as_secs_f64();
@@ -303,8 +293,6 @@ fn main() {
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            let curve_config = SlippageCurveConfig::default();
-            let curve = choose_rise_shape(&[cells.clone()], &curve_config).ok();
             for (evidence, counted) in classes.iter().zip(&alone) {
                 let Some(counted) = counted else { continue };
                 let repeats = evidence.stratum.reference_repeats;
@@ -315,15 +303,6 @@ fn main() {
                     allele_length_variation: counted.allele_length_variation.clone(),
                 };
                 print_rows(&setting, seed, "counting", repeats, loci, &estimate, span);
-                let cell = cells.iter().find(|cell| cell.repeats == repeats).copied();
-                let curve_here = curve.as_ref().and_then(|c| c.by_group[0].as_ref());
-                if let Some(blended) = blend_level(cell, curve_here, repeats, &curve_config) {
-                    println!(
-                        "row\t{setting}\t{seed}\tcounting+blend\t{repeats}\t{loci}\tlevel\t{:.6e}\t{:.6e}",
-                        blended.level,
-                        truth_at(repeats, span).slippage.level
-                    );
-                }
             }
 
             // Every class at once.
