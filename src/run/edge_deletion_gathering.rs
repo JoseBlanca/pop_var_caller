@@ -198,12 +198,9 @@ impl EdgeDeletionGathering {
                     && tract.overlaps(self.held[index].0.region())
                 {
                     let (held, held_windows) = self.held.remove(index);
-                    match reconcile(held, &tract, &mut self.counts) {
-                        Some(kept) => {
-                            self.held.insert(index, (kept, held_windows));
-                            index += 1;
-                        }
-                        None => {}
+                    if let Some(kept) = reconcile(held, &tract, &mut self.counts) {
+                        self.held.insert(index, (kept, held_windows));
+                        index += 1;
                     }
                 } else {
                     index += 1;

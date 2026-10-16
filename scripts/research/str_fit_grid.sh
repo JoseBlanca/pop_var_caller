@@ -10,12 +10,12 @@
 # Usage (every setting is an environment variable; the defaults are the plan's three required
 # corners, for the counting fit, on both default truths' PCR variant):
 #
-#   OUT=tmp/str_fit_grid METHODS="A B" SEEDS="1 2 3" PERIODS="1 2" \
+#   OUT=tmp/str_fit_grid METHODS="B D_tract_prior" SEEDS="1 2 3" PERIODS="1 2" \
 #     CELLS="1:3 2000:3 1:300" ./scripts/research/str_fit_grid.sh
 #
 #   CELLS     samples:depth pairs, or "full" for the plan's grid (1, 10, 60, 500, 2000 samples ×
 #             3, 10, 30, 300 reads)
-#   METHODS   method names the bench knows (A, B, B_within, …)
+#   METHODS   method names the bench knows (B, B_within, D, D_tract_prior, …)
 #   TRUTH     pcr, pcr_free, or a TOML model file
 #   LOCI      tomato2 (as tomato2 has them) or a number a class
 #   LOCI_AT_MOST, FOLDS, HELDOUT_LOCI

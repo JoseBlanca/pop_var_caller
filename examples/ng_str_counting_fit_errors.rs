@@ -43,7 +43,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
     ConcentrationSource, CountedClass, fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    Slippage, SsrFitConfig, StratumError, StratumEvidence, bench_fixtures,
+    Slippage, StratumError, StratumEvidence, bench_fixtures,
 };
 
 /// The stutter every class is drawn at.
@@ -274,26 +274,21 @@ fn draw(setting: &Setting, seed: u64) -> StratumEvidence {
     evidence
 }
 
-fn config_for(setting: &Setting) -> SsrFitConfig {
-    SsrFitConfig {
-        allele_span: allele_span(setting.window),
-        ..SsrFitConfig::default()
-    }
-}
-
 fn fit(setting: &Setting, evidence: &StratumEvidence, excess: &[f64]) -> CountedClass {
-    let config = config_for(setting);
+    let window_span = allele_span(setting.window);
     match setting.source {
         Pairs => fit_class_by_counting_with_pairs(
             evidence,
             START,
             excess,
-            &config,
+            window_span,
             MAX_ROUNDS,
             TOLERANCE,
             ALTERNATIONS,
         ),
-        OwnCopies => fit_class_by_counting(evidence, START, excess, &config, MAX_ROUNDS, TOLERANCE),
+        OwnCopies => {
+            fit_class_by_counting(evidence, START, excess, window_span, MAX_ROUNDS, TOLERANCE)
+        }
     }
 }
 
@@ -445,7 +440,7 @@ fn standard_deviation(values: &[f64]) -> f64 {
 
 fn run_coverage(cli: &Cli, setting: &Setting) {
     let excess = vec![setting.homozygote_excess; setting.samples];
-    let config = config_for(setting);
+    let window_span = allele_span(setting.window);
     let started = Instant::now();
     let done = std::sync::atomic::AtomicUsize::new(0);
     let drawn: Vec<(usize, Vec<Number>)> = (0..cli.draws)
@@ -454,12 +449,12 @@ fn run_coverage(cli: &Cli, setting: &Setting) {
             let seed = 1_000_003 * (draw_index as u64 + 1);
             let evidence = draw(setting, seed);
             let fitted = fit(setting, &evidence, &excess);
-            let curvature = sandwich_errors(&evidence, &fitted, &excess, &config);
+            let curvature = sandwich_errors(&evidence, &fitted, &excess, window_span);
             let bootstrap = bootstrap_errors(
                 &evidence,
                 &fitted,
                 &excess,
-                &config,
+                window_span,
                 bootstrap_settings(cli.replicates, seed ^ 0x5eed),
             );
             let finished = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -573,7 +568,7 @@ fn run_coverage(cli: &Cli, setting: &Setting) {
 
 fn run_cost(cli: &Cli, setting: &Setting) {
     let excess = vec![setting.homozygote_excess; setting.samples];
-    let config = config_for(setting);
+    let window_span = allele_span(setting.window);
     let (mut fit_seconds, mut sandwich_seconds, mut bootstrap_seconds) = (0.0, 0.0, 0.0);
     for draw_index in 0..cli.draws {
         let seed = 1_000_003 * (draw_index as u64 + 1);
@@ -582,14 +577,14 @@ fn run_cost(cli: &Cli, setting: &Setting) {
         let fitted = fit(setting, &evidence, &excess);
         fit_seconds += clock.elapsed().as_secs_f64();
         let clock = Instant::now();
-        let _ = sandwich_errors(&evidence, &fitted, &excess, &config);
+        let _ = sandwich_errors(&evidence, &fitted, &excess, window_span);
         sandwich_seconds += clock.elapsed().as_secs_f64();
         let clock = Instant::now();
         let _ = bootstrap_errors(
             &evidence,
             &fitted,
             &excess,
-            &config,
+            window_span,
             bootstrap_settings(cli.replicates, seed ^ 0x5eed),
         );
         bootstrap_seconds += clock.elapsed().as_secs_f64();

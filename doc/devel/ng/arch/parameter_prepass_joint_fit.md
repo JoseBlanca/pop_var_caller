@@ -322,7 +322,9 @@ It is this.
 
 ```rust
 /// Every stratum's slippage numbers, indexed by the key the caller has. Built once per run
-/// from what `fit_strata` returned, then read unchanged for the whole of calling.
+/// from what the repeat-tract fit returned (`fit_strata` when this was written; the penalised
+/// fit's `fit_repeat_tracts` since 2026-10-16) or from a parameters file's rows, then read
+/// unchanged for the whole of calling.
 pub struct StratumFits { /* … */ }
 
 /// What one `(read group, stratum)` cell answers with: the three emitted numbers, and where

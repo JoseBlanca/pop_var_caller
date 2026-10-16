@@ -1324,10 +1324,9 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        DerivedStratum, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
-        StratumOutcome,
+        LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumOutcome,
     };
-    use crate::parameter_estimation::joint::stratum_fits::StratumFits;
+    use crate::parameter_estimation::joint::stratum_fits::{StratumFits, StratumRowsOfAFile};
     use crate::parameter_estimation::repeat_strata::{Stratum as SsrStratum, StratumKey};
     use crate::types::{InbreedingF, LogProb, Ploidy, SsrPeriod, SummedLogError};
 
@@ -1486,7 +1485,7 @@ mod tests {
         repeat_count: u32,
         groups: usize,
         level: impl Fn(u32) -> LevelProvenance,
-    ) -> StratumOutcome {
+    ) -> StratumRowsOfAFile {
         stratum_row_at(
             MOTIF.len() as u8,
             repeat_count,
@@ -1507,14 +1506,14 @@ mod tests {
         level: impl Fn(u32) -> LevelProvenance,
         shorter: ShareSource,
         fall_off: ShareSource,
-    ) -> StratumOutcome {
+    ) -> StratumRowsOfAFile {
         let slippage: Vec<Option<Slippage>> = (0..groups as u32)
             .map(|group| Some(slippage_at(group, repeat_count)))
             .collect();
         let level_provenance: Vec<Option<LevelProvenance>> =
             (0..groups as u32).map(|group| Some(level(group))).collect();
         let shares_provenance = vec![Some(shares_from(shorter, fall_off)); groups];
-        StratumOutcome::Derived(Box::new(DerivedStratum {
+        StratumRowsOfAFile {
             stratum: FitStratum {
                 period,
                 reference_repeats: u64::from(repeat_count),
@@ -1522,9 +1521,7 @@ mod tests {
             slippage,
             level_provenance,
             shares_provenance,
-            tracts_of_its_own: 4,
-            reads_crossing: 40,
-        }))
+        }
     }
 
     /// **Every read group in its own slippage group**, which is the specified grain — so the
@@ -1536,10 +1533,20 @@ mod tests {
             .collect()
     }
 
+    /// The fits a parameters file holding only these rows reads into — the slippage numbers and
+    /// their provenance, with no allele length variation, so every tract is seeded from the
+    /// ladder's bottom rung.
+    fn of_rows(
+        rows: impl IntoIterator<Item = StratumRowsOfAFile>,
+        slippage_group_of: BTreeMap<ReadGroupId, u32>,
+    ) -> StratumFits {
+        StratumFits::over(&[], slippage_group_of).with_rows_of_a_file(rows, BTreeMap::new())
+    }
+
     /// The whole fit: both candidates' strata, every group fitted on its own reads.
     fn fits_for_both_candidates() -> StratumFits {
-        StratumFits::over(
-            &[
+        of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -1790,8 +1797,8 @@ mod tests {
     fn a_candidate_the_fit_never_reached_takes_the_stated_constant_and_says_so() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
+        let fits = of_rows(
+            [stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                 fitted_level(400.0 + f64::from(group))
             })],
             one_group_each(READ_GROUPS),
@@ -1842,8 +1849,8 @@ mod tests {
         let alleles = candidates(&bases);
         // Two of the run's three read groups are in the fit's map; the third is a library the
         // pre-pass did not know existed.
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], 2, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -1953,8 +1960,8 @@ mod tests {
     fn a_level_read_off_the_curve_is_borrowed_rather_than_fitted_here() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -2011,8 +2018,8 @@ mod tests {
     fn a_cell_that_borrowed_only_its_shares_is_borrowed() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row_at(
                     MOTIF.len() as u8,
                     CANDIDATE_REPEATS[0],
@@ -2317,8 +2324,8 @@ mod tests {
         // The same table with the longer candidate's stratum carrying the shorter one's
         // numbers — what a lookup keyed by the reference tract rather than by the candidate
         // would produce.
-        let flattened = StratumFits::over(
-            &[
+        let flattened = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], READ_GROUPS, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -2326,10 +2333,8 @@ mod tests {
                     let mut row = stratum_row(CANDIDATE_REPEATS[1], READ_GROUPS, |group| {
                         fitted_level(800.0 + f64::from(group))
                     });
-                    if let StratumOutcome::Derived(derived) = &mut row {
-                        for (group, slot) in derived.slippage.iter_mut().enumerate() {
-                            *slot = Some(slippage_at(group as u32, CANDIDATE_REPEATS[0]));
-                        }
+                    for (group, slot) in row.slippage.iter_mut().enumerate() {
+                        *slot = Some(slippage_at(group as u32, CANDIDATE_REPEATS[0]));
                     }
                     row
                 },
@@ -2453,8 +2458,8 @@ mod tests {
             })
             .collect();
 
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row_at(
                     3,
                     CANDIDATE_REPEATS[0],
@@ -2533,8 +2538,8 @@ mod tests {
     fn a_cell_that_fitted_one_share_and_borrowed_the_other_is_borrowed() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row_at(
                     MOTIF.len() as u8,
                     CANDIDATE_REPEATS[0],
@@ -2694,7 +2699,6 @@ mod tests {
                 allele_length_variation: vec![StratumError::TooFewLoci; 3],
                 concentration: StratumError::NotPlaced,
             }),
-            climb: None,
             samples_fitted_on: None,
             tracts_of_its_own: 40,
             reads_crossing: 400,
@@ -2852,8 +2856,8 @@ mod tests {
     fn a_run_of_one_library_is_gathered_like_any_other() {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 stratum_row(CANDIDATE_REPEATS[0], 1, |group| {
                     fitted_level(400.0 + f64::from(group))
                 }),
@@ -2900,8 +2904,8 @@ mod tests {
         // reported the right number.** The fit here names one of the run's three libraries and
         // holds one of the two candidates' strata, which gives **four** cells lost to an
         // unknown library against **one** lost to a stratum with no numbers.
-        let fits = StratumFits::over(
-            &[stratum_row(CANDIDATE_REPEATS[0], 1, |group| {
+        let fits = of_rows(
+            [stratum_row(CANDIDATE_REPEATS[0], 1, |group| {
                 fitted_level(400.0 + f64::from(group))
             })],
             one_group_each(1),

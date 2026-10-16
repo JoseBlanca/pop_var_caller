@@ -387,8 +387,9 @@ it exists to prevent.
 
 **What has to change at the seam.** `StratumFits` is the one lookup that crosses into calling
 (`src/ng/parameter_estimation/joint/stratum_fits.rs`). It gathers each stratum's slippage numbers
-and their provenance and **drops the length spectrum and the concentration**, which `fit_strata`
-produced. They must be carried, keyed the same way, with the rung recorded beside them.
+and their provenance and **drops the length spectrum and the concentration**, which the
+repeat-tract fit produced (`fit_strata` then; replaced by the penalised fit's `fit_repeat_tracts` on
+2026-10-16). They must be carried, keyed the same way, with the rung recorded beside them.
 
 **The ordinary-site side needs no seam work.** `RunParameters::project_seed`
 (`src/ng/calling/run_parameters.rs:97`) already takes the frequency spectrum and the diversity as arguments;

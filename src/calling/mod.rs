@@ -4441,8 +4441,8 @@ mod tests {
         use crate::parameter_estimation::joint::share_curve::ShareSource;
         use crate::parameter_estimation::joint::slippage_curve::LevelSource;
         use crate::parameter_estimation::joint::ssr_fit::{
-            ClimbEnding, ClimbRecord, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
-            StratumFit, StratumOutcome,
+            LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+            StratumOutcome,
         };
 
         let level = LevelProvenance {
@@ -4471,13 +4471,6 @@ mod tests {
                     })],
                     allele_length_variation,
                     concentration: Some(concentration),
-                    climb: Some(ClimbRecord {
-                        log_likelihood_a_tract: -1.5,
-                        tracts_fitted: 40,
-                        borrowed: Vec::new(),
-                        ending: ClimbEnding::Settled,
-                        walks: Vec::new(),
-                    }),
                     samples_fitted_on: None,
                     tracts_of_its_own: 40,
                     reads_crossing: 400,

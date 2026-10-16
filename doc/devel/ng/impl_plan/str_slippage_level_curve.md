@@ -286,7 +286,8 @@ precision. **Gated on spec §11's open question** — fit drawn strata down to a
 first and report how often the climb converges and how often the level returns exactly zero. If
 that measurement says the thin fits are unusable, this step does not happen and the floor stays.
 ***Depends:*** E3. ***Source:*** spec §5.1, §11.
-***The gate measurement, and what it settled*** ([`examples/ng_ssr_thin_stratum_gate.rs`](../../../../examples/ng_ssr_thin_stratum_gate.rs),
+***The gate measurement, and what it settled*** (`examples/ng_ssr_thin_stratum_gate.rs`, deleted
+with the climb on 2026-10-16 and still in git history,
 30 drawn strata a row at both ends of the range): the level comes back below a tenth of the truth
 in **27%** of a single deep sample's 3-tract fits and **20%** of its 5-tract ones, against **3%**
 at 8 tracts and none from 12 up; on a 63-sample cohort at three reads it collapses in 3% of

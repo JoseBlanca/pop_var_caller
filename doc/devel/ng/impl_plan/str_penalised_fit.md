@@ -407,12 +407,29 @@ Every D step runs after C10 *(owner, 2026-10-15)*, so each measures the fit as i
 
 ### Milestone E — delete the climb
 
-- ☐ **E1** Everything arch §4.1 marks deleted, in one commit: the climb's code, tests and examples;
+- ✅ **E1** Everything arch §4.1 marks deleted, in one commit: the climb's code, tests and examples;
   `fit_period_allele_length_variations` (tests that used its output build their tables by hand);
   `ssr_fit/library_stutter.rs`, `genotype_rows.rs`, `neighbour_start.rs` and their examples; the
   bench's methods `A` and `B_curves`; `SsrFitConfig` (examples that name it only for the window
   ported); `StratumRefusal::BelowTheFloor`. Kept: what older files need to read. *Depends:* D2, D5 and
   the owner's go-ahead. *Source:* arch §4.1; spec §7.
+  *Done (2026-10-16):* `ssr_fit.rs` 9,999 → 2,099 lines; three modules (688 lines) and seven
+  climb-only examples (1,600 lines) deleted; `StratumFit::climb` and `ClimbRecord` gone. The
+  repeat-tract halves of `ng_joint_records_walk`, `dhat_ng_joint_fit` and `benches/ng_joint_fit_perf`
+  and the harness's `library` mode went with the climb; `ng_str_guard_census` lost `FIT_CLASSES`.
+  The counting fit takes `allele_span: i32` where it took `&SsrFitConfig`; its floor is
+  `expected_counts::COUNTING_FIT_FLOOR` (8, the climb's). The bench reports the counting fit as `B`
+  (was `B_raw`). Kept, as the arch says: the curve types, and the curve-fitting code in
+  `slippage_curve.rs` / `share_curve.rs`, which production no longer calls but
+  `tests/*_on_real_cells.rs` and `str_fit_penalised_em` do. After the E1 review
+  (`doc/devel/reports/reviews/str_penalised_fit_E1_2026-10-16.md`): `StratumOutcome::Derived`,
+  `DerivedStratum`, `PeriodAlleleLengthVariation` and `with_period_allele_length_variations` deleted
+  too — the tests that built older-file shapes with them pass the same rows through
+  `StratumFits::of_gathered_rows`, the door an older file comes in by (a test-only
+  `with_rows_of_a_file`); the share ladder and blend (`share_curve_for_a_period`, `blend_share`,
+  `BlendedShare`) and the four constants only they read deleted; the library-scoring code only the
+  bench and tests use (`TractLikelihoods` and its helpers) compiled only with them. Fixture (153 runs) exact; digests and
+  parameters-file tests unchanged.
 - ☐ **E2** The specs the climb built on get a dated note that the fit they describe was replaced
   (`parameter_prepass_ssr.md`, `str_slippage_level_curve.md`), pointing at the new spec.
   *Depends:* E1. *Source:* spec-authoring's rule for decisions that were acted on.

@@ -1,10 +1,10 @@
 //! **A repeat class's stutter and allele-length shares by expectation maximisation, without the
 //! average over tract frequencies** — the owner's routes 1 and 2 together (2026-10-11), a prototype.
 //!
-//! The fit proper averages each tract's likelihood over how its alleles could be shared among its
-//! chromosomes, and that average, over 256 points, is several log-likelihood units a tract wrong at
-//! thirteen allele lengths (`fit_precision_quadrature_average_2026-10-01.md`). It also makes the fit
-//! slow. This estimates the same stutter and the class's allele-length shares from a simpler
+//! The climb, the fit this replaced (deleted 2026-10-16), averaged each tract's likelihood over how
+//! its alleles could be shared among its chromosomes, and that average, over 256 points, is several
+//! log-likelihood units a tract wrong at thirteen allele lengths
+//! (`fit_precision_quadrature_average_2026-10-01.md`). It also made the fit slow. This estimates the same stutter and the class's allele-length shares from a simpler
 //! objective: a sample's alleles at a random tract of the class are drawn from the class's shares,
 //! whatever that tract's own frequencies, so
 //!
@@ -85,6 +85,12 @@ impl CountedClass {
 /// lost among them. Each share moves by at most about `1 / tracts` — 0.005 at 200 tracts, a fifth
 /// of a standard error at the bench's base setting.
 pub const SHARE_PRIOR_TRACTS: f64 = 1.0;
+
+/// **The fewest loci with reads a class needs before the bench and the examples run the counting
+/// fit on it: 8.** It is the climb's refusal floor (the climb was deleted 2026-10-16), which every
+/// measurement of the counting fit was made with; a thinner class is left unfitted. The counting
+/// fit's own drivers do not read it — their callers skip the class.
+pub const COUNTING_FIT_FLOOR: usize = 8;
 
 /// **The ends of the concentration's search**, where an estimate says the data did not place it.
 /// The penalised fit clamps its concentration to these same ends, so an estimate pinned at its
@@ -265,7 +271,7 @@ pub fn fit_class_by_counting(
     evidence: &StratumEvidence,
     start: Slippage,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
 ) -> CountedClass {
@@ -277,7 +283,7 @@ pub fn fit_class_by_counting(
         1.0,
         SHARE_PRIOR_TRACTS,
         homozygote_excess,
-        config,
+        allele_span,
         max_rounds,
         tolerance,
     )
@@ -291,7 +297,7 @@ pub fn fit_class_by_counting_at_share_prior(
     evidence: &StratumEvidence,
     start: Slippage,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
     share_prior_tracts: f64,
@@ -304,7 +310,7 @@ pub fn fit_class_by_counting_at_share_prior(
         1.0,
         share_prior_tracts,
         homozygote_excess,
-        config,
+        allele_span,
         max_rounds,
         tolerance,
     )
@@ -322,11 +328,11 @@ fn count_class(
     start_spread: f64,
     share_prior_tracts: f64,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
 ) -> CountedClass {
-    let classes = allele_classes_of(config);
+    let classes = allele_classes_in(allele_span);
     let mut slippage = start;
     let mut shares =
         start_shares.map_or_else(|| vec![1.0 / classes as f64; classes], <[f64]>::to_vec);
@@ -343,7 +349,7 @@ fn count_class(
             slippage,
             &shares,
             concentration,
-            config.allele_span,
+            allele_span,
         );
         log_likelihood = counts.log_likelihood;
         // Each length's prior weight: one tract's worth of draws, spread evenly.
@@ -1061,10 +1067,10 @@ pub(super) fn expected_counts_by_tract(
     shares: &[f64],
     concentration: f64,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> Vec<Counts> {
     let distinct = DistinctRows::of(evidence, homozygote_excess);
-    ScoredDistinctRows::of(evidence, &distinct, slippage, config.allele_span)
+    ScoredDistinctRows::of(evidence, &distinct, slippage, allele_span)
         .expected_counts_by_tract(shares, concentration)
 }
 
@@ -1084,11 +1090,11 @@ fn expected_counts_by_tract_row_by_row(
     shares: &[f64],
     concentration: f64,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> Vec<Counts> {
-    let classes = allele_classes_of(config);
+    let classes = allele_classes_in(allele_span);
     let genotypes = genotype_pairs(classes);
-    let span = config.allele_span;
+    let span = allele_span;
     let read_span = evidence.read_span;
     let last_bucket = (2 * read_span) as usize;
     let slot =
@@ -1283,7 +1289,7 @@ pub fn fit_class_by_counting_with_pairs(
     evidence: &StratumEvidence,
     start: Slippage,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
     alternations: usize,
@@ -1292,7 +1298,7 @@ pub fn fit_class_by_counting_with_pairs(
         evidence,
         start,
         homozygote_excess,
-        config,
+        allele_span,
         max_rounds,
         tolerance,
         alternations,
@@ -1312,7 +1318,7 @@ pub fn fit_class_by_counting_with_pairs_at_share_prior(
     evidence: &StratumEvidence,
     start: Slippage,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
     alternations: usize,
@@ -1326,7 +1332,7 @@ pub fn fit_class_by_counting_with_pairs_at_share_prior(
         1.0,
         share_prior_tracts,
         homozygote_excess,
-        config,
+        allele_span,
         max_rounds,
         tolerance,
     );
@@ -1346,7 +1352,7 @@ pub fn fit_class_by_counting_with_pairs_at_share_prior(
         fitted,
         1.0,
         homozygote_excess,
-        config,
+        allele_span,
         max_rounds,
         tolerance,
         alternations,
@@ -1373,7 +1379,7 @@ pub fn refit_class_by_counting_from(
     evidence: &StratumEvidence,
     from: &CountedClass,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
     alternations: usize,
@@ -1387,7 +1393,7 @@ pub fn refit_class_by_counting_from(
             from.concentration_counted_at,
             from.share_prior_tracts,
             homozygote_excess,
-            config,
+            allele_span,
             max_rounds,
             tolerance,
         ),
@@ -1396,7 +1402,7 @@ pub fn refit_class_by_counting_from(
             from.clone(),
             from.concentration_counted_at,
             homozygote_excess,
-            config,
+            allele_span,
             max_rounds,
             tolerance,
             alternations,
@@ -1413,7 +1419,7 @@ fn alternate_with_pairs(
     mut fitted: CountedClass,
     mut spread: f64,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     max_rounds: usize,
     tolerance: f64,
     alternations: usize,
@@ -1427,7 +1433,7 @@ fn alternate_with_pairs(
             fitted.slippage,
             &fitted.allele_length_variation,
             homozygote_excess,
-            config,
+            allele_span,
         );
         fitted = count_class(
             evidence,
@@ -1437,7 +1443,7 @@ fn alternate_with_pairs(
             1.0,
             fitted.share_prior_tracts,
             homozygote_excess,
-            config,
+            allele_span,
             max_rounds,
             tolerance,
         );
@@ -1472,15 +1478,10 @@ pub fn fit_spread_by_pairs(
     slippage: Slippage,
     shares: &[f64],
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> f64 {
-    let per_tract = pair_cubics_by_tract(
-        evidence,
-        slippage,
-        shares,
-        homozygote_excess,
-        config.allele_span,
-    );
+    let per_tract =
+        pair_cubics_by_tract(evidence, slippage, shares, homozygote_excess, allele_span);
     let objective = |ln_spread: f64| -> f64 {
         ln_pairs_summed_in_tract_order(&per_tract, float::exp(ln_spread))
     };
@@ -2018,10 +2019,7 @@ mod tests {
             shorter_share: 0.8,
             fall_off: 0.25,
         };
-        let config = SsrFitConfig {
-            allele_span: 2,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 2;
         let spectrum = spectrum_of(5);
         let samples = 20;
         let evidence = draw_stratum(truth, &spectrum, 0.5, 0.9, 300, samples, 3, 2, 23);
@@ -2049,8 +2047,8 @@ mod tests {
                 && close(left.log_likelihood, right.log_likelihood)
         };
         let by_row =
-            expected_counts_by_tract_row_by_row(&evidence, at, &shares, 0.7, &excess, &config);
-        let by_tract = expected_counts_by_tract(&evidence, at, &shares, 0.7, &excess, &config);
+            expected_counts_by_tract_row_by_row(&evidence, at, &shares, 0.7, &excess, allele_span);
+        let by_tract = expected_counts_by_tract(&evidence, at, &shares, 0.7, &excess, allele_span);
         assert_eq!(by_row.len(), by_tract.len());
         for (index, (row, tract)) in by_row.iter().zip(&by_tract).enumerate() {
             assert!(same(tract, row), "tract {index}: {tract:?} against {row:?}");
@@ -2061,14 +2059,8 @@ mod tests {
         }
         let distinct = DistinctRows::of(&evidence, &excess);
         assert!(distinct.reads.len() < evidence.rows_with_reads());
-        let class = expected_counts_by_distinct_rows(
-            &evidence,
-            &distinct,
-            at,
-            &shares,
-            0.7,
-            config.allele_span,
-        );
+        let class =
+            expected_counts_by_distinct_rows(&evidence, &distinct, at, &shares, 0.7, allele_span);
         assert!(same(&class, &summed), "{class:?} against {summed:?}");
     }
 
@@ -2266,7 +2258,9 @@ mod tests {
         };
         let (one, other) = (row(false), row(true));
         let shares: Vec<f64> = {
-            let raw: Vec<f64> = (0..classes).map(|_| uniform().powi(3) + 1e-4).collect();
+            let raw: Vec<f64> = (0..classes)
+                .map(|_| float::powi(uniform(), 3) + 1e-4)
+                .collect();
             let total: f64 = raw.iter().sum();
             raw.iter().map(|value| value / total).collect()
         };
@@ -2370,10 +2364,7 @@ mod tests {
             shorter_share: 0.8,
             fall_off: 0.25,
         };
-        let config = SsrFitConfig {
-            allele_span: 1,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 1;
         let spectrum = spectrum_of(3);
         let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 2000, 20, 10, 1, 13);
         let start = Slippage {
@@ -2381,7 +2372,7 @@ mod tests {
             shorter_share: 0.5,
             fall_off: 0.5,
         };
-        let fitted = fit_class_by_counting(&evidence, start, &[0.4; 20], &config, 500, 1e-9);
+        let fitted = fit_class_by_counting(&evidence, start, &[0.4; 20], allele_span, 500, 1e-9);
         assert!((fitted.slippage.level - 0.08).abs() < 0.01, "{fitted:?}");
         assert!(
             (fitted.slippage.shorter_share - 0.8).abs() < 0.05,
@@ -2428,20 +2419,16 @@ mod tests {
             shorter_share: 0.5,
             fall_off: 0.5,
         };
-        let fit_at = |span: i32| {
-            let config = SsrFitConfig {
-                allele_span: span,
-                ..SsrFitConfig::default()
-            };
-            fit_class_by_counting(&evidence, start, &[0.4; 20], &config, 500, 1e-9)
+        let fit_at = |allele_span: i32| {
+            fit_class_by_counting(&evidence, start, &[0.4; 20], allele_span, 500, 1e-9)
         };
 
         let narrow = fit_at(6);
         assert!(narrow.slippage.level > 0.1, "{narrow:?}");
         assert!(narrow.allele_length_variation[0] > 0.15, "{narrow:?}");
 
-        assert_eq!(SsrFitConfig::default().allele_span, recorded + 1);
-        let shipped = fit_at(SsrFitConfig::default().allele_span);
+        assert_eq!(ALLELE_SPAN, recorded + 1);
+        let shipped = fit_at(ALLELE_SPAN);
         assert!((shipped.slippage.level - 0.08).abs() < 0.01, "{shipped:?}");
         // Which way and how far the far alleles' reads slipped is read from the model, not from
         // their end bucket, which they share with the edge allele's own reads.
@@ -2470,10 +2457,7 @@ mod tests {
             shorter_share: 0.8,
             fall_off: 0.25,
         };
-        let config = SsrFitConfig {
-            allele_span: 1,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 1;
         let spectrum = spectrum_of(3);
         let evidence = draw_stratum(truth, &spectrum, 0.5, 0.95, 2000, 20, 3, 1, 17);
         let start = Slippage {
@@ -2481,8 +2465,15 @@ mod tests {
             shorter_share: 0.5,
             fall_off: 0.5,
         };
-        let fitted =
-            fit_class_by_counting_with_pairs(&evidence, start, &[0.95; 20], &config, 500, 1e-9, 10);
+        let fitted = fit_class_by_counting_with_pairs(
+            &evidence,
+            start,
+            &[0.95; 20],
+            allele_span,
+            500,
+            1e-9,
+            10,
+        );
         assert!(
             fitted
                 .concentration
@@ -2506,12 +2497,16 @@ mod tests {
         };
         let spectrum = [0.0, 0.25, 0.5, 0.25, 0.0];
         let evidence = draw_stratum(truth, &spectrum, 0.5, 0.4, 300, 20, 10, 2, 23);
-        let config = SsrFitConfig {
-            allele_span: 2,
-            ..SsrFitConfig::default()
-        };
-        let fitted =
-            fit_class_by_counting_with_pairs(&evidence, truth, &[0.4; 20], &config, 2000, 1e-7, 10);
+        let allele_span = 2;
+        let fitted = fit_class_by_counting_with_pairs(
+            &evidence,
+            truth,
+            &[0.4; 20],
+            allele_span,
+            2000,
+            1e-7,
+            10,
+        );
         for outer in [0, 4] {
             let share = fitted.allele_length_variation[outer];
             assert!(
@@ -2534,14 +2529,11 @@ mod tests {
             shorter_share: 0.8,
             fall_off: 0.25,
         };
-        let config = SsrFitConfig {
-            allele_span: 1,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 1;
         let spectrum = spectrum_of(3);
         let outbred = draw_stratum(truth, &spectrum, 0.5, 0.4, 2000, 1, 30, 1, 29);
         let fitted =
-            fit_class_by_counting_with_pairs(&outbred, truth, &[0.4], &config, 2000, 1e-7, 10);
+            fit_class_by_counting_with_pairs(&outbred, truth, &[0.4], allele_span, 2000, 1e-7, 10);
         assert_eq!(
             fitted.concentration_from,
             ConcentrationSource::EachSamplesTwoCopies
@@ -2556,7 +2548,7 @@ mod tests {
 
         let inbred = draw_stratum(truth, &spectrum, 0.5, 1.0, 2000, 1, 30, 1, 31);
         let fitted =
-            fit_class_by_counting_with_pairs(&inbred, truth, &[1.0], &config, 2000, 1e-7, 10);
+            fit_class_by_counting_with_pairs(&inbred, truth, &[1.0], allele_span, 2000, 1e-7, 10);
         assert_eq!(fitted.concentration, None, "{fitted:?}");
         assert_eq!(fitted.between_locus_share(), None);
         assert!((fitted.slippage.level - 0.08).abs() < 0.01, "{fitted:?}");

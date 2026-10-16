@@ -500,8 +500,8 @@ pub(crate) fn a_file_the_next_run_can_read(
 
 /// **A cohort's psps opened as a cohort, their censuses read, judged against this run's settings
 /// and assembled, and the reference and catalog they were walked against read and checked** —
-/// everything `estimate-parameters` does before it fits, and what the repeat-tract subset
-/// comparison (`examples/ng_ssr_subset_against_every_sample.rs`) needs too.
+/// everything `estimate-parameters` does before it fits, and what the research bench's psp mode
+/// (`examples/ng_str_fit_bench.rs`) needs too.
 pub struct OpenedCensuses {
     /// The psps, opened together and put in the order of their sample names.
     ///

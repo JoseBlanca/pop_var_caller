@@ -17,7 +17,9 @@
 //! report's §7.
 //!
 //! Fixtures: `tests/data/slippage_cells/`. They are the raw `SSR_CELL_TABLE` output of
-//! `examples/ng_joint_records_walk.rs`, copied unchanged.
+//! `examples/ng_joint_records_walk.rs`, copied unchanged. That output went with the climb on
+//! 2026-10-16, so the tables can no longer be regenerated; they stay as the record the curve
+//! fitting was measured on.
 //!
 //! **They were produced with the refusal floor at 50 tracts, which is where it stood until
 //! 2026-08-20; it is 8 now.** So they hold fewer fitted strata than a run produces today — 55 on

@@ -16,9 +16,11 @@ Markdown, one table per measure of the research plan (doc/devel/ng/research/str_
    Monte Carlo error.
 4. Cost: seconds to fit every locus, seconds for the held-out fits, peak memory.
 
-With `--compare B_raw,B_curves,D`, it prints instead the methods side by side: the held-out score
-with its standard error over seeds and the paired difference D − B, the two held-out fallbacks at one
-sample (the bench's `--both-fallbacks`), recovery and error honesty with shares grouped by size.
+With `--compare B,D,D_working_F`, it prints instead the methods side by side: the held-out score
+with its standard error over seeds and the paired difference D − B (rows from before 2026-10-16 name
+the counting fit `B_raw` and the climb's curves `B_curves`; both are still read), the two held-out
+fallbacks at one sample (the bench's `--both-fallbacks`), recovery and error honesty with shares
+grouped by size.
 
 Usage:
     uv run --no-project --with numpy python scripts/research/str_fit_summarise.py DIR [DIR ...] [--compare ...]
@@ -285,7 +287,12 @@ def comparison(rows, methods):
           "numbers. Mean over the seeds ± its standard error. The last columns are the paired "
           "difference, seed by seed, of D against B: above zero means D predicts better.\n")
     head = " | ".join(methods)
-    pairs = [("D", "B_raw")] + [(m, "B_curves") for m in methods if not m.startswith("B")]
+    # The counting fit is `B`; rows written before 2026-10-16 call it `B_raw` and also hold the
+    # climb's curves as `B_curves`, which the other methods are then paired against too.
+    base = "B" if any((cell, "B") in scores for cell in cells) else "B_raw"
+    has_curves = any((cell, "B_curves") in scores for cell in cells)
+    pairs = [("D", base)] + [(m, "B_curves") for m in methods
+                             if has_curves and not m.startswith("B")]
     pair_head = " | ".join(f"{m} − {b}" for m, b in pairs)
     print(f"| cell | seeds | loci a seed | {head} | {pair_head} |")
     print("|---|---|---|" + "---|" * (len(methods) + len(pairs)))
@@ -299,9 +306,9 @@ def comparison(rows, methods):
             loci += [v[1] for v in values.values()]
             columns.append(show(*mean_and_error([v[0] for v in values.values()])[:2]))
         differences = []
-        for method, base in pairs:
+        for method, paired_with in pairs:
             d = scores.get((cell, method), {})
-            b = scores.get((cell, base), {})
+            b = scores.get((cell, paired_with), {})
             paired = [d[seed][0] - b[seed][0] for seed in d if seed in b]
             differences.append(show(*mean_and_error(paired)[:2]))
         print(f"| {cell_label(cell)} | {len(seeds_seen)} | {np.nanmean(loci):.0f} | "
@@ -318,9 +325,13 @@ def comparison(rows, methods):
               "the share of held-out loci whose class B left without a concentration. Mean over the "
               "seeds ± its standard error, a locus, against the truth; the paired column is seed by "
               "seed, above zero where D predicts better.\n")
-        print("| cell | B_raw: calling / own | B_curves: calling / own | D: calling / own | "
-              "D_working_F | D − B_curves, own shares | B classes on fallback |")
-        print("|---|---|---|---|---|---|---|")
+        # On older rows the climb's curves are the B that D is paired against, as they were then.
+        shown = [base, "B_curves"] if has_curves else [base]
+        against = "B_curves" if has_curves else base
+        print("| cell | " + " | ".join(f"{m}: calling / own" for m in shown)
+              + f" | D: calling / own | D_working_F | D − {against}, own shares | "
+              "B classes on fallback |")
+        print("|---|" + "---|" * (len(shown) + 4))
         for cell in one_sample:
             def pair(method):
                 calling = scores.get((cell, method), {})
@@ -328,12 +339,13 @@ def comparison(rows, methods):
                 return (show(*mean_and_error([v[0] for v in calling.values()])[:2]) + " / "
                         + show(*mean_and_error([v[0] for v in own.values()])[:2]))
             d = scores.get((cell, "D_own_shares"), {})
-            b = scores.get((cell, "B_curves_own_shares"), {})
+            b = scores.get((cell, f"{against}_own_shares"), {})
             paired = [d[seed][0] - b[seed][0] for seed in d if seed in b]
-            calling = scores.get((cell, "B_curves"), {})
+            calling = scores.get((cell, against), {})
             on = [v[2] / v[1] for v in calling.values() if v[1]]
             working = scores.get((cell, "D_working_F"), {})
-            print(f"| {cell_label(cell)} | {pair('B_raw')} | {pair('B_curves')} | {pair('D')} | "
+            print(f"| {cell_label(cell)} | " + " | ".join(pair(m) for m in shown)
+                  + f" | {pair('D')} | "
                   f"{show(*mean_and_error([v[0] for v in working.values()])[:2])} | "
                   f"{show(*mean_and_error(paired)[:2])} | "
                   f"{np.mean(on) if on else float('nan'):.2f} |")
@@ -421,7 +433,7 @@ def main():
     parser.add_argument("directory", nargs="+", help="one or more directories of rows files")
     parser.add_argument("--compare", default=None,
                         help="comma-separated method variants to set side by side (e.g. "
-                             "B_raw,B_curves,D,D_working_F); prints only the side-by-side tables")
+                             "B,D,D_working_F); prints only the side-by-side tables")
     arguments = parser.parse_args()
     rows = read_rows(arguments.directory)
     if not rows:

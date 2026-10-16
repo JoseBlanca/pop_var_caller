@@ -1,8 +1,8 @@
 //! **Every repeat class of a cohort fitted by counting** (`ssr_fit::expected_counts`): stutter,
 //! allele-length shares and spread by expectation maximisation, with no average over tract
 //! frequencies (the owner's routes 1 and 2, 2026-10-11). Writes one row a class in the columns
-//! `ng_str_class_spectra` writes for the usual fit, so the two can be compared class by class; the
-//! error columns are `NA`.
+//! `ng_str_class_spectra` wrote for the climb (that example went with the climb on 2026-10-16), so
+//! older outputs of the two compare class by class; the error columns are `NA`.
 //!
 //! ```text
 //! cargo run --release --example ng_str_counting_fit -- --reference REF --catalog CATALOG \
@@ -17,11 +17,9 @@ use pop_var_caller::cli::estimate_parameters::{
     EstimateParametersArgs, OpenedCensuses, contig_id_of, open_the_censuses,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
-    fit_class_by_counting, fit_class_by_counting_with_pairs,
+    COUNTING_FIT_FLOOR, fit_class_by_counting, fit_class_by_counting_with_pairs,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    DEFAULT_REFUSAL_FLOOR, Slippage, SsrFitConfig,
-};
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{ALLELE_SPAN, Slippage};
 use pop_var_caller::run::{
     CohortTractStrata, every_read_group_pooled, the_tract_strata_of_a_cohort,
 };
@@ -61,10 +59,7 @@ fn main() {
     let CohortTractStrata { strata, .. } =
         the_tract_strata_of_a_cohort(&mut evidence, &plan.loci, &contig_of, &pooled)
             .unwrap_or_else(|error| panic!("{error:?}"));
-    let mut config = SsrFitConfig::default();
-    if let Some(span) = cli.allele_span {
-        config.allele_span = span;
-    }
+    let allele_span = cli.allele_span.unwrap_or(ALLELE_SPAN);
     let names: Vec<String> = evidence.sample_names().map(str::to_owned).collect();
     let excess: Vec<f64> = match &cli.fitted {
         Some(path) => {
@@ -99,7 +94,7 @@ fn main() {
         shorter_share: 0.5,
         fall_off: 0.3,
     };
-    let span = config.allele_span;
+    let span = allele_span;
     let mut header: Vec<String> = [
         "period",
         "repeats",
@@ -118,16 +113,22 @@ fn main() {
     header.extend(["rounds".to_owned(), "seconds".to_owned()]);
     println!("{}", header.join("\t"));
     for evidence in &strata {
-        if evidence.tracts_with_reads() < DEFAULT_REFUSAL_FLOOR {
+        if evidence.tracts_with_reads() < COUNTING_FIT_FLOOR {
             continue;
         }
         let fitting = Instant::now();
         let fit = if cli.pairs {
             fit_class_by_counting_with_pairs(
-                evidence, start, &excess, &config, cli.rounds, 1e-7, 10,
+                evidence,
+                start,
+                &excess,
+                allele_span,
+                cli.rounds,
+                1e-7,
+                10,
             )
         } else {
-            fit_class_by_counting(evidence, start, &excess, &config, cli.rounds, 1e-7)
+            fit_class_by_counting(evidence, start, &excess, allele_span, cli.rounds, 1e-7)
         };
         let mut row = vec![
             evidence.stratum.period.to_string(),

@@ -42,13 +42,13 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::counting_fit_errors::sandwich_errors;
 use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
-    expected_counts, fit_class_by_counting_with_pairs, fit_spread_by_pairs,
+    COUNTING_FIT_FLOOR, expected_counts, fit_class_by_counting_with_pairs, fit_spread_by_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, fit_period_by_penalised_counting,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    DEFAULT_REFUSAL_FLOOR, Slippage, SsrFitConfig, StratumEvidence,
+    ALLELE_SPAN, Slippage, StratumEvidence,
 };
 use pop_var_caller::run::{
     CohortTractStrata, every_read_group_pooled, the_tract_strata_of_a_cohort,
@@ -178,17 +178,14 @@ fn main() {
         strata.len(),
         rayon::current_num_threads()
     );
-    let mut config = SsrFitConfig::default();
-    if let Some(span) = cli.allele_span {
-        config.allele_span = span;
-    }
+    let allele_span = cli.allele_span.unwrap_or(ALLELE_SPAN);
     let start = Slippage {
         level: 0.05,
         shorter_share: 0.5,
         fall_off: 0.3,
     };
     let methods: Vec<&str> = cli.methods.split(',').collect();
-    let classes = (2 * config.allele_span + 1) as usize;
+    let classes = (2 * allele_span + 1) as usize;
     let flat = vec![1.0 / classes as f64; classes];
     let mut numbers = Numbers::default();
     let wanted = |evidence: &StratumEvidence| {
@@ -203,7 +200,7 @@ fn main() {
         let mut totals = (0_usize, 0.0, 0.0, 0_usize, 0_usize);
         let mut error_totals = (0.0, 0.0);
         for evidence in strata.iter().filter(|e| wanted(e)) {
-            if evidence.tracts_with_reads() < DEFAULT_REFUSAL_FLOOR {
+            if evidence.tracts_with_reads() < COUNTING_FIT_FLOOR {
                 continue;
             }
             let rows = evidence.rows_with_reads();
@@ -211,11 +208,10 @@ fn main() {
             let (estep_cpu, estep_wall, pairs_cpu, pairs_wall) = if cli.no_units {
                 (f64::NAN, f64::NAN, f64::NAN, f64::NAN)
             } else {
-                let (_, estep_cpu, estep_wall) = timed(|| {
-                    expected_counts(evidence, start, &flat, 1.0, &excess, config.allele_span)
-                });
+                let (_, estep_cpu, estep_wall) =
+                    timed(|| expected_counts(evidence, start, &flat, 1.0, &excess, allele_span));
                 let (_, pairs_cpu, pairs_wall) =
-                    timed(|| fit_spread_by_pairs(evidence, start, &flat, &excess, &config));
+                    timed(|| fit_spread_by_pairs(evidence, start, &flat, &excess, allele_span));
                 (estep_cpu, estep_wall, pairs_cpu, pairs_wall)
             };
             let (fit, fit_cpu, fit_wall) = if cli.units_only {
@@ -226,7 +222,7 @@ fn main() {
                         evidence,
                         start,
                         &excess,
-                        &config,
+                        allele_span,
                         2000,
                         cli.tolerance,
                         10,
@@ -237,7 +233,7 @@ fn main() {
             let errors_cpu = match (&fit, cli.errors) {
                 (Some(fit), true) => {
                     let (errors, cpu, wall) =
-                        timed(|| sandwich_errors(evidence, fit, &excess, &config));
+                        timed(|| sandwich_errors(evidence, fit, &excess, allele_span));
                     error_totals.0 += cpu;
                     error_totals.1 += wall;
                     let errors = errors.sandwich;
@@ -284,7 +280,7 @@ fn main() {
             }
             println!(
                 "{label}\t{}\t{}\t{}\t{}\t{rows}\t{:.3}\t{:.3}\t{estep_cpu:.3}\t{estep_wall:.3}\t{pairs_cpu:.3}\t{pairs_wall:.3}\t{fit_cpu:.3}\t{fit_wall:.3}\t{}\t{}\t{errors_cpu:.3}\t{}\t{}\t{in_class}\t{by_tract}",
-                config.allele_span,
+                allele_span,
                 evidence.stratum.period,
                 evidence.stratum.reference_repeats,
                 evidence.tracts_with_reads(),
@@ -322,7 +318,7 @@ fn main() {
             allele_prior_tracts: if *method == "D_tract_prior" { 1.0 } else { 0.0 },
             ..PenalisedFitConfig::prototype()
         }
-        .with_allele_span(config.allele_span);
+        .with_allele_span(allele_span);
         let mut periods: Vec<u8> = strata.iter().map(|e| e.stratum.period).collect();
         periods.sort_unstable();
         periods.dedup();
@@ -378,7 +374,7 @@ fn main() {
             }
             println!(
                 "{label}\t{method}\tspan {}\tperiod {period}\trows {rows}\tcpu {cpu:.1}\twall {wall:.1}\trounds {}\tclass_rounds {}\texpectation_s {:.1}\tstrength_s {:.1}\tpairs_s {:.1}\tpair_alternations {}\terrors_s {:.1}",
-                config.allele_span,
+                allele_span,
                 fit.rounds,
                 fit.class_rounds_counted,
                 fit.expectation_seconds,

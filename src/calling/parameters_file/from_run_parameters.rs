@@ -1093,11 +1093,10 @@ mod tests {
     };
     use crate::parameter_estimation::joint::slippage_curve::RiseShape;
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, ClimbRecord, DerivedStratum, PeriodAlleleLengthVariation, SharesProvenance,
-        Slippage, StratumFit, StratumOutcome, StratumRefusal,
+        SharesProvenance, Slippage, StratumFit, StratumOutcome, StratumRefusal,
     };
     use crate::parameter_estimation::joint::stratum_fits::{
-        AlleleLengthVariationRung, FittedAlleleLengthVariation,
+        AlleleLengthVariationRung, FittedAlleleLengthVariation, StratumRowsOfAFile,
     };
     use crate::parameter_estimation::repeat_strata::{
         RepeatCount, Stratum as SsrStratum, StratumKey,
@@ -1304,6 +1303,9 @@ mod tests {
     ///   Its group-0 shares are absent where its group-1 shares are not, so a reader that took
     ///   group 0's shares for every group would write this row's `shorter_share_and_fall_off_origin` as missing.
     /// - period 1 at 30 repeats — **refused**, which contributes nothing at all.
+    ///
+    /// The two derived strata and the period-2 pool are shapes only the climb wrote (deleted
+    /// 2026-10-16), so they come in through the rows of a file, as an older file's do.
     fn the_runs_slippage() -> StratumFits {
         let fitted = StratumOutcome::Fitted(Box::new(StratumFit {
             standard_errors: None,
@@ -1321,13 +1323,6 @@ mod tests {
             ],
             allele_length_variation: vec![0.1, 0.8, 0.1],
             concentration: Some(3.5),
-            climb: Some(ClimbRecord {
-                log_likelihood_a_tract: -1.25,
-                tracts_fitted: 900,
-                borrowed: Vec::new(),
-                ending: ClimbEnding::Settled,
-                walks: Vec::new(),
-            }),
             samples_fitted_on: None,
             tracts_of_its_own: 900,
             reads_crossing: 19_000,
@@ -1357,7 +1352,7 @@ mod tests {
                 None,
             ],
         }));
-        let derived = StratumOutcome::Derived(Box::new(DerivedStratum {
+        let derived = StratumRowsOfAFile {
             stratum: Stratum {
                 period: 2,
                 reference_repeats: 11,
@@ -1380,10 +1375,8 @@ mod tests {
                 }),
             ],
             shares_provenance: vec![None, None],
-            tracts_of_its_own: 12,
-            reads_crossing: 140,
-        }));
-        let blended_shares = StratumOutcome::Derived(Box::new(DerivedStratum {
+        };
+        let blended_shares = StratumRowsOfAFile {
             stratum: Stratum {
                 period: 3,
                 reference_repeats: 9,
@@ -1421,39 +1414,34 @@ mod tests {
                     },
                 }),
             ],
-            tracts_of_its_own: 4,
-            reads_crossing: 61,
-        }));
+        };
         let refused = StratumOutcome::Refused {
             stratum: Stratum {
                 period: 1,
                 reference_repeats: 30,
             },
-            tracts: 3,
-            reason: StratumRefusal::BelowTheFloor {
-                tracts: 3,
-                floor: 50,
-            },
+            tracts: 0,
+            reason: StratumRefusal::NoSpanningReads,
         };
         StratumFits::over(
-            &[fitted, derived, blended_shares, refused],
+            &[fitted, refused],
             BTreeMap::from([
                 (ReadGroupId(0), 0),
                 (ReadGroupId(1), 0),
                 (ReadGroupId(2), 1),
             ]),
         )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            PeriodAlleleLengthVariation {
-                period: 2,
-                allele_length_variation: vec![0.15, 0.7, 0.15],
-                concentration: 2.75,
-                tracts_fitted: 1_400,
-                strata_pooled: 2,
-                converged: true,
-            },
-        )]))
+        .with_rows_of_a_file(
+            [derived, blended_shares],
+            BTreeMap::from([(
+                2,
+                FittedAlleleLengthVariation {
+                    weights: vec![0.15, 0.7, 0.15],
+                    concentration: Some(2.75),
+                    concentration_standard_error: None,
+                },
+            )]),
+        )
     }
 
     /// **Two rates, and every part of the two keys differs** — different read groups, periods,
@@ -2903,7 +2891,6 @@ mod tests {
             ],
             allele_length_variation: vec![0.1, 0.8, 0.1],
             concentration: Some(3.5),
-            climb: None,
             samples_fitted_on: None,
             tracts_of_its_own: 900,
             reads_crossing: 19_000,
@@ -3555,7 +3542,6 @@ mod tests {
             ],
             allele_length_variation: vec![0.1, 0.8, 0.1],
             concentration: None,
-            climb: None,
             samples_fitted_on: None,
             tracts_of_its_own: 900,
             reads_crossing: 19_000,

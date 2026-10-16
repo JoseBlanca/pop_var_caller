@@ -5,12 +5,12 @@
 //!
 //! One run is one **cell** of the plan's grid — a motif length, a number of samples, a read depth,
 //! a truth and a seed. The drawing is the count-level simulator
-//! (`ssr_fit::bench_fixtures::cohort_draw`); the methods, the curves and the held-out score are in
+//! (`ssr_fit::bench_fixtures::cohort_draw`); the methods and the held-out score are in
 //! `ssr_fit::bench_fixtures::fit_bench`, whose documentation says how to add a method.
 //!
 //! ```text
 //! cargo run --release --features bench-fixtures --example ng_str_fit_bench -- \
-//!   --period 1 --samples 60 --depth 3 --seed 1 --truth pcr --methods A,B \
+//!   --period 1 --samples 60 --depth 3 --seed 1 --truth pcr --methods B,D_tract_prior \
 //!   --out rows.tsv --truth-out truth.tsv
 //! ```
 //!
@@ -21,7 +21,7 @@
 //! | column | meaning |
 //! |---|---|
 //! | `cell`, `period`, `samples`, `depth`, `truth_variant`, `seed` | the cell |
-//! | `method` | `A_raw`, `A_curves`, `B_raw`, `B_curves`, …; the bare name (`A`) on cost rows |
+//! | `method` | the method's name (`B`, `D_tract_prior`, …), with a fallback's suffix on held-out rows |
 //! | `repeats` | the class's reference repeat count, or `all` |
 //! | `parameter` | below |
 //! | `truth`, `estimate`, `standard_error` | `NA` where there is none |
@@ -121,7 +121,6 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -142,15 +141,14 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
 use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::fit_bench::{
     CallChanges, ClassCaller, ClassEstimate, ClassNumbers, CountingFitErrorMethod, FoldPlan,
     HeldOutClasses, HeldOutRun, HeldOutSettings, HeldOutSums, PeriodFit, Sampler, ScoringFallback,
-    TheClimb, TheCountingFit, ThePenalisedFit, call_changes, class_seed_across_motif_lengths,
+    TheCountingFit, ThePenalisedFit, call_changes, class_seed_across_motif_lengths,
     drawn_genotypes_in_window, fold_plans_across_motif_lengths, held_out_run, numbers_for_scoring,
-    variants_of,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     ParameterCurve as FittedCurve, PenalisedPeriodFit, stutter_prior_weight_problem,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    ALLELE_SPAN, Slippage, SsrFitConfig, StratumEvidence,
+    ALLELE_SPAN, Slippage, StratumEvidence,
 };
 use pop_var_caller::run::{
     CohortTractStrata, every_read_group_pooled, homozygote_excess_in_cohort_order,
@@ -226,10 +224,11 @@ struct Cli {
     /// Tell the methods the libraries' true multipliers.
     #[arg(long)]
     multipliers_told: bool,
-    /// The methods, comma-separated: `A` (the climb), `B` (the counting fit, spread from pairs),
-    /// `B_within` (the counting fit, spread from each sample's own two copies), `D` (penalised
-    /// counting) and `D_working_F` (the same, reporting at one sample the concentration it worked
-    /// at); the `B_` variants in `method_named` are for measurements.
+    /// The methods, comma-separated: `B` (the counting fit, spread from pairs), `B_within` (the
+    /// counting fit, spread from each sample's own two copies), `D` (penalised counting),
+    /// `D_tract_prior` (the same as `estimate-parameters` runs it) and `D_working_F` (reporting at
+    /// one sample the concentration it worked at); the `B_` variants in `method_named` are for
+    /// measurements. `A`, the climb, went with it on 2026-10-16.
     #[arg(long, value_delimiter = ',', default_value = "B")]
     methods: Vec<String>,
     /// Folds for the held-out score; 0 switches it off.
@@ -247,9 +246,6 @@ struct Cli {
     /// The held-out sampler beyond two samples: `automatic`, `dirichlet` or `sequential`.
     #[arg(long, default_value = "automatic")]
     sampler: String,
-    /// How many classes the climb fits at once (all the machine's threads by default).
-    #[arg(long)]
-    climb_strata_at_once: Option<usize>,
     /// Where the rows go.
     #[arg(long, required_unless_present = "fixture_out")]
     out: Option<PathBuf>,
@@ -347,16 +343,6 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
         return Box::new(fit);
     }
     match name {
-        "A" => {
-            let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-            Box::new(TheClimb {
-                config: SsrFitConfig {
-                    strata_at_once: NonZeroUsize::new(cli.climb_strata_at_once.unwrap_or(threads))
-                        .unwrap_or(NonZeroUsize::MIN),
-                    ..SsrFitConfig::default()
-                },
-            })
-        }
         "B" => Box::new(TheCountingFit {
             share_prior_tracts: cli
                 .share_prior_tracts
@@ -386,7 +372,7 @@ fn method_named(name: &str, cli: &Cli) -> Box<dyn PeriodFit> {
             ..TheCountingFit::default()
         }),
         other => panic!(
-            "no method is called {other}; the methods are A, B, B_within, B_noerrors, \
+            "no method is called {other}; the methods are B, B_within, B_noerrors, \
              B_noprior, B_tight, B_bootstrap, D, D_working_F and D_tract_prior"
         ),
     }
@@ -1063,7 +1049,6 @@ fn run_on_psps(cli: &Cli) {
         "the psp mode computes the held-out score only; --folds 0 leaves it nothing to do"
     );
     let fallbacks = fallbacks_asked(cli);
-    let curve_config = SsrFitConfig::default();
     let cell = cli
         .cell
         .clone()
@@ -1132,7 +1117,6 @@ fn run_on_psps(cli: &Cli) {
                 &folded,
                 &settings,
                 &fallbacks,
-                &curve_config,
                 cli.locus_out.is_some(),
             );
             eprintln!(
@@ -1395,7 +1379,6 @@ fn main() {
     );
 
     let settings = held_out_settings(&cli);
-    let curve_config = SsrFitConfig::default();
     // A drawn class is seeded by its repeat count alone (one motif length a run).
     let folded = HeldOutClasses::new(
         &drawn.strata,
@@ -1492,19 +1475,14 @@ fn main() {
         let method = method_named(name, &cli);
         let base = method.name();
         let started = Instant::now();
-        let raw = method.fit_period(&drawn.strata, &drawn.homozygote_excess, ALLELE_SPAN);
+        let estimates = method.fit_period(&drawn.strata, &drawn.homozygote_excess, ALLELE_SPAN);
         let fit_seconds = started.elapsed().as_secs_f64();
         eprintln!("{cell}: {base} fitted every locus in {fit_seconds:.1} s");
         rows.push(&base, "all", "fit_seconds", None, Some(fit_seconds), None);
-        let full = variants_of(method.as_ref(), raw, &drawn.strata, &curve_config);
-        for (variant, estimates) in &full {
-            recovery_rows(&mut rows, variant, estimates, &drawn.truth);
-        }
+        recovery_rows(&mut rows, &base, &estimates, &drawn.truth);
         if cli.calls_out.is_some() {
             let started = Instant::now();
-            for (variant, estimates) in &full {
-                call_lines(&mut calls, &rows.cell_columns, variant, estimates, &drawn);
-            }
+            call_lines(&mut calls, &rows.cell_columns, &base, &estimates, &drawn);
             eprintln!(
                 "{cell}: {base} calls compared in {:.1} s",
                 started.elapsed().as_secs_f64()
@@ -1517,7 +1495,6 @@ fn main() {
                 &folded,
                 &settings,
                 &fallbacks,
-                &curve_config,
                 cli.locus_out.is_some(),
             );
             eprintln!(

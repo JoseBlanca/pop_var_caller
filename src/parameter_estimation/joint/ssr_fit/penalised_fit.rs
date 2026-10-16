@@ -783,11 +783,10 @@ fn fitted_period(
 ///   points on its motif length's penalised curves: the level and both shares carry
 ///   [`LevelSource::PenalisedCurve`] / [`ShareSource::PenalisedCurve`], inside the curves' range,
 ///   with no parametric curve beside them. It was read from every sample, so
-///   [`StratumFit::samples_fitted_on`] is `None`, and [`StratumFit::climb`] is `None`. There is no
-///   floor of loci below which a class is refused.
+///   [`StratumFit::samples_fitted_on`] is `None`. There is no floor of loci below which a class
+///   is refused.
 /// - **A class with no reads at any locus is [`StratumOutcome::Refused`]** for
 ///   [`StratumRefusal::NoSpanningReads`], and takes no value off the curves.
-/// - **No class is [`StratumOutcome::Derived`].**
 ///
 /// A class's concentration is `None` when no locus of its motif length holds two samples with
 /// reads, or when the estimate stopped within 1% of an end of its search
@@ -1016,7 +1015,6 @@ fn outcome_of_a_class(
         slippage: vec![Some(fitted.slippage)],
         allele_length_variation: fitted.allele_length_variation,
         concentration,
-        climb: None,
         samples_fitted_on: None,
         tracts_of_its_own: loci_with_reads,
         reads_crossing,
@@ -3103,6 +3101,10 @@ mod tests {
     /// **The banded Cholesky solves what a dense solve does**, on a random positive-definite
     /// matrix of bandwidth four.
     #[test]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "fills dense[i][j] and dense[j][i] together"
+    )]
     fn the_banded_solve_is_the_dense_one() {
         let (size, width) = (12, 4);
         let mut band = SymmetricBand::zeros(size, width);
@@ -3217,10 +3219,7 @@ mod tests {
     /// 10⁻⁸.
     #[test]
     fn with_no_penalty_the_fit_is_the_counting_fit() {
-        let config = SsrFitConfig {
-            allele_span: 1,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 1;
         let spectrum = spectrum_of(3);
         let classes: Vec<StratumEvidence> = [(8_u64, 0.03), (9, 0.05), (10, 0.08)]
             .iter()
@@ -3242,7 +3241,7 @@ mod tests {
             .collect();
         let excess = [0.4; 10];
         let fit = PenalisedFitConfig {
-            allele_span: config.allele_span,
+            allele_span,
             smoothing: Smoothing::Fixed(1e-8),
             allele_pseudo_draws: 0.0,
             kink_knee: f64::INFINITY,
@@ -3256,7 +3255,13 @@ mod tests {
             // The counting fit without its shares' prior: with no floor here either, the two fits
             // maximise the same objective.
             let alone = fit_class_by_counting_at_share_prior(
-                evidence, fit.start, &excess, &config, 2000, 1e-10, 0.0,
+                evidence,
+                fit.start,
+                &excess,
+                allele_span,
+                2000,
+                1e-10,
+                0.0,
             );
             assert!(
                 (fitted.slippage.level - alone.slippage.level).abs() < 1e-5,
@@ -3471,7 +3476,6 @@ mod tests {
                 }
                 StratumOutcome::Fitted(fit) => {
                     assert!(evidence.rows_with_reads() > 0);
-                    assert_eq!(fit.climb, None);
                     assert_eq!(fit.samples_fitted_on, None);
                     assert_eq!(fit.slippage.len(), 1, "one slippage group");
                     assert_eq!(fit.tracts_of_its_own, 30);
@@ -3503,10 +3507,6 @@ mod tests {
                             assert!(value.is_finite() && value > 0.0, "{error:?}");
                         }
                     }
-                }
-                StratumOutcome::Derived(_) => panic!("the penalised fit derives no class"),
-                StratumOutcome::Refused { reason, .. } => {
-                    panic!("refused only for no spanning reads, not {reason:?}")
                 }
             }
         }

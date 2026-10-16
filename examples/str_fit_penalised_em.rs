@@ -41,7 +41,7 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, Smoothing, fit_period_by_penalised_counting,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    FittedCell, Slippage, SlippageCurveConfig, SsrFitConfig, Stratum, StratumEvidence, blend_level,
+    FittedCell, Slippage, SlippageCurveConfig, Stratum, StratumEvidence, blend_level,
     choose_rise_shape,
 };
 
@@ -206,10 +206,6 @@ fn main() {
             )
         })
         .collect();
-    let config = SsrFitConfig {
-        allele_span: span,
-        ..SsrFitConfig::default()
-    };
     let homozygote_excess: f64 = arguments
         .get(4)
         .map_or(0.3, |a| a.parse().expect("a homozygote excess"));
@@ -273,7 +269,7 @@ fn main() {
                         evidence,
                         fit.start,
                         &excess,
-                        &config,
+                        span,
                         fit.max_rounds,
                         fit.tolerance,
                         pair_alternations,
@@ -283,7 +279,7 @@ fn main() {
                         evidence,
                         fit.start,
                         &excess,
-                        &config,
+                        span,
                         fit.max_rounds,
                         fit.tolerance,
                     )

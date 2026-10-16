@@ -7,7 +7,7 @@
 //! - `pass`: one round of the counting fit's E-step over every class, one class after another, at
 //!   the starting numbers: what a round costs either fit;
 //! - `B`: the counting fit as the bench runs it (pairs of samples, up to 10 readings, 2,000 rounds,
-//!   tolerance 10⁻⁷, classes side by side, a class below the refusal floor not fitted);
+//!   tolerance 10⁻⁷, classes side by side, a class below `COUNTING_FIT_FLOOR` not fitted);
 //! - `D_every`: penalised counting choosing strengths every round (the first schedule), every
 //!   class counted every round;
 //! - `D_steady`: holding a curve's strength once it moves by less than 0.1;
@@ -30,14 +30,12 @@ use pop_var_caller::parameter_estimation::joint::ssr_fit::bench_fixtures::cohort
     CohortModel, LociPerClass, StutterRegime, draw_period,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::expected_counts::{
-    expected_counts, fit_class_by_counting_with_pairs,
+    COUNTING_FIT_FLOOR, expected_counts, fit_class_by_counting_with_pairs,
 };
 use pop_var_caller::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, fit_period_by_penalised_counting,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    ALLELE_SPAN, DEFAULT_REFUSAL_FLOOR, Slippage, SsrFitConfig,
-};
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{ALLELE_SPAN, Slippage};
 
 fn main() {
     let arguments: Vec<String> = std::env::args().collect();
@@ -65,10 +63,6 @@ fn main() {
     let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
     let classes = &drawn.strata;
     let excess = &drawn.homozygote_excess;
-    let config = SsrFitConfig {
-        allele_span: ALLELE_SPAN,
-        ..SsrFitConfig::default()
-    };
     let start = Slippage {
         level: 0.05,
         shorter_share: 0.5,
@@ -97,11 +91,17 @@ fn main() {
                 let rounds: Vec<usize> = classes
                     .par_iter()
                     .map(|evidence| {
-                        if evidence.tracts_with_reads() < DEFAULT_REFUSAL_FLOOR {
+                        if evidence.tracts_with_reads() < COUNTING_FIT_FLOOR {
                             return 0;
                         }
                         fit_class_by_counting_with_pairs(
-                            evidence, start, excess, &config, 2000, 1e-7, 10,
+                            evidence,
+                            start,
+                            excess,
+                            ALLELE_SPAN,
+                            2000,
+                            1e-7,
+                            10,
                         )
                         .rounds_in_all
                     })

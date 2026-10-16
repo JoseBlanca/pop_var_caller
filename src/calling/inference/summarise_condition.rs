@@ -2873,8 +2873,8 @@ mod tests {
         use crate::parameter_estimation::joint::share_curve::ShareSource;
         use crate::parameter_estimation::joint::slippage_curve::LevelSource;
         use crate::parameter_estimation::joint::ssr_fit::{
-            ClimbEnding, ClimbRecord, LevelProvenance, ShareProvenance, SharesProvenance, Slippage,
-            StratumFit, StratumOutcome,
+            LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit,
+            StratumOutcome,
         };
 
         let level = LevelProvenance {
@@ -2916,13 +2916,6 @@ mod tests {
                 slippage: slippage_of_each_group(level_in_group_0),
                 allele_length_variation,
                 concentration: Some(concentration),
-                climb: Some(ClimbRecord {
-                    log_likelihood_a_tract: -1.5,
-                    tracts_fitted: 40,
-                    borrowed: Vec::new(),
-                    ending: ClimbEnding::Settled,
-                    walks: Vec::new(),
-                }),
                 samples_fitted_on: None,
                 tracts_of_its_own: 40,
                 reads_crossing: 400,
@@ -9114,7 +9107,8 @@ mod tests {
     }
 
     /// **The middle rung of the tract ladder reaches the record too** — a stratum the fit never
-    /// reached, in a run whose fit pooled that motif period's tracts.
+    /// reached, in a run read from an older parameters file whose fit pooled that motif period's
+    /// tracts (no fit produces a pool now).
     ///
     /// **It is the rung neither of the fixtures beside it can produce**, and each of them can
     /// be produced by a mistake: a lookup that ignored the pool answers `StatedFlat`, and one
@@ -9123,20 +9117,20 @@ mod tests {
     /// two (`population_diversity.md` §8, check 3).
     #[test]
     fn a_tract_whose_stratum_the_fit_missed_is_seeded_from_its_motif_periods_pool() {
-        use crate::parameter_estimation::joint::ssr_fit::PeriodAlleleLengthVariation;
-        // A fit that reached no stratum of its own, but pooled every dinucleotide tract it saw.
-        let pooled = StratumFits::over(&[], std::collections::BTreeMap::new())
-            .with_period_allele_length_variations(std::collections::BTreeMap::from([(
+        use crate::parameter_estimation::joint::stratum_fits::FittedAlleleLengthVariation;
+        // An older parameters file whose fit reached no stratum of its own, but pooled every
+        // dinucleotide tract it saw.
+        let pooled = StratumFits::over(&[], std::collections::BTreeMap::new()).with_rows_of_a_file(
+            [],
+            std::collections::BTreeMap::from([(
                 2,
-                PeriodAlleleLengthVariation {
-                    period: 2,
-                    allele_length_variation: vec![0.10, 0.20, 0.40, 0.20, 0.10],
-                    concentration: 12.0,
-                    tracts_fitted: 900,
-                    strata_pooled: 7,
-                    converged: true,
+                FittedAlleleLengthVariation {
+                    weights: vec![0.10, 0.20, 0.40, 0.20, 0.10],
+                    concentration: Some(12.0),
+                    concentration_standard_error: None,
                 },
-            )]));
+            )]),
+        );
 
         let reads = [tract_reads(TRACT_CANDIDATE_REPEATS[0], 12)];
         let mut scratch = worker_scratch();

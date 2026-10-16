@@ -1416,10 +1416,12 @@ mod the_north_star_round_trip {
         LevelSource, RiseShape, SlippageCurve as FittedSlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, ClimbRecord, DerivedStratum, LevelProvenance, ShareProvenance,
-        SharesProvenance, Slippage, StratumFit, StratumOutcome, StratumRefusal,
+        LevelProvenance, ShareProvenance, SharesProvenance, Slippage, StratumFit, StratumOutcome,
+        StratumRefusal,
     };
-    use crate::parameter_estimation::joint::stratum_fits::{AlleleLengthVariationRung, NoSlippage};
+    use crate::parameter_estimation::joint::stratum_fits::{
+        AlleleLengthVariationRung, NoSlippage, StratumRowsOfAFile,
+    };
     use crate::read::input::read_groups::ReadGroups;
     use crate::types::{Ploidy, SsrPeriod};
 
@@ -1599,9 +1601,10 @@ mod the_north_star_round_trip {
 
     /// **Which periods the run fitted curves for.** A period with no curve is a real state — it
     /// is what `LevelSource::Cell` and `ShareSource::Stratum` mean, in their own words — and it
-    /// is also what decides which outcomes a period's strata can have: `derive_thin_strata`
-    /// produces a derived stratum **only** where its period has a curve, so a period without one
-    /// holds fitted strata and refusals and nothing else.
+    /// is also what decides which outcomes a period's strata can have: the climb (deleted
+    /// 2026-10-16), whose files these fixtures stand for, derived a stratum **only** where its
+    /// period had a curve, so a period without one holds fitted strata and refusals and nothing
+    /// else.
     fn the_period_has_curves(period: u8) -> bool {
         period != PERIODS[0]
     }
@@ -1643,13 +1646,14 @@ mod the_north_star_round_trip {
     /// - **the other two have both curves**, so a stratum with its own evidence blends
     ///   (`LevelSource::Blend`, the fit's ordinary case) and one without is derived whole from
     ///   them (`LevelSource::Curve`, both shares `ShareSource::Curve` and no slipped-read count,
-    ///   which is exactly what `derive_thin_strata` writes).
+    ///   which is exactly what the climb wrote for a thin stratum, and what its files still hold).
+    ///   No fit produces that last shape now, so it is returned apart, as the rows of a file.
     ///
-    /// **A refused stratum is `NoSpanningReads` everywhere**, because the other refusal —
-    /// `BelowTheFloor` — is what `derive_thin_strata` converts into a derived stratum wherever a
-    /// curve exists, so it cannot survive in a period that has one.
-    fn the_runs_outcomes() -> Vec<StratumOutcome> {
+    /// **A refused stratum is `NoSpanningReads`**, the only refusal there is: the climb's other
+    /// one, below its floor of tracts, went with the climb on 2026-10-16.
+    fn the_runs_outcomes() -> (Vec<StratumOutcome>, Vec<StratumRowsOfAFile>) {
         let mut outcomes = Vec::new();
+        let mut derived = Vec::new();
         for (which_period, period) in PERIODS.iter().enumerate() {
             // **One curve a period**, which is what the fit produces and what the file's own
             // section comment says.
@@ -1712,7 +1716,7 @@ mod the_north_star_round_trip {
                     .collect();
                 // **A share's origin, and the curve it names where it names one.** A source of
                 // `Stratum` means the period had no curve at all, so it carries neither the curve
-                // nor a reach — which is what `blend_share` writes in that arm.
+                // nor a reach — which is what the climb's blend wrote in that arm.
                 let a_share = |source: ShareSource| match source {
                     ShareSource::Stratum => ShareProvenance {
                         source,
@@ -1751,7 +1755,7 @@ mod the_north_star_round_trip {
                                     }),
                                     fall_off: a_share(ShareSource::Curve),
                                 },
-                                // What `derive_thin_strata` writes, and it writes nothing else.
+                                // What the climb wrote for a derived stratum, and nothing else.
                                 (Some(_), false) => SharesProvenance {
                                     slipped_reads: None,
                                     shorter_share: a_share(ShareSource::Curve),
@@ -1763,8 +1767,6 @@ mod the_north_star_round_trip {
                     .collect();
 
                 if refused {
-                    // **`NoSpanningReads`, not `BelowTheFloor`**: the second is what a period's
-                    // curves turn into a derived stratum, so it cannot survive beside them.
                     outcomes.push(StratumOutcome::Refused {
                         stratum,
                         tracts: 0,
@@ -1794,15 +1796,6 @@ mod the_north_star_round_trip {
                         slippage,
                         allele_length_variation: weights,
                         concentration,
-                        climb: Some(ClimbRecord {
-                            log_likelihood_a_tract: -a_number(2.0, &keys),
-                            tracts_fitted: 100 + which_repeats,
-                            // **Empty, which is what a stratum that stood on its own tracts has** —
-                            // this field names the neighbouring repeat counts it borrowed from.
-                            borrowed: Vec::new(),
-                            ending: ClimbEnding::Settled,
-                            walks: Vec::new(),
-                        }),
                         samples_fitted_on: None,
                         tracts_of_its_own: 100 + which_repeats,
                         reads_crossing: 5_000 + which_repeats as u64,
@@ -1810,25 +1803,23 @@ mod the_north_star_round_trip {
                         shares_provenance: shares,
                     })));
                 } else {
-                    outcomes.push(StratumOutcome::Derived(Box::new(DerivedStratum {
+                    derived.push(StratumRowsOfAFile {
                         stratum,
                         slippage,
                         level_provenance: level,
                         shares_provenance: shares,
-                        tracts_of_its_own: 3,
-                        reads_crossing: 40,
-                    })));
+                    });
                 }
             }
         }
-        outcomes
+        (outcomes, derived)
     }
 
     /// **The tract ladder's middle rung**, one pooled spectrum a period, for the periods whose
     /// curves the fit drew — the rung a run that skips the second pass over its tracts does not
-    /// have, and the one the file writes in `allele_length_variation_by_period`.
-    fn the_runs_period_pools()
-    -> BTreeMap<u8, crate::parameter_estimation::joint::ssr_fit::PeriodAlleleLengthVariation> {
+    /// have, and the one the file writes in `allele_length_variation_by_period`. Only the climb
+    /// pooled, so these too come in as the rows of an older file.
+    fn the_runs_period_pools() -> BTreeMap<u8, FittedAlleleLengthVariation> {
         PERIODS
             .iter()
             .enumerate()
@@ -1844,13 +1835,10 @@ mod the_north_star_round_trip {
                 }
                 (
                     *period,
-                    crate::parameter_estimation::joint::ssr_fit::PeriodAlleleLengthVariation {
-                        period: *period,
-                        allele_length_variation: weights,
-                        concentration: a_number(2.5, &[which_period]),
-                        tracts_fitted: 400 + which_period,
-                        strata_pooled: REPEAT_COUNTS.count(),
-                        converged: true,
+                    FittedAlleleLengthVariation {
+                        weights,
+                        concentration: Some(a_number(2.5, &[which_period])),
+                        concentration_standard_error: None,
                     },
                 )
             })
@@ -1914,6 +1902,7 @@ mod the_north_star_round_trip {
         let slippage_group_of: BTreeMap<ReadGroupId, u32> = (0..read_group_count())
             .map(|group| (ReadGroupId(group as u32), (group % SLIPPAGE_GROUPS) as u32))
             .collect();
+        let (outcomes, derived) = the_runs_outcomes();
         let parameters = RunParameters::assemble(
             &rates,
             &minted,
@@ -1921,8 +1910,8 @@ mod the_north_star_round_trip {
             DeclaredBatches::all_together(&read_groups),
             inbreeding.iter().map(|estimate| estimate.value).collect(),
             SpectrumSeed::new(1.0, 6e-4, SeedRegime::FittedCurve),
-            StratumFits::over(&the_runs_outcomes(), slippage_group_of)
-                .with_period_allele_length_variations(the_runs_period_pools()),
+            StratumFits::over(&outcomes, slippage_group_of)
+                .with_rows_of_a_file(derived, the_runs_period_pools()),
             the_runs_substitution_rates(),
             Ploidy::try_new(2).expect("diploid"),
         );

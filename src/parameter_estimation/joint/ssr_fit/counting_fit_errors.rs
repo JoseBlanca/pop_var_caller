@@ -215,7 +215,7 @@ fn slopes_by_tract(
     layout: &Layout,
     source: ConcentrationSource,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> Vec<Vec<f64>> {
     let counts = expected_counts_by_tract(
         evidence,
@@ -223,7 +223,7 @@ fn slopes_by_tract(
         &point.shares,
         point.concentration,
         homozygote_excess,
-        config,
+        allele_span,
     );
     let mut slopes: Vec<Vec<f64>> = counts
         .iter()
@@ -237,7 +237,7 @@ fn slopes_by_tract(
             point.slippage,
             &point.shares,
             homozygote_excess,
-            config.allele_span,
+            allele_span,
         );
         let at = layout.concentration_index();
         for (slope, pairwise) in slopes
@@ -416,9 +416,9 @@ fn errors_from_covariance(
 
 /// **The sandwich errors of a counting fit, and the plain inverse curvature beside them.**
 ///
-/// `fitted` is a counting fit of `evidence`, at `homozygote_excess` and `config` — the same ones it
-/// was fitted with; its errors follow the estimator it records (`concentration_from`). **Where the
-/// fit gives no concentration** (`CountedClass::concentration` is `None`) neither it nor the
+/// `fitted` is a counting fit of `evidence`, at `homozygote_excess` and `allele_span` — the same
+/// ones it was fitted with; its errors follow the estimator it records (`concentration_from`).
+/// **Where the fit gives no concentration** (`CountedClass::concentration` is `None`) neither it nor the
 /// between-locus share has an error ([`StratumError::NotIdentified`]), and the other numbers'
 /// errors are those with the concentration held where the fit counted at it.
 ///
@@ -436,10 +436,10 @@ pub fn sandwich_errors(
     evidence: &StratumEvidence,
     fitted: &CountedClass,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
 ) -> CurvatureErrors {
     let source = fitted.concentration_from;
-    let classes = allele_classes_of(config);
+    let classes = allele_classes_in(allele_span);
     let pivot = fitted
         .allele_length_variation
         .iter()
@@ -471,7 +471,14 @@ pub fn sandwich_errors(
         concentration: fitted.concentration_counted_at,
     };
     let from_pairs = layout.with_concentration && source == ConcentrationSource::PairsOfSamples;
-    let by_tract = slopes_by_tract(evidence, &at, &layout, source, homozygote_excess, config);
+    let by_tract = slopes_by_tract(
+        evidence,
+        &at,
+        &layout,
+        source,
+        homozygote_excess,
+        allele_span,
+    );
 
     // The slopes' change, column by column: minus the derivative of the summed slope.
     let mut change = vec![0.0; size * size];
@@ -486,7 +493,14 @@ pub fn sandwich_errors(
         for (side, sign) in [1.0, -1.0].into_iter().enumerate() {
             let moved = at.moved(&layout, column, sign * step);
             sides[side] = summed(
-                &slopes_by_tract(evidence, &moved, &layout, source, homozygote_excess, config),
+                &slopes_by_tract(
+                    evidence,
+                    &moved,
+                    &layout,
+                    source,
+                    homozygote_excess,
+                    allele_span,
+                ),
                 size,
             );
         }
@@ -506,7 +520,7 @@ pub fn sandwich_errors(
         &at.shares,
         at.concentration,
         homozygote_excess,
-        config,
+        allele_span,
     )
     .iter()
     .map(|counts| counts.draws.iter().sum::<f64>())
@@ -667,7 +681,7 @@ pub fn bootstrap_errors(
     evidence: &StratumEvidence,
     fitted: &CountedClass,
     homozygote_excess: &[f64],
-    config: &SsrFitConfig,
+    allele_span: i32,
     settings: BootstrapSettings,
 ) -> CountedClassErrors {
     let replicates: Vec<CountedClass> = (0..settings.replicates)
@@ -684,7 +698,7 @@ pub fn bootstrap_errors(
                 &drawn,
                 fitted,
                 homozygote_excess,
-                config,
+                allele_span,
                 settings.max_rounds,
                 settings.tolerance,
                 settings.alternations,
@@ -756,10 +770,7 @@ mod tests {
     /// numerically, at a point away from the answer, for every coordinate.
     #[test]
     fn the_slope_from_the_expected_counts_is_the_objectives_slope() {
-        let config = SsrFitConfig {
-            allele_span: 2,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 2;
         let evidence = draw_stratum(TRUTH, &spectrum_of(5), 0.5, 0.4, 60, 6, 5, 2, 3);
         let excess = [0.4; 6];
         let at = Point {
@@ -786,13 +797,13 @@ mod tests {
                 &point.shares,
                 point.concentration,
                 &excess,
-                &config,
+                allele_span,
             )
             .iter()
             .map(|counts| counts.log_likelihood)
             .sum()
         };
-        let slopes = slopes_by_tract(&evidence, &at, &layout, source, &excess, &config);
+        let slopes = slopes_by_tract(&evidence, &at, &layout, source, &excess, allele_span);
         let analytic = summed(&slopes, layout.width());
         for (which, value) in analytic.iter().enumerate() {
             let step = 1e-5;
@@ -812,10 +823,7 @@ mod tests {
     /// twenty independent samples would.
     #[test]
     fn the_sandwich_widens_the_share_errors_where_tracts_differ() {
-        let config = SsrFitConfig {
-            allele_span: 1,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 1;
         let evidence = draw_stratum(TRUTH, &spectrum_of(3), 0.5, 0.4, 300, 20, 3, 1, 11);
         let excess = [0.4; 20];
         let start = Slippage {
@@ -823,14 +831,21 @@ mod tests {
             shorter_share: 0.5,
             fall_off: 0.3,
         };
-        let fitted =
-            fit_class_by_counting_with_pairs(&evidence, start, &excess, &config, 2000, 1e-7, 10);
-        let curvature = sandwich_errors(&evidence, &fitted, &excess, &config);
+        let fitted = fit_class_by_counting_with_pairs(
+            &evidence,
+            start,
+            &excess,
+            allele_span,
+            2000,
+            1e-7,
+            10,
+        );
+        let curvature = sandwich_errors(&evidence, &fitted, &excess, allele_span);
         let bootstrap = bootstrap_errors(
             &evidence,
             &fitted,
             &excess,
-            &config,
+            allele_span,
             BootstrapSettings {
                 replicates: 60,
                 seed: 5,
@@ -862,21 +877,25 @@ mod tests {
     /// the other numbers keep theirs.
     #[test]
     fn a_concentration_the_fit_cannot_place_has_no_error() {
-        let config = SsrFitConfig {
-            allele_span: 1,
-            ..SsrFitConfig::default()
-        };
+        let allele_span = 1;
         let evidence = draw_stratum(TRUTH, &spectrum_of(3), 0.5, 1.0, 300, 1, 30, 1, 2);
         let excess = [1.0];
-        let fitted =
-            fit_class_by_counting_with_pairs(&evidence, TRUTH, &excess, &config, 2000, 1e-7, 10);
+        let fitted = fit_class_by_counting_with_pairs(
+            &evidence,
+            TRUTH,
+            &excess,
+            allele_span,
+            2000,
+            1e-7,
+            10,
+        );
         assert_eq!(fitted.concentration, None, "{fitted:?}");
-        let curvature = sandwich_errors(&evidence, &fitted, &excess, &config);
+        let curvature = sandwich_errors(&evidence, &fitted, &excess, allele_span);
         let bootstrap = bootstrap_errors(
             &evidence,
             &fitted,
             &excess,
-            &config,
+            allele_span,
             BootstrapSettings {
                 replicates: 10,
                 seed: 3,

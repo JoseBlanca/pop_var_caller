@@ -58,7 +58,7 @@
 //! a pooled figure would call a size adequate after one of them had already gone.
 //!
 //! ```text
-//! ng_joint_str_harness [fit|faces-truth|kappa|classes|seeds|size|library|borrow|borrow-edge]
+//! ng_joint_str_harness [fit|faces-truth|kappa|classes|seeds|size]
 //!     [samples] [depth] [loci] [classes] [kappa]
 //! ```
 
@@ -1362,132 +1362,11 @@ fn stratum_size_sweep(samples: usize, depth: u32, only: usize, classes: usize, k
 // The same draw, fitted by this program and by the library
 // ---------------------------------------------------------------------
 
-/// Fit one drawn stratum twice — here and in
-/// `parameter_estimation::joint::ssr_fit` — and print the two answers side by side.
-///
-/// **This is the test that says the library estimator was lifted out of this program rather
-/// than written again.** Two implementations of one model are two things to keep agreeing, and
-/// the only way to know they still do is to hand them the same draw. They are not expected to
-/// agree bit for bit: the library sums the genotype prior's identical-by-descent and
-/// independent-draw halves separately, so that a sample may carry its own homozygote excess,
-/// and that reorders a few additions.
-fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
-    use pop_var_caller::parameter_estimation::joint::ssr_fit;
-
-    println!(
-        "\nThe same draw, fitted twice — {} classes, {} samples, {} reads a locus, {loci} \
-         tracts, concentration {:.3}",
-        truth.classes, truth.samples, truth.depth, truth.kappa
-    );
-
-    let data = truth.draw(loci, seed);
-
-    let started = Instant::now();
-    let (here, _) = fit(
-        &data,
-        Candidate::DirichletPoints,
-        truth.inbreeding,
-        truth.classes,
-        &starting_points(truth.classes),
-    );
-    let here_seconds = started.elapsed().as_secs_f64();
-
-    // The same counts, in the library's shape. A sample with no read at a tract is left out
-    // there rather than carried as a row of zeros, which is what the library does with a real
-    // cohort at three reads a site.
-    let span = (truth.classes as i32 - 1) / 2;
-    let tracts: Vec<ssr_fit::TractReads> = data
-        .iter()
-        .map(|panel| ssr_fit::TractReads {
-            samples: panel
-                .iter()
-                .enumerate()
-                .filter(|(_, counts)| counts.iter().any(|reads| *reads > 0))
-                .map(|(sample, counts)| ssr_fit::SampleTractReads {
-                    sample: sample as u32,
-                    by_library: vec![(ssr_fit::LibraryIndex(sample as u32), counts.clone())],
-                })
-                .collect(),
-        })
-        .collect();
-    let evidence = ssr_fit::StratumEvidence {
-        stratum: ssr_fit::Stratum {
-            period: 2,
-            reference_repeats: 10,
-        },
-        tracts,
-        read_span: span,
-        groups: 1,
-        // One library a sample, as the library's own drawn strata have it.
-        libraries: (0..truth.samples as u32)
-            .map(|sample| ssr_fit::Library::in_group(pop_var_caller::types::ReadGroupId(sample), 0))
-            .collect(),
-        tracts_over_guard_threshold: 0,
-        reads_reaching_not_crossing: 0,
-        guard_reads: 0,
-        // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero bases
-        // compared is what `substitution_rate()` returns `None` for, which is the honest answer
-        // here rather than a fitted zero.
-        bases_compared: 0,
-        mismatching_bases: 0,
-    };
-    let config = ssr_fit::SsrFitConfig {
-        allele_span: span,
-        ..ssr_fit::SsrFitConfig::default()
-    };
-    let started = Instant::now();
-    let there = ssr_fit::fit_stratum(&evidence, &vec![truth.inbreeding; truth.samples], &config)
-        .expect("the drawn stratum carries reads");
-    let there_seconds = started.elapsed().as_secs_f64();
-    let there_slippage = there.slippage[0].expect("the one group carries reads");
-
-    let rows: [(&str, f64, f64, f64); 4] = [
-        (
-            "slippage level",
-            here.slippage.level,
-            there_slippage.level,
-            truth.slippage.level,
-        ),
-        (
-            "shorter-share",
-            here.slippage.down_share,
-            there_slippage.shorter_share,
-            truth.slippage.down_share,
-        ),
-        (
-            "fall-off",
-            here.slippage.fall_off,
-            there_slippage.fall_off,
-            truth.slippage.fall_off,
-        ),
-        (
-            "concentration",
-            here.kappa,
-            there
-                .concentration
-                .expect("the climb fills the concentration"),
-            truth.kappa,
-        ),
-    ];
-    println!("\n  number             harness      library    difference        truth");
-    for (name, harness, library, truth_value) in rows {
-        println!(
-            "  {name:<16} {harness:>10.6}  {library:>10.6}  {:>12.2e}  {truth_value:>10.6}",
-            (library - harness).abs() / harness.abs().max(1e-12)
-        );
-    }
-    for class in 0..truth.classes {
-        println!(
-            "  spectrum[{class}]      {:>10.6}  {:>10.6}  {:>12.2e}  {:>10.6}",
-            here.spectrum[class],
-            there.allele_length_variation[class],
-            (there.allele_length_variation[class] - here.spectrum[class]).abs()
-                / here.spectrum[class].abs().max(1e-12),
-            truth.spectrum[class],
-        );
-    }
-    println!("\n  harness {here_seconds:.1} s, library {there_seconds:.1} s");
-}
+// **Removed 2026-10-16: the `library` mode fitted one draw here and with the library's climb**
+// (`ssr_fit::fit_stratum`), the estimator lifted from this program, and printed the two side by
+// side. The climb was deleted for the penalised fit (`doc/devel/ng/arch/str_penalised_fit.md`
+// §4.1), which is a different estimator, so there is nothing left in the library for this
+// program to agree with.
 
 // ---------------------------------------------------------------------
 // When a thin stratum should borrow from its neighbours
@@ -1522,10 +1401,6 @@ fn main() {
         .map_or(0.5, |a| a.parse().expect("a concentration"));
 
     match mode.as_str() {
-        "library" => {
-            let truth = Truth::default_for(classes, samples, depth, kappa);
-            library_agreement(&truth, loci, 11);
-        }
         "size" => stratum_size_sweep(samples, depth, loci, classes, kappa),
         "kappa" => kappa_sweep(classes, samples, depth, loci),
         "classes" => {

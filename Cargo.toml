@@ -231,10 +231,11 @@ alloc-mimalloc = ["dep:mimalloc"]
 # slot.
 default = ["alloc-mimalloc"]
 # Compile the joint fit's drawn-evidence generators — `ssr_fit::bench_fixtures`
-# (a stratum drawn at a known slippage) and `fit::bench_fixtures` (a cohort drawn
-# at a known error rate, heterozygosity and inbreeding) — outside `cfg(test)`, so
-# `benches/ng_joint_fit_perf.rs` can time the real `fit_stratum` / `fit_strata` /
-# `fit_jointly` on evidence that needs no CRAM and no reference genome.
+# (a stratum drawn at a known slippage, and the repeat-tract fitting bench) and
+# `fit::bench_fixtures` (a cohort drawn at a known error rate, heterozygosity and
+# inbreeding) — outside `cfg(test)`, so `benches/ng_joint_fit_perf.rs` can time the
+# real `fit_jointly`, and `examples/ng_str_fit_bench.rs` the repeat-tract fit, on
+# evidence that needs no CRAM and no reference genome.
 #
 # **The generators are the ones the module's own positive controls draw from**, not
 # copies: a benchmark drawn differently from the oracle would be timing a workload
@@ -333,28 +334,17 @@ test = true
 name = "ng_str_stutter_benchmark"
 test = true
 
-# The thin-stratum gate draws its strata from `ssr_fit::bench_fixtures`, which exists
-# only under `cfg(test)` or the `bench-fixtures` feature. Without this entry a plain
-# `cargo test` — which builds every example — fails to compile the crate at all.
-#
-# The `ng_joint_fit_perf` bench above deliberately avoids `required-features` so that
-# `cargo bench --no-run` still catches it going stale. That trade is not available
-# here: this example *names* the gated module in a `use`, so there is no version of it
-# that compiles without the feature and refuses at startup instead.
-[[example]]
-name = "ng_ssr_thin_stratum_gate"
-required-features = ["bench-fixtures"]
-
-# Where the repeat-tract fit's threads are better spent — over one repeat-length class's
-# tracts, or over the classes at once. Draws its classes from `ssr_fit::bench_fixtures`,
-# so it needs the same feature as the gate above.
-[[example]]
-name = "ng_ssr_strata_threads"
-required-features = ["bench-fixtures"]
-
 # Whether the counting fit's standard errors are honest: draws repeat classes from a known
 # truth and counts how often it lies within one and two reported errors, for the bootstrap,
 # the sandwich and the naive curvature (`ssr_fit::counting_fit_errors`).
+#
+# It draws from `ssr_fit::bench_fixtures`, which exists only under `cfg(test)` or the
+# `bench-fixtures` feature; without this entry a plain `cargo test` — which builds every
+# example — fails to compile the crate at all. The `ng_joint_fit_perf` bench above
+# deliberately avoids `required-features` so that `cargo bench --no-run` still catches it
+# going stale. That trade is not available here: this example *names* the gated module in a
+# `use`, so there is no version of it that compiles without the feature and refuses at
+# startup instead. The same holds for every example below that draws from the module.
 [[example]]
 name = "ng_str_counting_fit_errors"
 required-features = ["bench-fixtures"]

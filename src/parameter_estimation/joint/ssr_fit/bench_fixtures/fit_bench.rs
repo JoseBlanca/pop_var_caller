@@ -1,6 +1,6 @@
 //! **The library half of the repeat-tract fitting bench**: the interface every fitting method
-//! implements, the existing curves applied to any method's answers, and a held-out score that does
-//! not depend on the method (`doc/devel/ng/research/str_fit_research_plan.md` §2, §5).
+//! implements and a held-out score that does not depend on the method
+//! (`doc/devel/ng/research/str_fit_research_plan.md` §2, §5).
 //!
 //! The bench itself is `examples/ng_str_fit_bench.rs`: it draws a cohort with
 //! [`cohort_draw`](super::cohort_draw), runs each method through this interface, and writes one row
@@ -18,13 +18,17 @@
 //! `-allele_span ..= +allele_span` (the outermost two meaning "this far or further"), the
 //! concentration `c` of the Dirichlet each locus's frequencies are drawn from, and a standard error
 //! for any of them the method can give. **Absent is a legitimate answer**: a number the method
-//! cannot estimate is `None`, never a fitted zero. A method that draws its own curves across
-//! repeat count says so with [`PeriodFit::draws_its_own_curves`]; otherwise the bench scores it
-//! twice, as it comes (`_raw`) and after the curves the caller draws today (`_curves`,
-//! [`with_the_curves`]).
+//! cannot estimate is `None`, never a fitted zero. Each method's answers are reported under its
+//! own name.
 //!
-//! Two methods are wired in: [`TheClimb`] (`A`, the fit the caller ships) and [`TheCountingFit`]
-//! (`B`, expectation maximisation per class with the spread read from pairs of samples).
+//! Two methods are wired in: [`ThePenalisedFit`] (`D`, and `D_tract_prior`, the fit
+//! `estimate-parameters` runs) and [`TheCountingFit`] (`B`, expectation maximisation per class
+//! with the spread read from pairs of samples, the baseline the held-out comparisons are made
+//! against). **Two methods went with the climb on 2026-10-16** (`arch/str_penalised_fit.md`
+//! §4.1): `A`, the climb itself, and the `_curves` variant of any method that did not draw its own
+//! curves, which applied the climb's curves to its answers (`B_curves`); the counting fit's
+//! answers, which were reported as `B_raw` beside it, are now reported as `B`. Their results stay
+//! in the research reports.
 //!
 //! # The held-out score
 //!
@@ -49,7 +53,7 @@
 //!   [`HeldOutSettings::target_standard_error`] (0.05 by default) or the draw limit is reached; the
 //!   error is reported either way.
 //!
-//! **The climb's own 256-point average is not used**: at 13 allele lengths it is several
+//! **The climb's 256-point average was not used**: at 13 allele lengths it is several
 //! log-likelihood units a locus wrong (`fit_precision_quadrature_average_2026-10-01.md`).
 //!
 //! Every method's score at a locus uses the same random numbers, so differences between methods
@@ -81,9 +85,6 @@ pub struct ClassEstimate {
     /// The concentration `c`; the between-locus share is `1 / (1 + c)`.
     pub concentration: Option<f64>,
     pub errors: ClassErrors,
-    /// **The reads the class's answer rests on**, which the curves weigh its own stutter by: the
-    /// class's spanning reads, unless the method read only some of them.
-    pub reads_crossing: u64,
 }
 
 /// **The standard errors a method gives**, each on its number's own scale; `None` where it gives
@@ -116,7 +117,6 @@ impl ClassEstimate {
             allele_length_variation: None,
             concentration: None,
             errors: ClassErrors::default(),
-            reads_crossing: evidence.spanning_reads(),
         }
     }
 
@@ -251,7 +251,7 @@ impl ClassNumbers {
 
 /// **A way of fitting every class of one motif length.** See the module documentation.
 pub trait PeriodFit: Sync {
-    /// The method's name in the bench's output, e.g. `A`.
+    /// The method's name in the bench's output, e.g. `B`.
     fn name(&self) -> String;
 
     /// Fit `classes`, every class of one motif length, each sample's homozygote excess held at
@@ -263,89 +263,19 @@ pub trait PeriodFit: Sync {
         homozygote_excess: &[f64],
         allele_span: i32,
     ) -> Vec<ClassEstimate>;
-
-    /// Whether the method draws its own curves across repeat count, so the caller's curves are not
-    /// applied after it.
-    fn draws_its_own_curves(&self) -> bool {
-        false
-    }
 }
 
 // ---------------------------------------------------------------------
 // The two methods wired in
 // ---------------------------------------------------------------------
 
-/// **Method A: the climb**, as the caller runs it ([`fit_strata_on_sample_subsets`], so a cohort
-/// of more than 256 samples is fitted on a subset grown until each class's level is measured to
-/// 2%), with the curves left for the bench to apply.
-#[derive(Debug, Clone)]
-pub struct TheClimb {
-    pub config: SsrFitConfig,
-}
-
-impl PeriodFit for TheClimb {
-    fn name(&self) -> String {
-        "A".to_owned()
-    }
-
-    fn fit_period(
-        &self,
-        classes: &[StratumEvidence],
-        homozygote_excess: &[f64],
-        allele_span: i32,
-    ) -> Vec<ClassEstimate> {
-        let mut config = self.config.clone();
-        config.allele_span = allele_span;
-        config.curve.draw_curves = false;
-        // The drawn samples are exchangeable, so their own order is as good as the run's.
-        let order: Vec<usize> = (0..homozygote_excess.len()).collect();
-        let outcomes = fit_strata_on_sample_subsets(classes, homozygote_excess, &order, &config);
-        classes
-            .iter()
-            .zip(outcomes)
-            .map(|(evidence, outcome)| match outcome {
-                StratumOutcome::Fitted(fit) => {
-                    let value = |error: StratumError| error.value();
-                    let errors =
-                        fit.standard_errors
-                            .as_ref()
-                            .map_or_else(ClassErrors::default, |errors| {
-                                let slippage = errors.slippage.first().copied().flatten();
-                                ClassErrors {
-                                    level: slippage.and_then(|group| value(group.level)),
-                                    shorter_share: slippage
-                                        .and_then(|group| value(group.shorter_share)),
-                                    fall_off: slippage.and_then(|group| value(group.fall_off)),
-                                    concentration: value(errors.concentration),
-                                    allele_length_variation: errors
-                                        .allele_length_variation
-                                        .iter()
-                                        .map(|error| value(*error))
-                                        .collect(),
-                                }
-                            });
-                    ClassEstimate {
-                        stratum: evidence.stratum,
-                        slippage: fit.slippage.first().copied().flatten(),
-                        allele_length_variation: Some(fit.allele_length_variation.clone()),
-                        concentration: fit.concentration,
-                        errors,
-                        reads_crossing: fit.reads_crossing,
-                    }
-                }
-                StratumOutcome::Derived(_) | StratumOutcome::Refused { .. } => {
-                    ClassEstimate::absent(evidence)
-                }
-            })
-            .collect()
-    }
-}
-
 /// **Method B: the counting fit**, class by class
 /// ([`fit_class_by_counting_with_pairs`](super::super::expected_counts::fit_class_by_counting_with_pairs)
 /// with `pairs`, the within-sample version without), as `examples/ng_str_counting_fit.rs` runs it.
-/// A class with fewer loci carrying reads than the climb's refusal floor is left absent, as that
-/// example leaves it. Its concentration is absent where the fit cannot place it.
+/// A class with fewer loci carrying reads than
+/// [`COUNTING_FIT_FLOOR`](super::super::expected_counts::COUNTING_FIT_FLOOR) (8, the climb's
+/// refusal floor) is left absent, as that example leaves it. Its concentration is absent where the
+/// fit cannot place it.
 ///
 /// **Its standard errors** come from `counting_fit_errors`, by the method `errors` names.
 #[derive(Debug, Clone, Copy)]
@@ -412,10 +342,6 @@ impl PeriodFit for TheCountingFit {
         use super::super::counting_fit_errors::{
             BootstrapSettings, CountedClassErrors, bootstrap_errors, sandwich_errors,
         };
-        let config = SsrFitConfig {
-            allele_span,
-            ..SsrFitConfig::default()
-        };
         let start = Slippage {
             level: 0.05,
             shorter_share: 0.5,
@@ -426,7 +352,8 @@ impl PeriodFit for TheCountingFit {
         classes
             .par_iter()
             .map(|evidence| {
-                if evidence.tracts_with_reads() < DEFAULT_REFUSAL_FLOOR {
+                if evidence.tracts_with_reads() < super::super::expected_counts::COUNTING_FIT_FLOOR
+                {
                     return ClassEstimate::absent(evidence);
                 }
                 let fit = if self.pairs {
@@ -434,7 +361,7 @@ impl PeriodFit for TheCountingFit {
                         evidence,
                         start,
                         homozygote_excess,
-                        &config,
+                        allele_span,
                         self.max_rounds,
                         self.tolerance,
                         self.alternations,
@@ -445,24 +372,24 @@ impl PeriodFit for TheCountingFit {
                         evidence,
                         start,
                         homozygote_excess,
-                        &config,
+                        allele_span,
                         self.max_rounds,
                         self.tolerance,
                     )
                 };
                 let found: Option<CountedClassErrors> = match self.errors {
                     CountingFitErrorMethod::None => None,
-                    CountingFitErrorMethod::Sandwich => {
-                        Some(sandwich_errors(evidence, &fit, homozygote_excess, &config).sandwich)
-                    }
+                    CountingFitErrorMethod::Sandwich => Some(
+                        sandwich_errors(evidence, &fit, homozygote_excess, allele_span).sandwich,
+                    ),
                     CountingFitErrorMethod::Bootstrap(replicates) => Some(bootstrap_errors(
                         evidence,
                         &fit,
                         homozygote_excess,
-                        &config,
+                        allele_span,
                         BootstrapSettings {
                             replicates,
-                            seed: u64::from(evidence.stratum.reference_repeats),
+                            seed: evidence.stratum.reference_repeats,
                             max_rounds: self.max_rounds,
                             tolerance: self.tolerance,
                             alternations: self.alternations,
@@ -486,7 +413,6 @@ impl PeriodFit for TheCountingFit {
                     allele_length_variation: Some(fit.allele_length_variation),
                     concentration: fit.concentration,
                     errors,
-                    reads_crossing: evidence.spanning_reads(),
                 }
             })
             .collect()
@@ -494,7 +420,8 @@ impl PeriodFit for TheCountingFit {
 }
 
 /// **Method D: penalised counting**, every class of the motif length at once, each number a
-/// penalised curve across repeat count ([`fit_period_by_penalised_counting`]), the spread read off pairs of samples as method B reads it. It draws its own curves, fits every
+/// penalised curve across repeat count ([`fit_period_by_penalised_counting`]), the spread read off
+/// pairs of samples as method B reads it. It fits every
 /// class with reads (no refusal floor: a thin class takes what its counts and its neighbours say),
 /// and gives standard errors for every number it reports (`PenalisedClassErrors`).
 ///
@@ -598,123 +525,10 @@ impl PeriodFit for ThePenalisedFit {
                                 .map(Some)
                                 .collect(),
                         }),
-                    reads_crossing: evidence.spanning_reads(),
                 },
             })
             .collect()
     }
-
-    fn draws_its_own_curves(&self) -> bool {
-        true
-    }
-}
-
-// ---------------------------------------------------------------------
-// The curves, after any method
-// ---------------------------------------------------------------------
-
-/// **Any method's answers with the caller's curves applied**, exactly as [`fit_strata`] applies
-/// them to the climb's ([`draw_and_apply_curves`]): each class's stutter blended with its period's
-/// curves by how many of its reads slipped, and a class with no answer of its own given the curves'
-/// stutter (its shares and concentration stay absent). The shares and concentration of a class
-/// that has them are not touched.
-///
-/// **A number the curves moved loses its standard error**: a blended number has none
-/// (`str_slippage_level_curve.md` §5.2).
-///
-/// # Panics
-///
-/// When `raw` and `classes` are not the same classes in the same order.
-#[must_use]
-pub fn with_the_curves(
-    raw: &[ClassEstimate],
-    classes: &[StratumEvidence],
-    config: &SsrFitConfig,
-) -> Vec<ClassEstimate> {
-    assert_eq!(raw.len(), classes.len(), "one estimate per class");
-    let mut outcomes: Vec<StratumOutcome> = raw
-        .iter()
-        .zip(classes)
-        .map(|(estimate, evidence)| {
-            assert_eq!(
-                estimate.stratum, evidence.stratum,
-                "estimates in class order"
-            );
-            let tracts = evidence.tracts_with_reads();
-            let Some(slippage) = estimate.slippage else {
-                return StratumOutcome::Refused {
-                    stratum: evidence.stratum,
-                    tracts,
-                    reason: if tracts == 0 {
-                        StratumRefusal::NoSpanningReads
-                    } else {
-                        StratumRefusal::BelowTheFloor {
-                            tracts,
-                            floor: config.refusal_floor,
-                        }
-                    },
-                };
-            };
-            let slipped_reads = slippage.level * estimate.reads_crossing as f64;
-            StratumOutcome::Fitted(Box::new(StratumFit {
-                stratum: evidence.stratum,
-                slippage: vec![Some(slippage)],
-                allele_length_variation: estimate
-                    .allele_length_variation
-                    .clone()
-                    .unwrap_or_default(),
-                concentration: estimate.concentration,
-                // A method that does not climb has no climb record, and so borrowed nothing.
-                climb: None,
-                samples_fitted_on: None,
-                tracts_of_its_own: tracts,
-                reads_crossing: estimate.reads_crossing,
-                level_provenance: vec![Some(LevelProvenance {
-                    source: LevelSource::Cell,
-                    curve: None,
-                    reach: None,
-                    slipped_reads: Some(slipped_reads),
-                })],
-                shares_provenance: vec![Some(SharesProvenance::own(slipped_reads))],
-                standard_errors: None,
-            }))
-        })
-        .collect();
-    draw_and_apply_curves(&mut outcomes, classes, config);
-    raw.iter()
-        .zip(outcomes)
-        .map(|(estimate, outcome)| {
-            let smoothed = outcome.slippage().first().copied().flatten();
-            let kept = |own: Option<f64>, after: Option<f64>, error: Option<f64>| {
-                (own.is_some() && own.map(f64::to_bits) == after.map(f64::to_bits))
-                    .then_some(error)
-                    .flatten()
-            };
-            let own = estimate.slippage;
-            ClassEstimate {
-                slippage: smoothed,
-                errors: ClassErrors {
-                    level: kept(
-                        own.map(|s| s.level),
-                        smoothed.map(|s| s.level),
-                        estimate.errors.level,
-                    ),
-                    shorter_share: kept(
-                        own.map(|s| s.shorter_share),
-                        smoothed.map(|s| s.shorter_share),
-                        estimate.errors.shorter_share,
-                    ),
-                    fall_off: kept(
-                        own.map(|s| s.fall_off),
-                        smoothed.map(|s| s.fall_off),
-                        estimate.errors.fall_off,
-                    ),
-                    ..estimate.errors.clone()
-                },
-                ..estimate.clone()
-            }
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -874,35 +688,6 @@ pub fn without_fold(evidence: &StratumEvidence, plan: &FoldPlan, fold: usize) ->
 // The held-out run of one method
 // ---------------------------------------------------------------------
 
-/// The names a method's answers are reported under: its own name for a method that draws its own
-/// curves; otherwise `<name>_raw` (as it comes) and `<name>_curves` (after the caller's curves).
-#[must_use]
-pub fn variant_names(method: &dyn PeriodFit) -> Vec<String> {
-    let base = method.name();
-    if method.draws_its_own_curves() {
-        vec![base]
-    } else {
-        vec![format!("{base}_raw"), format!("{base}_curves")]
-    }
-}
-
-/// A method's answers under each of [`variant_names`].
-#[must_use]
-pub fn variants_of(
-    method: &dyn PeriodFit,
-    raw: Vec<ClassEstimate>,
-    classes: &[StratumEvidence],
-    curve_config: &SsrFitConfig,
-) -> Vec<(String, Vec<ClassEstimate>)> {
-    let names = variant_names(method);
-    if method.draws_its_own_curves() {
-        names.into_iter().zip([raw]).collect()
-    } else {
-        let smoothed = with_the_curves(&raw, classes, curve_config);
-        names.into_iter().zip([raw, smoothed]).collect()
-    }
-}
-
 /// A locus's Monte Carlo seed, the same for every method so their scores share their draws.
 #[must_use]
 pub fn locus_seed(settings: &HeldOutSettings, class_seed: u64, locus: usize) -> u64 {
@@ -1045,8 +830,8 @@ pub struct HeldOutLocusScore {
     pub fitted_share: f64,
 }
 
-/// What one method's held-out run over one motif length produced: per variant and fallback (named
-/// in `variants`), per class, the summed scores; the time its fits and its scoring took; and,
+/// What one method's held-out run over one motif length produced: per fallback (each a variant,
+/// named in `variants`), per class, the summed scores; the time its fits and its scoring took; and,
 /// when asked for, every scored locus.
 #[derive(Debug, Clone)]
 pub struct HeldOutRun {
@@ -1068,8 +853,8 @@ type ScoredAtNumbers = (Vec<Option<ClassNumbers>>, Vec<Option<HeldOutLocus>>);
 
 /// **The held-out score of one method over one motif length**: for each fold, the method fitted on
 /// the other folds' loci, then every scored locus of the fold scored at the fitted numbers of its
-/// class, under each variant and fallback (`fallbacks` pairs each with the suffix its variant names
-/// get). A class without its own shares or concentration is scored at the fallback rung and
+/// class, under each fallback (`fallbacks` pairs each with the suffix the method's name gets to
+/// name its variant). A class without its own shares or concentration is scored at the fallback rung and
 /// counted, not skipped. With `keep_loci`, every scored locus is kept in [`HeldOutRun::loci`].
 #[must_use]
 pub fn held_out_run(
@@ -1077,16 +862,12 @@ pub fn held_out_run(
     folded: &HeldOutClasses,
     settings: &HeldOutSettings,
     fallbacks: &[(&str, ScoringFallback)],
-    curve_config: &SsrFitConfig,
     keep_loci: bool,
 ) -> HeldOutRun {
-    let variants: Vec<String> = variant_names(method)
+    let name = method.name();
+    let variants: Vec<String> = fallbacks
         .iter()
-        .flat_map(|variant| {
-            fallbacks
-                .iter()
-                .map(move |(suffix, _)| format!("{variant}{suffix}"))
-        })
+        .map(|(suffix, _)| format!("{name}{suffix}"))
         .collect();
     let classes = folded.classes;
     let mut sums = vec![vec![HeldOutSums::default(); classes.len()]; variants.len()];
@@ -1100,8 +881,7 @@ pub fn held_out_run(
             .map(|(evidence, plan)| without_fold(evidence, plan, fold))
             .collect();
         let started = Instant::now();
-        let raw = method.fit_period(&training, folded.homozygote_excess, ALLELE_SPAN);
-        let fitted = variants_of(method, raw, &training, curve_config);
+        let estimates = method.fit_period(&training, folded.homozygote_excess, ALLELE_SPAN);
         fit_seconds += started.elapsed().as_secs_f64();
         let started = Instant::now();
         // **Only the loci of the fold the fit was made without** are scored with it.
@@ -1110,77 +890,73 @@ pub fn held_out_run(
             .iter()
             .filter(|scored| scored.fold == fold)
             .collect();
-        for (variant_index, (_, estimates)) in fitted.iter().enumerate() {
-            // The numbers and scores of the variant's previous fallback: a class scored at the
-            // same numbers again reuses its scores.
-            let mut previous: Option<ScoredAtNumbers> = None;
-            for (fallback_index, (_, fallback)) in fallbacks.iter().enumerate() {
-                let output = variant_index * fallbacks.len() + fallback_index;
-                let scored_numbers = numbers_for_scoring(estimates, *fallback);
-                let numbers: Vec<Option<ClassNumbers>> = scored_numbers
-                    .iter()
-                    .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))
-                    .collect();
-                let on_the_fallback: Vec<bool> = scored_numbers
-                    .iter()
-                    .map(|scored| scored.as_ref().is_some_and(|s| s.on_the_fallback))
-                    .collect();
-                let scores: Vec<Option<HeldOutLocus>> = in_fold
-                    .par_iter()
-                    .enumerate()
-                    .map(|(index, scored)| {
-                        let numbers_here = numbers[scored.class].as_ref()?;
-                        if let Some((earlier_numbers, earlier_scores)) = &previous
-                            && earlier_numbers[scored.class].as_ref() == Some(numbers_here)
-                        {
-                            return earlier_scores[index];
-                        }
-                        let score =
-                            folded.score(scored.class, scored.locus, numbers_here, settings);
-                        Some((
-                            scored.class,
-                            score.ln_likelihood,
-                            score.variance,
-                            scored.truth_ln,
-                            score.reads,
-                        ))
-                    })
-                    .collect();
-                if keep_loci {
-                    for (scored, score) in in_fold.iter().zip(&scores) {
-                        let Some((_, ln, _, truth, reads)) = score else {
-                            continue;
-                        };
-                        let evidence = &classes[scored.class];
-                        let (offset, share) = most_reported_offset(
-                            &evidence.tracts[scored.locus],
-                            evidence.read_span,
-                            numbers[scored.class].as_ref(),
-                        );
-                        loci.push(HeldOutLocusScore {
-                            variant: output,
-                            class: scored.class,
-                            locus: scored.locus,
-                            fit_without_fold: fold,
-                            ln_likelihood: *ln,
-                            truth_ln: *truth,
-                            reads: *reads,
-                            most_reported_offset: offset,
-                            fitted_share: share,
-                        });
+        // The numbers and scores of the previous fallback: a class scored at the same numbers
+        // again reuses its scores.
+        let mut previous: Option<ScoredAtNumbers> = None;
+        for (output, (_, fallback)) in fallbacks.iter().enumerate() {
+            let scored_numbers = numbers_for_scoring(&estimates, *fallback);
+            let numbers: Vec<Option<ClassNumbers>> = scored_numbers
+                .iter()
+                .map(|scored| scored.as_ref().map(|s| s.numbers.clone()))
+                .collect();
+            let on_the_fallback: Vec<bool> = scored_numbers
+                .iter()
+                .map(|scored| scored.as_ref().is_some_and(|s| s.on_the_fallback))
+                .collect();
+            let scores: Vec<Option<HeldOutLocus>> = in_fold
+                .par_iter()
+                .enumerate()
+                .map(|(index, scored)| {
+                    let numbers_here = numbers[scored.class].as_ref()?;
+                    if let Some((earlier_numbers, earlier_scores)) = &previous
+                        && earlier_numbers[scored.class].as_ref() == Some(numbers_here)
+                    {
+                        return earlier_scores[index];
                     }
+                    let score = folded.score(scored.class, scored.locus, numbers_here, settings);
+                    Some((
+                        scored.class,
+                        score.ln_likelihood,
+                        score.variance,
+                        scored.truth_ln,
+                        score.reads,
+                    ))
+                })
+                .collect();
+            if keep_loci {
+                for (scored, score) in in_fold.iter().zip(&scores) {
+                    let Some((_, ln, _, truth, reads)) = score else {
+                        continue;
+                    };
+                    let evidence = &classes[scored.class];
+                    let (offset, share) = most_reported_offset(
+                        &evidence.tracts[scored.locus],
+                        evidence.read_span,
+                        numbers[scored.class].as_ref(),
+                    );
+                    loci.push(HeldOutLocusScore {
+                        variant: output,
+                        class: scored.class,
+                        locus: scored.locus,
+                        fit_without_fold: fold,
+                        ln_likelihood: *ln,
+                        truth_ln: *truth,
+                        reads: *reads,
+                        most_reported_offset: offset,
+                        fitted_share: share,
+                    });
                 }
-                for (class, ln, variance, truth, reads) in scores.iter().flatten().copied() {
-                    let into = &mut sums[output][class];
-                    into.ln += ln;
-                    into.variance += variance;
-                    into.truth_ln += truth;
-                    into.reads += reads;
-                    into.loci += 1;
-                    into.fallback_loci += usize::from(on_the_fallback[class]);
-                }
-                previous = Some((numbers, scores));
             }
+            for (class, ln, variance, truth, reads) in scores.iter().flatten().copied() {
+                let into = &mut sums[output][class];
+                into.ln += ln;
+                into.variance += variance;
+                into.truth_ln += truth;
+                into.reads += reads;
+                into.loci += 1;
+                into.fallback_loci += usize::from(on_the_fallback[class]);
+            }
+            previous = Some((numbers, scores));
         }
         score_seconds += started.elapsed().as_secs_f64();
     }
@@ -2235,66 +2011,6 @@ mod tests {
         assert!((scored.ln_likelihood - again.ln_likelihood).abs() < 4.0 * joint);
     }
 
-    /// **The curves the bench applies to the climb's raw answers are the ones [`fit_strata`] applies
-    /// itself**, so `A_curves` is the climb as the caller runs it: five classes of one period, one
-    /// of them below the refusal floor so that it is furnished from the curves.
-    #[test]
-    fn the_curves_after_the_climb_are_the_climbs_own() {
-        let strata: Vec<StratumEvidence> = (0..5_u64)
-            .map(|index| {
-                let mut evidence = bench_fixtures::draw_stratum(
-                    Slippage {
-                        level: 0.01 * (index + 1) as f64,
-                        shorter_share: 0.6,
-                        fall_off: 0.3,
-                    },
-                    &spectrum_of(3),
-                    1.0,
-                    0.5,
-                    if index == 2 { 5 } else { 15 },
-                    6,
-                    3,
-                    1,
-                    100 + index,
-                );
-                evidence.stratum = Stratum {
-                    period: 2,
-                    reference_repeats: 6 + index,
-                };
-                evidence
-            })
-            .collect();
-        let excess = vec![0.5; 6];
-        // What is tested is the curves' plumbing, not how well the climb fits, so a short climb
-        // from one start does.
-        let config = SsrFitConfig {
-            allele_span: 1,
-            starting_points: vec![StartingPoint::spanning_the_monomorphic_range()[1]],
-            max_rounds: 5,
-            ..SsrFitConfig::default()
-        };
-        let by_the_fit = fit_strata(&strata, &excess, &config);
-        let raw = TheClimb {
-            config: config.clone(),
-        }
-        .fit_period(&strata, &excess, 1);
-        let by_the_bench = with_the_curves(&raw, &strata, &config);
-        assert!(
-            raw[2].slippage.is_none(),
-            "the thin class has no answer of its own"
-        );
-        assert!(
-            by_the_bench[2].slippage.is_some(),
-            "and the curves furnish one"
-        );
-        for (outcome, estimate) in by_the_fit.iter().zip(&by_the_bench) {
-            assert_eq!(
-                outcome.slippage().first().copied().flatten(),
-                estimate.slippage
-            );
-        }
-    }
-
     #[test]
     fn folds_cover_every_locus_once_and_cap_the_scored_loci() {
         let evidence = bench_fixtures::draw_stratum(
@@ -2464,10 +2180,6 @@ mod tests {
                 })
                 .collect()
         }
-
-        fn draws_its_own_curves(&self) -> bool {
-            true
-        }
     }
 
     /// **Every held-out locus is scored by the fit made without it.** A stand-in method records
@@ -2528,7 +2240,6 @@ mod tests {
             &folded,
             &settings,
             &[("", ScoringFallback::default())],
-            &SsrFitConfig::default(),
             true,
         );
         let handed = method.handed.into_inner().expect("no fit panicked");
@@ -2605,7 +2316,6 @@ mod tests {
             allele_length_variation: Some(vec![0.2, 0.6, 0.2]),
             concentration,
             errors: ClassErrors::default(),
-            reads_crossing: 100,
         };
         let estimates = [
             estimate(8, Some(0.2), true),

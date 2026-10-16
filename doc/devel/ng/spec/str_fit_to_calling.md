@@ -180,10 +180,12 @@ new step of §3.2 applies to each run's class the same way.
 ### 3.4 The pooled step: readable, no longer produced
 
 It is filled only from a parameters file that carries `allele_length_variation_by_period`
-(`with_period_allele_length_variations`, `stratum_fits.rs:740`), and **it stays readable**. Its only
-producer, `fit_period_allele_length_variations` (`ssr_fit.rs:3392`), has only test callers and runs the
-climb (`the_best_walk`, `:3429`); **it is deleted with the climb, and the tests that used it build
-their period tables by hand** *(lead, 2026-10-14)*.
+(`StratumFits::of_gathered_rows`), and **it stays readable**. Its only producer,
+`fit_period_allele_length_variations`, had only test callers and ran the climb; **it is deleted with
+the climb, and the tests that used it build their period tables by hand** *(lead, 2026-10-14)*.
+*Done 2026-10-16:* deleted with the climb, together with the builder that handed its output to
+calling (`with_period_allele_length_variations`) and its type (`PeriodAlleleLengthVariation`); the
+tests now pass their hand-built tables through the file's own door, `of_gathered_rows`.
 
 ### 3.5 The stated F
 

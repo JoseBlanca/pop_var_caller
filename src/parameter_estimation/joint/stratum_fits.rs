@@ -9,14 +9,16 @@
 //! # What it deliberately does not do
 //!
 //! **It does not blend, and re-blending here would be a defect rather than a duplication.** The
-//! level on a [`StratumOutcome`] is already the emitted one, by one of three routes, and its
-//! [`LevelProvenance`] says which:
+//! level on a [`StratumOutcome`] is already the emitted one, and its [`LevelProvenance`] says how
+//! it was made. The penalised fit (`ssr_fit::penalised_fit::fit_repeat_tracts`) emits a point on
+//! its motif length's penalised curve. The climb it replaced (deleted 2026-10-16), whose
+//! parameters files are still read, emitted one of three:
 //!
-//! - a stratum fitted on its own tracts has had its level weighed against its period's curve —
-//!   [`fit_strata`](super::ssr_fit::fit_strata) draws the curves after every stratum has its own
-//!   answer, then applies [`blend_level`](super::slippage_curve::blend_level) in place;
-//! - a stratum too thin to be fitted takes its period's curve whole, never through `blend_level`;
-//! - a run with curves switched off keeps every cell's own answer.
+//! - a stratum fitted on its own tracts had its level weighed against its period's curve — the
+//!   curves were drawn after every stratum had its own answer, then
+//!   [`blend_level`](super::slippage_curve::blend_level) applied in place;
+//! - a stratum too thin to be fitted took its period's curve whole, never through `blend_level`;
+//! - a run with curves switched off kept every cell's own answer.
 //!
 //! Feeding any of those back through `blend_level` would weigh the curve against a number the
 //! curve is already inside. `spec/str_slippage_level_curve.md` §5.1 does not name this act — what
@@ -92,7 +94,7 @@ pub struct FittedSlippage {
 /// describe a number the stratum does not emit. A number blended with the curve has none either,
 /// even at a curve weight of 0, where the number is the stratum's own fit: no error is computed for
 /// a blend (spec `fit_precision.md` §5.2), the writer and the validator have always refused one
-/// beside it, and the climb never emits a blend at weight 0. Also `None` where the fit gives the
+/// beside it, and the climb never emitted a blend at weight 0. Also `None` where the fit gives the
 /// number none — not told apart from the stratum's other numbers, not placed by its tracts, or
 /// withheld for too few loci.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -135,7 +137,7 @@ impl OwnFitStandardErrors {
 /// Whether a level from this source was fitted with its stratum's own reads, so that the fit's
 /// error describes it. **Every variant is named**, so a new source has to say which side it is
 /// on. A blend is not, even at a curve weight of 0: no error is computed for a blend, and the
-/// climb never emits one at weight 0.
+/// climb, the only fit that emitted blends (deleted 2026-10-16), never emitted one at weight 0.
 fn a_level_fitted_with_its_strata_reads(source: LevelSource) -> bool {
     match source {
         LevelSource::Cell | LevelSource::PenalisedCurve(_) => true,
@@ -278,7 +280,7 @@ mod checked_spectrum {
         /// **That the shares sum to one is *not* checked here**, and deliberately: it is
         /// `O(classes)` where these are `O(1)`, and it is already checked once per run where the
         /// spectra are gathered — [`StratumFits::over`](super::StratumFits::over) and
-        /// [`with_period_allele_length_variations`](super::StratumFits::with_period_allele_length_variations), both
+        /// [`of_gathered_rows`](super::StratumFits::of_gathered_rows), both
         /// through `checked_allele_length_variation`. A caller that builds one of these from weights
         /// that did not come through the gather owes that check itself: the seed's total is
         /// `concentration × (mass the candidates cover)`, which is a claim about conviction only
@@ -418,9 +420,8 @@ pub enum AlleleLengthVariationRung {
 /// type here. The lookup tells them apart, and tells a stratum with a concentration from one
 /// without.
 ///
-/// **A period's pool always carries a concentration**: both doors onto the pooled table refuse
-/// one without ([`StratumFits::of_gathered_rows`] and
-/// [`StratumFits::with_period_allele_length_variations`]), because the ladder has no rung for a
+/// **A period's pool always carries a concentration**: the only door onto the pooled table,
+/// [`StratumFits::of_gathered_rows`], refuses one without, because the ladder has no rung for a
 /// pooled shape at a stated strength.
 ///
 /// **Public, and its fields with it, so that [`StratumFits::of_gathered_rows`] has a named pair
@@ -488,9 +489,26 @@ struct StratumRow {
     samples_fitted_on: Vec<Option<u64>>,
 }
 
+/// **One stratum's numbers as a parameters file holds them, with no fit behind them**, per
+/// slippage group — what a test hands [`StratumFits::with_rows_of_a_file`]. The climb wrote such
+/// rows for strata too thin to fit, taking every number from its period's curves.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct StratumRowsOfAFile {
+    pub stratum: Stratum,
+    /// Per slippage group, its three numbers — `None` where that group put no read here.
+    pub slippage: Vec<Option<Slippage>>,
+    /// Where each group's level came from; `Some` wherever the group has numbers.
+    pub level_provenance: Vec<Option<LevelProvenance>>,
+    /// Where each group's two shares came from.
+    pub shares_provenance: Vec<Option<SharesProvenance>>,
+}
+
 /// **Every stratum's slippage numbers, indexed by the key the caller has.**
 ///
-/// Built once per run from what [`fit_strata`](super::ssr_fit::fit_strata) returned, then read
+/// Built once per run from what the repeat-tract fit
+/// ([`fit_repeat_tracts`](super::ssr_fit::penalised_fit::fit_repeat_tracts)) returned, or from a
+/// parameters file's rows, then read
 /// unchanged for the whole of calling: slippage is a frozen parameter, and nothing about it is
 /// re-estimated per locus (`arch/calling_em_loop.md` §2).
 #[derive(Debug, Clone, PartialEq)]
@@ -503,14 +521,14 @@ pub struct StratumFits {
     /// ladder's top rung, and its second rung where the fit placed no concentration; harvested
     /// from the same outcomes the slippage numbers come from.
     ///
-    /// **Only a stratum fitted on its own tracts has an entry.** One furnished from its
-    /// period's slippage curves ([`DerivedStratum`](super::ssr_fit::DerivedStratum)) carries no
-    /// allele length variation at all, by construction — nothing about it was estimated — and that
+    /// **Only a stratum fitted on its own tracts has an entry.** A stratum an older parameters
+    /// file holds numbers for that the climb furnished whole from its period's slippage curves
+    /// carries no allele length variation at all — nothing about it was estimated — and that
     /// absence is exactly what the pooled rung exists to answer.
     allele_length_variation_by_stratum: BTreeMap<Stratum, FittedAlleleLengthVariation>,
     /// **Per motif period, one allele length variation and concentration fitted over every tract of
-    /// that period pooled** — the tract ladder's pooled rung. Empty unless the run asked for
-    /// it, which is what [`Self::with_period_allele_length_variations`] is.
+    /// that period pooled** — the tract ladder's pooled rung. **No fit produces one now**: only
+    /// an older parameters file, read by [`Self::of_gathered_rows`], fills it.
     allele_length_variation_by_period: BTreeMap<u8, FittedAlleleLengthVariation>,
     /// The strength the second rung and the bottom rung state: the run's own median fitted
     /// concentration, taken on the between-locus share over the strata with enough loci (see
@@ -542,11 +560,6 @@ impl StratumFits {
     /// is that the stratum has no answer for anybody. Leaving it out makes the lookup say
     /// [`NoSuchStratum`](NoSlippage::NoSuchStratum), which is the honest one of the two.
     ///
-    /// **A fitted stratum and a derived one are kept alike**, exactly as
-    /// [`StratumOutcome::slippage`] keeps them: the read likelihood reads three numbers and the
-    /// provenance beside them, and where the fit stopped and the curve started is in the
-    /// provenance rather than in which door the numbers came through.
-    ///
     /// # Panics
     ///
     /// **When two outcomes name one stratum**, which would otherwise lose one of them without a
@@ -554,11 +567,10 @@ impl StratumFits {
     /// factor of five.
     ///
     /// **The guarantee that they do not belongs to
-    /// [`gather_strata`](super::ssr_fit::gather_strata), not to `fit_strata`.** `fit_strata`
-    /// returns one outcome per *evidence* it was handed, and `derive_thin_strata` rewrites those
-    /// in place rather than adding any; what makes the strata distinct is that `gather_strata`
-    /// keys its evidence off a map. `fit_strata` is public and three examples and a benchmark
-    /// build `StratumEvidence` by hand, so a caller that assembled its own list could reach this.
+    /// [`gather_strata`](super::ssr_fit::gather_strata), not to the fit.** The fit returns one
+    /// outcome per *evidence* it was handed; what makes the strata distinct is that
+    /// `gather_strata` keys its evidence off a map. The fit is public and the research bench
+    /// builds `StratumEvidence` by hand, so a caller that assembled its own list could reach this.
     /// **Release-level, deliberately**: the cost is one comparison per stratum, of which a run has
     /// tens, and the alternative is a caller scoring every tract of one shape against another
     /// shape's polymerase.
@@ -577,15 +589,14 @@ impl StratumFits {
                 continue;
             }
             let stratum = outcome.stratum();
-            // **The own fit's errors and its samples, from a stratum that was fitted**; one
-            // furnished from its period's curves has neither.
+            // **The own fit's errors and its samples.**
             let (own_fit_errors, samples_fitted_on) = match outcome {
                 StratumOutcome::Fitted(fit) => (
                     fit.standard_errors.as_ref(),
                     fit.samples_fitted_on
                         .map(|samples| u64::try_from(samples).expect("a cohort's size fits a u64")),
                 ),
-                StratumOutcome::Derived(_) | StratumOutcome::Refused { .. } => (None, None),
+                StratumOutcome::Refused { .. } => (None, None),
             };
             let groups = outcome.slippage().len();
             let row = StratumRow {
@@ -611,9 +622,9 @@ impl StratumFits {
                     .collect(),
                 samples_fitted_on: vec![samples_fitted_on; groups],
             };
-            // **Checked once here rather than at every lookup.** Both of the fit's paths build
-            // the three vectors from one mask in one pass, so they are the same length by
-            // construction — but every field of `StratumFit` and `DerivedStratum` is public, so
+            // **Checked once here rather than at every lookup.** The fit builds the three
+            // vectors from one mask in one pass, so they are the same length by
+            // construction — but every field of `StratumFit` is public, so
             // a caller that assembled its own outcome could hand over a short one, and the
             // failure would then be an index panic inside a lookup rather than a sentence
             // naming the stratum. Build time is where a caller can act on it.
@@ -632,16 +643,14 @@ impl StratumFits {
             assert!(
                 displaced.is_none(),
                 "two of the fit's outcomes are for period {}, {} repeats, and one of them would \
-                 be lost without a word — look at how the evidence handed to `fit_strata` was \
+                 be lost without a word — look at how the evidence handed to the fit was \
                  assembled, since `gather_strata` cannot produce a repeat",
                 stratum.period,
                 stratum.reference_repeats,
             );
-            // **The stratum's own allele length variation, harvested from the same outcome**, and only
-            // where the fit produced one: a stratum furnished from its period's slippage curves
-            // carries none, which is the absence the pooled rung answers. **A fitted stratum with
-            // no concentration keeps its shares** (`str_fit_to_calling.md` §3.2); the lookup holds
-            // them at the stated concentration.
+            // **The stratum's own allele length variation, harvested from the same outcome.**
+            // **A fitted stratum with no concentration keeps its shares**
+            // (`str_fit_to_calling.md` §3.2); the lookup holds them at the stated concentration.
             if let StratumOutcome::Fitted(fit) = outcome {
                 let checked = checked_allele_length_variation(
                     &fit.allele_length_variation,
@@ -690,8 +699,8 @@ impl StratumFits {
     /// harvested from the fit's own outcomes.
     ///
     /// **Why not [`Self::over`].** That one takes [`StratumOutcome`]s — the fit's raw output,
-    /// which carries a refusal, an allele length variation and, from the climb, a log likelihood
-    /// and how its walks ended, beside the numbers a lookup answers with. A parameters file carries the answers and not
+    /// which carries a refusal and an allele length variation beside the numbers a lookup
+    /// answers with. A parameters file carries the answers and not
     /// the fitting: a refused stratum is simply a stratum with no rows, and the median that seeds
     /// the ladder's bottom rung was computed when the fit ran and is written down
     /// ([`Self::stated_concentration`]) rather than recomputed here. Recomputing it would make a
@@ -803,57 +812,64 @@ impl StratumFits {
         }
     }
 
-    /// **Set the tract ladder's pooled rung**: one pooled allele length variation and concentration a
-    /// motif period, for the strata whose own fit does not exist.
-    ///
-    /// **It replaces rather than merges**, as a `with_` builder does: a second call keeps only
-    /// the second call's periods.
-    ///
-    /// **A second call rather than an argument to [`Self::over`], because the pool costs a run a
-    /// second pass over its tracts** ([`fit_period_allele_length_variations`](super::ssr_fit::fit_period_allele_length_variations)),
-    /// where everything else this type carries is already computed. A run that skips it is not
-    /// broken: [`Self::allele_length_variation_at`] then answers from the ladder's bottom rung, a flat
-    /// shape at a stated concentration, and says so — so the omission shows up in the run's own
-    /// record as a rung rather than as a wrong number.
-    ///
-    /// **It does not move [`Self::stated_concentration`].** That median is over the strata's own
-    /// fits, and a period's pool is fitted from the very same tracts — counting both would weigh
-    /// one period's tracts twice.
+    /// **These fits plus rows only a parameters file holds, read the way the file's are**: strata
+    /// whose numbers came whole from elsewhere, with no fit and no allele length variation of
+    /// their own, and pooled allele length variations a motif period. The climb wrote both and
+    /// no fit produces either now, so tests that need them build them here; they go through
+    /// [`Self::of_gathered_rows`], the door an older file comes in by. The stated concentration
+    /// and its warrant stay `self`'s, and `pools` replaces any pooled table `self` held.
     ///
     /// # Panics
     ///
-    /// On a pool whose allele length variation is not a distribution, or whose concentration is not
-    /// finite and positive — the same checks [`Self::over`] runs on a stratum's own, and for the
-    /// same reason: every field of the fit's output types is public.
-    ///
-    /// On a pool filed under a motif period that is not its own. The period is carried twice —
-    /// as the map's key and on [`PeriodAlleleLengthVariation`](super::ssr_fit::PeriodAlleleLengthVariation)
-    /// itself — and the lookup reads the key, so a disagreement would file a period's tracts
-    /// under another period's tracts with nothing to say so.
+    /// On a row for a stratum `self` already holds, as [`Self::over`] refuses two outcomes for
+    /// one stratum; and on whatever [`Self::of_gathered_rows`] refuses.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_period_allele_length_variations(
+    pub(crate) fn with_rows_of_a_file(
         mut self,
-        pools: BTreeMap<u8, super::ssr_fit::PeriodAlleleLengthVariation>,
+        rows: impl IntoIterator<Item = StratumRowsOfAFile>,
+        pools: BTreeMap<u8, FittedAlleleLengthVariation>,
     ) -> Self {
-        self.allele_length_variation_by_period = pools
+        let slippage_by_stratum = rows
             .into_iter()
-            .map(|(period, pool)| {
-                assert_eq!(
-                    period, pool.period,
-                    "a pooled fit of motif period {} is filed under period {period}; the lookup \
-                     reads the key, so every tract of period {period} would be seeded from \
-                     period {}'s spread",
-                    pool.period, pool.period
-                );
-                let checked = checked_allele_length_variation(
-                    &pool.allele_length_variation,
-                    Some(pool.concentration),
-                    None,
-                    &format_args!("the pooled fit of motif period {period}"),
-                );
-                (period, checked)
+            .map(|row| {
+                let groups = row
+                    .slippage
+                    .iter()
+                    .zip(&row.level_provenance)
+                    .zip(&row.shares_provenance)
+                    .map(|((slippage, level), shares)| {
+                        slippage.map(|slippage| FittedSlippage {
+                            slippage,
+                            level: level.expect(
+                                "a test row gives every group with numbers a level provenance",
+                            ),
+                            shares: *shares,
+                            own_fit_standard_errors: OwnFitStandardErrors::default(),
+                            samples_fitted_on: None,
+                        })
+                    })
+                    .collect();
+                (row.stratum, groups)
             })
             .collect();
+        let read = Self::of_gathered_rows(
+            self.slippage_group_of.clone(),
+            slippage_by_stratum,
+            BTreeMap::new(),
+            pools,
+            self.stated_concentration,
+            self.stated_concentration_warrant,
+        );
+        for (stratum, row) in read.by_stratum {
+            assert!(
+                self.by_stratum.insert(stratum, row).is_none(),
+                "two rows for period {}, {} repeats",
+                stratum.period,
+                stratum.reference_repeats
+            );
+        }
+        self.allele_length_variation_by_period = read.allele_length_variation_by_period;
         self
     }
 
@@ -940,15 +956,16 @@ impl StratumFits {
     }
 
     /// How many strata carry an allele length variation of their own — the tract ladder's top rung,
-    /// which is **not** [`Self::strata`]: a stratum furnished from its period's slippage curves
-    /// carries slippage numbers and no spectrum, so the second count is the larger of the two.
+    /// which is **not** [`Self::strata`]: a stratum an older parameters file holds numbers for
+    /// that the climb furnished from its period's slippage curves carries slippage numbers and no
+    /// spectrum, so the second count can be the larger of the two.
     #[must_use]
     pub fn strata_with_a_allele_length_variation(&self) -> usize {
         self.allele_length_variation_by_stratum.len()
     }
 
-    /// How many motif periods carry a pooled allele length variation — zero unless the run called
-    /// [`Self::with_period_allele_length_variations`].
+    /// How many motif periods carry a pooled allele length variation — zero unless an older
+    /// parameters file supplied pools.
     #[must_use]
     pub fn periods_with_a_pooled_allele_length_variation(&self) -> usize {
         self.allele_length_variation_by_period.len()
@@ -1055,8 +1072,9 @@ impl StratumFits {
     /// them. The concentration and its error are `None` where the fit placed none; such a stratum
     /// is still here, because its shares are its own.
     ///
-    /// **A stratum absent here is data and not a hole**: one furnished from its period's
-    /// slippage curves was never estimated, which is what the pooled rung exists to answer. The
+    /// **A stratum absent here is data and not a hole**: one an older file's climb furnished from
+    /// its period's slippage curves was never estimated, which is what the pooled rung exists to
+    /// answer. The
     /// name says *fitted* for that reason — this is not one item a stratum.
     ///
     /// **The record is handed out as stored rather than wrapped in an [`AlleleLengthVariation`]**,
@@ -1071,8 +1089,8 @@ impl StratumFits {
     }
 
     /// **Every motif period the run pooled an allele length variation over** — the tract ladder's
-    /// pooled rung, and empty unless the run called [`Self::with_period_allele_length_variations`]
-    /// or read a file that carries pools. Each yields its shares and the concentration they are
+    /// pooled rung, and empty unless the run read an older parameters file that carries pools.
+    /// Each yields its shares and the concentration they are
     /// held with, which a pool always has.
     ///
     /// The shares are handed out borrowed rather than wrapped in an [`AlleleLengthVariation`],
@@ -1129,9 +1147,8 @@ fn checked_stated_concentration(concentration: f64) -> f64 {
 ///
 /// **Checked where they are gathered rather than where they are read**, exactly as the three
 /// slippage vectors' lengths are, and for the same reason: every field of
-/// [`StratumFit`](super::ssr_fit::StratumFit) and
-/// [`PeriodAlleleLengthVariation`](super::ssr_fit::PeriodAlleleLengthVariation) is public, so a caller that
-/// assembled one by hand can hand over raw counts or a negative share. What that costs if it is
+/// [`StratumFit`](super::ssr_fit::StratumFit) and [`FittedAlleleLengthVariation`] is public, and a
+/// parameters file is text a person can edit, so a caller that assembled one by hand can hand over raw counts or a negative share. What that costs if it is
 /// not caught here is not a crash: a seed built from weights that do not sum to one is a prior
 /// that is wrong at **every tract of that stratum**, by an amount nothing downstream can see.
 ///
@@ -1313,8 +1330,7 @@ mod tests {
         LevelSource, RiseShape, SlippageCurve,
     };
     use crate::parameter_estimation::joint::ssr_fit::{
-        ClimbEnding, ClimbRecord, DerivedStratum, PeriodAlleleLengthVariation, ShareProvenance,
-        StratumFit, StratumRefusal,
+        ShareProvenance, StratumFit, StratumRefusal,
     };
 
     fn stratum(period: u8, reference_repeats: u64) -> Stratum {
@@ -1362,9 +1378,9 @@ mod tests {
     }
 
     /// A shares provenance with real content — **the shape the fit actually emits**, where the
-    /// helper below used to hand out `None`. `derive_thin_strata` and the pooled fit both set a
-    /// shares provenance wherever they set a slippage number, so a fixture without one is a
-    /// shape no run can produce.
+    /// helper below used to hand out `None`. The climb's thin strata and its pooled fit (both
+    /// deleted 2026-10-16) set a shares provenance wherever they set a slippage number, so a
+    /// fixture without one is a shape no file holds.
     fn shares_from_a_curve(slipped_reads: f64) -> SharesProvenance {
         let from_a_curve = ShareProvenance {
             source: ShareSource::Curve,
@@ -1378,16 +1394,16 @@ mod tests {
         }
     }
 
-    /// A stratum nothing was fitted at, whose numbers came from its period's curves — the shape
-    /// [`StratumOutcome::Derived`] carries, built by hand so the tests do not pay for a fit.
+    /// A stratum nothing was fitted at, whose numbers came from elsewhere — the rows a parameters
+    /// file holds for one, built by hand so the tests do not pay for a fit.
     ///
     /// Every group with a slippage number gets a level provenance and a shares provenance beside
-    /// it, which is the invariant both of the fit's paths hold.
+    /// it, which is the invariant every fit holds.
     fn derived(
         at: Stratum,
         slippage: Vec<Option<Slippage>>,
         level: Vec<Option<LevelProvenance>>,
-    ) -> StratumOutcome {
+    ) -> StratumRowsOfAFile {
         let shares = slippage
             .iter()
             .zip(&level)
@@ -1396,14 +1412,20 @@ mod tests {
                     .and(level.map(|level| shares_from_a_curve(level.slipped_reads.unwrap_or(1.0))))
             })
             .collect();
-        StratumOutcome::Derived(Box::new(DerivedStratum {
+        StratumRowsOfAFile {
             stratum: at,
             slippage,
             level_provenance: level,
             shares_provenance: shares,
-            tracts_of_its_own: 4,
-            reads_crossing: 40,
-        }))
+        }
+    }
+
+    /// The fits a parameters file holding only these rows reads into.
+    fn of_rows(
+        rows: impl IntoIterator<Item = StratumRowsOfAFile>,
+        slippage_group_of: BTreeMap<ReadGroupId, u32>,
+    ) -> StratumFits {
+        StratumFits::over(&[], slippage_group_of).with_rows_of_a_file(rows, BTreeMap::new())
     }
 
     /// **A stratum's own-fit errors are kept only for the numbers it emits as its own, and the
@@ -1447,13 +1469,6 @@ mod tests {
             slippage: vec![Some(slippage(0.1)), Some(slippage(0.2))],
             allele_length_variation: leaning_short(),
             concentration: Some(2.0),
-            climb: Some(ClimbRecord {
-                log_likelihood_a_tract: -1.5,
-                tracts_fitted: 40,
-                borrowed: Vec::new(),
-                ending: ClimbEnding::Settled,
-                walks: Vec::new(),
-            }),
             samples_fitted_on: Some(300),
             tracts_of_its_own: 40,
             reads_crossing: 400,
@@ -1461,15 +1476,16 @@ mod tests {
             shares_provenance: vec![Some(shares_partly_own), Some(shares_from_a_curve(90.0))],
         }));
         let fits = StratumFits::over(
-            &[
-                fitted_on_a_subset,
-                derived(
-                    stratum(2, 12),
-                    vec![Some(slippage(0.3))],
-                    vec![Some(from_the_cell(5.0))],
-                ),
-            ],
+            &[fitted_on_a_subset],
             BTreeMap::from([(ReadGroupId(0), 0), (ReadGroupId(1), 1)]),
+        )
+        .with_rows_of_a_file(
+            [derived(
+                stratum(2, 12),
+                vec![Some(slippage(0.3))],
+                vec![Some(from_the_cell(5.0))],
+            )],
+            BTreeMap::new(),
         );
         let cells: Vec<_> = fits.each_stratum_and_group_with_numbers().collect();
         assert_eq!(cells.len(), 3);
@@ -1531,7 +1547,6 @@ mod tests {
             slippage: vec![Some(slippage(0.1))],
             allele_length_variation: leaning_short(),
             concentration: None,
-            climb: None,
             samples_fitted_on: None,
             tracts_of_its_own: 40,
             reads_crossing: 400,
@@ -1568,8 +1583,8 @@ mod tests {
     /// the read, and the candidate's own motif period and repeat count.
     #[test]
     fn a_lookup_answers_with_the_stratum_and_groups_own_numbers() {
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 derived(
                     stratum(2, 9),
                     vec![Some(slippage(0.08)), Some(slippage(0.11))],
@@ -1640,8 +1655,8 @@ mod tests {
     /// of reads slipping and about 15 %.
     #[test]
     fn two_candidates_at_one_tract_are_two_strata() {
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 derived(
                     stratum(2, 6),
                     vec![Some(slippage(0.06))],
@@ -1675,8 +1690,8 @@ mod tests {
     /// pools everything is saying it cannot tell them apart.
     #[test]
     fn read_groups_pooled_into_one_slippage_group_get_one_answer() {
-        let fits = StratumFits::over(
-            &[derived(
+        let fits = of_rows(
+            [derived(
                 stratum(2, 9),
                 vec![Some(slippage(0.08))],
                 vec![Some(from_the_cell(400.0))],
@@ -1705,26 +1720,24 @@ mod tests {
     #[test]
     fn the_four_absences_are_told_apart() {
         let fits = StratumFits::over(
-            &[
-                derived(
-                    stratum(2, 9),
-                    vec![Some(slippage(0.08)), None],
-                    vec![Some(from_the_cell(400.0)), None],
-                ),
-                StratumOutcome::Refused {
-                    stratum: stratum(2, 20),
-                    tracts: 3,
-                    reason: StratumRefusal::BelowTheFloor {
-                        tracts: 3,
-                        floor: 50,
-                    },
-                },
-            ],
+            &[StratumOutcome::Refused {
+                stratum: stratum(2, 20),
+                tracts: 0,
+                reason: StratumRefusal::NoSpanningReads,
+            }],
             BTreeMap::from([
                 (ReadGroupId(7), 0),
                 (ReadGroupId(9), 1),
                 (ReadGroupId(11), 4),
             ]),
+        )
+        .with_rows_of_a_file(
+            [derived(
+                stratum(2, 9),
+                vec![Some(slippage(0.08)), None],
+                vec![Some(from_the_cell(400.0)), None],
+            )],
+            BTreeMap::new(),
         );
 
         assert_eq!(
@@ -1787,8 +1800,8 @@ mod tests {
             "the fixture must not be a level the curve would also produce, or nothing it \
              asserts can fail",
         );
-        let fits = StratumFits::over(
-            &[derived(
+        let fits = of_rows(
+            [derived(
                 stratum(2, repeats),
                 vec![Some(slippage(emitted))],
                 vec![Some(LevelProvenance {
@@ -1833,16 +1846,8 @@ mod tests {
     fn two_outcomes_for_one_stratum_are_refused() {
         let _ = StratumFits::over(
             &[
-                derived(
-                    stratum(2, 10),
-                    vec![Some(slippage(0.05))],
-                    vec![Some(from_the_cell(400.0))],
-                ),
-                derived(
-                    stratum(2, 10),
-                    vec![Some(slippage(0.99))],
-                    vec![Some(from_the_cell(400.0))],
-                ),
+                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
+                fitted(stratum(2, 10), 0.99, leaning_short(), 4.0),
             ],
             one_group(),
         );
@@ -1853,7 +1858,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     /// A stratum fitted on its own tracts, carrying the allele length variation and concentration the
-    /// fit produced — built by hand so the tests do not pay for a climb.
+    /// fit produced — built by hand so the tests do not pay for a fit.
     ///
     /// **The slippage numbers and the spectrum are given separately and never derived from one
     /// another**, so a fixture can hold a stratum whose slippage says one thing and whose
@@ -1870,13 +1875,6 @@ mod tests {
             slippage: vec![Some(slippage(level))],
             allele_length_variation,
             concentration: Some(concentration),
-            climb: Some(ClimbRecord {
-                log_likelihood_a_tract: -1.5,
-                tracts_fitted: 40,
-                borrowed: Vec::new(),
-                ending: ClimbEnding::Settled,
-                walks: Vec::new(),
-            }),
             samples_fitted_on: None,
             tracts_of_its_own: 40,
             reads_crossing: 400,
@@ -1891,19 +1889,12 @@ mod tests {
         vec![0.6, 0.3, 0.1]
     }
 
-    /// A pooled period, built by hand.
-    fn pool(
-        period: u8,
-        allele_length_variation: Vec<f64>,
-        concentration: f64,
-    ) -> PeriodAlleleLengthVariation {
-        PeriodAlleleLengthVariation {
-            period,
-            allele_length_variation,
-            concentration,
-            tracts_fitted: 900,
-            strata_pooled: 5,
-            converged: true,
+    /// A pooled period as an older parameters file holds it, built by hand.
+    fn pool(weights: Vec<f64>, concentration: f64) -> FittedAlleleLengthVariation {
+        FittedAlleleLengthVariation {
+            weights,
+            concentration: Some(concentration),
+            concentration_standard_error: None,
         }
     }
 
@@ -1930,20 +1921,17 @@ mod tests {
     #[test]
     fn a_stratum_with_no_fit_of_its_own_takes_its_periods_pooled_tracts() {
         let fits = StratumFits::over(
-            &[
-                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
-                derived(
-                    stratum(2, 14),
-                    vec![Some(slippage(0.09))],
-                    vec![Some(from_the_cell(400.0))],
-                ),
-            ],
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
             one_group(),
         )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            pool(2, vec![0.2, 0.5, 0.3], 9.0),
-        )]));
+        .with_rows_of_a_file(
+            [derived(
+                stratum(2, 14),
+                vec![Some(slippage(0.09))],
+                vec![Some(from_the_cell(400.0))],
+            )],
+            BTreeMap::from([(2, pool(vec![0.2, 0.5, 0.3], 9.0))]),
+        );
 
         // The derived stratum has slippage — it is not absent from the fit — and no spectrum.
         assert!(fits.at(ReadGroupId(0), 2, 14).is_ok());
@@ -1972,10 +1960,7 @@ mod tests {
             &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
             one_group(),
         )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            pool(2, vec![0.2, 0.5, 0.3], 9.0),
-        )]));
+        .with_rows_of_a_file([], BTreeMap::from([(2, pool(vec![0.2, 0.5, 0.3], 9.0))]));
 
         assert_eq!(
             fits.at(ReadGroupId(0), 2, 31),
@@ -1996,10 +1981,7 @@ mod tests {
             &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
             one_group(),
         )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            pool(2, vec![0.2, 0.5, 0.3], 9.0),
-        )]));
+        .with_rows_of_a_file([], BTreeMap::from([(2, pool(vec![0.2, 0.5, 0.3], 9.0))]));
 
         let spectrum = fits.allele_length_variation_at(3, 10);
         assert_eq!(spectrum.rung(), AlleleLengthVariationRung::StatedFlat);
@@ -2279,10 +2261,7 @@ mod tests {
             ],
             one_group(),
         )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            pool(2, vec![0.2, 0.5, 0.3], 9.0),
-        )]));
+        .with_rows_of_a_file([], BTreeMap::from([(2, pool(vec![0.2, 0.5, 0.3], 9.0))]));
 
         let spectrum = fits.allele_length_variation_at(2, 12);
         assert_eq!(
@@ -2450,31 +2429,6 @@ mod tests {
         );
     }
 
-    /// **A period's pool does not move the stated concentration**, because it is fitted from
-    /// the very same tracts the strata's own fits read — counting both weighs one period twice.
-    #[test]
-    fn a_periods_pool_does_not_move_the_stated_concentration() {
-        let fits = StratumFits::over(
-            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
-            one_group(),
-        );
-        let with_pool = StratumFits::over(
-            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
-            one_group(),
-        )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            pool(2, vec![0.2, 0.5, 0.3], 500.0),
-        )]));
-
-        assert_eq!(fits.stated_concentration(), 4.0);
-        assert_eq!(
-            with_pool.stated_concentration(),
-            4.0,
-            "a pool at 500 chromosomes does not drag the run's median off its strata's own"
-        );
-    }
-
     /// **The two lookups are keyed by two different repeat counts, and this is the fixture that
     /// can tell them apart.** The tract sits at 10 repeats and carries a candidate at 14; the
     /// stratum at 10 and the stratum at 14 hold different slippage levels *and* different
@@ -2510,23 +2464,25 @@ mod tests {
             &[
                 fitted(stratum(2, 8), 0.05, leaning_short(), 1.0),
                 fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
-                derived(
-                    stratum(2, 14),
-                    vec![Some(slippage(0.09))],
-                    vec![Some(from_the_cell(400.0))],
-                ),
             ],
             one_group(),
         )
-        .with_period_allele_length_variations(BTreeMap::from([
-            (2, pool(2, vec![0.2, 0.5, 0.3], 9.0)),
-            (3, pool(3, vec![0.3, 0.4, 0.3], 6.0)),
-        ]));
+        .with_rows_of_a_file(
+            [derived(
+                stratum(2, 14),
+                vec![Some(slippage(0.09))],
+                vec![Some(from_the_cell(400.0))],
+            )],
+            BTreeMap::from([
+                (2, pool(vec![0.2, 0.5, 0.3], 9.0)),
+                (3, pool(vec![0.3, 0.4, 0.3], 6.0)),
+            ]),
+        );
 
         assert_eq!(
             fits.strata_with_a_allele_length_variation(),
             2,
-            "three outcomes, of which two were fitted here and one was furnished from curves"
+            "three strata, of which two were fitted here and one was furnished from curves"
         );
         assert_eq!(fits.periods_with_a_pooled_allele_length_variation(), 2);
         assert_eq!(
@@ -2534,17 +2490,6 @@ mod tests {
             3,
             "every one of the three carries slippage, which is the count `strata` is about — it \
              is the larger of the two and they are not interchangeable"
-        );
-    }
-
-    /// **A pool filed under a period that is not its own is refused.** The period is carried
-    /// twice — as the map key and on the pool — and the lookup reads the key, so a disagreement
-    /// would seed every tract of one period from another period's spread.
-    #[test]
-    #[should_panic(expected = "is filed under period 3")]
-    fn a_pool_filed_under_another_period_is_refused() {
-        let _ = StratumFits::over(&[], BTreeMap::new()).with_period_allele_length_variations(
-            BTreeMap::from([(3, pool(2, vec![0.2, 0.5, 0.3], 9.0))]),
         );
     }
 
@@ -2665,11 +2610,13 @@ mod tests {
     /// **The pool is checked the way a stratum's own fit is**, and by the same function — a
     /// second door onto the same seam is a second place for raw counts to get in.
     #[test]
-    #[should_panic(expected = "the pooled fit of motif period 2 has length shares totalling")]
+    #[should_panic(
+        expected = "the period's pooled allele length variation filed under 2 has length shares \
+                    totalling"
+    )]
     fn a_pooled_allele_length_variation_that_is_not_a_distribution_is_refused_too() {
-        let _ = StratumFits::over(&[], BTreeMap::new()).with_period_allele_length_variations(
-            BTreeMap::from([(2, pool(2, vec![6.0, 3.0, 1.0], 4.0))]),
-        );
+        let _ = StratumFits::over(&[], BTreeMap::new())
+            .with_rows_of_a_file([], BTreeMap::from([(2, pool(vec![6.0, 3.0, 1.0], 4.0))]));
     }
 
     /// **Each allele length variation comes back naming the rung it came off**, and the two rungs are
@@ -2681,20 +2628,17 @@ mod tests {
     #[test]
     fn each_allele_length_variation_names_the_rung_it_came_off() {
         let fits = StratumFits::over(
-            &[
-                fitted(stratum(2, 10), 0.05, leaning_short(), 4.0),
-                derived(
-                    stratum(2, 14),
-                    vec![Some(slippage(0.09))],
-                    vec![Some(from_the_cell(40.0))],
-                ),
-            ],
+            &[fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)],
             one_group(),
         )
-        .with_period_allele_length_variations(BTreeMap::from([(
-            2,
-            pool(2, vec![0.2, 0.5, 0.3], 2.5),
-        )]));
+        .with_rows_of_a_file(
+            [derived(
+                stratum(2, 14),
+                vec![Some(slippage(0.09))],
+                vec![Some(from_the_cell(40.0))],
+            )],
+            BTreeMap::from([(2, pool(vec![0.2, 0.5, 0.3], 2.5))]),
+        );
 
         assert_eq!(
             fits.fitted_allele_length_variation_of_each_stratum()
@@ -2734,8 +2678,8 @@ mod tests {
     #[test]
     fn each_stratum_and_group_with_numbers_skips_a_pair_with_none() {
         let two_groups = BTreeMap::from([(ReadGroupId(0), 0), (ReadGroupId(1), 1)]);
-        let fits = StratumFits::over(
-            &[
+        let fits = of_rows(
+            [
                 derived(
                     stratum(2, 10),
                     vec![Some(slippage(0.05)), None],
@@ -2771,17 +2715,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "period 2, 10 repeats, slippage group 0 has slippage numbers")]
     fn a_group_with_numbers_and_no_level_provenance_is_refused_by_name() {
-        let fits = StratumFits::over(
-            &[StratumOutcome::Derived(Box::new(DerivedStratum {
-                stratum: stratum(2, 10),
-                slippage: vec![Some(slippage(0.05))],
-                level_provenance: vec![None],
-                shares_provenance: vec![None],
-                tracts_of_its_own: 4,
-                reads_crossing: 40,
-            }))],
-            one_group(),
-        );
+        let StratumOutcome::Fitted(mut fit) = fitted(stratum(2, 10), 0.05, leaning_short(), 4.0)
+        else {
+            unreachable!("`fitted` builds a fitted outcome")
+        };
+        fit.level_provenance = vec![None];
+        fit.shares_provenance = vec![None];
+        let fits = StratumFits::over(&[StratumOutcome::Fitted(fit)], one_group());
         let _ = fits.each_stratum_and_group_with_numbers().count();
     }
 }

@@ -6,13 +6,12 @@
 //! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- all
 //! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- generic
 //! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- gather
-//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- tracts
 //! ```
 //!
-//! **Four runs and not one, because dhat reports a single `t-gmax`** — the one
+//! **Three runs and not one, because dhat reports a single `t-gmax`** — the one
 //! instant the process held the most — and only the sites live at that instant
-//! get exact byte attribution. The three phases have three separate peak
-//! questions, so in one process the largest would hide the other two. `all` still
+//! get exact byte attribution. The two phases have separate peak questions, so in
+//! one process the larger would hide the other. `all` still
 //! answers the *churn* question (total blocks and bytes a site), which is a sum
 //! over the run and does not care which phase peaked.
 //!
@@ -55,22 +54,22 @@
 //!
 //! ## What it reaches, and what it does not
 //!
-//! Both halves of the fit, from data built in memory:
+//! The ordinary-position half of the fit and the gathering of the repeat-tract
+//! evidence, from data built in memory:
 //!
 //! | mode | phase | what it runs | size here |
 //! |---|---|---|---|
 //! | `generic` | 1 | `fit_jointly` — the **ordinary-position half**, contamination included | 8 and 24 samples × 30,000 kept positions |
 //! | `gather` | 2 | `gather_strata` — the census→fit re-encoding of the **repeat-tract** evidence | 8 samples × 6 strata × 2,000 and 4,000 tracts |
-//! | `tracts` | 3 | `fit_strata` — the **repeat-tract half**, borrowing and dedup included | 8 samples × 4 strata × 25 and 50 tracts |
-//! | `tracts` | 4 | `fit_stratum` with the climb switched off — what one fat stratum's read likelihoods weigh | 8 samples × 3,000 tracts |
 //!
 //! Every phase runs at two sizes, because a single number cannot separate a fixed
-//! cost from a per-sample or per-tract one. Phase 3 is small on purpose: the
-//! review measures the repeat-tract fit at about 0.045 s a tract at 8 samples on
-//! four threads, so a stratum wide enough to be interesting takes longer than a
-//! profiling run should — which is why phase 4 exists to measure the wide case's
-//! *footprint* with `max_rounds = 0` and one starting point, buying the width by
-//! giving up the climb.
+//! cost from a per-sample or per-tract one.
+//!
+//! **The repeat-tract fit itself is not profiled here.** Two modes profiled the
+//! climb, the fit before the penalised one, and went with it on 2026-10-16
+//! (`doc/devel/ng/arch/str_penalised_fit.md` §4.1); the penalised fit's memory
+//! was measured by the bench (`doc/devel/ng/impl_plan/str_penalised_fit.md`, steps
+//! C4 and D3).
 //!
 //! **Not reached:** the census *walk* (it needs reads), the census *file*
 //! (`census_file.rs` — a file-backed run needs a written census, which needs the
@@ -80,11 +79,10 @@
 //!
 //! ## Where the fixtures come from
 //!
-//! The drawn cohort of phase 1 and the drawn stratum of phase 3 are **duplicated
-//! from the two positive controls inside the module's own `#[cfg(test)]` blocks**
-//! — `draw_cohort_with_duplications` (`fit.rs`) and `draw_stratum`
-//! (`ssr_fit.rs`) — rather than moved out of them, so this example changes no
-//! line of `src/`. They are simplified: the draw only has to produce evidence of
+//! The drawn cohort of phase 1 is **duplicated from the positive control inside
+//! the module's own `#[cfg(test)]` block** — `draw_cohort_with_duplications`
+//! (`fit.rs`) — rather than moved out of it, so this example changes no line of
+//! `src/`. It is simplified: the draw only has to produce evidence of
 //! the right *shape and size* for an allocation profile, not evidence the fit
 //! recovers known parameters from. Nothing here asserts a fitted value, and
 //! nothing here should be read as an accuracy check.
@@ -112,9 +110,7 @@ use pop_var_caller::parameter_estimation::joint::fit::{JointFitConfig, fit_joint
 use pop_var_caller::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
 };
-use pop_var_caller::parameter_estimation::joint::ssr_fit::{
-    self, SampleTractReads, Slippage, SsrFitConfig, StratumEvidence, TractReads,
-};
+use pop_var_caller::parameter_estimation::joint::ssr_fit::{self, StratumEvidence};
 use pop_var_caller::repeat_catalog::StrRepeatCriteria;
 use pop_var_caller::tandem_repeat::ScanParams;
 use pop_var_caller::types::{Ploidy, ReadGroupId};
@@ -126,18 +122,14 @@ fn main() {
     // module have separate peak questions, so running them in one process would
     // let the largest hide the other two. One mode a question, one file each.
     let mode = std::env::args().nth(1).unwrap_or_else(|| "all".to_string());
-    // `prepared` is `tracts` without its two churn phases: phase 4 alone, which is
-    // the cheap one, so a change to the quadrature or the read likelihoods can be
-    // checked for **bit-identity of the fitted numbers** in seconds rather than
-    // after the millions of objective evaluations the climb makes.
-    let (generic_half, gather, tract_churn, prepared) = match mode.as_str() {
-        "generic" => (true, false, false, false),
-        "gather" => (false, true, false, false),
-        "tracts" => (false, false, true, true),
-        "prepared" => (false, false, false, true),
-        "all" => (true, true, true, true),
+    // The `tracts` and `prepared` modes profiled the climb, and went with it on
+    // 2026-10-16 (`doc/devel/ng/arch/str_penalised_fit.md` §4.1).
+    let (generic_half, gather) = match mode.as_str() {
+        "generic" => (true, false),
+        "gather" => (false, true),
+        "all" => (true, true),
         other => {
-            eprintln!("unknown mode {other:?}: expected all, generic, gather, tracts or prepared");
+            eprintln!("unknown mode {other:?}: expected all, generic or gather");
             std::process::exit(2);
         }
     };
@@ -149,7 +141,7 @@ fn main() {
 
     #[cfg(not(feature = "dhat-heap"))]
     {
-        let _ = (generic_half, gather, tract_churn, prepared);
+        let _ = (generic_half, gather);
         eprintln!(
             "This example measures allocations and needs the dhat allocator.\n\
              Re-run with: cargo run --profile profiling --example dhat_ng_joint_fit \
@@ -264,133 +256,6 @@ fn main() {
                     .sum::<u64>()
             );
             drop(gathered);
-        }
-
-        // ---- phase 3: the repeat-tract half ---------------------------------
-        //
-        // Four thin strata of one motif length. The borrowing floor is left at
-        // its default, so every stratum borrows the other three, the pooled sets
-        // are identical, and `fit_strata`'s dedup collapses four fits to one —
-        // which is exactly the path the review's L4 and L5 are about.
-        //
-        // Two tract counts, so what the fit allocates can be told from what it
-        // allocates *per tract* — the review's L3 is an arithmetic claim about
-        // exactly that slope.
-        let samples = 8;
-        for tracts in [25_usize, 50]
-            .into_iter()
-            .take(if tract_churn { 2 } else { 0 })
-        {
-            let (strata, _) = measured(&format!("draw 4 strata x {tracts} tracts"), || {
-                (0..4)
-                    .map(|ring| {
-                        draw_stratum(
-                            Slippage {
-                                level: 0.08,
-                                shorter_share: 0.8,
-                                fall_off: 0.25,
-                            },
-                            &spectrum_of(13),
-                            3.0,
-                            0.2,
-                            tracts,
-                            samples,
-                            6,
-                            4,
-                            Stratum {
-                                period: 2,
-                                reference_repeats: 10 + ring,
-                            },
-                            0xA076_1D64_78BD_642F ^ ring,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            });
-            let excess = vec![0.2_f64; samples];
-            let config = SsrFitConfig::default();
-            let (outcomes, _) = measured(
-                &format!("fit_strata, 4 strata x {tracts} tracts x {samples} samples"),
-                || ssr_fit::fit_strata(&strata, &excess, &config),
-            );
-            println!("    ({} outcomes)", outcomes.len());
-        }
-
-        // ---- phase 4: what one fat stratum's `Prepared` actually weighs ------
-        //
-        // **The climb is switched off here and that is the point.** `max_rounds =
-        // 0` and one starting point leave `fit_stratum` building the `Scorer`,
-        // refreshing it once and scoring once — which is every allocation the
-        // review's L3 is an arithmetic claim about, and none of the millions of
-        // objective evaluations that would otherwise make a stratum this wide take
-        // minutes. What it costs is that this phase says nothing about churn; the
-        // two phases above say that.
-        if prepared {
-            let tracts = 3_000;
-            let (evidence, _) = measured(&format!("draw one stratum x {tracts} tracts"), || {
-                draw_stratum(
-                    Slippage {
-                        level: 0.08,
-                        shorter_share: 0.8,
-                        fall_off: 0.25,
-                    },
-                    &spectrum_of(13),
-                    3.0,
-                    0.2,
-                    tracts,
-                    samples,
-                    6,
-                    4,
-                    Stratum {
-                        period: 2,
-                        reference_repeats: 10,
-                    },
-                    0x2545_F491_4F6C_DD1D,
-                )
-            });
-            let excess = vec![0.2_f64; samples];
-            // **One start, then the three the estimator ships with, and nothing
-            // else different.** `fit_pooled` constructs its `Scorer` *inside* the
-            // starting-point loop, so if the review's L3 is right that the read
-            // likelihoods are built once per start, the second run's blocks at
-            // `TractLikelihoods::of` must be exactly three times the first's. That
-            // is a countable prediction and this is what counts it.
-            for starts in [1_usize, 3] {
-                let config = SsrFitConfig {
-                    max_rounds: 0,
-                    starting_points: ssr_fit::StartingPoint::spanning_the_monomorphic_range()
-                        .into_iter()
-                        .take(starts)
-                        .collect(),
-                    ..SsrFitConfig::default()
-                };
-                let (fit, _) = measured(
-                    &format!(
-                        "fit_stratum, {tracts} tracts x {samples} samples, no climb, \
-                         {starts} start(s)"
-                    ),
-                    || ssr_fit::fit_stratum(&evidence, &excess, &config),
-                );
-                // **Printed at full precision on purpose.** A change to the
-                // quadrature or the read likelihoods that claims to be
-                // value-preserving has to show these bytes unchanged, and `{:?}`
-                // on an `f64` is the shortest string that round-trips — so a diff
-                // of two runs is a bit-identity check.
-                match fit {
-                    Some(fit) => println!(
-                        "    (ln L a tract {:?}, concentration {:?}, slippage {:?}, \
-                         spectrum[6] {:?})",
-                        fit.climb
-                            .as_ref()
-                            .expect("the climb fills its own record")
-                            .log_likelihood_a_tract,
-                        fit.concentration
-                            .expect("the climb fills the concentration"),
-                        fit.slippage[0],
-                        fit.allele_length_variation[6],
-                    ),
-                    None => println!("    (no fit)"),
-                }
-            }
         }
 
         let stats = dhat::HeapStats::get();
@@ -665,92 +530,4 @@ fn drawn_ssr_cohort(
         CohortCensusEvidence::new(records).expect("every sample recorded the same thing"),
         per_tract,
     )
-}
-
-/// One stratum drawn at known slippage — duplicated from `ssr_fit.rs`'s
-/// `draw_stratum`, with the stratum key made an argument so several rings of one
-/// motif length can be drawn and `fit_strata`'s borrowing has neighbours to take.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the drawn stratum's own parameters"
-)]
-fn draw_stratum(
-    slippage: Slippage,
-    spectrum: &[f64],
-    concentration: f64,
-    homozygote_excess: f64,
-    tracts: usize,
-    samples: usize,
-    depth: u32,
-    span: i32,
-    stratum: Stratum,
-    seed: u64,
-) -> StratumEvidence {
-    let classes = spectrum.len();
-    let buckets = (2 * span + 1) as usize;
-    let per_allele: Vec<Vec<f64>> = (0..classes)
-        .map(|class| slippage.read_probabilities(class as i32 - span, span))
-        .collect();
-    let mut draw = Draw(seed);
-    let mut drawn = Vec::with_capacity(tracts);
-    for _ in 0..tracts {
-        // The test generator draws the tract's allele frequencies from a
-        // Dirichlet; a flat draw over the same classes gives evidence of the
-        // same shape and size, which is all a heap profile reads.
-        let frequencies: Vec<f64> = spectrum
-            .iter()
-            .map(|weight| weight * (0.5 + draw.uniform()) * concentration.max(1e-3))
-            .collect();
-        let mut reads = TractReads::default();
-        for sample in 0..samples {
-            let first = draw.pick(&frequencies);
-            let second = if draw.uniform() < homozygote_excess {
-                first
-            } else {
-                draw.pick(&frequencies)
-            };
-            let mut counts = vec![0_u32; buckets];
-            for _ in 0..depth {
-                let allele = if draw.uniform() < 0.5 { first } else { second };
-                counts[draw.pick(&per_allele[allele])] += 1;
-            }
-            reads.samples.push(SampleTractReads {
-                sample: sample as u32,
-                by_library: vec![(ssr_fit::LibraryIndex(sample as u32), counts)],
-            });
-        }
-        drawn.push(reads);
-    }
-    StratumEvidence {
-        stratum,
-        tracts: drawn,
-        read_span: span,
-        groups: 1,
-        // One library a sample, as the library's own drawn strata have it.
-        libraries: (0..samples as u32)
-            .map(|sample| ssr_fit::Library::in_group(ReadGroupId(sample), 0))
-            .collect(),
-        tracts_over_guard_threshold: 0,
-        reads_reaching_not_crossing: 0,
-        guard_reads: 0,
-        // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero bases
-        // compared is what `substitution_rate()` returns `None` for, which is the honest answer
-        // here rather than a fitted zero.
-        bases_compared: 0,
-        mismatching_bases: 0,
-    }
-}
-
-/// Most chromosomes at the reference length, one repeat either side carrying most
-/// of the rest — `ssr_fit.rs`'s `spectrum_of`.
-fn spectrum_of(classes: usize) -> Vec<f64> {
-    let middle = classes / 2;
-    let mut spectrum: Vec<f64> = (0..classes)
-        .map(|class| 0.55_f64.powi((class as i32 - middle as i32).abs()))
-        .collect();
-    let total: f64 = spectrum.iter().sum();
-    for weight in &mut spectrum {
-        *weight /= total;
-    }
-    spectrum
 }
