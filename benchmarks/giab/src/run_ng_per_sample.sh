@@ -202,7 +202,7 @@ for sample in "${SAMPLES[@]}"; do
     [[ "${DRY_RUN:-0}" == "1" ]] && { echo; continue; }
 
     # The numbers the run scored with, as a parameters file beside the VCF.
-    sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$ng_log" > "${raw_vcf%.vcf*}.parameters.toml"
+    sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$ng_log" | sed '1d;$d' > "${raw_vcf%.vcf*}.parameters.toml"
 
     # Apply the QUAL gate to produce the comparable headline set.
     awk -v min="$MIN_QUAL" "$FILTER_AWK" "$raw_vcf" > "$vcf"
