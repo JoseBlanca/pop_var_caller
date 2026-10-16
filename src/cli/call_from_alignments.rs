@@ -1,6 +1,6 @@
 //! The `call-from-alignments` subcommand: **call a cohort of alignment files and write a VCF**,
-//! in one process, with nothing written to disk in between — and, beside that VCF, the model
-//! parameters the run scored with.
+//! in one process, with nothing written to disk in between — and a log holding, among the rest,
+//! the model parameters the run scored with.
 //!
 //! This is ng's direct mode (`doc/devel/ng/spec/run_streaming.md` §2 and §5.1) at the command
 //! line. Every sample's file is opened and held for the whole run, every sample's reads are
@@ -14,13 +14,12 @@
 //! sample, the stretch of genome to call over, and the model's numbers — either a parameters
 //! file or `--defaults`.
 //!
-//! Out: **two files**. The VCF, and a `<output stem>.parameters.toml` beside it holding every
-//! number the run scored with. The second is not optional and there is no flag to switch it off
-//! (`doc/devel/ng/spec/parameters_file.md` §7): a run is then reproducible from its own output,
-//! a run that guessed its numbers is auditable in the same form as one that measured them, and
-//! somebody who wants to change one number starts from a file rather than from a document. It
-//! is also why a run whose `--parameters` file is the one it would write is refused — that is
-//! the second command a person types, and it would destroy the edit they just made.
+//! Out: **two files**. The VCF, and the run's log (`pvc_calls.log` beside it unless `--log` says
+//! otherwise), which holds every number the run scored with as a parameters file between two
+//! marker lines (`doc/devel/ng/spec/command_line.md` §7.3). A run is then reproducible from its
+//! own output, a run that guessed its numbers is auditable in the same form as one that measured
+//! them, and somebody who wants to change one number copies the block out and starts from a file
+//! rather than from a document.
 //!
 //! **The catalog is not optional and it is not a repeat caller's input.** It is what says where
 //! the repeat tracts are, so the run can route them; every locus is called down the SNP/indel
@@ -185,7 +184,8 @@ pub struct CallFromAlignmentsArgs {
     /// working directory when the VCF goes to standard output.
     ///
     /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
-    /// it ends, however it ends. While the hidden-dup filter is on, every call waits there until
+    /// it ends, whether it succeeded or failed; a run that is killed, or stops on an internal
+    /// error, leaves it behind. While the hidden-dup filter is on, every call waits there until
     /// the whole genome is called: several times the compressed VCF's size.
     #[arg(long)]
     pub tmp_dir: Option<PathBuf>,
@@ -227,7 +227,7 @@ pub struct CallFromAlignmentsArgs {
     ///
     /// The filter removes calls better explained by a hidden duplication — two copies of a
     /// sequence collapsed onto one in the reference — than by a variant. While it is on, the
-    /// run needs scratch space beside the output of several times the compressed VCF's size.
+    /// run needs scratch space in --tmp-dir of several times the compressed VCF's size.
     #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
     pub hidden_dup_fdr: f64,
 
@@ -486,7 +486,7 @@ fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_
     }
 }
 
-/// Call `--alignment`'s cohort over `--regions` and write `--output`. Prints a summary when it
+/// Call `--alignment`'s cohort over `--regions` and write `--output`. Logs the run report when it
 /// finishes.
 ///
 /// # Errors
@@ -530,6 +530,7 @@ pub fn run_call_from_alignments(
     )?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
+    calling_run::refuse_a_tmp_dir_that_is_not_a_directory(args.tmp_dir.as_deref())?;
     if !is_standard_output(&args.output) && args.output.exists() && !args.force {
         return Err(CallFromAlignmentsCliError::OutputAlreadyThere {
             path: args.output.clone(),

@@ -150,6 +150,16 @@ pub enum CallingRunError {
         directory: PathBuf,
     },
 
+    /// `--tmp-dir` names something that is not a directory.
+    ///
+    /// Judged with the rest of the command line, because the scratch directory is otherwise first
+    /// made after the reference has been read and every input opened.
+    #[error("--tmp-dir {} is not a directory", path.display())]
+    TmpDirIsNotADirectory {
+        /// What was typed.
+        path: PathBuf,
+    },
+
     /// The run's scratch directory could not be made.
     #[error(
         "the run's scratch directory could not be made in {} — give --tmp-dir a directory it \
@@ -508,6 +518,22 @@ pub fn refuse_an_output_that_cannot_be_written(output: &Path) -> Result<(), Call
         });
     }
     Ok(())
+}
+
+/// Refuse a `--tmp-dir` that is not a directory, before anything is read.
+///
+/// # Errors
+///
+/// [`CallingRunError::TmpDirIsNotADirectory`].
+pub fn refuse_a_tmp_dir_that_is_not_a_directory(
+    tmp_dir: Option<&Path>,
+) -> Result<(), CallingRunError> {
+    match tmp_dir {
+        Some(directory) if !directory.is_dir() => Err(CallingRunError::TmpDirIsNotADirectory {
+            path: directory.to_path_buf(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// **The run's own scratch directory**, `pvc_tmp_<random>` inside `--tmp-dir`, or inside the

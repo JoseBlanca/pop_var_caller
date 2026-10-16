@@ -163,7 +163,8 @@ pub struct CallFromPspsArgs {
     /// working directory when the VCF goes to standard output.
     ///
     /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
-    /// it ends, however it ends. While the hidden-dup filter is on, every call waits there until
+    /// it ends, whether it succeeded or failed; a run that is killed, or stops on an internal
+    /// error, leaves it behind. While the hidden-dup filter is on, every call waits there until
     /// the whole genome is called: several times the compressed VCF's size.
     #[arg(long)]
     pub tmp_dir: Option<PathBuf>,
@@ -205,7 +206,7 @@ pub struct CallFromPspsArgs {
     ///
     /// The filter removes calls better explained by a hidden duplication — two copies of a
     /// sequence collapsed onto one in the reference — than by a variant. While it is on, the
-    /// run needs scratch space beside the output of several times the compressed VCF's size.
+    /// run needs scratch space in --tmp-dir of several times the compressed VCF's size.
     #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
     pub hidden_dup_fdr: f64,
 
@@ -441,20 +442,13 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
+    calling_run::refuse_a_tmp_dir_that_is_not_a_directory(args.tmp_dir.as_deref())?;
     if !is_standard_output(&args.output) && args.output.exists() && !args.force {
         return Err(CallFromPspsCliError::OutputAlreadyThere {
             path: args.output.clone(),
         });
     }
     let paths = psps_named_by(args)?;
-    // **The log opens once the command line has been judged**, so a typing mistake leaves no log
-    // behind, and before the reference is read, so everything that takes time is in it.
-    let started = Instant::now();
-    let log = args
-        .log
-        .clone()
-        .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
-    let run_log = run_output::open_log(&log, args.force)?;
     // **The round width comes from the cohort's size**, and the cohort is the psps — so this
     // waits for the directories to be expanded, where direct mode can count its `--alignment`
     // flags straight away.
@@ -463,6 +457,14 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         args.locus_builder_regions_len,
         paths.len(),
     )?;
+    // **The log opens once the command line has been judged**, so a typing mistake leaves no log
+    // behind, and before the reference is read, so everything that takes time is in it.
+    let started = Instant::now();
+    let log = args
+        .log
+        .clone()
+        .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
+    let run_log = run_output::open_log(&log, args.force)?;
 
     // **The FASTA is read to the end before a psp is opened**: every file's contig table is
     // compared against the reference's per-contig checksums, and a reference whose verification
