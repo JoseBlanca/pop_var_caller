@@ -282,6 +282,7 @@ fn an_existing_vcf_is_refused_unless_the_run_is_forced() {
     let forced = CallFromAlignmentsArgs {
         force: true,
         log: Some(directory.path().join("forced.log")),
+        tmp_dir: None,
         ..a_run_writing_to(output)
     };
     let past_the_check = run_call_from_alignments(&forced).expect_err("there is no reference");
@@ -304,6 +305,7 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         output,
         force: false,
         log: None,
+        tmp_dir: None,
         regions: None,
         parameters: None,
         defaults: true,
@@ -384,6 +386,7 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         output: directory.path().join("calls.vcf"),
         force: false,
         log: None,
+        tmp_dir: None,
         regions: None,
         parameters: None,
         defaults: true,
@@ -757,6 +760,7 @@ fn a_cohort_on_disk() -> (
         output: cohort.directory.path().join("calls.vcf"),
         force: false,
         log: None,
+        tmp_dir: None,
         regions: None,
         parameters: None,
         defaults: true,

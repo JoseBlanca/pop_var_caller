@@ -216,6 +216,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         // Several tests call this cohort again into the same directory.
         force: true,
         log: None,
+        tmp_dir: None,
         parameters: None,
         defaults: true,
         ploidy: None,
@@ -369,6 +370,7 @@ fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
         psps: vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")],
         output: cohort.directory.path().join("pure.vcf"),
         log: Some(cohort.directory.path().join("pure.log")),
+        tmp_dir: None,
         ..args
     };
     run_call_from_psps(&args).expect("the psps' own settings are the run's");

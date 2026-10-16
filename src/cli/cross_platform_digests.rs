@@ -400,6 +400,7 @@ mod tests {
             output: calls.clone(),
             force: false,
             log: None,
+            tmp_dir: None,
             parameters: Some(parameters.clone()),
             defaults: false,
             ploidy: None,

@@ -80,7 +80,7 @@ use crate::run::report::BoundsTheRunCalledUnder;
 use crate::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
 use crate::types::InbreedingF;
 use crate::types::MAX_MOTIF_LEN;
-use crate::vcf::writer::{VcfWriteError, VcfWriter};
+use crate::vcf::writer::{VcfWriteError, VcfWriter, is_standard_output};
 
 /// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
 ///
@@ -121,11 +121,12 @@ pub struct CallFromAlignmentsArgs {
     #[arg(long = "alignment", required = true, num_args = 1..)]
     pub alignments: Vec<PathBuf>,
 
-    /// Where to write the VCF. A name ending in `.vcf.gz` or `.vcf.bgz` is written compressed
-    /// (bgzip); any other is plain text.
+    /// Where to write the VCF; `-` writes it to standard output, uncompressed. A name ending in
+    /// `.vcf.gz` or `.vcf.bgz` is written compressed (bgzip); any other is plain text.
     ///
-    /// The file appears whole or not at all: it is written as `<output>.tmp` and renamed when
-    /// the last record is on disk.
+    /// A file appears whole or not at all: it is written as `<output>.tmp` and renamed when the
+    /// last record is on disk. Standard output cannot be taken back: a run that fails part-way
+    /// has sent part of a VCF, and its exit status says it failed.
     #[arg(long)]
     pub output: PathBuf,
 
@@ -180,6 +181,15 @@ pub struct CallFromAlignmentsArgs {
     /// The log holds the inputs by name, every setting's value, and the run's full report.
     #[arg(long)]
     pub log: Option<PathBuf>,
+
+    /// The directory for the run's scratch files. Defaults to the VCF's directory, or the
+    /// working directory when the VCF goes to standard output.
+    ///
+    /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
+    /// it ends, however it ends. While the hidden-dup filter is on, every call waits there until
+    /// the whole genome is called: several times the compressed VCF's size.
+    #[arg(long)]
+    pub tmp_dir: Option<PathBuf>,
 
     /// A locus where any sample has a read group deeper than this is not called, for any sample.
     ///
@@ -544,7 +554,7 @@ pub fn run_call_from_alignments(
     )?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
-    if args.output.exists() && !args.force {
+    if !is_standard_output(&args.output) && args.output.exists() && !args.force {
         return Err(CallFromAlignmentsCliError::OutputAlreadyThere {
             path: args.output.clone(),
         });
@@ -698,11 +708,21 @@ pub fn run_call_from_alignments(
     // records are parked and **the VCF is not opened at all**: no record's fate is known until
     // every record has been scored, so a file opened now would stand beside a run that has
     // decided nothing.
-    let mut sink = if asked_for.is_some() {
+    // **The run's own scratch directory, made only where something will be parked in it**, and
+    // removed when `scratch` is dropped — at the end of this function, on its success or on any
+    // error that returns through it.
+    let scratch = match asked_for {
+        Some(_) => Some(calling_run::scratch_directory_for(
+            &args.output,
+            args.tmp_dir.as_deref(),
+        )?),
+        None => None,
+    };
+    let mut sink = if let Some(scratch) = &scratch {
         // The spill's lines are encoded against the same contigs the header names, taken from
         // the metadata itself rather than re-derived.
-        CalledRecordSink::ParkedOnTheSpill(SpillingSink::beside(
-            &args.output,
+        CalledRecordSink::ParkedOnTheSpill(SpillingSink::in_directory(
+            scratch.path(),
             metadata.contigs().to_vec(),
             ploidy,
         ))
@@ -846,7 +866,7 @@ pub fn run_call_from_alignments(
     tracing::info!(
         "done: {} records written to {} in {}",
         run_output::with_thousands(records),
-        args.output.display(),
+        calling_run::where_the_calls_went(&args.output),
         run_output::elapsed_text(started.elapsed())
     );
     tracing::info!("log: {}", log.display());
@@ -893,7 +913,10 @@ fn say_what_this_run_does(
             group.id
         );
     }
-    tracing::debug!("output: {}", args.output.display());
+    tracing::debug!(
+        "output: {}",
+        calling_run::where_the_calls_went(&args.output)
+    );
 }
 
 #[cfg(test)]

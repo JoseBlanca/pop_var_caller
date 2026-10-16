@@ -129,6 +129,14 @@ Spec §7.4 and §7.5.
   puts the hidden-dup spill file there, and removes it however the run ends. Outputs in the making
   (`<name>.tmp`) stay beside their output.
 
+**Done (2026-10-16).** The VCF writer gained a third destination beside plain text and bgzip,
+standard output, which it only flushes at the end; the scratch directory is a `tempfile::TempDir`
+made only when the filter is on, so a run with `--hidden-dup-fdr 0` makes none. Until step 3
+removes it, a VCF on standard output puts its parameters file in the working directory as
+`pvc_calls.parameters.toml`. Checked on the tomato1 psps of step 2: the same run to a file and to
+stdout give the same VCF (3,119 records); both scratch directories were made inside `--tmp-dir`
+and gone afterwards; and both modes still match `main`'s VCFs.
+
 ## Step 5 — every message through the logging framework (after the merge)
 
 Spec §7.7.

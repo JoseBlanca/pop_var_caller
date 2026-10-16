@@ -131,6 +131,7 @@ mod tests {
             // name left.
             force: true,
             log: Some(output.with_extension("log")),
+            tmp_dir: None,
             regions: None,
             parameters: None,
             defaults: true,
@@ -221,6 +222,7 @@ mod tests {
             output: output.to_path_buf(),
             force: true,
             log: Some(output.with_extension("log")),
+            tmp_dir: None,
             parameters: None,
             defaults: true,
             ploidy: None,
@@ -906,6 +908,7 @@ mod tests {
             output: output.to_path_buf(),
             force: true,
             log: Some(output.with_extension("log")),
+            tmp_dir: None,
             parameters: None,
             defaults: true,
             ploidy: None,

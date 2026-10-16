@@ -61,6 +61,12 @@ const PARAMETERS_SUFFIX: &str = ".parameters.toml";
 /// See this module's header for the rule and what it buys.
 #[must_use]
 pub fn beside_the_vcf(vcf: &Path) -> PathBuf {
+    // **A VCF on standard output has no name to take**, so its parameters file goes to the
+    // working directory under the name the run's log takes there
+    // (`doc/devel/ng/spec/command_line.md` §7.3–§7.4).
+    if crate::vcf::writer::is_standard_output(vcf) {
+        return PathBuf::from("pvc_calls.parameters.toml");
+    }
     // **Never through a `String`.** A file name on both platforms this project builds for is
     // arbitrary bytes, and `to_string_lossy` maps every invalid byte to U+FFFD — so
     // `/data/\xff.vcf` and `/data/\xfe.vcf` produced one parameters file between them, each
@@ -178,6 +184,16 @@ mod tests {
                 "from {vcf}"
             );
         }
+    }
+
+    /// **A VCF on standard output has no name to take**, so its parameters go to the working
+    /// directory under a fixed name rather than to a file called `-.parameters.toml`.
+    #[test]
+    fn a_vcf_on_standard_output_puts_its_parameters_in_the_working_directory() {
+        assert_eq!(
+            beside_the_vcf(Path::new("-")),
+            Path::new("pvc_calls.parameters.toml")
+        );
     }
 
     /// **The directory is the VCF's, not the working directory**, which is the whole of *beside*

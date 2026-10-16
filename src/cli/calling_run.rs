@@ -150,6 +150,20 @@ pub enum CallingRunError {
         directory: PathBuf,
     },
 
+    /// The run's scratch directory could not be made.
+    #[error(
+        "the run's scratch directory could not be made in {} — give --tmp-dir a directory it \
+         can write to",
+        directory.display()
+    )]
+    ScratchDirectory {
+        /// Where it was to be made.
+        directory: PathBuf,
+        /// What the file system said.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// The parameters file this run would write is the one it was handed.
     ///
     /// **Spec §7 invites the collision**: it tells a user to copy the file their run wrote and
@@ -513,6 +527,49 @@ pub fn refuse_an_output_that_cannot_be_written(output: &Path) -> Result<(), Call
         });
     }
     Ok(())
+}
+
+/// **The run's own scratch directory**, `pvc_tmp_<random>` inside `--tmp-dir`, or inside the
+/// VCF's directory when no `--tmp-dir` was given (the working directory for a VCF on standard
+/// output) (`doc/devel/ng/spec/command_line.md` §7.5). Removed when the returned value is
+/// dropped.
+///
+/// **A directory of its own**, so several runs can share one `--tmp-dir` without colliding, and
+/// removing it never touches anything the user put there.
+///
+/// # Errors
+///
+/// [`CallingRunError::ScratchDirectory`] when it cannot be made.
+pub fn scratch_directory_for(
+    output: &Path,
+    tmp_dir: Option<&Path>,
+) -> Result<tempfile::TempDir, CallingRunError> {
+    let directory = match tmp_dir {
+        Some(directory) => directory.to_path_buf(),
+        None => match output.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        },
+    };
+    let made = tempfile::Builder::new()
+        .prefix("pvc_tmp_")
+        .tempdir_in(&directory)
+        .map_err(|source| CallingRunError::ScratchDirectory {
+            directory: directory.clone(),
+            source,
+        })?;
+    tracing::debug!("scratch directory: {}", made.path().display());
+    Ok(made)
+}
+
+/// Where the calls went, as a person reads it: the file, or `standard output`.
+#[must_use]
+pub fn where_the_calls_went(output: &Path) -> String {
+    if crate::vcf::writer::is_standard_output(output) {
+        "standard output".to_owned()
+    } else {
+        output.display().to_string()
+    }
 }
 
 /// **A run may not write its parameters file over the one it was handed.**

@@ -116,6 +116,21 @@ impl SpillingSink {
         }
     }
 
+    /// Park records in `directory`, the run's own temporary directory, encoding their lines
+    /// against `contigs` at `ploidy`.
+    #[must_use]
+    pub fn in_directory(
+        directory: &std::path::Path,
+        contigs: Vec<HeaderContig>,
+        ploidy: Ploidy,
+    ) -> Self {
+        Self {
+            spill: SpillFile::in_directory(directory),
+            contigs,
+            ploidy,
+        }
+    }
+
     /// The file the records are parked in, for passes two and three.
     #[must_use]
     pub fn spill(&self) -> &SpillFile {
