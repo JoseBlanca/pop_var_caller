@@ -364,24 +364,39 @@ samples once, after B5.
   oracle run; re-recorded with that account. The five digest tests pass natively on macOS and in
   the Linux container (Apple `container`, arm64). The oracle itself was run on macOS only: the
   container built the library's tests, not the `pvc` binary the oracle needs.
-- ☐ **E2** Calls on the 4 oracle psps: called once with the new fit and once with the current fit
+- ✅ **E2** Calls on the 4 oracle psps: called once with the new fit and once with the current fit
   (`o4_base.toml`), **both by the new build**, so only the parameters file differs; records added and
   lost, sample genotypes changed, QUAL changes (`tmp/snp_conv/compare_vcfs.py`, `qualdiff.py`).
   Expected near the diagnosis's §5.1: 2 records added, 5 genotypes changed of 26,720.
   *Depends:* D2. *Source:* `parameter_prepass_joint_fit.md` §3.3.1, *Measured*.
-- ☐ **E3** The same on the 59 tomato2 psps, against `t2_59.parameters.toml`. Not measured before:
+  *Done 2026-10-17:* as expected — 6,680 → 6,682 records (two SNVs at QUAL 9.4), 5 of 26,720
+  genotypes changed at one locus, QUAL otherwise by 0.1–0.2. Main's fit is the branch base's byte for
+  byte. Report: `reports/implementations/snp_fit_convergence_E_2026-10-17.md` §2.
+- ✅ **E3** The same on the 59 tomato2 psps, against `t2_59.parameters.toml`. Not measured before:
   the diagnosis skipped it for cost (two 59-sample calling runs).
   *Depends:* D2. *Source:* as E2.
-- ☐ **E4** The stopping rule loses nothing at 59 samples: the new fit's returned values (from
+  *Done 2026-10-17:* main refitted (every number equal to `t2_59.parameters.toml`'s). **A defect
+  found:** the Newton target puts two samples' homozygote excess exactly on its bound of 1, and
+  `fitted_inbreeding_of` (`run/census_fit.rs`), which assumes the fit never returns 1, drops them
+  to F = 0 `defaulted`. With it, 94 records lost, 1,331 added and 4,766 of 17.2 million genotypes
+  changed, 4,314 in those two samples; with their F restored by hand, 3 lost, 4 added and 52
+  changed (GQ ≤ 5). To fix before merging. Report §3.
+- ✅ **E4** The stopping rule loses nothing at 59 samples: the new fit's returned values (from
   `PVC_JOINT_FIT_TRACE`'s returned-fit rows) against the reference `t59_d1e-4.judge.tsv`, every
   determined quantity within 0.1 of its reference error (predicted 0.047); B1's reproduction already
   covers 1 and 4 samples. Also the 59-sample verdicts and file tables against §2.1.3's example.
   *Depends:* D2. *Source:* `fit_precision.md` §3.6 item 4.
-- ☐ **E5** Timings, on a machine running nothing else: `estimate-parameters` wall time, the
+  *Done 2026-10-17:* against this build run to 10⁻⁴ (a scratch build) and against the prototype's
+  reference: largest distance 0.047 of an error (the mismapped share) both ways; verdicts and
+  tables as §2.1.3's example (costs 1.35 and 0.116). Report §4.
+- ✅ **E5** Timings, on a machine running nothing else: `estimate-parameters` wall time, the
   SNP/indel stage, passes by start and peak resident memory, at 1 sample, the 4 oracle samples and
   the 59 tomato2 samples. Main's binary and the new one at 1 and 4; at 59 the new one against
   main's run of 2026-10-15 (61 min, 18 threads), unless the owner asks for main to be run again.
   *Depends:* D2. *Source:* `parameter_prepass_joint_fit.md` §3.3.1 (the measured table).
+  *Done 2026-10-17:* main run again at 59 as well. Wall time main → branch: 1 sample 72 → 24 s;
+  4 samples 366 → 87 s; 59 samples 55 min 41 s → 15 min 49 s (SNP/indel stage 55 min 17 s →
+  15 min 27 s); peak memory 131/127, 203/203, 417/410 MB. Report §5.
 - ☐ **E6** The report, `doc/devel/reports/implementations/snp_fit_convergence_E_<date>.md`, with
   E1–E5; the full suite in release; a code review of the branch.
   *Depends:* E1–E5.
