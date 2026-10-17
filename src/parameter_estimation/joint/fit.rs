@@ -2072,6 +2072,9 @@ pub fn fit_jointly(
                 standard_errors.described(&parameters, &group_index)
             )
         });
+        if let Some(note) = note_on_inverted_rates(&parameters, &groups) {
+            stage.always(|into| format!("SNP/indel fit: {note}; {into}"));
+        }
         trace_the_returned_fit(
             winning_start,
             passes,
@@ -2555,8 +2558,11 @@ fn maximise(
                 reach = (reach / 4.0).max(1.0);
             }
             // Shortened towards the plain step, and taken as the plain step once close to it
-            // or once the passes are spent — `θ₂` never needs a check, the alternation's own
-            // guarantee covers it.
+            // or once the passes are spent — `θ₂` is not checked, on the alternation's guarantee
+            // that a plain step does not lower the log-likelihood. That guarantee holds only to
+            // within the drift `JUMP_SLACK` describes, and it held not at all while the
+            // maximisation swapped a library's two error rates (deleted 2026-10-17): every other
+            // cycle then landed on a point tens of units lower.
             alpha = (1.0 + alpha) / 2.0;
             if alpha < 1.01 || alternation.passes >= config.max_passes {
                 alpha = 1.0;
@@ -2804,6 +2810,32 @@ fn print_the_cycle(
             crate::parameter_estimation::progress::duration(began.elapsed()),
         )
     });
+}
+
+/// **A note for the run log naming each library whose error rate at mismapped positions ended
+/// below its rate at ordinary positions**, `groups` naming the libraries in the parameters' order;
+/// `None` when no library did. The fit does not keep the two rates in order
+/// (`parameter_prepass_joint_fit.md` §3.3, decided 2026-10-17), and nothing outside it reads the
+/// mismapped rate, so this is information for a reader of the log, not a warning. It never
+/// happened on the tomato cohorts measured (1, 4 and 59 samples).
+fn note_on_inverted_rates(parameters: &Parameters, groups: &[ReadGroupId]) -> Option<String> {
+    let inverted: Vec<String> = groups
+        .iter()
+        .zip(parameters.clean.iter().zip(&parameters.noisy))
+        .filter(|(_, (clean, noisy))| noisy < clean)
+        .map(|(group, _)| group.to_string())
+        .collect();
+    (!inverted.is_empty()).then(|| {
+        format!(
+            "{} of {} libraries ended with a lower error rate at mismapped positions than at \
+             ordinary ones (read group(s) {}); the fit does not keep the two in order — the share \
+             of mismapped positions, at most a half, is what names that class — and nothing \
+             outside the fit reads the mismapped rate",
+            inverted.len(),
+            groups.len(),
+            inverted.join(", ")
+        )
+    })
 }
 
 /// **How far from settled `parameters` are**, by the information and slope one pass summed there:
@@ -4331,17 +4363,12 @@ fn maximisation(
             }
         }
     }
-    // A class that emptied cannot be told apart from one at the other's rate, and the
-    // separation is what the starting points exist to span. Keep them ordered so a swap does
-    // not read as a fit.
-    for group in 0..parameters.clean.len() {
-        if parameters.noisy[group] < parameters.clean[group] {
-            parameters.noisy.swap(group, group);
-            let (clean, noisy) = (parameters.noisy[group], parameters.clean[group]);
-            parameters.clean[group] = clean;
-            parameters.noisy[group] = noisy;
-        }
-    }
+    // **The two rates are not put in order** (`parameter_prepass_joint_fit.md` §3.3, decided
+    // 2026-10-17). A library whose mismapped-position rate comes out below its ordinary one keeps
+    // both: swapping them alone, with the share and the other libraries' rates unswapped, handed
+    // the ordinary positions a rate fitted to the few mismapped ones and lowered the
+    // log-likelihood by tens of units a pass. The cap of 0.5 on the mismapped share is what makes
+    // that class the minority one.
 
     // Each sample's homozygote excess, over its expected genotype counts at each node.
     let quadrature = BetaQuadrature::new(
@@ -4763,6 +4790,26 @@ mod tests {
             hom_excess: vec![0.0],
             duplicated: None,
         }
+    }
+
+    /// **The run log names each library whose mismapped-position rate ended below its ordinary
+    /// one, and says nothing when none did**: three libraries, the second and third inverted (the
+    /// third by the smallest step a rate can take), then none.
+    #[test]
+    fn the_log_names_the_libraries_whose_mismapped_rate_ended_below_the_ordinary_one() {
+        let mut parameters = a_judged_point();
+        parameters.clean = vec![0.003, 0.004, 0.002];
+        parameters.noisy = vec![0.06, 0.001, f64::from_bits(0.002_f64.to_bits() - 1)];
+        let groups = [ReadGroupId(0), ReadGroupId(7), ReadGroupId(9)];
+        let note = note_on_inverted_rates(&parameters, &groups).expect("two are inverted");
+        assert!(note.starts_with("2 of 3 libraries"), "{note}");
+        assert!(note.contains("(read group(s) 7, 9)"), "{note}");
+        parameters.noisy = vec![0.06, 0.004, 0.002];
+        assert_eq!(
+            note_on_inverted_rates(&parameters, &groups),
+            None,
+            "equal rates are not inverted"
+        );
     }
 
     /// A target that moves only the density's first shape, from 0.6 to 1.4.
@@ -6942,7 +6989,12 @@ mod whole_fit_tests {
     /// 8,100 passes, none lowers it by more than 3 × 10⁻¹¹ units, the rounding of a log-likelihood
     /// that has stopped moving. The bound cohort here fails with a step that clamps each shape of
     /// the joint step on its own (plan step A7's review: 36 units lost between passes 100 and 200).
-    /// It guards the update against falling; it cannot tell a correct update from a frozen or a
+    /// **Three small cohorts where a library's mismapped-position rate comes out below its
+    /// ordinary one** — 2 samples over 600 positions at 8 reads and 3 at 5, mismapped positions one
+    /// in 330, and 2 samples over 1,000 positions with none — guard the deletion of the swap that
+    /// put the two rates in order (`parameter_prepass_joint_fit.md` §3.3, decided 2026-10-17): with
+    /// it, 239 of their plain passes lower the log-likelihood, by up to 0.45 units. It guards the
+    /// update against falling; it cannot tell a correct update from a frozen or a
     /// timid one, which lower nothing either. Where the update comes to rest is checked by
     /// `the_shapes_rest_where_the_likelihoods_slope_is_zero_at_a_bound_too`, and the slopes it steps
     /// on by `the_passs_shape_slopes_are_the_likelihoods`.
@@ -6954,16 +7006,19 @@ mod whole_fit_tests {
             a: 0.6,
             b,
         };
-        for (samples, positions, depth, duplicated, second_shape, passes, seed) in [
-            (20_usize, 5_000, 3.0, 0.0, 2.2, 40, 4_u64),
-            (8, 10_000, 8.0, 0.01, 2.2, 40, 6),
-            (4, 20_000, 5.0, 0.0, 150.0, 150, 8),
+        for (samples, positions, depth, duplicated, second_shape, passes, seed, mismapped) in [
+            (20_usize, 5_000, 3.0, 0.0, 2.2, 40, 4_u64, 0.03),
+            (8, 10_000, 8.0, 0.01, 2.2, 40, 6, 0.03),
+            (4, 20_000, 5.0, 0.0, 150.0, 150, 8, 0.03),
+            (2, 600, 8.0, 0.0, 2.2, 150, 10, 0.003),
+            (3, 600, 5.0, 0.0, 2.2, 150, 13, 0.003),
+            (2, 1_000, 8.0, 0.0, 2.2, 150, 14, 0.0),
         ] {
             let drawn = draw_cohort_with_duplications(
                 samples,
                 positions,
                 depth,
-                (0.003, 0.06, 0.03),
+                (0.003, 0.06, mismapped),
                 density_with_second_shape(second_shape),
                 0.3,
                 duplicated,

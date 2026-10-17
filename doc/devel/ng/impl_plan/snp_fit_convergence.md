@@ -175,7 +175,7 @@ samples once, after B5.
   before, SNP/indel numbers within 5 × 10⁻¹⁰ of themselves, slip rates within 2 × 10⁻⁵. Digests: the
   two-sample fixture without errors converges (37, 41, 41 passes); the other two still run to the
   limit, as the review measured for this fix alone.
-- ☐ **B3** The swap of a library's two error rates in `maximisation` is deleted; the run log names a
+- ✅ **B3** The swap of a library's two error rates in `maximisation` is deleted; the run log names a
   library whose mismapped-position rate ends below its ordinary-position rate. The comment that the
   plain step "never needs a check" corrected.
   *Touches:* `fit.rs` (`maximisation`, `fit_jointly`, `maximise`'s comment).
@@ -183,6 +183,12 @@ samples once, after B5.
   hundredth of a unit; the log's note, from hand-set rates.
   *Identity:* the oracle unchanged (the swap never fires there). **Moves:** the digests.
   *Depends:* B2. *Source:* `parameter_prepass_joint_fit.md` §3.3, decided 2026-10-17.
+  *Done 2026-10-17:* `plain_passes_never_lower_the_log_likelihood` gains three small cohorts
+  (2 and 3 samples over 600 to 1,000 positions); with the swap, 239 of their plain passes fall, by
+  up to 0.45 units; without it none does. The oracle's two files byte for byte; the note never
+  printed there. Digests: the two-sample fixture with errors ends its three starts within 0.001 of
+  each other, two of three libraries inverted; the 21-sample one rises to −5,045.64, 12 of 22
+  inverted; both still at the limit.
 - ☐ **B4** The decrement counts only the parameters that have a standard error, the others profiled
   out, through the arrow's blocks (§2 amendment, part 2); today's decrement when every parameter the
   step moves has an error.

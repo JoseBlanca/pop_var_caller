@@ -364,7 +364,21 @@ mod tests {
     /// concentrations with the density (34.85 to 49.89, 0.0191 to 0.0223), the starts' rows, and in
     /// the tenth significant figure the repeat-tract row and fallback F. Recorded on macOS (arm64)
     /// only; it was `e5463fbf4a49798b810cc44db00f3a6d`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "64d573193f0492bd973d8d0a82367448";
+    ///
+    /// **Re-recorded 2026-10-17 again** (plan step B3) when the maximisation stopped swapping a
+    /// library's two error rates whenever the mismapped one came out below the ordinary one
+    /// (`parameter_prepass_joint_fit.md` §3.3, decided 2026-10-17). Measured on four tomato
+    /// accessions and one first: both files byte for byte, the swap never firing there. Here it
+    /// fired on every other cycle and lost about 50 units each time; without it the three starts end
+    /// within 0.001 of each other (−482.158 to −482.159) where they ended 1.0 unit apart, and two of
+    /// the three libraries end with the mismapped rate below the ordinary one, which the run log now
+    /// says. Every start still runs to the limit (198, 199, 199): the decrement stays above the
+    /// threshold along parameters that have no error, which the next step addresses. The multipliers
+    /// move by at most 0.4% (7.754, 6.411, 8.379), the inbreeding coefficients 3.1 × 10⁻¹³ to
+    /// 1.1 × 10⁻¹¹, the ordinary-site prior's concentrations 49.89 to 47.53 and 0.0223 to 0.0194,
+    /// the starts' rows, and the repeat-tract row and fallback F in their eleventh significant
+    /// figure. Recorded on macOS (arm64) only; it was `64d573193f0492bd973d8d0a82367448`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "d5a9d68eb60e8ac53f61fa1601fb7d50";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -424,7 +438,11 @@ mod tests {
     /// 178.5 and 189.1 to 174.5, with the multipliers' move, and the other sample's GQ 73 to 74 at
     /// both. No genotype moved; the repeat tract did not move. Recorded on macOS (arm64) only; it
     /// was `46d43b7dc786bc8717807898ebd67ac5`.
-    const WITH_ERRORS_CALLS_MD5: &str = "37d84c3ef1b0fe88160b08eeb72f1f90";
+    ///
+    /// **Re-recorded 2026-10-17 again** with the fit above (plan step B3): the two SNPs' QUAL
+    /// 178.5 to 178.1 and 174.5 to 174.1. Nothing else moved. Recorded on macOS (arm64) only; it was
+    /// `37d84c3ef1b0fe88160b08eeb72f1f90`.
+    const WITH_ERRORS_CALLS_MD5: &str = "241e57ecda2afed9a792607a44a8bb8c";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -468,7 +486,20 @@ mod tests {
     /// stays at about 50.00); one start's row; and in the tenth significant figure the
     /// repeat-tract row and fallback F. Recorded on macOS (arm64) only; it was
     /// `8451e9ebed2660b2f35549d4844875d0`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "291463840e49dca2f779491725538af3";
+    ///
+    /// **Re-recorded 2026-10-17 again** (plan step B3), for the reason
+    /// [`WITH_ERRORS_FITTED_PARAMETERS_MD5`] gives. The swap had fired thousands of times here (6,126
+    /// in the review's count). Every start still runs to the limit (198, 199, 199), but the best
+    /// log-likelihood rises from −5,053.47 to −5,045.64, the review's 200-pass figure for the
+    /// corrected fit; 12 of the 22 libraries end with the mismapped rate below the ordinary one, and
+    /// the "mismapped" class holds about 45% of the positions (the review's measurement of this
+    /// fix) — on this fixture the two classes
+    /// split ordinary positions into two error levels. All 22 multipliers move, now 0.0032 to 15.59
+    /// with errors of 1.03 to 4.73; the 21 inbreeding coefficients 0 to 7.8 × 10⁻¹¹; the
+    /// ordinary-site prior's concentrations 50.00 to 49.91 and 0.0590 to 0.0498; the starts' rows;
+    /// and the repeat-tract row and fallback F in their eleventh significant figure. Recorded on
+    /// macOS (arm64) only; it was `291463840e49dca2f779491725538af3`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "ecd5c80409b9b372d50015d6c765c297";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -517,7 +548,14 @@ mod tests {
     /// chrV:396 (QUAL 31.2); QUAL moves in 21 of the 23 both hold, by −96.0 to +325.2, with the
     /// multipliers; one genotype of 483 changes, the last sample's at chrV:55, 0/0 to 0/1; GQ moves
     /// in 10 records. Recorded on macOS (arm64) only; it was `64ac9af7ecaf0b2c603984e9b4420e6f`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "bfaff38cf2b6c5783ba280f98a177bb8";
+    ///
+    /// **Re-recorded 2026-10-17 again** with the fit above (plan step B3): 24 records still, two
+    /// lost (chrV:386 at QUAL 0.0 and chrV:396 at 31.2) and two added (chrV:483 at 26.8 and chrV:590
+    /// at 45.3); QUAL moves in 21 of the 22 both hold, by −365.0 to +363.8, with the multipliers;
+    /// three genotypes of 462 change — sample 7 at chrV:285 and chrV:377, 0/0 to 0/1, and the last
+    /// sample at chrV:55 back to 0/0, as before step B2 — and GQ moves in almost every record.
+    /// Recorded on macOS (arm64) only; it was `bfaff38cf2b6c5783ba280f98a177bb8`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "aba287e8691aeb67c507d15005379ee1";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
