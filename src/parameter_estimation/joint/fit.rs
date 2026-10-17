@@ -2113,7 +2113,12 @@ pub fn fit_jointly(
         stage.always(|into| {
             format!(
                 "SNP/indel fit: standard errors at the returned values: {}; {into}",
-                standard_errors.described(&parameters, &group_index)
+                standard_errors.described(
+                    &parameters,
+                    &group_index,
+                    &density_report,
+                    duplicated_report.as_ref(),
+                )
             )
         });
         if let Some(note) = note_on_inverted_rates(&parameters, &groups) {

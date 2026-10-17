@@ -1033,13 +1033,13 @@ mod tests {
         draw_cohort_with_duplications,
     };
     use crate::parameter_estimation::joint::fit::standard_errors::{
-        StandardError, StandardErrors, inverse_of_positive_definite,
+        StandardError, StandardErrors, cohort_covariance, inverse_of_positive_definite,
     };
     use crate::parameter_estimation::joint::fit::{
-        DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFit, JointFitConfig,
-        LibraryAtPosition, MAX_RECORDED_SPREAD, MIN_POSITIONS_PER_CHUNK, Parameters, PassKeeps,
-        Statistics, candidate_read_probability, digamma, expectation_pass, fill_depth_weights,
-        fit_jointly, genotype_frequencies, one_position,
+        DensityReport, DuplicatedPositions, EvidenceCursor, FrequencyDensity, JointFit,
+        JointFitConfig, LibraryAtPosition, MAX_RECORDED_SPREAD, MIN_POSITIONS_PER_CHUNK,
+        Parameters, PassKeeps, Statistics, candidate_read_probability, digamma, expectation_pass,
+        fill_depth_weights, fit_jointly, genotype_frequencies, one_position,
     };
 
     use super::*;
@@ -2418,7 +2418,12 @@ mod tests {
             }
             let errors = StandardErrors::of(&information);
             assert_eq!(errors.samples[silent], [StandardError::NoInformation; 3]);
-            let line = errors.described(&parameters, &without);
+            let density = DensityReport::of(
+                &parameters.density,
+                &errors.cohort.map(StandardError::value),
+                &cohort_covariance(&information),
+            );
+            let line = errors.described(&parameters, &without, &density, None);
             assert!(
                 line.contains("error rates at ordinary positions (3 read groups)"),
                 "{line}"
@@ -4838,7 +4843,12 @@ mod tests {
             [StandardError::NoInformation; 3]
         );
         let line = with_sections(&cohort, None, |_, _, group_index, _| {
-            fit.standard_errors.described(&parameters, group_index)
+            fit.standard_errors.described(
+                &parameters,
+                group_index,
+                &fit.density_report,
+                fit.duplicated_report.as_ref(),
+            )
         });
         assert!(
             !line.contains("duplicated") && !line.contains("carrier"),

@@ -79,6 +79,9 @@
 //! remainder that is only rounding would be inverted into an error of millions (measured: 2 × 10⁶
 //! on a carrier shape, 13.5 on a share that lives in [0, 1], at two samples and 300,000 positions).
 
+use crate::float;
+
+use super::determined::{DensityReport, DeterminedShare, DuplicatedReport, STATED_FREQUENCY};
 use super::information::{
     COHORT_PARAMETERS, FullInformation, InformationSums, cohort, own_parameters, sample,
 };
@@ -476,24 +479,52 @@ impl StandardErrors {
     /// reason. `group_index` says which read groups each sample's sections are. The duplicated
     /// class's three are left out when the run does not fit it. The median of an even count is the
     /// lower of the middle two.
-    pub(super) fn described(&self, parameters: &Parameters, group_index: &[Vec<usize>]) -> String {
+    ///
+    /// **What the data determine** (`parameter_prepass_joint_fit.md` §2.1.3), from `density` and,
+    /// when the run fits the class, `duplicated`: where a pair's two numbers are not separately
+    /// determined, each is printed with that verdict in place of its error, the first with the
+    /// share the data do fix and what trading the pair costs; where they are, that share and the
+    /// cost follow the pair's last number.
+    pub(super) fn described(
+        &self,
+        parameters: &Parameters,
+        group_index: &[Vec<usize>],
+        density: &DensityReport,
+        duplicated: Option<&DuplicatedReport>,
+    ) -> String {
         debug_assert!(
             self.laid_out_for(group_index),
             "rows laid out for another cohort"
         );
         let values = parameters.named();
-        let mut parts = vec![
-            (0..cohort_parameters_fitted(parameters))
-                .map(|i| {
-                    format!(
-                        "{} {}",
-                        COHORT_PARAMETER_NAMES[i],
-                        self.cohort[i].printed_with(values[i].1)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
+        let fitted = cohort_parameters_fitted(parameters);
+        let mut in_place: [Option<String>; COHORT_PARAMETERS] = Default::default();
+        let mut after: [Option<String>; COHORT_PARAMETERS] = Default::default();
+        let pairs = [
+            Some((&DENSITY_PAIR, density.determined)),
+            duplicated
+                .filter(|_| fitted == COHORT_PARAMETERS)
+                .map(|report| (&DUPLICATED_PAIR, report.determined)),
         ];
+        for (pair, determined) in pairs.into_iter().flatten() {
+            if determined.separately_determined {
+                after[pair.last_of_group] = Some(pair.determined_share_entry(&determined));
+            } else {
+                in_place[pair.first] = Some(pair.verdict_on_the_first(&determined));
+                in_place[pair.second] = Some(pair.verdict_on_the_second());
+            }
+        }
+        let mut cohort_entries = Vec::with_capacity(fitted + 2);
+        for i in 0..fitted {
+            let name = COHORT_PARAMETER_NAMES[i];
+            let value = values[i].1;
+            cohort_entries.push(match &in_place[i] {
+                Some(verdict) => format!("{name} {value:.4e} ({verdict})"),
+                None => format!("{name} {}", self.cohort[i].printed_with(value)),
+            });
+            cohort_entries.extend(after[i].take());
+        }
+        let mut parts = vec![cohort_entries.join(", ")];
         for (class, name) in RATE_NAMES.iter().enumerate() {
             let rates: Vec<StandardError> = self
                 .samples
@@ -532,6 +563,145 @@ impl StandardErrors {
                 .zip(group_index)
                 .all(|(row, own)| row.len() == own_parameters(own.len()))
     }
+}
+
+/// **How the run's log speaks of one pair of numbers the data may not separate**
+/// (`parameter_prepass_joint_fit.md` §2.1.3): which two cohort slots the pair is, after which slot
+/// a separately determined pair's share is printed, and the words for the share the trade moves
+/// and the share the data see.
+struct PairWording {
+    first: usize,
+    second: usize,
+    last_of_group: usize,
+    /// The share the trade moves, `σ`.
+    traded_share: &'static str,
+    /// The share the data see, as a noun phrase ending where the stated frequency is printed.
+    share_seen: &'static str,
+    /// What follows the stated frequency in [`Self::share_seen`].
+    share_seen_ends: &'static str,
+    /// What the data do not fix.
+    not_seen: &'static str,
+}
+
+/// The density's pair: the invariant share against the first shape.
+const DENSITY_PAIR: PairWording = PairWording {
+    first: cohort::P_INVARIANT,
+    second: cohort::DENSITY_A,
+    last_of_group: cohort::DENSITY_B,
+    traded_share: "the segregating share",
+    share_seen: "the share segregating above",
+    share_seen_ends: "",
+    not_seen: "not how much lies below it",
+};
+
+/// The duplicated class's pair: its share against the carrier Beta's first shape.
+const DUPLICATED_PAIR: PairWording = PairWording {
+    first: cohort::DUPLICATED_SHARE,
+    second: cohort::CARRIER_A,
+    last_of_group: cohort::CARRIER_B,
+    traded_share: "the duplicated share",
+    share_seen: "the share of positions duplicated in more than",
+    share_seen_ends: " of the panel",
+    not_seen: "not how many are duplicated in fewer",
+};
+
+impl PairWording {
+    /// The share the data see, named with the stated frequency: "the share segregating above 1%".
+    fn share_seen(&self) -> String {
+        format!(
+            "{} {}%{}",
+            self.share_seen,
+            STATED_FREQUENCY * 100.0,
+            self.share_seen_ends
+        )
+    }
+
+    /// **The first number's verdict when the pair is not separately determined**: which number it
+    /// trades against, the share the data fix with its error, and what trading costs.
+    fn verdict_on_the_first(&self, determined: &DeterminedShare) -> String {
+        let cost = match determined.trade_cost {
+            Some(cost) => format!(
+                "halving or doubling {} costs {}",
+                self.traded_share,
+                a_cost(cost)
+            ),
+            None => format!(
+                "what halving or doubling {} costs cannot be computed, as the data do not \
+                 determine every number it is computed from",
+                self.traded_share
+            ),
+        };
+        format!(
+            "not separately determined from {}: the data fix {}, {}, {}; {cost}",
+            COHORT_PARAMETER_NAMES[self.second],
+            self.share_seen(),
+            printed_share(determined),
+            self.not_seen
+        )
+    }
+
+    /// The second number's verdict when the pair is not separately determined.
+    fn verdict_on_the_second(&self) -> String {
+        format!(
+            "not separately determined from the {}",
+            COHORT_PARAMETER_NAMES[self.first]
+        )
+    }
+
+    /// **The share the data see, as its own entry, when the pair is separately determined**, with
+    /// what trading the traded share against it would cost.
+    fn determined_share_entry(&self, determined: &DeterminedShare) -> String {
+        let cost = match determined.trade_cost {
+            Some(cost) if cost.is_infinite() => {
+                format!("{} cannot change without changing it", self.traded_share)
+            }
+            Some(cost) => format!(
+                "halving or doubling {} with it held costs {}",
+                self.traded_share,
+                a_cost(cost)
+            ),
+            None => "what trading them costs cannot be computed".to_owned(),
+        };
+        let share_seen = self.share_seen();
+        format!(
+            "{} {} (the {} and {} are separately determined: {cost})",
+            share_seen.trim_start_matches("the "),
+            printed_share(determined),
+            COHORT_PARAMETER_NAMES[self.first],
+            COHORT_PARAMETER_NAMES[self.second],
+        )
+    }
+}
+
+/// The share the data see and its error, as the run's log prints them: `8.45e-3 ± 2.0e-4`.
+fn printed_share(determined: &DeterminedShare) -> String {
+    let share = determined.share_above;
+    match share.standard_error {
+        Some(error) => format!("{:.2e} ± {error:.1e}", share.value),
+        None => format!("{:.2e} with no standard error", share.value),
+    }
+}
+
+/// **A log-likelihood cost as the run's log prints it**: in three significant figures, and above a
+/// million as just that. A cost that large is rounding: where the two shares move together, as on
+/// the 4 oracle samples, `V_trade` comes out a unit in the last place above zero and the cost at
+/// 10¹⁶ or so, and printing that figure would invite a reader to make something of it.
+fn a_cost(cost: f64) -> String {
+    if cost > 1e6 {
+        "over a million log-likelihood units".to_owned()
+    } else {
+        format!("{} log-likelihood units", in_three_figures(cost))
+    }
+}
+
+/// A log-likelihood cost in three significant figures — `1.35`, `0.00549`, `324` — and in
+/// scientific notation from a thousand up, and for anything not above zero.
+fn in_three_figures(cost: f64) -> String {
+    if cost.is_nan() || cost <= 0.0 || cost >= 1_000.0 {
+        return format!("{cost:.2e}");
+    }
+    let decimals = (2.0 - float::log10(cost).floor()).max(0.0) as usize;
+    format!("{cost:.decimals$}")
 }
 
 /// **Per-parameter values in the order the fit's own vector lists them**
@@ -1402,6 +1572,7 @@ fn inverse_by_cholesky(matrix: &[f64], n: usize, floor: &[f64]) -> Result<Vec<f6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parameter_estimation::joint::fit::ReportedNumber;
     use crate::parameter_estimation::joint::fit::information::{
         ONE_LIBRARY_SAMPLE_PARAMETERS, PositionScores, cohort, own_parameters,
     };
@@ -2169,6 +2340,53 @@ mod tests {
         }
     }
 
+    /// What the data determine about one pair, by hand: the share above 1% and its error, and the
+    /// trade's cost, from which the verdict follows as `determined` gives it.
+    fn determined(share: f64, error: Option<f64>, trade_cost: Option<f64>) -> DeterminedShare {
+        DeterminedShare {
+            share_above: ReportedNumber {
+                value: share,
+                standard_error: error,
+            },
+            trade_cost,
+            separately_determined: trade_cost.is_some_and(|cost| cost >= 2.0),
+        }
+    }
+
+    /// The two reports `described` reads for `parameters`, with these verdicts; the numbers'
+    /// errors, which the log takes from the standard errors and not from the reports, left out.
+    fn reports_for_the_log(
+        parameters: &Parameters,
+        density: DeterminedShare,
+        duplicated: Option<DeterminedShare>,
+    ) -> (DensityReport, Option<DuplicatedReport>) {
+        let bare = |value: f64| ReportedNumber {
+            value,
+            standard_error: None,
+        };
+        let values = parameters.density;
+        (
+            DensityReport {
+                invariant_share: bare(values.p_invariant),
+                fixed_non_reference_share: bare(values.p_fixed_alt),
+                segregating_shape_a: bare(values.a),
+                segregating_shape_b: bare(values.b),
+                expected_heterozygosity: bare(values.expected_heterozygosity()),
+                expected_alternative_frequency: bare(values.expected_alternative_frequency()),
+                determined: density,
+            },
+            duplicated.map(|determined| {
+                let values = parameters.duplicated.expect("the class is fitted");
+                DuplicatedReport {
+                    duplicated_share: bare(values.share),
+                    carrier_shape_a: bare(values.carrier_a),
+                    carrier_shape_b: bare(values.carrier_b),
+                    determined,
+                }
+            }),
+        )
+    }
+
     /// **The run's log line gives every cohort parameter's value and standard error by name, and
     /// summarises each kind of a sample's own**: the median (the lower middle of an even count) and
     /// the largest standard error, and how many are missing, by reason — with values chosen so a
@@ -2201,24 +2419,42 @@ mod tests {
             ],
         };
         let one_group_each = vec![vec![0], vec![1], vec![2], vec![3]];
+        let no_trade = determined(0.06, Some(2e-3), Some(f64::INFINITY));
+        let without_the_class = parameters_for_the_log(false, 4, 4);
+        let (density, _) = reports_for_the_log(&without_the_class, no_trade, None);
         assert_eq!(
-            errors.described(&parameters_for_the_log(false, 4, 4), &one_group_each),
+            errors.described(&without_the_class, &one_group_each, &density, None),
             "mismapped share 3.1200e-2 ± 2.00e-4, invariant share 9.0000e-1 ± 3.25e-3, fixed \
              non-reference share 1.2500e-2, no standard error (not identified), allele-frequency \
              shape a 5.0000e-1, no standard error (it came out at 6.10e1, wider than the \
-             parameter's whole range), allele-frequency shape b 6.1000e1 ± 5.00e-1; error rates at \
+             parameter's whole range), allele-frequency shape b 6.1000e1 ± 5.00e-1, share \
+             segregating above 1% 6.00e-2 ± 2.0e-3 (the invariant share and allele-frequency shape \
+             a are separately determined: the segregating share cannot change without changing \
+             it); error rates at \
              ordinary positions (4 read groups): median standard error 2.00e-4, largest 4.00e-4, \
              none missing; error rates at mismapped positions (4 read groups): median standard \
              error 1.00e-2, largest 2.00e-2, 2 missing (1 no information, 1 not identified); \
              homozygote excesses (4 samples): none has a standard error (4 held fixed)"
         );
-        let with_the_class = errors.described(&parameters_for_the_log(true, 4, 4), &one_group_each);
+        let parameters = parameters_for_the_log(true, 4, 4);
+        let (density, duplicated) = reports_for_the_log(
+            &parameters,
+            no_trade,
+            Some(determined(8e-3, Some(1e-4), Some(5.3))),
+        );
+        let with_the_class =
+            errors.described(&parameters, &one_group_each, &density, duplicated.as_ref());
         assert!(
             with_the_class.contains(
-                "allele-frequency shape b 6.1000e1 ± 5.00e-1, duplicated share 1.0000e-2 ± 1.00e-3, \
-                 carrier-frequency shape a 1.5000e0, no standard error (no information), \
-                 carrier-frequency shape b 5.0000e0, no standard error (not identified); error \
-                 rates at ordinary positions"
+                "allele-frequency shape b 6.1000e1 ± 5.00e-1, share segregating above 1% 6.00e-2 ± \
+                 2.0e-3 (the invariant share and allele-frequency shape a are separately determined: \
+                 the segregating share cannot change without changing it), duplicated share \
+                 1.0000e-2 ± 1.00e-3, carrier-frequency shape a 1.5000e0, no standard error (no \
+                 information), carrier-frequency shape b 5.0000e0, no standard error (not \
+                 identified), share of positions duplicated in more than 1% of the panel 8.00e-3 ± \
+                 1.0e-4 (the duplicated share and carrier-frequency shape a are separately \
+                 determined: halving or doubling the duplicated share with it held costs 5.30 \
+                 log-likelihood units); error rates at ordinary positions"
             ),
             "{with_the_class}"
         );
@@ -2228,6 +2464,8 @@ mod tests {
         let line = two_libraries.described(
             &parameters_for_the_log(false, 5, 4),
             &second_group_of_sample_0,
+            &density,
+            None,
         );
         assert!(
             line.ends_with(
@@ -2239,6 +2477,130 @@ mod tests {
             ),
             "{line}"
         );
+    }
+
+    /// **A pair the data do not separate is printed with the verdict in place of its errors**
+    /// (spec §2.1.3, *What is reported*): the first number with the share the data fix, its error,
+    /// and what halving or doubling the traded share costs; the second naming the first. With the
+    /// 59-sample numbers of the spec's example — the density's cost 1.35, the class's 0.116 — and,
+    /// at one sample, a cost that cannot be computed and a share with no error. The number's own
+    /// error, which the standard errors still hold, is not printed.
+    #[test]
+    fn a_pair_not_separately_determined_is_printed_with_the_verdict() {
+        use StandardError::{Estimated, HeldFixed, NotIdentified};
+        let errors = StandardErrors {
+            cohort: [
+                Estimated(1.4e-4),
+                Estimated(0.068),
+                Estimated(4.05e-6),
+                Estimated(0.0089),
+                Estimated(0.0605),
+                Estimated(0.023),
+                Estimated(0.031),
+                Estimated(0.0466),
+            ],
+            samples: vec![vec![Estimated(4e-4), Estimated(0.01), HeldFixed]],
+        };
+        let mut parameters = parameters_for_the_log(true, 1, 1);
+        parameters.density.p_invariant = 0.84159;
+        parameters.density.a = 0.02;
+        if let Some(duplicated) = parameters.duplicated.as_mut() {
+            duplicated.share = 0.015427;
+            duplicated.carrier_a = 0.02;
+        }
+        let (density, duplicated) = reports_for_the_log(
+            &parameters,
+            determined(8.447e-3, Some(2.04e-4), Some(1.3467)),
+            Some(determined(1.2122e-3, Some(3.38e-5), Some(0.11571))),
+        );
+        let line = errors.described(&parameters, &[vec![0]], &density, duplicated.as_ref());
+        assert!(
+            line.starts_with(
+                "mismapped share 3.1200e-2 ± 1.40e-4, invariant share 8.4159e-1 (not separately \
+                 determined from allele-frequency shape a: the data fix the share segregating above \
+                 1%, 8.45e-3 ± 2.0e-4, not how much lies below it; halving or doubling the \
+                 segregating share costs 1.35 log-likelihood units), fixed non-reference share \
+                 1.2500e-2 ± 4.05e-6, allele-frequency shape a 2.0000e-2 (not separately determined \
+                 from the invariant share), allele-frequency shape b 6.1000e1 ± 6.05e-2, duplicated \
+                 share 1.5427e-2 (not separately determined from carrier-frequency shape a: the \
+                 data fix the share of positions duplicated in more than 1% of the panel, 1.21e-3 ± \
+                 3.4e-5, not how many are duplicated in fewer; halving or doubling the duplicated \
+                 share costs 0.116 log-likelihood units), carrier-frequency shape a 2.0000e-2 (not \
+                 separately determined from the duplicated share), carrier-frequency shape b \
+                 5.0000e0 ± 4.66e-2; error rates"
+            ),
+            "{line}"
+        );
+
+        let mut at_one_sample = errors.clone();
+        at_one_sample.cohort[cohort::DENSITY_A] = NotIdentified;
+        at_one_sample.cohort[cohort::DENSITY_B] = NotIdentified;
+        let (density, _) = reports_for_the_log(&parameters, determined(2.33e-3, None, None), None);
+        let without_the_class = Parameters {
+            duplicated: None,
+            ..parameters
+        };
+        let line = at_one_sample.described(&without_the_class, &[vec![0]], &density, None);
+        assert!(
+            line.contains(
+                "invariant share 8.4159e-1 (not separately determined from allele-frequency shape \
+                 a: the data fix the share segregating above 1%, 2.33e-3 with no standard error, \
+                 not how much lies below it; what halving or doubling the segregating share costs \
+                 cannot be computed, as the data do not determine every number it is computed \
+                 from), fixed non-reference share 1.2500e-2 ± 4.05e-6, allele-frequency shape a \
+                 2.0000e-2 (not separately determined from the invariant share), allele-frequency \
+                 shape b 6.1000e1, no standard error (not identified); error rates"
+            ),
+            "{line}"
+        );
+    }
+
+    /// **The duplicated class's part is absent when the class is off**: no duplicated number and no
+    /// verdict on its pair, even when a report for it is handed over; and a separately determined
+    /// density's share comes after its second shape, its cost in three figures.
+    #[test]
+    fn the_duplicated_part_is_absent_when_the_class_is_off() {
+        use StandardError::{Estimated, HeldFixed};
+        let errors = StandardErrors {
+            cohort: [Estimated(1e-3); COHORT_PARAMETERS],
+            samples: vec![vec![Estimated(4e-4), Estimated(0.01), HeldFixed]],
+        };
+        let with_the_class = parameters_for_the_log(true, 1, 1);
+        let (density, duplicated) = reports_for_the_log(
+            &with_the_class,
+            determined(0.0806, Some(3.2e-3), Some(324.25)),
+            Some(determined(1e-3, Some(1e-4), Some(0.5))),
+        );
+        let without_the_class = parameters_for_the_log(false, 1, 1);
+        for handed in [None, duplicated.as_ref()] {
+            let line = errors.described(&without_the_class, &[vec![0]], &density, handed);
+            assert!(
+                !line.contains("duplicated") && !line.contains("carrier"),
+                "{line}"
+            );
+            assert!(
+                line.contains(
+                    "allele-frequency shape b 6.1000e1 ± 1.00e-3, share segregating above 1% \
+                     8.06e-2 ± 3.2e-3 (the invariant share and allele-frequency shape a are \
+                     separately determined: halving or doubling the segregating share with it held \
+                     costs 324 log-likelihood units); error rates"
+                ),
+                "{line}"
+            );
+        }
+    }
+
+    /// **A cost in three significant figures**, in scientific notation from a thousand up, and
+    /// above a million as just that.
+    #[test]
+    fn a_cost_is_printed_in_three_figures() {
+        assert_eq!(in_three_figures(1.346728), "1.35");
+        assert_eq!(in_three_figures(0.005494), "0.00549");
+        assert_eq!(in_three_figures(0.11571), "0.116");
+        assert_eq!(in_three_figures(324.25), "324");
+        assert_eq!(in_three_figures(4302.7), "4.30e3");
+        assert_eq!(a_cost(1.346728), "1.35 log-likelihood units");
+        assert_eq!(a_cost(4.66e16), "over a million log-likelihood units");
     }
 
     /// **The trace names each error after the value it belongs to**: the same names as

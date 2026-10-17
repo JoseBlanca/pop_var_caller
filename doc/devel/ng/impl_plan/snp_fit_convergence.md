@@ -304,13 +304,22 @@ samples once, after B5.
 
 ### Milestone D — what is reported
 
-- ☐ **D1** The run log: `StandardErrors::described` takes the two reports, prints the verdict in
+- ✅ **D1** The run log: `StandardErrors::described` takes the two reports, prints the verdict in
   place of a marked number's error, and adds each determined share and trade cost (§2.1.3's
   wording).
   *Tests:* the line from a hand-built report, marked and not; the duplicated class's part absent
   when the class is off.
   *Identity:* only the log line changes; checksums and digests unchanged.
   *Depends:* C3. *Source:* §2.1.3, *What is reported*.
+  *Done 2026-10-17:* a marked pair's first number carries §2.1.3's sentence (the share the data fix
+  with its error, what halving or doubling the traded share costs), its second "not separately
+  determined from the …"; a pair that is separately determined gets its share as an entry after
+  the group's last number, with the cost. Where the cost cannot be computed (one sample) the
+  sentence says so. Choices of wording the spec left open: the full log names ("allele-frequency
+  shape a"); a cost in three figures, and **above a million printed as "over a million"** — on
+  the 4 oracle samples `V_trade` came out one unit in the last place above zero and the cost at
+  4.66 × 10¹⁶, a figure a reader should not be shown. The 1- and 4-sample files byte for byte, the
+  oracle's checksums and the digests unchanged; only the log line moved.
 - ☐ **D2** **Own commit, do not bundle.** Parameters file format 4: the two tables'
   types (`deny_unknown_fields`), writing with their comments, reading, validation;
   `FORMAT_VERSION` = 4 (the test at `validate.rs:1854` flips to 4 read, 5 refused);
