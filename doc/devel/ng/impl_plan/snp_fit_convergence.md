@@ -144,6 +144,65 @@ what moves, and how the move is checked.
 > Checkpoint B (lead): B1 reproduces the prototype; the oracle's moves are explained. No owner pause
 > unless the reproduction fails for a reason that is not a bug.
 
+### Milestone B′ — what the review of A1–B1 found (owner, 2026-10-17)
+
+The review of steps A1, A2 and B1
+([`../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md`](../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md))
+found why every start of the cross-platform checks' small cohorts (2, 2 and 21 samples) runs to the
+pass limit, and the owner decided the fixes on 2026-10-17: `fit_precision.md` §2, amendment of
+2026-10-17, and `parameter_prepass_joint_fit.md` §3.3 and §11 question 13, parts 5 to 7. The
+review's prototype, every candidate behind an environment variable, is reference code only
+(`tmp/review_AB/prototype_with_probes.diff`). Each step is its own commit, with the 1- and 4-sample
+oracle runs and the three digest fixtures before and after, every move explained; the 59 tomato2
+samples once, after B5.
+
+- ☐ **B2** The box solve is the primal active-set method (§2 amendment, part 1): `bounded_step`
+  rewritten, no fallback; it says whether it finished, and `newton_step` reports the decrement of an
+  unfinished solve as NaN. The negative-decrement trap and the docs on `NewtonStep::decrement` and
+  `has_converged` rewritten.
+  *Touches:* `fit/standard_errors.rs`, `fit/settled.rs` (docs).
+  *Tests:* over random positive-definite and near-singular matrices (condition numbers to 10¹²),
+  random slopes and positions inside or on the bounds, on the whole matrix and the arrow: every step
+  lands inside the box, its decrement is at least zero, the solve finishes, and on the well
+  conditioned ones the step meets the conditions of the box's maximum; the existing step and
+  decrement tests unchanged.
+  *Identity:* where no bound binds, the same bits. **Moves:** the oracle's 4-sample fit by about
+  10⁻¹¹ of each SNP/indel number, passes unchanged (review, B1); the digests, re-recorded.
+  *Depends:* B1. *Source:* `fit_precision.md` §2, amendment of 2026-10-17, part 1.
+- ☐ **B3** The swap of a library's two error rates in `maximisation` is deleted; the run log names a
+  library whose mismapped-position rate ends below its ordinary-position rate. The comment that the
+  plain step "never needs a check" corrected.
+  *Touches:* `fit.rs` (`maximisation`, `fit_jointly`, `maximise`'s comment).
+  *Tests:* on a drawn cohort where the swap fired, a run of plain passes never loses more than a
+  hundredth of a unit; the log's note, from hand-set rates.
+  *Identity:* the oracle unchanged (the swap never fires there). **Moves:** the digests.
+  *Depends:* B2. *Source:* `parameter_prepass_joint_fit.md` §3.3, decided 2026-10-17.
+- ☐ **B4** The decrement counts only the parameters that have a standard error, the others profiled
+  out, through the arrow's blocks (§2 amendment, part 2); today's decrement when every parameter the
+  step moves has an error.
+  *Touches:* `fit/standard_errors.rs` (`newton_step` takes the pass's `StandardErrors`), `fit.rs`
+  (its two callers).
+  *Tests:* equal to `½ d_Kᵀ (Σ_KK)⁻¹ d_K` from a dense inverse, on the whole matrix, the arrow and an
+  arrow of mixed libraries, with and without a bound binding; the same bits as before when every
+  parameter has an error; zero when none has.
+  *Cost:* measured at 59 samples and at 2,000 on drawn arrows, against the box solve.
+  *Identity:* the oracle unchanged. **Moves:** the digests (review: every start of all three
+  converges).
+  *Depends:* B3. *Source:* `fit_precision.md` §2, amendment of 2026-10-17, part 2.
+- ☐ **B5** Tests that catch the review's five mutations of `maximise`'s control flow — a negative
+  decrement counted converged; the start not ended at the judged point when refused tries leave
+  fewer than two passes; an accepted try's pass re-run; the first try always the whole step; a start
+  at the pass limit used as the yardstick — each run against its mutation and seen to fail.
+  `PassSummary` records each judging pass's Newton step. The progress line says whether the
+  log-likelihood rose or fell (review Mi1); a cycle that begins with an accepted try's pass needs two
+  passes in hand, not three, so that pass is never left unjudged at the limit (Mi2).
+  *Touches:* `fit.rs`, `fit/information.rs` (tests).
+  *Identity:* the oracle unchanged, unless a start ends at the limit on an accepted try's pass.
+  *Depends:* B4. *Source:* the review's M2, §8, Mi1, Mi2.
+
+> Checkpoint B′ (lead): every digest fixture converges or says why not; the 59 tomato2 samples
+> against B1: passes, wall time, log-likelihood.
+
 ### Milestone C — what the data determine (computed, not yet written)
 
 - ☐ **C1** The regularised incomplete Beta function `I_x(a, b)` beside `genetics::lgamma`

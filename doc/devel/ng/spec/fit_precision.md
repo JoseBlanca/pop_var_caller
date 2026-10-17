@@ -1,6 +1,6 @@
 # Fitting to the precision the data support
 
-**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02); on 2026-10-16 (owner) §2's per-parameter stopping test is replaced by one on the Newton decrement, §3.3 gains the Newton step the SNP/indel fit takes ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3.1), and §3.5, §3.6 and §8 follow. Not built yet; build order [`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md).
+**Status:** design, 2026-09-27; amended at checkpoints A and A′ (§1.3, §3.2; 2026-09-29), at plan step B1 (§2, §3.3, §3.4; 2026-09-29) at plan step C3 (§4.3; 2026-10-01; §4.1, §4.2, §4.5 and §6 brought into line at checkpoint C, 2026-10-02) and at plan step D2 (§4.4; 2026-10-02); on 2026-10-16 (owner) §2's per-parameter stopping test is replaced by one on the Newton decrement, §3.3 gains the Newton step the SNP/indel fit takes ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3.1), and §3.5, §3.6 and §8 follow; on 2026-10-17 (owner, after the review of that build's first steps) §2 gains a box solve that always finishes and a decrement measured over the parameters that have a standard error. Not built yet; build order [`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md).
 Build order:
 [`../../implementation_plans/fit_precision.md`](../../implementation_plans/fit_precision.md). It
 amends the SNP/indel fit ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3,
@@ -207,7 +207,9 @@ on its natural scale; it does not depend on how fast the fit happens to be movin
   solution points back into its interval is freed (the active-set rule for a box). *Found in B1's
   review:* holding only a parameter exactly on an end left a clean error rate the golden section rests
   4.4 × 10⁻¹⁰ above its floor, and a density shape the fit walks towards its lower bound, unsettled for
-  1,000 passes; with the box both converge.
+  1,000 passes; with the box both converge. *The way this rule finds the box's maximum was replaced
+  on 2026-10-17* (the amendment at the end of this section): it often failed to finish on small
+  cohorts.
 - **A parameter is settled when |dⱼ| < `SETTLED_FRACTION` × SEⱼ**, both from the same pass; one with
   no error, or no distance (not solved for), is settled by definition. **The fit has converged when
   every parameter is settled**, and stops at the end of that cycle.
@@ -263,15 +265,17 @@ step B1 stays — the judging pass, its information and scores, the bounded step
 **Traps.**
 
 - **A negative `λ` is not convergence.** The quadratic model's maximum within the box is never below
-  zero, since staying put is in the box, so a negative value means the active-set solve ended at its
-  round limit without reaching that maximum (`bounded_step`,
-  [`fit/standard_errors.rs:603`](../../../../src/parameter_estimation/joint/fit/standard_errors.rs#L603),
-  `3 × side + 3` rounds). It happened on the 4 oracle samples read one chunk in eight: starts 2 and 3
-  reached pass 30 with `λ` = −2,959 and −2,804, while several error rates and the carrier shapes were
-  being sent to their bounds. Read as below the threshold, it stopped both 13 to 14 log-likelihood
-  units below start 1. A start at a negative `λ` goes on to step 2 and 3 above, like any start not
-  converged. **A `λ` that is not a number** (NaN, from a degenerate solve) is not convergence either:
-  the test is written `λ >= 0.0 && λ < threshold`, which a NaN fails.
+  zero, since staying put is in the box. The box solve as first built (the active-set rule of plan
+  step B1 above, `3 × side + 3` rounds) could end at its round limit and return a step outside the
+  box, and then `λ` had any sign. It happened on the 4 oracle samples read one chunk in eight: starts
+  2 and 3 reached pass 30 with `λ` = −2,959 and −2,804, while several error rates and the carrier
+  shapes were being sent to their bounds. Read as below the threshold, it stopped both 13 to 14
+  log-likelihood units below start 1. **A non-negative `λ` did not prove the solve had finished**:
+  on the two-sample fixtures of the cross-platform checks a failed solve gave 290. The solve of the
+  2026-10-17 amendment below cannot return a negative `λ`, and reports one it did not finish as not
+  a number. The test stays written `λ >= 0.0 && λ < threshold`: a NaN fails it, and so would a
+  negative value from any later change to the solve. A start that fails it goes on to steps 2 and 3
+  above, like any start not converged.
 - **`λ` understates what is left, by a factor of two and a half to six near the maximum.** Measured
   on the converged references, the log-likelihood still to gain was 2.5 to 4.2 times `λ` once `λ` was
   below 0.1 on 1 and 4 samples, 3.0 to 5.9 times on 59, and up to 10 times in the middle of the climb
@@ -318,6 +322,99 @@ cohort above 59 samples, and no other depth, was measured.
 The per-parameter test survives in two places: the progress line and a non-converged start's report
 still name the parameter furthest from settled, in errors (§3.5), and `SETTLED_FRACTION` keeps that
 meaning there. **It no longer stops anything.**
+
+**Amended 2026-10-17 (owner): the box solve always finishes, and the decrement counts only the
+directions the data determine.** Decided after the review of the build's first three steps
+([`../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md`](../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md),
+findings B1 and M1). That review traced why the cross-platform checks' small cohorts — two samples
+without sequencing errors, two with, and 21 — stopped converging once the decrement rule was built:
+every start of all three ran to the 200-pass limit. Two causes stack, and each has its own decision.
+
+**1. The box solve is the primal active-set method.** The rule of plan step B1 above fixes every
+parameter that crosses an end of its interval in one round and frees every one whose slope points
+back in, for at most `3 × side + 3` rounds. Nothing makes that sequence finish, and on information
+that is nearly singular it cycles. On the two-sample fixture with sequencing errors 95 of its 100
+solves ended at the round limit (75 of 102 on the fit module's own 3-sample test cohort), and the step
+it then returned lay outside the box, so the decrement read from it meant nothing: 290, −36 and
+−1,100 were all seen. It is replaced, with no fallback to it, by the textbook method (Nocedal & Wright,
+*Numerical Optimization*, §16.5):
+
+1. start from staying put, `d = 0`, which is inside the box;
+2. solve the free parameters' Newton step from the current point, the fixed ones held where they are;
+3. move along it until the first free parameter meets an end of its interval; fix that parameter
+   there — and any other that meets an end at the same point — and go back to 2;
+4. after a whole step, free the one fixed parameter whose slope points furthest back into its
+   interval and go back to 2; when none does, that point is the box's maximum.
+
+A slope counts as pointing back in only when it exceeds 10⁻⁹ of the size of the two terms it is the
+difference of, so that rounding cannot free and re-fix the same parameter forever. Every point the
+solve passes through is inside the box, and the quadratic model's value never falls along the way —
+each move is a Newton step on a subspace, or part of one — so **the decrement is never negative**.
+When no bound binds, the first solve is the whole step and the result is the old one, bit for bit.
+The round limit stays, at ten rounds a parameter plus ten; a solve that reaches it still returns a
+step inside the box, which the Newton step of §3.3.1 may try, but **its decrement is reported as not
+a number**, so the start cannot stop on it and runs on.
+
+*Measured* (review, B1): no solve unfinished on any digest fixture, any fit test of the module, or
+the 1- and 4-sample oracle; the 1-sample parameters file byte for byte as before; on 4 samples the
+same passes (53 converged; 46 and 37 agreed), every SNP/indel number moved by at most 10⁻¹¹ of
+itself, the repeat-tract slip rates by at most 2 × 10⁻⁵.
+
+**2. The decrement counts only the parameters that have a standard error; the others adjust
+freely.** With the solve fixed, the two-sample fixtures still ran to the limit. What was left to gain
+lay along parameters the data do not determine — on the fixture with sequencing errors 12 of its 16
+parameters have no standard error (the density's shapes against their bound, the duplicated class);
+on the one without, all 16 — and there the decrement fell only to about 0.02 by pass 200. This
+section already calls such a parameter "settled by definition"; the decrement did not.
+
+- **The quantity, in words.** `½ dᵀ I d` is the step's length measured in standard errors: for any
+  quantity `h` built from the parameters, the step moves `h` by at most `√(dᵀ I d)` of `h`'s own
+  error. Split the parameters the step moves into those with an error, `K`, and those without, `U`.
+  The decrement is now **the smallest that length can be when the determined parameters move as the
+  step says and the undetermined ones may move anywhere** — the undetermined ones are profiled out.
+  That is the largest `½ (Δh / SE_h)²` over every quantity `h` built from determined parameters
+  alone: the guarantee of `√(2λ)` above, restricted to the quantities it promises anything about.
+- **Precisely.**
+
+  ```text
+  λ_K = min over e_U of ½ (d_K, e_U)ᵀ I (d_K, e_U)
+      = ½ d_Kᵀ (I_KK − I_KU I_UU⁻¹ I_UK) d_K
+      = ½ d_Kᵀ (Σ_KK)⁻¹ d_K
+  ```
+
+  `d_K` is the determined parameters' part of the whole bounded step; `I_KK`, `I_KU`, `I_UU` are the
+  blocks of the information; `Σ_KK` is the determined parameters' block of its inverse, their joint
+  covariance. The minimum is at `e_U = −I_UU⁻¹ I_UK d_K`. A parameter with an error that the step does
+  not solve for is in `U` too; one with neither an error nor a distance (no information, held fixed,
+  not told apart from the others) is in neither and stays put, as it does in the step.
+- **When every parameter the step moves has an error, the decrement is the one above**,
+  `g·d − ½ dᵀ I d`, computed exactly as before, so a cohort where everything is determined does not
+  move by a bit. (Without a bound binding the two formulas give the same number, `½ dᵀ I d`; with one
+  they differ, and the rule keeps the old formula there for that reason.)
+- **It scales with the cohort as the step does.** The information is an arrow — each sample's own
+  parameters paired with each other and with the cohort's eight, two samples' never paired (§3.2).
+  `e_U` is one solve restricted to `U`, by the same block elimination the step's solve uses: each
+  sample's own block, then the cohort's eight from what the samples leave. `λ_K` is then one product
+  of the information with `(d_K, e_U)`. No dense inverse is formed; the cost is linear in the number of
+  samples. Measured at plan step B4 (its entry in
+  [`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md)).
+- *Measured* (review, M1; together with 1 and with the error-rate swap deleted,
+  [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3): the two-sample fixture
+  without errors converges in 16 passes a start where it ran to the limit; the one with errors in 22,
+  13 and 13, best log-likelihood −482.27 where 200 passes of the corrected fit reach −482.16; the
+  21-sample fixture in 84, 38 and 44, −5,045.75 against −5,045.64. On the 1 and 4 oracle samples,
+  where every parameter the step moves has an error, nothing changes.
+- *Rejected, measured:* **leaving the parameters without an error out of the Newton system.** It
+  converges the fixtures too (16; 43, 21, 15; 95, 62, 59 passes), but it holds those parameters still
+  while expectation–maximisation keeps moving them, and that drags the determined ones: on the
+  4-sample test cohort with the duplicated class a parameter stopped 0.41 of its error from a long
+  fit, and the 4 oracle samples took 56, 49 and 37 passes in place of 53, 46 and 37. **Treating an
+  unfinished solve as "cannot judge"** without replacing it: no start can stop, and every digest
+  start still ran to the limit.
+
+**Trap: an undetermined parameter can still be moving when the start stops.** That is the point of
+the decision, not a defect: the parameters file reports such a parameter without a standard error,
+and the run log says why it has none (§3.5).
 
 ---
 

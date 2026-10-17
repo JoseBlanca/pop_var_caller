@@ -970,6 +970,49 @@ model: a start that puts the two classes close together empties one of them and 
 ([`parameter_prepass.md`](parameter_prepass.md) §9.3). A scan does not care and a climb does. §10
 carries it.
 
+**A library's two error rates are not kept in order — decided 2026-10-17 (owner).** Until then the
+first block's update ended by swapping a library's two rates whenever the rate fitted at mismapped
+positions came out below the one fitted at ordinary positions, "so a swap does not read as a fit".
+**The swap is deleted, and the cap of 0.5 on the share of mismapped positions is what defines the
+mismapped class**: whichever class holds the minority of positions. Decided on the review of the
+convergence build ([`../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md`](../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md),
+finding B2 and its addendum of 2026-10-17).
+
+- **Why the swap had to go.** It was not a relabelling of the two classes: neither the mismapped
+  share nor any other library's rates were swapped with it. So the ordinary positions — 99.7% of
+  them on the two-sample fixture of the cross-platform checks — were handed the rate fitted to the
+  0.3% that are mismapped, 2.64 × 10⁻⁴ in place of 2.44 × 10⁻³ for one library there. The
+  log-likelihood fell from −482.38 to −532.0, and the next pass re-fitted the ordinary rate and undid
+  it. A plain expectation–maximisation pass is supposed never to lower the log-likelihood, and SQUAREM
+  relies on that when it takes the second plain step's point without a check (§3.3.1). With the swap
+  the fit oscillated between the two states to the pass limit, losing 50 to 909 units in a pass; the
+  swap fired 1,040 times on that fixture and 6,126 times on the 21-sample one. Deleting it removed
+  every loss of more than one unit on all three fixtures. The defect is older than the convergence
+  build: main at `51b7be99` shows the same alternation once its old stopping test is switched off.
+- **What nothing reads.** Calling takes each library's ordinary-position rate alone
+  (`JointFit::sequencing_error_rates`); contamination takes each position's probability of being
+  mismapped, not the rate behind it; the parameters file does not carry it; the run log summarises
+  the mismapped rates' standard errors and the per-pass trace, a diagnostic, prints their values.
+  Verified in the code on 2026-10-17. **If
+  a library's mismapped-position rate ends below its ordinary-position rate, the run log names the
+  library** — a note for a reader, not a correction.
+- **It does not happen on real data measured.** The swap never fired on 1, 4 or 59 tomato2 samples,
+  at any pass of any start; there, the closest library's mismapped rate is 2.66 times its ordinary
+  rate (median 12.6). On the drawn digest fixtures labels switch with or without the swap: with the
+  new stopping rule a start returns a point a Newton step or a SQUAREM jump reached, neither of which
+  applied it, so keeping it no longer guaranteed the order of what is returned. On the 21-sample
+  fixture the two classes do not describe mismapping at all — the "mismapped" class holds 45% of
+  positions, splitting ordinary positions into two error levels.
+- *Rejected, measured:* **relabelling the whole class** (the share to one minus itself, every
+  library's two rates exchanged) is an exact symmetry of the model, but the relabelled share would
+  break its cap, and on the 21-sample fixture the libraries disagree (10 or 12 of 22 inverted), so no
+  relabelling fixes them. **The order as a constraint everywhere** — one rate fitted from both classes'
+  pooled read counts when the order is violated, and every point a jump or a Newton step proposes put
+  back in order — removes the losses but costs likelihood where the data want the inversion: −5,095.1
+  against −5,045.75 on the 21-sample fixture's first start. **The pooled update alone** left 12
+  losses of up to 35 units there, because jumps and Newton steps left the ordered region. Impose the
+  order as that constraint only if a reader of the mismapped rate turns up.
+
 #### 3.3.1 The climb as built, and the Newton step it takes — amended 2026-10-16
 
 **What is built.** Each pass over the kept positions computes every position's posteriors and then
@@ -2389,6 +2432,21 @@ holds, and where the generic budget starts to matter — are
        ([report](../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md)); 0.1, first
        proposed, and 0.01 were rejected as leaving the mismapped share 0.55 to 1.17 and a quarter to
        a third of its error short.
+
+    **Decided 2026-10-17 (owner), after the review of the build's first three steps**
+    ([review](../../reports/reviews/snp_fit_convergence_AB_2026-10-16.md)), which found that every
+    start of the cross-platform checks' small cohorts (2, 2 and 21 samples) ran to the pass limit:
+
+    5. **The box solve is the primal active-set method**, with no fallback to the rule it replaces;
+       it never returns a step outside the box or a negative decrement, and one that does not finish
+       gives a decrement that is not a number ([`fit_precision.md`](fit_precision.md) §2, amendment
+       of 2026-10-17).
+    6. **The decrement counts only the parameters that have a standard error**, the others profiled
+       out, computed through the arrow's blocks so it scales to thousands of samples; it is today's
+       decrement when every parameter the step moves has an error (same amendment).
+    7. **A library's two error rates are not kept in order**: the swap in the maximisation step is
+       deleted, the 0.5 cap on the mismapped share defines the mismapped class, and the run log names
+       a library whose mismapped rate ends below its ordinary one (§3.3).
 
 ---
 
