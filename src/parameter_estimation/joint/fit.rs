@@ -2423,8 +2423,9 @@ fn maximise(
         // What this cycle's information pass found, at the parameters it judged; `None` before the
         // fit judges them.
         let judged_here = entering.information.as_ref().map(|information| {
-            let errors = StandardErrors::of(information).by_coordinate(&parameters, group_index);
-            let step = newton_step(information, &parameters, group_index);
+            let standard_errors = StandardErrors::of(information);
+            let errors = standard_errors.by_coordinate(&parameters, group_index);
+            let step = newton_step(information, &standard_errors, &parameters, group_index);
             let converged = has_converged(step.decrement, config.decrement_threshold);
             // A start that has converged is never stopped by agreement: it competes to be the
             // fit's answer. Agreement stops only a start still on its way.
@@ -2848,8 +2849,9 @@ fn how_far_from_settled(
     sample_names: &[String],
     fraction: f64,
 ) -> Option<FurthestFromSettled> {
-    let errors = StandardErrors::of(information).by_coordinate(parameters, group_index);
-    let distances = newton_step(information, parameters, group_index).distances;
+    let standard_errors = StandardErrors::of(information);
+    let errors = standard_errors.by_coordinate(parameters, group_index);
+    let distances = newton_step(information, &standard_errors, parameters, group_index).distances;
     let names = parameters.plain_names(sample_names, group_index);
     assert_eq!(
         names.len(),

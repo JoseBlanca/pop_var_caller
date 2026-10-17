@@ -4294,9 +4294,15 @@ mod tests {
             )
             .information
             .expect("asked for");
-            let errors =
-                StandardErrors::of(&information).by_coordinate(&outcome.parameters, group_index);
-            let distances = newton_step(&information, &outcome.parameters, group_index).distances;
+            let standard_errors = StandardErrors::of(&information);
+            let errors = standard_errors.by_coordinate(&outcome.parameters, group_index);
+            let distances = newton_step(
+                &information,
+                &standard_errors,
+                &outcome.parameters,
+                group_index,
+            )
+            .distances;
             let ratios: Vec<Option<f64>> = errors
                 .iter()
                 .zip(&distances)

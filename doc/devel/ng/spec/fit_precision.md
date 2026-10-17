@@ -396,8 +396,12 @@ section already calls such a parameter "settled by definition"; the decrement di
   `e_U` is one solve restricted to `U`, by the same block elimination the step's solve uses: each
   sample's own block, then the cohort's eight from what the samples leave. `λ_K` is then one product
   of the information with `(d_K, e_U)`. No dense inverse is formed; the cost is linear in the number of
-  samples. Measured at plan step B4 (its entry in
-  [`../impl_plan/snp_fit_convergence.md`](../impl_plan/snp_fit_convergence.md)).
+  samples. *Measured* (plan step B4, on drawn arrows of one library a sample, the density's two
+  shapes and one sample's rate in thirty without an error): 7 µs a judging pass at 59 samples (185
+  parameters) and 160 µs at 2,000 (6,008), against 0.12 ms and 3.0 ms for the box solve and 0.08 ms
+  and 1.8 ms for the standard errors the pass already computes. A dense inverse at 2,000 samples
+  would be some 7 × 10¹⁰ operations a judging pass. On the 1 and 4 oracle samples every parameter
+  the step moves has an error, so the old decrement is computed and the new one costs nothing.
 - *Measured* (review, M1; together with 1 and with the error-rate swap deleted,
   [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.3): the two-sample fixture
   without errors converges in 16 passes a start where it ran to the limit; the one with errors in 22,

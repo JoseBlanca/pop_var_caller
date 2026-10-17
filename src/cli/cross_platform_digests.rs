@@ -222,8 +222,22 @@ mod tests {
     /// `reference_concentration`, 43.393 to 48.274, and `alternative_concentration_total`,
     /// 4.58 × 10⁻³ to 1.79 × 10⁻²; and, in their tenth significant figure, the repeat-tract row and
     /// the fallback F that read the libraries' rates. Recorded on macOS (arm64) only; it was
-    /// `5e36155136a9a0b33d5b89b6395d83fc`.
-    const FITTED_PARAMETERS_MD5: &str = "69445d42684b942826e43bdc02d49a3a";
+    /// `5e36155136a9a0b33d5b89b6395d83fc`. (Plan step B3, the error-rate swap deleted, moved
+    /// nothing here.)
+    ///
+    /// **Re-recorded 2026-10-17 again** (plan step B4) when the decrement began to count only the
+    /// parameters that have a standard error, the others profiled out (`fit_precision.md` §2,
+    /// amendment of 2026-10-17). Measured on four tomato accessions and one first: both files byte
+    /// for byte, every parameter the step moves having an error there. **Here none of the 16 has
+    /// one**, so the decrement is zero at the first judging pass and every start converges after 16
+    /// passes (37, 41 and 41 before). The best log-likelihood is −44.871 against −44.699 at 41
+    /// passes: the 0.17 units given up are all along parameters the data do not place. Nine lines
+    /// move, back to the values of 2026-10-16 for six of them: the starts' rows; the multipliers
+    /// 0.003162 to 0.003164 and the inbreeding coefficients 0 to 3.2 × 10⁻¹⁰; the ordinary-site
+    /// prior's `reference_concentration`, 48.274 to 17.240, and `alternative_concentration_total`,
+    /// 1.79 × 10⁻² to 1.63 × 10⁻²; the repeat-tract row and fallback F in their tenth significant
+    /// figure. Recorded on macOS (arm64) only; it was `69445d42684b942826e43bdc02d49a3a`.
+    const FITTED_PARAMETERS_MD5: &str = "accb6b70b146bb0c83bfcedad8333871";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -304,7 +318,12 @@ mod tests {
     /// **Re-recorded 2026-10-17** with the fit above (plan step B2): the two SNPs' QUAL, chrV:121
     /// 511.1 to 516.6 and chrV:456 510.5 to 516.0. No genotype or GQ moved; the repeat tract did
     /// not move. Recorded on macOS (arm64) only; it was `24afa05244c632f84f33f05bf86b4675`.
-    const CALLS_MD5: &str = "8babc6961203813baa8802274c79e728";
+    ///
+    /// **Re-recorded 2026-10-17 again** with the fit above (plan step B4): the two SNPs' QUAL
+    /// 516.6 to 520.2 and 516.0 to 519.6, the other sample's GQ 74 to 70 at both. No genotype
+    /// moved; the repeat tract did not move. Recorded on macOS (arm64) only; it was
+    /// `8babc6961203813baa8802274c79e728`.
+    const CALLS_MD5: &str = "2661c66dac4f40502bda5f7e2e242713";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -378,7 +397,17 @@ mod tests {
     /// 1.1 × 10⁻¹¹, the ordinary-site prior's concentrations 49.89 to 47.53 and 0.0223 to 0.0194,
     /// the starts' rows, and the repeat-tract row and fallback F in their eleventh significant
     /// figure. Recorded on macOS (arm64) only; it was `64d573193f0492bd973d8d0a82367448`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "d5a9d68eb60e8ac53f61fa1601fb7d50";
+    ///
+    /// **Re-recorded 2026-10-17 a third time** (plan step B4), for the reason
+    /// [`FITTED_PARAMETERS_MD5`] gives. Here 12 of the 16 parameters have no error; measured over
+    /// the other four the decrement falls below the threshold, and **every start converges**, in
+    /// 22, 13 and 13 passes where all three ran to the limit. The best log-likelihood is −482.266
+    /// against −482.158 after 198 passes. The multipliers move by at most 0.5% (7.753, 6.444,
+    /// 8.378; errors 6.9, 27.3 and 3.9), the inbreeding coefficients 1.1 × 10⁻¹¹ to 3.2 × 10⁻¹⁰,
+    /// the ordinary-site prior's concentrations 47.53 to 18.94 and 0.0194 to 0.0148, the starts'
+    /// rows, and the repeat-tract row and fallback F in their tenth significant figure. Recorded
+    /// on macOS (arm64) only; it was `d5a9d68eb60e8ac53f61fa1601fb7d50`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "16cdb5d1f7ab2ece9d505bdba3586eb4";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -442,7 +471,12 @@ mod tests {
     /// **Re-recorded 2026-10-17 again** with the fit above (plan step B3): the two SNPs' QUAL
     /// 178.5 to 178.1 and 174.5 to 174.1. Nothing else moved. Recorded on macOS (arm64) only; it was
     /// `37d84c3ef1b0fe88160b08eeb72f1f90`.
-    const WITH_ERRORS_CALLS_MD5: &str = "241e57ecda2afed9a792607a44a8bb8c";
+    ///
+    /// **Re-recorded 2026-10-17 a third time** with the fit above (plan step B4): the two SNPs'
+    /// QUAL 178.1 to 180.5 and 174.1 to 176.5, the other sample's GQ 74 to 70 at both. No genotype
+    /// moved; the repeat tract did not move. Recorded on macOS (arm64) only; it was
+    /// `241e57ecda2afed9a792607a44a8bb8c`.
+    const WITH_ERRORS_CALLS_MD5: &str = "25a1e5728030f1b0dbdfa916fbf4ee74";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -499,7 +533,17 @@ mod tests {
     /// ordinary-site prior's concentrations 50.00 to 49.91 and 0.0590 to 0.0498; the starts' rows;
     /// and the repeat-tract row and fallback F in their eleventh significant figure. Recorded on
     /// macOS (arm64) only; it was `291463840e49dca2f779491725538af3`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "ecd5c80409b9b372d50015d6c765c297";
+    ///
+    /// **Re-recorded 2026-10-17 a third time** (plan step B4), for the reason
+    /// [`FITTED_PARAMETERS_MD5`] gives: **every start converges**, in 84, 38 and 44 passes, where all
+    /// three ran to the limit; the best log-likelihood is −5,045.753 against −5,045.638 after 198
+    /// passes. Its errors come from the blocks, so the decrement over the determined parameters is
+    /// solved through the arrow here. All 22 multipliers move, now 0.0032 to 15.52 with errors of
+    /// 0.83 to 9.14; the 21 inbreeding coefficients 7.8 × 10⁻¹¹ to 3.2 × 10⁻¹⁰; the ordinary-site
+    /// prior's concentrations 49.91 to 49.52 and 0.0498 to 0.0526; the starts' rows; and the
+    /// repeat-tract row and fallback F in their eleventh significant figure. Recorded on macOS
+    /// (arm64) only; it was `ecd5c80409b9b372d50015d6c765c297`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "c2d56c4117a633b23c475ee7e422a53b";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -555,7 +599,12 @@ mod tests {
     /// three genotypes of 462 change — sample 7 at chrV:285 and chrV:377, 0/0 to 0/1, and the last
     /// sample at chrV:55 back to 0/0, as before step B2 — and GQ moves in almost every record.
     /// Recorded on macOS (arm64) only; it was `bfaff38cf2b6c5783ba280f98a177bb8`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "aba287e8691aeb67c507d15005379ee1";
+    ///
+    /// **Re-recorded 2026-10-17 a third time** with the fit above (plan step B4): 24 records to
+    /// 23, chrV:483 (QUAL 26.8) lost; QUAL moves in all 23 others, by under 3.4 but for chrV:354,
+    /// 516.8 to 318.4; most samples' GQ by one; no genotype of 483 changes. Recorded on macOS
+    /// (arm64) only; it was `aba287e8691aeb67c507d15005379ee1`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "c3e72793116b01d57ca63cbc3bbd2c16";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

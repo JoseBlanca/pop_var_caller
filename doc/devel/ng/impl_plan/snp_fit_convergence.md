@@ -189,7 +189,7 @@ samples once, after B5.
   printed there. Digests: the two-sample fixture with errors ends its three starts within 0.001 of
   each other, two of three libraries inverted; the 21-sample one rises to −5,045.64, 12 of 22
   inverted; both still at the limit.
-- ☐ **B4** The decrement counts only the parameters that have a standard error, the others profiled
+- ✅ **B4** The decrement counts only the parameters that have a standard error, the others profiled
   out, through the arrow's blocks (§2 amendment, part 2); today's decrement when every parameter the
   step moves has an error.
   *Touches:* `fit/standard_errors.rs` (`newton_step` takes the pass's `StandardErrors`), `fit.rs`
@@ -201,6 +201,13 @@ samples once, after B5.
   *Identity:* the oracle unchanged. **Moves:** the digests (review: every start of all three
   converges).
   *Depends:* B3. *Source:* `fit_precision.md` §2, amendment of 2026-10-17, part 2.
+  *Done 2026-10-17:* tested on an arbitrary step rather than a bounded one — the formula holds for
+  any step, so where the bounds bind does not matter to it; three choices of profiled parameters,
+  cohort and sample ones, on the three matrices; holding the profiled parameters still instead
+  fails it. Cost on drawn arrows (one library a sample; two shapes and one rate in thirty without
+  an error): 7 µs at 59 samples, 160 µs at 2,000, against 0.12 and 3.0 ms for the box solve. The
+  oracle's two files byte for byte. Digests: every start of all three fixtures converges — 16, 16,
+  16; 22, 13, 13; 84, 38, 44 passes — as the review measured.
 - ☐ **B5** Tests that catch the review's five mutations of `maximise`'s control flow — a negative
   decrement counted converged; the start not ended at the judged point when refused tries leave
   fewer than two passes; an accepted try's pass re-run; the first try always the whole step; a start

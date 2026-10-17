@@ -581,10 +581,12 @@ fn in_coordinate_order<T: Copy>(
 /// The same matrix the errors come from ([`StandardErrors::of`]): the whole one where the pass kept
 /// it, the arrow of blocks otherwise, and the same parameters left out of it.
 ///
-/// **It also says what the step is worth** ([`NewtonStep::decrement`]), from the same solve: the
-/// stopping rule reads that, and the distances are what the step moves.
+/// **It also says what the step is worth** ([`NewtonStep::decrement`]), from the same solve and
+/// `errors`, the standard errors the same pass's sums give ([`StandardErrors::of`]): the stopping
+/// rule reads that, and the distances are what the step moves.
 pub(super) fn newton_step(
     sums: &InformationSums,
+    errors: &StandardErrors,
     parameters: &Parameters,
     group_index: &[Vec<usize>],
 ) -> NewtonStep {
@@ -592,8 +594,20 @@ pub(super) fn newton_step(
     let values = layout.values_of(parameters, group_index);
     let bounds = layout.bounds();
     let step = bounded_step(sums, &layout, &values, &bounds);
+    let has_error: Vec<bool> = errors
+        .cohort
+        .iter()
+        .chain(errors.samples.iter().flatten())
+        .map(|error| error.value().is_some())
+        .collect();
+    assert_eq!(
+        has_error.len(),
+        layout.side,
+        "the errors are laid out as the sums they came from"
+    );
     let decrement = if step.finished {
-        decrement_of(sums, &layout, &step.moves)
+        determined_decrement(sums, &layout, &step.moves, &has_error)
+            .unwrap_or_else(|| decrement_of(sums, &layout, &step.moves))
     } else {
         f64::NAN
     };
@@ -611,12 +625,14 @@ pub(super) struct NewtonStep {
     /// order the fit's vector lists them ([`Parameters::coordinates`]); `None` where the parameter is
     /// not solved for.
     pub(super) distances: Vec<Option<f64>>,
-    /// **The Newton decrement**: the log-likelihood the step would gain under the quadratic model,
-    /// `g·d − ½ dᵀ I d` for the slope `g`, the information `I` and the step `d` with each parameter
-    /// not solved for moving 0 — `½ gᵀ I⁻¹ g` when no bound binds. Never below zero, since the box
-    /// solve climbs the model from staying put ([`bounded_step`]); **not a number when that solve
-    /// reached its round limit**, so that no start stops on a step that is not the box's maximum
-    /// (`fit_precision.md` §2, amendment of 2026-10-17).
+    /// **The Newton decrement, over the directions the data determine** (`fit_precision.md` §2,
+    /// amendment of 2026-10-17). When every parameter the step moves has a standard error, it is the
+    /// log-likelihood the step would gain under the quadratic model, `g·d − ½ dᵀ I d` for the slope
+    /// `g`, the information `I` and the step `d` with each parameter not solved for moving 0 —
+    /// `½ gᵀ I⁻¹ g` when no bound binds. When some have none, it is the step's length in standard
+    /// errors with those parameters profiled out ([`determined_decrement`]). Never below zero
+    /// either way; **not a number when the box solve reached its round limit**, so that no start
+    /// stops on a step that is not the box's maximum.
     pub(super) decrement: f64,
 }
 
@@ -641,6 +657,70 @@ fn decrement_of(sums: &InformationSums, layout: &Layout, step: &[Option<f64>]) -
     let gained: f64 = slope.iter().zip(&moved).map(|(g, d)| g * d).sum();
     let lost: f64 = moved.iter().zip(&curved).map(|(d, c)| d * c).sum();
     gained - 0.5 * lost
+}
+
+/// **What the bounded step `step` is worth along the directions the data determine**
+/// (`fit_precision.md` §2, amendment of 2026-10-17), in the flat layout; `None` when every
+/// parameter the step moves has a standard error (`has_error`), where the decrement is
+/// [`decrement_of`]'s.
+///
+/// `½ dᵀ I d` is the step's length in standard errors: no quantity built from the parameters moves
+/// by more than `√(dᵀ I d)` of its own error. Split the parameters into those the step moves that
+/// have an error, `K`, and those that the data leave without one, `U` — a parameter the step moves
+/// with no error, or one with an error the step does not move. This is **the smallest that length
+/// can be when the parameters in `K` move as the step says and those in `U` may move anywhere**:
+///
+/// ```text
+/// λ_K = min over e_U of ½ (d_K, e_U)ᵀ I (d_K, e_U) = ½ d_Kᵀ (I_KK − I_KU I_UU⁻¹ I_UK) d_K
+/// ```
+///
+/// the largest `½ (Δh / SE_h)²` over every quantity `h` built from `K` alone. The minimum is at
+/// `e_U = −I_UU⁻¹ I_UK d_K`: one solve over `U` of what moving `K` pulls on it, by the same block
+/// elimination the step uses on the arrow ([`arrow_solve`]) or the whole matrix
+/// ([`whole_matrix_solve`]), so nothing is inverted densely and the cost grows with the samples as
+/// the step's does. A parameter in neither set — no information, held fixed, or not told apart from
+/// the others — stays put, as it does in the step; so does one of `U` the solve over `U` cannot
+/// tell apart from the rest of `U`.
+fn determined_decrement(
+    sums: &InformationSums,
+    layout: &Layout,
+    step: &[Option<f64>],
+    has_error: &[bool],
+) -> Option<f64> {
+    let profiled: Vec<bool> = step
+        .iter()
+        .zip(has_error)
+        .map(|(moved, has_error)| moved.is_some() != *has_error)
+        .collect();
+    if !profiled.contains(&true) {
+        return None;
+    }
+    // The step's determined part, `(d_K, 0)`, and what it pulls on every parameter, `I (d_K, 0)`.
+    let determined: Vec<f64> = step
+        .iter()
+        .zip(has_error)
+        .map(|(moved, has_error)| {
+            if *has_error {
+                moved.unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let pulled = information_times(sums, layout, &determined);
+    // `I_UU⁻¹ I_UK d_K`, solved over the profiled parameters alone.
+    let held: Vec<bool> = profiled.iter().map(|profiled| !profiled).collect();
+    let followed = match &sums.full {
+        Some(full) => whole_matrix_solve(full, &pulled, &held),
+        None => arrow_solve(sums, layout, &pulled, &held),
+    };
+    let moves: Vec<f64> = determined
+        .iter()
+        .zip(&followed)
+        .map(|(determined, followed)| determined - followed.unwrap_or(0.0))
+        .collect();
+    let curved = information_times(sums, layout, &moves);
+    Some(0.5 * moves.iter().zip(&curved).map(|(m, c)| m * c).sum::<f64>())
 }
 
 /// **The Newton step to the maximum of the quadratic model within the bounds**, by the primal
@@ -2346,7 +2426,13 @@ mod tests {
         let (slope, flat) = a_slope_of(&libraries, 92);
         sums.slope = slope;
         let parameters = parameters_inside(&libraries);
-        let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
+        let got = newton_step(
+            &sums,
+            &StandardErrors::of(&sums),
+            &parameters,
+            &group_index_of(&libraries),
+        )
+        .distances;
         let expected = in_the_fits_order(
             &dense_step(&dense, &flat, |_| true),
             &libraries,
@@ -2367,7 +2453,13 @@ mod tests {
         let (slope, flat) = a_slope_of(&libraries, 94);
         sums.slope = slope;
         let parameters = parameters_inside(&libraries);
-        let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
+        let got = newton_step(
+            &sums,
+            &StandardErrors::of(&sums),
+            &parameters,
+            &group_index_of(&libraries),
+        )
+        .distances;
         let expected = in_the_fits_order(
             &dense_step(&dense, &flat, |_| true),
             &libraries,
@@ -2441,7 +2533,13 @@ mod tests {
                         let mut expected = dense_step(&dense, &slope_left, |i| i != row);
                         expected[row] = Some(moved);
                         let expected = in_the_fits_order(&expected, &libraries, &parameters);
-                        let got = newton_step(&sums, &parameters, &group_index).distances;
+                        let got = newton_step(
+                            &sums,
+                            &StandardErrors::of(&sums),
+                            &parameters,
+                            &group_index,
+                        )
+                        .distances;
                         assert_steps_match(
                             &got,
                             &expected,
@@ -2477,7 +2575,8 @@ mod tests {
             };
             let mut parameters = parameters_inside(&libraries);
             set_at(&mut parameters, row, end);
-            let got = newton_step(&sums, &parameters, &group_index).distances;
+            let got =
+                newton_step(&sums, &StandardErrors::of(&sums), &parameters, &group_index).distances;
             assert_steps_match(
                 &got,
                 &in_the_fits_order(&free, &libraries, &parameters),
@@ -2519,7 +2618,13 @@ mod tests {
             let free = dense_step(&dense, &flat, |_| true)[row].expect("solved");
             let mut parameters = parameters_inside(&libraries);
             parameters.clean[0] = if free < 0.0 { beside[0] } else { beside[1] };
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
+            let got = newton_step(
+                &sums,
+                &StandardErrors::of(&sums),
+                &parameters,
+                &group_index_of(&libraries),
+            )
+            .distances;
             // In the fit's order: the cohort's eight, then read group 0's clean rate.
             let distance = got[COHORT_PARAMETERS].expect("solved");
             assert!(
@@ -2545,7 +2650,13 @@ mod tests {
             sums.slope = slope;
             let mut parameters = parameters_inside(&libraries);
             parameters.hom_excess[0] = 0.5;
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
+            let got = newton_step(
+                &sums,
+                &StandardErrors::of(&sums),
+                &parameters,
+                &group_index_of(&libraries),
+            )
+            .distances;
             let expected = in_the_fits_order(
                 &dense_step(&dense, &flat, |i| i != excess),
                 &libraries,
@@ -2605,7 +2716,13 @@ mod tests {
                 "{label}"
             );
             let parameters = parameters_inside(&libraries);
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).distances;
+            let got = newton_step(
+                &sums,
+                &StandardErrors::of(&sums),
+                &parameters,
+                &group_index_of(&libraries),
+            )
+            .distances;
             let in_layout = dense_step(&dense, &flat, |i| i != uninformed && i != copied);
             let expected = in_the_fits_order(&in_layout, &libraries, &parameters);
             assert_eq!(
@@ -2641,7 +2758,13 @@ mod tests {
             let (slope, flat) = a_slope_of(&libraries, slope_seed);
             sums.slope = slope;
             let parameters = parameters_inside(&libraries);
-            let got = newton_step(&sums, &parameters, &group_index_of(&libraries)).decrement;
+            let got = newton_step(
+                &sums,
+                &StandardErrors::of(&sums),
+                &parameters,
+                &group_index_of(&libraries),
+            )
+            .decrement;
             let free = dense_step(&dense, &flat, |_| true);
             let half_slope_through_inverse = 0.5
                 * flat
@@ -2689,7 +2812,7 @@ mod tests {
                 .collect();
             let mut box_step = dense_step(&dense, &slope_left, |i| i != row);
             box_step[row] = Some(moved);
-            let step = newton_step(&sums, &parameters, &group_index);
+            let step = newton_step(&sums, &StandardErrors::of(&sums), &parameters, &group_index);
             assert_steps_match(
                 &step.distances,
                 &in_the_fits_order(&box_step, &libraries, &parameters),
@@ -2705,6 +2828,148 @@ mod tests {
             assert!(
                 expected > 0.0 && expected < unbounded,
                 "{label}: the box step's {expected} against the unbounded {unbounded}"
+            );
+        }
+    }
+
+    /// `½ d_Kᵀ (Σ_KK)⁻¹ d_K` densely: `Σ` the inverse of `matrix` over every parameter with an
+    /// error or a move, `K` those with both.
+    fn dense_determined_decrement(matrix: &[f64], step: &[Option<f64>], has_error: &[bool]) -> f64 {
+        let n = step.len();
+        let solved: Vec<usize> = (0..n)
+            .filter(|&i| step[i].is_some() || has_error[i])
+            .collect();
+        let covariance = inverse_of_positive_definite(
+            &square_of(&solved, |row, column| matrix[row * n + column]),
+            solved.len(),
+        )
+        .expect("positive definite");
+        let determined: Vec<usize> = (0..solved.len())
+            .filter(|&p| step[solved[p]].is_some() && has_error[solved[p]])
+            .collect();
+        let k = determined.len();
+        let block = square_of(&determined, |p, q| covariance[p * solved.len() + q]);
+        let precision = inverse_of_positive_definite(&block, k).expect("positive definite");
+        let moved: Vec<f64> = determined
+            .iter()
+            .map(|&p| step[solved[p]].expect("determined"))
+            .collect();
+        0.5 * (0..k)
+            .map(|a| moved[a] * (0..k).map(|b| precision[a * k + b] * moved[b]).sum::<f64>())
+            .sum::<f64>()
+    }
+
+    /// **Measured over the determined parameters, the decrement is `½ d_Kᵀ (Σ_KK)⁻¹ d_K`**, the
+    /// step's length in the determined parameters' own joint covariance — on the whole matrix, the
+    /// arrow and an arrow of samples of one to three libraries, for an arbitrary step and three
+    /// choices of which parameters have no error: the density's two shapes; those, a sample's
+    /// mismapped rate and another's homozygote excess; and those, with a parameter that has an error
+    /// but no move (profiled too) and one with neither (left out). Against a dense inverse, to 10⁻⁹
+    /// relative. Holding the profiled parameters still instead — `½ d_Kᵀ I_KK d_K` — fails, and so
+    /// does the whole step's length, which the profiled one is checked to stay below.
+    #[test]
+    fn the_determined_decrement_is_the_step_through_the_determined_covariance() {
+        let libraries = [1, 2, 3, 1];
+        let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+        let second_sample = COHORT_PARAMETERS + own_parameters(1);
+        let third_sample = second_sample + own_parameters(2);
+        let shapes = [cohort::DENSITY_A, cohort::DENSITY_B];
+        let with_samples = [
+            cohort::DENSITY_A,
+            cohort::DENSITY_B,
+            second_sample + sample::rate(1, 1),
+            third_sample + sample::HOMOZYGOTE_EXCESS,
+        ];
+        for (label, (sums, dense)) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 121)),
+            ("arrow", an_arrow_of(&libraries, 123)),
+            ("arrow of one library a sample", an_arrow(4, 125)),
+        ] {
+            let n = if label.ends_with("sample") {
+                COHORT_PARAMETERS + 4 * ONE_LIBRARY_SAMPLE_PARAMETERS
+            } else {
+                n
+            };
+            let layout = Layout::of(&sums);
+            assert_eq!(layout.side, n, "{label}");
+            let mut draw = uniform_draws(127);
+            let step: Vec<Option<f64>> = (0..n).map(|_| Some(draw() - 0.5)).collect();
+            for (case, undetermined) in [&shapes[..], &with_samples[..]].into_iter().enumerate() {
+                let undetermined: Vec<usize> =
+                    undetermined.iter().copied().filter(|&i| i < n).collect();
+                let has_error: Vec<bool> = (0..n).map(|i| !undetermined.contains(&i)).collect();
+                let got = determined_decrement(&sums, &layout, &step, &has_error)
+                    .expect("some parameter is profiled");
+                let expected = dense_determined_decrement(&dense, &step, &has_error);
+                // `½ dᵀ I d`: the quadratic model's loss at the step, with no slope.
+                let whole = -dense_decrement(&dense, &vec![0.0; n], &step);
+                assert!(
+                    (got - expected).abs() <= 1e-9 * expected,
+                    "{label}, case {case}: {got} against {expected}"
+                );
+                assert!(
+                    expected > 0.0 && expected < whole,
+                    "{label}, case {case}: profiling lowers the step's length ({expected} \
+                     against {whole})"
+                );
+            }
+            // A parameter with an error and no move is profiled; one with neither stays put.
+            let mut step_without = step.clone();
+            let (error_no_move, neither) = (cohort::P_FIXED_ALT, cohort::NOISY_SHARE);
+            step_without[error_no_move] = None;
+            step_without[neither] = None;
+            let has_error: Vec<bool> = (0..n)
+                .map(|i| i != neither && !shapes.contains(&i))
+                .collect();
+            let got = determined_decrement(&sums, &layout, &step_without, &has_error)
+                .expect("some parameter is profiled");
+            let expected = dense_determined_decrement(&dense, &step_without, &has_error);
+            assert!(
+                (got - expected).abs() <= 1e-9 * expected,
+                "{label}, with a parameter of each kind left: {got} against {expected}"
+            );
+        }
+    }
+
+    /// **When every parameter the step moves has an error the decrement is the old one, bit for
+    /// bit, and when none has one it is zero**: on the whole matrix and the arrow, the decrement
+    /// `newton_step` gives equals `g·d − ½ dᵀ I d` of its own box step exactly; with every error
+    /// taken away the determined decrement is exactly zero — nothing is left to measure the step
+    /// in.
+    #[test]
+    fn with_every_error_the_decrement_is_the_old_one_and_with_none_it_is_zero() {
+        let libraries = [1, 2, 3, 1];
+        let group_index = group_index_of(&libraries);
+        for (label, (mut sums, _), slope_seed) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 91), 92),
+            ("arrow", an_arrow_of(&libraries, 93), 94),
+        ] {
+            let (slope, _) = a_slope_of(&libraries, slope_seed);
+            sums.slope = slope;
+            let parameters = parameters_inside(&libraries);
+            let errors = StandardErrors::of(&sums);
+            assert!(
+                errors
+                    .cohort
+                    .iter()
+                    .chain(errors.samples.iter().flatten())
+                    .all(|error| error.value().is_some()),
+                "{label}: every parameter has an error"
+            );
+            let layout = Layout::of(&sums);
+            let step = bounded_step(
+                &sums,
+                &layout,
+                &layout.values_of(&parameters, &group_index),
+                &layout.bounds(),
+            );
+            let old = decrement_of(&sums, &layout, &step.moves);
+            let got = newton_step(&sums, &errors, &parameters, &group_index).decrement;
+            assert_eq!(got.to_bits(), old.to_bits(), "{label}: {got} against {old}");
+            assert_eq!(
+                determined_decrement(&sums, &layout, &step.moves, &vec![false; layout.side]),
+                Some(0.0),
+                "{label}"
             );
         }
     }
