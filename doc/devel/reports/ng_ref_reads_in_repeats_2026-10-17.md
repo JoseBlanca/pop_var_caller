@@ -15,7 +15,10 @@ A prototype fix on this branch removes most of those reads: of the four ways the
 answers three and not the fourth. On simulated reads from
 four of the colleague's sites, every homozygote it called `0/1` is now `1/1` at 30× and 200×, and
 every simulated heterozygote stays `0/1`. On the local GIAB and tomato benchmarks it changes almost
-nothing else (§4). It is not merged; §7 lists what needs a decision.
+nothing else (§4).
+
+**Merged to main on 2026-10-17** with the three parts §7 recommends, unit tests for each, and the
+tomato identity oracle's baseline re-recorded (`scripts/promote_ng_oracle.baseline` says what moved).
 
 **Words this report uses.**
 

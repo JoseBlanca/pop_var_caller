@@ -148,12 +148,24 @@
 # no record changes. Defaults (92758b01 → 3d91e3a2, 7,508 → 7,507 records): ch01:12776029 A>T and ch01:37011736 T>C are now
 # dropped, ch01:33042122 C>T is kept. With the fit (e7dc72eb → 9a4f49c2, 6,680 → 6,682): ch01:12776369 C>T is now dropped,
 # ch01:33037237 (an A/T homopolymer deletion), ch01:37087746 T>C and ch01:67912984 A>G are kept.
+# Re-recorded 2026-10-17 (macOS host, arm64) when a read stopping inside an indel's slide stopped counting as a reference read
+# (doc/devel/reports/ng_ref_reads_in_repeats_2026-10-17.md): on the STR path a reference read that stops before the end of the
+# stretch an indel in the tract can slide to is a partial observation, and on the generic path a read stopping short of a
+# slide cut at the region's end is set aside. The pre-change binary (main at 2c6eac36) reproduced every line below's old value
+# on this host first. The defaults run's parameters file does not move. Defaults (3d91e3a2 → 82a9575b, 7,507 records both): no
+# record appears or vanishes; 18 change, 3 sample genotypes with them, all at homopolymer length variants at GQ ≤ 47 —
+# ch01:56740653 CTT>CTTT 0/1 → 1/1 in the third sample (the other two called samples are 1/1), ch01:79360746 0/1 → 1/1,
+# ch01:85912272 0/0 → 0/1. Windows (4acdda68 → 56798acf): 3 of 30,632 change their depth sums, and the histograms with them
+# (09635117 → b2fc1bfa). The fit (5ea720b6 → 14a09b0a) moves in 206 of 665 lines: base-quality multipliers in the fifth
+# significant digit, inbreeding coefficients by at most 0.0003, and all 49 repeat-tract slippage rows (median 1.1%, largest
+# 27%). With the fit (9a4f49c2 → 58bfad8f, 6,682 → 6,684 records): ch01:85900664 A>C and ch01:85900669 A>G (AC=1, DP=7) are
+# new, one genotype changes (ch01:56740653 again, 0/1 → 1/1), and the rest move in AF or GQ only.
 slice: 20 regions, 4 alignments
 # records: 7507
-3d91e3a20fa4e7397d206dee17cf4480  from_alignments.comparable
-3d91e3a20fa4e7397d206dee17cf4480  from_psps.comparable
+82a9575b258c7763b4a2567918ac58b1  from_alignments.comparable
+82a9575b258c7763b4a2567918ac58b1  from_psps.comparable
 920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
-4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
-09635117af8fe70350f6ad222bea2360  from_alignments.windows.histograms
-5ea720b63c4674239720087f21a72674  fitted.parameters.toml
-9a4f49c292dac53940ae2f8793d97446  from_fit.comparable
+56798acfa66618ab08fb98e420d54d68  from_alignments.windows.sorted
+b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
+14a09b0ac38fe718051dd18d1f32d1d1  fitted.parameters.toml
+58bfad8f0b134527f8f40849af1fb360  from_fit.comparable
