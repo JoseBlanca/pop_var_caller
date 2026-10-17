@@ -360,6 +360,34 @@ the 1- and 4-sample oracle; the 1-sample parameters file byte for byte as before
 same passes (53 converged; 46 and 37 agreed), every SNP/indel number moved by at most 10⁻¹¹ of
 itself, the repeat-tract slip rates by at most 2 × 10⁻⁵.
 
+*Three departures from the textbook method, from the review of the built solve*
+([`../../reports/reviews/snp_fit_convergence_B_2026-10-17.md`](../../reports/reviews/snp_fit_convergence_B_2026-10-17.md),
+findings 1, 2 and 4; built 2026-10-17):
+
+- **No parameter is freed twice in one solve.** The method assumes a freed parameter moves back into
+  its interval and that the free set's maximum is unique; on nearly singular information neither
+  holds. Of 6,000 random cases of 1 to 8 samples, 28 did not finish in ten rounds a parameter: one
+  parameter freed, its next step pointing out, fixed again and freed again from round 21 to 199; or
+  two parameters taking turns, each turn gaining 10⁻⁹ of a step worth 10⁻⁶. With each parameter
+  freed at most once the solve takes at most three rounds a parameter plus one, so it always
+  finishes, and the round limit is a guard. The price is that on such information the point it
+  finishes at need not be the box's maximum. On information well conditioned no parameter needed a
+  second freeing — 2,400 of the 6,000 cases and 134 of the property test's 400 — and the 1,200 best
+  conditioned of the 6,000 end at the box's maximum, checked by the slope left at each parameter.
+- **A parameter beside the end its step heads to is on it**, while the solve has not moved it:
+  within 10⁻⁹ of one plus the end's size, the golden section's stopping width, which leaves a
+  homozygote excess up to half that above 0. Fixing only the parameter meeting an end first spent a
+  round on each such excess: at 2,000 outbred samples at their floor the solve took 1.83 s, against
+  1.3 ms with the excesses inside; it now takes 1.9 ms.
+- **The determined decrement is raised to zero when rounding makes it negative.** It is a small
+  difference of large terms, and on exactly singular information it came out negative on 125 of
+  3,546 random cases (as low as −1.4 × 10⁻¹⁰ against terms of 2.3 × 10⁴), which `has_converged`
+  refuses. A decrement that is not a number stays one.
+
+None of the three moves a number on the 1- and 4-sample oracle: both parameters files are byte for
+byte those of the build before. On the 21-sample digest fixture the second moves the fitted numbers
+by at most 6 × 10⁻⁶ of themselves, the same starts taking the same passes.
+
 **2. The decrement counts only the parameters that have a standard error; the others adjust
 freely.** With the solve fixed, the two-sample fixtures still ran to the limit. What was left to gain
 lay along parameters the data do not determine — on the fixture with sequencing errors 12 of its 16
@@ -372,6 +400,9 @@ section already calls such a parameter "settled by definition"; the decrement di
   error. Split the parameters the step moves into those with an error, `K`, and those without, `U`.
   The decrement is now **the smallest that length can be when the determined parameters move as the
   step says and the undetermined ones may move anywhere** — the undetermined ones are profiled out.
+  (Where the solve over the undetermined ones cannot tell one apart from the rest, it leaves that one
+  still, and the length is a minimum over fewer directions: larger than `λ_K` below, on 12 of 3,546
+  random cases by up to 3.3 times, never above 2.5 × 10⁻⁵.)
   That is the largest `½ (Δh / SE_h)²` over every quantity `h` built from determined parameters
   alone: the guarantee of `√(2λ)` above, restricted to the quantities it promises anything about.
 - **Precisely.**

@@ -760,10 +760,30 @@ pub(super) fn newton_step(
     parameters: &Parameters,
     group_index: &[Vec<usize>],
 ) -> NewtonStep {
+    let round_limit = box_solve_round_limit(Layout::of(sums).side);
+    newton_step_within(sums, errors, parameters, group_index, round_limit)
+}
+
+/// [`newton_step`] with the box solve given `round_limit` rounds ([`bounded_step`]), so a test can
+/// make it run out.
+fn newton_step_within(
+    sums: &InformationSums,
+    errors: &StandardErrors,
+    parameters: &Parameters,
+    group_index: &[Vec<usize>],
+    round_limit: usize,
+) -> NewtonStep {
+    // The errors say which parameters the data determine, so they must be the ones these sums
+    // give; the two are handed over separately only because the caller needs the errors too.
+    debug_assert_eq!(
+        errors,
+        &StandardErrors::of(sums),
+        "the errors come from the sums the step is solved from"
+    );
     let layout = Layout::of(sums);
     let values = layout.values_of(parameters, group_index);
     let bounds = layout.bounds();
-    let step = bounded_step(sums, &layout, &values, &bounds);
+    let step = bounded_step(sums, &layout, &values, &bounds, round_limit);
     let has_error: Vec<bool> = errors
         .cohort
         .iter()
@@ -855,8 +875,49 @@ struct BoundedStep {
 
 /// How far a fixed parameter's slope must point back into its interval, as a share of the two terms
 /// it is the difference of, for the box solve to free it: below this the sign is rounding, and
-/// freeing on it could free and re-fix the same parameter until the round limit.
+/// freeing on it spends rounds on a parameter with nowhere to go.
 const SLOPE_POINTING_IN: f64 = 1e-9;
+
+/// **How close to an end of its interval a parameter must be, as a share of one plus the end's
+/// size, for the box solve to treat it as on that end**: the golden section's stopping width
+/// ([`GOLDEN_SECTION_WIDTH`](super::GOLDEN_SECTION_WIDTH)). That search leaves a maximum on an end
+/// up to half its width beside it — a homozygote excess 4.4 × 10⁻¹⁰ above 0 — and a step heading
+/// to that end would otherwise move every parameter by that sliver's share of the step and fix
+/// only the one: a round for each such parameter, which at 2,000 outbred samples at their floor
+/// cost 1.8 s a solve where a whole step costs 1.3 ms.
+const BESIDE_AN_END: f64 = super::GOLDEN_SECTION_WIDTH;
+
+/// **How many rounds the box solve takes before giving up**: ten a parameter, plus ten. A guard:
+/// the solve needs at most three a parameter, plus one ([`bounded_step`]).
+fn box_solve_round_limit(parameters: usize) -> usize {
+    10 * parameters + 10
+}
+
+/// **How far a free parameter at `value`, moved `moved` so far, can go along its step `toward`
+/// before it meets the end of `bounds` that step heads to**, as a share of the step, with that end;
+/// `None` for a step of 0.
+///
+/// Never below zero: a parameter already past that end — by the rounding of the moves so far — has
+/// no room, so the solve does not carry every parameter backwards along the step to bring it there,
+/// and the model's value never falls along the way. One the solve has not given a move yet
+/// (`unmoved`) that sits within [`BESIDE_AN_END`] of the end has no room either.
+fn room_to_an_end(
+    value: f64,
+    moved: f64,
+    toward: f64,
+    bounds: (f64, f64),
+    unmoved: bool,
+) -> Option<(f64, f64)> {
+    if toward == 0.0 {
+        return None;
+    }
+    let end = if toward > 0.0 { bounds.1 } else { bounds.0 };
+    let gap = end - value - moved;
+    if unmoved && gap.abs() <= BESIDE_AN_END * (1.0 + end.abs()) {
+        return Some((0.0, end));
+    }
+    Some(((gap / toward).max(0.0), end))
+}
 
 /// **What the bounded step `step` is worth under the quadratic model**, `g·d − ½ dᵀ I d`, in the
 /// flat layout, a parameter not solved for moving 0.
@@ -890,7 +951,10 @@ fn decrement_of(sums: &InformationSums, layout: &Layout, step: &[Option<f64>]) -
 /// ([`whole_matrix_solve`]), so nothing is inverted densely and the cost grows with the samples as
 /// the step's does. A parameter in neither set — no information, held fixed, or not told apart from
 /// the others — stays put, as it does in the step; so does one of `U` the solve over `U` cannot
-/// tell apart from the rest of `U`.
+/// tell apart from the rest of `U`. **Then the length is a minimum over fewer directions, so it can
+/// exceed `λ_K`, and even the whole step's `½ dᵀ I d`** when that parameter is one the step moved:
+/// on the review's random cases (`snp_fit_convergence_B_2026-10-17.md`), 12 of 3,546, by up to 3.3
+/// times, and never above 2.5 × 10⁻⁵ — far below the threshold a start stops at.
 fn determined_decrement(
     sums: &InformationSums,
     layout: &Layout,
@@ -930,7 +994,12 @@ fn determined_decrement(
         .map(|(determined, followed)| determined - followed.unwrap_or(0.0))
         .collect();
     let curved = information_times(sums, layout, &moves);
-    Some(0.5 * moves.iter().zip(&curved).map(|(m, c)| m * c).sum::<f64>())
+    let length = 0.5 * moves.iter().zip(&curved).map(|(m, c)| m * c).sum::<f64>();
+    // A length is never below zero, but this one is a small difference of large terms: on
+    // exactly singular information it came out as low as −1.4 × 10⁻¹⁰ against terms of 2.3 × 10⁴,
+    // and `has_converged` refuses a negative, so a start that had arrived would run on. Only a
+    // negative is raised; a length that is not a number stays one.
+    Some(if length < 0.0 { 0.0 } else { length })
 }
 
 /// **The Newton step to the maximum of the quadratic model within the bounds**, by the primal
@@ -940,20 +1009,35 @@ fn determined_decrement(
 /// 1. solve the free parameters' Newton step from the current point, the fixed ones held where they
 ///    are — the slope there is the summed scores less the information times the moves so far;
 /// 2. move along it until the first free parameter meets an end of its interval, and fix it there,
-///    with any other that meets an end at the same point; then solve again;
+///    with any other that meets an end at the same point; then solve again. A parameter the solve
+///    has not moved yet that sits within [`BESIDE_AN_END`] of the end its step heads to is on that
+///    end already;
 /// 3. after a whole step, free the one fixed parameter whose slope points furthest back into its
-///    interval ([`SLOPE_POINTING_IN`]), and solve again; when none does, the point is the box's
-///    maximum and the solve has finished.
+///    interval ([`SLOPE_POINTING_IN`]), and solve again; when none does, the solve has finished.
+///    A freed parameter whose step then points out rather than back in has no room to move, and is
+///    fixed again at once.
+///
+/// **No parameter is freed twice in one solve**, so the solve always finishes: each parameter is
+/// fixed at most twice and freed at most once, and a round fixes one or frees one, so it takes at
+/// most three rounds a parameter, plus one. On information well conditioned — 2,400 of the
+/// review's random cases and 134 of the property test's (`snp_fit_convergence_B_2026-10-17.md`) —
+/// no parameter needed a second freeing, so the point where the solve finishes is the box's
+/// maximum. On nearly singular information it need not be: freeing a parameter again let the
+/// solve cycle — one freed and fixed again, its step pointing out, from round 21 to 199 with the
+/// model's value constant to 10⁻¹¹ — or zigzag between two parameters, each freeing gaining
+/// 10⁻⁹ of a step worth 10⁻⁶, until the round limit; 28 of 6,000 cases did not finish.
 ///
 /// Every point it passes through is inside the box, and the model's value `g·d − ½ dᵀ I d` never
 /// falls along the way, so the step is worth at least nothing. When no bound binds, the first solve
-/// is the whole step. It gives up after ten rounds a parameter, plus ten, with the point it has
-/// reached, still inside the box, and says so.
+/// is the whole step. It gives up after `round_limit` rounds ([`box_solve_round_limit`]), which a
+/// test can set below what it needs, with the point it has reached, still inside the box, and says
+/// so.
 fn bounded_step(
     sums: &InformationSums,
     layout: &Layout,
     values: &[f64],
     bounds: &[(f64, f64)],
+    round_limit: usize,
 ) -> BoundedStep {
     let slope = layout.slope_of(sums);
     let mut moved = vec![0.0; layout.side];
@@ -961,8 +1045,10 @@ fn bounded_step(
     let mut fixed_at: Vec<Option<f64>> = vec![None; layout.side];
     // Whether the solve has given the parameter a move at least once.
     let mut solved = vec![false; layout.side];
+    // Whether the solve has freed the parameter: it is never freed again.
+    let mut freed_before = vec![false; layout.side];
     let mut finished = false;
-    for _ in 0..10 * layout.side + 10 {
+    for _ in 0..round_limit {
         // The slope where the moves so far have taken the parameters, and the free parameters'
         // Newton step from there.
         let curved = information_times(sums, layout, &moved);
@@ -977,16 +1063,7 @@ fn bounded_step(
             .iter()
             .enumerate()
             .map(|(j, toward)| {
-                let toward = (*toward)?;
-                if toward == 0.0 {
-                    return None;
-                }
-                let end = if toward > 0.0 {
-                    bounds[j].1
-                } else {
-                    bounds[j].0
-                };
-                Some((((end - values[j] - moved[j]) / toward).max(0.0), end))
+                room_to_an_end(values[j], moved[j], (*toward)?, bounds[j], !solved[j])
             })
             .collect();
         let reach = room
@@ -1012,11 +1089,14 @@ fn bounded_step(
             continue;
         }
         // A whole step: the maximum with these parameters fixed. Free the one whose slope points
-        // furthest back into its interval, if any does.
+        // furthest back into its interval, if any does, among those not freed before.
         let curved = information_times(sums, layout, &moved);
         let mut freed: Option<(usize, f64)> = None;
         for (j, end) in fixed_at.iter().enumerate() {
             let Some(end) = end else { continue };
+            if freed_before[j] {
+                continue;
+            }
             let slope_there = slope[j] - curved[j];
             let inwards = if *end == bounds[j].0 {
                 slope_there
@@ -1029,7 +1109,10 @@ fn bounded_step(
             }
         }
         match freed {
-            Some((j, _)) => fixed_at[j] = None,
+            Some((j, _)) => {
+                freed_before[j] = true;
+                fixed_at[j] = None;
+            }
             None => {
                 finished = true;
                 break;
@@ -3364,6 +3447,7 @@ mod tests {
                 &layout,
                 &layout.values_of(&parameters, &group_index),
                 &layout.bounds(),
+                box_solve_round_limit(layout.side),
             );
             let old = decrement_of(&sums, &layout, &step.moves);
             let got = newton_step(&sums, &errors, &parameters, &group_index).decrement;
@@ -3475,7 +3559,13 @@ mod tests {
                  {}",
                 if whole { "whole matrix" } else { "arrow" }
             );
-            let step = bounded_step(&sums, &layout, &values, &bounds);
+            let step = bounded_step(
+                &sums,
+                &layout,
+                &values,
+                &bounds,
+                box_solve_round_limit(layout.side),
+            );
             assert!(step.finished, "{label}: the solve did not finish");
             let mut on_an_end = vec![None; n];
             for (j, moved) in step.moves.iter().enumerate() {
@@ -3525,6 +3615,434 @@ mod tests {
             maxima_checked > 50 && bounds_binding > 100,
             "the cases exercise the box: {maxima_checked} maxima checked, {bounds_binding} ends"
         );
+    }
+
+    /// **A box-solve case drawn harsher than the property test's**: the information, the slope and
+    /// the parameters of one case of the sequence the correctness review of 2026-10-17 drew
+    /// (`snp_fit_convergence_B_2026-10-17.md`, its stress test), as `dense` beside the sums.
+    struct HarshCase {
+        sums: InformationSums,
+        dense: Vec<f64>,
+        /// The summed scores, flat.
+        slope: Vec<f64>,
+        values: Vec<f64>,
+        /// Libraries, positions, floor and matrix, for a failure message.
+        label: String,
+    }
+
+    /// **The review's harsh sequence, case by case.** One to eight samples of one to three
+    /// libraries; information summed from three times, half or a third as many positions as
+    /// parameters, with a diagonal floor of 10⁻⁹, 0, 10⁻¹⁵, 10⁻¹⁰ or 10⁻¹³ of its largest entry
+    /// (by the case number modulo 5), so the floor-0 cases are exactly singular; on the whole
+    /// matrix for even cases, the arrow for odd; the slope scaled by 10⁻⁴ to 10⁴; each parameter
+    /// on an end, a relative 10⁻¹² to 10⁻² of its interval inside one, or anywhere inside.
+    fn harsh_cases() -> impl Iterator<Item = HarshCase> {
+        let mut draw = uniform_draws(0xDEAD_BEEF_0000_0001);
+        let mut next = 0_u64;
+        std::iter::from_fn(move || {
+            let case = next;
+            next += 1;
+            let samples = 1 + (draw() * 8.0) as usize;
+            let libraries: Vec<usize> = (0..samples).map(|_| 1 + (draw() * 3.0) as usize).collect();
+            let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+            let (positions, floor) = match case % 5 {
+                0 => (3 * n, 1e-9),
+                1 => (n / 2, 0.0),
+                2 => (n / 3, 1e-15),
+                3 => (n / 2, 1e-10),
+                _ => (2 * n, 1e-13),
+            };
+            let positions = positions.max(1);
+            let dense = summed_from_positions(&libraries, positions, floor, &mut draw);
+            let whole = case.is_multiple_of(2);
+            let mut sums = if whole {
+                with_the_whole_matrix(&libraries, &dense)
+            } else {
+                blocks_of_dense(&libraries, &dense)
+            };
+            let (mut slope, mut flat) = a_slope_of(&libraries, 7_000 + case);
+            let scale = crate::float::powf(10.0, -4.0 + 8.0 * draw());
+            for entry in slope
+                .cohort
+                .iter_mut()
+                .chain(slope.samples.iter_mut().flatten())
+            {
+                *entry *= scale;
+            }
+            flat.iter_mut().for_each(|entry| *entry *= scale);
+            sums.slope = slope;
+            let values: Vec<f64> = Layout::of(&sums)
+                .bounds()
+                .iter()
+                .map(|&(low, high)| {
+                    let inside = crate::float::powf(10.0, -12.0 + 10.0 * draw()) * (high - low);
+                    match (draw() * 4.0) as usize {
+                        0 => low,
+                        1 => high,
+                        2 => {
+                            if draw() < 0.5 {
+                                low + inside
+                            } else {
+                                high - inside
+                            }
+                        }
+                        _ => low + draw() * (high - low),
+                    }
+                })
+                .collect();
+            Some(HarshCase {
+                sums,
+                dense,
+                slope: flat,
+                values,
+                label: format!(
+                    "harsh case {case}: libraries {libraries:?}, {positions} positions, floor \
+                     {floor:e}, {}",
+                    if whole { "whole matrix" } else { "arrow" }
+                ),
+            })
+        })
+    }
+
+    /// Where every move of `step` lands, checked against `bounds` from `values`, to the rounding
+    /// of `value + move`.
+    fn assert_inside_the_box(
+        step: &BoundedStep,
+        values: &[f64],
+        bounds: &[(f64, f64)],
+        label: &str,
+    ) {
+        for (j, moved) in step.moves.iter().enumerate() {
+            let Some(moved) = moved else { continue };
+            let (low, high) = bounds[j];
+            let landing = values[j] + moved;
+            let rounding = 4.0 * f64::EPSILON * values[j].abs().max(high.abs());
+            assert!(
+                landing >= low - rounding && landing <= high + rounding,
+                "{label}: parameter {j} at {} moved {moved} to {landing}, outside {:?}",
+                values[j],
+                bounds[j]
+            );
+        }
+    }
+
+    /// **The box solve finishes on nearly singular information, within three rounds a parameter
+    /// plus one** — the bound [`bounded_step`] derives from freeing no parameter twice — on the
+    /// 6,000 cases of the review's harsh sequence ([`harsh_cases`]); every move lands inside its
+    /// interval, and the step is worth at least nothing; on the 1,200 best conditioned it is also
+    /// the box's maximum ([`assert_the_box_maximum`]). 28 of these cases did not finish in ten
+    /// rounds a parameter when the solve could free a parameter again (review of 2026-10-17,
+    /// finding 1): on case 203 one parameter was freed and fixed again, its step pointing out, from
+    /// round 21 to 199; on cases 573 and 5,398 two parameters took turns, each freeing gaining
+    /// 10⁻⁹ of a step worth 10⁻⁶. Freeing every fixed parameter that points inwards at once, rather
+    /// than the one pointing furthest, misses the maximum here (case 5,475).
+    #[test]
+    fn the_box_solve_finishes_on_nearly_singular_information() {
+        let mut maxima_checked = 0;
+        for (case, harsh) in harsh_cases().take(6_000).enumerate() {
+            let layout = Layout::of(&harsh.sums);
+            let bounds = layout.bounds();
+            let step = bounded_step(
+                &harsh.sums,
+                &layout,
+                &harsh.values,
+                &bounds,
+                3 * layout.side + 1,
+            );
+            assert!(step.finished, "{}: the solve did not finish", harsh.label);
+            assert_inside_the_box(&step, &harsh.values, &bounds, &harsh.label);
+            let worth = dense_decrement(&harsh.dense, &harsh.slope, &step.moves);
+            assert!(worth >= 0.0, "{}: the step is worth {worth}", harsh.label);
+            if well_conditioned(case) && step.moves.iter().all(Option::is_some) {
+                maxima_checked += 1;
+                assert_the_box_maximum(&harsh, &step, &bounds);
+            }
+        }
+        assert!(maxima_checked > 1_000, "{maxima_checked} maxima checked");
+    }
+
+    /// Whether case `case` of the review's harsh sequence has information well conditioned: summed
+    /// from three times as many positions as parameters, its diagonal floor 10⁻⁹.
+    fn well_conditioned(case: usize) -> bool {
+        case.is_multiple_of(5)
+    }
+
+    /// **`step` is the maximum of the quadratic model within the box**: the slope left at the step,
+    /// `g − I d`, is zero for a parameter strictly inside its interval, and points out of the
+    /// interval for one on an end — each to 10⁻⁷ of the terms it is the difference of.
+    fn assert_the_box_maximum(harsh: &HarshCase, step: &BoundedStep, bounds: &[(f64, f64)]) {
+        let n = harsh.values.len();
+        let moved: Vec<f64> = step.moves.iter().map(|m| m.unwrap_or(0.0)).collect();
+        for j in 0..n {
+            let (low, high) = bounds[j];
+            let landing = harsh.values[j] + moved[j];
+            let rounding = 4.0 * f64::EPSILON * harsh.values[j].abs().max(high.abs());
+            let curved: f64 = (0..n).map(|k| harsh.dense[j * n + k] * moved[k]).sum();
+            let left = harsh.slope[j] - curved;
+            let scale = 1e-7 * (harsh.slope[j].abs() + curved.abs());
+            if (landing - low).abs() <= rounding {
+                assert!(
+                    -left >= -scale,
+                    "{}: parameter {j} on its floor, slope {left} in",
+                    harsh.label
+                );
+            } else if (landing - high).abs() <= rounding {
+                assert!(
+                    left >= -scale,
+                    "{}: parameter {j} on its ceiling, slope {left} in",
+                    harsh.label
+                );
+            } else {
+                assert!(
+                    left.abs() <= scale,
+                    "{}: parameter {j} inside, slope {left}",
+                    harsh.label
+                );
+            }
+        }
+    }
+
+    /// **On exactly singular information the determined decrement is not below zero**: the 100
+    /// cases of the review's harsh sequence among its first 1,000 whose information is an arrow
+    /// summed from half as many positions as parameters with no floor on its diagonal
+    /// ([`harsh_cases`]). The length `½ mᵀ I m` it computes is a small difference of large terms
+    /// there: in review it came out negative on 125 of the 3,546 random cases that profile a
+    /// parameter out, all on exactly singular information (as low as −1.4 × 10⁻¹⁰ against terms of
+    /// 2.3 × 10⁴), which `has_converged` refuses — so a start that had arrived ran on. Without the
+    /// raise to zero this fails on case 311, at −2.1 × 10⁻¹¹.
+    #[test]
+    fn on_exactly_singular_information_the_determined_decrement_is_not_below_zero() {
+        let mut profiled = 0;
+        for (case, harsh) in harsh_cases().take(1_000).enumerate() {
+            if case % 10 != 1 {
+                continue;
+            }
+            assert!(harsh.sums.full.is_none(), "{}: an arrow", harsh.label);
+            let layout = Layout::of(&harsh.sums);
+            let step = bounded_step(
+                &harsh.sums,
+                &layout,
+                &harsh.values,
+                &layout.bounds(),
+                box_solve_round_limit(layout.side),
+            );
+            assert!(step.finished, "{}", harsh.label);
+            let errors = StandardErrors::of(&harsh.sums);
+            let has_error: Vec<bool> = errors
+                .cohort
+                .iter()
+                .chain(errors.samples.iter().flatten())
+                .map(|error| error.value().is_some())
+                .collect();
+            if let Some(length) =
+                determined_decrement(&harsh.sums, &layout, &step.moves, &has_error)
+            {
+                profiled += 1;
+                assert!(length >= 0.0, "{}: {length}", harsh.label);
+            }
+        }
+        assert!(profiled > 50, "{profiled} cases profile a parameter out");
+    }
+
+    /// **A box solve that runs out of rounds gives a decrement that is not a number, and no
+    /// convergence**: the density's second shape placed a quarter of its free step inside the end
+    /// that step points to (the case `with_a_bound_binding_the_decrement_is_the_box_steps_worth`
+    /// checks), on both matrices. Its first round moves to that end and fixes the shape there;
+    /// given that one round, the solve stops short of the whole step and the decrement is NaN,
+    /// which `has_converged` refuses; given two, it finishes, with the decrement [`newton_step`]
+    /// gives.
+    #[test]
+    fn a_box_solve_that_runs_out_of_rounds_gives_a_decrement_that_is_not_a_number() {
+        use crate::parameter_estimation::joint::fit::settled::{
+            DECREMENT_THRESHOLD, has_converged,
+        };
+        let libraries = [1, 2, 1];
+        let group_index = group_index_of(&libraries);
+        let row = cohort::DENSITY_B;
+        for (label, (mut sums, dense)) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 95)),
+            ("arrow", an_arrow_of(&libraries, 97)),
+        ] {
+            let (slope, flat) = a_slope_of(&libraries, 96);
+            sums.slope = slope;
+            let free = dense_step(&dense, &flat, |_| true)[row].expect("solved");
+            let end = if free < 0.0 {
+                COHORT_BOUNDS[row].0
+            } else {
+                COHORT_BOUNDS[row].1
+            };
+            let mut parameters = parameters_inside(&libraries);
+            set_at(&mut parameters, row, end - 0.25 * free);
+            let errors = StandardErrors::of(&sums);
+            let short = newton_step_within(&sums, &errors, &parameters, &group_index, 1);
+            assert!(short.decrement.is_nan(), "{label}: {}", short.decrement);
+            assert!(
+                !has_converged(short.decrement, DECREMENT_THRESHOLD),
+                "{label}"
+            );
+            let enough = newton_step_within(&sums, &errors, &parameters, &group_index, 2);
+            let full = newton_step(&sums, &errors, &parameters, &group_index);
+            assert!(enough.decrement > 0.0, "{label}: {}", enough.decrement);
+            assert_eq!(
+                enough.decrement.to_bits(),
+                full.decrement.to_bits(),
+                "{label}"
+            );
+        }
+    }
+
+    /// **Parameters the golden section left beside an end cost the box solve no round each**: 2,000
+    /// samples of one library, each sample's homozygote excess 10⁻¹⁰ to 2 × 10⁻¹⁰ above its floor
+    /// of 0 — inside the gap that search leaves — with its slope pointing down, every other
+    /// parameter in the middle of its interval. The solve treats each excess as on its floor, fixes
+    /// all 2,000 in its first round and finishes in its second; every excess's distance is its gap
+    /// down to 0. Fixing only the parameter meeting an end first took a round an excess: 1.83 s
+    /// for this solve, against 1.3 ms with the excesses in the middle (review of 2026-10-17,
+    /// finding 4); it takes 1.9 ms.
+    #[test]
+    fn parameters_beside_an_end_are_fixed_there_in_one_round() {
+        let samples = 2_000;
+        let group_index: Vec<Vec<usize>> = (0..samples).map(|s| vec![s]).collect();
+        let mut sums = InformationSums::new(&group_index);
+        let n = ONE_LIBRARY_SAMPLE_PARAMETERS;
+        let mut draw = uniform_draws(12_345 + samples as u64);
+        for i in 0..COHORT_PARAMETERS {
+            sums.cohort[i * COHORT_PARAMETERS + i] = 1e4 * samples as f64;
+        }
+        for s in 0..samples {
+            for j in 0..n {
+                sums.sample_blocks[s][j * n + j] = 1e4;
+                for c in 0..COHORT_PARAMETERS {
+                    sums.sample_cohort_blocks[s][j * COHORT_PARAMETERS + c] = 10.0 * (draw() - 0.5);
+                }
+            }
+        }
+        for row in &mut sums.slope.samples {
+            row[sample::HOMOZYGOTE_EXCESS] = -10.0 * (0.5 + draw());
+        }
+        let layout = Layout::of(&sums);
+        let bounds = layout.bounds();
+        let mut values: Vec<f64> = bounds
+            .iter()
+            .map(|&(low, high)| 0.5 * (low + high))
+            .collect();
+        let excesses: Vec<usize> = (0..samples)
+            .map(|s| layout.starts[s] + sample::HOMOZYGOTE_EXCESS)
+            .collect();
+        for &at in &excesses {
+            values[at] = 1e-10 * (1.0 + draw());
+        }
+        let step = bounded_step(&sums, &layout, &values, &bounds, 2);
+        assert!(step.finished, "two rounds");
+        for &at in &excesses {
+            assert_eq!(step.moves[at], Some(-values[at]), "parameter {at}");
+        }
+    }
+
+    /// The slope in the errors' layout for samples of `libraries` libraries, from its flat list.
+    fn slope_from_flat(libraries: &[usize], flat: &[f64]) -> PositionScores {
+        let mut slope = PositionScores::new(&group_index_of(libraries), 0);
+        let mut entries = flat.iter();
+        for entry in slope
+            .cohort
+            .iter_mut()
+            .chain(slope.samples.iter_mut().flatten())
+        {
+            *entry = *entries.next().expect("one entry a parameter");
+        }
+        assert!(entries.next().is_none(), "one entry a parameter");
+        slope
+    }
+
+    /// **A parameter on an end whose slope there is rounding is not freed**: on both matrices,
+    /// eight parameters placed on an end of their intervals and the rest in the middle, and the
+    /// slope set to `I d` for a step `d` that moves the rest by up to a hundredth of their
+    /// intervals and those eight not at all — so the box's maximum has them exactly where they
+    /// are, and the slope the solve finds there is a difference of large terms that cancel to
+    /// rounding. The solve fixes those its steps point out of their intervals and finishes after
+    /// the whole step, the step `d`, within three rounds (two on the whole matrix, three on the
+    /// arrow). Freeing a parameter on a slope of rounding ([`SLOPE_POINTING_IN`] at 0) spends
+    /// rounds on such parameters: five on the whole matrix.
+    #[test]
+    fn a_parameter_on_an_end_whose_slope_is_rounding_is_not_freed() {
+        let libraries = [1, 2, 1];
+        let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+        let on_an_end = [0, 2, 3, 6, 9, 11, 13, 17];
+        for (label, (mut sums, dense)) in [
+            ("whole matrix", a_whole_matrix_of(&libraries, 131)),
+            ("arrow", an_arrow_of(&libraries, 133)),
+        ] {
+            let layout = Layout::of(&sums);
+            assert_eq!(layout.side, n, "{label}");
+            let bounds = layout.bounds();
+            let mut draw = uniform_draws(135);
+            let mut values = vec![0.0; n];
+            let mut step = vec![0.0; n];
+            for j in 0..n {
+                let (low, high) = bounds[j];
+                if on_an_end.contains(&j) {
+                    values[j] = if j % 2 == 0 { low } else { high };
+                } else {
+                    values[j] = 0.5 * (low + high);
+                    step[j] = (draw() - 0.5) * 0.02 * (high - low);
+                }
+            }
+            let flat: Vec<f64> = (0..n)
+                .map(|i| (0..n).map(|j| dense[i * n + j] * step[j]).sum())
+                .collect();
+            sums.slope = slope_from_flat(&libraries, &flat);
+            let solved = bounded_step(&sums, &layout, &values, &bounds, 3);
+            assert!(solved.finished, "{label}: three rounds");
+            for j in 0..n {
+                let moved = solved.moves[j].expect("solved");
+                assert!(
+                    (moved - step[j]).abs() <= 1e-9 * (bounds[j].1 - bounds[j].0),
+                    "{label}, parameter {j}: {moved} against {}",
+                    step[j]
+                );
+            }
+        }
+    }
+
+    /// **A free parameter's room to the end its step heads to is the gap over the step, and never
+    /// below zero**: a clean error rate (interval 10⁻⁶ to 0.2) inside its interval has the gap's
+    /// share of the step, towards either end; one moved 10⁻¹² past its floor, or handed over past
+    /// it, has none. Taken as it is, a negative room makes the solve carry every parameter
+    /// backwards along the step, the model's value falling — which no check of the step it returns
+    /// can see, since the next solve goes back to the same maximum. One sitting beside its floor,
+    /// 4.4 × 10⁻¹⁰ above it as the golden section leaves it, has none while the solve has not
+    /// moved it, and the gap's share once it has; a step of zero has no end.
+    #[test]
+    fn a_parameters_room_to_an_end_is_never_below_zero() {
+        let bounds = CLEAN_ERROR_BOUNDS;
+        let (low, high) = bounds;
+        assert_eq!(
+            room_to_an_end(0.01, 0.0, -0.002, bounds, true),
+            Some(((low - 0.01) / -0.002, low))
+        );
+        assert_eq!(
+            room_to_an_end(0.01, 0.005, 0.5, bounds, false),
+            Some(((high - 0.01 - 0.005) / 0.5, high))
+        );
+        let past = (low - 1e-12) - 0.01;
+        assert_eq!(
+            room_to_an_end(0.01, past, -0.002, bounds, false),
+            Some((0.0, low))
+        );
+        assert_eq!(
+            room_to_an_end(low - 1e-3, 0.0, -0.002, bounds, true),
+            Some((0.0, low))
+        );
+        let beside = low + 4.4e-10;
+        assert_eq!(
+            room_to_an_end(beside, 0.0, -0.002, bounds, true),
+            Some((0.0, low))
+        );
+        assert_eq!(
+            room_to_an_end(beside, 0.0, -0.002, bounds, false),
+            Some(((low - beside) / -0.002, low))
+        );
+        assert_eq!(room_to_an_end(0.01, 0.0, 0.0, bounds, true), None);
     }
 
     /// The dense inverse of `full` (side `n`) without the parameters `removed` says, restricted to

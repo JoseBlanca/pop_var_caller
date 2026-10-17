@@ -566,7 +566,17 @@ mod tests {
     /// of 0.05 — and only the fixed non-reference share carrying an error. The tables deleted and
     /// the version set back give the old checksum; the calls' did not move. Recorded on macOS
     /// (arm64) only; it was `c2d56c4117a633b23c475ee7e422a53b`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "728256994c0c90109ae7f4a15eeb00a9";
+    ///
+    /// **Re-recorded 2026-10-17 once more**, when the Newton step's box solve began treating a
+    /// parameter it has not moved yet, sitting within the golden section's stopping width of the
+    /// end its step heads to, as on that end (review of 2026-10-17, finding 4). The solve reaches
+    /// the same maximum by another path, so its steps differ in their last bits, and the points the
+    /// fit tries them at with them: the starts' rows do not move (the same endings and passes), the
+    /// fitted numbers move by at most 6 × 10⁻⁶ of themselves and 4 × 10⁻⁶ of their errors, the
+    /// errors by at most 4.4 × 10⁻⁵ of themselves. With that rule switched off the old checksum
+    /// comes back; the calls' did not move. Recorded on macOS (arm64) only; it was
+    /// `728256994c0c90109ae7f4a15eeb00a9`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "c548c669d12d20097217ff03e1299e3a";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -660,41 +670,8 @@ mod tests {
     /// Walk the cohort, fit it and call it with the fit. Hands back the parameters file's path
     /// and the VCF's.
     fn walked_fitted_and_called(cohort: &AVaryingCohort) -> (PathBuf, PathBuf) {
-        let directory = cohort.directory.path();
-        let psps = directory.join("psps");
-        run_generate_psps(&GeneratePspsArgs {
-            reference: cohort.reference.clone(),
-            catalog: Some(cohort.catalog.clone()),
-            alignments: cohort.alignments.clone(),
-            output_dir: psps.clone(),
-            regions: None,
-            force: false,
-            build_index_if_missing: false,
-            min_copies: MinCopies::default(),
-            min_period: DEFAULT_MIN_PERIOD,
-            max_period: DEFAULT_MAX_PERIOD,
-            max_str_len: DEFAULT_MAX_STR_LEN,
-            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-            min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        })
-        .expect("the cohort walks into psps");
-
-        let parameters = directory.join("fitted.parameters.toml");
-        run_estimate_parameters(&EstimateParametersArgs {
-            reference: cohort.reference.clone(),
-            catalog: Some(cohort.catalog.clone()),
-            psps: vec![psps.clone()],
-            output: parameters.clone(),
-            force: false,
-            ploidy: 2,
-            inbreeding: None,
-            str_param_estimates_at_once: None,
-            skip_contamination: false,
-        })
-        .expect("the cohort fits");
-
-        let calls = directory.join("calls.vcf");
+        let (psps, parameters) = walked_and_fitted(cohort);
+        let calls = cohort.directory.path().join("calls.vcf");
         run_call_from_psps(&CallFromPspsArgs {
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
@@ -731,6 +708,44 @@ mod tests {
         })
         .expect("the cohort calls with its own fit");
         (parameters, calls)
+    }
+
+    /// Walk the cohort and fit it. Hands back the psps' directory and the parameters file's path.
+    fn walked_and_fitted(cohort: &AVaryingCohort) -> (PathBuf, PathBuf) {
+        let directory = cohort.directory.path();
+        let psps = directory.join("psps");
+        run_generate_psps(&GeneratePspsArgs {
+            reference: cohort.reference.clone(),
+            catalog: Some(cohort.catalog.clone()),
+            alignments: cohort.alignments.clone(),
+            output_dir: psps.clone(),
+            regions: None,
+            force: false,
+            build_index_if_missing: false,
+            min_copies: MinCopies::default(),
+            min_period: DEFAULT_MIN_PERIOD,
+            max_period: DEFAULT_MAX_PERIOD,
+            max_str_len: DEFAULT_MAX_STR_LEN,
+            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
+            min_purity: DEFAULT_MIN_PURITY,
+            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        })
+        .expect("the cohort walks into psps");
+
+        let parameters = directory.join("fitted.parameters.toml");
+        run_estimate_parameters(&EstimateParametersArgs {
+            reference: cohort.reference.clone(),
+            catalog: Some(cohort.catalog.clone()),
+            psps: vec![psps.clone()],
+            output: parameters.clone(),
+            force: false,
+            ploidy: 2,
+            inbreeding: None,
+            str_param_estimates_at_once: None,
+            skip_contamination: false,
+        })
+        .expect("the cohort fits");
+        (psps, parameters)
     }
 
     /// One whole run — a fresh cohort walked, fitted and called — inside a pool of `threads`
@@ -804,6 +819,31 @@ mod tests {
             "the checksums moved; read this module's documentation before re-recording them.\n\
              --- fitted parameters ---\n{fitted}\n--- calls ---\n{called}",
         );
+    }
+
+    /// **Every start of the SNP/indel fit on the two-sample cohort with sequencing errors converges,
+    /// in fewer than 50 passes** (`fit_precision.md` §2, amendment of 2026-10-17). On this cohort
+    /// the data leave most parameters without a standard error — 12 of 16, as the review of
+    /// 2026-10-17 counted — so the decrement a start stops on counts only the 4 that have one, the
+    /// others profiled out. The three starts converge after 22, 13 and 13 passes; counting every
+    /// parameter, all three ran to the 200-pass limit. The checksums above were this rule's only
+    /// guard before.
+    #[test]
+    fn every_start_on_the_cohort_with_sequencing_errors_converges() {
+        use crate::calling::parameters_file::{ParametersFile, StartOutcome};
+        let cohort = a_varying_cohort_with_sequencing_errors_on_disk();
+        let (_, parameters) = walked_and_fitted(&cohort);
+        let text = std::fs::read_to_string(&parameters).expect("the fit wrote its file");
+        let file = ParametersFile::from_toml(&text).expect("the fit's file reads back");
+        let starts = file
+            .fitted_from
+            .snp_indel_fit_starts
+            .expect("the fit lists its starts");
+        assert_eq!(starts.len(), 3, "{starts:?}");
+        for start in &starts {
+            assert_eq!(start.ended, StartOutcome::Converged, "{starts:?}");
+            assert!(start.passes < 50, "{starts:?}");
+        }
     }
 
     /// **The errors computed a sample's block at a time have their recorded checksums too**: 21

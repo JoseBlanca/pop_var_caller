@@ -2906,8 +2906,11 @@ fn how_the_log_likelihood_moved(gain: f64) -> String {
 /// below its rate at ordinary positions**, `groups` naming the libraries in the parameters' order;
 /// `None` when no library did. The fit does not keep the two rates in order
 /// (`parameter_prepass_joint_fit.md` §3.3, decided 2026-10-17), and nothing outside it reads the
-/// mismapped rate, so this is information for a reader of the log, not a warning. It never
-/// happened on the tomato cohorts measured (1, 4 and 59 samples).
+/// mismapped rate, so this is information for a reader of the log, not a warning. **Calling takes
+/// the ordinary-position rate as the library's sequencing error rate** — on such a library the
+/// higher of its two — which §3.3 records as accepted. It never happened on the tomato cohorts
+/// measured (1, 4 and 59 samples); on the 21-sample cohort of the cross-platform checks the review
+/// of 2026-10-17 found 12 of 22 libraries ending this way.
 fn note_on_inverted_rates(parameters: &Parameters, groups: &[ReadGroupId]) -> Option<String> {
     let inverted: Vec<String> = groups
         .iter()
@@ -2920,7 +2923,8 @@ fn note_on_inverted_rates(parameters: &Parameters, groups: &[ReadGroupId]) -> Op
             "{} of {} libraries ended with a lower error rate at mismapped positions than at \
              ordinary ones (read group(s) {}); the fit does not keep the two in order — the share \
              of mismapped positions, at most a half, is what names that class — and nothing \
-             outside the fit reads the mismapped rate",
+             outside the fit reads the mismapped rate; calling uses the ordinary-position rate as \
+             each library's sequencing error rate, which for these is the higher of the two",
             inverted.len(),
             groups.len(),
             inverted.join(", ")
@@ -4558,6 +4562,12 @@ fn maximise_hom_excess(counts: &[[f64; 3]], quadrature: &BetaQuadrature, current
     golden_section(&score, HOM_EXCESS_BOUNDS.0, HOM_EXCESS_BOUNDS.1)
 }
 
+/// **How narrow the golden section's bracket must be for it to stop**, as a share of one plus the
+/// size of its upper end. It returns the bracket's middle, so a maximum on an end of the interval
+/// comes back up to half this beside the end rather than on it — which the box solve of the Newton
+/// step treats as on it (`standard_errors::BESIDE_AN_END`).
+const GOLDEN_SECTION_WIDTH: f64 = 1e-9;
+
 /// The maximum of a unimodal function on `[low, high]`, to about six figures.
 fn golden_section(score: &dyn Fn(f64) -> f64, low: f64, high: f64) -> f64 {
     const INVERSE_PHI: f64 = 0.618_033_988_749_895;
@@ -4566,7 +4576,7 @@ fn golden_section(score: &dyn Fn(f64) -> f64, low: f64, high: f64) -> f64 {
     let mut d = low + INVERSE_PHI * (high - low);
     let (mut fc, mut fd) = (score(c), score(d));
     for _ in 0..60 {
-        if high - low < 1e-9 * (1.0 + high.abs()) {
+        if high - low < GOLDEN_SECTION_WIDTH * (1.0 + high.abs()) {
             break;
         }
         if fc > fd {
@@ -4887,8 +4897,8 @@ mod tests {
     }
 
     /// **The run log names each library whose mismapped-position rate ended below its ordinary
-    /// one, and says nothing when none did**: three libraries, the second and third inverted (the
-    /// third by the smallest step a rate can take), then none.
+    /// one, and which of the two calling uses, and says nothing when none did**: three libraries,
+    /// the second and third inverted (the third by the smallest step a rate can take), then none.
     #[test]
     fn the_log_names_the_libraries_whose_mismapped_rate_ended_below_the_ordinary_one() {
         let mut parameters = a_judged_point();
@@ -4898,6 +4908,10 @@ mod tests {
         let note = note_on_inverted_rates(&parameters, &groups).expect("two are inverted");
         assert!(note.starts_with("2 of 3 libraries"), "{note}");
         assert!(note.contains("(read group(s) 7, 9)"), "{note}");
+        assert!(
+            note.ends_with("which for these is the higher of the two"),
+            "the note says which rate calling uses: {note}"
+        );
         parameters.noisy = vec![0.06, 0.004, 0.002];
         assert_eq!(
             note_on_inverted_rates(&parameters, &groups),

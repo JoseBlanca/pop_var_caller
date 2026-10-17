@@ -996,6 +996,13 @@ finding B2 and its addendum of 2026-10-17).
   Verified in the code on 2026-10-17. **If
   a library's mismapped-position rate ends below its ordinary-position rate, the run log names the
   library** — a note for a reader, not a correction.
+- **What calling gets from such a library — accepted.** Calling's sequencing error rate for a
+  library is its ordinary-position rate, so on a library whose rates end inverted it is the higher
+  of the two. Accepted (decided 2026-10-17, on the correctness review of the convergence build,
+  [`../../reports/reviews/snp_fit_convergence_B_2026-10-17.md`](../../reports/reviews/snp_fit_convergence_B_2026-10-17.md),
+  finding 7): it is the rate fitted to the class holding at least half of the positions, and the
+  inversion has not been seen on real data. The run log's note says which rate calling uses. On the 21-sample
+  cohort of the cross-platform checks the review found 12 of 22 libraries inverted.
 - **It does not happen on real data measured.** The swap never fired on 1, 4 or 59 tomato2 samples,
   at any pass of any start; there, the closest library's mismapped rate is 2.66 times its ordinary
   rate (median 12.6). On the drawn digest fixtures labels switch with or without the swap: with the
@@ -2440,7 +2447,8 @@ holds, and where the generic budget starts to matter — are
     5. **The box solve is the primal active-set method**, with no fallback to the rule it replaces;
        it never returns a step outside the box or a negative decrement, and one that does not finish
        gives a decrement that is not a number ([`fit_precision.md`](fit_precision.md) §2, amendment
-       of 2026-10-17).
+       of 2026-10-17). It frees no parameter twice, so it always finishes (same amendment, from the
+       review of 2026-10-17).
     6. **The decrement counts only the parameters that have a standard error**, the others profiled
        out, computed through the arrow's blocks so it scales to thousands of samples; it is today's
        decrement when every parameter the step moves has an error (same amendment).
