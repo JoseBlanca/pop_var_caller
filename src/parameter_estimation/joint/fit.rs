@@ -62,10 +62,15 @@ use super::contamination::{
     not_identified_anywhere,
 };
 
+mod determined;
 mod information;
 mod settled;
 mod standard_errors;
 
+pub use determined::{
+    DensityReport, DeterminedShare, DuplicatedReport, ReportedNumber, SEPARATION_LOG_LIKELIHOOD,
+    STATED_FREQUENCY,
+};
 use information::{InformationSums, PositionScores, RuleSlopes, ScoringTables, score_position};
 use settled::{
     AGREEMENT_FRACTION, DECREMENT_THRESHOLD, EarlierAnswer, SETTLED_FRACTION, agrees,
@@ -73,7 +78,7 @@ use settled::{
     not_settled,
 };
 pub use settled::{FurthestFromSettled, StartEnding};
-use standard_errors::{StandardError, StandardErrors, newton_step};
+use standard_errors::{StandardError, StandardErrors, cohort_covariance, newton_step};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -304,6 +309,15 @@ pub struct JointFit {
     /// Positions a sample carries more copies of than the reference. `None` when the run did
     /// not fit the class.
     pub duplicated: Option<Estimate<DuplicatedPositions>>,
+    /// **The density as the fit reports it** — its four numbers with their errors, the two
+    /// integrals the prior's seed is built from, and whether the data separate the invariant share
+    /// from the Beta's first shape (spec §2.1.3) — at the returned parameters, from the information
+    /// the winning start's final pass summed.
+    pub density_report: DensityReport,
+    /// **The duplicated class as the fit reports it**, the same way: its three numbers, and whether
+    /// the data separate its share from the carrier Beta's first shape. `None` when the run did not
+    /// fit the class.
+    pub duplicated_report: Option<DuplicatedReport>,
     /// Per sample, the departure from the Hardy–Weinberg proportions the density predicts.
     pub hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>>,
     /// Per sample, derived from the converged posteriors rather than fitted.
@@ -1891,6 +1905,8 @@ pub fn fit_jointly(
         trace,
         contamination,
         standard_errors,
+        density_report,
+        duplicated_report,
         clean_rate_standard_error,
     } = cohort.with_generic(&groups, |lent| {
         // Which read group each sample's own groups are, in the order the cursor visits them.
@@ -2084,6 +2100,16 @@ pub fn fit_jointly(
         // **Every parameter's standard error, at the parameters the fit returns**, from the
         // information the winning start's final pass summed (spec §3.3).
         let standard_errors = StandardErrors::of(&information);
+        // **What the data determine about the density and the duplicated class** (spec §2.1.3),
+        // from the cohort's covariance over the same information: the errors' diagonal is not
+        // enough, since the verdicts and the derived shares' errors need how the numbers move
+        // together.
+        let covariance = cohort_covariance(&information);
+        let cohort_errors = standard_errors.cohort.map(StandardError::value);
+        let density_report = DensityReport::of(&parameters.density, &cohort_errors, &covariance);
+        let duplicated_report = parameters
+            .duplicated
+            .map(|duplicated| DuplicatedReport::of(&duplicated, &cohort_errors, &covariance));
         stage.always(|into| {
             format!(
                 "SNP/indel fit: standard errors at the returned values: {}; {into}",
@@ -2163,6 +2189,8 @@ pub fn fit_jointly(
             trace,
             contamination,
             standard_errors,
+            density_report,
+            duplicated_report,
             clean_rate_standard_error,
         }
     })?;
@@ -2295,6 +2323,8 @@ pub fn fit_jointly(
             observations,
             standard_error: None,
         }),
+        density_report,
+        duplicated_report,
         noisy_posterior: statistics.noisy_posterior,
         genotype_posterior,
         duplicated_posterior,
@@ -3019,6 +3049,8 @@ struct FittedCohort {
     trace: Vec<PassSummary>,
     contamination: Vec<SampleContaminationEstimates>,
     standard_errors: StandardErrors,
+    density_report: DensityReport,
+    duplicated_report: Option<DuplicatedReport>,
     /// Each read group's, in the order of the fit's list of read groups.
     clean_rate_standard_error: Vec<StandardError>,
 }
@@ -5347,6 +5379,12 @@ mod tests {
                 standard_error: None,
             },
             duplicated: None,
+            density_report: DensityReport::of(
+                &density,
+                &[None; information::COHORT_PARAMETERS],
+                &[[None; information::COHORT_PARAMETERS]; information::COHORT_PARAMETERS],
+            ),
+            duplicated_report: None,
             hom_excess: BTreeMap::new(),
             rates: BTreeMap::new(),
             contamination: BTreeMap::new(),
@@ -5714,6 +5752,82 @@ pub mod bench_fixtures {
         duplicated_share: f64,
         seed: u64,
     ) -> DrawnCohort {
+        draw_cohort_carried_by(
+            libraries_of_each_sample,
+            noisy_share,
+            positions,
+            density,
+            hom_excess,
+            duplicated_share,
+            CarrierFrequency::TomatoCounts,
+            seed,
+        )
+    }
+
+    /// How the share of the panel carrying a duplication is drawn, a duplicated position at a time.
+    #[derive(Copy, Clone, Debug)]
+    pub enum CarrierFrequency {
+        /// `Beta(1.19, 9.55)`, the Beta the eight-sample tomato counts were fitted to, raised to
+        /// at least 0.2 — what every drawn cohort used before the carrier Beta could be chosen.
+        TomatoCounts,
+        /// `Beta(a, b)` as given, nothing raised: a duplication carried by one plant in a thousand
+        /// is drawn as such.
+        Beta { a: f64, b: f64 },
+    }
+
+    /// One library a sample, as [`draw_cohort_with_duplications`], with **the carrier share drawn
+    /// as `carriers` says** — so a test can draw duplications carried by most of the panel or by
+    /// almost none of it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the drawn cohort's own parameters"
+    )]
+    pub fn draw_cohort_with_carriers(
+        samples: usize,
+        positions: usize,
+        mean_depth: f64,
+        truth: (f64, f64, f64),
+        density: FrequencyDensity,
+        hom_excess: f64,
+        duplicated_share: f64,
+        carriers: CarrierFrequency,
+        seed: u64,
+    ) -> DrawnCohort {
+        let (clean, noisy, noisy_share) = truth;
+        let libraries = vec![
+            vec![DrawnLibrary {
+                clean,
+                noisy,
+                mean_depth,
+            }];
+            samples
+        ];
+        draw_cohort_carried_by(
+            &libraries,
+            noisy_share,
+            positions,
+            density,
+            hom_excess,
+            duplicated_share,
+            carriers,
+            seed,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the drawn cohort's own parameters"
+    )]
+    fn draw_cohort_carried_by(
+        libraries_of_each_sample: &[Vec<DrawnLibrary>],
+        noisy_share: f64,
+        positions: usize,
+        density: FrequencyDensity,
+        hom_excess: f64,
+        duplicated_share: f64,
+        carriers: CarrierFrequency,
+        seed: u64,
+    ) -> DrawnCohort {
         let samples = libraries_of_each_sample.len();
         let every_library: Vec<DrawnLibrary> =
             libraries_of_each_sample.iter().flatten().copied().collect();
@@ -5764,7 +5878,11 @@ pub mod bench_fixtures {
             };
             let (duplicated, carrier_frequency) = if duplicated_share > 0.0 {
                 let duplicated = draw.uniform() < duplicated_share;
-                (duplicated, draw.beta(1.19, 9.55).max(0.2))
+                let carrier_frequency = match carriers {
+                    CarrierFrequency::TomatoCounts => draw.beta(1.19, 9.55).max(0.2),
+                    CarrierFrequency::Beta { a, b } => draw.beta(a, b),
+                };
+                (duplicated, carrier_frequency)
             } else {
                 (false, 0.0)
             };
@@ -5915,8 +6033,8 @@ pub mod bench_fixtures {
 #[cfg(test)]
 mod whole_fit_tests {
     use super::bench_fixtures::{
-        DrawnLibrary, as_cohort, draw_cohort, draw_cohort_of_libraries,
-        draw_cohort_with_duplications, draw_cohort_with_library_rates,
+        CarrierFrequency, DrawnLibrary, as_cohort, draw_cohort, draw_cohort_of_libraries,
+        draw_cohort_with_carriers, draw_cohort_with_duplications, draw_cohort_with_library_rates,
     };
     use super::*;
     use crate::parameter_estimation::joint::census::DepthCap;
@@ -7350,5 +7468,136 @@ mod whole_fit_tests {
         assert!(HomozygoteExcess::try_new(0.0).is_some());
         assert!(HomozygoteExcess::try_new(1.0).is_some());
         assert!(HomozygoteExcess::try_new(1.2).is_none());
+    }
+
+    /// **The verdicts are right on both sides** (spec §12 test 12; §2.1.3), on drawn cohorts at 3
+    /// reads a position, 10,000 positions, contamination not estimated:
+    ///
+    /// - *the density*, the duplicated class off: 20 samples whose segregating positions are all
+    ///   above 1% (`Beta(3, 10)`) — not marked (measured: trade cost 4.3 × 10⁶); 50 samples whose
+    ///   density piles up below 1% (`Beta(0.05, 1)`, a fifth of its mass above 1%) — marked (0.18),
+    ///   its invariant share and first shape written without errors. In both the share above 1%
+    ///   lies within two of its errors of the drawn density's (measured: 0.61 and 0.38 errors);
+    /// - *the duplicated class*: 50 samples whose duplications are carried by about a third of the
+    ///   panel (carrier `Beta(3, 6)`) — not marked (1.4 × 10⁶); 4 samples whose duplications are
+    ///   rarely carried (`Beta(0.05, 2)`) — marked (0.0010);
+    /// - *one sample*: both pairs marked, with no trade cost, and the share above 1%, `Hexp` and
+    ///   `E[f]` without errors.
+    #[test]
+    fn the_verdicts_are_right_on_both_sides() {
+        let fitted = |samples: usize,
+                      density: FrequencyDensity,
+                      duplicated_share: f64,
+                      carriers: CarrierFrequency| {
+            let drawn = draw_cohort_with_carriers(
+                samples,
+                10_000,
+                3.0,
+                (0.003, 0.06, 0.03),
+                density,
+                0.3,
+                duplicated_share,
+                carriers,
+                0x005E_EDC3_0001,
+            );
+            let config = JointFitConfig {
+                duplicated_positions: duplicated_share > 0.0,
+                estimate_contamination: false,
+                ..JointFitConfig::default()
+            };
+            fit_jointly(&mut as_cohort(&drawn.samples), &config).expect("a drawn cohort fits")
+        };
+        let drawn_share_above = |density: FrequencyDensity| {
+            density.p_segregating()
+                * (1.0
+                    - crate::genetics::regularised_incomplete_beta(
+                        STATED_FREQUENCY,
+                        density.a,
+                        density.b,
+                    ))
+        };
+        let within_two_errors = |report: &DensityReport, density: FrequencyDensity, what: &str| {
+            let share = report.determined.share_above;
+            let error = share
+                .standard_error
+                .expect("the share above 1% has an error");
+            let off = (share.value - drawn_share_above(density)).abs() / error;
+            assert!(
+                off < 2.0,
+                "{what}: the share above 1% is {off:.2} errors off"
+            );
+        };
+        let ordinary = FrequencyDensity {
+            p_invariant: 0.9,
+            p_fixed_alt: 0.01,
+            a: 0.6,
+            b: 2.2,
+        };
+
+        let above = FrequencyDensity {
+            p_invariant: 0.9,
+            p_fixed_alt: 0.01,
+            a: 3.0,
+            b: 10.0,
+        };
+        let fit = fitted(20, above, 0.0, CarrierFrequency::TomatoCounts);
+        assert!(fit.duplicated_report.is_none(), "the class is off");
+        assert!(fit.density_report.determined.separately_determined);
+        assert!(fit.density_report.invariant_share.standard_error.is_some());
+        within_two_errors(&fit.density_report, above, "every position above 1%");
+
+        let piled_below = FrequencyDensity {
+            p_invariant: 0.85,
+            p_fixed_alt: 0.01,
+            a: 0.05,
+            b: 1.0,
+        };
+        let fit = fitted(50, piled_below, 0.0, CarrierFrequency::TomatoCounts);
+        let density = &fit.density_report;
+        assert!(!density.determined.separately_determined);
+        assert!(
+            density
+                .determined
+                .trade_cost
+                .is_some_and(|cost| cost < SEPARATION_LOG_LIKELIHOOD)
+        );
+        assert_eq!(density.invariant_share.standard_error, None);
+        assert_eq!(density.segregating_shape_a.standard_error, None);
+        assert!(density.segregating_shape_b.standard_error.is_some());
+        within_two_errors(density, piled_below, "piled up below 1%");
+
+        let fit = fitted(
+            50,
+            ordinary,
+            0.02,
+            CarrierFrequency::Beta { a: 3.0, b: 6.0 },
+        );
+        let duplicated = fit.duplicated_report.expect("the class is fitted");
+        assert!(duplicated.determined.separately_determined);
+        assert!(duplicated.duplicated_share.standard_error.is_some());
+        assert!(duplicated.carrier_shape_a.standard_error.is_some());
+
+        let fit = fitted(
+            4,
+            ordinary,
+            0.02,
+            CarrierFrequency::Beta { a: 0.05, b: 2.0 },
+        );
+        let duplicated = fit.duplicated_report.expect("the class is fitted");
+        assert!(!duplicated.determined.separately_determined);
+        assert_eq!(duplicated.duplicated_share.standard_error, None);
+        assert_eq!(duplicated.carrier_shape_a.standard_error, None);
+
+        let fit = fitted(1, ordinary, 0.02, CarrierFrequency::TomatoCounts);
+        let density = &fit.density_report;
+        let duplicated = fit.duplicated_report.expect("the class is fitted");
+        for determined in [density.determined, duplicated.determined] {
+            assert!(!determined.separately_determined);
+            assert_eq!(determined.trade_cost, None);
+            assert_eq!(determined.share_above.standard_error, None);
+        }
+        assert_eq!(density.expected_heterozygosity.standard_error, None);
+        assert_eq!(density.expected_alternative_frequency.standard_error, None);
+        assert_eq!(density.invariant_share.standard_error, None);
     }
 }

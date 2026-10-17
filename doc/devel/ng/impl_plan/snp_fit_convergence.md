@@ -271,7 +271,7 @@ samples once, after B5.
   10⁻¹² relative; holding the samples' own parameters in the solves (the cohort's block inverted
   alone) fails it. Parameters without information or not told apart have no entries; one whose
   error is wider than its range keeps them. Marked `expect(dead_code)` outside the tests until C3.
-- ☐ **C3** `fit/determined.rs`: `ReportedNumber`, `DeterminedShare`, `DensityReport`,
+- ✅ **C3** `fit/determined.rs`: `ReportedNumber`, `DeterminedShare`, `DensityReport`,
   `DuplicatedReport`; `STATED_FREQUENCY`, `SEPARATION_LOG_LIKELIHOOD`; the determined share, its
   error, the errors of `Hexp` and `E[f]`, the trade cost and the verdict for both pairs; a marked
   number's error withheld. `JointFit` gains `density_report` and `duplicated_report`, computed after
@@ -285,6 +285,20 @@ samples once, after B5.
   drawn cohorts for both pairs.
   *Identity:* no written output changes — the oracle's checksums and the digests are unchanged.
   *Depends:* C1, C2. *Source:* §2.1.3; §12 test 12.
+  *Done 2026-10-17:* `DensityReport::of` and `DuplicatedReport::of` take the values, the cohort's
+  errors and `cohort_covariance`; `JointFit::density_report` and `duplicated_report` (`None` with
+  the class off), computed beside `StandardErrors::of` on the winning start's final information.
+  Two choices the spec left open: `trade_cost` is `None` also when `Var(S)` is not a positive finite
+  number (the spec names only a missing covariance), and the derived numbers keep their errors
+  when the pair is marked, as the spec's example tables show. The three reference fits give the
+  spec's table: 1 sample both marked, no cost; 4 samples the density's cost above 10⁶ (rounding;
+  the reference computed exactly 0) and the duplicated pair 0.00549; 59 samples 1.347 and 0.1157,
+  every number of the spec's example tables. §12 test 12's drawn cohorts (3 reads, 10,000
+  positions; a fitting fixture `draw_cohort_with_carriers` lets the carrier Beta be chosen): the
+  density above 1% at 20 samples not marked, piled below 1% at 50 marked (cost 0.18), its share
+  above 1% 0.61 and 0.38 errors from the drawn one; carriers `Beta(3, 6)` at 50 not marked,
+  `Beta(0.05, 2)` at 4 marked; one sample both marked, no derived error. The 1- and 4-sample files
+  byte for byte, the oracle's checksums and the four digest tests unchanged.
 
 > Checkpoint C (lead): C changes no output.
 

@@ -652,13 +652,6 @@ pub(super) type CohortCovariance = [[Option<f64>; COHORT_PARAMETERS]; COHORT_PAR
 /// ones the errors leave out: no information, or not told apart from the others; their rows and
 /// columns are `None`. A parameter whose error came out wider than its range still has its entries.
 /// Eight solves, each costing what one Newton step's first solve does: linear in the samples.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the report of what the data determine reads it from plan step C3"
-    )
-)]
 pub(super) fn cohort_covariance(sums: &InformationSums) -> CohortCovariance {
     let layout = Layout::of(sums);
     let held = vec![false; layout.side];
