@@ -9,8 +9,10 @@
 //! ([`StandardErrors::described`]) and, when the per-pass trace is on, one row a parameter
 //! ([`StandardErrors::named`]). While it runs, once its log-likelihood has nearly stopped moving, it
 //! computes them every cycle beside each parameter's distance to the maximum ([`newton_step`], the
-//! same matrix solved against the summed scores), and stops when every distance is below a tenth of
-//! its error ([`settled`](super::settled), [`StandardErrors::by_coordinate`]).
+//! same matrix solved against the summed scores), and stops when the log-likelihood that step would
+//! gain — the Newton decrement, counted over the parameters that have an error — is below a
+//! thousandth of a unit ([`settled`](super::settled)). Each distance against its error
+//! ([`StandardErrors::by_coordinate`]) is reported, and stops nothing.
 //!
 //! # From information to errors
 //!
@@ -851,8 +853,7 @@ pub(super) struct NewtonStep {
     pub(super) decrement: f64,
 }
 
-/// The cohort's eight parameters' covariance, by slot ([`cohort`](super::information::cohort)), row
-/// by row; `None` for an entry whose row or column was not solved for.
+/// The cohort's eight parameters' covariance, by slot ([`cohort`]), row by row; `None` for an entry whose row or column was not solved for.
 pub(super) type CohortCovariance = [[Option<f64>; COHORT_PARAMETERS]; COHORT_PARAMETERS];
 
 /// **The covariance of the cohort's eight parameters**: the inverse information restricted to them,

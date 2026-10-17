@@ -388,6 +388,24 @@ None of the three moves a number on the 1- and 4-sample oracle: both parameters 
 byte those of the build before. On the 21-sample digest fixture the second moves the fitted numbers
 by at most 6 × 10⁻⁶ of themselves, the same starts taking the same passes.
 
+*A known limit (code review E6, 2026-10-17; not fixed).* **The solve fixes one parameter a round,
+so when many parameters cross an end of their interval at different points along the step, its cost
+grows with the square of the samples**: each round is one solve over every parameter, and there is
+a round for each parameter that meets an end. Measured on a contrived case — one library a sample,
+every sample's homozygote excess at 0.01 to 0.02 with a slope pushing it past 0, each at a different
+fraction of the step: 10 ms a solve at 59 samples, 5.4 to 5.9 s at 2,000. With no parameter near an
+end a solve at 2,000 samples costs 1.3 to 1.9 ms. A fit takes one solve a judging pass, so at 2,000
+samples in that case each judging pass would gain several seconds; whether real cohorts come near it
+is not measured. The fixes, in order of effort:
+
+- **measure first**: a judging pass's share of wall time on a real cohort of a few thousand samples;
+- **fix every parameter whose room is within a tolerance of the shortest in one round.** This does not
+  help the case above, where the crossings are spread over the whole step, and moves parameters onto
+  ends a little before the step reaches them, so it is not done;
+- **a gradient-projection solve** (Moré & Toraldo, 1991; Nocedal & Wright §16.7), which fixes every
+  parameter a projected step carries past an end at once, in a handful of rounds whatever the
+  samples. It replaces this solve, and would need the oracle and the digests re-measured.
+
 **2. The decrement counts only the parameters that have a standard error; the others adjust
 freely.** With the solve fixed, the two-sample fixtures still ran to the limit. What was left to gain
 lay along parameters the data do not determine — on the fixture with sequencing errors 12 of its 16

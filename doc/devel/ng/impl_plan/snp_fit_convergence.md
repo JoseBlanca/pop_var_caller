@@ -424,3 +424,9 @@ samples once, after B5.
 
 The observed information against the outer-product estimator (`fit_precision.md` §8 question 3);
 reparameterising the density (joint-fit §11 question 13); a full-scale run above 59 samples.
+
+**Follow-up from the code review E6 (2026-10-17):** the box solve's cost when many parameters cross
+an end at different fractions of the step — one round each, so the cost grows with the square of
+the samples: 10 ms a solve at 59 samples, 5.4 to 5.9 s at 2,000 in a contrived case
+(`fit_precision.md` §2, "A known limit"). First measure a judging pass's share of wall time on a real
+cohort of a few thousand samples; if it matters, replace the solve with a gradient-projection one.

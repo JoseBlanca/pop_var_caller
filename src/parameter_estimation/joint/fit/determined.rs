@@ -33,9 +33,11 @@
 //! trade_cost = ½ (ln 2)² σ² / V_trade              (V_trade ≤ 10⁻¹² Var(σ): no trade, cost +∞)
 //! ```
 //!
-//! The pair is also marked when a number it is computed from has no covariance — dropped from the
-//! inversion as not identified, the density's at one sample and the duplicated class's at one and
-//! two — or when `Var(S)` is not a positive finite number.
+//! The pair is also marked, with no trade cost, when a number it is computed from has no standard
+//! error — dropped from the inversion as not identified, the density's at one sample and the
+//! duplicated class's at one and two, or kept in it with an error wider than its range, as every
+//! number of the density's group at two samples and 3 reads — or when `Var(S)` is not a positive
+//! finite number.
 //!
 //! # How each number is computed
 //!
@@ -48,7 +50,7 @@
 //! value, through the same functions that compute their values. A difference would fail along a
 //! share: one on its lower bound of 10⁻¹² gives a step below the last place of `σ`. The errors are
 //! `√Var` from the same `C` (the delta method), and none where a number of the group has no
-//! covariance.
+//! covariance or where `√Var` is wider than 1, the whole range of each of them.
 
 use std::f64::consts::LN_2;
 
@@ -95,7 +97,7 @@ pub struct DeterminedShare {
     /// of positions duplicated in more than that share of the panel, for the duplicated class.
     pub share_above: ReportedNumber,
     /// The log-likelihood lost halving or doubling `σ` with `S` held: `+∞` when there is no trade;
-    /// `None` when a number of the group has no covariance or `Var(S)` is not a positive finite
+    /// `None` when a number of the group has no standard error or `Var(S)` is not a positive finite
     /// number, so the cost cannot be computed.
     pub trade_cost: Option<f64>,
     /// `false`: the pair's two numbers are written without standard errors and with the mark.
@@ -134,7 +136,7 @@ pub struct DuplicatedReport {
 
 impl DensityReport {
     /// The report of `density`, from the cohort's standard errors `errors` (by slot of
-    /// [`cohort`](super::information::cohort), `None` where a number has none) and `covariance`,
+    /// [`cohort`], `None` where a number has none) and `covariance`,
     /// both from the information the fit's errors come from.
     pub(super) fn of(
         density: &FrequencyDensity,
@@ -155,6 +157,7 @@ impl DensityReport {
                 density.a,
                 density.b,
             ],
+            errors,
             covariance,
         );
         let as_density = |values: &[f64; 4]| FrequencyDensity {
@@ -237,6 +240,7 @@ impl DuplicatedReport {
         let group = Group::of(
             slots,
             [duplicated.share, duplicated.carrier_a, duplicated.carrier_b],
+            errors,
             covariance,
         );
         let determined = group.determined_share(
@@ -276,15 +280,25 @@ fn share_of_beta_above(a: f64, b: f64) -> f64 {
     1.0 - regularised_incomplete_beta(STATED_FREQUENCY, a, b)
 }
 
-/// **The numbers a pair's quantities are computed from**: their values, and their covariance with
-/// each other, `None` when any entry is missing — a number of the group dropped from the inversion.
+/// **The numbers a pair's quantities are computed from**: their values, their covariance with
+/// each other, `None` when any entry is missing — a number of the group dropped from the inversion
+/// — and whether every one of them has a standard error.
 struct Group<const N: usize> {
     values: [f64; N],
     covariance: Option<[[f64; N]; N]>,
+    /// `false` when a number of the group has no standard error: dropped from the inversion, or
+    /// kept in it with an error wider than its range. The pair is then marked, with no trade cost.
+    every_number_has_an_error: bool,
 }
 
 impl<const N: usize> Group<N> {
-    fn of(slots: [usize; N], values: [f64; N], covariance: &CohortCovariance) -> Self {
+    fn of(
+        slots: [usize; N],
+        values: [f64; N],
+        errors: &[Option<f64>; COHORT_PARAMETERS],
+        covariance: &CohortCovariance,
+    ) -> Self {
+        let every_number_has_an_error = slots.iter().all(|&slot| errors[slot].is_some());
         let mut within = [[0.0; N]; N];
         for (row, &slot_of_row) in within.iter_mut().zip(&slots) {
             for (entry, &slot_of_column) in row.iter_mut().zip(&slots) {
@@ -294,6 +308,7 @@ impl<const N: usize> Group<N> {
                         return Self {
                             values,
                             covariance: None,
+                            every_number_has_an_error,
                         };
                     }
                 }
@@ -302,6 +317,7 @@ impl<const N: usize> Group<N> {
         Self {
             values,
             covariance: Some(within),
+            every_number_has_an_error,
         }
     }
 
@@ -362,12 +378,17 @@ impl<const N: usize> Group<N> {
     ) -> DeterminedShare {
         let above_gradient = self.gradient(&share_above, above_exact);
         let variance_above = self.covariance_of(&above_gradient, &above_gradient);
+        // **A number of the group with no error leaves no cost to compute.** Its covariance, where
+        // it kept one, describes a curvature too shallow to place it anywhere in its range; a cost
+        // from it would be a verdict on numbers the data do not determine — at two samples, `+∞`
+        // with every number of the density's group so placed (spec §2.1.3, amended 2026-10-17).
         let trade_cost = match (
+            self.every_number_has_an_error,
             self.covariance_of(&share_gradient, &share_gradient),
             variance_above,
             self.covariance_of(&share_gradient, &above_gradient),
         ) {
-            (Some(variance), Some(variance_above), Some(together))
+            (true, Some(variance), Some(variance_above), Some(together))
                 if variance_above > 0.0 && variance_above.is_finite() =>
             {
                 trade_cost_of(
@@ -413,10 +434,20 @@ fn is_separately_determined(trade_cost: Option<f64>) -> bool {
     trade_cost.is_some_and(|cost| cost >= SEPARATION_LOG_LIKELIHOOD)
 }
 
-/// The standard error a variance gives: its square root when it is a positive finite number.
+/// **The standard error a variance gives a derived number**: its square root when it is a positive
+/// finite number no wider than 1. Every number derived here — the share above
+/// [`STATED_FREQUENCY`], `Hexp`, `E[f]` — lies in [0, 1], and an error wider than that whole range
+/// says nothing about where in it the number lies; the cohort's own numbers are withheld by the same
+/// rule ([`StandardError::WiderThanItsRange`](super::standard_errors::StandardError::WiderThanItsRange)). Measured
+/// at two samples and 3 reads: the share above 1% came out at 0.073 ± 11.0.
 fn error_from_variance(variance: f64) -> Option<f64> {
-    (variance > 0.0 && variance.is_finite()).then(|| variance.sqrt())
+    (variance > 0.0 && variance.is_finite())
+        .then(|| variance.sqrt())
+        .filter(|&error| error <= DERIVED_NUMBER_RANGE)
 }
+
+/// The width of the range every derived number lies in: each is a share or a frequency in [0, 1].
+const DERIVED_NUMBER_RANGE: f64 = 1.0;
 
 #[cfg(test)]
 mod tests {
@@ -489,15 +520,16 @@ mod tests {
     }
 
     /// **A share that moves only with what the reads see has no trade.** Every carrier above 1%
-    /// (`Beta(30, 60)`) and only the duplicated share uncertain: `S` is `σ` times a constant, so
-    /// `V_trade` is zero up to rounding — the cost is `+∞` — and the pair is separately determined,
-    /// its two numbers keeping their errors.
+    /// (`Beta(30, 60)`) and only the duplicated share uncertain — the carrier shapes known to
+    /// 10⁻¹⁵, so that they still have errors: `S` is `σ` times a constant, so `V_trade` is zero up
+    /// to rounding — the cost is `+∞` — and the pair is separately determined, its two numbers
+    /// keeping their errors.
     #[test]
     fn a_share_that_moves_only_with_what_is_seen_has_no_trade() {
         let mut variances = [1e-6; 8];
         variances[cohort::DUPLICATED_SHARE] = 4e-6;
-        variances[cohort::CARRIER_A] = 0.0;
-        variances[cohort::CARRIER_B] = 0.0;
+        variances[cohort::CARRIER_A] = 1e-30;
+        variances[cohort::CARRIER_B] = 1e-30;
         let errors: [Option<f64>; 8] = variances.map(error_from_variance);
         let report = DuplicatedReport::of(
             &duplicated(0.01, 30.0, 60.0),
@@ -536,6 +568,69 @@ mod tests {
         assert_eq!(report.expected_heterozygosity.standard_error, None);
         assert_eq!(report.expected_alternative_frequency.standard_error, None);
         assert!((report.invariant_share.value - 0.9).abs() < 1e-15);
+    }
+
+    /// **A number of the group kept in the inversion but with no standard error marks the pair,
+    /// with no trade cost** (spec §2.1.3, amended 2026-10-17): the duplicated class with every
+    /// carrier above 1%, which with every error present has no trade (the test above), its carrier
+    /// shape `b` given no error — as when it came out wider than its range. Its covariance is still
+    /// there, so `S` keeps its error.
+    #[test]
+    fn a_number_with_a_covariance_but_no_error_marks_the_pair() {
+        let mut variances = [1e-6; 8];
+        variances[cohort::DUPLICATED_SHARE] = 4e-6;
+        variances[cohort::CARRIER_A] = 1e-30;
+        variances[cohort::CARRIER_B] = 1e-30;
+        let mut errors: [Option<f64>; 8] = variances.map(error_from_variance);
+        errors[cohort::CARRIER_B] = None;
+        let report = DuplicatedReport::of(
+            &duplicated(0.01, 30.0, 60.0),
+            &errors,
+            &covariance_of(diagonal(variances), &[]),
+        );
+        assert_eq!(report.determined.trade_cost, None);
+        assert!(!report.determined.separately_determined);
+        assert_eq!(report.duplicated_share.standard_error, None);
+        assert_eq!(report.carrier_shape_a.standard_error, None);
+        assert!(report.determined.share_above.standard_error.is_some());
+    }
+
+    /// **A derived number's error wider than 1, the whole range of each, is withheld**: an error
+    /// of exactly 1 is kept, the next number up is not. Through the report: the invariant share's
+    /// variance at 100 (an error of 10, as at two samples) leaves `S`, `Hexp` and `E[f]` with none,
+    /// while at 10⁻⁶ they keep theirs.
+    #[test]
+    fn a_derived_error_wider_than_its_range_is_withheld() {
+        assert_eq!(error_from_variance(1.0), Some(1.0));
+        let just_over_one = 1.0_f64.next_up();
+        assert_eq!(error_from_variance(just_over_one * just_over_one), None);
+        assert_eq!(error_from_variance(0.25), Some(0.5));
+        let density = FrequencyDensity {
+            p_invariant: 0.9,
+            p_fixed_alt: 0.001,
+            a: 0.6,
+            b: 2.2,
+        };
+        for (variance, kept) in [(100.0, false), (1e-6, true)] {
+            let mut variances = [1e-6; 8];
+            variances[cohort::P_INVARIANT] = variance;
+            let report = DensityReport::of(
+                &density,
+                &[Some(1e-3); 8],
+                &covariance_of(diagonal(variances), &[]),
+            );
+            for derived in [
+                report.determined.share_above,
+                report.expected_heterozygosity,
+                report.expected_alternative_frequency,
+            ] {
+                assert_eq!(
+                    derived.standard_error.is_some(),
+                    kept,
+                    "{variance}: {derived:?}"
+                );
+            }
+        }
     }
 
     /// **A fixed non-reference share on its lower bound gets exact slopes**, not a central
@@ -937,19 +1032,28 @@ mod tests {
         assert_eq!(duplicated.carrier_shape_a.standard_error, None);
     }
 
-    /// **At 4 oracle accessions the density has no trade and the duplicated class is marked.**
-    /// Every segregating position is above 1% (`a` = 15.4), so `σ` is the determined share and
-    /// `V_trade` comes out at rounding level — the reference's own computation gave exactly zero;
-    /// here the cost is `+∞`, and the pair keeps its errors. The duplicated pair costs 0.0055
-    /// units (`carrier_a` on its bound).
+    /// **At 4 oracle accessions both pairs are marked, each because a number of its group has no
+    /// standard error** (spec §2.1.3, amended 2026-10-17): the density's second shape `b` (on its
+    /// bound of 50, its error 115 against a range of 49.98) and the duplicated share. Neither pair
+    /// has a trade cost; the derived numbers keep their errors, each well inside [0, 1].
+    ///
+    /// **The trades themselves are as measured before the amendment**: given an error for the
+    /// number that has none, the density has no trade — every segregating position is above 1%
+    /// (`a` = 15.4), so `σ` is the determined share and `V_trade` comes out at rounding level, the
+    /// cost `+∞` — and the duplicated pair costs 0.0055 units (`carrier_a` on its bound).
     #[test]
-    fn at_four_oracle_samples_the_density_has_no_trade_and_the_duplicated_class_is_marked() {
-        let (density, duplicated) = four_oracle_samples().reports();
-        assert_eq!(density.determined.trade_cost, Some(f64::INFINITY));
-        assert!(density.determined.separately_determined);
-        assert_eq!(density.invariant_share.standard_error, Some(0.0003361555));
-        assert_eq!(density.segregating_shape_a.standard_error, Some(36.77845));
+    fn at_four_oracle_samples_both_pairs_are_marked_as_a_number_of_each_has_no_error() {
+        let reference = four_oracle_samples();
+        let (density, duplicated) = reference.reports();
+        assert!(!density.determined.separately_determined);
+        assert_eq!(density.determined.trade_cost, None);
+        assert_eq!(density.invariant_share.standard_error, None);
+        assert_eq!(density.segregating_shape_a.standard_error, None);
         assert_eq!(density.segregating_shape_b.standard_error, None);
+        assert_eq!(
+            density.fixed_non_reference_share.standard_error,
+            Some(1.326464e-05)
+        );
         assert_near(
             density.determined.share_above.value,
             0.0016026975375932264,
@@ -976,12 +1080,7 @@ mod tests {
         );
 
         assert!(!duplicated.determined.separately_determined);
-        assert_near(
-            duplicated.determined.trade_cost.expect("a cost"),
-            0.005494469013440156,
-            1e-4,
-            "the duplicated pair's trade cost",
-        );
+        assert_eq!(duplicated.determined.trade_cost, None);
         assert_near(
             duplicated.determined.share_above.value,
             0.0009618499283254206,
@@ -997,6 +1096,24 @@ mod tests {
         assert_eq!(duplicated.duplicated_share.standard_error, None);
         assert_eq!(duplicated.carrier_shape_a.standard_error, None);
         assert_eq!(duplicated.carrier_shape_b.standard_error, Some(0.5503759));
+
+        let mut every_error = reference.errors;
+        every_error[cohort::DENSITY_B] = Some(1.0);
+        every_error[cohort::DUPLICATED_SHARE] = Some(1e-3);
+        let (density, duplicated) = ReferenceFit {
+            errors: every_error,
+            ..reference
+        }
+        .reports();
+        assert_eq!(density.determined.trade_cost, Some(f64::INFINITY));
+        assert!(density.determined.separately_determined);
+        assert_near(
+            duplicated.determined.trade_cost.expect("a cost"),
+            0.005494469013440156,
+            1e-4,
+            "the duplicated pair's trade cost",
+        );
+        assert!(!duplicated.determined.separately_determined);
     }
 
     /// **At 59 tomato2 accessions both pairs are marked**: the density's trade costs 1.35 units, the

@@ -3982,7 +3982,8 @@ mod tests {
 
     /// Three samples over 600 positions at 5 reads, one position in 330 mismapped, the duplicated
     /// class fitted: a cohort whose first start refuses every try of most of its Newton steps
-    /// (its judging pass 12 tries four and runs passes 13 to 16) and runs to the 200-pass limit.
+    /// (its judging pass 12 tries four and runs passes 13 to 16) and stops at the default limit of
+    /// 200 passes, its outcome counting 199 (measured by the code review E6).
     fn a_cohort_refusing_its_newton_steps() -> (DrawnCohort, JointFitConfig) {
         let cohort = crate::parameter_estimation::joint::fit::bench_fixtures::draw_cohort(
             3,
@@ -4085,7 +4086,8 @@ mod tests {
     }
 
     /// The first start of the four-sample fixture, traced, which accepts a Newton step at every
-    /// judging pass but its last: at a quarter of the step five times, then a half, then the whole.
+    /// judging pass but its last, eight in all: at a quarter of the step five times, then a half,
+    /// then the whole twice. Its ninth judging pass, at pass 25, finds it converged.
     fn a_start_accepting_its_newton_steps() -> super::super::StartOutcome {
         let config = JointFitConfig {
             estimate_contamination: false,
@@ -5271,10 +5273,14 @@ mod tests {
         if cohorts != COVERAGE_COHORTS {
             return;
         }
-        // **How many fits converge within the pass limit.** Since plan step B1 a fit converges only
-        // when every parameter is within a tenth of its error of the maximum, and at a few samples
-        // and 3 reads some fits still crawl at 200 passes and say so: 182 of 200 at 4 samples
-        // (198 under the relative-move rule) and 8 of 200 at 2 (146), which is left unchecked.
+        // **How many fits converge within the pass limit.** These floors were measured under the
+        // stopping rule of fit-precision step B1, when a fit converged only once every parameter was
+        // within a tenth of its error of the maximum: at a few samples and 3 reads some fits still
+        // crawled at 200 passes and said so, 182 of 200 at 4 samples (198 under the relative-move
+        // rule before it) and 8 of 200 at 2 (146), which is left unchecked. Since 2026-10-16 a fit
+        // converges when the Newton decrement is below a thousandth of a unit (`settled`); the
+        // floors have not been re-measured under that rule, and this measurement is ignored by
+        // default.
         let fewest_converged = match (samples, mean_depth as usize) {
             (2, _) => 0,
             (4, 3) => 175,

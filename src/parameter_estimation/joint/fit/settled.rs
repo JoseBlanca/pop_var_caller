@@ -17,9 +17,12 @@
 //!
 //! **A start has converged when the decrement is at least zero and below [`DECREMENT_THRESHOLD`]**
 //! ([`has_converged`]), and stops at once at the parameters that pass judged; the final pass follows
-//! there. One number bounds every parameter and every quantity computed from them: the step moves
-//! any of them by at most `√(2λ)` of its own standard error. At 0.001 that is 0.045 errors, and on
-//! every cohort measured (1, 4 and 59 tomato samples) every determined quantity stopped within a
+//! there. One number bounds every parameter that has a standard error and every quantity computed
+//! from those alone: the step moves any of them by at most `√(2λ)` of its own standard error; at
+//! 0.001 that is 0.045 errors. The parameters with none — not identified, or with an error wider
+//! than their range — are profiled out of the decrement (plan step B4,
+//! [`newton_step`](super::standard_errors::newton_step)), and the number bounds nothing about them.
+//! On every cohort measured (1, 4 and 59 tomato samples) every determined quantity stopped within a
 //! tenth of its error of a fit run to 10⁻⁴; the decrement understates what is left by two and a half
 //! to six times near the maximum, so the threshold was chosen from that measurement and not from the
 //! bound. A decrement that is not a number is not convergence: it means the bounded solve reached

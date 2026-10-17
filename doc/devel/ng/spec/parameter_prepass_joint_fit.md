@@ -321,9 +321,9 @@ separately determined. Precisely, with `C` the covariance of the cohort's eight 
 Var(x)      = ∇xᵀ C ∇x,   Cov(x, y) = ∇xᵀ C ∇y
 V_trade     = Var(σ) − Cov(σ, S)² / Var(S)          how far σ can move with S held
 trade_cost  = ½ · (ln 2)² · σ² / V_trade            log-likelihood lost halving or doubling σ
-              (V_trade ≤ 0: no trade, trade_cost = +∞)
+              (V_trade ≤ 10⁻¹² · Var(σ): no trade, trade_cost = +∞)
 not separately determined  ⟺  trade_cost < SEPARATION_LOG_LIKELIHOOD = 2
-                              or a number of the pair's group has no covariance (below)
+                              or a number of the pair's group has no standard error (below)
                               or Var(S) is not a positive finite number
 ```
 
@@ -338,11 +338,22 @@ The pair's **group** is the numbers `σ` and `S` are computed from: `p_invariant
 - **Two units** is soft: about the half-width of a 95% likelihood interval for one number (1.92).
 - **A number with no covariance** is one dropped from the inversion as not identified
   ([`fit_precision.md`](fit_precision.md) §3.2): the density's at one sample, the duplicated class's
-  at one and two samples. The pair is then marked. A number whose error came out wider than its
-  range still has a covariance and goes through the test. Marking is also the fix for a defect the
+  at one and two samples. The pair is then marked. Marking is also the fix for a defect the
   diagnosis found (§4.1, §6): with the shapes dropped, `p_invariant`'s error is computed with them
   held where they were fitted, which understates it — at one sample `p_invariant` differed by 4.7 of
   that error between two fits of equal likelihood. Marked, it is written without an error.
+- **A number with no standard error** marks the pair too, with no trade cost. *Amended 2026-10-17
+  (code review E6):* this text said a number whose error came out wider than its range "still has a
+  covariance and goes through the test". On a drawn cohort of 2 samples at 3 reads a position,
+  10,000 positions, the duplicated class on, every number of the density's group came out that way
+  (the invariant share's error at 13.3, the shapes' at 2,520 and 5,190), and the test, run on that
+  covariance, found no trade (`trade_cost` = +∞) and called the pair separately determined — of
+  four numbers the data place nowhere in their ranges. The rule now is the conservative one, in the
+  spirit of the owner's rule that a shape not identified marks the pair: **the pair is marked
+  whenever any number of its group has no standard error, for whatever reason**, and its cost is
+  not computed. A number with no covariance is the special case above. On the 4 oracle samples this
+  marks the density's pair, which the test alone passed with no trade: its shape `b` sits on its
+  bound of 50 with an error of 115, against a range of 49.98 (table below).
 
 Measured at the converged fits (the stopping-rule report's reference runs; `tmp/snp_plan/dup_trade.py`
 for the duplicated class):
@@ -358,6 +369,13 @@ for the duplicated class):
 On 59 samples read one chunk in four, `carrier_a` stopped at 0.24, off its bound, and the duplicated
 pair passes; on all positions it went to the bound and does not. The verdict is the data's, input by
 input, not a property of the cohort's size.
+
+*Amended 2026-10-17 (code review E6):* the table is the test as first written. Under the rule that a
+number with no standard error marks its pair, two cells change on the 4 oracle samples read in full:
+the density's pair is marked (its shape `b` has no error) and the duplicated pair keeps its mark but
+loses its cost of 0.0055 (its share has no error). The rows at one sample and at 59 samples read in
+full do not move: at one sample both pairs were already marked for want of a covariance, and at 59
+samples every number of both groups has an error. The two rows read in part were not re-run.
 
 **How each number is computed, and where it lives.**
 
@@ -379,7 +397,10 @@ input, not a property of the cohort's size.
   and so on); only the shapes are differenced. A share on its lower bound of 10⁻¹² gave a step below
   the last place of `σ`: −0.087 for an exact −0.053.
 - **The errors of `S`, `Hexp` and `E[f]`** are `√Var` from the same `C` (the delta method). Where a
-  number of the group has no covariance, they have no error.
+  number of the group has no covariance, they have no error. *Amended 2026-10-17 (code review E6):*
+  nor where `√Var` is wider than 1, the whole range of each — the rule the cohort's own numbers
+  already follow ([`fit_precision.md`](fit_precision.md) §3.2). On the two-sample cohort above the
+  report had said `S` = 0.073 ± 11.0, `Hexp` 0.031 ± 4.8 and `E[f]` 0.037 ± 5.8.
 - **The test and the report** in a new module `src/parameter_estimation/joint/fit/determined.rs`,
   with `STATED_FREQUENCY` and `SEPARATION_LOG_LIKELIHOOD`; computed once, after the winning start's
   final pass, and carried on `JointFit`:
@@ -394,7 +415,7 @@ pub struct DeterminedShare {
     /// S: the share above STATED_FREQUENCY.
     pub share_above: ReportedNumber,
     /// Log-likelihood lost halving or doubling σ with S held; None when a number of the group has
-    /// no covariance, +∞ when there is no trade.
+    /// no standard error, +∞ when there is no trade.
     pub trade_cost: Option<f64>,
     /// false: the pair's two numbers are written without errors and with the mark.
     pub separately_determined: bool,
@@ -1065,6 +1086,13 @@ stops — converged, or heading where an earlier start arrived ([`fit_precision.
    ([`fit.rs:2837`](../../../../src/parameter_estimation/joint/fit.rs#L2837)); a parameter not solved
    for moves 0. A try at fraction `f` is `θ + f·(θ* − θ)`, coordinate by coordinate, read back by
    `Parameters::with_coordinates` ([`fit.rs:2863`](../../../../src/parameter_estimation/joint/fit.rs#L2863)).
+   *Amended 2026-10-17 (the 59-sample run of step E3, and code review E6):* the numbers a golden-section search maximises — each
+   library's two error rates and each sample's homozygote excess — are clamped not onto the ends of
+   their interval but half the search's stopping width inside each end
+   (`Coordinate::newton_range`), a point the search itself returns for a maximum there: a step
+   clamped onto an excess of exactly 1 had left two nearly fully inbred tomato samples with no
+   inbreeding coefficient. And the whole step, `f = 1`, is `θ*` itself, not `θ + 1·(θ* − θ)`, which
+   can round a unit in the last place past an end.
    A coordinate the step does not move keeps its exact bits, as SQUAREM's jump keeps them
    ([`fit.rs:2894`](../../../../src/parameter_estimation/joint/fit.rs#L2894)): that is how the
    homozygote excess the fit holds at zero at one sample stays zero.

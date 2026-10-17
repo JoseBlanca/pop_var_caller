@@ -2803,7 +2803,10 @@ enum NewtonOutcome<Pass> {
 /// caller keeps of it, or `None` once the passes are spent, which ends the tries.
 ///
 /// A coordinate the step does not move keeps its exact bits, since `fraction · 0` adds nothing:
-/// that is how a homozygote excess the fit holds at zero stays zero.
+/// that is how a homozygote excess the fit holds at zero stays zero. **The whole step is the
+/// target itself**, not `judged + 1 · (target − judged)`, which can round to a unit in the last
+/// place beyond it — outside the interval when the target is on an end (13 random starts in 100
+/// for a target of 0.02, 80 in 100 for one of 10⁻¹², measured by the code review).
 fn try_the_newton_step<Pass>(
     judged: &Parameters,
     target: &[f64],
@@ -2822,7 +2825,13 @@ fn try_the_newton_step<Pass>(
         let values: Vec<f64> = coordinates
             .iter()
             .zip(target)
-            .map(|(coordinate, full)| coordinate.value + fraction * (full - coordinate.value))
+            .map(|(coordinate, &full)| {
+                if fraction == 1.0 {
+                    full
+                } else {
+                    coordinate.value + fraction * (full - coordinate.value)
+                }
+            })
             .collect();
         let candidate = judged.with_coordinates(&values);
         if candidate.density.p_invariant + candidate.density.p_fixed_alt >= P_INVARIANT_BOUNDS.1 {
@@ -5085,6 +5094,32 @@ mod tests {
             (run_at[0] - (0.9 + 0.5 * (P_INVARIANT_BOUNDS.1 - 0.9))).abs() < 1e-12,
             "the first pass is at half the step: {run_at:?}"
         );
+    }
+
+    /// **The whole step lands exactly on the target**, never a unit in the last place beyond it: the
+    /// first shape stepped from each of 200 starting values onto its lower bound of 0.02. For some
+    /// of them `a + 1 · (0.02 − a)` rounds below 0.02, outside the interval (the fixture checks
+    /// that it holds such a start); the try run is at 0.02 itself for every one.
+    #[test]
+    fn a_whole_newton_step_lands_exactly_on_its_target() {
+        let lower = BETA_SHAPE_BOUNDS.0;
+        let starts: Vec<f64> = (0..200).map(|i| 0.03 + 0.0173 * f64::from(i)).collect();
+        assert!(
+            starts.iter().any(|&a| a + 1.0 * (lower - a) < lower),
+            "the fixture holds a start whose whole step rounds past the bound"
+        );
+        for a in starts {
+            let mut judged = a_judged_point();
+            judged.density.a = a;
+            let mut target = judged.values();
+            target[3] = lower;
+            let mut run_at = Vec::new();
+            try_the_newton_step(&judged, &target, 1.0, -100.0, |candidate| {
+                run_at.push(candidate.density.a);
+                Some((-99.0, ()))
+            });
+            assert_eq!(run_at[0].to_bits(), lower.to_bits(), "from {a}");
+        }
     }
 
     /// **No try once the passes are spent**: a pass that cannot be run ends the tries, none counted,
@@ -7732,5 +7767,124 @@ mod whole_fit_tests {
         assert_eq!(density.expected_heterozygosity.standard_error, None);
         assert_eq!(density.expected_alternative_frequency.standard_error, None);
         assert_eq!(density.invariant_share.standard_error, None);
+    }
+
+    /// **Every sample of a fully inbred cohort gets an inbreeding coefficient** — the whole-fit
+    /// regression for the 59 tomato2 samples, two of which a Newton step clamped onto an excess of
+    /// exactly 1 and which were then written with no coefficient, as outcrossers. Drawn cohorts of
+    /// 10 and 20 samples at 3 reads a position, 20,000 positions, every sample's excess drawn at 1:
+    /// each excess comes back below 1 and each sample has a coefficient. With the Newton target
+    /// allowed onto the ends again (`Coordinate::newton_range` returning the whole interval), 8 of
+    /// the 10 and 15 of the 20 excesses land on exactly 1 and lose their coefficients.
+    #[test]
+    fn fit_jointly_returns_a_coefficient_for_every_sample_when_excesses_sit_at_one() {
+        for (samples, seed) in [(10, 5), (20, 7)] {
+            let drawn = draw_cohort_with_duplications(
+                samples,
+                20_000,
+                3.0,
+                (0.003, 0.06, 0.03),
+                FrequencyDensity {
+                    p_invariant: 0.88,
+                    p_fixed_alt: 0.01,
+                    a: 0.6,
+                    b: 2.2,
+                },
+                1.0,
+                0.0,
+                seed,
+            );
+            let config = JointFitConfig {
+                estimate_contamination: false,
+                duplicated_positions: false,
+                ..JointFitConfig::default()
+            };
+            let fit =
+                fit_jointly(&mut as_cohort(&drawn.samples), &config).expect("a drawn cohort fits");
+            let on_one: Vec<&String> = fit
+                .hom_excess
+                .iter()
+                .filter(|(_, excess)| excess.value.get() >= 1.0)
+                .map(|(sample, _)| sample)
+                .collect();
+            assert!(on_one.is_empty(), "{samples} samples: on 1: {on_one:?}");
+            let coefficients = crate::run::census_fit::fitted_inbreeding_of(&fit.hom_excess);
+            assert_eq!(
+                coefficients.len(),
+                samples,
+                "{samples} samples: a coefficient for each"
+            );
+        }
+    }
+
+    /// **Two samples whose fit gives none of the density's or the duplicated class's numbers an
+    /// error are reported with no verdict and no error wider than its range** (spec §2.1.3,
+    /// amended 2026-10-17): a drawn cohort of 2 samples, 3 reads a position, 10,000 positions, the
+    /// duplicated class on. There each of the density's four numbers is kept in the inversion, but
+    /// its error came out wider than its range (the invariant share's at 13.3), so the fit gives it
+    /// none; the duplicated class's carrier shape `b` is not identified. Before the fix the report
+    /// said the share above 1% was 0.073 ± 11.0, `Hexp` 0.031 ± 4.8 and `E[f]` 0.037 ± 5.8 —
+    /// errors no share in [0, 1] can have — and marked the density's pair separately determined,
+    /// at a trade cost of `+∞`. Now both pairs are marked, with no cost, and no derived number
+    /// carries an error wider than 1.
+    #[test]
+    fn a_pair_whose_numbers_have_no_error_is_marked_and_no_derived_error_exceeds_its_range() {
+        let drawn = draw_cohort_with_duplications(
+            2,
+            10_000,
+            3.0,
+            (0.003, 0.06, 0.03),
+            FrequencyDensity {
+                p_invariant: 0.88,
+                p_fixed_alt: 0.01,
+                a: 0.6,
+                b: 2.2,
+            },
+            0.3,
+            0.01,
+            77,
+        );
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: true,
+            ..JointFitConfig::default()
+        };
+        let fit =
+            fit_jointly(&mut as_cohort(&drawn.samples), &config).expect("a drawn cohort fits");
+        let density = &fit.density_report;
+        let duplicated = fit.duplicated_report.expect("the class is fitted");
+        assert!(
+            [
+                density.invariant_share,
+                density.fixed_non_reference_share,
+                density.segregating_shape_a,
+                density.segregating_shape_b,
+                duplicated.duplicated_share,
+                duplicated.carrier_shape_a,
+                duplicated.carrier_shape_b,
+            ]
+            .iter()
+            .all(|number| number.standard_error.is_none()),
+            "the fixture is the case where no number of either group has an error: {density:?} \
+             {duplicated:?}"
+        );
+        for determined in [density.determined, duplicated.determined] {
+            assert!(!determined.separately_determined, "{determined:?}");
+            assert_eq!(determined.trade_cost, None, "{determined:?}");
+        }
+        for derived in [
+            density.determined.share_above,
+            density.expected_heterozygosity,
+            density.expected_alternative_frequency,
+            duplicated.determined.share_above,
+        ] {
+            assert!(
+                derived.standard_error.is_none_or(|error| error <= 1.0),
+                "{derived:?}"
+            );
+        }
+        assert_eq!(density.determined.share_above.standard_error, None);
+        assert_eq!(density.expected_heterozygosity.standard_error, None);
+        assert_eq!(density.expected_alternative_frequency.standard_error, None);
     }
 }

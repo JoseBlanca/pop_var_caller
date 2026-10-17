@@ -1229,16 +1229,16 @@ fn the_unit_of(count: EvidenceCount) -> &'static str {
     }
 }
 
+/// **The format that added `[ordinary_site_prior.fitted_density]` and `[duplicated_positions]`**:
+/// 4. A file stamped with an earlier version and holding either is refused.
+const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
+
 /// The refusal, with the key's path in the file's own spelling.
 ///
 /// **Shared with the projection** (`to_run_parameters`), which refuses in the same words where a
 /// value passes every check here and a newtype's own constructor still turns it down — a motif
 /// period past the longest this build indexes, say. Two spellings of one refusal is what having
 /// one function stops.
-/// **The format that added `[ordinary_site_prior.fitted_density]` and `[duplicated_positions]`**:
-/// 4. A file stamped with an earlier version and holding either is refused.
-const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
-
 pub(super) fn refuse(field: impl Into<String>, problem: impl Into<String>) -> ParametersFileError {
     ParametersFileError::Meaningless {
         field: field.into(),
