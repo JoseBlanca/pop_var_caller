@@ -139,12 +139,21 @@
 # Putting `ng`, the old `##parametersFile` line and `hiddenParalog` back reproduces all three old checksums exactly;
 # the records (7,508), both parameters files, the windows and the histograms did not move. They were 67bfe9a1… /
 # 67bfe9a1… / 61b09b60….
+# Re-recorded 2026-10-17 (macOS host, arm64) with the coverage histogram's depth axis fitted from every window through a
+# fixed relative-depth grid, where it was fitted from each sample's first 10,000 (window_coverage.md §3.4; report
+# doc/devel/reports/ng_coverage_depth_scale_2026-10-17.md). The pre-change binary reproduced every line below's old value on
+# this host first. Windows and both parameters files do not move; the histograms do (0d61963f → 09635117), and with them the
+# four samples' fitted one-copy depths (by at most 2.8%, 4.66 → 4.53 reads) and scatters (by at most 0.006). The fitted
+# duplication rates barely move (0.031618 → 0.031693; 0.050664 → 0.051914 with the fit). Apart from PARALOG_LR / PARALOG_POST
+# no record changes. Defaults (92758b01 → 3d91e3a2, 7,508 → 7,507 records): ch01:12776029 A>T and ch01:37011736 T>C are now
+# dropped, ch01:33042122 C>T is kept. With the fit (e7dc72eb → 9a4f49c2, 6,680 → 6,682): ch01:12776369 C>T is now dropped,
+# ch01:33037237 (an A/T homopolymer deletion), ch01:37087746 T>C and ch01:67912984 A>G are kept.
 slice: 20 regions, 4 alignments
-# records: 7508
-92758b01922e1f1b080c6d6e5dccd156  from_alignments.comparable
-92758b01922e1f1b080c6d6e5dccd156  from_psps.comparable
+# records: 7507
+3d91e3a20fa4e7397d206dee17cf4480  from_alignments.comparable
+3d91e3a20fa4e7397d206dee17cf4480  from_psps.comparable
 920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
-0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
+09635117af8fe70350f6ad222bea2360  from_alignments.windows.histograms
 5ea720b63c4674239720087f21a72674  fitted.parameters.toml
-e7dc72ebde9c69c10cf4a02e5105041c  from_fit.comparable
+9a4f49c292dac53940ae2f8793d97446  from_fit.comparable

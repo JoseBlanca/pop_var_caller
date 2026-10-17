@@ -257,7 +257,15 @@ mod tests {
     /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
     /// header lines are all that moved — putting the old two back reproduces the old checksum
     /// exactly. It was `eb43b6968066b5d22525aaaeaed2f736`. Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "e9738457fb6b4e36f33e5fa008b935f0";
+    ///
+    /// **Re-recorded 2026-10-17** when the coverage histogram's depth axis came to be fitted from
+    /// every window through a fixed relative-depth grid (`doc/devel/ng/spec/window_coverage.md`
+    /// §3.4): `PARALOG_LR` and `PARALOG_POST` are all that moved — with both taken out, the old
+    /// and new files are identical line for line, the filter's header line included, and all
+    /// 3 records are kept by both. The fixture is under 10,000 windows, so the old axis was
+    /// already fitted from every window, and the move is the grid's rounding of the median and the
+    /// re-cut alone. It was `e9738457fb6b4e36f33e5fa008b935f0`. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "ce76015b7bc2f654f0adf2c235062381";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -343,7 +351,15 @@ mod tests {
     /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
     /// header lines are all that moved — putting the old two back reproduces the old checksum
     /// exactly. It was `3a2e830acc6991ee3b2285a80abbb89e`. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "973688dbec909bb94ee73cfd2941401c";
+    ///
+    /// **Re-recorded 2026-10-17** when the coverage histogram's depth axis came to be fitted from
+    /// every window through a fixed relative-depth grid (`doc/devel/ng/spec/window_coverage.md`
+    /// §3.4): `PARALOG_LR` and `PARALOG_POST` are all that moved — with both taken out, the old
+    /// and new files are identical line for line, the filter's header line included, and all
+    /// 3 records are kept by both. The fixture is under 10,000 windows, so the old axis was
+    /// already fitted from every window, and the move is the grid's rounding of the median and the
+    /// re-cut alone. It was `973688dbec909bb94ee73cfd2941401c`. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "b1ae11de0ce915350cd2b76b2b72d630";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -412,7 +428,15 @@ mod tests {
     /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
     /// header lines are all that moved — putting the old two back reproduces the old checksum
     /// exactly. It was `45a981f5c11fde06848374dcdfe574a3`. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "23fb1a94c44118ecf249a68afaa67979";
+    ///
+    /// **Re-recorded 2026-10-17** when the coverage histogram's depth axis came to be fitted from
+    /// every window through a fixed relative-depth grid (`doc/devel/ng/spec/window_coverage.md`
+    /// §3.4): `PARALOG_LR` and `PARALOG_POST` are all that moved — with both taken out, the old
+    /// and new files are identical line for line, the filter's header line included, and all
+    /// 22 records are kept by both. The fixture is under 10,000 windows, so the old axis was
+    /// already fitted from every window, and the move is the grid's rounding of the median and the
+    /// re-cut alone. It was `23fb1a94c44118ecf249a68afaa67979`. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "9d3c1c6c8243c41bb251d0d6cf7de7bb";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

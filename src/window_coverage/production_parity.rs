@@ -194,7 +194,6 @@ fn windows_on_stream(
         // centre — which is what keeps this comparable with production, whose window has
         // no floor at all. The floor is ng's own and is unit-tested.
         min_window_positions: 1,
-        depth_scale_windows: 10_000,
         depth_range_in_medians: 10.0,
     };
     let mut transcription = WindowCoverageAccumulator::new(config);

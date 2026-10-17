@@ -579,7 +579,6 @@ impl WindowCoverageInProgress {
                 window_bp: window_coverage::WINDOW_BP,
                 gc_bins: window_coverage::GC_BINS,
                 depth_bins: window_coverage::DEPTH_BINS,
-                depth_scale_windows: window_coverage::DEPTH_SCALE_WINDOWS,
                 depth_range_in_medians: window_coverage::DEPTH_RANGE_IN_MEDIANS,
                 min_window_positions: window_coverage::MIN_WINDOW_POSITIONS,
             }),
@@ -956,9 +955,8 @@ impl<S> ObservationCache<S> {
     /// **This is the only place a sample's histogram is finished**, and finishing is not a
     /// formality: [`WindowCoverageAccumulator::finish`] closes the centres no cover could — the
     /// last half-window of the sample's own stream, which has no later position to complete it —
-    /// and fits the depth axis for a sample whose pass ended before the scale sample was full.
-    /// A run that dropped the accumulators instead would produce histograms short of their tails
-    /// and, at a sample with fewer than `depth_scale_windows` windows, no histogram at all.
+    /// and fits every sample's depth axis, from the median over all its windows. A run that
+    /// dropped the accumulators instead would produce no histogram at all.
     /// (`spec/window_coverage.md` §3.5.)
     ///
     /// **The tail windows `finish` hands back are dropped here**, deliberately: a window is read

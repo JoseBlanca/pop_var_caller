@@ -92,13 +92,13 @@
 //! # The fourth question
 //!
 //! Every window that clears the floor is folded into a per-sample histogram, binned by GC and by
-//! depth. The depth axis is not configured but **fitted to the sample**: the accumulator holds its
-//! first `DEPTH_SCALE_WINDOWS` windows back, takes the median of their mean depths, and cuts
-//! `DEPTH_BINS` bins spanning `DEPTH_RANGE_IN_MEDIANS` times that median. Everything above lands
-//! in one overflow column, and the model fit that reads the histogram rejects the sample outright
-//! once more than a fifth of its windows are there. Those three constants were starting values
-//! until this measurement was run; it kept all three, and re-running it is how a later change to
-//! any of them is checked.
+//! depth. The depth axis is not configured but **fitted to the sample**: the accumulator takes the
+//! median of every window's mean depth and cuts `DEPTH_BINS` bins spanning
+//! `DEPTH_RANGE_IN_MEDIANS` times that median. Everything above lands in one overflow column, and
+//! the model fit that reads the histogram rejects the sample outright once more than a fifth of
+//! its windows are there. Until 2026-10-17 the median was taken over the first 10,000 windows
+//! only (`DEPTH_SCALE_WINDOWS`), and this sweep also varied that number; the prefix it measured
+//! is gone, and so is that half of the sweep.
 //!
 //! **The same device answers this**: one shipped accumulator per candidate setting, differing from
 //! the run's in one field, fed the identical positions. Each reports the axis it fitted and how
@@ -513,7 +513,6 @@ fn the_configuration_a_run_uses() -> WindowCoverageConfig {
         window_bp: window_coverage::WINDOW_BP,
         gc_bins: window_coverage::GC_BINS,
         depth_bins: window_coverage::DEPTH_BINS,
-        depth_scale_windows: window_coverage::DEPTH_SCALE_WINDOWS,
         depth_range_in_medians: window_coverage::DEPTH_RANGE_IN_MEDIANS,
         min_window_positions: window_coverage::MIN_WINDOW_POSITIONS,
     }
@@ -812,23 +811,17 @@ impl WindowsUnderEachFloor {
 /// it** — the three constants spec `window_coverage.md` §3.4 left to measurement, and that this
 /// sweep is what settled.
 ///
-/// The axis is not configured but fitted: the accumulator holds its first `depth_scale_windows`
-/// windows back, takes the median of their mean depths, and cuts `depth_bins` bins so they span
-/// `depth_range_in_medians` times that median. Everything above lands in one overflow column, and
+/// The axis is not configured but fitted: the accumulator takes the median of every window's mean
+/// depth, and cuts `depth_bins` bins so they span `depth_range_in_medians` times that median. Everything above lands in one overflow column, and
 /// the model fit that reads this histogram **rejects a sample outright** once more than a fifth of
 /// its windows are in that column ([`THE_OVERFLOW_SHARE_THE_FIT_ALLOWS`]), because at that point
 /// the sample's own single-copy peak has left the range and the regular bins hold noise.
 ///
-/// **So the same device the floor sweep above uses answers all three**: one shipped accumulator
-/// per setting, fed exactly the positions [`WindowRecomputation`] is fed and differing from it in
-/// one field. Varying `depth_scale_windows` says how far the fitted median moves when the width is
-/// fitted from more of the store, up to every window of it. Varying `depth_range_in_medians` says
-/// what the factor of ten buys and costs: a wider range overflows less and resolves more coarsely,
-/// and the two move in opposite directions over the same bins.
-///
-/// **The two answers are read together, not one at a time.** A scale sample that fits a median
-/// below the whole store's costs a proportional slice off the top of the axis, so what a short
-/// scale sample costs is paid in overflow — which is the range's quantity.
+/// **So the same device the floor sweep above uses answers it**: one shipped accumulator per
+/// setting, fed exactly the positions [`WindowRecomputation`] is fed and differing from it in one
+/// field. Varying `depth_range_in_medians` says what the factor of ten buys and costs: a wider
+/// range overflows less and resolves more coarsely, and the two move in opposite directions over
+/// the same bins.
 struct BinSchemeSweep {
     /// One arm per setting, in the order [`the_bin_schemes_asked_about`] gives them.
     arms: Vec<OneBinScheme>,
@@ -841,7 +834,7 @@ struct OneBinScheme {
     accumulator: WindowCoverageAccumulator,
 }
 
-/// Which of the two settings an arm varies, and to what — the whole of what makes one arm differ
+/// Which setting an arm varies, and to what — the whole of what makes one arm differ
 /// from another, and what a row is labelled by, so that a reader does not have to know the arm's
 /// position in a list to know what it changed.
 ///
@@ -852,8 +845,6 @@ enum BinSchemeSetting {
     /// The run's own configuration, unchanged. Exactly one arm is this, and
     /// [`BinSchemeSweep::close`] checks its answer against the walk's own histogram.
     AsTheRunFitsIt,
-    /// `depth_scale_windows` moved to this many windows, everything else the run's.
-    ScaleSampleOf(u32),
     /// `depth_range_in_medians` moved to this multiple, everything else the run's.
     RangeOf(f64),
 }
@@ -934,17 +925,10 @@ const THE_OVERFLOW_SHARE_THE_FIT_ALLOWS: f64 = DEFAULT_MAX_OVERFLOW_FRACTION;
 
 /// The settings the bin-scheme sweep asks about.
 ///
-/// **The first is the run's own**, which is what ties the sweep to the walk beside it. The scale
-/// samples bracket the shipped 10,000 by two orders each way and end with one no store here
-/// reaches, which fits the width from every window the sample has. The ranges bracket the shipped
-/// factor of ten from a quarter of it to four times.
+/// **The first is the run's own**, which is what ties the sweep to the walk beside it. The ranges
+/// bracket the shipped factor of ten from a quarter of it to four times.
 fn the_bin_schemes_asked_about() -> Vec<BinSchemeSetting> {
     let mut settings = vec![BinSchemeSetting::AsTheRunFitsIt];
-    settings.extend(
-        [100, 1_000, 100_000, 1_000_000, u32::MAX]
-            .into_iter()
-            .map(BinSchemeSetting::ScaleSampleOf),
-    );
     settings.extend(
         [2.5, 5.0, 20.0, 40.0]
             .into_iter()
@@ -959,10 +943,6 @@ impl BinSchemeSetting {
         let run = the_configuration_a_run_uses();
         match self {
             BinSchemeSetting::AsTheRunFitsIt => run,
-            BinSchemeSetting::ScaleSampleOf(windows) => WindowCoverageConfig {
-                depth_scale_windows: windows,
-                ..run
-            },
             BinSchemeSetting::RangeOf(medians) => WindowCoverageConfig {
                 depth_range_in_medians: medians,
                 ..run
@@ -974,8 +954,6 @@ impl BinSchemeSetting {
     fn as_text(self) -> String {
         match self {
             BinSchemeSetting::AsTheRunFitsIt => "as-the-run-fits-it".to_owned(),
-            BinSchemeSetting::ScaleSampleOf(u32::MAX) => "scale-sample=every-window".to_owned(),
-            BinSchemeSetting::ScaleSampleOf(windows) => format!("scale-sample={windows}"),
             BinSchemeSetting::RangeOf(medians) => format!("range-in-medians={medians}"),
         }
     }
@@ -2140,6 +2118,8 @@ mod tests {
             mapq_sum_sq: 0,
             placed_left: 0,
             chain_ids: Vec::new(),
+            flank_deletion: pop_var_caller::locus_generation::FlankDeletion::NONE,
+            held_flank: None,
         }
     }
 
@@ -2549,7 +2529,8 @@ mod tests {
 
     /// Six hundred covered positions all at 8 reads: every window's mean depth is 8, so the
     /// fitted median is 8, the bin width is `8 × 10 / 400 = 0.2`, the regular bins stop at 80,
-    /// and nothing overflows.
+    /// and nothing overflows. The median is read off the depth grid, so each of the three is good
+    /// to one grid step, 2.33%.
     ///
     /// **The arithmetic is the whole of what this pins** — the width the accumulator fits and the
     /// depth this file recovers it from are two directions of one formula, and a reader can check
@@ -2558,18 +2539,19 @@ mod tests {
     fn a_stream_of_one_depth_fits_an_axis_this_file_can_recover_that_depth_from() {
         let answers = bin_schemes_over(&[(8, 600)]);
         let axis = the_axis(&answers, BinSchemeSetting::AsTheRunFitsIt);
+        let within_a_grid_step = |got: f64, exact: f64| (got / exact - 1.0).abs() < 0.0233;
         assert!(
-            (axis.median_depth - 8.0).abs() < 1e-9,
+            within_a_grid_step(axis.median_depth, 8.0),
             "{}",
             axis.median_depth
         );
         assert!(
-            (axis.depth_bin_width - 0.2).abs() < 1e-9,
+            within_a_grid_step(axis.depth_bin_width, 0.2),
             "{}",
             axis.depth_bin_width
         );
         assert!(
-            (axis.top_of_the_range - 80.0).abs() < 1e-9,
+            within_a_grid_step(axis.top_of_the_range, 80.0),
             "{}",
             axis.top_of_the_range
         );
@@ -2599,8 +2581,9 @@ mod tests {
         ] {
             let axis = the_axis(&answers, setting);
             assert!(
-                (axis.median_depth - 1.0).abs() < 1e-9,
-                "700 of the 1,000 windows sit at 1, so the median is 1 whatever the range: {}",
+                (axis.median_depth - 1.0).abs() < 0.0233,
+                "700 of the 1,000 windows sit at 1, so the median is 1 whatever the range, to \
+                 one step of the depth grid: {}",
                 axis.median_depth,
             );
             assert_eq!(axis.folded(), 1_000);
@@ -2689,53 +2672,25 @@ mod tests {
         );
     }
 
-    /// **What the scale sample buys, on a stream whose depth changes after it has closed.**
+    /// **The run's axis is fitted from every window, so a depth that changes late costs
+    /// nothing.**
     ///
-    /// 10,300 windows at 1 read a position, then 19,700 at 100, on two contigs. The run's setting
-    /// fits from the first 10,000 windows, every one of which sits at 1, so its axis stops at 10
-    /// and the 19,700 deep windows all overflow — 66 windows in 100, and the model fit refuses
-    /// the sample. The arm that holds every window back until the pass ends sees a median of 100,
-    /// cuts an axis reaching 1,000, and overflows nothing.
-    ///
-    /// This is the failure the constant exists to trade against: a scale sample too small to
-    /// reach the sample's own depth costs the whole sample, not a little resolution.
+    /// 10,300 windows at 1 read a position, then 19,700 at 100, on two contigs. Until 2026-10-17
+    /// the run fitted its axis from the first 10,000 windows, every one of which sits at 1, so the
+    /// axis stopped at 10, the 19,700 deep windows all overflowed — 66 windows in 100 — and the
+    /// model fit refused the sample. Fitted from every window, the median is 100 and the axis
+    /// reaches 1,000.
     #[test]
-    fn a_scale_sample_that_closes_before_the_depth_changes_costs_the_sample() {
+    fn a_depth_that_changes_after_the_first_windows_costs_the_sample_nothing() {
         let answers = bin_schemes_over(&[(1, 10_300), (100, 19_700)]);
         let as_the_run = the_axis(&answers, BinSchemeSetting::AsTheRunFitsIt);
         assert!(
-            (as_the_run.median_depth - 1.0).abs() < 1e-9,
-            "the first 10,000 windows all sit at 1: {}",
+            (as_the_run.median_depth / 100.0 - 1.0).abs() < 0.0233,
+            "19,700 of the 30,000 windows sit at 100, and the median off the depth grid is good \
+             to one grid step: {}",
             as_the_run.median_depth,
         );
-        assert_eq!(as_the_run.overflowed, 19_700);
-        assert!(the_arm(&answers, BinSchemeSetting::AsTheRunFitsIt).the_fit_would_reject_it());
-
-        let every_window = the_axis(&answers, BinSchemeSetting::ScaleSampleOf(u32::MAX));
-        assert!(
-            (every_window.median_depth - 100.0).abs() < 1e-9,
-            "19,700 of the 30,000 windows sit at 100: {}",
-            every_window.median_depth,
-        );
-        assert_eq!(every_window.overflowed, 0);
-        assert!(
-            !the_arm(&answers, BinSchemeSetting::ScaleSampleOf(u32::MAX)).the_fit_would_reject_it()
-        );
-    }
-
-    /// On a stream shorter than the shipped scale sample, the arm that holds every window back
-    /// answers exactly as the run does — both fit at `finish` from every window they have.
-    ///
-    /// It is the control for the test above: without it, that one's difference could as easily be
-    /// a mis-wired arm as the scale sample doing its job.
-    #[test]
-    fn an_arm_that_holds_every_window_back_answers_as_the_run_does_on_a_short_stream() {
-        let answers = bin_schemes_over(&[(8, 600)]);
-        assert_eq!(
-            the_arm(&answers, BinSchemeSetting::ScaleSampleOf(u32::MAX)).as_a_row(),
-            the_arm(&answers, BinSchemeSetting::AsTheRunFitsIt).as_a_row(),
-            "600 windows is under the shipped scale sample of 10,000, so both fit at `finish` \
-             from every window they have",
-        );
+        assert_eq!(as_the_run.overflowed, 0);
+        assert!(!the_arm(&answers, BinSchemeSetting::AsTheRunFitsIt).the_fit_would_reject_it());
     }
 }
