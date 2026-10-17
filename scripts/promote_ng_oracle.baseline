@@ -185,13 +185,41 @@
 #   branch's byte for byte: no QUAL, genotype or GQ moved. Main's own fitted VCF, on main's fit, dropped 12776369 and
 #   kept 33037237, 37087746 and 67912984 for the same reason; the differences between the two lists are the two fits'.
 # They were 920e36b7… (main; d083cd87… on the branch) / 5ea720b6… (main; 3e60785a… on the branch) / 9a4f49c2… (main;
-# fd1a3bc8… on the branch).
+# fd1a3bc8… on the branch). The merged values were 3d91e3a2 (both) / d083cd87 / 4acdda68 / 09635117 / ae0fcef9 /
+# f3b69491; the paragraph after main's next one says how they moved.
+# Re-recorded 2026-10-17 (macOS host, arm64) when a read stopping inside an indel's slide stopped counting as a reference read
+# (doc/devel/reports/ng_ref_reads_in_repeats_2026-10-17.md): on the STR path a reference read that stops before the end of the
+# stretch an indel in the tract can slide to is a partial observation, and on the generic path a read stopping short of a
+# slide cut at the region's end is set aside. The pre-change binary (main at 2c6eac36) reproduced every line below's old value
+# on this host first. The defaults run's parameters file does not move. Defaults (3d91e3a2 → 82a9575b, 7,507 records both): no
+# record appears or vanishes; 18 change, 3 sample genotypes with them, all at homopolymer length variants at GQ ≤ 47 —
+# ch01:56740653 CTT>CTTT 0/1 → 1/1 in the third sample (the other two called samples are 1/1), ch01:79360746 0/1 → 1/1,
+# ch01:85912272 0/0 → 0/1. Windows (4acdda68 → 56798acf): 3 of 30,632 change their depth sums, and the histograms with them
+# (09635117 → b2fc1bfa). The fit (5ea720b6 → 14a09b0a) moves in 206 of 665 lines: base-quality multipliers in the fifth
+# significant digit, inbreeding coefficients by at most 0.0003, and all 49 repeat-tract slippage rows (median 1.1%, largest
+# 27%). With the fit (9a4f49c2 → 58bfad8f, 6,682 → 6,684 records): ch01:85900664 A>C and ch01:85900669 A>G (AC=1, DP=7) are
+# new, one genotype changes (ch01:56740653 again, 0/1 → 1/1), and the rest move in AF or GQ only.
+# Merged again 2026-10-18 (macOS host, arm64): main (7a1e2417, reads that stop inside an indel's slide) into the branch
+# after the merge above (223673bb). Against that merge's values, line by line:
+# - defaults comparable, windows.sorted, windows.histograms: main's 82a9575b / 56798acf / b2fc1bfa, as main recorded.
+# - from_alignments.parameters.toml: d083cd87, unchanged (main: the defaults run's parameters do not move).
+# - fitted.parameters.toml (ae0fcef9 -> bff818c5): the same lines main's change moved on main's fit (206 of them,
+#   among them the four read groups' period-2, 20-repeat slippage rows, which disappear here as on main, 718 -> 714
+#   lines), plus the numbers of the two informational tables, which follow the fit in their last digits; both pairs'
+#   verdicts unchanged (both marked).
+# - from_fit.comparable (f3b69491 -> 8e0d0c3a): 6,680 records both, the same positions. One genotype changes,
+#   ch01:56740653 CTT>CTTT 0/1 -> 1/1 in the third sample, as on main; 968 records move — QUAL in 254 (253 of them STR
+#   records), by more than 1 only at main's homopolymer sites ch01:56740653 (61.1 -> 94.0), 79360746 (26.7 -> 35.8),
+#   11803792 and 85912272 — the rest in AF, GQ or the PARALOG fields; the filter's header pi 0.052500 -> 0.052499 and
+#   `##pvcParameters` with the fitted file's new MD5. The two records main's fit gained (ch01:85900664, 85900669) were
+#   already in the branch's calls since its step B1.
+# They were 3d91e3a2 (both) / d083cd87 / 4acdda68 / 09635117 / ae0fcef9 / f3b69491.
 slice: 20 regions, 4 alignments
 # records: 7507
-3d91e3a20fa4e7397d206dee17cf4480  from_alignments.comparable
-3d91e3a20fa4e7397d206dee17cf4480  from_psps.comparable
+82a9575b258c7763b4a2567918ac58b1  from_alignments.comparable
+82a9575b258c7763b4a2567918ac58b1  from_psps.comparable
 d083cd878e0e98a0e17a60625d7ebe27  from_alignments.parameters.toml
-4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
-09635117af8fe70350f6ad222bea2360  from_alignments.windows.histograms
-ae0fcef982402812109ebf966865a3f8  fitted.parameters.toml
-f3b6949180117989c64b57ac117a9f72  from_fit.comparable
+56798acfa66618ab08fb98e420d54d68  from_alignments.windows.sorted
+b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
+bff818c5853807dff7f41bc39345c281  fitted.parameters.toml
+8e0d0c3a33a91fd7448ac758fb9ccfcb  from_fit.comparable

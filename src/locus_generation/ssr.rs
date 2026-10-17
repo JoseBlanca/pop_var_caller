@@ -885,6 +885,8 @@ mod read_region {
 // to an observation or a no-observation reason. The per-read pipeline ported from
 // production's `classify_read`, over the new delimiter. Consumed by the tally + generator.
 // ---------------------------------------------------------------------
+mod slide_reach;
+
 mod classify {
     use super::read_region::{
         Footprint, MIN_REGION_Q1, extract_region, flank_truncated, passes_quality_gate,
@@ -3519,6 +3521,8 @@ pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq + Send + 'static, A: Repe
     stutter: StutterModel,
     /// Reused scratch for the margin fetch.
     margin_buffer: Vec<u8>,
+    /// Reused scratch for the reference around a tract that [`slide_reach`] measures.
+    slide_buffer: Vec<u8>,
     /// Reused scratch for the quality gate.
     qual_buffer: Vec<u8>,
     config: SsrGeneratorConfig,
@@ -3592,6 +3596,7 @@ where
             align_scratch: A::Scratch::default(),
             stutter: StutterModel::hipstr_shipped(),
             margin_buffer: Vec::new(),
+            slide_buffer: Vec::new(),
             qual_buffer: Vec::new(),
             config,
             counts: SsrGeneratorCounts::default(),
@@ -3984,6 +3989,36 @@ where
         .map_err(|source| LocusGenerationError::Reference { region, source })
     }
 
+    /// How far an indel in `locus`'s tract can slide past its edges, measured on the reference
+    /// ([`slide_reach::SlideReach`]).
+    fn slide_reach(
+        &mut self,
+        locus: &SsrLocus,
+        contig: ContigId,
+        region: GenomeRegion,
+    ) -> Result<slide_reach::SlideReach, LocusGenerationError> {
+        let margin = (slide_reach::MAX_SLIDE + slide_reach::MAX_INDEL_UNIT + 1) as u64;
+        let start = locus.repeat.start().saturating_sub(margin).max(1);
+        let contig_len = self
+            .reference
+            .contigs()
+            .entries
+            .get(contig.get() as usize)
+            .map_or(locus.repeat.end(), |entry| entry.length);
+        let end = (locus.repeat.end() + margin).min(contig_len);
+        self.reference
+            .fetch_into(contig, start, end + 1 - start, &mut self.slide_buffer)
+            .map_err(|source| LocusGenerationError::Reference { region, source })?;
+        self.slide_buffer.make_ascii_uppercase();
+        let first = (locus.repeat.start() - start) as usize;
+        let last = (locus.repeat.end() - start) as usize;
+        Ok(slide_reach::SlideReach::measure(
+            &self.slide_buffer,
+            first,
+            last,
+        ))
+    }
+
     /// Steps (2) to (4): fetch the reads over the repeat-plus-margin query span, admitting on
     /// relevance (overlap, which `SampleReads` applies) — not spanning — and depth-cap them;
     /// classify each against `locus` (delimit, recover, gate); tally the outcomes into the
@@ -4020,15 +4055,19 @@ where
         self.counts.reads_fetched += capped.fetched;
         self.counts.reads_discarded_by_cap += reads_discarded_by_cap;
 
+        let reach = self.slide_reach(locus, contig, region)?;
         let mut outcomes = Vec::with_capacity(capped.kept.len());
         for read in &capped.kept {
-            outcomes.push(classify::classify_read(
+            let outcome = classify::classify_read(
                 read,
                 locus,
                 &self.aligner,
                 &self.stutter,
                 &mut self.align_scratch,
                 &mut self.qual_buffer,
+            );
+            outcomes.push(slide_reach::demoted_if_short_of_the_slide(
+                outcome, read, locus, reach,
             ));
         }
 
@@ -4725,12 +4764,18 @@ mod tests {
         // Not asserted on `region.contig`: a locus's region is built from `begin_segment`'s,
         // never from the cursor, so it re-states the test's own input and cannot fail under any
         // mutation here (review). What is load-bearing is that chr2's *read* arrived.
+        // **Arrived, not observed.** The fixture's contigs are all `A`, so an indel in this tract
+        // could slide to either contig end, and no read can show past it: each is set aside as
+        // a read without an observation (`slide_reach`). Arriving is what this test is about.
+        let arrived = |locus: &SampleLocusObservations| {
+            locus.observations.len() as u32 + locus.reads_without_observation
+        };
         assert!(
-            !first.observations.is_empty(),
+            arrived(&first) > 0,
             "chr1's read must reach its locus, or the comparison below is between two nothings",
         );
         assert!(
-            !second.observations.is_empty(),
+            arrived(&second) > 0,
             "chr2's read must reach the locus, not merely fail to error",
         );
         assert!(
