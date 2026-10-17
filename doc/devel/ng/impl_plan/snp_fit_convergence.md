@@ -208,7 +208,7 @@ samples once, after B5.
   an error): 7 µs at 59 samples, 160 µs at 2,000, against 0.12 and 3.0 ms for the box solve. The
   oracle's two files byte for byte. Digests: every start of all three fixtures converges — 16, 16,
   16; 22, 13, 13; 84, 38, 44 passes — as the review measured.
-- ☐ **B5** Tests that catch the review's five mutations of `maximise`'s control flow — a negative
+- ✅ **B5** Tests that catch the review's five mutations of `maximise`'s control flow — a negative
   decrement counted converged; the start not ended at the judged point when refused tries leave
   fewer than two passes; an accepted try's pass re-run; the first try always the whole step; a start
   at the pass limit used as the yardstick — each run against its mutation and seen to fail.
@@ -218,6 +218,23 @@ samples once, after B5.
   *Touches:* `fit.rs`, `fit/information.rs` (tests).
   *Identity:* the oracle unchanged, unless a start ends at the limit on an accepted try's pass.
   *Depends:* B4. *Source:* the review's M2, §8, Mi1, Mi2.
+  *Done 2026-10-17:* `PassSummary::newton` (`NewtonTrial`: first fraction, fraction kept, last
+  pass run). Each mutation run against the joint-fit tests: the start not ended at the judged point
+  fails `refused_tries_that_leave_fewer_than_two_passes_end_the_start_at_the_judged_point`; the
+  accepted try's pass re-run fails `an_accepted_newton_step_costs_one_pass` (and the yardstick
+  test); the first try always whole fails `the_first_newton_try_after_an_accepted_quarter_is_half_the_step`
+  (and two others); a start at the limit as yardstick fails `a_start_at_the_pass_limit_is_no_yardstick`,
+  now at 23 passes with a check that a later start would agree with an answer at the limit; a
+  negative decrement counted converged fails `settled`'s verdict test when made in `has_converged`,
+  and **is equivalent at the call site in `maximise`**, since B2's solve gives no negative decrement
+  to count (`every_judged_decrement_is_at_least_zero` pins that on 28 judging passes). Mi2 is fixed
+  by always judging an accepted try's pass and moving the two-pass guard before the SQUAREM cycle
+  to every cycle, not by a two-pass loop condition; reverting it fails
+  `an_accepted_trys_pass_is_judged_at_the_pass_limit`. The oracle and the digests did not move
+  with this step. **The 59 tomato2 samples, after B2–B5 together, against B1:** the same passes
+  (45 converged; 43 and 43 agreed), log-likelihood −7.985014 × 10⁶ both, no library inverted;
+  `estimate-parameters` 942 s at 18 threads against B1's 993 s (SNP/indel stage 15 min 20 s against
+  16 min 10 s), peak resident memory 414 MB against 454 MB.
 
 > Checkpoint B′ (lead): every digest fixture converges or says why not; the 59 tomato2 samples
 > against B1: passes, wall time, log-likelihood.

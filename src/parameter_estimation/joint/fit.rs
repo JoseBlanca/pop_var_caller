@@ -682,7 +682,9 @@ pub struct JointFitConfig {
     /// **A start converges once the remaining Newton step is worth less than this much
     /// log-likelihood** — the Newton decrement's threshold, 0.001 units by default ([`settled`]'s
     /// `DECREMENT_THRESHOLD`, `fit_precision.md` §2). A field so a test can run a fit further, to
-    /// 10⁻⁴, the way the measurement that chose the default ran its references.
+    /// 10⁻⁴, the way the measurement that chose the default ran its references. **Zero or below,
+    /// no start ever converges** — a decrement is never below zero — so none is a yardstick for
+    /// agreement either, and each runs to `max_passes`; tests use zero for that.
     pub decrement_threshold: f64,
     /// **A later start stops once it is heading where an earlier one converged**: when its projected
     /// endpoint lies within this share of the earlier answer's standard error of that answer, on
@@ -1653,6 +1655,22 @@ pub struct PassSummary {
     /// On a pass that judged, the log-likelihood the remaining Newton step was worth — what the
     /// start stops on (`fit_precision.md` §2); `None` on a pass that did not judge.
     pub decrement: Option<f64>,
+    /// On a judging pass that tried its Newton step, how the tries went; `None` on any other pass.
+    pub newton: Option<NewtonTrial>,
+}
+
+/// **How one judging pass's Newton step went** (`parameter_prepass_joint_fit.md` §3.3.1), as the
+/// per-pass trace records it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct NewtonTrial {
+    /// The fraction of the step tried first: twice the fraction the start last accepted, at most
+    /// the whole step.
+    pub first_fraction: f64,
+    /// The fraction kept, when a try rose; `None` when every try was refused.
+    pub accepted: Option<f64>,
+    /// The number of the last pass the tries ran — the kept try's, which is the next judging pass
+    /// — or of the judging pass itself when no try ran a pass.
+    pub last_pass: u32,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -2413,7 +2431,11 @@ fn maximise(
     // The fraction of its Newton step this start last accepted; before any, a half, so the first
     // try is the whole step.
     let mut last_fraction = 0.5_f64;
-    while alternation.passes + 3 <= config.max_passes {
+    // A cycle needs three passes in hand — its first, the second plain one, the jump's — but one
+    // that begins with an accepted try's pass has run its first already, and judging that pass
+    // costs none: it is always judged, and the guard before the SQUAREM cycle ends the start
+    // there if too few passes are left.
+    while accepted_pass.is_some() || alternation.passes + 3 <= config.max_passes {
         let cycle_began = std::time::Instant::now();
         let (first, entering) = match accepted_pass.take() {
             Some(already_run) => already_run,
@@ -2491,10 +2513,11 @@ fn maximise(
             && alternation.passes < config.max_passes
         {
             let target = parameters.newton_target(&judgement.distances);
+            let first_fraction = first_newton_fraction(last_fraction);
             let outcome = try_the_newton_step(
                 &parameters,
                 &target,
-                first_newton_fraction(last_fraction),
+                first_fraction,
                 entering.log_likelihood,
                 |candidate| {
                     (alternation.passes < config.max_passes).then(|| {
@@ -2503,6 +2526,22 @@ fn maximise(
                     })
                 },
             );
+            let trial = NewtonTrial {
+                first_fraction,
+                accepted: match &outcome {
+                    NewtonOutcome::Accepted { fraction, .. } => Some(*fraction),
+                    NewtonOutcome::Rejected { .. } => None,
+                },
+                last_pass: alternation.passes,
+            };
+            if let Some(traced) = alternation
+                .trace
+                .iter_mut()
+                .rev()
+                .find(|summary| summary.pass == judging_pass)
+            {
+                traced.newton = Some(trial);
+            }
             match outcome {
                 NewtonOutcome::Accepted {
                     fraction,
@@ -2535,9 +2574,10 @@ fn maximise(
                 NewtonOutcome::Rejected { tries } => newton_rejected = Some(tries),
             }
         }
-        // The SQUAREM cycle needs two passes at least; tries that spent them end the start here,
-        // at the parameters this pass judged.
-        if newton_rejected.is_some() && alternation.passes + 2 > config.max_passes {
+        // The SQUAREM cycle needs two passes more; refused tries that spent them, or a cycle that
+        // began with an accepted try's pass too near the limit, end the start here, at the
+        // parameters this pass judged.
+        if alternation.passes + 2 > config.max_passes {
             break;
         }
         let (second, _) = alternation.step(&first, false);
@@ -2786,9 +2826,10 @@ fn as_a_fraction(fraction: f64) -> String {
     }
 }
 
-/// **One cycle's progress line**, printed now and then: the start, the passes, how far the cycle
-/// moved the log-likelihood, which way it went when a Newton step was tried (`way`), and the
-/// judgement or why there is none yet (`judged`, built only when the line is printed).
+/// **One cycle's progress line**, printed now and then: the start, the passes, whether the cycle
+/// raised or lowered the log-likelihood and by how much, which way it went when a Newton step was
+/// tried (`way`), and the judgement or why there is none yet (`judged`, built only when the line is
+/// printed).
 fn print_the_cycle(
     which: &WhichStart<'_>,
     config: &JointFitConfig,
@@ -2800,17 +2841,30 @@ fn print_the_cycle(
 ) {
     which.stage.now_and_then(|into| {
         format!(
-            "SNP/indel fit, start {} of {}, pass {passes} of at most {}: log-likelihood moved \
-             {:.2e}{}; {}; {} a cycle, {into}",
+            "SNP/indel fit, start {} of {}, pass {passes} of at most {}: log-likelihood {}{}; {}; \
+             {} a cycle, {into}",
             which.number,
             which.of,
             config.max_passes,
-            gain.abs(),
+            how_the_log_likelihood_moved(gain),
             way.map_or_else(String::new, |way| format!("; {way}")),
             judged(),
             crate::parameter_estimation::progress::duration(began.elapsed()),
         )
     });
+}
+
+/// How a cycle moved the log-likelihood, as the progress line says it: which way, and the signed
+/// change — so a cycle that lost 50 units does not read like one that gained 50.
+fn how_the_log_likelihood_moved(gain: f64) -> String {
+    let way = if gain > 0.0 {
+        "rose"
+    } else if gain < 0.0 {
+        "fell"
+    } else {
+        "did not move"
+    };
+    format!("{way} ({gain:+.2e})")
 }
 
 /// **A note for the run log naming each library whose error rate at mismapped positions ended
@@ -3049,6 +3103,7 @@ impl Alternation<'_, '_> {
                 density_b: parameters.density.b,
                 not_settled: None,
                 decrement: None,
+                newton: None,
             });
         }
         (next, statistics)
@@ -4812,6 +4867,15 @@ mod tests {
             None,
             "equal rates are not inverted"
         );
+    }
+
+    /// **The progress line says which way the log-likelihood moved** (review Mi1): a cycle that
+    /// lost 50 units reads differently from one that gained 50.
+    #[test]
+    fn the_progress_line_says_whether_the_log_likelihood_rose_or_fell() {
+        assert_eq!(how_the_log_likelihood_moved(50.0), "rose (+5.00e1)");
+        assert_eq!(how_the_log_likelihood_moved(-50.0), "fell (-5.00e1)");
+        assert_eq!(how_the_log_likelihood_moved(0.0), "did not move (+0.00e0)");
     }
 
     /// A target that moves only the density's first shape, from 0.6 to 1.4.

@@ -3967,33 +3967,258 @@ mod tests {
     /// default 200.
     const SHORT_OF_CONVERGING: u32 = 15;
 
-    /// **A start at the pass limit is no yardstick** (spec §3.4's second trap): on four samples at 3
-    /// reads every start runs to the limit alone, and `fit_jointly` returns the best of them — none is
-    /// judged against another, so no later start stops early on an answer that is not the maximum.
+    /// **The pass limit at which the yardstick test's four-sample fixture has every start at the
+    /// limit and a later start well into its judging passes**: alone, its three starts converge
+    /// after 25, 27 and 24 passes, and at 23 each runs to the limit; start 2, judged against start 1's
+    /// answer at the limit, would agree after 16 passes (measured with the yardstick rule mutated to
+    /// accept a start at the limit: starts 2 and 3 then agree at 16 and 13 passes, and the fit
+    /// returns start 1's −6,423.754 in place of the best start's −6,423.641).
+    const ALL_AT_THE_LIMIT_YET_JUDGING: u32 = 23;
+
+    /// Three samples over 600 positions at 5 reads, one position in 330 mismapped, the duplicated
+    /// class fitted: a cohort whose first start refuses every try of most of its Newton steps
+    /// (its judging pass 12 tries four and runs passes 13 to 16) and runs to the 200-pass limit.
+    fn a_cohort_refusing_its_newton_steps() -> (DrawnCohort, JointFitConfig) {
+        let cohort = crate::parameter_estimation::joint::fit::bench_fixtures::draw_cohort(
+            3,
+            600,
+            5.0,
+            (0.002, 0.06, 0.003),
+            FrequencyDensity {
+                p_invariant: 0.90,
+                p_fixed_alt: 0.01,
+                a: 0.7,
+                b: 2.5,
+            },
+            0.2,
+            13,
+        );
+        let config = JointFitConfig {
+            quadrature_nodes: 8,
+            estimate_contamination: false,
+            pass_trace: true,
+            ..JointFitConfig::default()
+        };
+        (cohort, config)
+    }
+
+    /// The first start of `cohort` under `config`, run by `maximise` alone.
+    fn first_start(cohort: &DrawnCohort, config: &JointFitConfig) -> super::super::StartOutcome {
+        with_sections(cohort, None, |lent, depth_cap, group_index, coverage| {
+            one_start(
+                cohort,
+                lent,
+                depth_cap,
+                group_index,
+                coverage,
+                config,
+                1,
+                None,
+            )
+        })
+    }
+
+    /// **Every judged decrement is at least zero** (`fit_precision.md` §2, amendment of
+    /// 2026-10-17): on the cohort whose first start runs to the limit refusing its Newton steps, 28
+    /// judging passes, each decrement a number at or above zero — the box solve climbs the model
+    /// from staying put and finishes. Under the solve it replaced, a 3-sample cohort judged
+    /// decrements of −36.4 and −37.6 (the review of plan steps A1–B1), which `has_converged` refuses;
+    /// that refusal itself is pinned by `settled`'s own test at −2,959.
     #[test]
-    fn a_start_at_the_pass_limit_is_no_yardstick() {
-        use crate::parameter_estimation::joint::fit::settled::StartEnding;
+    fn every_judged_decrement_is_at_least_zero() {
+        let (cohort, config) = a_cohort_refusing_its_newton_steps();
+        let outcome = first_start(&cohort, &config);
+        let judged: Vec<f64> = outcome
+            .trace
+            .iter()
+            .filter_map(|summary| summary.decrement)
+            .collect();
+        assert!(judged.len() > 20, "{} judged", judged.len());
+        assert!(
+            judged.iter().all(|&decrement| decrement >= 0.0),
+            "{judged:?}"
+        );
+    }
+
+    /// **Refused tries that leave fewer than two passes end the start at the point they were tried
+    /// from** (`parameter_prepass_joint_fit.md` §3.3.1): the first judging pass of the cohort above
+    /// whose four tries are all refused, judged again with the pass limit one past its last try.
+    /// The start then stops right after the tries, within the limit, and returns the parameters that
+    /// pass judged — the shapes, the shares and the homozygote excesses the trace records it was run
+    /// at. Running the SQUAREM cycle anyway would overrun the limit or return its plain step.
+    #[test]
+    fn refused_tries_that_leave_fewer_than_two_passes_end_the_start_at_the_judged_point() {
+        let (cohort, config) = a_cohort_refusing_its_newton_steps();
+        let free = first_start(&cohort, &config);
+        let (judged_at, trial) = free
+            .trace
+            .iter()
+            .find_map(|summary| {
+                let trial = summary.newton?;
+                (trial.accepted.is_none() && trial.last_pass > summary.pass)
+                    .then_some((summary.clone(), trial))
+            })
+            .expect("the fixture refuses a Newton step whose tries run passes");
+        let limit = trial.last_pass + 1;
+        let stopped = first_start(
+            &cohort,
+            &JointFitConfig {
+                max_passes: limit,
+                ..config.clone()
+            },
+        );
+        eprintln!(
+            "judged at pass {}, tries to pass {}, limit {limit}: stopped after {} passes",
+            judged_at.pass, trial.last_pass, stopped.passes
+        );
+        assert!(stopped.passes <= limit, "{} passes", stopped.passes);
+        assert_eq!(stopped.passes, trial.last_pass, "it stops after the tries");
+        assert_eq!(stopped.parameters.density.a, judged_at.density_a);
+        assert_eq!(stopped.parameters.density.b, judged_at.density_b);
+        assert_eq!(stopped.parameters.noisy_share, judged_at.noisy_share);
+        assert_eq!(stopped.parameters.hom_excess, judged_at.hom_excess);
+    }
+
+    /// The first start of the four-sample fixture, traced, which accepts a Newton step at every
+    /// judging pass but its last: at a quarter of the step five times, then a half, then the whole.
+    fn a_start_accepting_its_newton_steps() -> super::super::StartOutcome {
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
-            max_passes: SHORT_OF_CONVERGING,
+            pass_trace: true,
+            ..JointFitConfig::default()
+        };
+        first_start(
+            &a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200),
+            &config,
+        )
+    }
+
+    /// **An accepted Newton step costs one pass** (§3.3.1 point 3): the kept try's pass is the next
+    /// cycle's judging pass, so the judging pass after a judging pass that accepted a try is the
+    /// try's own pass — not one more pass at the same parameters. Eight accepted steps.
+    #[test]
+    fn an_accepted_newton_step_costs_one_pass() {
+        let outcome = a_start_accepting_its_newton_steps();
+        let judged: Vec<&crate::parameter_estimation::joint::fit::PassSummary> = outcome
+            .trace
+            .iter()
+            .filter(|summary| summary.decrement.is_some())
+            .collect();
+        let mut accepted = 0;
+        for pair in judged.windows(2) {
+            let trial = pair[0]
+                .newton
+                .expect("a judging pass that stops nothing tries");
+            if trial.accepted.is_some() {
+                accepted += 1;
+                assert_eq!(
+                    pair[1].pass, trial.last_pass,
+                    "the judging pass after pass {} is the kept try's",
+                    pair[0].pass
+                );
+            }
+        }
+        assert!(accepted >= 5, "{accepted} accepted steps");
+    }
+
+    /// **An accepted try's pass is judged even when the limit leaves no room for a cycle after it**
+    /// (review Mi2): the start of the test above, limited to 24 passes, a pass short of where it
+    /// converges. Its last steps are kept at passes 23 and 24; each of those passes is judged, so
+    /// the start's last pass is a judging pass and the start ends at the parameters it judged.
+    /// Leaving the loop as soon as fewer than three passes remain left the kept try's pass
+    /// unjudged, and the final pass re-ran it.
+    #[test]
+    fn an_accepted_trys_pass_is_judged_at_the_pass_limit() {
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            pass_trace: true,
+            max_passes: 24,
+            ..JointFitConfig::default()
+        };
+        let outcome = first_start(
+            &a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200),
+            &config,
+        );
+        let last = outcome.trace.last().expect("traced");
+        assert_eq!(outcome.passes, 24);
+        assert_eq!(last.pass, 24);
+        assert!(
+            last.decrement.is_some(),
+            "the last pass, a kept try's, was judged"
+        );
+        assert_eq!(outcome.parameters.density.a, last.density_a);
+        assert_eq!(outcome.parameters.density.b, last.density_b);
+    }
+
+    /// **Each judging pass first tries twice the fraction its start last accepted, at most the whole
+    /// step** (§3.3.1 point 2): after steps kept at a quarter the next first try is a half, after a
+    /// half the whole, and a start's first try is the whole step.
+    #[test]
+    fn the_first_newton_try_after_an_accepted_quarter_is_half_the_step() {
+        let outcome = a_start_accepting_its_newton_steps();
+        let mut last_accepted = 0.5_f64;
+        let mut halves_after_a_quarter = 0;
+        for trial in outcome.trace.iter().filter_map(|summary| summary.newton) {
+            assert_eq!(
+                trial.first_fraction,
+                (2.0 * last_accepted).min(1.0),
+                "after {last_accepted}"
+            );
+            if last_accepted == 0.25 {
+                halves_after_a_quarter += 1;
+            }
+            if let Some(fraction) = trial.accepted {
+                last_accepted = fraction;
+            }
+        }
+        assert!(halves_after_a_quarter >= 3, "{halves_after_a_quarter}");
+    }
+
+    /// **A start at the pass limit is no yardstick** (spec §3.4's second trap): on four samples at 3
+    /// reads every start runs to the limit alone, and `fit_jointly` returns the best of them — none is
+    /// judged against another, so no later start stops early on an answer that is not the maximum.
+    /// **The fixture has teeth**: judged against start 1's answer at the limit, start 2 would stop as
+    /// having agreed, before the limit — so a yardstick rule that let a start at the limit be one
+    /// would change the fit (the review of plan steps A1–B1 found the test vacuous at 15 passes,
+    /// where no later start judged twice).
+    #[test]
+    fn a_start_at_the_pass_limit_is_no_yardstick() {
+        use crate::parameter_estimation::joint::fit::settled::{EarlierAnswer, StartEnding};
+        let config = JointFitConfig {
+            estimate_contamination: false,
+            duplicated_positions: false,
+            max_passes: ALL_AT_THE_LIMIT_YET_JUDGING,
             ..JointFitConfig::default()
         };
         let cohort = a_cohort_of(4, 6_000, 3.0, 0x5E77_1ED0_B200_0000 + 200);
         let alone: Vec<_> =
             with_sections(&cohort, None, |lent, depth_cap, group_index, coverage| {
+                let run = |number: usize, earlier: Option<&EarlierAnswer>| {
+                    one_start(
+                        &cohort,
+                        lent,
+                        depth_cap,
+                        group_index,
+                        coverage,
+                        &config,
+                        number,
+                        earlier,
+                    )
+                };
+                let first = run(1, None);
+                let answer_at_the_limit = EarlierAnswer::of(1, &first, group_index);
+                let judged = run(2, Some(&answer_at_the_limit));
+                assert_eq!(
+                    judged.ended,
+                    StartEnding::Agreed { with_start: 1 },
+                    "the fixture needs a later start that would agree with an answer at the limit"
+                );
+                assert!(judged.passes < ALL_AT_THE_LIMIT_YET_JUDGING);
                 (1..=config.starting_points.len())
                     .map(|number| {
-                        let outcome = one_start(
-                            &cohort,
-                            lent,
-                            depth_cap,
-                            group_index,
-                            coverage,
-                            &config,
-                            number,
-                            None,
-                        );
+                        let outcome = run(number, None);
                         (
                             outcome.ended,
                             outcome.statistics.log_likelihood,
