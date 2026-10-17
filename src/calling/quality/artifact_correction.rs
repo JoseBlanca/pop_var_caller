@@ -29,7 +29,7 @@
 
 use crate::calling::quality::ArtifactTestCounts;
 use crate::float;
-use crate::genetics::lgamma;
+use crate::genetics::{lgamma, regularised_incomplete_beta};
 use crate::types::Phred;
 
 /// **How much the site quality each artifact test took away.**
@@ -254,7 +254,7 @@ fn binomial_at_most(at_most: u64, total: u64, share: f64) -> f64 {
     if at_most >= total {
         return 1.0;
     }
-    regularised_incomplete_beta((total - at_most) as f64, (at_most + 1) as f64, 1.0 - share)
+    regularised_incomplete_beta(1.0 - share, (total - at_most) as f64, (at_most + 1) as f64)
 }
 
 /// `P(X ≥ at_least)` for `X` binomial on `total` reads at `share` — exact, through the same
@@ -282,7 +282,7 @@ fn binomial_at_least(at_least: u64, total: u64, share: f64) -> f64 {
     if at_least > total {
         return 0.0;
     }
-    regularised_incomplete_beta(at_least as f64, (total - at_least + 1) as f64, share)
+    regularised_incomplete_beta(share, at_least as f64, (total - at_least + 1) as f64)
 }
 
 /// The log of the binomial probability of exactly `count` of `total` at `share`.
@@ -308,93 +308,6 @@ fn log_binomial_probability(count: f64, total: f64, share: f64) -> f64 {
     }
     let log_ways = lgamma(total + 1.0) - lgamma(count + 1.0) - lgamma(total - count + 1.0);
     log_ways + count * float::ln(share) + (total - count) * float::ln(1.0 - share)
-}
-
-/// The regularised incomplete beta `I_x(a, b)` — which is the exact binomial cumulative
-/// distribution in closed form.
-///
-/// Numerical Recipes' `betai`, over ng's own [`lgamma`] and the continued fraction below.
-/// **ng's `lgamma` is `libm`'s and production's is a hand-written Lanczos approximation**, so
-/// the two are not bit-identical by construction; they agree to about one part in `1e-13`, and
-/// what the agreement costs at the end of the whole correction is measured by the differential
-/// this module's port is judged against (spec §11).
-fn regularised_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
-    if x <= 0.0 {
-        return 0.0;
-    }
-    if x >= 1.0 {
-        return 1.0;
-    }
-    let log_front =
-        lgamma(a + b) - lgamma(a) - lgamma(b) + a * float::ln(x) + b * float::ln(1.0 - x);
-    let front = float::exp(log_front);
-    // Each branch is the one the continued fraction converges quickly on; the other is reached
-    // through the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)`.
-    if x < (a + 1.0) / (a + b + 2.0) {
-        front * incomplete_beta_continued_fraction(a, b, x) / a
-    } else {
-        1.0 - front * incomplete_beta_continued_fraction(b, a, 1.0 - x) / b
-    }
-}
-
-/// Lentz's continued fraction for the incomplete beta (Numerical Recipes' `betacf`).
-///
-/// It converges to about one part in `1e-15` within a few dozen iterations **whatever the
-/// magnitude of `a` and `b`**, which is what makes the tail above cost the same at 30 reads and
-/// at 30,000.
-fn incomplete_beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
-    const MAX_ITERATIONS: usize = 300;
-    const CONVERGED: f64 = 1e-15;
-    /// Smallest magnitude the recurrence is allowed to carry, so a denominator that lands on
-    /// zero is nudged off it rather than producing an infinity.
-    const FLOOR: f64 = 1e-300;
-
-    let a_plus_b = a + b;
-    let a_plus_one = a + 1.0;
-    let a_minus_one = a - 1.0;
-    let mut c = 1.0;
-    let mut d = 1.0 - a_plus_b * x / a_plus_one;
-    if d.abs() < FLOOR {
-        d = FLOOR;
-    }
-    d = 1.0 / d;
-    let mut fraction = d;
-    for iteration in 1..=MAX_ITERATIONS {
-        let step = iteration as f64;
-        let two_steps = 2.0 * step;
-
-        // The even half of the recurrence.
-        let term = step * (b - step) * x / ((a_minus_one + two_steps) * (a + two_steps));
-        d = 1.0 + term * d;
-        if d.abs() < FLOOR {
-            d = FLOOR;
-        }
-        c = 1.0 + term / c;
-        if c.abs() < FLOOR {
-            c = FLOOR;
-        }
-        d = 1.0 / d;
-        fraction *= d * c;
-
-        // The odd half.
-        let term =
-            -(a + step) * (a_plus_b + step) * x / ((a + two_steps) * (a_plus_one + two_steps));
-        d = 1.0 + term * d;
-        if d.abs() < FLOOR {
-            d = FLOOR;
-        }
-        c = 1.0 + term / c;
-        if c.abs() < FLOOR {
-            c = FLOOR;
-        }
-        d = 1.0 / d;
-        let delta = d * c;
-        fraction *= delta;
-        if (delta - 1.0).abs() < CONVERGED {
-            break;
-        }
-    }
-    fraction
 }
 
 // ---------------------------------------------------------------------------------------

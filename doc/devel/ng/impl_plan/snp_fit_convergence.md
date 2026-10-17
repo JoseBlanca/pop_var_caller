@@ -241,13 +241,21 @@ samples once, after B5.
 
 ### Milestone C — what the data determine (computed, not yet written)
 
-- ☐ **C1** The regularised incomplete Beta function `I_x(a, b)` beside `genetics::lgamma`
+- ✅ **C1** The regularised incomplete Beta function `I_x(a, b)` beside `genetics::lgamma`
   (`src/genetics.rs`), by continued fraction, through `crate::float`.
   *Tests:* against values pinned from an independent implementation (SciPy's `betainc`, recorded in
   the test with their source) at `x` = 0.01 and shapes 0.02, 1 and 50; the symmetry
   `I_x(a, b) = 1 − I_{1−x}(b, a)`; `x` = 0 and 1.
   *Identity:* nothing calls it; every output bit-identical.
   *Depends:* —. *Source:* `parameter_prepass_joint_fit.md` §2.1.3, traps.
+  *Done 2026-10-17:* the crate did have one, private to the site quality's artifact correction
+  (`calling/quality/artifact_correction.rs`, Numerical Recipes' `betai` over `lgamma` and
+  `crate::float`); it is **moved** to `genetics::regularised_incomplete_beta(x, a, b)` with its
+  arithmetic unchanged, and the correction calls it there. Sixteen SciPy 1.18.1 values (all nine
+  pairings of 0.02, 1 and 50 at `x` = 0.01, values down to 10⁻¹⁰⁴, and four past the bulk) agree to
+  10⁻¹² relative; also defined just below the 0.02 bound. Since calling now reaches it through the
+  new path, the identity oracle was run: all seven checksums (the three VCFs, both parameters files,
+  the windows) equal to the step's starting commit.
 - ☐ **C2** `cohort_covariance` beside `newton_step`: the cohort's 8 × 8 block of the inverse
   information, by unit-slope solves on the whole matrix or the arrow, `None` for a number not
   solved for.

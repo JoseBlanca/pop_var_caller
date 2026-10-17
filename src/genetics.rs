@@ -26,6 +26,10 @@
 //! production's `dirichlet_multinomial_log_priors`: ng has its own in
 //! [`calling::genotype_prior::dirichlet_multinomial`](crate::calling::genotype_prior),
 //! and production's survives only as that port's test oracle.
+//!
+//! One item came later and from elsewhere: [`regularised_incomplete_beta`], moved here unchanged
+//! from the site quality's artifact correction on 2026-10-17, when the joint fit's report of what
+//! the data determine needed it too.
 
 use crate::float;
 
@@ -55,6 +59,107 @@ pub const PROBABILITY_FLOOR: f64 = 1e-300;
 pub fn lgamma(x: f64) -> f64 {
     debug_assert!(x > 0.0, "lgamma requires x > 0, got {x}");
     libm::lgamma(x)
+}
+
+/// **The regularised incomplete Beta function `I_x(a, b)`**: the probability that a value drawn
+/// from `Beta(a, b)` is at most `x`. Two modules read it: the site quality's artifact correction,
+/// for which it is the exact binomial cumulative distribution
+/// ([`calling::quality`](crate::calling::quality)), and the joint fit's report of what the data
+/// determine, for which one minus it is the share of a Beta above a stated frequency
+/// (`doc/devel/ng/spec/parameter_prepass_joint_fit.md` §2.1.3).
+///
+/// `x` at or below 0 gives 0 and at or above 1 gives 1; both shapes must be above zero. It is
+/// Numerical Recipes' `betai` (Press et al., §6.4), over [`lgamma`] and the continued fraction
+/// below, each evaluated on the side of the Beta's bulk where the fraction converges fast — for `x`
+/// past `(a + 1)/(a + b + 2)` through the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)`.
+///
+/// **Moved here from the artifact correction on 2026-10-17, its arithmetic unchanged**, so that the
+/// site quality's bits do not move. Production's `lgamma` was a hand-written Lanczos approximation
+/// and this one is `libm`'s, so the two are not bit-identical by construction; they agree to about
+/// one part in `1e-13`, and what the agreement costs at the end of the whole correction is measured
+/// by the differential the correction's port is judged against. `ln` and `exp` go through
+/// [`crate::float`], so the same arguments give the same bits on every platform.
+pub fn regularised_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
+    debug_assert!(
+        a > 0.0 && b > 0.0,
+        "Beta shapes must be above zero, got {a} and {b}"
+    );
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let log_front =
+        lgamma(a + b) - lgamma(a) - lgamma(b) + a * float::ln(x) + b * float::ln(1.0 - x);
+    let front = float::exp(log_front);
+    // Each branch is the one the continued fraction converges quickly on; the other is reached
+    // through the symmetry `I_x(a, b) = 1 − I_{1−x}(b, a)`.
+    if x < (a + 1.0) / (a + b + 2.0) {
+        front * incomplete_beta_continued_fraction(a, b, x) / a
+    } else {
+        1.0 - front * incomplete_beta_continued_fraction(b, a, 1.0 - x) / b
+    }
+}
+
+/// Lentz's continued fraction for the incomplete beta (Numerical Recipes' `betacf`).
+///
+/// It converges to about one part in `1e-15` within a few dozen iterations **whatever the
+/// magnitude of `a` and `b`**, which is what makes the tail above cost the same at 30 reads and
+/// at 30,000.
+fn incomplete_beta_continued_fraction(a: f64, b: f64, x: f64) -> f64 {
+    const MAX_ITERATIONS: usize = 300;
+    const CONVERGED: f64 = 1e-15;
+    /// Smallest magnitude the recurrence is allowed to carry, so a denominator that lands on
+    /// zero is nudged off it rather than producing an infinity.
+    const FLOOR: f64 = 1e-300;
+
+    let a_plus_b = a + b;
+    let a_plus_one = a + 1.0;
+    let a_minus_one = a - 1.0;
+    let mut c = 1.0;
+    let mut d = 1.0 - a_plus_b * x / a_plus_one;
+    if d.abs() < FLOOR {
+        d = FLOOR;
+    }
+    d = 1.0 / d;
+    let mut fraction = d;
+    for iteration in 1..=MAX_ITERATIONS {
+        let step = iteration as f64;
+        let two_steps = 2.0 * step;
+
+        // The even half of the recurrence.
+        let term = step * (b - step) * x / ((a_minus_one + two_steps) * (a + two_steps));
+        d = 1.0 + term * d;
+        if d.abs() < FLOOR {
+            d = FLOOR;
+        }
+        c = 1.0 + term / c;
+        if c.abs() < FLOOR {
+            c = FLOOR;
+        }
+        d = 1.0 / d;
+        fraction *= d * c;
+
+        // The odd half.
+        let term =
+            -(a + step) * (a_plus_b + step) * x / ((a + two_steps) * (a_plus_one + two_steps));
+        d = 1.0 + term * d;
+        if d.abs() < FLOOR {
+            d = FLOOR;
+        }
+        c = 1.0 + term / c;
+        if c.abs() < FLOOR {
+            c = FLOOR;
+        }
+        d = 1.0 / d;
+        let delta = d * c;
+        fraction *= delta;
+        if (delta - 1.0).abs() < CONVERGED {
+            break;
+        }
+    }
+    fraction
 }
 
 /// The `i`-th of `n` points on the inclusive linear grid `[lo, hi]`. `n <= 1`
@@ -157,6 +262,90 @@ pub fn alpha_from_diversity(n_alleles: usize, theta: f64) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `I_x(a, b)` pinned from an independent implementation: SciPy 1.18.1's
+    /// `scipy.special.betainc(a, b, x)`, run on 2026-10-17 (`tmp/impl_CD/betainc_values.py`).
+    /// `x` = 0.01 at shapes 0.02, 1 and 50 — the joint fit's two bounds and the middle — in every
+    /// pairing, plus the shapes the fits measured in the spec reach (0.158 and 1.408, a carrier
+    /// Beta; 17.9, a density with every segregating position above 1%) and four points past the
+    /// Beta's bulk, which go through the symmetry.
+    const SCIPY_BETAINC: [(f64, f64, f64, f64); 16] = [
+        (0.01, 0.02, 0.02, 0.45638517158324815),
+        (0.01, 0.02, 1.0, 0.9120108393559098),
+        (0.01, 0.02, 4.28, 0.9466555925383774),
+        (0.01, 0.02, 50.0, 0.9886315492736919),
+        (0.01, 1.0, 0.02, 0.0002009865165733764),
+        (0.01, 1.0, 1.0, 0.01),
+        (0.01, 1.0, 50.0, 0.39499393286246337),
+        (0.01, 50.0, 0.02, 4.4159013553768126e-104),
+        (0.01, 50.0, 1.0, 1.000000000000001e-100),
+        (0.01, 50.0, 50.0, 3.113021933716422e-72),
+        (0.01, 0.158, 1.408, 0.520803752881817),
+        (0.01, 17.9, 3.0, 2.9242835052820803e-34),
+        (0.5, 2.0, 3.0, 0.6875),
+        (0.99, 0.02, 4.28, 0.9999999999865253),
+        (0.3, 50.0, 50.0, 1.554779976144308e-05),
+        (0.7, 50.0, 50.0, 0.9999844522002386),
+    ];
+
+    /// **The incomplete Beta agrees with SciPy's to 10⁻¹² relative** at every pinned point, values
+    /// from 10⁻¹⁰⁴ to one.
+    #[test]
+    fn the_incomplete_beta_agrees_with_scipy() {
+        for (x, a, b, expected) in SCIPY_BETAINC {
+            let got = regularised_incomplete_beta(x, a, b);
+            assert!(
+                (got - expected).abs() <= 1e-12 * expected,
+                "I_{x}({a}, {b}) = {got:e}, SciPy {expected:e}"
+            );
+        }
+    }
+
+    /// **`I_x(a, b) = 1 − I_{1−x}(b, a)`**, on both sides of the bulk where the two terms are
+    /// computed by different branches, to 10⁻¹⁴.
+    #[test]
+    fn the_incomplete_beta_is_symmetric() {
+        for (x, a, b) in [
+            (0.01, 0.02, 4.28),
+            (0.2, 2.0, 3.0),
+            (0.5, 0.02, 0.02),
+            (0.9, 50.0, 1.0),
+            (0.45, 50.0, 50.0),
+            (0.99, 1.0, 50.0),
+        ] {
+            let direct = regularised_incomplete_beta(x, a, b);
+            let mirrored = 1.0 - regularised_incomplete_beta(1.0 - x, b, a);
+            assert!(
+                (direct - mirrored).abs() < 1e-14,
+                "I_{x}({a}, {b}) = {direct:e} against 1 − I_(1−x)({b}, {a}) = {mirrored:e}"
+            );
+        }
+    }
+
+    /// **At and past the ends**: 0 at `x` = 0 and below, 1 at `x` = 1 and above, whatever the
+    /// shapes; not a number for a `x` that is not one.
+    #[test]
+    fn the_incomplete_beta_is_zero_and_one_at_the_ends() {
+        for (a, b) in [(0.02, 0.02), (0.02, 50.0), (50.0, 0.02), (1.0, 1.0)] {
+            assert_eq!(regularised_incomplete_beta(0.0, a, b), 0.0);
+            assert_eq!(regularised_incomplete_beta(-0.5, a, b), 0.0);
+            assert_eq!(regularised_incomplete_beta(1.0, a, b), 1.0);
+            assert_eq!(regularised_incomplete_beta(1.5, a, b), 1.0);
+            assert!(regularised_incomplete_beta(f64::NAN, a, b).is_nan());
+        }
+    }
+
+    /// **Just below the fit's lower shape bound it is still defined**: a central difference at a
+    /// shape on its bound of 0.02 evaluates it at 0.02 less a step of 10⁻⁵ of it.
+    #[test]
+    fn the_incomplete_beta_is_defined_just_below_the_shape_bound() {
+        let below = regularised_incomplete_beta(0.01, 0.02 * (1.0 - 1e-5), 4.28);
+        let at = regularised_incomplete_beta(0.01, 0.02, 4.28);
+        assert!(
+            below.is_finite() && below > at && below < 1.0,
+            "{below} against {at}"
+        );
+    }
 
     /// `alpha_from_diversity` sets `α_ref = 1` and splits `θ` across the ALTs:
     /// biallelic → `[1, θ]`, triallelic → `[1, θ/2, θ/2]`.
