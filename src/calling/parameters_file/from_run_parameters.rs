@@ -2184,8 +2184,8 @@ mod tests {
             "a run that fitted no stratum states the compiled-in concentration"
         );
         assert_eq!(
-            stated.value, 0.5,
-            "the F of the compiled-in concentration of one; the median of a run that fitted \
+            stated.value, 1.0 / 11.0,
+            "the F of the compiled-in concentration of ten; the median of a run that fitted \
              strata can land on exactly this number, which is why the warrant is what separates \
              them"
         );
@@ -3258,7 +3258,7 @@ mod tests {
         }
         assert!(
             file.to_toml().contains(
-                "fallback_between_locus_share = { value = 0.5, warrant = \"defaulted\" }"
+                "fallback_between_locus_share = { value = 0.09090909090909091, warrant = \"defaulted\" }"
             ),
             "the fallback is the built-in F, defaulted"
         );
@@ -3503,7 +3503,7 @@ mod tests {
         let file = after_the_whole_trip(&run, &read_groups, &rates, &inbreeding);
         assert!(
             file.to_toml().contains(
-                "fallback_between_locus_share = { value = 0.5, warrant = \"defaulted\" }"
+                "fallback_between_locus_share = { value = 0.09090909090909091, warrant = \"defaulted\" }"
             ),
             "the fallback is the built-in F, defaulted"
         );

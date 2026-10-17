@@ -207,6 +207,8 @@ still a stated number measured on one human trio, and should be marked soft as t
 
 ## 5. The decision needed
 
+*Taken by the owner on 2026-10-17: yes (§6).*
+
 **Change the stated concentration of the tract ladder from 1 to 10 (F from 0.5 to 1/11)?**
 
 - **If yes**: `STATED_FLAT_CONCENTRATION` becomes 10, the defaulted `fallback_between_locus_share`
@@ -223,7 +225,34 @@ still a stated number measured on one human trio, and should be marked soft as t
 Not done here: group b (§1) needs the stutter model under `--defaults`, which is a separate
 investigation.
 
-## 6. Reproducing
+## 6. Applied
+
+**The owner took the recommendation on 2026-10-17**, and the branch now states a concentration of 10
+(`STATED_FLAT_CONCENTRATION`), written in the file as `fallback_between_locus_share = 1/11,
+defaulted`. Re-run with the built binary, not the experiment switch:
+
+- **GIAB, `--defaults`, one sample at a time**, 5x, 10x, 30x and 300x: every VCF identical, record
+  for record, to the experiment run of §3.3.
+- **GIAB, fitted on one sample**: each fit, redone with the new binary, writes the new value, and
+  its calls are identical to the edited-file runs of §3.4.
+- **Tomato, 63 accessions**: the refitted file differs from the old one only in the comment that
+  names the built-in value, and its 17,220 calls are identical. The `--defaults` calls are identical
+  to the experiment run of §3.5.
+- **The three cross-platform checksum tests** (`src/cli/cross_platform_digests.rs`) were
+  re-recorded. Each fixture's fit has a median of its own, so the value is not read; the parameters
+  file moves by that comment alone, and the VCF by the parameters file's md5 in its header.
+  Putting the old md5 back reproduces each old VCF checksum exactly.
+- **The tomato identity oracle** (`scripts/promote_ng_oracle.sh`, 4 accessions, 20 regions), run
+  natively on the macOS host with main's binary (354754b8) and with this branch's. Its fitted calls
+  are identical record for record; only the `##pvcParameters` md5 in the header moves. Its
+  `--defaults` calls move 15 sample genotypes and 4 records (1 gone, 3 new), all at STR loci; the
+  window-coverage file gains 8 rows, the 2 extra records' windows for 4 samples.
+  **The checked-in baseline was not re-recorded, because main does not reproduce it either**: main's
+  binary on this slice writes 15,064 records, against the baseline's 7,508, and none of the seven
+  checksums matches. Whatever separates the two predates this branch and needs its own look before
+  the baseline can judge a change again.
+
+## 7. Reproducing
 
 All under the worktree's `tmp/`: `experiment_knobs.patch` (the dump and the three environment
 switches used for the settings above: `PVC_EXP_STATED_CONC`, `PVC_EXP_PER_ALLELE`,
