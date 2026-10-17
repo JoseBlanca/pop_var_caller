@@ -81,7 +81,9 @@
 
 use crate::float;
 
-use super::determined::{DensityReport, DeterminedShare, DuplicatedReport, STATED_FREQUENCY};
+use super::determined::{
+    DensityReport, DeterminedShare, DuplicatedReport, SEPARATION_LOG_LIKELIHOOD, STATED_FREQUENCY,
+};
 use super::information::{
     COHORT_PARAMETERS, FullInformation, InformationSums, cohort, own_parameters, sample,
 };
@@ -683,24 +685,47 @@ fn printed_share(determined: &DeterminedShare) -> String {
 }
 
 /// **A log-likelihood cost as the run's log prints it**: in three significant figures, and above a
-/// million as just that. A cost that large is rounding: where the two shares move together, as on
-/// the 4 oracle samples, `V_trade` comes out a unit in the last place above zero and the cost at
-/// 10¹⁶ or so, and printing that figure would invite a reader to make something of it.
+/// million as just that. A cost that large is either rounding — what cancellation left just above
+/// the 10⁻¹² of `σ`'s variance below which a trade counts as none — or a genuine trade far past the
+/// line of two: drawn cohorts gave costs of 1.4 and 4.3 million. Either way the figure says no more
+/// than the words. A pair with no trade at all has `+∞`, which has its own wording.
+///
+/// **A cost below the line never prints as reaching it**: 1.996 rounds to `2.00` in three figures,
+/// beside a verdict that says it is below two, so it is printed with as many more decimals as it
+/// takes to show it below — `1.996`.
 fn a_cost(cost: f64) -> String {
     if cost > 1e6 {
-        "over a million log-likelihood units".to_owned()
-    } else {
-        format!("{} log-likelihood units", in_three_figures(cost))
+        return "over a million log-likelihood units".to_owned();
     }
+    let mut printed = in_three_figures(cost);
+    let mut decimals = 3;
+    while cost < SEPARATION_LOG_LIKELIHOOD
+        && printed
+            .parse::<f64>()
+            .is_ok_and(|shown| shown >= SEPARATION_LOG_LIKELIHOOD)
+        && decimals <= 17
+    {
+        printed = format!("{cost:.decimals$}");
+        decimals += 1;
+    }
+    format!("{printed} log-likelihood units")
 }
 
 /// A log-likelihood cost in three significant figures — `1.35`, `0.00549`, `324` — and in
-/// scientific notation from a thousand up, and for anything not above zero.
+/// scientific notation from a thousand up, and for anything not above zero. **The decimals are
+/// chosen for the cost as rounded**, so 0.9996 prints `1.00`, not `1.000`, and 999.6 prints
+/// `1.00e3`, not `1000`.
 fn in_three_figures(cost: f64) -> String {
-    if cost.is_nan() || cost <= 0.0 || cost >= 1_000.0 {
+    if cost.is_nan() || cost <= 0.0 {
         return format!("{cost:.2e}");
     }
-    let decimals = (2.0 - float::log10(cost).floor()).max(0.0) as usize;
+    let rounded: f64 = format!("{cost:.2e}")
+        .parse()
+        .expect("a number printed in scientific notation reads back");
+    if rounded >= 1_000.0 {
+        return format!("{cost:.2e}");
+    }
+    let decimals = (2.0 - float::log10(rounded).floor()).max(0.0) as usize;
     format!("{cost:.decimals$}")
 }
 
@@ -2684,6 +2709,37 @@ mod tests {
         assert_eq!(in_three_figures(4302.7), "4.30e3");
         assert_eq!(a_cost(1.346728), "1.35 log-likelihood units");
         assert_eq!(a_cost(4.66e16), "over a million log-likelihood units");
+    }
+
+    /// **The decimals are chosen after rounding**: a cost that rounds up to the next power of ten
+    /// keeps three figures (0.9996, 9.996), and one that rounds up to a thousand is printed in
+    /// scientific notation, as a thousand is.
+    #[test]
+    fn a_cost_that_rounds_up_a_power_of_ten_keeps_three_figures() {
+        assert_eq!(in_three_figures(0.9996), "1.00");
+        assert_eq!(in_three_figures(9.996), "10.0");
+        assert_eq!(in_three_figures(99.96), "100");
+        assert_eq!(in_three_figures(999.6), "1.00e3");
+        assert_eq!(in_three_figures(0.0009996), "0.00100");
+    }
+
+    /// **A cost below two never prints as two**, beside a verdict that says it is below: 1.996 is
+    /// printed `1.996`, the largest number below two in full; a cost of two or more, and one that
+    /// rounds below two, keep three figures.
+    #[test]
+    fn a_cost_below_the_line_never_prints_as_reaching_it() {
+        assert_eq!(a_cost(1.996), "1.996 log-likelihood units");
+        assert_eq!(a_cost(1.99996), "1.99996 log-likelihood units");
+        let largest_below = SEPARATION_LOG_LIKELIHOOD.next_down();
+        let printed = a_cost(largest_below);
+        let shown: f64 = printed
+            .trim_end_matches(" log-likelihood units")
+            .parse()
+            .expect("a number");
+        assert!(shown < SEPARATION_LOG_LIKELIHOOD, "{printed}");
+        assert_eq!(a_cost(1.994), "1.99 log-likelihood units");
+        assert_eq!(a_cost(2.0), "2.00 log-likelihood units");
+        assert_eq!(a_cost(2.004), "2.00 log-likelihood units");
     }
 
     /// **The trace names each error after the value it belongs to**: the same names as

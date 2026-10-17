@@ -3073,14 +3073,21 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"
         ));
 
-        let with_an_unknown_key = a_file_using_every_shape().to_toml().replace(
-            "stated_frequency = 0.01\n",
-            "stated_frequency = 0.01\nlater_key = 1.0\n",
-        );
-        assert!(
-            ParametersFile::from_toml(&with_an_unknown_key).is_err(),
-            "a key this build does not know, in either table, is refused"
-        );
+        let written = a_file_using_every_shape().to_toml();
+        for header in [
+            "[ordinary_site_prior.fitted_density]\n",
+            "[duplicated_positions]\n",
+        ] {
+            assert_eq!(written.matches(header).count(), 1, "{header}");
+            let with_an_unknown_key =
+                written.replacen(header, &format!("{header}later_key = 1.0\n"), 1);
+            let error = ParametersFile::from_toml(&with_an_unknown_key)
+                .expect_err("a key this build does not know is refused");
+            assert!(
+                format!("{error:?}").contains("later_key"),
+                "a key unknown to {header} is refused naming it: {error:?}"
+            );
+        }
     }
 
     /// **The informational tables are not groups of fitted numbers**: a file with both tables

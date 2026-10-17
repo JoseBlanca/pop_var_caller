@@ -254,6 +254,11 @@ with errors and a mark on the numbers the data do not separate — and the dupli
 in `[duplicated_positions]`. No run reads either; what they hold and how they are validated is
 [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.1.3.
 
+*Amended 2026-10-17 (code review of steps C–D):* that section said nothing else is checked; one
+thing is. **Either table in a file whose `format_version` is below 4 is refused**, naming the table:
+such a file cannot say which format it was written in. This is the refusal the reader already gives
+a format-3 key in a file stamped 1 or 2.
+
 **An alternative total of exactly zero is a real answer** — a fully invariant cohort — and is not
 floored on the way in or out; the flooring belongs to the per-locus expansion.
 

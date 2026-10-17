@@ -123,8 +123,34 @@ impl ParametersFile {
     /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
     /// a spread, and a number marked `separately_determined = false` refused if it carries a
     /// `standard_error`, since its curvature error describes where the trade and the bounds left it
-    /// and not the population. Nothing else is checked: no run reads the tables.
+    /// and not the population.
+    ///
+    /// **And neither table is in a file stamped before format 4**, which had neither: a file that
+    /// says version 3 and holds one cannot say which format it was written in — the refusal the
+    /// reader gives a format-3 key in a file stamped 1 or 2. Nothing else is checked: no run reads
+    /// the tables.
     fn the_informational_tables_hold_numbers(&self) -> Result<(), ParametersFileError> {
+        if self.format_version < FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES {
+            let tables = [
+                (
+                    "ordinary_site_prior.fitted_density",
+                    self.ordinary_site_prior.fitted_density.is_some(),
+                ),
+                ("duplicated_positions", self.duplicated_positions.is_some()),
+            ];
+            if let Some((table, _)) = tables.into_iter().find(|(_, written)| *written) {
+                return Err(refuse(
+                    table,
+                    format!(
+                        "is a format-{FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES} table in a file \
+                         whose `format_version` says {}, so it is not clear which format the file \
+                         was written in; set `format_version` to the format the file was written \
+                         in",
+                        self.format_version
+                    ),
+                ));
+            }
+        }
         if let Some(density) = &self.ordinary_site_prior.fitted_density {
             let at = "ordinary_site_prior.fitted_density";
             finite(format!("{at}.stated_frequency"), density.stated_frequency)?;
@@ -1209,6 +1235,10 @@ fn the_unit_of(count: EvidenceCount) -> &'static str {
 /// value passes every check here and a newtype's own constructor still turns it down — a motif
 /// period past the longest this build indexes, say. Two spellings of one refusal is what having
 /// one function stops.
+/// **The format that added `[ordinary_site_prior.fitted_density]` and `[duplicated_positions]`**:
+/// 4. A file stamped with an earlier version and holding either is refused.
+const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
+
 pub(super) fn refuse(field: impl Into<String>, problem: impl Into<String>) -> ParametersFileError {
     ParametersFileError::Meaningless {
         field: field.into(),
@@ -1947,7 +1977,11 @@ mod tests {
         let (field, problem) = refused(|file| file.format_version = 0);
         assert_eq!(field, "format_version");
         assert!(problem.contains("written by a newer build"), "{problem}");
-        accepted(|file| file.format_version = 3);
+        accepted(|file| {
+            file.format_version = 3;
+            file.ordinary_site_prior.fitted_density = None;
+            file.duplicated_positions = None;
+        });
         accepted(|file| file.format_version = 4);
         let (field, _) = refused(|file| file.format_version = 5);
         assert_eq!(field, "format_version");
@@ -2013,6 +2047,32 @@ mod tests {
                 density.invariant_share.standard_error = Some(0.068);
             }
         });
+    }
+
+    /// **Either table in a file stamped version 3 is refused**, naming the table — the format that
+    /// added them is 4, and a file holding one while saying 3 cannot say which it was written in —
+    /// as the reader refuses a format-3 key in a file stamped 1 or 2. Each table alone is refused;
+    /// version 3 with neither, and version 4 with both, are accepted.
+    #[test]
+    fn a_format_four_table_in_a_version_three_file_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.format_version = 3;
+            file.duplicated_positions = None;
+        });
+        assert_eq!(field, "ordinary_site_prior.fitted_density");
+        assert!(problem.contains("format-4 table"), "{problem}");
+        assert!(problem.contains("says 3"), "{problem}");
+        let (field, _) = refused(|file| {
+            file.format_version = 3;
+            file.ordinary_site_prior.fitted_density = None;
+        });
+        assert_eq!(field, "duplicated_positions");
+        accepted(|file| {
+            file.format_version = 3;
+            file.ordinary_site_prior.fitted_density = None;
+            file.duplicated_positions = None;
+        });
+        accepted(|file| file.format_version = 4);
     }
 
     /// **What version 2 added is checked as the rest is.** A standard error is a spread — finite
@@ -2172,12 +2232,15 @@ mod tests {
     }
 
     /// **A version-1 file still reads**: every key version 2 added is optional, so a file written
-    /// before them is the same file with those keys absent (`fit_precision.md` §5.2).
+    /// before them is the same file with those keys absent (`fit_precision.md` §5.2), and without
+    /// format 4's two tables.
     #[test]
     fn a_version_one_file_is_accepted() {
         let mut file = a_file_using_every_shape();
         file.format_version = 1;
         file.fitted_from.snp_indel_fit_starts = None;
+        file.ordinary_site_prior.fitted_density = None;
+        file.duplicated_positions = None;
         file.validate().expect("a version-1 file is accepted");
     }
 

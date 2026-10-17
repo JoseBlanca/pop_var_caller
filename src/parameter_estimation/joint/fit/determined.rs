@@ -30,7 +30,7 @@
 //! ```text
 //! Var(x) = ∇xᵀ C ∇x,   Cov(x, y) = ∇xᵀ C ∇y
 //! V_trade    = Var(σ) − Cov(σ, S)² / Var(S)       how far σ can move with S held
-//! trade_cost = ½ (ln 2)² σ² / V_trade              (V_trade ≤ 0: no trade, cost +∞)
+//! trade_cost = ½ (ln 2)² σ² / V_trade              (V_trade ≤ 10⁻¹² Var(σ): no trade, cost +∞)
 //! ```
 //!
 //! The pair is also marked when a number it is computed from has no covariance — dropped from the
@@ -41,10 +41,14 @@
 //!
 //! `C` is [`cohort_covariance`](super::standard_errors::cohort_covariance), from the information the
 //! winning start's final pass summed — the matrix the errors come from. `σ` is linear in its group,
-//! so its gradient is exact; `S`, the expected heterozygosity and the mean alternative frequency are
-//! differentiated by central differences, a step of [`DIFFERENCE_STEP`] of each number's value,
-//! through the same functions that compute their values. Their errors are `√Var` from the same `C`
-//! (the delta method), and none where a number of the group has no covariance.
+//! so its gradient is exact. `S`, the expected heterozygosity and the mean alternative frequency
+//! are linear in the shares — the invariant and fixed non-reference shares, the duplicated share —
+//! with slopes that depend on the shapes alone, so their slopes along the shares are exact too;
+//! along the shapes they are central differences, a step of [`DIFFERENCE_STEP`] of each shape's
+//! value, through the same functions that compute their values. A difference would fail along a
+//! share: one on its lower bound of 10⁻¹² gives a step below the last place of `σ`. The errors are
+//! `√Var` from the same `C` (the delta method), and none where a number of the group has no
+//! covariance.
 
 use std::f64::consts::LN_2;
 
@@ -68,6 +72,12 @@ pub const SEPARATION_LOG_LIKELIHOOD: f64 = 2.0;
 
 /// The central difference's step, as a share of the number it is taken on.
 const DIFFERENCE_STEP: f64 = 1e-5;
+
+/// **The share of `σ`'s own variance at or below which what is left of it, `S` held, is rounding**:
+/// 10⁻¹², ten thousand units in the last place of the variance it is the difference from. A trade
+/// that small would cost `½ (ln 2)² / 10⁻¹² ≈ 2.4 × 10¹¹` units times `σ² / Var(σ)`, past the line
+/// of two unless `σ`'s standard error were over 300,000 times `σ` itself.
+const NO_TRADE_SHARE: f64 = 1e-12;
 
 /// **One number as the fit reports it**: its value, and its standard error where it has one — none
 /// when the number is marked not separately determined, or when the fit gives it none.
@@ -154,9 +164,20 @@ impl DensityReport {
             b: values[3],
         };
         let segregating = |values: &[f64; 4]| 1.0 - values[0] - values[1];
-        let determined = group.determined_share([-1.0, -1.0, 0.0, 0.0], segregating, |values| {
-            segregating(values) * share_of_beta_above(values[2], values[3])
-        });
+        // **The three derived numbers are linear in the two shares**, with slopes set by the
+        // shapes alone: a segregating position's chance of lying above 1%, its heterozygosity and
+        // its mean frequency. Those slopes are exact; only the shapes are differenced.
+        let (a, b) = (density.a, density.b);
+        let seen = share_of_beta_above(a, b);
+        let per_segregating_position = as_density(&[0.0, 0.0, a, b]);
+        let heterozygosity_slope = -per_segregating_position.expected_heterozygosity();
+        let mean_frequency = per_segregating_position.expected_alternative_frequency();
+        let determined = group.determined_share(
+            [-1.0, -1.0, 0.0, 0.0],
+            segregating,
+            |values| segregating(values) * share_of_beta_above(values[2], values[3]),
+            [Some(-seen), Some(-seen), None, None],
+        );
         let heterozygosity = |values: &[f64; 4]| as_density(values).expected_heterozygosity();
         let alternative = |values: &[f64; 4]| as_density(values).expected_alternative_frequency();
         let pair_error = |slot: usize| errors[slot].filter(|_| determined.separately_determined);
@@ -177,8 +198,24 @@ impl DensityReport {
                 value: density.b,
                 standard_error: errors[cohort::DENSITY_B],
             },
-            expected_heterozygosity: group.reported(heterozygosity),
-            expected_alternative_frequency: group.reported(alternative),
+            expected_heterozygosity: group.reported(
+                heterozygosity,
+                [
+                    Some(heterozygosity_slope),
+                    Some(heterozygosity_slope),
+                    None,
+                    None,
+                ],
+            ),
+            expected_alternative_frequency: group.reported(
+                alternative,
+                [
+                    Some(-mean_frequency),
+                    Some(1.0 - mean_frequency),
+                    None,
+                    None,
+                ],
+            ),
             determined,
         }
     }
@@ -206,6 +243,14 @@ impl DuplicatedReport {
             [1.0, 0.0, 0.0],
             |values| values[0],
             |values| values[0] * share_of_beta_above(values[1], values[2]),
+            [
+                Some(share_of_beta_above(
+                    duplicated.carrier_a,
+                    duplicated.carrier_b,
+                )),
+                None,
+                None,
+            ],
         );
         let pair_error = |slot: usize| errors[slot].filter(|_| determined.separately_determined);
         Self {
@@ -260,9 +305,15 @@ impl<const N: usize> Group<N> {
         }
     }
 
-    /// The gradient of `quantity` at the group's values, by central differences.
-    fn gradient(&self, quantity: impl Fn(&[f64; N]) -> f64) -> [f64; N] {
+    /// **The gradient of `quantity` at the group's values**: `exact[k]`, the slope along the `k`th
+    /// number, where the caller knows it — where the quantity is linear in that number — and a
+    /// central difference where it is `None`. A share on its lower bound of 10⁻¹² must have its
+    /// slope given: the difference's step there is below the last place of the numbers it moves.
+    fn gradient(&self, quantity: impl Fn(&[f64; N]) -> f64, exact: [Option<f64>; N]) -> [f64; N] {
         std::array::from_fn(|k| {
+            if let Some(slope) = exact[k] {
+                return slope;
+            }
             let step = DIFFERENCE_STEP * self.values[k].abs();
             let mut above = self.values;
             above[k] += step;
@@ -283,9 +334,14 @@ impl<const N: usize> Group<N> {
         )
     }
 
-    /// A quantity of the group as the fit reports it: its value, and the delta method's error.
-    fn reported(&self, quantity: impl Fn(&[f64; N]) -> f64) -> ReportedNumber {
-        let gradient = self.gradient(&quantity);
+    /// A quantity of the group as the fit reports it: its value, and the delta method's error, from
+    /// a gradient that takes the slopes in `exact` as [`Self::gradient`] does.
+    fn reported(
+        &self,
+        quantity: impl Fn(&[f64; N]) -> f64,
+        exact: [Option<f64>; N],
+    ) -> ReportedNumber {
+        let gradient = self.gradient(&quantity, exact);
         ReportedNumber {
             value: quantity(&self.values),
             standard_error: self
@@ -295,14 +351,16 @@ impl<const N: usize> Group<N> {
     }
 
     /// **The verdict on the pair** whose traded share `σ` has the exact gradient `share_gradient`
-    /// and value `share`, and whose determined share is `share_above`.
+    /// and value `share`, and whose determined share is `share_above`, with the slopes of
+    /// `share_above` known exactly given in `above_exact`.
     fn determined_share(
         &self,
         share_gradient: [f64; N],
         share: impl Fn(&[f64; N]) -> f64,
         share_above: impl Fn(&[f64; N]) -> f64,
+        above_exact: [Option<f64>; N],
     ) -> DeterminedShare {
-        let above_gradient = self.gradient(&share_above);
+        let above_gradient = self.gradient(&share_above, above_exact);
         let variance_above = self.covariance_of(&above_gradient, &above_gradient);
         let trade_cost = match (
             self.covariance_of(&share_gradient, &share_gradient),
@@ -314,6 +372,7 @@ impl<const N: usize> Group<N> {
             {
                 trade_cost_of(
                     share(&self.values),
+                    variance,
                     variance - together * together / variance_above,
                 )
             }
@@ -331,14 +390,17 @@ impl<const N: usize> Group<N> {
 }
 
 /// **What halving or doubling the share `σ` costs** when it can move by a variance of `trade_variance`
-/// with the determined share held: `½ (ln 2)² σ² / V_trade`. `V_trade` at or below zero is no
-/// trade — `σ` and the determined share move together, and on the 4 oracle samples their
-/// correlation is 1.0000, so `V_trade` comes out at rounding level, either sign — and costs `+∞`,
-/// never a negative number. `None` when `V_trade` is not a number.
-fn trade_cost_of(share: f64, trade_variance: f64) -> Option<f64> {
+/// with the determined share held, out of the `variance` it has alone: `½ (ln 2)² σ² / V_trade`.
+///
+/// **A `V_trade` at or below [`NO_TRADE_SHARE`] of `σ`'s own variance is no trade** and costs
+/// `+∞`, never a negative number or a finite one. There `σ` and the determined share move together
+/// — on the 4 oracle samples their correlation is 1.0000 — and `V_trade` is the cancellation of two
+/// equal numbers: exactly zero, or a unit in the last place either side, which as a cost would be
+/// about 10¹⁶. One state, so one answer. `None` when `V_trade` is not a number.
+fn trade_cost_of(share: f64, variance: f64, trade_variance: f64) -> Option<f64> {
     if trade_variance.is_nan() {
         None
-    } else if trade_variance <= 0.0 {
+    } else if trade_variance <= NO_TRADE_SHARE * variance {
         Some(f64::INFINITY)
     } else {
         Some(0.5 * LN_2 * LN_2 * share * share / trade_variance)
@@ -383,18 +445,34 @@ mod tests {
         }
     }
 
-    /// **`V_trade` at or below zero is no trade, never a negative cost**: zero and a negative value
-    /// both cost `+∞`; a positive one costs `½ (ln 2)² σ² / V_trade`; not a number has no cost.
+    /// **`V_trade` at or below 10⁻¹² of `σ`'s variance is no trade, never a negative or finite
+    /// cost**: zero, a negative value, a unit in the last place of the variance above zero (the 4
+    /// oracle samples' case, which cost 4.66 × 10¹⁶ before) and 10⁻¹² of it all cost `+∞`; just
+    /// above that, and an ordinary value, cost `½ (ln 2)² σ² / V_trade`; not a number has no cost.
     #[test]
-    fn a_trade_variance_at_or_below_zero_is_no_trade() {
-        assert_eq!(trade_cost_of(0.1, 0.0), Some(f64::INFINITY));
-        assert_eq!(trade_cost_of(0.1, -1e-20), Some(f64::INFINITY));
-        let cost = trade_cost_of(0.1, 1e-3).expect("a cost");
-        assert!(
-            (cost - 0.5 * LN_2 * LN_2 * 0.01 / 1e-3).abs() < 1e-15,
-            "{cost}"
-        );
-        assert_eq!(trade_cost_of(0.1, f64::NAN), None);
+    fn a_trade_variance_at_rounding_level_is_no_trade() {
+        let variance = 1e-3;
+        for no_trade in [
+            0.0,
+            -1e-20,
+            variance * f64::EPSILON,
+            NO_TRADE_SHARE * variance,
+        ] {
+            assert_eq!(
+                trade_cost_of(0.1, variance, no_trade),
+                Some(f64::INFINITY),
+                "{no_trade:e}"
+            );
+        }
+        for trade in [(NO_TRADE_SHARE * variance).next_up(), 1e-4] {
+            let cost = trade_cost_of(0.1, variance, trade).expect("a cost");
+            assert!(cost.is_finite(), "{trade:e}");
+            assert!(
+                (cost - 0.5 * LN_2 * LN_2 * 0.01 / trade).abs() <= 1e-15 * cost,
+                "{cost}"
+            );
+        }
+        assert_eq!(trade_cost_of(0.1, variance, f64::NAN), None);
     }
 
     /// **Two units is the line**: a cost just under two marks the pair, two does not, and so do
@@ -412,8 +490,8 @@ mod tests {
 
     /// **A share that moves only with what the reads see has no trade.** Every carrier above 1%
     /// (`Beta(30, 60)`) and only the duplicated share uncertain: `S` is `σ` times a constant, so
-    /// `V_trade` is zero up to rounding — the cost is `+∞` or astronomically large — and the pair
-    /// is separately determined, its two numbers keeping their errors.
+    /// `V_trade` is zero up to rounding — the cost is `+∞` — and the pair is separately determined,
+    /// its two numbers keeping their errors.
     #[test]
     fn a_share_that_moves_only_with_what_is_seen_has_no_trade() {
         let mut variances = [1e-6; 8];
@@ -426,8 +504,7 @@ mod tests {
             &errors,
             &covariance_of(diagonal(variances), &[]),
         );
-        let cost = report.determined.trade_cost.expect("a cost");
-        assert!(cost > 1e12, "{cost}");
+        assert_eq!(report.determined.trade_cost, Some(f64::INFINITY));
         assert!(report.determined.separately_determined);
         assert_error_near(report.duplicated_share, 2e-3, 1e-15, "the duplicated share");
         assert!((report.determined.share_above.value - 0.01).abs() < 1e-12);
@@ -459,6 +536,57 @@ mod tests {
         assert_eq!(report.expected_heterozygosity.standard_error, None);
         assert_eq!(report.expected_alternative_frequency.standard_error, None);
         assert!((report.invariant_share.value - 0.9).abs() < 1e-15);
+    }
+
+    /// **A fixed non-reference share on its lower bound gets exact slopes**, not a central
+    /// difference whose step, 10⁻⁵ of 10⁻¹², is below the last place of the segregating share. Only
+    /// that share is uncertain (variance 10⁻⁶), so each derived number's error is its slope along
+    /// it times 10⁻³. The slopes are `∂S/∂p_fixed_alt = −P(f > 0.01)`, `∂Hexp/∂p_fixed_alt =
+    /// −2ab / ((a+b)(a+b+1))` and `∂E[f]/∂p_fixed_alt = 1 − a/(a+b)`; the code review measured the
+    /// difference giving −0.0867 against −0.0533 for `S` in the first case, −0.694 against −0.893 in
+    /// the second, and 0.694 against 0.786 for `E[f]` there. The exact `P(f > 0.01)` values are
+    /// SciPy's `betainc` (`tmp/review_CD/py/pfa_bound.py`).
+    #[test]
+    fn a_fixed_non_reference_share_on_its_bound_gets_exact_slopes() {
+        let cases = [
+            // (p_invariant, a, b, −∂S/∂p_fixed_alt)
+            (0.84, 0.02, 4.28, 0.05334440746162261),
+            (0.9, 0.6, 2.2, 0.893035940028032),
+            (0.99, 0.3, 14.5, 0.3988729496860478),
+        ];
+        for (p_invariant, a, b, share_seen) in cases {
+            let mut variances = [0.0; 8];
+            variances[cohort::P_FIXED_ALT] = 1e-6;
+            let report = DensityReport::of(
+                &FrequencyDensity {
+                    p_invariant,
+                    p_fixed_alt: 1e-12,
+                    a,
+                    b,
+                },
+                &[Some(1e-3); 8],
+                &covariance_of(diagonal(variances), &[]),
+            );
+            let what = format!("at p_invariant {p_invariant}, a {a}, b {b}");
+            assert_error_near(
+                report.determined.share_above,
+                share_seen * 1e-3,
+                1e-9,
+                &format!("S {what}"),
+            );
+            assert_error_near(
+                report.expected_heterozygosity,
+                2.0 * a * b / ((a + b) * (a + b + 1.0)) * 1e-3,
+                1e-12,
+                &format!("Hexp {what}"),
+            );
+            assert_error_near(
+                report.expected_alternative_frequency,
+                (1.0 - a / (a + b)) * 1e-3,
+                1e-12,
+                &format!("E[f] {what}"),
+            );
+        }
     }
 
     /// The returned fit of one of the stopping-rule report's reference runs, run to a decrement of
@@ -812,13 +940,12 @@ mod tests {
     /// **At 4 oracle accessions the density has no trade and the duplicated class is marked.**
     /// Every segregating position is above 1% (`a` = 15.4), so `σ` is the determined share and
     /// `V_trade` comes out at rounding level — the reference's own computation gave exactly zero;
-    /// here the cost is `+∞` or astronomically large, and the pair keeps its errors. The duplicated
-    /// pair costs 0.0055 units (`carrier_a` on its bound).
+    /// here the cost is `+∞`, and the pair keeps its errors. The duplicated pair costs 0.0055
+    /// units (`carrier_a` on its bound).
     #[test]
     fn at_four_oracle_samples_the_density_has_no_trade_and_the_duplicated_class_is_marked() {
         let (density, duplicated) = four_oracle_samples().reports();
-        let cost = density.determined.trade_cost.expect("a cost");
-        assert!(cost > 1e6, "the density's trade costs {cost}");
+        assert_eq!(density.determined.trade_cost, Some(f64::INFINITY));
         assert!(density.determined.separately_determined);
         assert_eq!(density.invariant_share.standard_error, Some(0.0003361555));
         assert_eq!(density.segregating_shape_a.standard_error, Some(36.77845));

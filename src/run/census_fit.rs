@@ -556,13 +556,26 @@ pub fn parameters_file_of(
         repeat_routing,
     )
     .with_snp_indel_fit_starts(Some(the_starts_as_written(&snp_indel_fit.starts)));
-    let seed_read_off_the_density = file.ordinary_site_prior.rung == SeedRung::FittedCurve;
-    file.with_what_the_data_determine(
-        seed_read_off_the_density.then(|| the_density_as_written(&snp_indel_fit.density_report)),
-        snp_indel_fit
-            .duplicated_report
-            .as_ref()
-            .map(the_duplicated_class_as_written),
+    let (fitted_density, duplicated_positions) = the_informational_tables_as_written(
+        file.ordinary_site_prior.rung,
+        &snp_indel_fit.density_report,
+        snp_indel_fit.duplicated_report.as_ref(),
+    );
+    file.with_what_the_data_determine(fitted_density, duplicated_positions)
+}
+
+/// **Format 4's two informational tables, as a file seeded on `rung` writes them**: the density's
+/// only on [`SeedRung::FittedCurve`], where the seed was read off the fitted density; the
+/// duplicated class's whenever the run fitted the class.
+fn the_informational_tables_as_written(
+    rung: SeedRung,
+    density: &DensityReport,
+    duplicated: Option<&DuplicatedReport>,
+) -> (Option<FittedDensity>, Option<FittedDuplicatedPositions>) {
+    let seed_read_off_the_density = rung == SeedRung::FittedCurve;
+    (
+        seed_read_off_the_density.then(|| the_density_as_written(density)),
+        duplicated.map(the_duplicated_class_as_written),
     )
 }
 
@@ -1553,5 +1566,137 @@ mod the_starts_in_the_file {
                 },
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod the_informational_tables_in_the_file {
+    //! **Format 4's two tables, written from the fit's reports** (`parameter_prepass_joint_fit.md`
+    //! §2.1.3): every field from the report field it names, and the density's table only on the
+    //! rung whose seed was read off the density.
+
+    use super::*;
+
+    /// A number with a value and an error unlike every other's here, so that a field written from
+    /// the wrong report field cannot match.
+    fn reported(value: f64, standard_error: Option<f64>) -> ReportedNumber {
+        ReportedNumber {
+            value,
+            standard_error,
+        }
+    }
+
+    /// A density whose pair is separately determined, so its two numbers keep their errors.
+    fn a_density_report() -> DensityReport {
+        DensityReport {
+            invariant_share: reported(0.84, Some(0.068)),
+            fixed_non_reference_share: reported(3.0e-5, Some(4.1e-6)),
+            segregating_shape_a: reported(0.31, Some(0.0089)),
+            segregating_shape_b: reported(4.28, None),
+            expected_heterozygosity: reported(1.19e-3, Some(3.0e-5)),
+            expected_alternative_frequency: reported(7.66e-4, Some(2.0e-5)),
+            determined: DeterminedShare {
+                share_above: reported(8.45e-3, Some(2.04e-4)),
+                trade_cost: Some(3.5),
+                separately_determined: true,
+            },
+        }
+    }
+
+    /// A duplicated class whose pair is not separately determined, so its two numbers have none.
+    fn a_duplicated_report() -> DuplicatedReport {
+        DuplicatedReport {
+            duplicated_share: reported(0.0154, None),
+            carrier_shape_a: reported(0.02, None),
+            carrier_shape_b: reported(1.41, Some(0.047)),
+            determined: DeterminedShare {
+                share_above: reported(1.21e-3, Some(3.4e-5)),
+                trade_cost: Some(0.116),
+                separately_determined: false,
+            },
+        }
+    }
+
+    fn informational(value: f64, standard_error: Option<f64>) -> InformationalNumber {
+        InformationalNumber {
+            value,
+            standard_error,
+        }
+    }
+
+    fn paired(
+        value: f64,
+        standard_error: Option<f64>,
+        separately_determined: bool,
+    ) -> PairedNumber {
+        PairedNumber {
+            value,
+            standard_error,
+            separately_determined,
+        }
+    }
+
+    /// The duplicated class's table as [`a_duplicated_report`] must be written.
+    fn the_duplicated_class_expected() -> FittedDuplicatedPositions {
+        FittedDuplicatedPositions {
+            stated_frequency: STATED_FREQUENCY,
+            duplicated_share: paired(0.0154, None, false),
+            carrier_shape_a: paired(0.02, None, false),
+            carrier_shape_b: informational(1.41, Some(0.047)),
+            share_with_carriers_above_stated_frequency: informational(1.21e-3, Some(3.4e-5)),
+        }
+    }
+
+    /// **On `fitted_curve` both tables are written, each field from its own report field**,
+    /// `separately_determined` from each pair's verdict.
+    #[test]
+    fn on_the_fitted_curve_every_field_is_its_report_field() {
+        let (density, duplicated) = the_informational_tables_as_written(
+            SeedRung::FittedCurve,
+            &a_density_report(),
+            Some(&a_duplicated_report()),
+        );
+        assert_eq!(
+            density,
+            Some(FittedDensity {
+                stated_frequency: STATED_FREQUENCY,
+                invariant_share: paired(0.84, Some(0.068), true),
+                fixed_non_reference_share: informational(3.0e-5, Some(4.1e-6)),
+                segregating_shape_a: paired(0.31, Some(0.0089), true),
+                segregating_shape_b: informational(4.28, None),
+                share_segregating_above_stated_frequency: informational(8.45e-3, Some(2.04e-4)),
+                expected_heterozygosity: informational(1.19e-3, Some(3.0e-5)),
+                expected_alternative_frequency: informational(7.66e-4, Some(2.0e-5)),
+            })
+        );
+        assert_eq!(duplicated, Some(the_duplicated_class_expected()));
+    }
+
+    /// **On every other rung the density's table is absent and the duplicated class's is still
+    /// written**; and a run that did not fit the class writes no table for it on any rung.
+    #[test]
+    fn on_any_other_rung_only_the_duplicated_class_is_written() {
+        for rung in [
+            SeedRung::NeutralShape,
+            SeedRung::ZeroDiversity,
+            SeedRung::StatedHeterozygosity,
+        ] {
+            let (density, duplicated) = the_informational_tables_as_written(
+                rung,
+                &a_density_report(),
+                Some(&a_duplicated_report()),
+            );
+            assert_eq!(density, None, "{rung:?}");
+            assert_eq!(
+                duplicated,
+                Some(the_duplicated_class_expected()),
+                "{rung:?}"
+            );
+        }
+        for rung in [SeedRung::FittedCurve, SeedRung::NeutralShape] {
+            let (_, duplicated) =
+                the_informational_tables_as_written(rung, &a_density_report(), None);
+            assert_eq!(duplicated, None, "{rung:?}");
+        }
     }
 }

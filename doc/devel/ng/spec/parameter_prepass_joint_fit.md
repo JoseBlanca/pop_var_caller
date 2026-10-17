@@ -373,6 +373,11 @@ input, not a property of the cohort's size.
   central differences, step `10⁻⁵ × |value|` on each number of the group, through the same functions
   that compute their values (`FrequencyDensity::expected_heterozygosity` and
   `expected_alternative_frequency`, [`fit.rs:145`, `:176`](../../../../src/parameter_estimation/joint/fit.rs#L145)).
+  *Amended 2026-10-17 (code review of steps C–D):* the three are linear in the shares —
+  `p_invariant`, `p_fixed_alt`, the duplicated share — with slopes set by the shapes alone, and
+  those slopes are now exact (`∂S/∂p_fixed_alt = −P(f > 0.01)`, `∂E[f]/∂p_fixed_alt = 1 − a/(a+b)`,
+  and so on); only the shapes are differenced. A share on its lower bound of 10⁻¹² gave a step below
+  the last place of `σ`: −0.087 for an exact −0.053.
 - **The errors of `S`, `Hexp` and `E[f]`** are `√Var` from the same `C` (the delta method). Where a
   number of the group has no covariance, they have no error.
 - **The test and the report** in a new module `src/parameter_estimation/joint/fit/determined.rs`,
@@ -470,7 +475,10 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
 - **Validation on read** (`validate.rs`): each value finite; each standard error finite and above
   zero; a number marked `separately_determined = false` that carries a `standard_error` is refused,
   naming its key. Nothing else is checked, since no run reads the tables. They round-trip: a file read
-  and written back holds the same tables.
+  and written back holds the same tables. *Amended 2026-10-17 (code review of steps C–D):* one more
+  check — either table in a file stamped before version 4 is refused, naming the table, as the
+  reader refuses a format-3 key in a file stamped 1 or 2 ([`parameters_file.md`](parameters_file.md)
+  §3.6).
 
 **Traps.**
 
@@ -479,7 +487,11 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
   inversion that could leave different parameters out.
 - **`V_trade` cancels where `σ` and `S` move together.** On the 4 oracle samples their correlation is
   1.0000 and `V_trade` comes out at rounding level, either sign. A `V_trade` at or below zero is *no
-  trade* (cost +∞, not marked), never a negative cost.
+  trade* (cost +∞, not marked), never a negative cost. *Amended 2026-10-17 (code review of steps
+  C–D):* the line is `V_trade ≤ 10⁻¹² · Var(σ)`, not zero. One unit in the last place above zero
+  gave a cost of 4.66 × 10¹⁶ and the log's "over a million" where exactly zero gave +∞ and "cannot
+  change without changing it" — one state, two wordings. A finite cost over a million is still
+  printed as that: drawn cohorts gave genuine costs of 1.4 and 4.3 million.
 - **`P(f > 0.01)` needs the regularised incomplete Beta function, which the crate does not have.**
   `libm` gives `lgamma` (`genetics::lgamma`, [`genetics.rs:55`](../../../../src/genetics.rs#L55)); the
   continued-fraction evaluation is about forty lines, beside it, through `crate::float` for `ln` and
