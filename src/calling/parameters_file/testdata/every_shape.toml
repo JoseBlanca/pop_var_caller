@@ -1,4 +1,4 @@
-format_version = 3
+format_version = 4
 ploidy = 2
 
 [fitted_from]
@@ -188,6 +188,57 @@ covered_positions = 9411027
 reference_concentration = 1.0
 alternative_concentration_total = 0.0006
 rung = "fitted_curve"
+
+[ordinary_site_prior.fitted_density]
+stated_frequency = 0.01
+
+[ordinary_site_prior.fitted_density.invariant_share]
+value = 0.8416
+separately_determined = false
+
+[ordinary_site_prior.fitted_density.fixed_non_reference_share]
+value = 0.0000296
+standard_error = 0.00000405
+
+[ordinary_site_prior.fitted_density.segregating_shape_a]
+value = 0.02
+separately_determined = false
+
+[ordinary_site_prior.fitted_density.segregating_shape_b]
+value = 4.28
+standard_error = 0.0605
+
+[ordinary_site_prior.fitted_density.share_segregating_above_stated_frequency]
+value = 0.008447
+standard_error = 0.000204
+
+[ordinary_site_prior.fitted_density.expected_heterozygosity]
+value = 0.0011895
+standard_error = 0.0000303
+
+[ordinary_site_prior.fitted_density.expected_alternative_frequency]
+value = 0.0007661
+standard_error = 0.0000202
+
+[duplicated_positions]
+stated_frequency = 0.01
+
+[duplicated_positions.duplicated_share]
+value = 0.026
+standard_error = 0.0023
+separately_determined = true
+
+[duplicated_positions.carrier_shape_a]
+value = 2.22
+standard_error = 0.439
+separately_determined = true
+
+[duplicated_positions.carrier_shape_b]
+value = 3.51
+standard_error = 0.522
+
+[duplicated_positions.share_with_carriers_above_stated_frequency]
+value = 0.026
 
 [repeat_tracts.fallback_between_locus_share]
 value = 0.22222222222222224

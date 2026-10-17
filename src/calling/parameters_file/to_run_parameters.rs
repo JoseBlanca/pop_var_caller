@@ -912,7 +912,11 @@ pub(super) mod tests {
             file.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
         )
-        .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
+        .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone())
+        .with_what_the_data_determine(
+            file.ordinary_site_prior.fitted_density.clone(),
+            file.duplicated_positions.clone(),
+        );
         assert_eq!(written, file);
     }
 
@@ -989,7 +993,11 @@ pub(super) mod tests {
             read.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
         )
-        .with_snp_indel_fit_starts(read.fitted_from.snp_indel_fit_starts.clone());
+        .with_snp_indel_fit_starts(read.fitted_from.snp_indel_fit_starts.clone())
+        .with_what_the_data_determine(
+            read.ordinary_site_prior.fitted_density.clone(),
+            read.duplicated_positions.clone(),
+        );
         assert_eq!(written.to_toml(), text);
     }
 
@@ -2224,7 +2232,11 @@ mod the_north_star_round_trip {
             file.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
         )
-        .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone());
+        .with_snp_indel_fit_starts(file.fitted_from.snp_indel_fit_starts.clone())
+        .with_what_the_data_determine(
+            file.ordinary_site_prior.fitted_density.clone(),
+            file.duplicated_positions.clone(),
+        );
         assert_eq!(again, file);
         assert_eq!(
             back.parameters.ssr_slippage_fits().at(ReadGroupId(0), 2, 6),

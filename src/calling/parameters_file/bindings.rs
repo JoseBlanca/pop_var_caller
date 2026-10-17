@@ -706,6 +706,8 @@ impl ParametersFile {
             sequencing_batches: _,
             inbreeding,
             ordinary_site_prior: _,
+            // Informational, and carries no warrant: a calling run reads none of it.
+            duplicated_positions: _,
             repeat_tracts,
             stated_constants,
             // Carries no warrant: it is what the run typed, not what a fit found, so there is

@@ -97,6 +97,8 @@ fn a_calling_run_writes_back_the_fit_starts_it_read() {
         inbreeding_by_sample: inbreeding.of_each_sample(&read_groups),
         census: CensusIdentity::of_a_run_with_no_census(),
         snp_indel_fit_starts: Some(starts.clone()),
+        fitted_density: None,
+        duplicated_positions: None,
     };
     let written = numbers.parameters_file(
         &read_groups,
@@ -115,6 +117,64 @@ fn a_calling_run_writes_back_the_fit_starts_it_read() {
         &StrRepeatCriteria::default(),
     );
     assert_eq!(written.fitted_from.snp_indel_fit_starts, None);
+}
+
+/// **A calling run writes back both informational tables it read** (format 4,
+/// `parameter_prepass_joint_fit.md` §2.1.3, traps): what the density determined and the duplicated
+/// class's numbers, through the same door as the fit's starts. No run reads them, so a writer that
+/// forgot them would compile and every calling run would strip them from the file it passes on.
+#[test]
+fn a_calling_run_writes_back_the_informational_tables_it_read() {
+    use crate::calling::parameters_file::{
+        FittedDensity, FittedDuplicatedPositions, InformationalNumber, PairedNumber,
+    };
+    let read_groups = ReadGroups::of_lanes(&[("HWI.3", "TS-1", "lib3")]);
+    let ploidy = Ploidy::try_new(2).expect("diploid");
+    let inbreeding = DeclaredInbreeding::nothing_said();
+    let number = |value: f64| InformationalNumber {
+        value,
+        standard_error: Some(value / 10.0),
+    };
+    let marked = |value: f64| PairedNumber {
+        value,
+        standard_error: None,
+        separately_determined: false,
+    };
+    let density = FittedDensity {
+        stated_frequency: 0.01,
+        invariant_share: marked(0.84),
+        fixed_non_reference_share: number(3e-5),
+        segregating_shape_a: marked(0.02),
+        segregating_shape_b: number(4.28),
+        share_segregating_above_stated_frequency: number(8.4e-3),
+        expected_heterozygosity: number(1.2e-3),
+        expected_alternative_frequency: number(7.7e-4),
+    };
+    let duplicated = FittedDuplicatedPositions {
+        stated_frequency: 0.01,
+        duplicated_share: marked(0.015),
+        carrier_shape_a: marked(0.02),
+        carrier_shape_b: number(1.41),
+        share_with_carriers_above_stated_frequency: number(1.2e-3),
+    };
+    let numbers = TheRunsNumbers {
+        parameters: RunParameters::of_defaults(&read_groups, ploidy, &inbreeding),
+        reads_behind_each_calibration: ReadsBehindEachCalibration::nothing_was_fitted(
+            read_groups.len(),
+        ),
+        inbreeding_by_sample: inbreeding.of_each_sample(&read_groups),
+        census: CensusIdentity::of_a_run_with_no_census(),
+        snp_indel_fit_starts: None,
+        fitted_density: Some(density.clone()),
+        duplicated_positions: Some(duplicated.clone()),
+    };
+    let written = numbers.parameters_file(
+        &read_groups,
+        &ReferenceDigest([3; 16]),
+        &StrRepeatCriteria::default(),
+    );
+    assert_eq!(written.ordinary_site_prior.fitted_density, Some(density));
+    assert_eq!(written.duplicated_positions, Some(duplicated));
 }
 
 /// **`--min-site-quality` takes zero and any finite positive quality, and refuses the rest** —

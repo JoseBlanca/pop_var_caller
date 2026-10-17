@@ -472,7 +472,7 @@ fn fit_and_assemble(
         &reference,
         &terms,
         &segmentation.inputs().repeat_tract_criteria,
-        &fit.generic.starts,
+        &fit.generic,
     );
     Ok((a_file_the_next_run_can_read(file)?, samples))
 }

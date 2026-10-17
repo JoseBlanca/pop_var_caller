@@ -34,7 +34,10 @@
 //!   says.
 //!
 //! `[fitted_from]` and `ploidy` are identity rather than numbers, and `format_version` is about
-//! the format.
+//! the format. **Format 4's two informational tables are not groups either**:
+//! `[ordinary_site_prior.fitted_density]` describes what the seed — already counted as
+//! [`GroupOfNumbers::OrdinarySitePrior`] — was read off, and `[duplicated_positions]` holds numbers
+//! no run reads (`parameter_prepass_joint_fit.md` §2.1.3).
 
 use super::{GroupOfNumbers, ParametersFile, SeedRung, Warrant, WhatTheRunFitted};
 

@@ -320,7 +320,7 @@ samples once, after B5.
   the 4 oracle samples `V_trade` came out one unit in the last place above zero and the cost at
   4.66 × 10¹⁶, a figure a reader should not be shown. The 1- and 4-sample files byte for byte, the
   oracle's checksums and the digests unchanged; only the log line moved.
-- ☐ **D2** **Own commit, do not bundle.** Parameters file format 4: the two tables'
+- ✅ **D2** **Own commit, do not bundle.** Parameters file format 4: the two tables'
   types (`deny_unknown_fields`), writing with their comments, reading, validation;
   `FORMAT_VERSION` = 4 (the test at `validate.rs:1854` flips to 4 read, 5 refused);
   `parameters_file_of` (`run/census_fit.rs:533`) passes the reports through builders beside
@@ -335,6 +335,17 @@ samples once, after B5.
   deleting them and diffing against B1's file. The defaults run's file moves by its version line
   alone. The digests re-recorded for those lines.
   *Depends:* C3. *Source:* §2.1.3, *What is reported* and its traps; `parameters_file.md` §3.6.
+  *Done 2026-10-17:* `FittedDensity` and `FittedDuplicatedPositions`, their numbers
+  `InformationalNumber` and `PairedNumber` (the pair's two always carry `separately_determined`,
+  by type); `OrdinarySitePrior::fitted_density` and `ParametersFile::duplicated_positions`;
+  `with_what_the_data_determine` beside `with_snp_indel_fit_starts`. Two choices: `parameters_file_of`
+  takes the `JointFit` in place of its starts, since it now needs three things of it; and the
+  density's table is written only on the `fitted_curve` rung (§2.1.3: absent means no density
+  was fitted). A calling run reading a version-3 file writes version 4 back, with no tables. The
+  oracle: the three VCF checksums unchanged; the defaults run's file moved by its version line
+  alone (diffed); the fitted file, and the 1- and 4-sample files, equal B's once the two tables are
+  deleted and the version set back. The three digest fixtures likewise (calls unchanged),
+  re-recorded.
 
 > **Checkpoint D (owner):** the oracle's fitted file (4 samples: the density not marked, the
 > duplicated class marked) and a one-sample file (both marked), with their log lines. The owner

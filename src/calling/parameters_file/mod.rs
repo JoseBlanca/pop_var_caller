@@ -92,6 +92,16 @@
 //! reference_concentration = 1.0
 //! alternative_concentration_total = 0.0006
 //! rung = "fitted_curve"
+//! [ordinary_site_prior.fitted_density]   # §3.6 — informational: no run reads it
+//! stated_frequency = 0.01
+//! invariant_share = { value = 0.8416, separately_determined = false }
+//! fixed_non_reference_share = { value = 2.960e-5, standard_error = 4.05e-6 }
+//! …
+//!
+//! [duplicated_positions]           # §3.6 — informational, and absent where the class was off
+//! stated_frequency = 0.01
+//! duplicated_share = { value = 1.543e-2, separately_determined = false }
+//! …
 //!
 //! [repeat_tracts]                  # §3.7
 //! fallback_between_locus_share = { value = 0.5, warrant = "defaulted" }
@@ -214,7 +224,15 @@ use serde::{Deserialize, Serialize};
 /// added without a version bump, before any build on main wrote version 3. A build made
 /// between the two changes reads and writes version 3 without it, and refuses a file that uses
 /// it with an unknown-variant error.
-pub const FORMAT_VERSION: u32 = 3;
+///
+/// **Version 4** adds two informational tables, which no run reads: what the prior's seed was read
+/// off, `[ordinary_site_prior.fitted_density]`, and the duplicated class's numbers,
+/// `[duplicated_positions]` — each number with its standard error, and the two numbers of each pair
+/// the data may not separate marked `separately_determined`
+/// (`doc/devel/ng/spec/parameter_prepass_joint_fit.md` §2.1.3; `parameters_file.md` §3.6). Every
+/// table refuses a key it does not know, so a version-3 build refuses a version-4 file rather than
+/// misreading it; this build reads a version-3 file with both tables absent.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -552,6 +570,10 @@ pub struct ParametersFile {
     pub inbreeding: Inbreeding,
     /// What the SNP/indel prior is seeded from (spec §3.6).
     pub ordinary_site_prior: OrdinarySitePrior,
+    /// **The duplicated class's numbers, for a human** — informational: a calling run reads none
+    /// of it (`parameter_prepass_joint_fit.md` §2.1.3). Absent where the run did not fit the class,
+    /// and in a file written before version 4.
+    pub duplicated_positions: Option<FittedDuplicatedPositions>,
     /// How often a read slips a repeat, and what lengths a tract's chromosomes are spread over
     /// (spec §3.7).
     pub repeat_tracts: RepeatTracts,
@@ -1033,6 +1055,70 @@ pub struct OrdinarySitePrior {
     pub alternative_concentration_total: f64,
     /// Which rung of the ladder the pair came from.
     pub rung: SeedRung,
+    /// **What the seed was read off, for a human** — informational: a calling run reads none of it
+    /// (spec §3.6, amended 2026-10-16). Absent where the run fitted no density — every rung but
+    /// [`SeedRung::FittedCurve`] — and in a file written before version 4.
+    pub fitted_density: Option<FittedDensity>,
+}
+
+/// **`[ordinary_site_prior.fitted_density]`: the frequency density the seed was read off**, its four
+/// numbers, the share of positions segregating above `stated_frequency`, and the two integrals the
+/// seed is built from (`parameter_prepass_joint_fit.md` §2.1.3).
+///
+/// **The invariant share and the first shape can trade against each other**: the data fix how many
+/// positions carry an allele at a frequency they can see, not how many carry one at all. Where they
+/// cannot tell the two apart, both are marked `separately_determined = false` and carry no
+/// standard error, and the share above `stated_frequency` is the number to quote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FittedDensity {
+    /// The frequency a share must lie above for the reads to see it: 0.01.
+    pub stated_frequency: f64,
+    pub invariant_share: PairedNumber,
+    pub fixed_non_reference_share: InformationalNumber,
+    pub segregating_shape_a: PairedNumber,
+    pub segregating_shape_b: InformationalNumber,
+    pub share_segregating_above_stated_frequency: InformationalNumber,
+    pub expected_heterozygosity: InformationalNumber,
+    pub expected_alternative_frequency: InformationalNumber,
+}
+
+/// **`[duplicated_positions]`: the duplicated class's numbers** — the share of positions some sample
+/// carries an extra copy of, the carrier Beta's two shapes, and the share of positions duplicated
+/// in more than `stated_frequency` of the panel (`parameter_prepass_joint_fit.md` §2.1.3).
+///
+/// **The share and the carrier Beta's first shape can trade against each other**, as the density's
+/// pair does; marked the same way, and the share above `stated_frequency` is then the one to quote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FittedDuplicatedPositions {
+    /// The share of the panel a duplication must be carried by for the reads to see it: 0.01.
+    pub stated_frequency: f64,
+    pub duplicated_share: PairedNumber,
+    pub carrier_shape_a: PairedNumber,
+    pub carrier_shape_b: InformationalNumber,
+    pub share_with_carriers_above_stated_frequency: InformationalNumber,
+}
+
+/// **A number of an informational table**: its value, and its standard error where the fit gives
+/// it one — absent means what it means elsewhere in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InformationalNumber {
+    pub value: f64,
+    pub standard_error: Option<f64>,
+}
+
+/// **One of a pair of numbers the data may not separate**: its value, whether the data separate it
+/// from the pair's other number, and its standard error — never present when it is not separately
+/// determined, since its curvature error then describes where the trade and the bounds left it,
+/// not the population.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairedNumber {
+    pub value: f64,
+    pub standard_error: Option<f64>,
+    pub separately_determined: bool,
 }
 
 /// Which rung produced the seed — the file's spelling of
@@ -1809,7 +1895,64 @@ mod tests {
                 reference_concentration: 1.0,
                 alternative_concentration_total: 0.000_6,
                 rung: SeedRung::FittedCurve,
+                // The 59-sample fit of the spec's example (§2.1.3), the density's pair marked.
+                fitted_density: Some(FittedDensity {
+                    stated_frequency: 0.01,
+                    invariant_share: PairedNumber {
+                        value: 0.8416,
+                        standard_error: None,
+                        separately_determined: false,
+                    },
+                    fixed_non_reference_share: InformationalNumber {
+                        value: 2.960e-5,
+                        standard_error: Some(4.05e-6),
+                    },
+                    segregating_shape_a: PairedNumber {
+                        value: 0.02,
+                        standard_error: None,
+                        separately_determined: false,
+                    },
+                    segregating_shape_b: InformationalNumber {
+                        value: 4.280,
+                        standard_error: Some(0.0605),
+                    },
+                    share_segregating_above_stated_frequency: InformationalNumber {
+                        value: 8.447e-3,
+                        standard_error: Some(2.04e-4),
+                    },
+                    expected_heterozygosity: InformationalNumber {
+                        value: 1.1895e-3,
+                        standard_error: Some(3.03e-5),
+                    },
+                    expected_alternative_frequency: InformationalNumber {
+                        value: 7.661e-4,
+                        standard_error: Some(2.02e-5),
+                    },
+                }),
             },
+            // The duplicated class separately determined, so the fixture carries both spellings of
+            // a pair's number: with its error and `true`, and without and `false` above.
+            duplicated_positions: Some(FittedDuplicatedPositions {
+                stated_frequency: 0.01,
+                duplicated_share: PairedNumber {
+                    value: 2.6e-2,
+                    standard_error: Some(2.3e-3),
+                    separately_determined: true,
+                },
+                carrier_shape_a: PairedNumber {
+                    value: 2.22,
+                    standard_error: Some(0.439),
+                    separately_determined: true,
+                },
+                carrier_shape_b: InformationalNumber {
+                    value: 3.51,
+                    standard_error: Some(0.522),
+                },
+                share_with_carriers_above_stated_frequency: InformationalNumber {
+                    value: 2.6e-2,
+                    standard_error: None,
+                },
+            }),
             repeat_tracts: RepeatTracts {
                 // **`fitted_here`, and the value is the median it says it is.** This fixture
                 // has one stratum with an allele length variation of its own, at a between-locus
@@ -2896,9 +3039,60 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_three() {
-        assert_eq!(FORMAT_VERSION, 3);
-        assert_eq!(a_file_using_every_shape().format_version, 3);
+    fn the_format_version_this_build_writes_is_four() {
+        assert_eq!(FORMAT_VERSION, 4);
+        assert_eq!(a_file_using_every_shape().format_version, 4);
+    }
+
+    /// **A version-3 file reads, with both informational tables absent** — the fixture with its
+    /// version set back and the two tables taken out of its text — and passes a run's checks; **a
+    /// version-5 file is refused**; and a version-3 build's reader, which knows neither table,
+    /// would refuse a version-4 file rather than misread it: every table refuses a key it does not
+    /// know, so the written text of either table, put in a file whose shape lacks it, is refused
+    /// naming the key.
+    #[test]
+    fn a_version_three_file_reads_without_the_tables_and_a_version_five_file_is_refused() {
+        let mut version_three = a_file_using_every_shape();
+        version_three.format_version = 3;
+        version_three.ordinary_site_prior.fitted_density = None;
+        version_three.duplicated_positions = None;
+        let read = ParametersFile::from_toml(&version_three.to_toml())
+            .expect("a version-3 file is a parameters file");
+        assert_eq!(read, version_three);
+        assert!(read.ordinary_site_prior.fitted_density.is_none());
+        assert!(read.duplicated_positions.is_none());
+        read.validate()
+            .expect("a version-3 file passes the checks a run applies");
+
+        let mut version_five = a_file_using_every_shape();
+        version_five.format_version = 5;
+        let read = ParametersFile::from_toml(&version_five.to_toml())
+            .expect("a version-5 file with this build's keys parses");
+        assert!(matches!(
+            read.validate(),
+            Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"
+        ));
+
+        let with_an_unknown_key = a_file_using_every_shape().to_toml().replace(
+            "stated_frequency = 0.01\n",
+            "stated_frequency = 0.01\nlater_key = 1.0\n",
+        );
+        assert!(
+            ParametersFile::from_toml(&with_an_unknown_key).is_err(),
+            "a key this build does not know, in either table, is refused"
+        );
+    }
+
+    /// **The informational tables are not groups of fitted numbers**: a file with both tables
+    /// reports the same groups fitted and not fitted as the same file without them
+    /// (`parameter_prepass_joint_fit.md` §2.1.3, traps).
+    #[test]
+    fn the_informational_tables_do_not_count_as_fitted_groups() {
+        let with = a_file_using_every_shape();
+        let mut without = with.clone();
+        without.ordinary_site_prior.fitted_density = None;
+        without.duplicated_positions = None;
+        assert_eq!(with.what_the_run_fitted(), without.what_the_run_fitted());
     }
 
     /// **Every `reach` in the fixture is true of the repeat count printed beside it.**

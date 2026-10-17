@@ -76,7 +76,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 3
+format_version = 4
 ploidy = 2
 
 [fitted_from]
@@ -231,6 +231,57 @@ by_sample = [
 reference_concentration = 1.0
 alternative_concentration_total = 0.0006
 rung = "fitted_curve"
+
+[ordinary_site_prior.fitted_density]
+# What the seed above was read off. Informational: a calling run reads none of
+# it, and editing it changes nothing.
+#
+# The population's allele-frequency density in four numbers: the share of
+# positions where the population carries only the reference base
+# (`invariant_share`), the share where it carries only a non-reference base
+# (`fixed_non_reference_share`), and the two shapes of the Beta the
+# non-reference allele's frequency follows at the positions that segregate.
+# `expected_heterozygosity` and `expected_alternative_frequency` are the two
+# integrals of it the seed above was built from.
+#
+# **A position segregating at one in a million looks invariant in any cohort
+# that can be sequenced**, so the reads fix how many positions segregate at a
+# frequency they can see — `share_segregating_above_stated_frequency`, the share
+# above `stated_frequency` — and not how many segregate at all.
+# `invariant_share` and `segregating_shape_a` trade against each other along
+# what the reads cannot see: more invariant positions against more of the Beta's
+# weight near zero. Where the data do not tell the two apart, both say
+# `separately_determined = false` and carry no `standard_error`, and the number
+# to quote is `share_segregating_above_stated_frequency`.
+stated_frequency = 0.01
+invariant_share = { value = 0.8416, separately_determined = false }
+fixed_non_reference_share = { value = 2.96e-5, standard_error = 4.05e-6 }
+segregating_shape_a = { value = 0.02, separately_determined = false }
+segregating_shape_b = { value = 4.28, standard_error = 0.0605 }
+share_segregating_above_stated_frequency = { value = 0.008447, standard_error = 0.000204 }
+expected_heterozygosity = { value = 0.0011895, standard_error = 3.03e-5 }
+expected_alternative_frequency = { value = 0.0007661, standard_error = 2.02e-5 }
+
+[duplicated_positions]
+# The duplicated class's numbers: positions where some sample carries more
+# copies of a stretch than the reference does. Informational: a calling run
+# reads none of it, and editing it changes nothing.
+#
+# `duplicated_share` is the share of positions some sample carries an extra copy
+# of; the carrier Beta's two shapes describe what share of the panel carries a
+# given duplication. **A duplication carried by one plant in a thousand has no
+# carrier among a few samples**, so the reads fix the share of positions
+# duplicated in more than `stated_frequency` of the panel —
+# `share_with_carriers_above_stated_frequency` — and not how many are duplicated
+# at all. `duplicated_share` and `carrier_shape_a` trade against each other
+# along what the reads cannot see. Where the data do not tell the two apart,
+# both say `separately_determined = false` and carry no `standard_error`, and
+# the number to quote is `share_with_carriers_above_stated_frequency`.
+stated_frequency = 0.01
+duplicated_share = { value = 0.026, standard_error = 0.0023, separately_determined = true }
+carrier_shape_a = { value = 2.22, standard_error = 0.439, separately_determined = true }
+carrier_shape_b = { value = 3.51, standard_error = 0.522 }
+share_with_carriers_above_stated_frequency = { value = 0.026 }
 
 [repeat_tracts]
 # Everything about repeat tracts. A **stratum** is a class of tract, and every

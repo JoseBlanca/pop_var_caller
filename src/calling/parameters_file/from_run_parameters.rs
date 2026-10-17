@@ -16,13 +16,14 @@ use super::bindings::hex_digest;
 use super::{
     BaseQualityCalibration, BaseQualityCalibrationRow, BetweenLocusShare, CensusIdentity,
     Contamination, ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, CurveReach,
-    EvidenceCount, FORMAT_VERSION, Inbreeding, InbreedingRow, InputsFittedFrom, LevelOrigin,
-    LevelSmoothing, OrdinarySitePrior, ParametersFile, PeriodAlleleLengthVariationRow,
-    ReadGroupBatchRow, ReadGroupRow, RepeatRouting, RepeatTracts, SampleBatchRow, SeedRung,
-    SequencingBatches, ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin,
-    SlippageCurve, SlippageGroupRow, SlippageRow, SnpIndelFitStart, StatedConstants,
-    StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant, WarrantedValue,
-    between_locus_share_error_of, between_locus_share_of, concentration_error_of,
+    EvidenceCount, FORMAT_VERSION, FittedDensity, FittedDuplicatedPositions, Inbreeding,
+    InbreedingRow, InputsFittedFrom, LevelOrigin, LevelSmoothing, OrdinarySitePrior,
+    ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, RepeatRouting,
+    RepeatTracts, SampleBatchRow, SeedRung, SequencingBatches, ShareCurve, ShareCurveRung,
+    ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve, SlippageGroupRow, SlippageRow,
+    SnpIndelFitStart, StatedConstants, StratumAlleleLengthVariationRow, SubstitutionRateRow,
+    Warrant, WarrantedValue, between_locus_share_error_of, between_locus_share_of,
+    concentration_error_of,
 };
 use crate::calling::genotype_prior::SeedRegime;
 use crate::calling::likelihood::{ContaminationView, ReadGroupCalibration};
@@ -412,7 +413,11 @@ impl ParametersFile {
                 reference_concentration: run.prior_seed().alpha_ref(),
                 alternative_concentration_total: run.prior_seed().alpha_alt_total(),
                 rung: run.prior_seed().regime().into(),
+                // What the seed was read off is not part of what calling scores with: the fit
+                // that made it adds it, with [`Self::with_what_the_data_determine`].
+                fitted_density: None,
             },
+            duplicated_positions: None,
             repeat_routing: Some(RepeatRouting::of(repeat_routing)),
             repeat_tracts: repeat_tracts_of(run),
             stated_constants: StatedConstants {
@@ -445,6 +450,24 @@ impl ParametersFile {
     #[must_use]
     pub fn with_snp_indel_fit_starts(mut self, starts: Option<Vec<SnpIndelFitStart>>) -> Self {
         self.fitted_from.snp_indel_fit_starts = starts;
+        self
+    }
+
+    /// **Record what the data determined about the fitted density and the duplicated class** —
+    /// the two informational tables of format 4 (`parameter_prepass_joint_fit.md` §2.1.3) —
+    /// `None` for one the run has nothing to say about.
+    ///
+    /// **A builder beside [`Self::with_snp_indel_fit_starts`], for its reason**: no run reads the
+    /// tables, so they are not part of what calling scored with, and only the fit that made them
+    /// and a calling run writing back the file it read have them to write.
+    #[must_use]
+    pub fn with_what_the_data_determine(
+        mut self,
+        fitted_density: Option<FittedDensity>,
+        duplicated_positions: Option<FittedDuplicatedPositions>,
+    ) -> Self {
+        self.ordinary_site_prior.fitted_density = fitted_density;
+        self.duplicated_positions = duplicated_positions;
         self
     }
 }
@@ -3733,7 +3756,11 @@ mod one_writer_three_sources {
             supplied.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
         )
-        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone());
+        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone())
+        .with_what_the_data_determine(
+            supplied.ordinary_site_prior.fitted_density.clone(),
+            supplied.duplicated_positions.clone(),
+        );
 
         assert_eq!(written, supplied);
     }
@@ -3933,7 +3960,11 @@ mod one_writer_three_sources {
             supplied.fitted_from.census.clone(),
             &StrRepeatCriteria::default(),
         )
-        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone());
+        .with_snp_indel_fit_starts(supplied.fitted_from.snp_indel_fit_starts.clone())
+        .with_what_the_data_determine(
+            supplied.ordinary_site_prior.fitted_density.clone(),
+            supplied.duplicated_positions.clone(),
+        );
 
         assert_eq!(
             written.base_quality_calibration.by_read_group[0].error_probability_multiplier,

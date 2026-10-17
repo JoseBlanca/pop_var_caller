@@ -62,9 +62,10 @@
 //! reading it as evidence would put a number the writer knows it lost into a run's report.
 
 use super::{
-    BetweenLocusShare, ContaminationMeasurement, EvidenceCount, LevelSmoothing, ParametersFile,
-    ParametersFileError, ShareCurve, ShareSmoothing, SlippageCurve, StartOutcome, Warrant,
-    WarrantedValue, between_locus_share_of, concentration_error_of,
+    BetweenLocusShare, ContaminationMeasurement, EvidenceCount, InformationalNumber,
+    LevelSmoothing, PairedNumber, ParametersFile, ParametersFileError, ShareCurve, ShareSmoothing,
+    SlippageCurve, StartOutcome, Warrant, WarrantedValue, between_locus_share_of,
+    concentration_error_of,
 };
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
 use crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
@@ -112,8 +113,70 @@ impl ParametersFile {
         self.contamination_is_absent_or_measured()?;
         self.every_inbreeding_coefficient_is_a_fraction()?;
         self.the_prior_seed_is_a_pair_of_concentrations()?;
+        self.the_informational_tables_hold_numbers()?;
         self.the_repeat_tract_numbers_are_what_they_claim()?;
         self.every_stated_constant_is_in_range()?;
+        Ok(())
+    }
+
+    /// **The two informational tables of format 4 hold numbers, and a marked number carries no
+    /// error** (`parameter_prepass_joint_fit.md` §2.1.3): every value finite, every standard error
+    /// a spread, and a number marked `separately_determined = false` refused if it carries a
+    /// `standard_error`, since its curvature error describes where the trade and the bounds left it
+    /// and not the population. Nothing else is checked: no run reads the tables.
+    fn the_informational_tables_hold_numbers(&self) -> Result<(), ParametersFileError> {
+        if let Some(density) = &self.ordinary_site_prior.fitted_density {
+            let at = "ordinary_site_prior.fitted_density";
+            finite(format!("{at}.stated_frequency"), density.stated_frequency)?;
+            a_paired_number(&format!("{at}.invariant_share"), &density.invariant_share)?;
+            an_informational_number(
+                &format!("{at}.fixed_non_reference_share"),
+                &density.fixed_non_reference_share,
+            )?;
+            a_paired_number(
+                &format!("{at}.segregating_shape_a"),
+                &density.segregating_shape_a,
+            )?;
+            an_informational_number(
+                &format!("{at}.segregating_shape_b"),
+                &density.segregating_shape_b,
+            )?;
+            an_informational_number(
+                &format!("{at}.share_segregating_above_stated_frequency"),
+                &density.share_segregating_above_stated_frequency,
+            )?;
+            an_informational_number(
+                &format!("{at}.expected_heterozygosity"),
+                &density.expected_heterozygosity,
+            )?;
+            an_informational_number(
+                &format!("{at}.expected_alternative_frequency"),
+                &density.expected_alternative_frequency,
+            )?;
+        }
+        if let Some(duplicated) = &self.duplicated_positions {
+            let at = "duplicated_positions";
+            finite(
+                format!("{at}.stated_frequency"),
+                duplicated.stated_frequency,
+            )?;
+            a_paired_number(
+                &format!("{at}.duplicated_share"),
+                &duplicated.duplicated_share,
+            )?;
+            a_paired_number(
+                &format!("{at}.carrier_shape_a"),
+                &duplicated.carrier_shape_a,
+            )?;
+            an_informational_number(
+                &format!("{at}.carrier_shape_b"),
+                &duplicated.carrier_shape_b,
+            )?;
+            an_informational_number(
+                &format!("{at}.share_with_carriers_above_stated_frequency"),
+                &duplicated.share_with_carriers_above_stated_frequency,
+            )?;
+        }
         Ok(())
     }
 
@@ -1168,6 +1231,40 @@ fn finite(at: impl Into<String>, value: f64) -> Result<(), ParametersFileError> 
     ))
 }
 
+/// A number of an informational table at `at`: a finite value, and a standard error that is a
+/// spread where it has one.
+fn an_informational_number(
+    at: &str,
+    number: &InformationalNumber,
+) -> Result<(), ParametersFileError> {
+    finite(format!("{at}.value"), number.value)?;
+    if let Some(error) = number.standard_error {
+        a_standard_error(&format!("{at}.standard_error"), error)?;
+    }
+    Ok(())
+}
+
+/// One of a pair of numbers at `at`: as [`an_informational_number`], and **no standard error where
+/// it is marked not separately determined**, refused naming its key.
+fn a_paired_number(at: &str, number: &PairedNumber) -> Result<(), ParametersFileError> {
+    if !number.separately_determined && number.standard_error.is_some() {
+        return Err(refuse(
+            format!("{at}.standard_error"),
+            "is given for a number marked `separately_determined = false`, and such a number has \
+             none: the data do not tell it apart from the other number of its pair, so its \
+             curvature error says where the trade left it, not how well it is measured; delete \
+             the key",
+        ));
+    }
+    an_informational_number(
+        at,
+        &InformationalNumber {
+            value: number.value,
+            standard_error: number.standard_error,
+        },
+    )
+}
+
 /// **A standard error is a spread**: finite and above zero. An error of zero would claim the number
 /// known exactly, which no fit can, and the writer leaves the key out rather than write one.
 fn a_standard_error(at: &str, error: f64) -> Result<(), ParametersFileError> {
@@ -1851,8 +1948,71 @@ mod tests {
         assert_eq!(field, "format_version");
         assert!(problem.contains("written by a newer build"), "{problem}");
         accepted(|file| file.format_version = 3);
-        let (field, _) = refused(|file| file.format_version = 4);
+        accepted(|file| file.format_version = 4);
+        let (field, _) = refused(|file| file.format_version = 5);
         assert_eq!(field, "format_version");
+    }
+
+    /// **The informational tables of format 4 hold numbers, and a marked number carries no error**
+    /// (`parameter_prepass_joint_fit.md` §2.1.3). Each edit to the fixture — which marks the
+    /// density's pair and not the duplicated class's — is refused naming its key: a marked number
+    /// given a `standard_error`; a value that is not a number, in either table; a standard error at
+    /// zero. Both tables absent, as a version-3 file reads, are accepted, and so is a pair that is
+    /// separately determined with its errors.
+    #[test]
+    fn the_informational_tables_are_refused_where_they_mean_nothing() {
+        let (field, problem) = refused(|file| {
+            if let Some(density) = file.ordinary_site_prior.fitted_density.as_mut() {
+                density.invariant_share.standard_error = Some(0.068);
+            }
+        });
+        assert_eq!(
+            field,
+            "ordinary_site_prior.fitted_density.invariant_share.standard_error"
+        );
+        assert!(
+            problem.contains("separately_determined = false"),
+            "{problem}"
+        );
+        let (field, _) = refused(|file| {
+            if let Some(duplicated) = file.duplicated_positions.as_mut() {
+                duplicated.carrier_shape_a.separately_determined = false;
+            }
+        });
+        assert_eq!(field, "duplicated_positions.carrier_shape_a.standard_error");
+        for bad in [f64::NAN, f64::INFINITY] {
+            let (field, _) = refused(|file| {
+                if let Some(density) = file.ordinary_site_prior.fitted_density.as_mut() {
+                    density.expected_heterozygosity.value = bad;
+                }
+            });
+            assert_eq!(
+                field,
+                "ordinary_site_prior.fitted_density.expected_heterozygosity.value"
+            );
+            let (field, _) = refused(|file| {
+                if let Some(duplicated) = file.duplicated_positions.as_mut() {
+                    duplicated.stated_frequency = bad;
+                }
+            });
+            assert_eq!(field, "duplicated_positions.stated_frequency");
+        }
+        let (field, _) = refused(|file| {
+            if let Some(duplicated) = file.duplicated_positions.as_mut() {
+                duplicated.carrier_shape_b.standard_error = Some(0.0);
+            }
+        });
+        assert_eq!(field, "duplicated_positions.carrier_shape_b.standard_error");
+        accepted(|file| {
+            file.ordinary_site_prior.fitted_density = None;
+            file.duplicated_positions = None;
+        });
+        accepted(|file| {
+            if let Some(density) = file.ordinary_site_prior.fitted_density.as_mut() {
+                density.invariant_share.separately_determined = true;
+                density.invariant_share.standard_error = Some(0.068);
+            }
+        });
     }
 
     /// **What version 2 added is checked as the rest is.** A standard error is a spread — finite

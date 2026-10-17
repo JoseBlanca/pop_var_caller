@@ -237,7 +237,16 @@ mod tests {
     /// prior's `reference_concentration`, 48.274 to 17.240, and `alternative_concentration_total`,
     /// 1.79 × 10⁻² to 1.63 × 10⁻²; the repeat-tract row and fallback F in their tenth significant
     /// figure. Recorded on macOS (arm64) only; it was `69445d42684b942826e43bdc02d49a3a`.
-    const FITTED_PARAMETERS_MD5: &str = "accb6b70b146bb0c83bfcedad8333871";
+    ///
+    /// **Re-recorded 2026-10-17 a third time** (plan step D2) for the parameters file's format 4:
+    /// the version line, 3 to 4, and the two informational tables
+    /// (`parameter_prepass_joint_fit.md` §2.1.3) — the density's, with its pair marked not
+    /// separately determined (invariant share 0.971, first shape 1.33) and no number carrying an
+    /// error, and the duplicated class's, marked the same way. With the two tables deleted and the
+    /// version set back, the file's checksum is the old one; nothing a run reads moved, and the
+    /// calls' checksum below did not. Recorded on macOS (arm64) only; it was
+    /// `accb6b70b146bb0c83bfcedad8333871`.
+    const FITTED_PARAMETERS_MD5: &str = "18ed96038479b4f9c860f1cb830038b0";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -407,7 +416,14 @@ mod tests {
     /// the ordinary-site prior's concentrations 47.53 to 18.94 and 0.0194 to 0.0148, the starts'
     /// rows, and the repeat-tract row and fallback F in their tenth significant figure. Recorded
     /// on macOS (arm64) only; it was `d5a9d68eb60e8ac53f61fa1601fb7d50`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "16cdb5d1f7ab2ece9d505bdba3586eb4";
+    ///
+    /// **Re-recorded 2026-10-17 a fourth time** (plan step D2), for the reason
+    /// [`FITTED_PARAMETERS_MD5`] gives: the version line and the two informational tables, both
+    /// pairs marked (invariant share 0.974, first shape 1.37; duplicated share 0.0041, carrier
+    /// shape 3.10), no number with an error. The tables deleted and the version set back give the
+    /// old checksum; the calls' did not move. Recorded on macOS (arm64) only; it was
+    /// `16cdb5d1f7ab2ece9d505bdba3586eb4`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "0138ccccf14e750e671290de06b58afd";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -543,7 +559,14 @@ mod tests {
     /// prior's concentrations 49.91 to 49.52 and 0.0498 to 0.0526; the starts' rows; and the
     /// repeat-tract row and fallback F in their eleventh significant figure. Recorded on macOS
     /// (arm64) only; it was `ecd5c80409b9b372d50015d6c765c297`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "c2d56c4117a633b23c475ee7e422a53b";
+    ///
+    /// **Re-recorded 2026-10-17 again** (plan step D2), for the reason [`FITTED_PARAMETERS_MD5`]
+    /// gives: the version line and the two informational tables, both pairs marked — the density's
+    /// first shape at 0.063 against an invariant share of 0.153, the duplicated share on its bound
+    /// of 0.05 — and only the fixed non-reference share carrying an error. The tables deleted and
+    /// the version set back give the old checksum; the calls' did not move. Recorded on macOS
+    /// (arm64) only; it was `c2d56c4117a633b23c475ee7e422a53b`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "728256994c0c90109ae7f4a15eeb00a9";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.

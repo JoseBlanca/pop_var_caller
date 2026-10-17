@@ -67,11 +67,11 @@ use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
 
 use super::{
     BaseQualityCalibrationRow, CensusTerm, ContaminationMeasurement, ContaminationRow, CurveReach,
-    EvidenceCount, GroupOfNumbers, InbreedingRow, LevelOrigin, LevelSmoothing, ParametersFile,
-    PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow, SampleBatchRow, SeedRung,
-    ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin, SlippageCurve,
-    SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome, StratumAlleleLengthVariationRow,
-    SubstitutionRateRow, Warrant, WarrantedValue,
+    EvidenceCount, GroupOfNumbers, InbreedingRow, InformationalNumber, LevelOrigin, LevelSmoothing,
+    PairedNumber, ParametersFile, PeriodAlleleLengthVariationRow, ReadGroupBatchRow, ReadGroupRow,
+    SampleBatchRow, SeedRung, ShareCurve, ShareCurveRung, ShareShape, ShareSmoothing, SharesOrigin,
+    SlippageCurve, SlippageGroupRow, SlippageRow, SnpIndelFitStart, StartOutcome,
+    StratumAlleleLengthVariationRow, SubstitutionRateRow, Warrant, WarrantedValue,
 };
 
 impl ParametersFile {
@@ -329,6 +329,99 @@ impl ParametersFile {
             "rung",
             &a_toml_string(the_word_for_seed_rung(self.ordinary_site_prior.rung)),
         );
+        // **Informational, and absent where there is nothing to say** — the run fitted no
+        // density, or the file came from a build before format 4.
+        if let Some(density) = &self.ordinary_site_prior.fitted_density {
+            section(&mut out, "ordinary_site_prior.fitted_density");
+            note(
+                &mut out,
+                &[
+                    "What the seed above was read off. Informational: a calling run reads none of it, and editing it changes nothing.",
+                    "",
+                    "The population's allele-frequency density in four numbers: the share of positions where the population carries only the reference base (`invariant_share`), the share where it carries only a non-reference base (`fixed_non_reference_share`), and the two shapes of the Beta the non-reference allele's frequency follows at the positions that segregate. `expected_heterozygosity` and `expected_alternative_frequency` are the two integrals of it the seed above was built from.",
+                    "",
+                    "**A position segregating at one in a million looks invariant in any cohort that can be sequenced**, so the reads fix how many positions segregate at a frequency they can see — `share_segregating_above_stated_frequency`, the share above `stated_frequency` — and not how many segregate at all. `invariant_share` and `segregating_shape_a` trade against each other along what the reads cannot see: more invariant positions against more of the Beta's weight near zero. Where the data do not tell the two apart, both say `separately_determined = false` and carry no `standard_error`, and the number to quote is `share_segregating_above_stated_frequency`.",
+                ],
+            );
+            scalar(
+                &mut out,
+                "stated_frequency",
+                &a_toml_float(density.stated_frequency),
+            );
+            scalar(
+                &mut out,
+                "invariant_share",
+                &a_paired_number(&density.invariant_share),
+            );
+            scalar(
+                &mut out,
+                "fixed_non_reference_share",
+                &an_informational_number(&density.fixed_non_reference_share),
+            );
+            scalar(
+                &mut out,
+                "segregating_shape_a",
+                &a_paired_number(&density.segregating_shape_a),
+            );
+            scalar(
+                &mut out,
+                "segregating_shape_b",
+                &an_informational_number(&density.segregating_shape_b),
+            );
+            scalar(
+                &mut out,
+                "share_segregating_above_stated_frequency",
+                &an_informational_number(&density.share_segregating_above_stated_frequency),
+            );
+            scalar(
+                &mut out,
+                "expected_heterozygosity",
+                &an_informational_number(&density.expected_heterozygosity),
+            );
+            scalar(
+                &mut out,
+                "expected_alternative_frequency",
+                &an_informational_number(&density.expected_alternative_frequency),
+            );
+        }
+        // **A section of its own, since nothing in the prior comes from it**; absent where the run
+        // did not fit the class.
+        if let Some(duplicated) = &self.duplicated_positions {
+            section(&mut out, "duplicated_positions");
+            note(
+                &mut out,
+                &[
+                    "The duplicated class's numbers: positions where some sample carries more copies of a stretch than the reference does. Informational: a calling run reads none of it, and editing it changes nothing.",
+                    "",
+                    "`duplicated_share` is the share of positions some sample carries an extra copy of; the carrier Beta's two shapes describe what share of the panel carries a given duplication. **A duplication carried by one plant in a thousand has no carrier among a few samples**, so the reads fix the share of positions duplicated in more than `stated_frequency` of the panel — `share_with_carriers_above_stated_frequency` — and not how many are duplicated at all. `duplicated_share` and `carrier_shape_a` trade against each other along what the reads cannot see. Where the data do not tell the two apart, both say `separately_determined = false` and carry no `standard_error`, and the number to quote is `share_with_carriers_above_stated_frequency`.",
+                ],
+            );
+            scalar(
+                &mut out,
+                "stated_frequency",
+                &a_toml_float(duplicated.stated_frequency),
+            );
+            scalar(
+                &mut out,
+                "duplicated_share",
+                &a_paired_number(&duplicated.duplicated_share),
+            );
+            scalar(
+                &mut out,
+                "carrier_shape_a",
+                &a_paired_number(&duplicated.carrier_shape_a),
+            );
+            scalar(
+                &mut out,
+                "carrier_shape_b",
+                &an_informational_number(&duplicated.carrier_shape_b),
+            );
+            scalar(
+                &mut out,
+                "share_with_carriers_above_stated_frequency",
+                &an_informational_number(&duplicated.share_with_carriers_above_stated_frequency),
+            );
+        }
 
         section(&mut out, "repeat_tracts");
         let tracts = &self.repeat_tracts;
@@ -1197,6 +1290,30 @@ fn a_read_group_row(row: &ReadGroupRow) -> String {
         ("library", a_toml_string(&row.library)),
         ("sample", a_toml_string(&row.sample)),
     ])
+}
+
+/// `{ value = …, standard_error = … }` — a number of an informational table, its error left out
+/// where it has none.
+fn an_informational_number(number: &InformationalNumber) -> String {
+    let mut fields = vec![("value", a_toml_float(number.value))];
+    if let Some(error) = number.standard_error {
+        fields.push(("standard_error", a_toml_float(error)));
+    }
+    an_inline_table(&fields)
+}
+
+/// `{ value = …, standard_error = …, separately_determined = … }` — one of a pair of numbers the
+/// data may not separate; it always says whether they do.
+fn a_paired_number(number: &PairedNumber) -> String {
+    let mut fields = vec![("value", a_toml_float(number.value))];
+    if let Some(error) = number.standard_error {
+        fields.push(("standard_error", a_toml_float(error)));
+    }
+    fields.push((
+        "separately_determined",
+        number.separately_determined.to_string(),
+    ));
+    an_inline_table(&fields)
 }
 
 fn a_fit_start(start: &SnpIndelFitStart) -> String {

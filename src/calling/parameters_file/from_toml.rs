@@ -700,18 +700,18 @@ mod tests {
         assert_eq!(read.format_version, 3);
         read.validate()
             .expect("a version-1 file passes the checks a run applies");
-        assert_eq!(
-            read,
-            the_fixture_without_what_versions_two_and_three_added()
-        );
+        assert_eq!(read, the_fixture_without_what_versions_two_to_four_added());
     }
 
     /// Today's fixture with every key added since version 1 taken out — the keys version 2 added,
-    /// and F's standard error and the row on penalised curves, which version 3 added — as a file
-    /// written before format 3 reads back. It says version 3, which is what reading such a file
-    /// stamps on it.
-    pub(super) fn the_fixture_without_what_versions_two_and_three_added() -> ParametersFile {
+    /// F's standard error and the row on penalised curves, which version 3 added, and the two
+    /// informational tables version 4 added — as a file written before format 3 reads back. It
+    /// says version 3, which is what reading such a file stamps on it.
+    pub(super) fn the_fixture_without_what_versions_two_to_four_added() -> ParametersFile {
         let mut file = a_file_using_every_shape();
+        file.format_version = 3;
+        file.ordinary_site_prior.fitted_density = None;
+        file.duplicated_positions = None;
         file.fitted_from.snp_indel_fit_starts = None;
         for row in &mut file.base_quality_calibration.by_read_group {
             row.error_probability_multiplier.standard_error = None;
@@ -1238,7 +1238,7 @@ mod files_written_before_format_3 {
     use super::super::{
         Warrant, between_locus_share_error_of, between_locus_share_of, concentration_of,
     };
-    use super::tests::the_fixture_without_what_versions_two_and_three_added;
+    use super::tests::the_fixture_without_what_versions_two_to_four_added;
     use super::*;
 
     /// The fixture as the last version-1 build wrote it.
@@ -1348,7 +1348,7 @@ mod files_written_before_format_3 {
             );
             assert_eq!(
                 read,
-                the_fixture_without_what_versions_two_and_three_added(),
+                the_fixture_without_what_versions_two_to_four_added(),
                 "{spelling}: every other number is the fixture's own"
             );
             read.validate()
@@ -1441,10 +1441,10 @@ mod files_written_before_format_3 {
     /// projected into a run's parameters, written back as the run writes the file it scored
     /// with, and written back again from that.
     ///
-    /// The first write is format 3 and is the migrated file itself, so the F the migration
-    /// picked for each concentration is the F a format-3 build writes for the concentration
-    /// calling then holds. The second write shows the run's parameters do not drift a second
-    /// time.
+    /// The first write is the migrated file itself but for its version line — this build writes
+    /// format 4, and a format-3 file has no key format 4 adds to — so the F the migration picked
+    /// for each concentration is the F this build writes for the concentration calling then
+    /// holds. The second write shows the run's parameters do not drift a second time.
     #[test]
     fn a_file_mains_build_wrote_survives_a_calling_run_byte_for_byte() {
         use super::super::tests::THE_REFERENCE_A_RUN_FITTED_AGAINST;
@@ -1473,8 +1473,10 @@ mod files_written_before_format_3 {
             written
         };
 
-        let read = ParametersFile::from_toml(&version_2_as_main_spelled_it())
+        let mut read = ParametersFile::from_toml(&version_2_as_main_spelled_it())
             .expect("a file main's build wrote reads");
+        assert_eq!(read.format_version, 3, "the migration writes format 3");
+        read.format_version = super::super::FORMAT_VERSION;
         let once = written_back(&read);
         assert_eq!(once, read, "the run writes the migrated file");
         assert_eq!(once.to_toml(), read.to_toml(), "byte for byte");

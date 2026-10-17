@@ -32,8 +32,8 @@ use crate::calling::allele_candidates::{CandidateSelectionConfig, MaxCandidateAl
 use crate::calling::inference::{CallingLoopConfig, DiscoveryMode, RunnableCallingLoopConfig};
 use crate::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::calling::parameters_file::{
-    CensusIdentity, DeclaredInbreeding, ParametersFile, ParametersFileError,
-    ReadsBehindEachCalibration, SnpIndelFitStart, beside_the_vcf,
+    CensusIdentity, DeclaredInbreeding, FittedDensity, FittedDuplicatedPositions, ParametersFile,
+    ParametersFileError, ReadsBehindEachCalibration, SnpIndelFitStart, beside_the_vcf,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
@@ -611,16 +611,25 @@ pub struct TheRunsNumbers {
     /// rather than dropped for the census's reason: a run writing its parameters out again writes
     /// back what it read.
     pub snp_indel_fit_starts: Option<Vec<SnpIndelFitStart>>,
+    /// **What the data determined about the fitted density and the duplicated class, as the file
+    /// that carried these numbers recorded it** — format 4's two informational tables
+    /// (`parameter_prepass_joint_fit.md` §2.1.3); `None` on the defaults path, or where the file
+    /// has none. No run reads them; carried so that a calling run does not silently drop them
+    /// from the file it writes back.
+    pub fitted_density: Option<FittedDensity>,
+    pub duplicated_positions: Option<FittedDuplicatedPositions>,
 }
 
 impl TheRunsNumbers {
     /// **The parameters file this run writes** — what it scored with, and everything the file it
     /// read said about where those numbers came from: the counts behind each multiplier, each
-    /// coefficient's warrant, the census, and how each start of the fit behind them ended.
+    /// coefficient's warrant, the census, how each start of the fit behind them ended, and what
+    /// the data determined about the fit's density and duplicated class.
     ///
     /// **The one door both calling commands write through**, so that neither can drop something
-    /// it read: [`ParametersFile::of_run`] writes no fit starts, and a writer that forgot
-    /// [`ParametersFile::with_snp_indel_fit_starts`] would compile and lose them.
+    /// it read: [`ParametersFile::of_run`] writes no fit starts and no informational tables, and a
+    /// writer that forgot [`ParametersFile::with_snp_indel_fit_starts`] or
+    /// [`ParametersFile::with_what_the_data_determine`] would compile and lose them.
     #[must_use]
     pub fn parameters_file(
         &self,
@@ -638,6 +647,10 @@ impl TheRunsNumbers {
             repeat_routing,
         )
         .with_snp_indel_fit_starts(self.snp_indel_fit_starts.clone())
+        .with_what_the_data_determine(
+            self.fitted_density.clone(),
+            self.duplicated_positions.clone(),
+        )
     }
 }
 
@@ -676,6 +689,8 @@ pub fn run_parameters(
             // about them rather than a gap.
             census: CensusIdentity::of_a_run_with_no_census(),
             snp_indel_fit_starts: None,
+            fitted_density: None,
+            duplicated_positions: None,
         });
     };
     let text =
@@ -731,6 +746,8 @@ pub fn run_parameters(
         inbreeding_by_sample: from_file.inbreeding_by_sample,
         census: file.fitted_from.census.clone(),
         snp_indel_fit_starts: file.fitted_from.snp_indel_fit_starts.clone(),
+        fitted_density: file.ordinary_site_prior.fitted_density.clone(),
+        duplicated_positions: file.duplicated_positions.clone(),
     })
 }
 

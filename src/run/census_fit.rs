@@ -30,7 +30,8 @@
 use std::collections::BTreeMap;
 
 use crate::calling::parameters_file::{
-    CensusIdentity, ParametersFile, ReadsBehindEachCalibration, SnpIndelFitStart, StartOutcome,
+    CensusIdentity, FittedDensity, FittedDuplicatedPositions, InformationalNumber, PairedNumber,
+    ParametersFile, ReadsBehindEachCalibration, SeedRung, SnpIndelFitStart, StartOutcome,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::parameter_estimation::calibration::MintedReadErrors;
@@ -39,7 +40,8 @@ use crate::parameter_estimation::joint::census::{
 };
 use crate::parameter_estimation::joint::contamination::ContaminationEstimate;
 use crate::parameter_estimation::joint::fit::{
-    HomozygoteExcess, JointFit, JointFitConfig, JointFitError, StartEnding, StartRecord,
+    DensityReport, DeterminedShare, DuplicatedReport, HomozygoteExcess, JointFit, JointFitConfig,
+    JointFitError, ReportedNumber, STATED_FREQUENCY, StartEnding, StartRecord,
 };
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::parameter_estimation::joint::loci::{CensusLoci, CensusLociDigester};
@@ -527,8 +529,13 @@ pub fn fitted_inbreeding_of(
 /// count under the name of a read count. `ReadsBehindEachCalibration::no_count_in_reads` is what
 /// states no count.
 ///
-/// `snp_indel_fit_starts` is the fit's record of how each of its starts ended, written into the
-/// file's `[fitted_from]` (`doc/devel/ng/spec/fit_precision.md` §5.2).
+/// `snp_indel_fit` is the SNP/indel fit behind the file. Two things of it are written that calling
+/// does not read: how each of its starts ended, into `[fitted_from]`
+/// (`doc/devel/ng/spec/fit_precision.md` §5.2), and what the data determine about its density and
+/// its duplicated class, as format 4's two informational tables
+/// (`parameter_prepass_joint_fit.md` §2.1.3). The density's table is written only where the seed
+/// was read off the fitted density — the `fitted_curve` rung — since on any other rung the seed
+/// does not come from it.
 #[must_use]
 pub fn parameters_file_of(
     parameters: &RunParameters,
@@ -537,9 +544,9 @@ pub fn parameters_file_of(
     reference: &ReferenceDigest,
     terms: &RecordingTerms,
     repeat_routing: &StrRepeatCriteria,
-    snp_indel_fit_starts: &[StartRecord],
+    snp_indel_fit: &JointFit,
 ) -> ParametersFile {
-    ParametersFile::of_run(
+    let file = ParametersFile::of_run(
         parameters,
         read_groups,
         &ReadsBehindEachCalibration::no_count_in_reads(read_groups.len()),
@@ -548,7 +555,67 @@ pub fn parameters_file_of(
         CensusIdentity::of(terms),
         repeat_routing,
     )
-    .with_snp_indel_fit_starts(Some(the_starts_as_written(snp_indel_fit_starts)))
+    .with_snp_indel_fit_starts(Some(the_starts_as_written(&snp_indel_fit.starts)));
+    let seed_read_off_the_density = file.ordinary_site_prior.rung == SeedRung::FittedCurve;
+    file.with_what_the_data_determine(
+        seed_read_off_the_density.then(|| the_density_as_written(&snp_indel_fit.density_report)),
+        snp_indel_fit
+            .duplicated_report
+            .as_ref()
+            .map(the_duplicated_class_as_written),
+    )
+}
+
+/// **What the data determine about the fitted density, in the file's words**
+/// (`[ordinary_site_prior.fitted_density]`).
+fn the_density_as_written(report: &DensityReport) -> FittedDensity {
+    let pair = |number: &ReportedNumber| a_paired_number(number, &report.determined);
+    FittedDensity {
+        stated_frequency: STATED_FREQUENCY,
+        invariant_share: pair(&report.invariant_share),
+        fixed_non_reference_share: an_informational_number(&report.fixed_non_reference_share),
+        segregating_shape_a: pair(&report.segregating_shape_a),
+        segregating_shape_b: an_informational_number(&report.segregating_shape_b),
+        share_segregating_above_stated_frequency: an_informational_number(
+            &report.determined.share_above,
+        ),
+        expected_heterozygosity: an_informational_number(&report.expected_heterozygosity),
+        expected_alternative_frequency: an_informational_number(
+            &report.expected_alternative_frequency,
+        ),
+    }
+}
+
+/// **What the data determine about the duplicated class, in the file's words**
+/// (`[duplicated_positions]`).
+fn the_duplicated_class_as_written(report: &DuplicatedReport) -> FittedDuplicatedPositions {
+    let pair = |number: &ReportedNumber| a_paired_number(number, &report.determined);
+    FittedDuplicatedPositions {
+        stated_frequency: STATED_FREQUENCY,
+        duplicated_share: pair(&report.duplicated_share),
+        carrier_shape_a: pair(&report.carrier_shape_a),
+        carrier_shape_b: an_informational_number(&report.carrier_shape_b),
+        share_with_carriers_above_stated_frequency: an_informational_number(
+            &report.determined.share_above,
+        ),
+    }
+}
+
+fn an_informational_number(number: &ReportedNumber) -> InformationalNumber {
+    InformationalNumber {
+        value: number.value,
+        standard_error: number.standard_error,
+    }
+}
+
+/// One of a pair's two numbers, marked with the pair's verdict. The report has already withheld
+/// the error of a number not separately determined.
+fn a_paired_number(number: &ReportedNumber, determined: &DeterminedShare) -> PairedNumber {
+    PairedNumber {
+        value: number.value,
+        standard_error: number.standard_error,
+        separately_determined: determined.separately_determined,
+    }
 }
 
 /// **How each start of the SNP/indel fit ended, in the file's words**: its number, how it ended,
@@ -1263,7 +1330,7 @@ mod writing_the_parameters_file {
             &plan.terms.reference,
             &terms,
             &plan.terms.ssr_criteria,
-            &fit.generic.starts,
+            &fit.generic,
         );
         (parameters, file)
     }
@@ -1401,7 +1468,7 @@ mod a_sample_with_repeat_tracts_only {
             &ReferenceDigest([7; 16]),
             &terms,
             &StrRepeatCriteria::default(),
-            &fit.generic.starts,
+            &fit.generic,
         );
         let multiplier =
             &file.base_quality_calibration.by_read_group[4].error_probability_multiplier;
