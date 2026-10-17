@@ -256,7 +256,7 @@ samples once, after B5.
   10⁻¹² relative; also defined just below the 0.02 bound. Since calling now reaches it through the
   new path, the identity oracle was run: all seven checksums (the three VCFs, both parameters files,
   the windows) equal to the step's starting commit.
-- ☐ **C2** `cohort_covariance` beside `newton_step`: the cohort's 8 × 8 block of the inverse
+- ✅ **C2** `cohort_covariance` beside `newton_step`: the cohort's 8 × 8 block of the inverse
   information, by unit-slope solves on the whole matrix or the arrow, `None` for a number not
   solved for.
   *Tests:* equal to the dense inverse restricted to the cohort (the module's
@@ -265,6 +265,12 @@ samples once, after B5.
   is `None`.
   *Identity:* nothing calls it; every output bit-identical.
   *Depends:* —. *Source:* §2.1.3, how each number is computed.
+  *Done 2026-10-17:* returns a `CohortCovariance`, `[[Option<f64>; 8]; 8]`; a parameter not solved
+  for has `None` across its row and its column. Every entry matches the dense inverse to 10⁻¹² of
+  its row's and column's errors on the three matrices, and the diagonal's roots match the errors to
+  10⁻¹² relative; holding the samples' own parameters in the solves (the cohort's block inverted
+  alone) fails it. Parameters without information or not told apart have no entries; one whose
+  error is wider than its range keeps them. Marked `expect(dead_code)` outside the tests until C3.
 - ☐ **C3** `fit/determined.rs`: `ReportedNumber`, `DeterminedShare`, `DensityReport`,
   `DuplicatedReport`; `STATED_FREQUENCY`, `SEPARATION_LOG_LIKELIHOOD`; the determined share, its
   error, the errors of `Hexp` and `E[f]`, the trade cost and the verdict for both pairs; a marked

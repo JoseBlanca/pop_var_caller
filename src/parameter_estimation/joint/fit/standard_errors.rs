@@ -636,6 +636,53 @@ pub(super) struct NewtonStep {
     pub(super) decrement: f64,
 }
 
+/// The cohort's eight parameters' covariance, by slot ([`cohort`](super::information::cohort)), row
+/// by row; `None` for an entry whose row or column was not solved for.
+pub(super) type CohortCovariance = [[Option<f64>; COHORT_PARAMETERS]; COHORT_PARAMETERS];
+
+/// **The covariance of the cohort's eight parameters**: the inverse information restricted to them,
+/// every sample's own parameters accounted for (`parameter_prepass_joint_fit.md` §2.1.3). Its
+/// diagonal is the square of the cohort's standard errors ([`StandardErrors::of`]); its off-diagonal
+/// entries are what a derived number such as the share segregating above 1% needs, since its error
+/// depends on how the parameters it is built from move together.
+///
+/// Column `k` is the solve against a slope of one on parameter `k` and zero elsewhere, by the same
+/// solve [`newton_step`] uses — the whole matrix where the pass kept it ([`whole_matrix_solve`]),
+/// the arrow otherwise ([`arrow_solve`]) — with nothing held. So the parameters left out are the
+/// ones the errors leave out: no information, or not told apart from the others; their rows and
+/// columns are `None`. A parameter whose error came out wider than its range still has its entries.
+/// Eight solves, each costing what one Newton step's first solve does: linear in the samples.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the report of what the data determine reads it from plan step C3"
+    )
+)]
+pub(super) fn cohort_covariance(sums: &InformationSums) -> CohortCovariance {
+    let layout = Layout::of(sums);
+    let held = vec![false; layout.side];
+    let mut covariance = [[None; COHORT_PARAMETERS]; COHORT_PARAMETERS];
+    let mut unit_slope = vec![0.0; layout.side];
+    for k in 0..COHORT_PARAMETERS {
+        unit_slope.fill(0.0);
+        unit_slope[k] = 1.0;
+        let column = match &sums.full {
+            Some(full) => whole_matrix_solve(full, &unit_slope, &held),
+            None => arrow_solve(sums, &layout, &unit_slope, &held),
+        };
+        // A parameter not solved for has no column: the solve ignored its slope. Its row is `None`
+        // in every other column, since every solve leaves out the same parameters.
+        if column[k].is_none() {
+            continue;
+        }
+        for (row, entry) in covariance.iter_mut().zip(&column) {
+            row[k] = *entry;
+        }
+    }
+    covariance
+}
+
 /// **The box solve's answer**: each parameter's move in the flat layout, `None` where it was never
 /// solved for, and whether the solve reached the box's maximum before its round limit.
 struct BoundedStep {
@@ -3122,6 +3169,159 @@ mod tests {
         assert!(
             maxima_checked > 50 && bounds_binding > 100,
             "the cases exercise the box: {maxima_checked} maxima checked, {bounds_binding} ends"
+        );
+    }
+
+    /// The dense inverse of `full` (side `n`) without the parameters `removed` says, restricted to
+    /// the cohort's eight: `None` for an entry whose row or column was removed.
+    fn dense_cohort_covariance_without(
+        full: &[f64],
+        n: usize,
+        removed: impl Fn(usize) -> bool,
+    ) -> CohortCovariance {
+        let kept: Vec<usize> = (0..n).filter(|&i| !removed(i)).collect();
+        let m = kept.len();
+        let inverse = inverse_of_positive_definite(
+            &square_of(&kept, |row, column| full[row * n + column]),
+            m,
+        )
+        .expect("positive definite");
+        let at = |i: usize| kept.iter().position(|&k| k == i);
+        std::array::from_fn(|j| std::array::from_fn(|k| Some(inverse[at(j)? * m + at(k)?])))
+    }
+
+    /// Every entry of `got` against `expected`, to 10⁻¹² of the larger diagonal entry of its row
+    /// and column; `None` exactly where `expected` has none.
+    fn assert_covariances_match(got: &CohortCovariance, expected: &CohortCovariance, what: &str) {
+        for j in 0..COHORT_PARAMETERS {
+            for k in 0..COHORT_PARAMETERS {
+                match (got[j][k], expected[j][k]) {
+                    (Some(got), Some(dense)) => {
+                        let scale = (expected[j][j].expect("diagonal")
+                            * expected[k][k].expect("diagonal"))
+                        .sqrt();
+                        assert!(
+                            (got - dense).abs() <= 1e-12 * scale,
+                            "{what}: ({j}, {k}) is {got:e}, the dense inverse {dense:e}"
+                        );
+                    }
+                    (None, None) => {}
+                    (got, dense) => panic!("{what}: ({j}, {k}) is {got:?}, dense {dense:?}"),
+                }
+            }
+        }
+    }
+
+    /// **The cohort's covariance is the dense inverse restricted to the cohort**, every other
+    /// parameter accounted for: on the whole matrix of samples of one, two, three and one library
+    /// (26 parameters), on an arrow of five one-library samples (23), and on an arrow of the same
+    /// mixed libraries — every entry, off the diagonal too, to 10⁻¹² of its row's and column's
+    /// errors. **Its diagonal's square roots are the cohort's standard errors**, to 10⁻¹² relative.
+    /// Solving the unit slopes with the samples' own parameters held — the cohort's block inverted
+    /// alone — fails (checked).
+    #[test]
+    fn the_cohort_covariance_is_the_dense_inverse_restricted_to_the_cohort() {
+        let mixed = [1, 2, 3, 1];
+        let cases = [
+            ("the whole matrix", a_whole_matrix_of(&mixed, 71), 26),
+            ("an arrow", an_arrow(5, 73), 23),
+            ("an arrow of mixed libraries", an_arrow_of(&mixed, 79), 26),
+        ];
+        for (what, (sums, dense), n) in cases {
+            let covariance = cohort_covariance(&sums);
+            assert_covariances_match(
+                &covariance,
+                &dense_cohort_covariance_without(&dense, n, |_| false),
+                what,
+            );
+            let errors = StandardErrors::of(&sums);
+            for (slot, (row, error)) in covariance.iter().zip(&errors.cohort).enumerate() {
+                let from_covariance = row[slot].expect("solved").sqrt();
+                let error = error.value().expect("an error");
+                assert!(
+                    (from_covariance - error).abs() <= 1e-12 * error,
+                    "{what}: slot {slot}, {from_covariance:e} against the error {error:e}"
+                );
+            }
+        }
+    }
+
+    /// **A cohort parameter the errors leave out has no row or column**: on the arrow and on the
+    /// whole matrix, the duplicated class's three without information and the density's second
+    /// shape made a copy of its first (so not told apart) are `None` across, and every other entry is
+    /// the dense inverse's without them. **One whose error came out wider than its range keeps its
+    /// entries**: the duplicated share's information cut ten-thousandfold.
+    #[test]
+    fn a_cohort_parameter_without_an_error_has_no_covariance_unless_it_is_only_wide() {
+        let libraries = [1, 2, 1];
+        let n = COHORT_PARAMETERS + 11;
+        let (_, mut dense) = an_arrow_of(&libraries, 83);
+        for i in cohort::DUPLICATED_SHARE..COHORT_PARAMETERS {
+            for k in 0..n {
+                dense[i * n + k] = 0.0;
+                dense[k * n + i] = 0.0;
+            }
+        }
+        let (copy, of) = (cohort::DENSITY_B, cohort::DENSITY_A);
+        for k in 0..n {
+            dense[copy * n + k] = dense[of * n + k];
+        }
+        for k in 0..n {
+            dense[k * n + copy] = dense[k * n + of];
+        }
+        let removed =
+            |i: usize| i == copy || (cohort::DUPLICATED_SHARE..COHORT_PARAMETERS).contains(&i);
+        let expected = dense_cohort_covariance_without(&dense, n, removed);
+        let arrow = blocks_of_dense(&libraries, &dense);
+        let whole = with_the_whole_matrix(&libraries, &dense);
+        for (what, sums) in [("the arrow", &arrow), ("the whole matrix", &whole)] {
+            let errors = StandardErrors::of(sums);
+            assert_eq!(errors.cohort[copy], StandardError::NotIdentified, "{what}");
+            assert_eq!(
+                errors.cohort[cohort::DUPLICATED_SHARE..],
+                [StandardError::NoInformation; 3],
+                "{what}"
+            );
+            let covariance = cohort_covariance(sums);
+            for slot in (0..COHORT_PARAMETERS).filter(|&slot| removed(slot)) {
+                assert!(
+                    covariance[slot].iter().all(Option::is_none),
+                    "{what}: row {slot}"
+                );
+                assert!(
+                    covariance.iter().all(|row| row[slot].is_none()),
+                    "{what}: column {slot}"
+                );
+            }
+            assert_covariances_match(&covariance, &expected, what);
+        }
+
+        let (mut sums, dense) = an_arrow(2, 61);
+        let at = cohort::DUPLICATED_SHARE;
+        let shrink = 1e-2;
+        for j in 0..COHORT_PARAMETERS {
+            sums.cohort[at * COHORT_PARAMETERS + j] *= shrink;
+            sums.cohort[j * COHORT_PARAMETERS + at] *= shrink;
+        }
+        for block in &mut sums.sample_cohort_blocks {
+            for row in 0..ONE_LIBRARY_SAMPLE_PARAMETERS {
+                block[row * COHORT_PARAMETERS + at] *= shrink;
+            }
+        }
+        assert!(matches!(
+            StandardErrors::of(&sums).cohort[at],
+            StandardError::WiderThanItsRange(_)
+        ));
+        let n = COHORT_PARAMETERS + 2 * ONE_LIBRARY_SAMPLE_PARAMETERS;
+        let mut shrunk = dense;
+        for k in 0..n {
+            shrunk[at * n + k] *= shrink;
+            shrunk[k * n + at] *= shrink;
+        }
+        assert_covariances_match(
+            &cohort_covariance(&sums),
+            &dense_cohort_covariance_without(&shrunk, n, |_| false),
+            "a wide error",
         );
     }
 }
