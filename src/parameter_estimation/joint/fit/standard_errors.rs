@@ -592,8 +592,12 @@ pub(super) fn newton_step(
     let values = layout.values_of(parameters, group_index);
     let bounds = layout.bounds();
     let step = bounded_step(sums, &layout, &values, &bounds);
-    let decrement = decrement_of(sums, &layout, &step);
-    let (cohort, samples) = layout.split(&step);
+    let decrement = if step.finished {
+        decrement_of(sums, &layout, &step.moves)
+    } else {
+        f64::NAN
+    };
+    let (cohort, samples) = layout.split(&step.moves);
     NewtonStep {
         distances: in_coordinate_order(&cohort, &samples, parameters, group_index, None),
         decrement,
@@ -609,11 +613,24 @@ pub(super) struct NewtonStep {
     pub(super) distances: Vec<Option<f64>>,
     /// **The Newton decrement**: the log-likelihood the step would gain under the quadratic model,
     /// `g·d − ½ dᵀ I d` for the slope `g`, the information `I` and the step `d` with each parameter
-    /// not solved for moving 0 — `½ gᵀ I⁻¹ g` when no bound binds. Never below zero when the
-    /// active-set solve reached its maximum, since staying put is inside the box; a negative value,
-    /// or one that is not a number, means it did not (`fit_precision.md` §2, traps).
+    /// not solved for moving 0 — `½ gᵀ I⁻¹ g` when no bound binds. Never below zero, since the box
+    /// solve climbs the model from staying put ([`bounded_step`]); **not a number when that solve
+    /// reached its round limit**, so that no start stops on a step that is not the box's maximum
+    /// (`fit_precision.md` §2, amendment of 2026-10-17).
     pub(super) decrement: f64,
 }
+
+/// **The box solve's answer**: each parameter's move in the flat layout, `None` where it was never
+/// solved for, and whether the solve reached the box's maximum before its round limit.
+struct BoundedStep {
+    moves: Vec<Option<f64>>,
+    finished: bool,
+}
+
+/// How far a fixed parameter's slope must point back into its interval, as a share of the two terms
+/// it is the difference of, for the box solve to free it: below this the sign is rounding, and
+/// freeing on it could free and re-fix the same parameter until the round limit.
+const SLOPE_POINTING_IN: f64 = 1e-9;
 
 /// **What the bounded step `step` is worth under the quadratic model**, `g·d − ½ dᵀ I d`, in the
 /// flat layout, a parameter not solved for moving 0.
@@ -626,81 +643,117 @@ fn decrement_of(sums: &InformationSums, layout: &Layout, step: &[Option<f64>]) -
     gained - 0.5 * lost
 }
 
-/// **The Newton step to the maximum of the quadratic model within the bounds**, by the active-set
-/// rule for a box: solve with the free parameters; a parameter whose step would carry it past an end
-/// is fixed at that end and the rest solved again, its move taken out of their scores; a fixed one
-/// whose slope at the solution points back into its interval is freed. It ends when no free
-/// parameter crosses an end and no fixed one wants back in — the constrained maximum, where a fixed
-/// parameter's distance is the way to its end — or, should the rule cycle, after as many rounds as
-/// there are parameters thrice over, with the step it last had.
+/// **The Newton step to the maximum of the quadratic model within the bounds**, by the primal
+/// active-set method for a box (`fit_precision.md` §2, amendment of 2026-10-17; Nocedal & Wright,
+/// *Numerical Optimization*, §16.5). From staying put, which is inside the box:
+///
+/// 1. solve the free parameters' Newton step from the current point, the fixed ones held where they
+///    are — the slope there is the summed scores less the information times the moves so far;
+/// 2. move along it until the first free parameter meets an end of its interval, and fix it there,
+///    with any other that meets an end at the same point; then solve again;
+/// 3. after a whole step, free the one fixed parameter whose slope points furthest back into its
+///    interval ([`SLOPE_POINTING_IN`]), and solve again; when none does, the point is the box's
+///    maximum and the solve has finished.
+///
+/// Every point it passes through is inside the box, and the model's value `g·d − ½ dᵀ I d` never
+/// falls along the way, so the step is worth at least nothing. When no bound binds, the first solve
+/// is the whole step. It gives up after ten rounds a parameter, plus ten, with the point it has
+/// reached, still inside the box, and says so.
 fn bounded_step(
     sums: &InformationSums,
     layout: &Layout,
     values: &[f64],
     bounds: &[(f64, f64)],
-) -> Vec<Option<f64>> {
+) -> BoundedStep {
     let slope = layout.slope_of(sums);
+    let mut moved = vec![0.0; layout.side];
     // Where each fixed parameter is fixed: the end of its interval, or `None` while it is free.
     let mut fixed_at: Vec<Option<f64>> = vec![None; layout.side];
-    let mut step = vec![None; layout.side];
-    for _ in 0..3 * layout.side + 3 {
-        // The fixed parameters' moves, and the scores the free ones are solved against once those
-        // moves are taken out.
-        let fixed_move: Vec<f64> = fixed_at
-            .iter()
-            .zip(values)
-            .map(|(end, value)| end.map_or(0.0, |end| end - value))
-            .collect();
-        let taken = information_times(sums, layout, &fixed_move);
-        let slope_left: Vec<f64> = slope.iter().zip(&taken).map(|(g, t)| g - t).collect();
+    // Whether the solve has given the parameter a move at least once.
+    let mut solved = vec![false; layout.side];
+    let mut finished = false;
+    for _ in 0..10 * layout.side + 10 {
+        // The slope where the moves so far have taken the parameters, and the free parameters'
+        // Newton step from there.
+        let curved = information_times(sums, layout, &moved);
+        let slope_here: Vec<f64> = slope.iter().zip(&curved).map(|(g, c)| g - c).collect();
         let held: Vec<bool> = fixed_at.iter().map(Option::is_some).collect();
-        let free_step = match &sums.full {
-            Some(full) => whole_matrix_solve(full, &slope_left, &held),
-            None => arrow_solve(sums, layout, &slope_left, &held),
+        let towards = match &sums.full {
+            Some(full) => whole_matrix_solve(full, &slope_here, &held),
+            None => arrow_solve(sums, layout, &slope_here, &held),
         };
-        step = free_step
+        // How far along it each free parameter can go before it meets an end, and the shortest.
+        let room: Vec<Option<(f64, f64)>> = towards
             .iter()
-            .zip(&fixed_at)
-            .zip(&fixed_move)
-            .map(|((free, end), moved)| if end.is_some() { Some(*moved) } else { *free })
+            .enumerate()
+            .map(|(j, toward)| {
+                let toward = (*toward)?;
+                if toward == 0.0 {
+                    return None;
+                }
+                let end = if toward > 0.0 {
+                    bounds[j].1
+                } else {
+                    bounds[j].0
+                };
+                Some((((end - values[j] - moved[j]) / toward).max(0.0), end))
+            })
             .collect();
-        // A free parameter carried past an end is fixed there.
-        let mut changed = false;
-        for (j, free) in free_step.iter().enumerate() {
-            let Some(free) = free else { continue };
-            if fixed_at[j].is_some() {
-                continue;
-            }
-            let (low, high) = bounds[j];
-            let landing = values[j] + free;
-            if landing < low {
-                fixed_at[j] = Some(low);
-                changed = true;
-            } else if landing > high {
-                fixed_at[j] = Some(high);
-                changed = true;
+        let reach = room
+            .iter()
+            .flatten()
+            .map(|&(fraction, _)| fraction)
+            .fold(1.0_f64, f64::min);
+        for (j, toward) in towards.iter().enumerate() {
+            if let Some(toward) = toward {
+                solved[j] = true;
+                moved[j] += reach * toward;
             }
         }
-        if changed {
+        if reach < 1.0 {
+            for (j, room) in room.iter().enumerate() {
+                if let Some((fraction, end)) = *room
+                    && fraction <= reach
+                {
+                    moved[j] = end - values[j];
+                    fixed_at[j] = Some(end);
+                }
+            }
             continue;
         }
-        // A fixed parameter whose slope at the solution points back into its interval is freed.
-        let whole_move: Vec<f64> = step.iter().map(|moved| moved.unwrap_or(0.0)).collect();
-        let curved = information_times(sums, layout, &whole_move);
-        for j in 0..layout.side {
-            let Some(end) = fixed_at[j] else { continue };
+        // A whole step: the maximum with these parameters fixed. Free the one whose slope points
+        // furthest back into its interval, if any does.
+        let curved = information_times(sums, layout, &moved);
+        let mut freed: Option<(usize, f64)> = None;
+        for (j, end) in fixed_at.iter().enumerate() {
+            let Some(end) = end else { continue };
             let slope_there = slope[j] - curved[j];
-            let at_low_end = end == bounds[j].0;
-            if (at_low_end && slope_there > 0.0) || (!at_low_end && slope_there < 0.0) {
-                fixed_at[j] = None;
-                changed = true;
+            let inwards = if *end == bounds[j].0 {
+                slope_there
+            } else {
+                -slope_there
+            };
+            let rounding = SLOPE_POINTING_IN * (slope[j].abs() + curved[j].abs());
+            if inwards > rounding && freed.is_none_or(|(_, most)| inwards > most) {
+                freed = Some((j, inwards));
             }
         }
-        if !changed {
-            break;
+        match freed {
+            Some((j, _)) => fixed_at[j] = None,
+            None => {
+                finished = true;
+                break;
+            }
         }
     }
-    step
+    BoundedStep {
+        moves: moved
+            .iter()
+            .zip(&solved)
+            .map(|(moved, solved)| solved.then_some(*moved))
+            .collect(),
+        finished,
+    }
 }
 
 /// **Where each parameter sits in one flat list**: the cohort's eight, then each sample's own in turn
@@ -2654,5 +2707,156 @@ mod tests {
                 "{label}: the box step's {expected} against the unbounded {unbounded}"
             );
         }
+    }
+
+    /// A draw in [0, 1) from a fixed sequence.
+    fn uniform_draws(seed: u64) -> impl FnMut() -> f64 {
+        let mut state = seed;
+        move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// **An information matrix summed the way a pass sums one**, densely in the layout: `positions`
+    /// outer products of score vectors, each position scoring the cohort's eight parameters and one
+    /// sample's own, so two samples are never paired and the matrix is an arrow; then `floor` times
+    /// its largest diagonal entry added to the diagonal. With fewer positions than parameters it is
+    /// singular but for that floor, so its condition number is about `1 / floor`.
+    fn summed_from_positions(
+        libraries: &[usize],
+        positions: usize,
+        floor: f64,
+        draw: &mut impl FnMut() -> f64,
+    ) -> Vec<f64> {
+        let sizes: Vec<usize> = libraries.iter().map(|&k| own_parameters(k)).collect();
+        let n = COHORT_PARAMETERS + sizes.iter().sum::<usize>();
+        let mut dense = vec![0.0; n * n];
+        for _ in 0..positions {
+            let s = ((draw() * sizes.len() as f64) as usize).min(sizes.len() - 1);
+            let first = COHORT_PARAMETERS + sizes[..s].iter().sum::<usize>();
+            let touched: Vec<usize> = (0..COHORT_PARAMETERS)
+                .chain(first..first + sizes[s])
+                .collect();
+            let score: Vec<f64> = touched.iter().map(|_| draw() - 0.5).collect();
+            for (a, &row) in touched.iter().enumerate() {
+                for (b, &column) in touched.iter().enumerate() {
+                    dense[row * n + column] += score[a] * score[b];
+                }
+            }
+        }
+        let largest = (0..n).map(|i| dense[i * n + i]).fold(0.0_f64, f64::max);
+        for i in 0..n {
+            dense[i * n + i] += floor * largest;
+        }
+        dense.iter().map(|entry| entry * 1e6).collect()
+    }
+
+    /// **The box solve stays inside the box, is worth at least nothing, and finishes** — on 400
+    /// random cases: one to five samples of one to three libraries, on the whole matrix and on the
+    /// arrow, information well conditioned (three times as many positions as parameters) or nearly
+    /// singular (half as many, condition numbers about 10⁶ and 10¹²), random slopes, and every
+    /// parameter placed on its lower end, on its upper end, just inside one or in the middle of its
+    /// interval. Every move lands inside the interval (to the rounding of `value + move`), the step's
+    /// worth `g·d − ½ dᵀ I d` is not negative, and the solve says it finished. On the well-conditioned
+    /// cases with every parameter solved for, the step is also the box's maximum: the slope left at
+    /// the step, `g − I d`, is zero for a parameter strictly inside, and points out of the interval
+    /// for one on an end. The solve that preceded the primal method failed this on cases like the
+    /// review's two-sample fixtures (`fit_precision.md` §2, amendment of 2026-10-17).
+    #[test]
+    fn the_box_step_stays_inside_the_box_and_is_worth_at_least_nothing() {
+        let mut draw = uniform_draws(0xB0C5_0000_0000_0017);
+        let mut maxima_checked = 0;
+        let mut bounds_binding = 0;
+        for case in 0..400 {
+            let samples = 1 + (draw() * 5.0) as usize;
+            let libraries: Vec<usize> = (0..samples).map(|_| 1 + (draw() * 3.0) as usize).collect();
+            let n = COHORT_PARAMETERS + libraries.iter().map(|&k| own_parameters(k)).sum::<usize>();
+            let (positions, floor) = match case % 3 {
+                0 => (3 * n, 1e-9),
+                1 => (n / 2, 1e-6),
+                _ => (n / 2, 1e-12),
+            };
+            let dense = summed_from_positions(&libraries, positions, floor, &mut draw);
+            let whole = case % 2 == 0;
+            let mut sums = if whole {
+                with_the_whole_matrix(&libraries, &dense)
+            } else {
+                blocks_of_dense(&libraries, &dense)
+            };
+            let (slope, flat) = a_slope_of(&libraries, 1_000 + case);
+            sums.slope = slope;
+            let layout = Layout::of(&sums);
+            let bounds = layout.bounds();
+            let values: Vec<f64> = bounds
+                .iter()
+                .map(|&(low, high)| {
+                    let inside = crate::float::powf(10.0, -7.0 + 3.0 * draw()) * (high - low);
+                    match (draw() * 5.0) as usize {
+                        0 => low,
+                        1 => high,
+                        2 => low + inside,
+                        3 => high - inside,
+                        _ => low + (0.2 + 0.6 * draw()) * (high - low),
+                    }
+                })
+                .collect();
+            let label = format!(
+                "case {case}: libraries {libraries:?}, {positions} positions, floor {floor:e}, \
+                 {}",
+                if whole { "whole matrix" } else { "arrow" }
+            );
+            let step = bounded_step(&sums, &layout, &values, &bounds);
+            assert!(step.finished, "{label}: the solve did not finish");
+            let mut on_an_end = vec![None; n];
+            for (j, moved) in step.moves.iter().enumerate() {
+                let Some(moved) = moved else { continue };
+                let (low, high) = bounds[j];
+                let landing = values[j] + moved;
+                let rounding = 4.0 * f64::EPSILON * values[j].abs().max(high.abs());
+                assert!(
+                    landing >= low - rounding && landing <= high + rounding,
+                    "{label}: parameter {j} at {} moved {moved} to {landing}, outside {:?}",
+                    values[j],
+                    bounds[j]
+                );
+                if (landing - low).abs() <= rounding {
+                    on_an_end[j] = Some(low);
+                } else if (landing - high).abs() <= rounding {
+                    on_an_end[j] = Some(high);
+                }
+            }
+            let worth = dense_decrement(&dense, &flat, &step.moves);
+            assert!(worth >= 0.0, "{label}: the step is worth {worth}");
+            if case % 3 == 0 && step.moves.iter().all(Option::is_some) {
+                maxima_checked += 1;
+                let moved: Vec<f64> = step.moves.iter().map(|m| m.unwrap_or(0.0)).collect();
+                for j in 0..n {
+                    let curved: f64 = (0..n).map(|k| dense[j * n + k] * moved[k]).sum();
+                    let left = flat[j] - curved;
+                    let scale = 1e-7 * (flat[j].abs() + curved.abs()) + 1e-9;
+                    match on_an_end[j] {
+                        None => assert!(
+                            left.abs() <= scale,
+                            "{label}: parameter {j} inside its interval with slope {left}"
+                        ),
+                        Some(end) => {
+                            bounds_binding += 1;
+                            let outwards = if end == bounds[j].0 { -left } else { left };
+                            assert!(
+                                outwards >= -scale,
+                                "{label}: parameter {j} on {end} with slope {left} pointing in"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            maxima_checked > 50 && bounds_binding > 100,
+            "the cases exercise the box: {maxima_checked} maxima checked, {bounds_binding} ends"
+        );
     }
 }

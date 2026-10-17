@@ -22,8 +22,9 @@
 //! every cohort measured (1, 4 and 59 tomato samples) every determined quantity stopped within a
 //! tenth of its error of a fit run to 10⁻⁴; the decrement understates what is left by two and a half
 //! to six times near the maximum, so the threshold was chosen from that measurement and not from the
-//! bound. A negative decrement or one that is not a number is not convergence: it means the bounded
-//! solve did not reach the quadratic model's maximum.
+//! bound. A decrement that is not a number is not convergence: it means the bounded solve reached
+//! its round limit short of the quadratic model's maximum. Nor is a negative one, which the solve
+//! cannot give (`fit_precision.md` §2, amendment of 2026-10-17) and the test refuses all the same.
 //!
 //! **The per-parameter test survives for reporting only.** A parameter is *settled* when its distance
 //! is below [`SETTLED_FRACTION`] of its standard error; a parameter without an error or a distance is
@@ -59,10 +60,11 @@ pub(in crate::parameter_estimation::joint) const SETTLED_FRACTION: f64 = 0.1;
 pub(in crate::parameter_estimation::joint) const DECREMENT_THRESHOLD: f64 = 0.001;
 
 /// **Whether a start whose remaining Newton step is worth `decrement` has converged**, at
-/// `threshold`: when the decrement is at least zero and below the threshold. A negative decrement
-/// means the bounded solve stopped at its round limit short of the quadratic model's maximum, and a
-/// decrement that is not a number came from a degenerate solve; neither is convergence
-/// (`fit_precision.md` §2, traps).
+/// `threshold`: when the decrement is at least zero and below the threshold. A decrement that is not
+/// a number comes from a box solve that reached its round limit, and is not convergence. Nor is a
+/// negative one: the solve climbs the quadratic model from staying put and cannot give one, so a
+/// negative value would mean a defect in it, never a start that has arrived (`fit_precision.md` §2,
+/// traps).
 pub(super) fn has_converged(decrement: f64, threshold: f64) -> bool {
     decrement >= 0.0 && decrement < threshold
 }

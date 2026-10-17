@@ -156,7 +156,7 @@ review's prototype, every candidate behind an environment variable, is reference
 oracle runs and the three digest fixtures before and after, every move explained; the 59 tomato2
 samples once, after B5.
 
-- ☐ **B2** The box solve is the primal active-set method (§2 amendment, part 1): `bounded_step`
+- ✅ **B2** The box solve is the primal active-set method (§2 amendment, part 1): `bounded_step`
   rewritten, no fallback; it says whether it finished, and `newton_step` reports the decrement of an
   unfinished solve as NaN. The negative-decrement trap and the docs on `NewtonStep::decrement` and
   `has_converged` rewritten.
@@ -169,6 +169,12 @@ samples once, after B5.
   *Identity:* where no bound binds, the same bits. **Moves:** the oracle's 4-sample fit by about
   10⁻¹¹ of each SNP/indel number, passes unchanged (review, B1); the digests, re-recorded.
   *Depends:* B1. *Source:* `fit_precision.md` §2, amendment of 2026-10-17, part 1.
+  *Done 2026-10-17:* the property test fails on the old solve at its second case (a five-sample
+  arrow, the solve unfinished) and passes on the new one. One accession's file byte for byte; four
+  accessions' file byte for byte the review's prototype run (`o4_primal`), passes 53, 46, 37 as
+  before, SNP/indel numbers within 5 × 10⁻¹⁰ of themselves, slip rates within 2 × 10⁻⁵. Digests: the
+  two-sample fixture without errors converges (37, 41, 41 passes); the other two still run to the
+  limit, as the review measured for this fix alone.
 - ☐ **B3** The swap of a library's two error rates in `maximisation` is deleted; the run log names a
   library whose mismapped-position rate ends below its ordinary-position rate. The comment that the
   plain step "never needs a check" corrected.
