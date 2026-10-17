@@ -3174,14 +3174,48 @@ fn squarem_step_length(start: &Parameters, first: &Parameters, second: &Paramete
     }
 }
 
-/// One fitted number and the interval its maximisation keeps it in.
+/// One fitted number, the interval its maximisation keeps it in, and whether that maximisation is
+/// a [`golden_section`] search.
 #[derive(Copy, Clone)]
 struct Coordinate {
     value: f64,
     bounds: (f64, f64),
+    by_golden_section: bool,
 }
 
 impl Coordinate {
+    /// **The interval a Newton step may put this number in.** For a number the closed forms or the
+    /// projected Beta step maximise, its whole interval: those land on an end themselves.
+    ///
+    /// For one a [`golden_section`] search maximises — each library's two error rates and each
+    /// sample's homozygote excess — **never an end**. That search reports the middle of a bracket
+    /// narrower than its stopping width ([`GOLDEN_SECTION_WIDTH`]), so for a maximum on an end it
+    /// returns a point between about a third and a half of the width beside the end, never the end
+    /// itself, and the code that reads these numbers may rely on that. The one that does turns an
+    /// excess into an inbreeding coefficient
+    /// ([`fitted_inbreeding_of`](crate::run::census_fit::fitted_inbreeding_of)): a coefficient
+    /// must be below 1, and on 59 tomato samples a Newton step clamped onto an excess of exactly 1
+    /// had two nearly fully inbred samples written with no coefficient, as outcrossers.
+    ///
+    /// So the interval stops **half the search's width short of each end**, a point the search
+    /// itself can return. A number the search left nearer its end than that, with a step heading
+    /// to that end, is moved back to it — by under a fifth of the width, 4 × 10⁻¹⁰ for an excess.
+    /// The box solve of the Newton step treats a number within the width of an end as on it
+    /// (`standard_errors::BESIDE_AN_END`), so this changes no decision it takes.
+    ///
+    /// (Holding such a number where the search left it instead was tried: on the 21-sample cohort
+    /// of `cli::cross_platform_digests` it moved the fit along a ridge the data do not determine —
+    /// the invariant share 0.153 to 0.430 — where this rule moves the libraries' multipliers by at
+    /// most 0.0003 of their standard errors and leaves the invariant share at 0.153.)
+    fn newton_range(self) -> (f64, f64) {
+        let (low, high) = self.bounds;
+        if !self.by_golden_section {
+            return (low, high);
+        }
+        let beside = |end: f64| 0.5 * GOLDEN_SECTION_WIDTH * (1.0 + end.abs());
+        (low + beside(low), high - beside(high))
+    }
+
     /// The value on the whole real line: the logit of where it sits in its interval, kept a
     /// hair inside the ends so a parameter at its bound maps to a finite number.
     fn free(self) -> f64 {
@@ -3209,7 +3243,16 @@ impl Parameters {
     /// Every fitted number as a [`Coordinate`], in one fixed order — the order
     /// [`with_coordinates`](Self::with_coordinates) reads them back in.
     fn coordinates(&self) -> Vec<Coordinate> {
-        let at = |value, bounds| Coordinate { value, bounds };
+        let at = |value, bounds| Coordinate {
+            value,
+            bounds,
+            by_golden_section: false,
+        };
+        let searched = |value, bounds| Coordinate {
+            value,
+            bounds,
+            by_golden_section: true,
+        };
         let mut all = vec![
             at(self.noisy_share, NOISY_SHARE_BOUNDS),
             at(self.density.p_invariant, P_INVARIANT_BOUNDS),
@@ -3223,18 +3266,20 @@ impl Parameters {
             all.push(at(duplicated.carrier_b, BETA_SHAPE_BOUNDS));
         }
         for (clean, noisy) in self.clean.iter().zip(&self.noisy) {
-            all.push(at(*clean, CLEAN_ERROR_BOUNDS));
-            all.push(at(*noisy, NOISY_ERROR_BOUNDS));
+            all.push(searched(*clean, CLEAN_ERROR_BOUNDS));
+            all.push(searched(*noisy, NOISY_ERROR_BOUNDS));
         }
         for excess in &self.hom_excess {
-            all.push(at(*excess, HOM_EXCESS_BOUNDS));
+            all.push(searched(*excess, HOM_EXCESS_BOUNDS));
         }
         all
     }
 
     /// **Where a Newton step from these parameters lands**: each coordinate plus its distance
-    /// (`distances`, a [`newton_step`]'s, in [`coordinates`](Self::coordinates)' order; a parameter
-    /// not solved for moves 0), clamped into its interval.
+    /// (`distances`, a [`newton_step`]'s, in [`coordinates`](Self::coordinates)' order), clamped
+    /// into the interval a Newton step may put it in ([`Coordinate::newton_range`]). A parameter
+    /// not solved for stays where it is, clamped only into its own interval — which holds it
+    /// exactly, so an excess held at 0 at one sample stays 0.
     fn newton_target(&self, distances: &[Option<f64>]) -> Vec<f64> {
         let coordinates = self.coordinates();
         assert_eq!(
@@ -3245,9 +3290,15 @@ impl Parameters {
         coordinates
             .iter()
             .zip(distances)
-            .map(|(coordinate, distance)| {
-                let (low, high) = coordinate.bounds;
-                (coordinate.value + distance.unwrap_or(0.0)).clamp(low, high)
+            .map(|(coordinate, distance)| match distance {
+                Some(distance) => {
+                    let (low, high) = coordinate.newton_range();
+                    (coordinate.value + distance).clamp(low, high)
+                }
+                None => {
+                    let (low, high) = coordinate.bounds;
+                    coordinate.value.clamp(low, high)
+                }
             })
             .collect()
     }
@@ -5067,6 +5118,69 @@ mod tests {
         assert_eq!(as_a_fraction(1.0), "1");
         assert_eq!(as_a_fraction(0.25), "1/4");
         assert_eq!(as_a_fraction(0.125), "1/8");
+    }
+
+    /// **A Newton step never puts a number the golden section maximises on an end of its
+    /// interval** — the regression for 59 tomato samples, where a step clamped two homozygote
+    /// excesses onto exactly 1 and the samples were written with no inbreeding coefficient. Each
+    /// library's two rates and the sample's excess are pushed past both ends: each target lands
+    /// half the search's width inside, no nearer the end than the search itself returns for a
+    /// maximum there, and the excess pushed up still becomes a coefficient below 1. A parameter not
+    /// solved for stays exactly where it is, even on an end.
+    #[test]
+    fn a_newton_step_keeps_the_golden_section_numbers_off_their_ends() {
+        let mut judged = a_judged_point();
+        judged.hom_excess = vec![0.5];
+        let (clean, noisy, excess) = (5, 6, 7);
+        for (push, ends_at) in [(1.0, 1), (-1.0, 0)] {
+            let mut distances = vec![None; judged.coordinates().len()];
+            for j in [clean, noisy, excess] {
+                distances[j] = Some(push);
+            }
+            let target = judged.newton_target(&distances);
+            for (j, bounds) in [
+                (clean, CLEAN_ERROR_BOUNDS),
+                (noisy, NOISY_ERROR_BOUNDS),
+                (excess, HOM_EXCESS_BOUNDS),
+            ] {
+                let end = if ends_at == 1 { bounds.1 } else { bounds.0 };
+                let inside = 0.5 * GOLDEN_SECTION_WIDTH * (1.0 + end.abs());
+                assert!(
+                    (target[j] - end).abs() >= inside * (1.0 - 1e-6),
+                    "coordinate {j} at {} lands on its end {end}",
+                    target[j]
+                );
+                let searched = golden_section(&|x: f64| push * x, bounds.0, bounds.1);
+                assert!(
+                    (target[j] - end).abs() >= (searched - end).abs() * (1.0 - 1e-6),
+                    "coordinate {j}: target {} is nearer its end than the search's {searched}",
+                    target[j]
+                );
+            }
+            if ends_at == 1 {
+                let hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>> = [(
+                    "nearly_fully_inbred".to_string(),
+                    Estimate {
+                        value: HomozygoteExcess::try_new(target[excess]).expect("inside [0, 1]"),
+                        provenance: Provenance::FittedHere,
+                        observations: 1,
+                        standard_error: None,
+                    },
+                )]
+                .into_iter()
+                .collect();
+                let coefficients = crate::run::census_fit::fitted_inbreeding_of(&hom_excess);
+                let coefficient = coefficients["nearly_fully_inbred"].value.get();
+                assert!(
+                    coefficient < 1.0 && coefficient > 0.999_999,
+                    "{coefficient}"
+                );
+            }
+        }
+        // Held: an excess at 0 with no distance stays exactly 0.
+        judged.hom_excess = vec![0.0];
+        let held = judged.newton_target(&vec![None; judged.coordinates().len()]);
+        assert_eq!(held[excess].to_bits(), 0.0_f64.to_bits());
     }
 
     // ---- the pieces, each on its own ------------------------------------------

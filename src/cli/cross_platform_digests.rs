@@ -576,7 +576,21 @@ mod tests {
     /// errors by at most 4.4 × 10⁻⁵ of themselves. With that rule switched off the old checksum
     /// comes back; the calls' did not move. Recorded on macOS (arm64) only; it was
     /// `728256994c0c90109ae7f4a15eeb00a9`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "c548c669d12d20097217ff03e1299e3a";
+    ///
+    /// **Re-recorded 2026-10-17 for the Newton step's target**, when the Newton step stopped putting a number the
+    /// golden-section search maximises on an end of its interval: its target now stops half the
+    /// search's stopping width short of each end (`Coordinate::newton_range` in `joint::fit`), the
+    /// fix for two nearly fully inbred tomato samples whose excess a step put on exactly 1. Here
+    /// the libraries' mismapped-position rates sit at their floor of 10⁻⁴, 3.8 × 10⁻¹⁰ above it,
+    /// and the steps heading to it were clamped onto 10⁻⁴ where they now stop 5 × 10⁻¹⁰ above it;
+    /// the tries along those steps differ from pass 40 of the first start. The starts' rows do not
+    /// move (84, 38, 44 passes, all converged), nor the 21 inbreeding coefficients; the 22
+    /// multipliers move by at most 0.00026 of their standard errors (4.5 × 10⁻⁴ of themselves),
+    /// their errors by at most 0.2%; the ordinary-site prior's concentrations in their fifth
+    /// figure; the informational tables' numbers by at most 0.09% (the duplicated class's share
+    /// with carriers above the stated frequency). Recorded on macOS (arm64) only; it was
+    /// `c548c669d12d20097217ff03e1299e3a`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "abdbf13bab51eb6d15ba9b57944d214d";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -637,7 +651,12 @@ mod tests {
     /// 23, chrV:483 (QUAL 26.8) lost; QUAL moves in all 23 others, by under 3.4 but for chrV:354,
     /// 516.8 to 318.4; most samples' GQ by one; no genotype of 483 changes. Recorded on macOS
     /// (arm64) only; it was `aba287e8691aeb67c507d15005379ee1`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "c3e72793116b01d57ca63cbc3bbd2c16";
+    ///
+    /// **Re-recorded 2026-10-17 again** with the fit above (the Newton target kept off the ends of
+    /// the golden-section numbers): only the AF of two records moves in its sixth decimal, chrV:285
+    /// 0.039376 to 0.039375 and chrV:377 0.048299 to 0.048298; no QUAL, genotype or GQ. Recorded on
+    /// macOS (arm64) only; it was `c3e72793116b01d57ca63cbc3bbd2c16`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "8c2025eaadcaf8f5e00a04688e2bd668";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

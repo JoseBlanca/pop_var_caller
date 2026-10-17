@@ -482,9 +482,13 @@ pub fn parameters_from_the_fit(
 /// The excess is a fraction in `[0, 1]` and a coefficient is one in `[0, 1)`, so an excess of
 /// exactly one has no coefficient to become. Such a sample is **absent from this map** and falls to
 /// the rung below, which is the honest handling: a maximisation that returns its own bound has
-/// reported where it stopped looking rather than what it measured. *The shipped maximisation cannot
-/// return exactly one — it is a golden-section search that reports the midpoint of a bracket
-/// strictly inside `[0, 1]` — so this guards the type's contract rather than an observed case.*
+/// reported where it stopped looking rather than what it measured. *The shipped fit does not return
+/// exactly one, so this guards the type's contract rather than an expected case.* It moves an excess
+/// two ways, and neither lands on 1: a golden-section search, which reports the middle of a bracket
+/// strictly inside `[0, 1]`, and a Newton step, whose target stops half that search's stopping
+/// width short of 1 (`Coordinate::newton_range` in `joint::fit`). Before that target was kept inside, it was
+/// clamped onto 1 itself, and on 59 tomato samples two nearly fully inbred samples came out of here
+/// with no coefficient and were written `defaulted` at 0.
 #[must_use]
 pub fn fitted_inbreeding_of(
     hom_excess: &BTreeMap<String, Estimate<HomozygoteExcess>>,
