@@ -353,10 +353,17 @@ samples once, after B5.
 
 ### Milestone E — the checks
 
-- ☐ **E1** Cross-platform: `cli::cross_platform_digests` and `scripts/promote_ng_oracle.sh` give the
+- ✅ **E1** Cross-platform: `cli::cross_platform_digests` and `scripts/promote_ng_oracle.sh` give the
   same checksums natively on macOS and in the Linux container. The oracle baseline is re-recorded
   once, its comment naming what A2, B1 and D2 each moved.
   *Depends:* D2. *Source:* `fit_precision.md` §3.6 item 5; the oracle script's rule.
+  *Done 2026-10-17:* the oracle on macOS at 2627af72 moved three lines and no other: the defaults
+  run's file by its version line (D2); the fitted file (A2's note, B1's fit, B2's last digits, D2's
+  two tables, the C–D review fix's four table errors); the VCF called with the fit, as B1 left it
+  (6,680 → 6,682 records, 5 of 26,720 genotypes). Each step's file was matched to its own earlier
+  oracle run; re-recorded with that account. The five digest tests pass natively on macOS and in
+  the Linux container (Apple `container`, arm64). The oracle itself was run on macOS only: the
+  container built the library's tests, not the `pvc` binary the oracle needs.
 - ☐ **E2** Calls on the 4 oracle psps: called once with the new fit and once with the current fit
   (`o4_base.toml`), **both by the new build**, so only the parameters file differs; records added and
   lost, sample genotypes changed, QUAL changes (`tmp/snp_conv/compare_vcfs.py`, `qualdiff.py`).

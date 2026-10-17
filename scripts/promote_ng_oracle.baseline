@@ -132,12 +132,29 @@
 # the file holds one, which only the climb wrote. Neither file has such a row, so each loses 24 comment lines (fitted
 # 298 -> 274, defaults run 341 -> 317); with comment lines taken out both are the previous files line for line
 # (tmp/oracle_E vs tmp/oracle_E2). No other line moved. They were bd7b9bea… / c84ce763….
+# Three lines re-recorded 2026-10-17 (macOS, arm64; snp_fit_convergence.md, step E1) at 2627af72, branch
+# snp-fit-convergence: the SNP/indel fit stops on the Newton decrement and tries its Newton step. The default-parameter
+# VCFs, windows and histograms do not move. The defaults run's parameters file moves by its version line alone, 3 -> 4
+# (D2). The fitted file, 665 -> 718 lines, moved in four steps: A2 rewords the note on what `converged` means (only that
+# moved; 5ea720b6 -> 23476eed); B1 ends the three starts at 53 passes converged and 46 and 37 agreed with start 1, where
+# all three ran to the 200-pass limit, which moves the 4 error multipliers (at most 0.04%), the 4 inbreeding coefficients
+# (largest SRS1839219 0.96617 -> 0.96811), the prior's two concentrations, the fallback F (0.613148 -> 0.613102) and the
+# 98 repeat-tract rows through the read groups' error rates (slip rates at most 0.13%) (25de1143); B2's box solve moves
+# the SNP/indel numbers by at most 5e-10 of themselves and the repeat-tract rows by at most 1.9e-5 (79a77c5d); D2 adds
+# format 4's two informational tables with their comments (`[ordinary_site_prior.fitted_density]`, the density separately
+# determined; `[duplicated_positions]`, the duplicated share and its carrier shape not) (e57e50c7); the C-D review's fix
+# (2627af72) moves four of the tables' standard errors by at most 1.1e-10 of themselves. B3-B5, C1-C3, D1 and the B
+# review's fix move no line here. Called with the fit (B1 alone; nothing after it moved this line): 6,680 -> 6,682
+# records, two SNVs added at SL4.0ch01:85900664 and 85900669 (QUAL 9.4 each); 5 of 26,720 sample genotypes changed, one
+# sample at SL4.0ch01:30161572-30161577 (0/1 -> 1/1, GQ 3); QUAL moves in 3,892 records, 5 of them by more than 1 (those
+# five, -6.6 to -8.2), the rest by 0.1 or 0.2. The cross-platform digests agree on macOS and in the Linux container.
+# They were 920e36b7… / 5ea720b6… / 61b09b60….
 slice: 20 regions, 4 alignments
 # records: 7508
 67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
 67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
-920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
+d083cd878e0e98a0e17a60625d7ebe27  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
 0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-5ea720b63c4674239720087f21a72674  fitted.parameters.toml
-61b09b604ee5fb2d7196150824c2c996  from_fit.comparable
+3e60785a3bbfca25385f281fa95fec02  fitted.parameters.toml
+fd1a3bc892256a89d4e0c9cebd6ff866  from_fit.comparable
