@@ -381,6 +381,12 @@ samples once, after B5.
   to F = 0 `defaulted`. With it, 94 records lost, 1,331 added and 4,766 of 17.2 million genotypes
   changed, 4,314 in those two samples; with their F restored by hand, 3 lost, 4 added and 52
   changed (GQ ≤ 5). To fix before merging. Report §3.
+  *Fixed 2026-10-17 (10d2a24c):* a Newton target for a number the golden-section search maximises
+  (the excess, each library's two error rates) stops half the search's stopping width inside its
+  interval. Re-run at 59: no coefficient `defaulted` (the two at 0.999999999, `fitted_here`); against
+  main, 3 records lost, 3 added, 54 of 17.2 million genotypes changed (51 at GQ ≤ 5). The 1- and
+  4-sample files and the oracle do not move; the 21-sample cross-platform digests re-recorded.
+  Report §3.3.
 - ✅ **E4** The stopping rule loses nothing at 59 samples: the new fit's returned values (from
   `PVC_JOINT_FIT_TRACE`'s returned-fit rows) against the reference `t59_d1e-4.judge.tsv`, every
   determined quantity within 0.1 of its reference error (predicted 0.047); B1's reproduction already
