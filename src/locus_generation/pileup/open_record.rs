@@ -1130,12 +1130,16 @@ impl OpenPileupRecord {
         );
         // **The observations come from the reads, not from the bucket totals** (B1). See
         // `keyed_observations` for why, and for what makes the two agree at one read group.
+        let without_observation_before = witness_counts.reads_without_observation;
         let mut keyed = self.keyed_observations_counting(record_end_exclusive, &mut witness_counts);
-        // Every folded read is resolved exactly once and lands in exactly one of the two
-        // classes; the no-observation set is disjoint from `folded_reads` by construction,
-        // its members having been removed when they produced nothing.
+        // Every folded read is resolved exactly once and lands in exactly one of three classes:
+        // complete, partial, or set aside for stopping inside a slide the record could not
+        // reach (`evidence_end_exclusive`), which `keyed_observations_counting` counts as reads
+        // without an observation. The no-observation set is disjoint from `folded_reads` by
+        // construction, its members having been removed when they produced nothing.
+        let set_aside = witness_counts.reads_without_observation - without_observation_before;
         debug_assert_eq!(
-            witness_counts.reads_complete + witness_counts.reads_partial,
+            witness_counts.reads_complete + witness_counts.reads_partial + set_aside,
             self.folded_reads.len() as u32,
             "every folded read resolves to exactly one witness class",
         );
