@@ -542,6 +542,40 @@ pub(super) struct OpenPileupRecord {
     /// `ref_span` (B1 in `ia/reviews/pileup_2026-05-06.md`).
     ///
     folded_reads: FoldedReads,
+    /// **How far a read must reach before it can tell this record's alleles apart**, when that
+    /// is further than the footprint: 1-based, exclusive. `0` when it is not.
+    ///
+    /// An indel's record reaches its right-most placement ([`indel_record_span`]), so a read
+    /// that stops inside the repeat does not cover the record and is a partial observation. But
+    /// the footprint is stopped at the region's last base ([`clamped_to_region`]), and a region
+    /// ends where repeat ground begins — exactly where the indel goes on sliding. A read that
+    /// stops past the clamped end and short of the slide's covers the footprint, so it would be
+    /// a complete observation of the reference although it could not have shown the indel. At
+    /// GIAB HG004 chr10:68636979 (`CGTTGT>C` sliding into a `(TG)n` tract) the mapper clips every
+    /// carrier read where the two haplotypes first differ, which is two bases past the clamp: 16
+    /// of the 39 reference reads this record counted at 300×, and 3 of 3 at 30×, where they made
+    /// the homozygous deletion `0/1`.
+    ///
+    /// The footprint keeps the clamp — the bases past it are the next region's — and this keeps
+    /// the end the evidence needs. A read that covers the footprint but whose alignment stops
+    /// short of it is not counted at this record (`keyed_observations_counting`).
+    ///
+    /// **Taken only from a slide two reads or more carry** ([`Self::slide_ends`]), so one read with
+    /// an odd insertion cannot set reads aside for everyone. A guard, not a measured fix: what
+    /// went wrong at GIAB HG004 chr10:4848077 was many reads' stutter deletions of the next
+    /// tract, which `process_position` now leaves out because they change no base of the region.
+    evidence_end_exclusive: u32,
+    /// Each distinct end a clamped slide asked for at this record, with how many reads asked for
+    /// it; resolved into `evidence_end_exclusive` when the record closes.
+    slide_ends: SmallVec<[(u32, u32); 2]>,
+    /// **The left-hand counterpart**: the first base a read's alignment must cover, 1-based, when
+    /// that is before the record's anchor; `0` when it is not. Set by a claimed junction
+    /// insertion ([`claimed_junction_insertion`]), whose record starts one base after the
+    /// insertion's anchor, so a read starting on the region's first base covers the record but
+    /// may have started inside the inserted copies. At GIAB HG002 chr22:36082092 in a simulated
+    /// homozygote at 200×, 11 carrier reads starting inside the `GA` run were complete reference
+    /// observations.
+    evidence_start: u32,
     /// **The reads barred from this record because their mate already stands for the
     /// pair here** — an indel mate-overlap loser, kept out for the record's whole life
     /// rather than for the one position it lost at.
@@ -710,6 +744,15 @@ struct FoldedReadState {
     /// so every set here holds exactly one run — but the field can now *say* two, which is
     /// what C3 needs before it can stop discarding the read that saw them.
     witnessed: WitnessedRefPositions,
+    /// One past the last reference base the read's alignment covers, 1-based — how far it
+    /// reached, which `witnessed` cannot say because it is clipped to the record. Compared
+    /// against [`OpenPileupRecord::evidence_end_exclusive`]; a fact about the read, so a widen
+    /// does not change it.
+    aligned_end_exclusive: u32,
+    /// The first reference base the read's alignment covers, 1-based — the left-hand
+    /// counterpart of `aligned_end_exclusive`, compared against
+    /// [`OpenPileupRecord::evidence_start`].
+    aligned_start: u32,
 }
 
 impl OpenPileupRecord {
@@ -769,6 +812,9 @@ impl OpenPileupRecord {
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
             folded_reads,
+            evidence_end_exclusive: 0,
+            slide_ends: SmallVec::new(),
+            evidence_start: 0,
             mate_overlap_losers: SmallVec::new(),
         }
     }
@@ -784,6 +830,9 @@ impl OpenPileupRecord {
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
             folded_reads: FoldedReads::with_capacity(fold_capacity),
+            evidence_end_exclusive: 0,
+            slide_ends: SmallVec::new(),
+            evidence_start: 0,
             mate_overlap_losers: SmallVec::new(),
         }
     }
@@ -892,6 +941,20 @@ impl OpenPileupRecord {
             // 0 %, and hash-keying the observations measured *worse*.)
             let bases = self.alleles[state.allele_index].seq.as_slice();
             let read_witness = witness_of(&state.witnessed, self.pos, record_end_exclusive);
+            // **A read that covers the clamped footprint but stops short of where the indel
+            // could still be placed saw nothing that tells the alleles apart**, and is not
+            // counted here (see `evidence_end_exclusive`). Not made a partial: the clamped
+            // record spells the indel by the bases inside the region only, so a carrier's
+            // sequence past the footprint is not what the allele followed by the reference
+            // says, and the partial rule would find the read compatible with the reference
+            // alone.
+            if matches!(read_witness, ReadWitness::Complete)
+                && (state.aligned_end_exclusive < self.evidence_end_exclusive
+                    || (self.evidence_start > 0 && state.aligned_start > self.evidence_start))
+            {
+                witness_counts.reads_without_observation += 1;
+                continue;
+            }
             match &read_witness {
                 ReadWitness::Complete => witness_counts.reads_complete += 1,
                 ReadWitness::Partial { positions } => {
@@ -994,11 +1057,18 @@ impl OpenPileupRecord {
     /// the emitted locus, which is the one part of a record that genuinely has to be new
     /// each time.
     pub fn finalise_recycling(
-        self,
+        mut self,
     ) -> (SampleLocusObservations, RecordWitnessCounts, RecordStorage) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
         let chrom_id = self.chrom_id;
+        self.evidence_end_exclusive = self
+            .slide_ends
+            .iter()
+            .filter(|&&(_, reads)| reads >= MIN_READS_FOR_AN_EVIDENCE_END)
+            .map(|&(end, _)| end)
+            .max()
+            .unwrap_or(0);
         // Every field named, no `..Default::default()`: a field added to `RecordWitnessCounts`
         // would otherwise compile here and arrive as a silent `0`.
         let mut witness_counts = RecordWitnessCounts {
@@ -2222,6 +2292,8 @@ fn fold_read_into_record(
         chain_id: active.chain_id,
         read_group: active.read.read_group,
         witnessed,
+        aligned_end_exclusive: active.read.alignment_end.saturating_add(1),
+        aligned_start: active.read.alignment_start,
     };
     folded_reads.store_at(slot, active.read_id, state);
 }
@@ -2316,6 +2388,8 @@ fn refold_live_reads(
             chain_id: _,
             read_group: _,
             witnessed: _,
+            aligned_end_exclusive: _,
+            aligned_start: _,
         } = folded_reads
             .get(read_id)
             .expect("the id came from this record's own fold state");
@@ -2398,6 +2472,8 @@ fn refold_live_reads(
             contribution: _,
             chain_id: _,
             read_group: _,
+            aligned_end_exclusive: _,
+            aligned_start: _,
         } = state;
         *allele_index = new_index;
     }
@@ -2899,6 +2975,13 @@ fn indel_record_span(
     })
 }
 
+/// How many reads must ask for the same clamped slide end before a record keeps it as its
+/// [`evidence_end_exclusive`](OpenPileupRecord::evidence_end_exclusive). Two: a lone read with an
+/// odd insertion must not set reads aside for everyone, and at about three reads a position a
+/// homozygous indel still brings two. Not tuned; a heterozygote at that depth often brings one,
+/// and then nothing is set aside.
+const MIN_READS_FOR_AN_EVIDENCE_END: u32 = 2;
+
 /// A record's footprint end, stopped at the region's last base.
 ///
 /// `region_end` is 1-based inclusive and the ends here are exclusive, so the bound is
@@ -2997,7 +3080,18 @@ pub(super) fn process_position(
                 .is_some_and(|first| ev.anchor_pos() < first);
             let span = match ev {
                 ReadEvent::Match { .. } => unslid_span,
-                _ if claimed || before_region => unslid_span,
+                // **A claimed junction insertion slides like any other** — from its anchor, one
+                // base before the region, so the record that starts on the region's first base
+                // needs one position fewer than the slide asks of the anchor. At GIAB HG002
+                // chr22:36082092 (`T>TGAGA` after a `T10` tract, sliding through `GAGAGAG`) the
+                // record kept the insertion's own five positions, and every read stopping inside
+                // the `GA` run was a complete reference observation: 5 of 32 at 30× in a
+                // simulated homozygote, called `0/1`.
+                _ if claimed => {
+                    let slid = indel_record_span(ev, chrom_id, reference, &mut slide_buf)?;
+                    unslid_span.max(slid.saturating_sub(1))
+                }
+                _ if before_region => unslid_span,
                 ReadEvent::Insertion {
                     anchor_ref_pos,
                     seq,
@@ -3047,13 +3141,16 @@ pub(super) fn process_position(
             // width its own reads say, and is discarded by the
             // generator's own clamp on the way out; clamping it here
             // would make it zero-width instead.
+            // Where the evidence has to reach, before the region's border is applied: what the
+            // record keeps as its `evidence_end_exclusive` when the clamp below cuts the slide.
+            let slid_end = event_start.saturating_add(span);
             let event_end = clamped_to_region(
                 event_start,
                 // **`span`, not the event's own `footprint_span`.** The record's positions
                 // are the ground every read here is compared over: an insertion needs its own
                 // length of them ([`record_span`]), and an indel inside a repeat needs every
                 // placement it could have had ([`indel_record_span`]).
-                event_start.saturating_add(span),
+                slid_end,
                 region_end,
             );
             // **The slide never makes a record too wide to walk.** `RecordTooWide` is fatal,
@@ -3108,6 +3205,33 @@ pub(super) fn process_position(
                 let new = open.open_new(chrom_id, event_start, span, reference)?;
                 new.pos
             };
+            if slid_end > event_end || claimed {
+                // PANIC-FREE: `key` was just inserted or located above.
+                let record = open.records.get_mut(&key).expect("just located");
+                // **Only an indel whose first changed base is inside the region.** One anchored on
+                // the region's last base changes nothing here: a deletion there removes the next
+                // region's bases, and at the base before a `T17` tract (GIAB HG004 chr10:4848077)
+                // every left-aligned stutter deletion of the tract is anchored there and slides its
+                // whole length — 72 of 252 reference reads set aside at a site with no variant.
+                let changes_the_region = region_end.is_none_or(|last| ev.anchor_pos() < last);
+                if slid_end > event_end && changes_the_region {
+                    match record
+                        .slide_ends
+                        .iter_mut()
+                        .find(|(end, _)| *end == slid_end)
+                    {
+                        Some((_, reads)) => *reads += 1,
+                        None => record.slide_ends.push((slid_end, 1)),
+                    }
+                }
+                if claimed {
+                    let anchor = ev.anchor_pos();
+                    record.evidence_start = match record.evidence_start {
+                        0 => anchor,
+                        earlier => earlier.min(anchor),
+                    };
+                }
+            }
             if !affected.contains(&key) {
                 affected.push(key);
             }
@@ -3818,6 +3942,8 @@ mod tests {
                     read_group: ReadGroupId(0),
                     witnessed: WitnessedRefPositions::from_half_open_runs([(1, 2)])
                         .expect("one run of one position"),
+                    aligned_end_exclusive: 2,
+                    aligned_start: 1,
                 },
             );
         }
@@ -6738,5 +6864,209 @@ mod tests {
             .expect("a record on the region's first base");
         assert_eq!(spellings(record), vec![b"G".to_vec()]);
         assert_nothing_before_reaches(&open, 11);
+    }
+
+    // -----------------------------------------------------------------
+    // Reads that stop inside an indel's slide, where the record cannot reach
+    // (`doc/devel/reports/ng_ref_reads_in_repeats_2026-10-17.md`).
+    // -----------------------------------------------------------------
+
+    /// Walk `reads` over `positions` with the region's last base at `region_end` and, when
+    /// given, a junction at the region's first base; return the closed record at `anchor`.
+    fn walk_and_close(
+        contig: &str,
+        reads: Vec<PreparedRead>,
+        positions: std::ops::RangeInclusive<u32>,
+        region_first_base: Option<u32>,
+        region_end: Option<u32>,
+        junction: Option<JunctionAtRegionStart>,
+        anchor: u32,
+    ) -> SampleLocusObservations {
+        let reference = fa(contig);
+        let (active, _ids) = admitted(reads);
+        let mut open = OpenPileupRecordTable::new();
+        open.begin_region(region_first_base);
+        for pos in positions {
+            let contributors = contributors_at(&active, pos);
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                &[],
+                &[],
+                &active,
+                &reference,
+                region_end,
+                junction,
+            )
+            .expect("the fixture walks cleanly");
+        }
+        open.records
+            .remove(&anchor)
+            .unwrap_or_else(|| panic!("a record at {anchor}"))
+            .finalise()
+            .0
+    }
+
+    /// Complete reads per spelling, as `(bases, reads)`, sorted.
+    fn complete_reads(locus: &SampleLocusObservations) -> Vec<(Vec<u8>, u32)> {
+        let mut counts: Vec<(Vec<u8>, u32)> = locus
+            .observations
+            .iter()
+            .filter(|observation| matches!(observation.read_witness, ReadWitness::Complete))
+            .map(|observation| (observation.bases.to_vec(), observation.num_obs))
+            .collect();
+        counts.sort();
+        counts
+    }
+
+    /// The contig of the region-end fixture: `A` at 8, then twelve `T`s at 9..=20, of which the
+    /// region owns 9 and 10 and an STR tract the rest.
+    const SLIDE_PAST_REGION_END: &str = "ACGTACGATTTTTTTTTTTTGCAGCAGCAG";
+
+    /// A carrier of the one-`T` deletion anchored at 8, aligned 1..=30.
+    fn t_deletion_carrier(qname: &str) -> PreparedRead {
+        let mut seq = SLIDE_PAST_REGION_END.as_bytes()[..8].to_vec();
+        seq.extend_from_slice(&SLIDE_PAST_REGION_END.as_bytes()[9..]);
+        plain_read(
+            qname,
+            1,
+            30,
+            vec![CigarOp::Match(8), CigarOp::Deletion(1), CigarOp::Match(21)],
+            seq,
+        )
+    }
+
+    /// A reference read aligned `1..=end`.
+    fn reference_read(contig: &str, qname: &str, start: u32, end: u32) -> PreparedRead {
+        plain_read(
+            qname,
+            start,
+            end,
+            vec![CigarOp::Match(end - start + 1)],
+            contig.as_bytes()[start as usize - 1..end as usize].to_vec(),
+        )
+    }
+
+    /// **A read that covers a record cut at the region's end, but stops short of the indel's
+    /// slide, is not counted as the reference** — mechanism C of the report.
+    ///
+    /// The deletion at 8 slides through the `T`s to 20, so a read tells it from the reference
+    /// only past 20; the record is cut to 8..=10 because the region ends at 10. `short` ends at
+    /// 16: it covers the record, and on either haplotype its bases there are `ATT`.
+    #[test]
+    fn a_read_stopping_inside_a_slide_cut_at_the_regions_end_is_not_counted() {
+        let contig = SLIDE_PAST_REGION_END;
+        let locus = walk_and_close(
+            contig,
+            vec![
+                t_deletion_carrier("carrier one"),
+                t_deletion_carrier("carrier two"),
+                reference_read(contig, "short", 1, 16),
+                reference_read(contig, "long", 1, 30),
+            ],
+            1..=10,
+            None,
+            Some(10),
+            None,
+            8,
+        );
+        assert_eq!((locus.region.start.get(), locus.region.end.get()), (8, 10));
+        assert_eq!(
+            complete_reads(&locus),
+            vec![(b"AT".to_vec(), 2), (b"ATT".to_vec(), 1)],
+            "`long` is the one reference read: `short` stopped at 16, inside the slide",
+        );
+        assert_eq!(locus.reads_without_observation, 1);
+    }
+
+    /// **One read's slide does not set reads aside**: the evidence end needs two reads asking
+    /// for it, so with a single carrier `short` counts as it always did.
+    #[test]
+    fn one_carrier_alone_sets_no_read_aside() {
+        let contig = SLIDE_PAST_REGION_END;
+        let locus = walk_and_close(
+            contig,
+            vec![
+                t_deletion_carrier("carrier"),
+                reference_read(contig, "short", 1, 16),
+                reference_read(contig, "long", 1, 30),
+            ],
+            1..=10,
+            None,
+            Some(10),
+            None,
+            8,
+        );
+        assert_eq!(
+            complete_reads(&locus),
+            vec![(b"AT".to_vec(), 1), (b"ATT".to_vec(), 2)],
+        );
+        assert_eq!(locus.reads_without_observation, 0);
+    }
+
+    /// The contig of the junction fixture: a `T` run ending at 10 (the repeat ground before the
+    /// region), then `GAGAGAG` at 11..=17, which an inserted `GA` slides through.
+    const SLIDE_FROM_A_JUNCTION: &str = "ACGTTTTTTTGAGAGAGCCTTACCGTACCT";
+
+    /// **A claimed junction insertion's record reaches its slide** — mechanism D. Inserting `GA`
+    /// after the `T` at 10 can be written anywhere up to 17, so a read tells it apart only from
+    /// 18. Before, the record was the insertion's own three positions, 11..=13, and `short`,
+    /// ending at 15, was a complete reference read; and `starter`, which begins on the region's
+    /// first base, may have begun inside the inserted copies.
+    #[test]
+    fn a_claimed_junction_insertion_reaches_its_slide() {
+        let contig = SLIDE_FROM_A_JUNCTION;
+        let carrier = |qname: &str| {
+            let mut seq = contig.as_bytes()[..10].to_vec();
+            seq.extend_from_slice(b"GA");
+            seq.extend_from_slice(&contig.as_bytes()[10..]);
+            plain_read(
+                qname,
+                1,
+                30,
+                vec![
+                    CigarOp::Match(10),
+                    CigarOp::Insertion(2),
+                    CigarOp::Match(20),
+                ],
+                seq,
+            )
+        };
+        let locus = walk_and_close(
+            contig,
+            vec![
+                carrier("carrier one"),
+                carrier("carrier two"),
+                reference_read(contig, "short", 1, 15),
+                reference_read(contig, "long", 1, 30),
+                reference_read(contig, "starter", 11, 30),
+            ],
+            10..=30,
+            Some(11),
+            Some(30),
+            Some(JunctionAtRegionStart {
+                first_base: 11,
+                repeat_last_base: b'T',
+            }),
+            11,
+        );
+        assert!(
+            locus.region.end.get() >= 18,
+            "the record reaches the first base past the slide, not 13: {:?}",
+            locus.region,
+        );
+        let reference = &contig.as_bytes()[10..locus.region.end.get() as usize];
+        let reference_reads: u32 = complete_reads(&locus)
+            .iter()
+            .filter(|(bases, _)| bases.as_slice() == reference)
+            .map(|(_, reads)| reads)
+            .sum();
+        assert_eq!(
+            reference_reads, 1,
+            "`long` is the one reference read: `short` stops inside the slide and `starter` \
+             starts at it",
+        );
     }
 }
