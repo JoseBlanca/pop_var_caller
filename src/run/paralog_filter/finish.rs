@@ -449,13 +449,45 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
     // 63, and the two that dropped out were nearly uncovered" are different statements, and only
     // the second tells an operator whether to look at those samples' reads. An index would make
     // them count their own command line to find out which sample it was.
+    let mut without_a_model = Vec::new();
     for (sample, why) in scoring.why_no_model().iter().enumerate() {
         if let Some(why) = why {
             lines.push(format!(
                 "  {} has no coverage model: {why}",
                 name_of(sample_names, sample)
             ));
+            without_a_model.push((sample, why));
         }
+    }
+
+    // **The same fact, once, on the terminal.** A sample with no coverage model contributes no
+    // coverage evidence to any record, so the filter cannot drop a hidden duplication on its
+    // account — and the lines above are the log's, which an operator may never open. Until
+    // 2026-10-17 a GIAB run had every sample refused and the terminal said only that the
+    // duplication rate fell back to a constant. **One line, whatever the cohort size**: the
+    // count, the first few samples with their reasons, and where the rest are.
+    const SAMPLES_WITHOUT_A_MODEL_NAMED: usize = 3;
+    if !without_a_model.is_empty() {
+        let named: Vec<String> = without_a_model
+            .iter()
+            .take(SAMPLES_WITHOUT_A_MODEL_NAMED)
+            .map(|(sample, why)| format!("{} ({why})", name_of(sample_names, *sample)))
+            .collect();
+        let unnamed = without_a_model
+            .len()
+            .saturating_sub(SAMPLES_WITHOUT_A_MODEL_NAMED);
+        lines.push(format!(
+            "  warning: {} of {} sample(s) have no coverage model, so the hidden-duplication \
+             filter used no coverage evidence from them: {}{}",
+            without_a_model.len(),
+            scoring.sample_count(),
+            named.join("; "),
+            if unnamed == 0 {
+                String::new()
+            } else {
+                format!("; and {unnamed} more, each named with its reason in the log")
+            },
+        ));
     }
 
     // **What the fit came to, per sample** — spec §3.1's outcome, which nothing printed before.
