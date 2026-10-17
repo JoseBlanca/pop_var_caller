@@ -1134,7 +1134,10 @@ impl Drop for VerificationHandle {
         // Abandoning the run's only verification hides a possibly-pending failure — warn
         // rather than swallow it (but stay quiet if we are already unwinding a panic).
         if self.handle.is_some() && !std::thread::panicking() {
-            eprintln!("{VERIFY_HANDLE_DROP_WARNING}");
+            tracing::warn!(
+                "{}",
+                VERIFY_HANDLE_DROP_WARNING.trim_start_matches("warning: ")
+            );
         }
     }
 }

@@ -1,4 +1,7 @@
-//! **Where parameter estimation has got to**, printed to stderr.
+//! **Where parameter estimation has got to**, stated as `tracing` events
+//! ([`crate::cli::run_output`]): a stage's start and its milestones go to the terminal and the
+//! log, the once-a-minute updates are a progress line drawn in place, and the details are the
+//! log's alone.
 //!
 //! Estimating a whole-genome cohort's parameters takes hours and writes nothing until the
 //! parameters file at the end, so a person watching it cannot tell a long fit from a hung one.
@@ -19,6 +22,8 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::cli::run_output::PROGRESS;
+
 /// The shortest time between two "where it is" lines of one stage.
 const BETWEEN_LINES: Duration = Duration::from_secs(60);
 
@@ -34,7 +39,7 @@ pub(crate) struct StageProgress {
 impl StageProgress {
     /// Start a stage, announcing it with `line`.
     pub(crate) fn begin(line: impl std::fmt::Display) -> Self {
-        eprintln!("estimating: {line}{}", memory());
+        tracing::info!("estimating: {line}{}", memory());
         let now = Instant::now();
         Self {
             started: now,
@@ -54,7 +59,8 @@ impl StageProgress {
         }
         *last = Instant::now();
         drop(last);
-        eprintln!(
+        tracing::info!(
+            target: PROGRESS,
             "estimating: {}{}",
             line(&self.time_into_the_stage()),
             memory()
@@ -63,7 +69,7 @@ impl StageProgress {
 
     /// Say something unconditionally — a milestone inside the stage, such as a start that ended.
     pub(crate) fn always(&self, line: impl FnOnce(&str) -> String) {
-        eprintln!(
+        tracing::info!(
             "estimating: {}{}",
             line(&self.time_into_the_stage()),
             memory()
@@ -117,13 +123,13 @@ fn memory_in_status(status: &str) -> String {
 /// Say one thing, with the process's memory — for a step that is not a stage of its own, such
 /// as what contamination kept.
 pub(crate) fn note(line: impl std::fmt::Display) {
-    eprintln!("estimating: {line}{}", memory());
+    tracing::debug!("estimating: {line}{}", memory());
 }
 
 /// Say one thing as it is, with neither time nor memory — for a detail of a step whose own line
 /// already carries both, such as one repeat class's row counts after its motif length's line.
 pub(crate) fn detail(line: impl std::fmt::Display) {
-    eprintln!("estimating: {line}");
+    tracing::debug!("estimating: {line}");
 }
 
 /// A size in bytes as the progress lines print it: whole mebibytes below one gibibyte, where one

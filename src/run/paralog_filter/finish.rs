@@ -37,10 +37,10 @@ use crate::run::explain::ParalogExplanations;
 /// checker, since one is a target and the other a plain `bool`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WhatTheOperatorAskedFor {
-    /// The share of the removed records that may really have been variants — `--paralog-fdr`.
+    /// The share of the removed records that may really have been variants — `--hidden-dup-fdr`.
     pub target_fdr: TargetFdr,
-    /// Keep a removed record on the `hiddenParalog` filter instead of leaving it out —
-    /// `--paralog-filter-tag`. **What it is for**: a run that drops can be audited against one
+    /// Keep a removed record on the `hiddenDup` filter instead of leaving it out —
+    /// `--hidden-dup-tag`. **What it is for**: a run that drops can be audited against one
     /// that tags, since the two files differ by exactly the tagged lines.
     pub tag_instead_of_dropping: bool,
 }
@@ -48,14 +48,14 @@ pub struct WhatTheOperatorAskedFor {
 impl WhatTheOperatorAskedFor {
     /// **What the two flags come to, or `None` where the operator asked for no filter.**
     ///
-    /// `--paralog-fdr 0` means *do not run the filter*, and this is the one place that rule
+    /// `--hidden-dup-fdr 0` means *do not run the filter*, and this is the one place that rule
     /// lives. It matters that it is one place and that the answer is an `Option`: handed a target
     /// of zero the scoring would not remove nothing — a strongly duplicated record's tail
     /// false-discovery value underflows to exactly zero, and zero is not above zero, so the most
     /// extreme records would go. A `TargetFdr` in hand therefore always means the filter runs,
     /// and "off" is the absence of one rather than a particular value of one.
     ///
-    /// `--paralog-filter-tag` on its own, with the filter off, is accepted and does nothing —
+    /// `--hidden-dup-tag` on its own, with the filter off, is accepted and does nothing —
     /// there is no verdict for it to change.
     ///
     /// # Errors
@@ -449,13 +449,45 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
     // 63, and the two that dropped out were nearly uncovered" are different statements, and only
     // the second tells an operator whether to look at those samples' reads. An index would make
     // them count their own command line to find out which sample it was.
+    let mut without_a_model = Vec::new();
     for (sample, why) in scoring.why_no_model().iter().enumerate() {
         if let Some(why) = why {
             lines.push(format!(
                 "  {} has no coverage model: {why}",
                 name_of(sample_names, sample)
             ));
+            without_a_model.push((sample, why));
         }
+    }
+
+    // **The same fact, once, on the terminal.** A sample with no coverage model contributes no
+    // coverage evidence to any record, so the filter cannot drop a hidden duplication on its
+    // account — and the lines above are the log's, which an operator may never open. Until
+    // 2026-10-17 a GIAB run had every sample refused and the terminal said only that the
+    // duplication rate fell back to a constant. **One line, whatever the cohort size**: the
+    // count, the first few samples with their reasons, and where the rest are.
+    const SAMPLES_WITHOUT_A_MODEL_NAMED: usize = 3;
+    if !without_a_model.is_empty() {
+        let named: Vec<String> = without_a_model
+            .iter()
+            .take(SAMPLES_WITHOUT_A_MODEL_NAMED)
+            .map(|(sample, why)| format!("{} ({why})", name_of(sample_names, *sample)))
+            .collect();
+        let unnamed = without_a_model
+            .len()
+            .saturating_sub(SAMPLES_WITHOUT_A_MODEL_NAMED);
+        lines.push(format!(
+            "  warning: {} of {} sample(s) have no coverage model, so the hidden-duplication \
+             filter used no coverage evidence from them: {}{}",
+            without_a_model.len(),
+            scoring.sample_count(),
+            named.join("; "),
+            if unnamed == 0 {
+                String::new()
+            } else {
+                format!("; and {unnamed} more, each named with its reason in the log")
+            },
+        ));
     }
 
     // **What the fit came to, per sample** — spec §3.1's outcome, which nothing printed before.

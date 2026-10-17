@@ -33,7 +33,7 @@ use crate::calling::inference::{CallingLoopConfig, DiscoveryMode, RunnableCallin
 use crate::calling::likelihood::MAX_PLOIDY_COPIES;
 use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, FittedDensity, FittedDuplicatedPositions, ParametersFile,
-    ParametersFileError, ReadsBehindEachCalibration, SnpIndelFitStart, beside_the_vcf,
+    ParametersFileError, ReadsBehindEachCalibration, SnpIndelFitStart,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
@@ -89,7 +89,7 @@ pub enum CallingRunError {
 
     /// A bound that is not a bound.
     #[error(
-        "--max-cohort-locus-span {asked}: a locus covers at least one reference base, so a \
+        "--max-locus-span {asked}: a locus covers at least one reference base, so a \
          bound of zero would refuse every locus there is"
     )]
     MaxCohortLocusSpanIsZero {
@@ -99,7 +99,7 @@ pub enum CallingRunError {
 
     /// A round that covers no ground.
     #[error(
-        "--cohort-locus-builder-regions-len {asked}: a round covers at least one reference \
+        "--locus-builder-regions-len {asked}: a round covers at least one reference \
          base, so a width of zero would never advance"
     )]
     CohortLocusBuilderRegionsLenIsZero {
@@ -113,7 +113,7 @@ pub enum CallingRunError {
     /// truncation, so a locus carrying two obvious variants would lose both — which
     /// `candidate_alleles.md` §4.1 rules out.
     #[error(
-        "--max-candidate-alleles {asked}: a cap counts the reference among the alleles, so it \
+        "--max-generic-alleles {asked}: a cap counts the reference among the alleles, so it \
          needs at least {smallest} — the reference and one alternative"
     )]
     MaxCandidateAllelesTooSmall {
@@ -150,23 +150,28 @@ pub enum CallingRunError {
         directory: PathBuf,
     },
 
-    /// The parameters file this run would write is the one it was handed.
+    /// `--tmp-dir` names something that is not a directory.
     ///
-    /// **Spec §7 invites the collision**: it tells a user to copy the file their run wrote and
-    /// change a line, so `--parameters calls.parameters.toml --output calls.vcf.gz` is the
-    /// natural next command and would write over the file that was just edited. Refused before
-    /// anything is read, because what it destroys is the edit and the run would look ordinary.
-    #[error(
-        "--parameters {} is the file this run would write beside --output {}; \
-         name the output differently, or copy the parameters somewhere else first",
-        path.display(),
-        output.display()
-    )]
-    ParametersWouldBeOverwritten {
-        /// The file that was handed in.
+    /// Judged with the rest of the command line, because the scratch directory is otherwise first
+    /// made after the reference has been read and every input opened.
+    #[error("--tmp-dir {} is not a directory", path.display())]
+    TmpDirIsNotADirectory {
+        /// What was typed.
         path: PathBuf,
-        /// The output whose sibling it is.
-        output: PathBuf,
+    },
+
+    /// The run's scratch directory could not be made.
+    #[error(
+        "the run's scratch directory could not be made in {} — give --tmp-dir a directory it \
+         can write to",
+        directory.display()
+    )]
+    ScratchDirectory {
+        /// Where it was to be made.
+        directory: PathBuf,
+        /// What the file system said.
+        #[source]
+        source: std::io::Error,
     },
 
     /// `--ploidy` was typed and disagrees with the parameters file's own.
@@ -515,65 +520,62 @@ pub fn refuse_an_output_that_cannot_be_written(output: &Path) -> Result<(), Call
     Ok(())
 }
 
-/// **A run may not write its parameters file over the one it was handed.**
+/// Refuse a `--tmp-dir` that is not a directory, before anything is read.
 ///
-/// Spec §7 tells a user to copy the file their run wrote and change a line, so a re-run whose
-/// supplied file and whose output share a stem writes over its own input — `calls.vcf.gz` and
-/// `calls.parameters.toml` are exactly that pair. What it would destroy is whatever the person
-/// changed by hand, and the numbers that came back would look ordinary, so this is refused
-/// rather than done. `write_beside_the_vcf`'s own note leaves the choice to the driver; this is
-/// the driver making it.
+/// # Errors
 ///
-/// **Only a file that is there is compared**, so a mistyped `--parameters` gets the message
-/// about the file not existing rather than an instruction to copy a file that does not exist.
-///
-/// **Both sides are resolved through the file system where it can resolve them**, which is what
-/// makes the comparison see three things a textual one does not: `./calls.parameters.toml` and
-/// `calls.parameters.toml` are one file; a symlink pointing at the file the run would write is
-/// that file, and following it would have destroyed the target through the link; and on a
-/// case-insensitive volume — macOS's default, and this project builds there — `CALLS.vcf.gz`'s
-/// sibling is the same file as `calls.parameters.toml`. Where a path cannot be resolved, its
-/// directory is resolved and the name compared as typed, which is the honest answer for a
-/// destination that does not exist yet.
-pub fn refuse_an_output_whose_parameters_file_is_this_run_s_input(
-    output: &Path,
-    supplied: Option<&Path>,
+/// [`CallingRunError::TmpDirIsNotADirectory`].
+pub fn refuse_a_tmp_dir_that_is_not_a_directory(
+    tmp_dir: Option<&Path>,
 ) -> Result<(), CallingRunError> {
-    let Some(supplied) = supplied else {
-        return Ok(());
-    };
-    if !supplied.exists() {
-        return Ok(());
+    match tmp_dir {
+        Some(directory) if !directory.is_dir() => Err(CallingRunError::TmpDirIsNotADirectory {
+            path: directory.to_path_buf(),
+        }),
+        _ => Ok(()),
     }
-    let would_write = beside_the_vcf(output);
-    if resolved(&would_write) == resolved(supplied) {
-        return Err(CallingRunError::ParametersWouldBeOverwritten {
-            path: supplied.to_path_buf(),
-            output: output.to_path_buf(),
-        });
-    }
-    Ok(())
 }
 
-/// A path as the file system knows it: fully resolved where it exists, and otherwise its
-/// directory resolved with the name as typed. A name with no directory part is the working
-/// directory's.
-fn resolved(path: &Path) -> PathBuf {
-    if let Ok(whole) = path.canonicalize() {
-        return whole;
-    }
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    let directory = if directory.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        directory
+/// **The run's own scratch directory**, `pvc_tmp_<random>` inside `--tmp-dir`, or inside the
+/// VCF's directory when no `--tmp-dir` was given (the working directory for a VCF on standard
+/// output) (`doc/devel/ng/spec/command_line.md` §7.5). Removed when the returned value is
+/// dropped.
+///
+/// **A directory of its own**, so several runs can share one `--tmp-dir` without colliding, and
+/// removing it never touches anything the user put there.
+///
+/// # Errors
+///
+/// [`CallingRunError::ScratchDirectory`] when it cannot be made.
+pub fn scratch_directory_for(
+    output: &Path,
+    tmp_dir: Option<&Path>,
+) -> Result<tempfile::TempDir, CallingRunError> {
+    let directory = match tmp_dir {
+        Some(directory) => directory.to_path_buf(),
+        None => match output.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => PathBuf::from("."),
+        },
     };
-    let resolved = directory
-        .canonicalize()
-        .unwrap_or_else(|_| directory.to_path_buf());
-    match path.file_name() {
-        Some(name) => resolved.join(name),
-        None => resolved,
+    let made = tempfile::Builder::new()
+        .prefix("pvc_tmp_")
+        .tempdir_in(&directory)
+        .map_err(|source| CallingRunError::ScratchDirectory {
+            directory: directory.clone(),
+            source,
+        })?;
+    tracing::debug!("scratch directory: {}", made.path().display());
+    Ok(made)
+}
+
+/// Where the calls went, as a person reads it: the file, or `standard output`.
+#[must_use]
+pub fn where_the_calls_went(output: &Path) -> String {
+    if crate::vcf::writer::is_standard_output(output) {
+        "standard output".to_owned()
+    } else {
+        output.display().to_string()
     }
 }
 
@@ -710,8 +712,8 @@ pub fn run_parameters(
     // knowing it happened, because a tract this run admits and the fit's selection did not is
     // scored from strata fitted over other loci.
     if let Some(axis) = file.routing_disagreement(routing) {
-        eprintln!(
-            "note: {} was written by a run that routed on a different {axis}; calling on",
+        tracing::warn!(
+            "{} was written by a run that routed on a different {axis}; calling on",
             path.display()
         );
     }
@@ -820,20 +822,44 @@ pub fn candidate_selection_for(
 #[cfg(test)]
 mod tests;
 
-/// **What the VCF's header states about the run that wrote it**, whichever mode wrote it.
+/// **The parameters a run recorded in its log, copied out to a file beside its VCF** — what a
+/// person does to reuse them, done for a test. `log` is the run's `--log`, or `None` for the
+/// default beside the VCF.
 ///
-/// **One copy, because one of the decisions in it survived a mutation until a command-level
-/// test existed**: `##parametersFile` names the file this run writes beside its VCF, by name
-/// and not by path — the two are siblings by construction ([`beside_the_vcf`]), so a path would
-/// say the same thing at greater length and would be wrong the moment somebody moved the pair.
-/// Two copies of that would be two places to get it wrong and one place to fix it.
+/// # Panics
+///
+/// When the log is not there or holds no parameters block: a test calls this after a run that
+/// must have written both.
+#[cfg(test)]
+pub(crate) fn parameters_the_run_logged(output: &Path, log: Option<&Path>) -> PathBuf {
+    let log = log.map_or_else(
+        || crate::cli::run_output::beside(output, "pvc_calls.log"),
+        Path::to_path_buf,
+    );
+    let text = std::fs::read_to_string(&log).expect("the run's log reads");
+    let parameters =
+        crate::cli::run_output::parameters_in(&text).expect("the log holds the run's parameters");
+    let mut name = output.as_os_str().to_os_string();
+    name.push(".logged-parameters.toml");
+    let at = PathBuf::from(name);
+    std::fs::write(&at, parameters).expect("the parameters are copied out");
+    at
+}
+
+/// **What the VCF's header states about the run that wrote it**, whichever mode wrote it: among
+/// the rest, the run's log by file name, and where its numbers came from
+/// (`doc/devel/ng/spec/command_line.md` §7.6).
+///
+/// **The log by name and not by path**, because the two usually travel as a directory and a path
+/// would be wrong the moment somebody moved the pair.
 ///
 /// # Errors
 ///
 /// [`CallingRunError::Header`] where the metadata is not something a header can state — a
 /// sample named twice, or a contig list the writer will not take.
 pub fn header_for(
-    output: &Path,
+    log: &Path,
+    parameters: Option<&Path>,
     reference: &Path,
     contigs: &ContigList,
     with_checksums: &ReferenceInfo,
@@ -857,43 +883,50 @@ pub fn header_for(
         samples,
         current_command_line(),
         reference.display().to_string(),
-        beside_the_vcf(output)
-            .file_name()
+        log.file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned(),
+        where_the_numbers_came_from(parameters),
     )
     .map_err(|source| CallingRunError::Header { source })
 }
 
-/// **What the run has to say about itself**, printed when it finishes — the two paths a person
-/// needs to open, then the report's own lines.
-///
-/// **The lines are the report's and not this function's**, so that what a run says is something
-/// a test can hold. It was the one part of `call-from-alignments` a mutation could change with
-/// the whole suite still green.
-pub fn print_report(calls: &Path, parameters_at: &Path, report: &RunReport<'_>) {
-    print_report_with_the_filter_s_lines(calls, parameters_at, report, &[]);
+/// **Where a run's numbers came from, as the header says it**: `defaults`, or the parameters
+/// file's name and the MD5 of its bytes — the name alone would say nothing once the file was
+/// edited. A file that cannot be read again here is named without a digest; the run read it once
+/// already, and a header is not the place to fail.
+#[must_use]
+pub fn where_the_numbers_came_from(parameters: Option<&Path>) -> String {
+    use md5::{Digest, Md5};
+
+    let Some(path) = parameters else {
+        return "defaults".to_owned();
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let digest = Md5::digest(&bytes);
+            let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{name} (md5 {hex})")
+        }
+        Err(_) => name.into_owned(),
+    }
 }
 
-/// **The run report, with what the hidden-duplication filter did appended.**
-///
-/// `filter_lines` is empty on a run with the filter off, which is why the two are one function
-/// rather than two: an off run's report is the report it printed before the filter existed, and
-/// the empty slice is what says so.
-pub fn print_report_with_the_filter_s_lines(
-    calls: &Path,
-    parameters_at: &Path,
-    report: &RunReport<'_>,
-    filter_lines: &[String],
-) {
-    println!("calls: {}", calls.display());
-    println!("parameters: {}", parameters_at.display());
-    for line in report.lines() {
-        println!("{line}");
-    }
-    for line in filter_lines {
-        println!("{line}");
+/// **The run report, written to the run's log**: the terminal says only how the run ended, and
+/// the counts behind that are the log's (`doc/devel/ng/spec/command_line.md` §7.2). Each line is
+/// prefixed `report:` so it can be found among the log's events; `filter_lines` are the
+/// hidden-dup filter's, empty on a run with the filter off.
+pub fn log_the_report(calls: &Path, report: &RunReport<'_>, filter_lines: &[String]) {
+    tracing::debug!("report: calls: {}", where_the_calls_went(calls));
+    for line in report.lines().iter().chain(filter_lines) {
+        // **A warning in the report is a warning on the terminal too**, where the rest of the
+        // report is not: it is the line a person must not miss.
+        match line.trim_start().strip_prefix("warning: ") {
+            Some(warning) => tracing::warn!("{warning}"),
+            None => tracing::debug!("report: {line}"),
+        }
     }
 }
 

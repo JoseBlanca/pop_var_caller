@@ -386,7 +386,7 @@ pub fn run_estimate_contamination(
     // run something to watch.
     let started = Instant::now();
     let prepared = prepare(args)?;
-    eprintln!(
+    tracing::info!(
         "analysed {} bases ({}); kept {} ordinary positions, {:.0} s",
         prepared.analysed_bases,
         prepared.regions_described,
@@ -444,7 +444,7 @@ pub fn run_estimate_contamination(
             // The order lines appear in is the order walks *finish*, which is not the order
             // the samples were given — so each line names its sample, and the count is how
             // many are done rather than which one this is.
-            eprintln!(
+            tracing::info!(
                 "walked {} ({} of {total} done), {:.0} s",
                 sample.sample,
                 done.fetch_add(1, Ordering::Relaxed) + 1,
@@ -461,7 +461,7 @@ pub fn run_estimate_contamination(
         .map(|(sample, names)| (sample.sample.clone(), names.clone()))
         .collect();
     let cohort: Vec<SampleCensusEvidence> = walked.into_iter().map(|(sample, _)| sample).collect();
-    eprintln!(
+    tracing::info!(
         "walked {total} samples in {:.0} s",
         started.elapsed().as_secs_f64()
     );
@@ -478,7 +478,7 @@ pub fn run_estimate_contamination(
     };
     let at = Instant::now();
     let fit = fit_jointly(&mut cohort, &config).map_err(EstimateContaminationCliError::Fit)?;
-    eprintln!(
+    tracing::info!(
         "fitted {} samples over {} read groups in {} passes, {:.0} s",
         cohort.len(),
         fit.noise.len(),
@@ -505,27 +505,31 @@ pub fn run_estimate_contamination(
 /// much evidence it rests on.
 fn report_to_the_terminal(report: &ContaminationReport) {
     let panel = &report.panel;
-    eprintln!(
+    tracing::info!(
         "\n{} of {} libraries from {} samples estimated over {} varying positions, {} not \
          identified",
-        panel.estimated, panel.libraries, panel.samples, panel.markers, panel.not_identified
+        panel.estimated,
+        panel.libraries,
+        panel.samples,
+        panel.markers,
+        panel.not_identified
     );
     match (panel.median, panel.highest) {
-        (Some(median), Some(highest)) => eprintln!(
+        (Some(median), Some(highest)) => tracing::info!(
             "the panel's own spread: median {median:.4}, highest {highest:.4} ({})",
             report.samples.first().map_or_else(
                 || "no library".to_string(),
                 |row| format!("{}, library {}", row.sample, row.library)
             )
         ),
-        _ => eprintln!("no sample could be estimated; the panel is too small or too uniform"),
+        _ => tracing::info!("no sample could be estimated; the panel is too small or too uniform"),
     }
     // **The count of varying positions is what the fraction's precision rests on**, and below
     // about a thousand the published error of this estimator at 1% contamination is of the same
     // size as the thing being estimated. Said here because a reader of the file cannot be
     // expected to know where that line falls.
     if panel.estimated > 0 && panel.markers < THIN_MARKERS {
-        eprintln!(
+        tracing::info!(
             "\nWARNING: {} varying positions is thin. Below about {THIN_MARKERS} the fraction is \
              dominated by noise — look at more genome (--regions or --drawn-bp), or expect these \
              numbers to move if you run it again over a different stretch.",
@@ -533,12 +537,13 @@ fn report_to_the_terminal(report: &ContaminationReport) {
         );
     }
     if panel.samples < SMALL_PANEL {
-        eprintln!(
+        tracing::info!(
             "\nWARNING: {} samples is a small panel. Each position's allele frequency is fitted \
              from the samples in this run, so a sample supplying more than half of its own \
              frequency is refused rather than given a number — {} were. Lower --components, or \
              add samples.",
-            panel.samples, panel.not_identified
+            panel.samples,
+            panel.not_identified
         );
     }
 }

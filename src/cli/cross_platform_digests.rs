@@ -332,7 +332,35 @@ mod tests {
     /// 516.6 to 520.2 and 516.0 to 519.6, the other sample's GQ 74 to 70 at both. No genotype
     /// moved; the repeat tract did not move. Recorded on macOS (arm64) only; it was
     /// `8babc6961203813baa8802274c79e728`.
-    const CALLS_MD5: &str = "2661c66dac4f40502bda5f7e2e242713";
+    ///
+    /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
+    /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `dae7e77c280d7f240349cc8433207a81`, the value `main` recorded for the fit above.
+    /// Recorded on the macOS host (arm64).
+    ///
+    /// **Re-recorded 2026-10-16** when a calling run stopped writing a parameters file beside its
+    /// VCF (`doc/devel/ng/spec/command_line.md` §7): `##source` reads `pvc` where it read `ng`, and
+    /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
+    /// header lines are all that moved — putting the old two back reproduces the old checksum
+    /// exactly. It was `eb43b6968066b5d22525aaaeaed2f736`. Recorded on the macOS host (arm64).
+    ///
+    /// **Re-recorded 2026-10-17** when the coverage histogram's depth axis came to be fitted from
+    /// every window through a fixed relative-depth grid (`doc/devel/ng/spec/window_coverage.md`
+    /// §3.4): `PARALOG_LR` and `PARALOG_POST` are all that moved — with both taken out, the old
+    /// and new files are identical line for line, the filter's header line included, and all
+    /// 3 records are kept by both. The fixture is under 10,000 windows, so the old axis was
+    /// already fitted from every window, and the move is the grid's rounding of the median and the
+    /// re-cut alone. It was `e9738457fb6b4e36f33e5fa008b935f0`. Recorded on the macOS host (arm64).
+    ///
+    /// **Merged 2026-10-18**, main into `snp-fit-convergence`: the notes from plan step A2 to here
+    /// are the branch's and those from the `hiddenDup` one on are main's, each side moving the
+    /// checksum for its own reasons. Against the branch's VCF the merged one differs only by main's
+    /// three changes — the `##source`/`##pvcLog`/`##pvcParameters` header lines, the filter's id
+    /// `hiddenDup`, and `PARALOG_LR`/`PARALOG_POST` from the coverage grid; with those taken out the
+    /// two files are identical, all 3 records included. The fitted file did not move. It was
+    /// `2661c66dac4f40502bda5f7e2e242713` on the branch and `ce76015b7bc2f654f0adf2c235062381` on
+    /// main. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "7672e055a1dbe6a9a642fc8badba944c";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -492,7 +520,31 @@ mod tests {
     /// QUAL 178.1 to 180.5 and 174.1 to 176.5, the other sample's GQ 74 to 70 at both. No genotype
     /// moved; the repeat tract did not move. Recorded on macOS (arm64) only; it was
     /// `241e57ecda2afed9a792607a44a8bb8c`.
-    const WITH_ERRORS_CALLS_MD5: &str = "25a1e5728030f1b0dbdfa916fbf4ee74";
+    ///
+    /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
+    /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `d315b4e4d0de2f21fd34cd673bbdfa8b`, the value `main` recorded for the fit above.
+    /// Recorded on the macOS host (arm64).
+    ///
+    /// **Re-recorded 2026-10-16** when a calling run stopped writing a parameters file beside its
+    /// VCF (`doc/devel/ng/spec/command_line.md` §7): `##source` reads `pvc` where it read `ng`, and
+    /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
+    /// header lines are all that moved — putting the old two back reproduces the old checksum
+    /// exactly. It was `3a2e830acc6991ee3b2285a80abbb89e`. Recorded on the macOS host (arm64).
+    ///
+    /// **Re-recorded 2026-10-17** when the coverage histogram's depth axis came to be fitted from
+    /// every window through a fixed relative-depth grid (`doc/devel/ng/spec/window_coverage.md`
+    /// §3.4): `PARALOG_LR` and `PARALOG_POST` are all that moved — with both taken out, the old
+    /// and new files are identical line for line, the filter's header line included, and all
+    /// 3 records are kept by both. The fixture is under 10,000 windows, so the old axis was
+    /// already fitted from every window, and the move is the grid's rounding of the median and the
+    /// re-cut alone. It was `973688dbec909bb94ee73cfd2941401c`. Recorded on the macOS host (arm64).
+    ///
+    /// **Merged 2026-10-18**, main into `snp-fit-convergence`, as [`CALLS_MD5`]'s last note: only
+    /// main's header lines, filter id and `PARALOG_LR`/`PARALOG_POST` differ from the branch's VCF.
+    /// It was `25a1e5728030f1b0dbdfa916fbf4ee74` on the branch and
+    /// `b1ae11de0ce915350cd2b76b2b72d630` on main. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "c81df78823bf9aa0836eee9dca56e85f";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -656,7 +708,32 @@ mod tests {
     /// the golden-section numbers): only the AF of two records moves in its sixth decimal, chrV:285
     /// 0.039376 to 0.039375 and chrV:377 0.048299 to 0.048298; no QUAL, genotype or GQ. Recorded on
     /// macOS (arm64) only; it was `c3e72793116b01d57ca63cbc3bbd2c16`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "8c2025eaadcaf8f5e00a04688e2bd668";
+    ///
+    /// **Re-recorded 2026-10-16** when the hidden-duplication filter's VCF id became `hiddenDup`
+    /// (`doc/devel/ng/spec/command_line.md` §4.3): its `##FILTER` header line is all that moved —
+    /// putting `hiddenParalog` back reproduces the old checksum exactly. It was `b23487bd69f9d39f1943fbe9350a7a3f`, the value `main` recorded for the fit above.
+    /// Recorded on the macOS host (arm64).
+    ///
+    /// **Re-recorded 2026-10-16** when a calling run stopped writing a parameters file beside its
+    /// VCF (`doc/devel/ng/spec/command_line.md` §7): `##source` reads `pvc` where it read `ng`, and
+    /// `##parametersFile=calls.parameters.toml` became `##pvcLog` and `##pvcParameters`. Those
+    /// header lines are all that moved — putting the old two back reproduces the old checksum
+    /// exactly. It was `45a981f5c11fde06848374dcdfe574a3`. Recorded on the macOS host (arm64).
+    ///
+    /// **Re-recorded 2026-10-17** when the coverage histogram's depth axis came to be fitted from
+    /// every window through a fixed relative-depth grid (`doc/devel/ng/spec/window_coverage.md`
+    /// §3.4): `PARALOG_LR` and `PARALOG_POST` are all that moved — with both taken out, the old
+    /// and new files are identical line for line, the filter's header line included, and all
+    /// 22 records are kept by both. The fixture is under 10,000 windows, so the old axis was
+    /// already fitted from every window, and the move is the grid's rounding of the median and the
+    /// re-cut alone. It was `23fb1a94c44118ecf249a68afaa67979`. Recorded on the macOS host (arm64).
+    ///
+    /// **Merged 2026-10-18**, main into `snp-fit-convergence`, as [`CALLS_MD5`]'s last note: only
+    /// main's header lines, filter id and `PARALOG_LR`/`PARALOG_POST` differ from the branch's VCF;
+    /// the branch's 23 records stay, with their genotypes, QUAL and GQ. It was
+    /// `8c2025eaadcaf8f5e00a04688e2bd668` on the branch and `9d3c1c6c8243c41bb251d0d6cf7de7bb` on
+    /// main. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "11ed05df550c9f1038bb07edf4975adc";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -700,29 +777,26 @@ mod tests {
                 .map(|sample| psp_path_for(&psps, sample))
                 .collect(),
             output: calls.clone(),
+            force: false,
+            log: None,
+            tmp_dir: None,
             parameters: Some(parameters.clone()),
             defaults: false,
             ploidy: None,
-            max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             // The shipped false-discovery target, so the hidden-duplication filter scores and
             // writes its two fields: it computes with `ln`, `exp` and `ln_1p` as well.
-            paralog_fdr: 0.01,
+            hidden_dup_fdr: 0.01,
             // Off: this test pins that platforms write the same bytes, over a fixture whose three
             // variant sites include low-quality ones; the threshold is pinned elsewhere.
             min_site_quality: 0.0,
-            paralog_filter_tag: false,
-            cohort_locus_builder_regions_len: None,
+            hidden_dup_tag: false,
+            locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
-            min_copies: MinCopies::default(),
-            min_period: DEFAULT_MIN_PERIOD,
-            max_period: DEFAULT_MAX_PERIOD,
-            max_str_len: DEFAULT_MAX_STR_LEN,
-            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-            min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            max_reads_per_position: None,
+            max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
         })
         .expect("the cohort calls with its own fit");
@@ -747,7 +821,7 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
 
@@ -758,10 +832,12 @@ mod tests {
             psps: vec![psps.clone()],
             output: parameters.clone(),
             force: false,
+            log: None,
             ploidy: 2,
             inbreeding: None,
             str_param_estimates_at_once: None,
             skip_contamination: false,
+            threads: 0,
         })
         .expect("the cohort fits");
         (psps, parameters)

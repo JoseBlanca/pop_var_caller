@@ -433,7 +433,10 @@ pub struct ParalogVerdicts {
 - **Three hundred reads a position.** The histogram's depth axis scales with the sample
   ([`window_coverage.md`](window_coverage.md) §3.4), so the fit is not rejected for range as
   production's was on a 100× human sample. HG002 is the plan's check that the fit accepts and the
-  verdicts are sane (step D3).
+  verdicts are sane (step D3). **Until 2026-10-17 that scale came from the run's first 10,000
+  windows**, and a GIAB run over chromosome 22 alone at 201–223 reads a position had every
+  sample's fit refused for range; the scale is fitted from every window since
+  ([report](../../reports/ng_coverage_depth_scale_2026-10-17.md)).
 
 ## 5. Cross-cutting concerns
 

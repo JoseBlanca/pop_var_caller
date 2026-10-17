@@ -57,7 +57,7 @@ use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStra
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::read::input::read_groups::ReadGroups;
 use crate::repeat_catalog::StrRepeatCriteria;
-use crate::run::census_freshness::THE_COMMAND_THAT_REBUILDS_A_CENSUS;
+use crate::run::census_freshness::THE_COMMAND_THAT_REWRITES_A_PSP;
 use crate::types::{ContigId, ErrorRate, InbreedingF, Ploidy, ReadGroupId, SsrPeriod};
 
 /// What a fit over a cohort of censuses produced.
@@ -121,8 +121,8 @@ pub enum CohortFitError {
          censuses were written against, and fitting them anyway would read one stratum's tracts \
          as another's; if the psps were walked against another reference or catalog, fit with \
          those, which regenerates nothing; if not, this build chooses census positions \
-         differently from the one that wrote them, so regenerate them with \
-         {THE_COMMAND_THAT_REBUILDS_A_CENSUS} and fit again"
+         differently from the one that wrote them, so write them again with \
+         pvc {THE_COMMAND_THAT_REWRITES_A_PSP} and fit again"
     )]
     AnotherSelection,
 
@@ -796,7 +796,7 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         };
         run_generate_psps(&walk).expect("the cohort walks into psps");
         let mut walked: Vec<PathBuf> = std::fs::read_dir(&psps)
@@ -1054,7 +1054,7 @@ mod tests {
             .unwrap_or_else(|| panic!("the fix that regenerates nothing is offered: {said}"));
         let costly = said
             .find(&format!(
-                "so regenerate them with {THE_COMMAND_THAT_REBUILDS_A_CENSUS} and fit again"
+                "so write them again with pvc {THE_COMMAND_THAT_REWRITES_A_PSP} and fit again"
             ))
             .unwrap_or_else(|| panic!("and the command, as an instruction: {said}"));
         // **The free check first.** A wrong reference ends here as surely as a changed build, and

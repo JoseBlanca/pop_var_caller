@@ -152,8 +152,10 @@ for caller in $CALLERS; do
                 --catalog "$NG_CATALOG" \
                 --alignment "$aln" \
                 --regions "$TMP/missed.bed" \
-                --output "$TMP/probe.vcf" \
-                --defaults > "$report" 2>&1 || true
+                --output "$TMP/probe.vcf" --force --log "$TMP/probe.log" \
+                --defaults > /dev/null 2>&1 || true
+            # The run report is in the run's log, one `report:` line each.
+            sed -n 's/^[^ ]* DEBUG report: //p' "$TMP/probe.log" > "$report"
 
             loci=$(awk '/^loci called:/ { print $3; exit }' "$report")
             called_bp=$(awk '/^  called:/ { print $2; exit }' "$report")

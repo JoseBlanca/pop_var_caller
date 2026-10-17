@@ -35,7 +35,7 @@ for run in "$@"; do
     "$ng" call-from-psps --reference "$out/reference.fa" --catalog "$out/reference.fa.repeats.parquet" \
         --psp "$out/$psps" --parameters "$out/true_stutter.parameters.toml" --threads "${THREADS:-8}" \
         --explain-loci "$out/segments.bed" "$out/$label.explain.tsv" \
-        --output "$out/$label.vcf" > "$out/$label.log" 2>&1
+        --output "$out/$label.vcf" --log "$out/$label.pvc.log" --force > "$out/$label.log" 2>&1
     echo "$run $label called in $((SECONDS - start)) s"
     ls "$out"/*.vcf | xargs -n1 basename | sed 's/\.vcf$//' | grep -E '^(x_|ng_main_true_stutter$)' > "$out/callers.list"
     SKIP_VCFEVAL=1 python3 "$root/scripts/ng_str_accuracy/score_callers.py" "$out"

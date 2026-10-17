@@ -181,7 +181,7 @@ NG_REFERENCE_CHECK="${NG_REFERENCE_CHECK:-skip}" "$NG_BIN" call-from-alignments 
     --alignment "$ROOT/bam/${COVERAGE}/HG002_TR_v1.0.1_Tier_${COVERAGE}.bam" \
     --regions "$CONFIDENT" \
     --output "$OUT/calls.vcf" \
-    --parameters "$OUT/parameters.toml" > "$OUT/run.log" 2>&1
+    --parameters "$OUT/parameters.toml" --force > "$OUT/run.log" 2>&1
 
 $PYTHON "$SCORER" \
     --reference "$REFERENCE" \

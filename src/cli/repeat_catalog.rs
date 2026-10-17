@@ -40,59 +40,66 @@ const SCANNER_MIN_COPIES: u32 = 2;
 /// outlive any one calling policy, so its floors sit below every one of them (spec §4.1).
 #[derive(Debug, Args, Clone)]
 pub struct RepeatCatalogArgs {
-    /// Reference FASTA. Read from byte zero — the digests and the scan come from the same
-    /// pass.
+    /// The reference FASTA to scan.
     #[arg(long)]
     pub reference: PathBuf,
 
-    /// Where to write the catalog. Defaults to `<reference>.repeats.parquet`.
+    /// Where to write the catalogue. Defaults to `<reference>.repeats.parquet`, where every
+    /// other command looks for it.
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// How many contigs to scan at once. The file is byte-identical at every value.
+    /// How many contigs to scan at once. The catalogue is the same at any number.
     ///
-    /// **It buys speed with memory, and a whole contig is the unit.** Each thread holds the
-    /// contig it is scanning, so the peak is set by the largest contigs in flight rather than
-    /// by the genome: six threads on GRCh38 in a 16 GB container is killed by the kernel, while
-    /// the default of one builds the same catalog in 103 seconds. Raise it on a machine with
-    /// room, and expect the first few chromosomes to be the expensive ones.
+    /// Each thread holds a whole contig in memory, so memory grows with the largest contigs
+    /// scanned together: six threads on the human genome need more than 16 GB, while one builds
+    /// its catalogue in under two minutes. Raise it on a machine with memory to spare.
     #[arg(long, default_value_t = 1)]
     pub threads: usize,
 
-    /// Overwrite an existing catalog.
+    /// Replace a catalogue, and its log, that are already there.
     ///
-    /// Without it an existing file is left alone: a run reading a catalog while another
-    /// rebuilds it in place fails with no error message, so replacing one is said out loud.
+    /// Without it, an existing catalogue is left alone: a run reading a catalogue while another
+    /// rebuilds it fails without a clear message.
     #[arg(long)]
     pub force: bool,
 
-    /// Smallest motif length scanned, in bases.
-    #[arg(long, default_value_t = CATALOG_MIN_PERIOD)]
+    /// Where to write the run's log. Defaults to `<catalogue>.log` beside the catalogue.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+
+    /// The shortest repeat unit scanned, in bases.
+    #[arg(long, default_value_t = CATALOG_MIN_PERIOD, help_heading = "Advanced")]
     pub min_period: u8,
 
-    /// Largest motif length scanned, in bases.
-    #[arg(long, default_value_t = CATALOG_MAX_PERIOD)]
+    /// The longest repeat unit scanned, in bases.
+    #[arg(long, default_value_t = CATALOG_MAX_PERIOD, help_heading = "Advanced")]
     pub max_period: u8,
 
-    /// The fewest motif copies a tract needs to be written down, one per period 1..=6.
+    /// The fewest repeat-unit copies a repeat needs to be written down: six comma-separated
+    /// numbers, for repeat units of 1 to 6 bases.
     ///
-    /// Measured on the span the scanner reports, as classification's own pre-screen
-    /// measures it. Below every floor a caller routes on, so a caller can move its floor by
-    /// filtering this file rather than re-scanning the genome.
-    #[arg(long, value_parser = parse_min_copies, default_value = "5,5,4,4,4,3")]
+    /// Deliberately below the calling commands' own `--min-copies`, so those can choose among
+    /// the catalogue's repeats without scanning the genome again.
+    #[arg(
+        long,
+        value_parser = parse_min_copies,
+        default_value = "5,5,4,4,4,3",
+        help_heading = "Advanced"
+    )]
     pub min_copies: MinCopies,
 
-    /// Sequence required on each side of a tract, to the contig's own end, in bases. A
-    /// tract with less than this beside it cannot be anchored by a read.
-    #[arg(long, default_value_t = CATALOG_MIN_FLANK_BP)]
+    /// The sequence needed on each side of a repeat, in bases. A repeat with less beside it
+    /// before the contig's end cannot be anchored by a read and is not written down.
+    #[arg(long, default_value_t = CATALOG_MIN_FLANK_BP, help_heading = "Advanced")]
     pub min_flank_bp: u64,
 
-    /// Score added when two bases one period apart agree.
-    #[arg(long, default_value_t = DEFAULT_MATCH_REWARD, help_heading = "Scoring")]
+    /// The scan's score for two bases one repeat unit apart that agree.
+    #[arg(long, default_value_t = DEFAULT_MATCH_REWARD, help_heading = "Advanced")]
     pub match_reward: i32,
 
-    /// Score subtracted when they disagree.
-    #[arg(long, default_value_t = DEFAULT_MISMATCH_PENALTY, help_heading = "Scoring")]
+    /// The scan's penalty for two bases one repeat unit apart that disagree.
+    #[arg(long, default_value_t = DEFAULT_MISMATCH_PENALTY, help_heading = "Advanced")]
     pub mismatch_penalty: i32,
 }
 
@@ -100,6 +107,10 @@ pub struct RepeatCatalogArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RepeatCatalogCliError {
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] crate::cli::run_output::LogFileError),
+
     /// `--min-period` / `--max-period` do not describe a range.
     #[error("--min-period {min} / --max-period {max}")]
     PeriodRange {
@@ -180,16 +191,31 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         return Err(RepeatCatalogCliError::Exists { path: output });
     }
 
-    eprintln!(
-        "repeat-catalog: reference={} output={} threads={}",
+    let started = std::time::Instant::now();
+    let log = args.log.clone().unwrap_or_else(|| {
+        let mut name = output.as_os_str().to_os_string();
+        name.push(".log");
+        PathBuf::from(name)
+    });
+    // **The number of threads the scan uses, and the one the log's header records**: the builder
+    // takes 0 as 1, and the header reads the size of rayon's pool, which the scan runs on.
+    let threads = args.threads.max(1);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global();
+    crate::cli::run_output::open_log(&log, args.force)?;
+    tracing::info!(
+        "pvc repeat-catalog: scanning {}, {threads} thread{}",
         args.reference.display(),
-        output.display(),
-        args.threads
+        if threads == 1 { "" } else { "s" },
     );
+    tracing::info!("log: {}", log.display());
+    tracing::debug!("input: reference {}", args.reference.display());
+    tracing::debug!("output: {}", output.display());
 
     let mut builder = RepeatCatalogBuilder::create(&output, criteria, scan)
         .map_err(|source| RepeatCatalogCliError::Build { source })?
-        .with_threads(args.threads);
+        .with_threads(threads);
 
     let reference = read_reference_info_observing(
         ReferenceSource::Fasta {
@@ -208,6 +234,14 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         .map_err(|source| RepeatCatalogCliError::Build { source })?;
 
     report(&tally, reference.contigs.len());
+    tracing::info!(
+        "done: {} repeats in {} contigs written to {} in {}",
+        crate::cli::run_output::with_thousands(tally.rows.total()),
+        reference.contigs.len(),
+        output.display(),
+        crate::cli::run_output::elapsed_text(started.elapsed()),
+    );
+    tracing::info!("log: {}", log.display());
     Ok(())
 }
 
@@ -262,15 +296,18 @@ fn catalog_criteria(args: &RepeatCatalogArgs) -> Result<StrRepeatCriteria, Repea
 /// the measurement open question 1 asks for, so the command produces it rather than a
 /// separate harness.
 fn report(tally: &BuildTally, contigs: usize) {
-    println!("contigs\t{contigs}");
-    println!("repeats\t{}", tally.rows.total());
+    tracing::debug!("report: contigs\t{contigs}");
+    tracing::debug!("report: repeats\t{}", tally.rows.total());
     for period in 1..=MAX_MOTIF_LEN as u8 {
-        println!("period_{period}\t{}", tally.rows.for_period(period));
+        tracing::debug!("report: period_{period}\t{}", tally.rows.for_period(period));
     }
-    println!("below_copy_floor\t{}", tally.below_copy_floor);
-    println!("too_close_to_contig_end\t{}", tally.too_close_to_contig_end);
+    tracing::debug!("report: below_copy_floor\t{}", tally.below_copy_floor);
+    tracing::debug!(
+        "report: too_close_to_contig_end\t{}",
+        tally.too_close_to_contig_end
+    );
     if tally.malformed > 0 {
-        println!("malformed\t{}", tally.malformed);
+        tracing::debug!("report: malformed\t{}", tally.malformed);
     }
 }
 

@@ -102,14 +102,26 @@ impl SpillFile {
     /// when the first entry is appended.
     #[must_use]
     pub fn beside(output: &Path) -> Self {
+        Self::at(spill_path_beside(output))
+    }
+
+    /// Name the spill at `path`. Creates nothing.
+    fn at(path: PathBuf) -> Self {
         Self {
-            path: spill_path_beside(output),
+            path,
             named_at: Instant::now(),
             bytes_on_disk: None,
             writer: None,
             stage: Stage::NotYetCreated,
             entries_written: 0,
         }
+    }
+
+    /// Name the spill inside `directory` — the run's own temporary directory
+    /// (`doc/devel/ng/spec/command_line.md` §7.5). **Creates nothing**, as [`Self::beside`].
+    #[must_use]
+    pub fn in_directory(directory: &Path) -> Self {
+        Self::at(directory.join(SPILL_FILE_NAME))
     }
 
     /// Where the file is, or would be.
@@ -324,8 +336,8 @@ impl Drop for SpillFile {
             // `VerificationHandle`. Stay quiet while a panic is unwinding: a second message
             // there buries the first, and a `Drop` must not panic.
             if !std::thread::panicking() {
-                eprintln!(
-                    "warning: the paralog spill `{}` could not be removed and is still on \
+                tracing::warn!(
+                    "the hidden-dup filter's spill `{}` could not be removed and is still on \
                      disk: {source}",
                     path.display()
                 );
@@ -441,6 +453,9 @@ pub enum SpillFileError {
         path: PathBuf,
     },
 }
+
+/// The spill's name inside a run's temporary directory.
+const SPILL_FILE_NAME: &str = "hidden-dup-spill.tmp";
 
 /// `<output>.paralog-spill.tmp`, the convention [`vcf::writer`](crate::vcf::writer) already
 /// uses for `<output>.tmp`.

@@ -319,7 +319,7 @@ pub fn write_header<W: io::Write>(
         min_copies: scan_min_copies,
     } = scan;
 
-    writeln!(out, "## tool: pvc type-regions")?;
+    writeln!(out, "## tool: pvc dev type-regions")?;
     writeln!(out, "## version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(out, "## reference: {}", reference.display())?;
     writeln!(out, "## min_period: {}", periods.min())?;
@@ -664,7 +664,7 @@ fn report_counts(counts: &CatalogRegionCounts) {
         no_clean_trim,
     } = rejected_by_reason;
 
-    eprintln!(
+    tracing::info!(
         "counts: spans={spans} ssr_loci={ssr_loci} ssr_bundles={ssr_bundles} \
          ssr_bundle_bp={ssr_bundle_bp} generic={generic} satellites={satellites} \
          satellite_bp={satellite_bp} repeat_bp_with_no_locus={repeat_bp_with_no_locus}"
@@ -673,7 +673,7 @@ fn report_counts(counts: &CatalogRegionCounts) {
     // (overlapping rejected repeats are each charged, and bases with no locus for
     // a reason that is not a rejection — bundled, capped, out of scope — are in
     // the total but under no reason here).
-    eprintln!(
+    tracing::info!(
         "rejected_bp (does not partition repeat_bp_with_no_locus): copy_floor={copy_floor} \
          purity={purity} compound={compound} no_clean_trim={no_clean_trim}"
     );
@@ -707,7 +707,7 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
         verify,
     } = prepare_walk_inputs(args, &cache)?;
 
-    eprintln!(
+    tracing::info!(
         "type-regions: reference={} regions={} output={}",
         args.reference.display(),
         args.regions
@@ -752,7 +752,7 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::command_line::{Cli, PopVarCallerCommand};
+    use crate::cli::command_line::{Cli, DevCommand, PopVarCallerCommand};
     use clap::Parser;
 
     /// The subcommand parses through the top-level CLI, and every knob resolves
@@ -762,6 +762,7 @@ mod tests {
     fn parses_through_the_top_level_cli() {
         let cli = Cli::try_parse_from([
             "pvc",
+            "dev",
             "type-regions",
             "--reference",
             "r.fa",
@@ -769,7 +770,7 @@ mod tests {
             "regions.tsv",
         ])
         .unwrap();
-        let PopVarCallerCommand::TypeRegions(args) = cli.cmd else {
+        let PopVarCallerCommand::Dev(DevCommand::TypeRegions(args)) = cli.cmd else {
             panic!("the parsed command is not type-regions");
         };
         assert_eq!(args.reference, PathBuf::from("r.fa"));
@@ -1390,6 +1391,7 @@ mod tests {
     ) -> TypedRegionsArgs {
         let mut argv = vec![
             "pvc".to_string(),
+            "dev".to_string(),
             "type-regions".to_string(),
             "--reference".to_string(),
             reference.display().to_string(),
@@ -1401,7 +1403,7 @@ mod tests {
             argv.push(bed.display().to_string());
         }
         let cli = Cli::try_parse_from(argv).expect("the args parse");
-        let PopVarCallerCommand::TypeRegions(args) = cli.cmd else {
+        let PopVarCallerCommand::Dev(DevCommand::TypeRegions(args)) = cli.cmd else {
             panic!("the parsed command is not type-regions");
         };
         args
@@ -1902,6 +1904,7 @@ mod tests {
         ] {
             let err = Cli::try_parse_from([
                 "pvc",
+                "dev",
                 "type-regions",
                 "--reference",
                 "r.fa",
@@ -2088,6 +2091,7 @@ mod tests {
     fn min_copies_accepts_exactly_six_values() {
         let cli = Cli::try_parse_from([
             "pvc",
+            "dev",
             "type-regions",
             "--reference",
             "r.fa",
@@ -2097,7 +2101,7 @@ mod tests {
             "9,5,4,3,3,3",
         ])
         .expect("six values parse");
-        let PopVarCallerCommand::TypeRegions(args) = cli.cmd else {
+        let PopVarCallerCommand::Dev(DevCommand::TypeRegions(args)) = cli.cmd else {
             panic!("the parsed command is not type-regions");
         };
         assert_eq!(args.min_copies.for_period(1), 9);
@@ -2112,6 +2116,7 @@ mod tests {
         for bad in ["6,4,4,3,3", "6,4,4,3,3,3,3", "6"] {
             let err = Cli::try_parse_from([
                 "pvc",
+                "dev",
                 "type-regions",
                 "--reference",
                 "r.fa",

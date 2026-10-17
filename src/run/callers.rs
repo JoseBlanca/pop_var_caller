@@ -258,7 +258,7 @@ pub struct AlignedFilesVariantCaller {
     /// `open`, so building a generator from them cannot fail later.
     locus_generator_settings: PileupGeneratorConfig,
     /// The most reads one read group may have at a locus before the locus is dropped for the
-    /// whole cohort (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)).
+    /// whole cohort (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)).
     depth_ceiling: DepthCeiling,
     /// What the assembly check could do at construction.
     assembly_check: AssemblyCheckOutcome,
@@ -2014,7 +2014,7 @@ pub struct SampleWalkTallies {
     /// depth settings shape the evidence" is answered by **both**, and by neither alone.
     pub snp_indel: Option<PileupGeneratorCounts>,
     /// **Loci this sample's walk dropped because a read group there was deeper than the run's
-    /// depth ceiling** (`--max-read-group-depth`, [`depth_ceiling`](super::depth_ceiling)). No
+    /// depth ceiling** (`--max-depth`, [`depth_ceiling`](super::depth_ceiling)). No
     /// locus was called over their ground, for any sample.
     pub loci_over_the_depth_ceiling: u64,
 }
@@ -6391,7 +6391,8 @@ mod records_handed_over_as_the_run_finishes_them {
             sample_names.clone(),
             "pvc call-from-alignments".to_owned(),
             "reference.fa".to_owned(),
-            String::new(),
+            "pvc_calls.log".to_owned(),
+            "defaults".to_owned(),
         )
         .expect("a header this run can state");
 
@@ -6625,7 +6626,8 @@ mod records_handed_over_as_the_run_finishes_them {
                 sample_names,
                 "pvc call-from-alignments".to_owned(),
                 "reference.fa".to_owned(),
-                String::new(),
+                "pvc_calls.log".to_owned(),
+                "defaults".to_owned(),
             )
             .expect("a header this run can state");
             let out = tempfile::tempdir().expect("a temporary directory");

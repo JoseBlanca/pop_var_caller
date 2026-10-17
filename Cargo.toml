@@ -184,8 +184,9 @@ rayon = "1.10"
 # (doc/devel/ng/spec/run_streaming.md §7.1a). Already in the lock file through
 # `tempfile`, so the crate is not new; `tempfile` enables only its `fs` feature,
 # so `process` does compile a module the build did not have. `rustix::process`
-# is a safe wrapper — no `unsafe` reaches this crate.
-rustix = { version = "1", features = ["process"] }
+# is a safe wrapper — no `unsafe` reaches this crate. `system` is for
+# `uname`, which gives the host name a run's log records.
+rustix = { version = "1", features = ["process", "system"] }
 serde = { version = "1", features = ["derive"] }
 # Only the binary's `estimate-contamination` writes JSON. Already in the
 # lock file through other crates, so it costs no new build.
@@ -194,6 +195,12 @@ smallvec = "1.13"
 tempfile = "3"
 thiserror = "2.0.18"
 toml = "1.1"
+# Logging (doc/devel/ng/spec/command_line.md §7.7): the library states events,
+# the binary decides where they go — the terminal and the run's log file.
+# `tracing-subscriber` without its default features: the two destinations are
+# this crate's own layers, so only the registry they sit on is needed.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # `wide`: portable SIMD primitives — AVX2 on x86_64 (production
 # server), NEON on aarch64 (Apple Silicon dev laptop). Single
 # source for both ISAs. Used by the joint fit's four-lane dot product

@@ -34,7 +34,7 @@
 //! Output: a `#` comment header, a bare TSV column line, then one row per typed region —
 //! `chrom  start  end  kind  motif  period  copies  purity  members`, coordinates 1-based
 //! inclusive, with `.` wherever a kind carries no such detail. `members` is a bundle's repeats as
-//! `pvc type-regions` writes them: a JSON array of `{"start","end","period","motif"}`, each member's
+//! `pvc dev type-regions` writes them: a JSON array of `{"start","end","period","motif"}`, each member's
 //! span cut back to whole copies of its motif, **zero-based half-open** — not the row's own
 //! coordinates.
 
@@ -149,7 +149,7 @@ fn run(
                 format!("{:.2}", segment.purity_fraction()),
             ),
         };
-        // A bundle's members, in the cell `pvc type-regions` writes — the same function, so
+        // A bundle's members, in the cell `pvc dev type-regions` writes — the same function, so
         // the two files cannot spell it two ways.
         let members = match &region.kind {
             RegionKind::SsrBundle { members } => members_json(members),

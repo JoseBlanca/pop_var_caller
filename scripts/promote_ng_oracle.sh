@@ -98,10 +98,10 @@ if [ "$fit" != 0 ]; then
   echo "=== psp mode, with the fit ==="
   # shellcheck disable=SC2086
   "$bin" call-from-psps --reference "$reference" --catalog "$catalog" $stored \
-    --parameters "$out/fitted.parameters.toml" --threads 4 \
+    --parameters "$out/fitted.parameters.toml" --threads 4 --force \
     --output "$out/from_fit.vcf" > "$out/from_fit.log" 2>&1 \
     || { echo "calling with the fit failed; see $out/from_fit.log" >&2; exit 1; }
-  grep -v '^##commandline=' "$out/from_fit.vcf" > "$out/from_fit.comparable"
+  grep -v '^##commandline=\|^##pvcLog=' "$out/from_fit.vcf" > "$out/from_fit.comparable"
 fi
 
 # **What gets a checksum, and why these five.**

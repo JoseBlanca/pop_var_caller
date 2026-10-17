@@ -185,7 +185,6 @@ mod to_run_parameters;
 mod to_toml;
 mod validate;
 mod what_was_fitted;
-mod written_beside_the_vcf;
 
 pub use between_locus_share::{
     BetweenLocusShare, NotABetweenLocusShare, between_locus_share_error_of, between_locus_share_of,
@@ -195,7 +194,6 @@ pub use bindings::{CensusAgreement, ParametersForThisRun};
 pub use defaults::{DEFAULT_INBREEDING_COEFFICIENT, DeclaredInbreeding};
 pub use from_run_parameters::ReadsBehindEachCalibration;
 pub use to_run_parameters::RunParametersFromFile;
-pub use written_beside_the_vcf::beside_the_vcf;
 
 use serde::{Deserialize, Serialize};
 

@@ -473,10 +473,19 @@ fn each_psp_is_named_for_its_sample_with_the_psp_extension() {
         })
         .collect();
     names.sort();
-    // **One file a sample, and nothing else** (`psp_census_pair.md` §3). The census is inside
-    // each psp, so a second file here would be a leftover `.partial` or a census this command
-    // no longer writes — and either is a file a later run might open.
-    assert_eq!(names, vec!["alpha.psp".to_string(), "zeta.psp".to_string()]);
+    // **One psp a sample, its log beside it, and nothing else** (`psp_census_pair.md` §3,
+    // `command_line.md` §7.3). The census is inside each psp, so any other file here would be a
+    // leftover `.partial` or a census this command no longer writes — and either is a file a
+    // later run might open.
+    assert_eq!(
+        names,
+        vec![
+            "alpha.psp".to_string(),
+            "alpha.psp.log".to_string(),
+            "zeta.psp".to_string(),
+            "zeta.psp.log".to_string(),
+        ]
+    );
 }
 
 /// **A sample whose `@RG SM` cannot be a file name is refused before anything is read.**
@@ -520,7 +529,7 @@ fn a_cohort_on_disk() -> (
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };
     (cohort.directory, cohort.zeta, cohort.alpha, args)
 }
@@ -685,9 +694,14 @@ fn two_files_naming_one_sample_become_one_psp() {
     assert_eq!(
         std::fs::read_dir(&args.output_dir)
             .expect("the output directory")
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .is_ok_and(|entry| entry.path().extension().is_some_and(|ext| ext == "psp"))
+            })
             .count(),
         2,
-        "two samples, one file each",
+        "two samples, one psp each",
     );
 }
 
@@ -946,9 +960,12 @@ fn a_stopped_walk_leaves_no_file_at_the_samples_path_or_beside_it() {
         })
         .filter(|name| name.starts_with("beta"))
         .collect();
-    assert!(
-        left.is_empty(),
-        "the stopped sample left nothing behind, and got {left:?}",
+    // **Its log stays**, and that is the point of it: the binary writes the error that stopped
+    // the walk into the sample's log before closing it.
+    assert_eq!(
+        left,
+        vec!["beta.psp.log".to_string()],
+        "the stopped sample left nothing behind but its log",
     );
 }
 

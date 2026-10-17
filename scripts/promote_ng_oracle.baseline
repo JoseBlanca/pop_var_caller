@@ -149,12 +149,49 @@
 # sample at SL4.0ch01:30161572-30161577 (0/1 -> 1/1, GQ 3); QUAL moves in 3,892 records, 5 of them by more than 1 (those
 # five, -6.6 to -8.2), the rest by 0.1 or 0.2. The cross-platform digests agree on macOS and in the Linux container.
 # They were 920e36b7… / 5ea720b6… / 61b09b60….
+# Three VCF lines re-recorded 2026-10-16 (macOS, arm64; command_line.md, branch command-line, step 5) on main's slice:
+# `##source` reads `pvc` where it read `ng`; `##parametersFile=` became `##pvcLog=` (left out of the comparison, as
+# `##commandline` is, since it names each route's own log) and `##pvcParameters=` (`defaults`, or the fitted file's
+# name and MD5, which is the fitted.parameters.toml line below); the hidden-duplication filter's id became `hiddenDup`.
+# Putting `ng`, the old `##parametersFile` line and `hiddenParalog` back reproduces all three old checksums exactly;
+# the records (7,508), both parameters files, the windows and the histograms did not move. They were 67bfe9a1… /
+# 67bfe9a1… / 61b09b60….
+# Re-recorded 2026-10-17 (macOS host, arm64) with the coverage histogram's depth axis fitted from every window through a
+# fixed relative-depth grid, where it was fitted from each sample's first 10,000 (window_coverage.md §3.4; report
+# doc/devel/reports/ng_coverage_depth_scale_2026-10-17.md). The pre-change binary reproduced every line below's old value on
+# this host first. Windows and both parameters files do not move; the histograms do (0d61963f → 09635117), and with them the
+# four samples' fitted one-copy depths (by at most 2.8%, 4.66 → 4.53 reads) and scatters (by at most 0.006). The fitted
+# duplication rates barely move (0.031618 → 0.031693; 0.050664 → 0.051914 with the fit). Apart from PARALOG_LR / PARALOG_POST
+# no record changes. Defaults (92758b01 → 3d91e3a2, 7,508 → 7,507 records): ch01:12776029 A>T and ch01:37011736 T>C are now
+# dropped, ch01:33042122 C>T is kept. With the fit (e7dc72eb → 9a4f49c2, 6,680 → 6,682): ch01:12776369 C>T is now dropped,
+# ch01:33037237 (an A/T homopolymer deletion), ch01:37087746 T>C and ch01:67912984 A>G are kept.
+# Merged 2026-10-18 (macOS host, arm64): main (2c6eac36) into snp-fit-convergence (6523c23a). The paragraph from
+# "Three lines re-recorded 2026-10-17 ... step E1" is the branch's history; the two after it are main's. Line by line:
+# - from_alignments/from_psps.comparable: main's 3d91e3a2. The branch did not move the default-parameter VCFs.
+# - from_alignments.parameters.toml: the branch's d083cd87. On main this is the parameters block of the calling run's
+#   log, 920e36b7, byte-identical to the format-3 file the branch's line was 920e36b7 for; the merged block is format
+#   4, which moves only its version line, as the branch's D2 did to the file.
+# - windows.sorted: unchanged on both sides. windows.histograms: main's 09635117 (the depth axis's grid).
+# - fitted.parameters.toml: neither side's (branch 3e60785a, main 5ea720b6). Against the branch's file only the E6
+#   review's M1 moves it: the density's pair is now marked, so invariant_share and segregating_shape_a lose their
+#   errors (3.36e-4 and 36.8) and say separately_determined = false, because shape b sits on its bound of 50 with an
+#   error of 115. Main's coverage grid does not move it, as main recorded. Same bytes as the fix commit's own 4-sample
+#   run (tmp/e6_fix/runs/o4.toml).
+# - from_fit.comparable: neither side's (branch fd1a3bc8, main 9a4f49c2). Against the branch's VCF (tmp/oracle_E1):
+#   main's header lines (`##source`, `##pvcParameters` with the fitted file's new MD5, `hiddenDup`), the filter's
+#   header pi 0.051261 -> 0.052500, PARALOG_LR/PARALOG_POST values, and the filter's keep/drop at six
+#   records, 6,682 -> 6,680: SL4.0ch01:12776369, 12776379, 12776380 and 15189779 now dropped, 33037237 (the A/T
+#   homopolymer deletion) and 67912984 now kept. With the PARALOG fields taken out, the other 6,678 records are the
+#   branch's byte for byte: no QUAL, genotype or GQ moved. Main's own fitted VCF, on main's fit, dropped 12776369 and
+#   kept 33037237, 37087746 and 67912984 for the same reason; the differences between the two lists are the two fits'.
+# They were 920e36b7… (main; d083cd87… on the branch) / 5ea720b6… (main; 3e60785a… on the branch) / 9a4f49c2… (main;
+# fd1a3bc8… on the branch).
 slice: 20 regions, 4 alignments
-# records: 7508
-67bfe9a17baff53552a410f4d30fe77d  from_alignments.comparable
-67bfe9a17baff53552a410f4d30fe77d  from_psps.comparable
+# records: 7507
+3d91e3a20fa4e7397d206dee17cf4480  from_alignments.comparable
+3d91e3a20fa4e7397d206dee17cf4480  from_psps.comparable
 d083cd878e0e98a0e17a60625d7ebe27  from_alignments.parameters.toml
 4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
-0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-3e60785a3bbfca25385f281fa95fec02  fitted.parameters.toml
-fd1a3bc892256a89d4e0c9cebd6ff866  from_fit.comparable
+09635117af8fe70350f6ad222bea2360  from_alignments.windows.histograms
+ae0fcef982402812109ebf966865a3f8  fitted.parameters.toml
+f3b6949180117989c64b57ac117a9f72  from_fit.comparable

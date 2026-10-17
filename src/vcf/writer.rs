@@ -7,6 +7,11 @@
 //! sink's: bytes go to `<output>.tmp` and are renamed into place only once they are on disk, so
 //! a crash leaves no half-written VCF for anyone to mistake for a finished run.
 //!
+//! **The one exception is a VCF written to standard output** (the output path `-`), which can be
+//! neither renamed nor taken back: its bytes go straight to the stream, uncompressed, and a run
+//! that fails part-way has already sent part of a file downstream. That is the contract of any
+//! tool writing to a pipe, and the run's exit status is what says so.
+//!
 //! **What "checked here" means for a caller holding a line rather than a record.** The check
 //! reads a [`RecordPlace`], not the bytes, so it is only as good as the place it is handed:
 //! [`VcfWriter::write_line`] will write a backwards file if given ascending places for
@@ -272,8 +277,21 @@ fn place_of(record: &VcfRecord) -> RecordPlace {
     }
 }
 
-/// Where the in-flight bytes live before the file is finished.
+/// **The output path that means standard output**: `-`, as `bcftools` and `samtools` spell it.
+pub const STANDARD_OUTPUT: &str = "-";
+
+/// Whether `path` names standard output rather than a file.
+#[must_use]
+pub fn is_standard_output(path: &Path) -> bool {
+    path == Path::new(STANDARD_OUTPUT)
+}
+
+/// Where the in-flight bytes live before the file is finished — for standard output, the stream
+/// itself, named so a message about it reads as one.
 fn tmp_path_for(final_path: &Path) -> PathBuf {
+    if is_standard_output(final_path) {
+        return PathBuf::from("standard output");
+    }
     let mut name = final_path.as_os_str().to_os_string();
     name.push(".tmp");
     PathBuf::from(name)
@@ -285,14 +303,22 @@ fn path_is_bgzf(path: &Path) -> bool {
     name.ends_with(".vcf.gz") || name.ends_with(".vcf.bgz")
 }
 
-/// The bytes' destination: plain text or bgzf, fixed at creation by the path's suffix.
+/// The bytes' destination: plain text or bgzf, fixed at creation by the path's suffix, or
+/// standard output, which is always plain text.
 enum Sink {
     Plain(BufWriter<File>),
     Bgzf(Box<noodles_bgzf::io::Writer<File>>),
+    Stdout(BufWriter<io::Stdout>),
 }
 
 impl Sink {
     fn open_tmp(final_path: &Path) -> Result<Self, VcfWriteError> {
+        if is_standard_output(final_path) {
+            return Ok(Self::Stdout(BufWriter::with_capacity(
+                WRITE_BUFFER_BYTES,
+                io::stdout(),
+            )));
+        }
         let tmp_path = tmp_path_for(final_path);
         let file = File::create(&tmp_path).map_err(|source| VcfWriteError::CreateTmp {
             tmp_path: tmp_path.clone(),
@@ -314,6 +340,14 @@ impl Sink {
         let tmp_path = tmp_path_for(final_path);
 
         let file = match self {
+            // **A stream is flushed and that is all**: there is no file to sync and no name to
+            // rename it to.
+            Self::Stdout(mut stream) => {
+                return stream.flush().map_err(|source| VcfWriteError::Write {
+                    tmp_path: tmp_path.clone(),
+                    source,
+                });
+            }
             Self::Plain(buffered) => {
                 buffered
                     .into_inner()
@@ -349,6 +383,7 @@ impl Write for Sink {
         match self {
             Self::Plain(sink) => sink.write(buf),
             Self::Bgzf(sink) => sink.write(buf),
+            Self::Stdout(sink) => sink.write(buf),
         }
     }
 
@@ -356,6 +391,7 @@ impl Write for Sink {
         match self {
             Self::Plain(sink) => sink.flush(),
             Self::Bgzf(sink) => sink.flush(),
+            Self::Stdout(sink) => sink.flush(),
         }
     }
 }

@@ -155,7 +155,8 @@ fn a_writer(output: &std::path::Path) -> VcfWriter {
         vec!["one".to_string()],
         String::new(),
         String::new(),
-        String::new(),
+        "pvc_calls.log".to_owned(),
+        "defaults".to_owned(),
     )
     .expect("a header");
     VcfWriter::create(output, metadata, Ploidy::try_new(2).expect("two copies")).expect("a writer")
@@ -322,7 +323,7 @@ fn tagging_writes_what_dropping_leaves_out_on_the_filter_s_id() {
     );
     let kept: Vec<&String> = tagged_lines
         .iter()
-        .filter(|line| !line.contains("hiddenParalog"))
+        .filter(|line| !line.contains("hiddenDup"))
         .collect();
     assert_eq!(
         kept,
@@ -331,7 +332,7 @@ fn tagging_writes_what_dropping_leaves_out_on_the_filter_s_id() {
     );
     assert_eq!(
         tagged_lines[0].split('\t').nth(6),
-        Some("hiddenParalog"),
+        Some("hiddenDup"),
         "and the tagged line carries the filter's id: {}",
         tagged_lines[0]
     );
@@ -354,7 +355,7 @@ fn a_record_that_already_carries_a_filter_is_joined_not_replaced() {
     assert_eq!(did.tagged, 1);
     assert_eq!(
         lines[0].split('\t').nth(6),
-        Some("EMNoConv;hiddenParalog"),
+        Some("EMNoConv;hiddenDup"),
         "both filters, in the order they were applied: {}",
         lines[0]
     );
@@ -390,7 +391,7 @@ fn the_verdict_follows_the_file_s_order_and_not_the_ratios_sorted_order() {
     assert_eq!(did.written, 3, "tagging writes them all");
     let tagged: Vec<&String> = lines
         .iter()
-        .filter(|line| line.contains("hiddenParalog"))
+        .filter(|line| line.contains("hiddenDup"))
         .collect();
     assert_eq!(tagged.len(), 1, "one record is removed by this cut");
     assert!(

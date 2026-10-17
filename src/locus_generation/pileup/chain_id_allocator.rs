@@ -439,8 +439,8 @@ impl ChainIdAllocator {
         let threshold = high_water_warn_threshold(self.max_active_reads);
         if !self.high_water_warned && self.counters.active_reads_high_water >= threshold {
             self.high_water_warned = true;
-            eprintln!(
-                "warning: pileup walker is holding {}/{} reads at chrom_id={} pos={}; \
+            tracing::warn!(
+                "pileup walker is holding {}/{} reads at chrom_id={} pos={}; \
                  past {} it starts dropping reads it is holding, and the positions that \
                  lose coverage are counted in positions_short_of_cap (raise \
                  max_active_reads if that number is not zero)",

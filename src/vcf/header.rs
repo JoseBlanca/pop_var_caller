@@ -38,7 +38,8 @@ pub struct VcfHeaderMetadata {
     sample_names: Vec<String>,
     command_line: String,
     reference_path: String,
-    parameters_file_name: String,
+    log_file_name: String,
+    parameters_source: String,
     /// What the hidden-duplication filter was calibrated to, when it ran. `None` — the default,
     /// and what every run wrote before the filter existed — emits neither the `##paralogFilter=`
     /// line nor the filter's three declarations, which is what keeps a filter-off run's header
@@ -75,7 +76,8 @@ impl VcfHeaderMetadata {
         sample_names: Vec<String>,
         command_line: String,
         reference_path: String,
-        parameters_file_name: String,
+        log_file_name: String,
+        parameters_source: String,
     ) -> Result<Self, HeaderMetadataError> {
         if sample_names.is_empty() {
             return Err(HeaderMetadataError::NoSamples);
@@ -113,7 +115,8 @@ impl VcfHeaderMetadata {
             sample_names,
             command_line,
             reference_path,
-            parameters_file_name,
+            log_file_name,
+            parameters_source,
             hidden_paralog: None,
         })
     }
@@ -140,7 +143,7 @@ impl VcfHeaderMetadata {
     #[inline]
     #[must_use]
     pub fn source(&self) -> String {
-        format!("ng {}", env!("CARGO_PKG_VERSION"))
+        format!("pvc {}", env!("CARGO_PKG_VERSION"))
     }
 
     /// The `##commandline` value: the invocation, as it was typed.
@@ -157,16 +160,23 @@ impl VcfHeaderMetadata {
         &self.reference_path
     }
 
-    /// The `##parametersFile` value: the parameters file written beside this VCF.
+    /// The `##pvcLog` value: the run's log, which holds the inputs by name, every setting and the
+    /// parameters the run scored with (`doc/devel/ng/spec/command_line.md` §7.6).
     ///
-    /// **A file name, not a path**, and that is the point: the two travel as a directory, and an
-    /// absolute path would be stale the first time the pair moved. It is the line that makes a
-    /// run reproducible from its own output directory, and neither production writer has
-    /// anything like it.
+    /// **A file name, not a path**: the two usually travel as a directory, and an absolute path
+    /// would be stale the first time the pair moved.
     #[inline]
     #[must_use]
-    pub fn parameters_file_name(&self) -> &str {
-        &self.parameters_file_name
+    pub fn log_file_name(&self) -> &str {
+        &self.log_file_name
+    }
+
+    /// The `##pvcParameters` value: where the run's numbers came from — `defaults`, or the
+    /// parameters file's name and its MD5 — so a VCF parted from its log still says it.
+    #[inline]
+    #[must_use]
+    pub fn parameters_source(&self) -> &str {
+        &self.parameters_source
     }
 }
 
@@ -260,7 +270,8 @@ mod tests {
             samples.iter().map(|name| (*name).to_string()).collect(),
             "ng call --reference ref.fa".to_string(),
             "/genomes/ref.fa".to_string(),
-            "run.parameters.toml".to_string(),
+            "pvc_calls.log".to_string(),
+            "defaults".to_string(),
         )
     }
 
@@ -273,10 +284,11 @@ mod tests {
         assert_eq!(header.contigs()[0].name, "chr1");
         assert_eq!(header.command_line(), "ng call --reference ref.fa");
         assert_eq!(header.reference_path(), "/genomes/ref.fa");
-        assert_eq!(header.parameters_file_name(), "run.parameters.toml");
+        assert_eq!(header.log_file_name(), "pvc_calls.log");
+        assert_eq!(header.parameters_source(), "defaults");
         // The source names this binary and its version, so a file cannot claim another writer.
-        assert!(header.source().starts_with("ng "));
-        assert!(header.source().len() > "ng ".len());
+        assert!(header.source().starts_with("pvc "));
+        assert!(header.source().len() > "pvc ".len());
     }
 
     #[test]
@@ -422,7 +434,7 @@ const INFO_DECLARATIONS: &[&str] = &[
 const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
     r#"##INFO=<ID=PARALOG_LR,Number=1,Type=Float,Description="Log likelihood ratio of a hidden paralog over a real variant, from coverage and allele balance across samples">"#,
     r#"##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the run's fitted paralog rate">"#,
-    r#"##FILTER=<ID=hiddenParalog,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
+    r#"##FILTER=<ID=hiddenDup,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
 ];
 
 /// **The filter's id, as it appears in a removed record's `FILTER` column.**
@@ -431,7 +443,7 @@ const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
 /// the `##FILTER` line that declares it are one fact spelled twice — and a file whose records
 /// carry an id its header does not declare is invalid VCF. `the_declared_filter_id_is_the_one_a_record_carries`
 /// is what holds the two together.
-pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenParalog";
+pub const HIDDEN_PARALOG_FILTER_ID: &str = "hiddenDup";
 
 /// **How a record's likelihood ratio is written**, and how the header writes the cut it is
 /// compared against — one number of decimals, because an operator auditing why a record went
@@ -543,7 +555,8 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
         sample_names: _,
         command_line: _,
         reference_path: _,
-        parameters_file_name: _,
+        log_file_name: _,
+        parameters_source: _,
         hidden_paralog,
     } = metadata;
 
@@ -553,10 +566,8 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
         ("source", metadata.source()),
         ("commandline", metadata.command_line().to_string()),
         ("reference", metadata.reference_path().to_string()),
-        (
-            "parametersFile",
-            metadata.parameters_file_name().to_string(),
-        ),
+        ("pvcLog", metadata.log_file_name().to_string()),
+        ("pvcParameters", metadata.parameters_source().to_string()),
     ] {
         if !value.is_empty() {
             lines.push(format!("##{key}={value}"));
@@ -615,7 +626,8 @@ mod header_text_tests {
             samples.iter().map(|name| (*name).to_string()).collect(),
             "ng call --reference ref.fa cohort/*.cram".to_string(),
             "/genomes/ref.fa".to_string(),
-            "run.parameters.toml".to_string(),
+            "pvc_calls.log".to_string(),
+            "defaults".to_string(),
         )
         .expect("a well-formed header")
     }
@@ -745,10 +757,11 @@ samples_with_coverage_model=61/63",
 
         let expected = format!(
             "##fileformat=VCFv4.4\n\
-             ##source=ng {version}\n\
+             ##source=pvc {version}\n\
              ##commandline=ng call --reference ref.fa cohort/*.cram\n\
              ##reference=/genomes/ref.fa\n\
-             ##parametersFile=run.parameters.toml\n\
+             ##pvcLog=pvc_calls.log\n\
+             ##pvcParameters=defaults\n\
              ##contig=<ID=chr1,length=248956422>\n\
              {info}\n{filter}\n{format}\n\
              #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tHG002\tHG003\n",
@@ -806,7 +819,8 @@ samples_with_coverage_model=61/63",
             vec!["one".to_string()],
             String::new(),
             String::new(),
-            "run.parameters.toml".to_string(),
+            "pvc_calls.log".to_string(),
+            "defaults".to_string(),
         )
         .expect("a well-formed header");
 
@@ -814,9 +828,9 @@ samples_with_coverage_model=61/63",
         assert!(!text.contains("##commandline"), "got {text}");
         assert!(!text.contains("##reference"), "got {text}");
         // The one that is present still is.
-        assert!(text.contains("##parametersFile=run.parameters.toml\n"));
+        assert!(text.contains("##pvcLog=pvc_calls.log\n"));
         // And `##source` is derived, so it is always there.
-        assert!(text.contains("##source=ng "));
+        assert!(text.contains("##source=pvc "));
     }
 
     #[test]

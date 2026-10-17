@@ -3,7 +3,6 @@
 
 use super::*;
 use clap::Parser;
-use std::path::Path;
 
 use crate::calling::parameters_file::{
     CensusIdentity, DeclaredInbreeding, ParametersFile, ReadsBehindEachCalibration,
@@ -256,6 +255,45 @@ fn an_output_that_can_be_written_is_admitted() {
     );
 }
 
+/// **A VCF already there is refused without `--force`, before anything is read** — the reference
+/// here does not exist, so a run that got as far as reading it would fail differently — and the
+/// file is left as it was.
+#[test]
+fn an_existing_vcf_is_refused_unless_the_run_is_forced() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let output = directory.path().join("calls.vcf");
+    std::fs::write(&output, "an earlier run's calls\n").expect("the earlier output is written");
+
+    let refused = run_call_from_alignments(&a_run_writing_to(output.clone()))
+        .expect_err("an existing VCF is refused");
+    assert!(
+        matches!(
+            refused,
+            CallFromAlignmentsCliError::OutputAlreadyThere { .. }
+        ),
+        "refused for the VCF, and got: {refused:?}",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&output).expect("the earlier output is still there"),
+        "an earlier run's calls\n",
+    );
+
+    let forced = CallFromAlignmentsArgs {
+        force: true,
+        log: Some(directory.path().join("forced.log")),
+        tmp_dir: None,
+        ..a_run_writing_to(output)
+    };
+    let past_the_check = run_call_from_alignments(&forced).expect_err("there is no reference");
+    assert!(
+        !matches!(
+            past_the_check,
+            CallFromAlignmentsCliError::OutputAlreadyThere { .. }
+        ),
+        "with --force the run goes on to read the reference",
+    );
+}
+
 /// A run's arguments with everything but the output fixed, so the output checks read as one
 /// question.
 fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
@@ -264,17 +302,20 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         catalog: None,
         alignments: vec![PathBuf::from("one.cram")],
         output,
+        force: false,
+        log: None,
+        tmp_dir: None,
         regions: None,
         parameters: None,
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -282,8 +323,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     }
 }
@@ -342,17 +383,20 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         catalog: None,
         alignments: vec![directory.path().join("one.cram")],
         output: directory.path().join("calls.vcf"),
+        force: false,
+        log: None,
+        tmp_dir: None,
         regions: None,
         parameters: None,
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -360,8 +404,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     };
 
@@ -391,156 +435,9 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
 // The parameters the run wrote beside its VCF (spec §7)
 // ---------------------------------------------------------------------
 
-/// **The header names the file the run writes beside its output**, by name and not by path.
-///
-/// A reader holding the VCF has to be able to find what its genotypes rest on, and the two are
-/// siblings by construction — so the name is enough, and a path would be wrong the moment
-/// somebody moved the pair.
-#[test]
-fn the_headers_parameters_file_is_the_one_the_run_writes_beside_the_vcf() {
-    for (output, expected) in [
-        ("/data/run7/calls.vcf.gz", "calls.parameters.toml"),
-        ("/data/run7/calls.vcf", "calls.parameters.toml"),
-        ("tomato.bcf", "tomato.parameters.toml"),
-    ] {
-        assert_eq!(
-            beside_the_vcf(Path::new(output))
-                .file_name()
-                .expect("a file name")
-                .to_string_lossy(),
-            expected,
-            "from {output}",
-        );
-    }
-}
-
-/// **A run may not write its parameters over the file it was handed**, and the collision is the
-/// one spec §7 invites: it tells a user to copy the file their run wrote and change a line, so
-/// `--parameters calls.parameters.toml --output calls.vcf.gz` is the natural next command.
-#[test]
-fn a_run_whose_output_would_overwrite_its_own_parameters_file_is_refused() {
-    let directory = tempfile::tempdir().expect("a temporary directory");
-    let supplied = directory.path().join("calls.parameters.toml");
-    std::fs::write(&supplied, "# a file somebody edited\n").expect("a file to be handed");
-    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
-    args.defaults = false;
-    args.parameters = Some(supplied);
-
-    let refused = calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-        &args.output,
-        args.parameters.as_deref(),
-    )
-    .expect_err("the run would write over its own input");
-
-    let rendered = crate::error_render::format_error_chain(&refused);
-    assert!(
-        rendered.contains("calls.parameters.toml") && rendered.contains("calls.vcf.gz"),
-        "the message names both files, and got: {rendered}",
-    );
-}
-
-/// **Two spellings of one path are one file**, so a relative name does not slip past the
-/// refusal.
-#[test]
-fn the_refusal_sees_through_two_spellings_of_one_path() {
-    let directory = tempfile::tempdir().expect("a temporary directory");
-    std::fs::write(directory.path().join("calls.parameters.toml"), "# edited\n")
-        .expect("a file to be handed");
-    std::fs::create_dir(directory.path().join("sub")).expect("a subdirectory to walk back out of");
-    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
-    args.defaults = false;
-    args.parameters = Some(
-        directory
-            .path()
-            .join(".")
-            .join("sub")
-            .join("..")
-            .join("calls.parameters.toml"),
-    );
-
-    assert!(
-        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-            &args.output,
-            args.parameters.as_deref()
-        )
-        .is_err(),
-        "`<dir>/sub/../calls.parameters.toml` is `<dir>/calls.parameters.toml`",
-    );
-}
-
 /// **A symlink pointing at the file the run would write is that file**, and following it would
 /// have destroyed the target through the link — the same loss, one indirection away.
 #[cfg(unix)]
-#[test]
-fn the_refusal_follows_a_symlink_to_the_file_the_run_would_write() {
-    let directory = tempfile::tempdir().expect("a temporary directory");
-    let target = directory.path().join("calls.parameters.toml");
-    std::fs::write(&target, "# edited by hand\n").expect("a file to be handed");
-    let handy = directory.path().join("handy.toml");
-    std::os::unix::fs::symlink(&target, &handy).expect("a symlink to it");
-    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
-    args.defaults = false;
-    args.parameters = Some(handy);
-
-    assert!(
-        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-            &args.output,
-            args.parameters.as_deref()
-        )
-        .is_err(),
-        "a link to the destination is the destination",
-    );
-}
-
-/// **A `--parameters` file that is not there is not this refusal's business.** The person
-/// mistyped a name, and telling them to copy a file that does not exist sends them nowhere; the
-/// message they need comes from the read that follows.
-#[test]
-fn a_parameters_file_that_does_not_exist_is_left_to_the_read_that_follows() {
-    let directory = tempfile::tempdir().expect("a temporary directory");
-    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
-    args.defaults = false;
-    args.parameters = Some(directory.path().join("calls.parameters.toml"));
-
-    assert!(
-        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-            &args.output,
-            args.parameters.as_deref()
-        )
-        .is_ok(),
-        "nothing is there to be overwritten yet",
-    );
-}
-
-/// A parameters file that is not the run's own output is admitted, and so is a defaults run,
-/// which has no input to overwrite.
-#[test]
-fn a_parameters_file_that_is_not_the_runs_own_output_is_admitted() {
-    let directory = tempfile::tempdir().expect("a temporary directory");
-    let elsewhere = directory.path().join("fitted.parameters.toml");
-    std::fs::write(&elsewhere, "# a fit's own file\n").expect("a file to be handed");
-    let mut args = a_run_writing_to(directory.path().join("calls.vcf.gz"));
-    args.defaults = false;
-    args.parameters = Some(elsewhere);
-    assert!(
-        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-            &args.output,
-            args.parameters.as_deref()
-        )
-        .is_ok()
-    );
-
-    let defaults = a_run_writing_to(directory.path().join("calls.vcf.gz"));
-    assert!(
-        calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-            &defaults.output,
-            defaults.parameters.as_deref()
-        )
-        .is_ok(),
-        "a defaults run has no supplied file to overwrite",
-    );
-}
-
 /// Two fixture alignment files, and the run's read-group table over them.
 ///
 /// **A real table rather than a fabricated one**, because every axis of a parameters file is
@@ -570,7 +467,7 @@ fn a_cohorts_read_groups() -> (tempfile::TempDir, tempfile::TempDir, ReadGroups)
 
 /// **A run is reproducible from its own output** — spec §7's first purpose, as an assertion.
 ///
-/// The file a defaults run writes beside its VCF reads back into the same numbers that run
+/// The parameters a defaults run records in its log read back into the same numbers that run
 /// scored with: the same ploidy, the same count of libraries and plants, and the same
 /// coefficient for each of them. It is bound to this run at its own door on the way back in —
 /// a file naming another reference or another cohort's read groups is refused there — so what
@@ -605,16 +502,8 @@ fn what_a_defaults_run_writes_reads_back_into_the_numbers_it_scored_with() {
         CensusIdentity::of_a_run_with_no_census(),
         &StrRepeatCriteria::default(),
     );
-    let directory = tempfile::tempdir().expect("a temporary directory");
-    let vcf = directory.path().join("calls.vcf.gz");
-    let at = file.write_beside_the_vcf(&vcf).expect("the write succeeds");
-
-    assert_eq!(
-        at,
-        directory.path().join("calls.parameters.toml"),
-        "beside the VCF, named after it",
-    );
-    let text = std::fs::read_to_string(&at).expect("the file is there");
+    // The text a run records in its log, and that a person copies out of it.
+    let text = file.to_toml();
     let read_back = ParametersFile::from_toml(&text)
         .expect("what a run wrote is what its reader reads")
         .to_run_parameters_for(&reference, &read_groups, None)
@@ -713,17 +602,20 @@ fn a_cohort_on_disk() -> (
         catalog: Some(cohort.catalog),
         alignments: cohort.alignments,
         output: cohort.directory.path().join("calls.vcf"),
+        force: false,
+        log: None,
+        tmp_dir: None,
         regions: None,
         parameters: None,
         defaults: true,
         ploidy: None,
         build_index_if_missing: false,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
         min_period: DEFAULT_MIN_PERIOD,
@@ -731,46 +623,47 @@ fn a_cohort_on_disk() -> (
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     };
     (cohort.directory, cohort.zeta, cohort.alpha, args)
 }
 
-/// **The command writes both its files, and each says the right thing about the other.**
+/// **What the command writes: a VCF, and a log holding the parameters it scored with** — and no
+/// parameters file beside the VCF (`doc/devel/ng/spec/command_line.md` §7).
 ///
-/// **This is the only test that drives `run_call_from_alignments` itself**, and the review that
-/// asked for it measured what its absence cost: nine of fourteen mutations aimed at this step
-/// survived, because every other test calls the helpers directly. Among them were a header
-/// naming `calls.vcf` instead of `calls.parameters.toml` on every VCF a run writes, and two that
-/// hand `ParametersFile::of_run` an axis of the wrong length — which panics at startup on any
-/// real run and on nothing in the suite.
+/// **This drives `run_call_from_alignments` itself**, and the review that asked for it measured
+/// what its absence cost: nine of fourteen mutations aimed at this step survived while every
+/// other test called the helpers directly. Among them were two that hand `ParametersFile::of_run`
+/// an axis of the wrong length, which panics at startup on any real run and on nothing else here.
 #[test]
-fn the_command_writes_a_vcf_and_the_parameters_beside_it() {
+fn the_command_writes_a_vcf_and_logs_the_parameters_it_scored_with() {
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
 
     run_call_from_alignments(&args).expect("the cohort runs");
 
-    let parameters_at = beside_the_vcf(&args.output);
     assert!(args.output.is_file(), "the VCF is at {:?}", args.output);
+    let directory = args.output.parent().expect("the VCF's directory");
     assert!(
-        parameters_at.is_file(),
-        "and the parameters beside it at {parameters_at:?}",
+        !directory.join("calls.parameters.toml").exists(),
+        "no parameters file is written beside the VCF any more",
     );
 
     let vcf = std::fs::read_to_string(&args.output).expect("the VCF reads");
+    let header: Vec<&str> = vcf
+        .lines()
+        .take_while(|line| line.starts_with("##"))
+        .collect();
     assert!(
-        vcf.contains("##parametersFile=calls.parameters.toml\n"),
-        "the header names the file the run wrote beside it, and got:\n{}",
-        vcf.lines()
-            .take_while(|line| line.starts_with("##"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        header.contains(&"##pvcLog=pvc_calls.log") && header.contains(&"##pvcParameters=defaults"),
+        "the header names the run's log and where its numbers came from, and got:\n{}",
+        header.join("\n"),
     );
 
-    let text = std::fs::read_to_string(&parameters_at).expect("the parameters read");
-    let file = ParametersFile::from_toml(&text).expect("what the run wrote, its reader reads");
+    let parameters = crate::cli::calling_run::parameters_the_run_logged(&args.output, None);
+    let text = std::fs::read_to_string(&parameters).expect("the logged parameters read");
+    let file = ParametersFile::from_toml(&text).expect("what the run logged, its reader reads");
     assert_eq!(
         file.fitted_from.samples,
         vec!["zeta".to_string(), "alpha".to_string()],
@@ -784,32 +677,47 @@ fn the_command_writes_a_vcf_and_the_parameters_beside_it() {
     assert_eq!(file.inbreeding.by_sample.len(), 2);
     assert!(
         file.what_the_run_fitted().nothing_was_fitted(),
-        "a `--defaults` run fitted nothing, and the file says so",
+        "a `--defaults` run fitted nothing, and the block says so",
     );
 }
 
-/// **The second command a person types is refused by the driver**, not merely by the helper the
-/// other tests call.
-///
-/// After a first run, `--parameters calls.parameters.toml --output calls.vcf` is the natural next
-/// thing to type and would write over the file just read. Deleting the refusal's *call site* left
-/// every other test green, which is what this closes.
+/// **The parameters block of a run's log, passed back with `--parameters`, calls the same VCF** —
+/// the one use the dropped `calls.parameters.toml` had, kept (`command_line.md` §7.3). The second
+/// run's header names its file and that file's MD5 where the first said `defaults`, and nothing
+/// else moves.
 #[test]
-fn the_command_refuses_to_write_its_parameters_over_the_file_it_was_given() {
+fn a_runs_logged_parameters_passed_back_call_the_same_vcf() {
     let (_reference_dir, _zeta_dir, _alpha_dir, args) = a_cohort_on_disk();
-    run_call_from_alignments(&args).expect("the first run writes both files");
+    run_call_from_alignments(&args).expect("the defaults run");
+    let first = std::fs::read_to_string(&args.output).expect("the first VCF reads");
+    let parameters = crate::cli::calling_run::parameters_the_run_logged(&args.output, None);
 
     let again = CallFromAlignmentsArgs {
-        parameters: Some(beside_the_vcf(&args.output)),
+        parameters: Some(parameters.clone()),
         defaults: false,
+        force: true,
         ..args.clone()
     };
-    let refused = run_call_from_alignments(&again).expect_err("the second run is refused");
+    run_call_from_alignments(&again).expect("the run under its own logged parameters");
+    let second = std::fs::read_to_string(&again.output).expect("the second VCF reads");
 
-    let rendered = crate::error_render::format_error_chain(&refused);
+    let comparable = |vcf: &str| -> Vec<String> {
+        vcf.lines()
+            .filter(|line| {
+                !line.starts_with("##commandline") && !line.starts_with("##pvcParameters")
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(comparable(&first), comparable(&second));
+    let source = second
+        .lines()
+        .find(|line| line.starts_with("##pvcParameters="))
+        .expect("the second header says where its numbers came from");
+    let name = parameters.file_name().expect("a name").to_string_lossy();
     assert!(
-        rendered.contains("calls.parameters.toml"),
-        "the message names the file that would be lost, and got: {rendered}",
+        source.starts_with(&format!("##pvcParameters={name} (md5 ")),
+        "the file, by name and digest, and got: {source}",
     );
 }
 
@@ -1081,7 +989,7 @@ fn a_tract_below_the_calling_floor_becomes_generic_ground_and_one_above_it_stays
     );
 }
 
-/// **The parameters file a run writes says what that run counted as a repeat**
+/// **The parameters a run logs say what that run counted as a repeat**
 /// (`parameters_file.md` §3.9), and it says what this run typed rather than what the binary
 /// defaults to.
 ///
@@ -1100,7 +1008,11 @@ fn the_written_parameters_file_records_what_this_run_counted_as_a_repeat() {
 
     run_call_from_alignments(&args).expect("the cohort runs");
 
-    let written = std::fs::read_to_string(beside_the_vcf(&args.output)).expect("it was written");
+    let written = std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+        &args.output,
+        args.log.as_deref(),
+    ))
+    .expect("it was written");
     let file = ParametersFile::from_toml(&written).expect("what this run wrote, it can read");
     let routing = file
         .repeat_routing
@@ -1358,12 +1270,12 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
     let args = args_of(&a_defaults_run());
 
     assert!(
-        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        (args.hidden_dup_fdr - 0.01).abs() < 1e-12,
         "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
-        args.paralog_fdr
+        args.hidden_dup_fdr
     );
     assert!(
-        !args.paralog_filter_tag,
+        !args.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
 }
@@ -1381,7 +1293,7 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused_in_direct_mode_too() {
     let (_reference, _alignments, _directory, mut args) = a_cohort_on_disk();
 
     for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
-        args.paralog_fdr = asked;
+        args.hidden_dup_fdr = asked;
         let refused = run_call_from_alignments(&args).expect_err("not a false-discovery rate");
         assert!(
             matches!(

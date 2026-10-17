@@ -35,7 +35,8 @@ for cov in 30x 50x; do
         if [[ ! -s $vcf ]]; then
             if [[ $arm == experiment ]]; then export "$switch"=1; else unset "$switch"; fi
             NG_REFERENCE_CHECK=skip "$bin" call-from-alignments --reference "$ref" --catalog "$ref.repeats.parquet" \
-                --alignment "$bam" --regions "$out/tier_sorted.bed" --output "$vcf" --defaults > "$out/${arm}_${cov}.log" 2>&1
+                --alignment "$bam" --regions "$out/tier_sorted.bed" --output "$vcf" --defaults \
+                --log "$out/${arm}_${cov}.pvc.log" > "$out/${arm}_${cov}.log" 2>&1
             unset "$switch"
         fi
         python3 "$root/benchmarks/lib/tract_qual_experiment.py" --reference "$ref" --truth "$truth" --query "$vcf" \

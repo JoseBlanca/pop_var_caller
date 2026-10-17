@@ -1546,7 +1546,7 @@ impl<R: std::io::Read> BlockStream<R> {
     /// kept body.
     ///
     /// **For a caller that drops such a locus anyway.** A cohort run with a depth ceiling
-    /// (`--max-read-group-depth`) treats a record too large to hold as one too deep to call —
+    /// (`--max-depth`) treats a record too large to hold as one too deep to call —
     /// the record that stopped the 2,169-sample tomato run at SL4.0ch01:34,948,547 was 142 bases
     /// with 10,151 reads, 536,667 bytes of observed bases against the 524,288 allowed. A caller
     /// that needs every record's evidence leaves this off and keeps the refusal.

@@ -462,6 +462,13 @@ else. A file fitted from a different census of this same cohort can — it is si
 
 ## 7. When it is written, and where
 
+> **Superseded 2026-10-16** by [`command_line.md`](command_line.md) §7 (owner's ruling): a
+> calling run no longer writes a parameters file beside its VCF. Only `estimate-parameters` writes
+> one, because only it produces parameters. A calling run records the numbers it scored with in
+> its log instead, as a parameters file between two marker lines, so the three purposes below —
+> a run reproducible from its own output, a defaults run auditable, an edit that starts from
+> something — are served from the log. The text below is kept as the record of the earlier design.
+
 **Every run writes the parameters file it used, beside its VCF, whatever the numbers came from.**
 One writer, three sources — a file the user supplied, the defaults in the binary, or the fit — and
 after assembly the run cannot tell them apart, which is the point.

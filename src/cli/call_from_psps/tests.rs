@@ -8,6 +8,10 @@ use clap::Parser;
 use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
 use crate::cli::test_fixtures::{ACohortOnDisk, a_cohort_on_disk};
+use crate::region_typing::segment_criteria::{
+    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
+};
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
 
 /// Parse an argument vector into this subcommand's arguments, refusing any other subcommand.
 fn args_of(argv: &[&str]) -> CallFromPspsArgs {
@@ -200,7 +204,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
     .expect("the cohort walks into psps");
 
@@ -209,25 +213,23 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         catalog: Some(cohort.catalog.clone()),
         psps: vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")],
         output: cohort.directory.path().join("calls.vcf"),
+        // Several tests call this cohort again into the same directory.
+        force: true,
+        log: None,
+        tmp_dir: None,
         parameters: None,
         defaults: true,
         ploidy: None,
-        max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-        max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-        paralog_fdr: 0.0,
+        max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+        max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        paralog_filter_tag: false,
-        cohort_locus_builder_regions_len: None,
+        hidden_dup_tag: false,
+        locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,
-        min_copies: MinCopies::default(),
-        min_period: DEFAULT_MIN_PERIOD,
-        max_period: DEFAULT_MAX_PERIOD,
-        max_str_len: DEFAULT_MAX_STR_LEN,
-        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-        min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-        max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        max_reads_per_position: None,
+        max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
         explain_loci: None,
     };
     (cohort, args)
@@ -240,16 +242,17 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
 /// wiring from being proved only in pieces: direct mode's own review measured that gap and
 /// found nine of fourteen mutations survived while every test called the helpers directly.
 #[test]
-fn the_command_writes_a_vcf_and_the_parameters_beside_it() {
+fn the_command_writes_a_vcf_and_logs_its_parameters() {
     let (_cohort, args) = a_cohort_of_psps();
 
     run_call_from_psps(&args).expect("a cohort of stored samples calls");
 
     assert!(args.output.is_file(), "the VCF is at {:?}", args.output);
-    let parameters = beside_the_vcf(&args.output);
+    let parameters =
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref());
     assert!(
         parameters.is_file(),
-        "the parameters file is at {parameters:?}",
+        "the run's log holds its parameters, copied out to {parameters:?}",
     );
     let vcf = std::fs::read_to_string(&args.output).expect("the VCF reads");
     let columns = vcf
@@ -313,7 +316,7 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: 0.99,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     })
     .expect("the cohort walks into psps a second time");
     // zeta from the first walk, alpha from the second: the disagreement is between the files.
@@ -335,21 +338,43 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
     );
 }
 
-/// **A cohort walked under a different catalog is refused before a block is decoded**, naming
-/// what differs — the refusal that makes stored evidence safe to call at all.
+/// **A cohort walked under its own repeat settings is called under them, with nothing to type**
+/// (`doc/devel/ng/spec/command_line.md` §4.4). Before the settings were read from the psp
+/// headers, this run — psps written at a purity of 0.99, called at the default 0.8 — was refused
+/// for routing differently from its walk.
 #[test]
-fn a_run_whose_routing_is_not_the_walks_is_refused() {
-    let (_cohort, mut args) = a_cohort_of_psps();
-    // A tract that is a repeat to the walk and ordinary sequence to this run.
-    args.min_purity = 0.99;
+fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
+    let cohort = a_cohort_on_disk();
+    let psps = cohort.directory.path().join("psps-pure");
+    run_generate_psps(&GeneratePspsArgs {
+        reference: cohort.reference.clone(),
+        catalog: Some(cohort.catalog.clone()),
+        alignments: cohort.alignments.clone(),
+        output_dir: psps.clone(),
+        regions: None,
+        force: false,
+        build_index_if_missing: false,
+        min_copies: MinCopies::default(),
+        min_period: DEFAULT_MIN_PERIOD,
+        max_period: DEFAULT_MAX_PERIOD,
+        max_str_len: DEFAULT_MAX_STR_LEN,
+        max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
+        min_purity: 0.99,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+    })
+    .expect("the cohort walks into psps at a purity of 0.99");
 
-    let refused = run_call_from_psps(&args).expect_err("this run did not route as the walk did");
-
-    let rendered = crate::error_render::format_error_chain(&refused);
-    assert!(
-        rendered.contains("purity") || rendered.contains("criteria"),
-        "the refusal names the field that differs, and got: {rendered}",
-    );
+    let (_defaults_cohort, args) = a_cohort_of_psps();
+    let args = CallFromPspsArgs {
+        catalog: Some(cohort.catalog.clone()),
+        reference: cohort.reference.clone(),
+        psps: vec![psp_path_for(&psps, "zeta"), psp_path_for(&psps, "alpha")],
+        output: cohort.directory.path().join("pure.vcf"),
+        log: Some(cohort.directory.path().join("pure.log")),
+        tmp_dir: None,
+        ..args
+    };
+    run_call_from_psps(&args).expect("the psps' own settings are the run's");
 }
 
 // ---------------------------------------------------------------------
@@ -403,26 +428,6 @@ fn an_output_in_a_missing_directory_is_refused_by_the_command() {
     );
 }
 
-/// **A run may not write its parameters file over the one it was handed** (spec §7 invites the
-/// collision: copy the file your run wrote, change a line, re-run). What it would destroy is
-/// the edit, and the numbers that came back would look ordinary.
-#[test]
-fn a_run_whose_output_would_overwrite_its_own_parameters_file_is_refused_by_the_command() {
-    let (_cohort, mut args) = a_cohort_of_psps();
-    run_call_from_psps(&args).expect("the first run writes both files");
-
-    args.parameters = Some(beside_the_vcf(&args.output));
-    args.defaults = false;
-
-    let refused = run_call_from_psps(&args).expect_err("this run would write over its own input");
-
-    let rendered = crate::error_render::format_error_chain(&refused);
-    assert!(
-        rendered.contains("calls.parameters.toml"),
-        "the message names the file that would be lost, and got: {rendered}",
-    );
-}
-
 /// **A `--ploidy` that disagrees with the parameters file is refused** — a file's numbers were
 /// fitted at one ploidy and mean nothing at another, so a run that wants the other number wants
 /// a different fit. Provoked through the command, because the flag has to reach the check.
@@ -433,7 +438,11 @@ fn a_ploidy_that_is_not_the_parameters_files_is_refused_by_the_command() {
 
     // The file the first run wrote, moved out of the way so the second run may read it.
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
-    std::fs::rename(beside_the_vcf(&args.output), &supplied).expect("the file moves");
+    std::fs::rename(
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref()),
+        &supplied,
+    )
+    .expect("the file moves");
     args.parameters = Some(supplied);
     args.defaults = false;
     args.ploidy = Some(4);
@@ -456,7 +465,11 @@ fn the_parameters_a_previous_run_wrote_bind_to_this_cohort() {
     let (cohort, mut args) = a_cohort_of_psps();
     run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
-    std::fs::rename(beside_the_vcf(&args.output), &supplied).expect("the file moves");
+    std::fs::rename(
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref()),
+        &supplied,
+    )
+    .expect("the file moves");
 
     args.parameters = Some(supplied);
     args.defaults = false;
@@ -472,7 +485,11 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
     let (cohort, mut args) = a_cohort_of_psps();
     run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
-    std::fs::rename(beside_the_vcf(&args.output), &supplied).expect("the file moves");
+    std::fs::rename(
+        crate::cli::calling_run::parameters_the_run_logged(&args.output, args.log.as_deref()),
+        &supplied,
+    )
+    .expect("the file moves");
     let text = std::fs::read_to_string(&supplied).expect("the file reads");
     std::fs::write(&supplied, text.replace("zeta", "someone-else")).expect("the file rewrites");
 
@@ -497,7 +514,7 @@ fn parameters_that_name_another_cohorts_samples_are_refused() {
 #[test]
 fn a_run_asking_for_the_filter_writes_a_calibrated_file() {
     let (cohort, mut args) = a_cohort_of_psps();
-    args.paralog_fdr = 0.01;
+    args.hidden_dup_fdr = 0.01;
 
     run_call_from_psps(&args).expect("the filter finishes a run now");
 
@@ -508,7 +525,7 @@ fn a_run_asking_for_the_filter_writes_a_calibrated_file() {
         written.lines().take(12).collect::<Vec<_>>().join("\n")
     );
     assert!(
-        written.contains("##FILTER=<ID=hiddenParalog,"),
+        written.contains("##FILTER=<ID=hiddenDup,"),
         "and it must declare the filter it may have applied"
     );
     assert!(
@@ -529,12 +546,12 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
     let args = args_of(&a_defaults_run());
 
     assert!(
-        (args.paralog_fdr - 0.01).abs() < 1e-12,
+        (args.hidden_dup_fdr - 0.01).abs() < 1e-12,
         "the filter is on by default, at about one wrongly removed record in a hundred; got {}",
-        args.paralog_fdr
+        args.hidden_dup_fdr
     );
     assert!(
-        !args.paralog_filter_tag,
+        !args.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
 }
@@ -549,7 +566,7 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused() {
     let (cohort, mut args) = a_cohort_of_psps();
 
     for asked in [7.0, 1.0, -0.5, -0.0, f64::INFINITY, f64::NAN] {
-        args.paralog_fdr = asked;
+        args.hidden_dup_fdr = asked;
 
         let refused = run_call_from_psps(&args).expect_err("not a false-discovery rate");
 
@@ -578,7 +595,11 @@ fn a_run_writes_back_the_starts_its_file_carried() {
     run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
     let supplied = cohort.directory.path().join("supplied.parameters.toml");
     let mut file = ParametersFile::from_toml(
-        &std::fs::read_to_string(beside_the_vcf(&args.output)).expect("the run wrote its file"),
+        &std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+            &args.output,
+            args.log.as_deref(),
+        ))
+        .expect("the run wrote its file"),
     )
     .expect("and it parses");
     assert_eq!(
@@ -601,15 +622,91 @@ fn a_run_writes_back_the_starts_its_file_carried() {
     ];
     file.fitted_from.snp_indel_fit_starts = Some(starts.clone());
     std::fs::write(&supplied, file.to_toml()).expect("the supplied file is written");
-    std::fs::remove_file(beside_the_vcf(&args.output)).expect("the first run's file is removed");
+    std::fs::remove_file(crate::cli::calling_run::parameters_the_run_logged(
+        &args.output,
+        args.log.as_deref(),
+    ))
+    .expect("the first run's file is removed");
     args.parameters = Some(supplied);
     args.defaults = false;
     run_call_from_psps(&args).expect("a run handed its own kind of file binds it");
     let written = ParametersFile::from_toml(
-        &std::fs::read_to_string(beside_the_vcf(&args.output)).expect("the run wrote its file"),
+        &std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+            &args.output,
+            args.log.as_deref(),
+        ))
+        .expect("the run wrote its file"),
     )
     .expect("and it parses");
     assert_eq!(written.fitted_from.snp_indel_fit_starts, Some(starts));
+}
+
+/// **The parameters block a calling run writes into its log carries both informational tables the
+/// file it read held** — `[ordinary_site_prior.fitted_density]` and `[duplicated_positions]`
+/// (`parameter_prepass_joint_fit.md` §2.1.3, traps). Since a calling run records its parameters
+/// in its log rather than beside its VCF, that block is the file a person copies out to re-run;
+/// a block without the tables would silently strip them from every file passed on. The whole
+/// command, from a supplied file on disk to the block read back out of the log.
+#[test]
+fn a_runs_logged_parameters_carry_the_informational_tables_its_file_held() {
+    use crate::calling::parameters_file::{
+        FittedDensity, FittedDuplicatedPositions, InformationalNumber, PairedNumber, ParametersFile,
+    };
+    let (cohort, mut args) = a_cohort_of_psps();
+    run_call_from_psps(&args).expect("a defaults run writes the parameters it scored with");
+    let mut file = ParametersFile::from_toml(
+        &std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+            &args.output,
+            args.log.as_deref(),
+        ))
+        .expect("the run logged its parameters"),
+    )
+    .expect("and they parse");
+    assert_eq!(file.ordinary_site_prior.fitted_density, None);
+    assert_eq!(file.duplicated_positions, None);
+    let number = |value: f64| InformationalNumber {
+        value,
+        standard_error: Some(value / 10.0),
+    };
+    let marked = |value: f64| PairedNumber {
+        value,
+        standard_error: None,
+        separately_determined: false,
+    };
+    let density = FittedDensity {
+        stated_frequency: 0.01,
+        invariant_share: marked(0.84),
+        fixed_non_reference_share: number(3e-5),
+        segregating_shape_a: marked(0.02),
+        segregating_shape_b: number(4.28),
+        share_segregating_above_stated_frequency: number(8.4e-3),
+        expected_heterozygosity: number(1.2e-3),
+        expected_alternative_frequency: number(7.7e-4),
+    };
+    let duplicated = FittedDuplicatedPositions {
+        stated_frequency: 0.01,
+        duplicated_share: marked(0.015),
+        carrier_shape_a: marked(0.02),
+        carrier_shape_b: number(1.41),
+        share_with_carriers_above_stated_frequency: number(1.2e-3),
+    };
+    file.ordinary_site_prior.fitted_density = Some(density.clone());
+    file.duplicated_positions = Some(duplicated.clone());
+    let supplied = cohort.directory.path().join("supplied.parameters.toml");
+    std::fs::write(&supplied, file.to_toml()).expect("the supplied file is written");
+    args.parameters = Some(supplied);
+    args.defaults = false;
+    args.output = cohort.directory.path().join("with_tables.vcf");
+    args.log = None;
+    run_call_from_psps(&args).expect("a run handed a file with both tables binds it");
+    let logged = std::fs::read_to_string(crate::cli::calling_run::parameters_the_run_logged(
+        &args.output,
+        args.log.as_deref(),
+    ))
+    .expect("the run logged its parameters");
+    let written = ParametersFile::from_toml(&logged).expect("and they parse");
+    assert_eq!(written.ordinary_site_prior.fitted_density, Some(density));
+    assert_eq!(written.duplicated_positions, Some(duplicated));
 }
 
 /// **`--explain-loci` explains and changes nothing that is called** (`spec/explain_loci.md`
@@ -635,9 +732,7 @@ fn explaining_loci_writes_the_explanation_and_the_same_vcf() {
 
     let comparable = |vcf: &str| -> Vec<String> {
         vcf.lines()
-            .filter(|line| {
-                !line.starts_with("##commandline") && !line.starts_with("##parametersFile")
-            })
+            .filter(|line| !line.starts_with("##commandline") && !line.starts_with("##pvcLog"))
             .map(str::to_owned)
             .collect()
     };

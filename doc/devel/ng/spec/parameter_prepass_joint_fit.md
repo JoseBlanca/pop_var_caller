@@ -526,7 +526,11 @@ pub struct DuplicatedReport {        // JointFit::duplicated_report: Option<…>
   are a diagnostic, not a report, and are not filtered by the mark.
 - **A calling run writes the file back**, beside its VCF, from the file it read
   (`snp_indel_fit_starts` is carried the same way, [`cli/calling_run.rs:613`](../../../../src/cli/calling_run.rs#L613));
-  the two tables must be carried too, or a calling run silently drops them.
+  the two tables must be carried too, or a calling run silently drops them. *Amended 2026-10-18
+  (the merge of main's command-line work):* a calling run no longer writes a file beside its VCF;
+  it records its parameters as a block in its log (`command_line.md` §7), written through the
+  same `TheRunsNumbers::parameters_file`, so the block carries both tables
+  (`call_from_psps` test `a_runs_logged_parameters_carry_the_informational_tables_its_file_held`).
 - **The tables are not groups of fitted numbers.** `what_was_fitted.rs` counts the groups a run
   fitted; informational tables must not enter its count.
 

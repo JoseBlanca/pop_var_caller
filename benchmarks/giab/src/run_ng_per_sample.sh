@@ -21,8 +21,9 @@
 #     writes a fitted file yet, so every run here is `--defaults`: no
 #     base-quality calibration, no contamination, no inbreeding. The genotypes
 #     are what the reads alone say under those assumptions.
-#   * It writes a `<output-stem>.parameters.toml` beside the VCF recording the
-#     numbers it scored with.
+#   * It records the numbers it scored with in its log, which this script
+#     copies out to a `<output-stem>.parameters.toml` beside the VCF, where
+#     later scripts (the HG002 tract sweep) look for it.
 #
 # Fairness with the other two callers. ng applies no QUAL floor of its own,
 # while the production caller defaults to `--min-qual 30` and freebayes gets a
@@ -183,19 +184,25 @@ for sample in "${SAMPLES[@]}"; do
     echo
 
     t0=$(date +%s)
-    # ng prints its run report — what it called, and what ground it declined to
-    # speak for — on stdout, so both streams go to the log and to the terminal.
+    # ng's run report — what it called, and what ground it declined to speak
+    # for — is in its own log, one per sample, since several samples' VCFs share
+    # this directory; the terminal lines go to the script's log as well.
     echo "[ng] $sample -> $raw_vcf"
+    ng_log="${raw_vcf%.vcf*}.pvc.log"
     run "$NG_BIN" call-from-alignments \
         --reference "$REFERENCE" \
         --catalog "$NG_CATALOG" \
         --alignment "$aln" \
         --regions "$bed" \
         --output "$raw_vcf" \
+        --force --log "$ng_log" \
         --defaults 2>&1 | tee "$log"
     t1=$(date +%s)
 
     [[ "${DRY_RUN:-0}" == "1" ]] && { echo; continue; }
+
+    # The numbers the run scored with, as a parameters file beside the VCF.
+    sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$ng_log" | sed '1d;$d' > "${raw_vcf%.vcf*}.parameters.toml"
 
     # Apply the QUAL gate to produce the comparable headline set.
     awk -v min="$MIN_QUAL" "$FILTER_AWK" "$raw_vcf" > "$vcf"

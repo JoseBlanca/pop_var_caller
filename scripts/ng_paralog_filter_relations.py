@@ -37,10 +37,10 @@ FILTER_HEADER_PREFIXES = (
     "##paralogFilter=",
     "##INFO=<ID=PARALOG_LR,",
     "##INFO=<ID=PARALOG_POST,",
-    "##FILTER=<ID=hiddenParalog,",
+    "##FILTER=<ID=hiddenDup,",
 )
 FILTER_INFO_KEYS = ("PARALOG_LR", "PARALOG_POST")
-FILTER_ID = "hiddenParalog"
+FILTER_ID = "hiddenDup"
 
 # What `patch.rs` puts in an empty column, and the two FILTER values it replaces rather than
 # joins on (`append_filter_column`, `append_info_column`).
@@ -91,7 +91,7 @@ def without_the_filters_info_keys(record):
 
 
 def without_the_filters_id(record):
-    """One record line with the `hiddenParalog` id taken back out of its FILTER column.
+    """One record line with the `hiddenDup` id taken back out of its FILTER column.
 
     The inverse of `patch.rs`'s `append_filter_column`: the id is joined on with `;` unless what
     was there was `PASS` or `.`, in which case it replaced the column outright. So removing the

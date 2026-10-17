@@ -323,7 +323,7 @@ where
     }
 
     let positions = u16::try_from(observation.alleles[0].len())
-        .expect("an ordinary locus is bounded by --max-cohort-locus-span, far inside u16");
+        .expect("an ordinary locus is bounded by --max-locus-span, far inside u16");
     let whole_locus = WitnessedLocusPositions::one_run_from_offset_and_length(0, positions)
         .expect("a locus covers at least its reference base, and its length fits in u16");
     for sample in &mut observation.per_sample {

@@ -4,10 +4,10 @@
 #
 # One cohort of alignment files, called three ways, and the numbers each run reports:
 #
-#   off      --paralog-fdr 0            the run before this work, byte for byte
-#   drop     --paralog-fdr <target>     flagged records leave the file
-#   tag      --paralog-fdr <target> --paralog-filter-tag
-#                                       flagged records stay, on the hiddenParalog filter
+#   off      --hidden-dup-fdr 0            the run before this work, byte for byte
+#   drop     --hidden-dup-fdr <target>     flagged records leave the file
+#   tag      --hidden-dup-fdr <target> --hidden-dup-tag
+#                                       flagged records stay, on the hiddenDup filter
 #
 # **Why all three every time.** The off run is what the other two are measured against — how many
 # records went, and whether anything but the filter's own lines moved. The tag run is where a
@@ -138,33 +138,37 @@ fi
 
 run_one() {
   local side=$1; shift
-  # **Every run writes to the same basename.** The header records the parameters file beside the
-  # VCF by name (`##parametersFile=`), so a run written as `off.vcf` and one written as
-  # `drop.vcf` would differ in the header whatever the filter did — which would make the off run
-  # uncomparable with the standing pre-filter baseline. Each writes `run.vcf` and is moved after.
+  # **Every run writes to the same basenames.** The header names the run's log (`##pvcLog=`), so
+  # runs whose logs were `off.pvc.log` and `drop.pvc.log` would differ in the header whatever the
+  # filter did, and the comparison of the off and drop headers would fail on a filename. Each
+  # writes `run.vcf` and `run.pvc.log`, and both are moved after.
   printf '%s: ' "$side"
   if [[ ${NG_MODE:-alignments} == psps ]]; then
     measure "$out/$side.log" \
       "$bin" call-from-psps \
       --reference "$reference" --catalog "$catalog" "${stored[@]}" \
-      --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
+      --defaults --threads "$threads" "$@" --output "$out/run.vcf" \
+      --force --log "$out/run.pvc.log" || {
         echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
   else
     measure "$out/$side.log" \
       "$bin" call-from-alignments \
       --reference "$reference" --catalog "$catalog" "${alignments[@]}" --regions "$regions" \
-      --defaults --threads "$threads" "$@" --output "$out/run.vcf" || {
+      --defaults --threads "$threads" "$@" --output "$out/run.vcf" \
+      --force --log "$out/run.pvc.log" || {
         echo "the $side run failed:" >&2; tail -40 "$out/$side.log" >&2; exit 1; }
   fi
   mv "$out/run.vcf" "$out/$side.vcf"
-  mv "$out/run.parameters.toml" "$out/$side.parameters.toml"
+  mv "$out/run.pvc.log" "$out/$side.pvc.log"
+  # The numbers the run scored with are in its log, between two marker lines that are TOML comments.
+  sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' "$out/$side.pvc.log" | sed '1d;$d' > "$out/$side.parameters.toml"
 }
 
 echo
 echo "=== the three runs ==="
-run_one off --paralog-fdr 0
-run_one drop --paralog-fdr "$fdr"
-run_one tag --paralog-fdr "$fdr" --paralog-filter-tag
+run_one off --hidden-dup-fdr 0
+run_one drop --hidden-dup-fdr "$fdr"
+run_one tag --hidden-dup-fdr "$fdr" --hidden-dup-tag
 
 # **The off run is the one compared against the standing pre-filter baseline**, so it is the only
 # one whose hash means anything; the other two carry the filter's own lines by design.
@@ -184,9 +188,9 @@ done
 if [[ ${written[off]} -eq 0 ]]; then
   echo "WARNING: the off run wrote no records at all — nothing below is a measurement of anything"
 fi
-tagged=$(awk -F'\t' '!/^#/ { n = split($7, ids, ";"); for (i = 1; i <= n; i++) if (ids[i] == "hiddenParalog") { print; next } }' \
+tagged=$(awk -F'\t' '!/^#/ { n = split($7, ids, ";"); for (i = 1; i <= n; i++) if (ids[i] == "hiddenDup") { print; next } }' \
   "$out/tag.vcf" | wc -l | tr -d ' ')
-printf 'of the tag run, carrying hiddenParalog: %s\n' "$tagged"
+printf 'of the tag run, carrying hiddenDup: %s\n' "$tagged"
 if [[ $tagged -eq 0 && ${written[off]} -gt 0 ]]; then
   echo "NOTE: nothing was flagged, so every relation below is the empty case"
 fi
@@ -200,7 +204,10 @@ for side in drop tag; do
   # **An empty report is a failure, not a quiet section.** `sed` prints nothing and exits 0 when
   # the marker is absent, so a reworded first line would silently take π, the cut, the
   # convergence flag and the drop count out of every report written from this output.
-  report=$(sed -n '/^hidden-duplication filter:/,$p' "$out/$side.log")
+  # The run report is in the run's log, one `report:` line each — except its warnings, which are
+  # `WARN` events (so the terminal shows them too) and carry no `report:` prefix.
+  report=$(sed -n 's/^[^ ]* DEBUG report: //p; s/^[^ ]* WARN  /warning: /p' "$out/$side.pvc.log" \
+    | sed -n '/^hidden-duplication filter:/,$p')
   if [[ -z $report ]]; then
     echo "the $side run printed no filter report — has the report's first line been reworded?" >&2
     exit 1

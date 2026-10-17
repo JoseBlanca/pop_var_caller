@@ -20,20 +20,28 @@ use std::process;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
+use pop_var_caller::cli::command_line::settings_of;
+use pop_var_caller::cli::run_output;
 use pop_var_caller::cli::{
-    Cli, PopVarCallerCommand, run_call_from_alignments, run_call_from_psps,
+    Cli, DevCommand, PopVarCallerCommand, run_call_from_alignments, run_call_from_psps,
     run_estimate_contamination, run_estimate_parameters, run_generate_psps, run_inspect_psp,
-    run_regenerate_census, run_repeat_catalog, run_typed_regions,
+    run_repeat_catalog, run_typed_regions,
 };
 use pop_var_caller::error_render::format_error_chain;
 
 fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    run_output::install(cli.quiet, settings_of(&matches));
+    // **A panic is recorded in the log before the process stops**: a release build aborts on a
+    // panic, so nothing after it runs. Rust's own message still goes to the terminal.
+    let print_the_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        print_the_panic(info);
+        run_output::close_log_after_a_panic(&format!("pvc stopped on an internal error: {info}"));
+    }));
     let result = match cli.cmd {
-        PopVarCallerCommand::TypeRegions(args) => {
-            run_typed_regions(&args).map_err(|e| format_error_chain(&e))
-        }
         PopVarCallerCommand::RepeatCatalog(args) => {
             run_repeat_catalog(&args).map_err(|e| format_error_chain(&e))
         }
@@ -46,21 +54,25 @@ fn main() {
         PopVarCallerCommand::GeneratePsps(args) => {
             run_generate_psps(&args).map_err(|e| format_error_chain(&e))
         }
-        PopVarCallerCommand::RegenerateCensus(args) => {
-            run_regenerate_census(&args).map_err(|e| format_error_chain(&e))
-        }
         PopVarCallerCommand::EstimateParameters(args) => {
             run_estimate_parameters(&args).map_err(|e| format_error_chain(&e))
         }
-        PopVarCallerCommand::EstimateContamination(args) => {
-            run_estimate_contamination(&args).map_err(|e| format_error_chain(&e))
-        }
-        PopVarCallerCommand::InspectPsp(args) => {
+        PopVarCallerCommand::Dev(DevCommand::InspectPsp(args)) => {
             run_inspect_psp(&args).map_err(|e| format_error_chain(&e))
         }
+        PopVarCallerCommand::Dev(DevCommand::TypeRegions(args)) => {
+            run_typed_regions(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerCommand::Dev(DevCommand::EstimateContamination(args)) => {
+            run_estimate_contamination(&args).map_err(|e| format_error_chain(&e))
+        }
     };
+    // **The error is the run's last word, so it goes to the log too**, which is why the log is
+    // closed here and not when the subcommand returns.
     if let Err(msg) = result {
-        eprintln!("error: {msg}");
+        tracing::error!("{msg}");
+        run_output::close_log(1);
         process::exit(1);
     }
+    run_output::close_log(0);
 }

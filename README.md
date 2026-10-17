@@ -2,8 +2,8 @@
 
 A population variant caller: SNPs, indels and repeat tracts, from aligned reads to one VCF, for
 one sample to a cohort. The `pvc` binary ([src/main.rs](src/main.rs)) has the
-subcommands `type-regions`, `repeat-catalog`, `call-from-alignments`, `generate-psps`,
-`call-from-psps`, `regenerate-census`, `estimate-parameters` and `estimate-contamination`;
+subcommands `repeat-catalog`, `call-from-alignments`, `generate-psps`, `estimate-parameters`
+and `call-from-psps`, and developer tools under `pvc dev`;
 `pvc <subcommand> --help` describes each.
 
 > This caller was written as "ng", beside an older six-stage caller (per-sample pileup → `.psp`

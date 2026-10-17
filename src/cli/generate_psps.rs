@@ -103,76 +103,69 @@ pub const SUBCOMMAND: &str = "generate-psps";
 /// Walk each sample's alignment files once and store its observations as a psp.
 #[derive(Debug, Args)]
 pub struct GeneratePspsArgs {
-    /// Reference FASTA — the one every alignment file was made against. A `.fai` is built
+    /// The reference FASTA every alignment file was made against. A `.fai` index is built
     /// beside it if there is none.
     #[arg(long)]
     pub reference: PathBuf,
 
-    /// The tandem-repeat catalog, which says where the repeat tracts are. Build it first with
-    /// `pvc repeat-catalog --reference <reference>`; it is not optional.
+    /// The repeat catalogue. Defaults to `<reference>.repeats.parquet`, where
+    /// `pvc repeat-catalog` writes it.
     ///
-    /// Defaults to `<reference>.repeats.parquet`, which is where that command writes it. A
-    /// catalog built on another reference is refused: its coordinates would put every tract in
-    /// the wrong place, genome-wide, with nothing to notice.
+    /// A catalogue built on another reference is refused.
     #[arg(long)]
     pub catalog: Option<PathBuf>,
 
-    /// One alignment file per sample (BAM or CRAM, indexed). Repeat the flag.
+    /// A sample's BAM or CRAM file, indexed. Repeat the option, once per file.
     ///
-    /// A sample is named by its files' `@RG SM` tag, and **files sharing one `SM` are one
-    /// sample and are walked together into one psp**. Naming several samples here is allowed
-    /// and writes one psp each, **one after another, in the order the samples were first
-    /// seen** — so a run stopped part-way leaves the samples it finished on disk, and only the
-    /// one it was on has to be walked again. Running this command once per sample is still the
-    /// way to spread a cohort over cores or machines, and it makes that guarantee per process.
+    /// Samples are named by their files' `@RG SM` tag; files with the same `SM` are one sample
+    /// and go into one psp. Several samples are written one after another, so a run stopped
+    /// part-way keeps the samples it finished. To spread a cohort over cores or machines, run
+    /// one command per sample.
     #[arg(long = "alignment", required = true, num_args = 1..)]
     pub alignments: Vec<PathBuf>,
 
-    /// The directory the psp files are written into, one `<sample>.psp` per sample. Created
-    /// if it does not exist.
+    /// The directory to write the psps into, one `<sample>.psp` each. Created if it does not
+    /// exist.
     #[arg(long)]
     pub output_dir: PathBuf,
 
-    /// BED of the stretch of genome to walk. Without it, every base of every contig.
+    /// A BED file of the regions to store. Without it, the whole genome.
     ///
-    /// **This is recorded in every psp written**, and a later calling run compares it across
-    /// the cohort: samples analysed over different ground are not comparable, so a cohort
-    /// whose files disagree about it is refused rather than called over the ground they
-    /// happen to share (spec §6.2). Walking a cohort in several invocations therefore means
-    /// giving every one of them the same `--regions`.
+    /// Every psp records it, and a cohort whose psps were written over different regions is
+    /// refused when it is fitted or called — so a cohort written by several commands needs the
+    /// same `--regions` in each.
     #[arg(long)]
     pub regions: Option<PathBuf>,
 
-    /// Overwrite psps that are already in `--output-dir`.
-    ///
-    /// Without it a run refuses as soon as it finds one, before walking anything: a psp is
-    /// hours of decoding, and silently replacing one because a command was re-typed is not a
-    /// thing a person can undo. **The refusal comes before the first sample is walked**, so a
-    /// cohort is never left half-replaced.
+    /// Replace psps already in `--output-dir`. Without it, a run refuses before reading
+    /// anything.
     #[arg(long)]
     pub force: bool,
 
-    /// Build a `.bai`/`.crai` beside any alignment file that has none.
+    /// The most reads of one read group stored at one position; a deeper position keeps this
+    /// many.
+    ///
+    /// Such depth, far above a sample's usual coverage, is almost always a collapsed repeat, and
+    /// `--max-depth` when calling drops the loci it reaches. The default, 1,000, is about three
+    /// times the depth of a 300× sample. The reads kept are chosen by a hash of their names, so
+    /// neighbouring positions keep the same reads.
+    #[arg(
+        long,
+        default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Advanced"
+    )]
+    pub max_depth: u32,
+
+    /// Build a `.bai` or `.crai` index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
 
-    /// The most reads of one read group used at one position. Where a read group has more, the
-    /// walk keeps this many, chosen by a hash of the read name so the same reads are kept at
-    /// neighbouring positions, and counts the rest as discarded. The same cap applies at every
-    /// position, including where reads carry an insertion or deletion.
+    /// The fewest repeat-unit copies a stretch needs to be stored as a repeat: six
+    /// comma-separated numbers, for repeat units of 1 to 6 bases.
     ///
-    /// It bounds the work and memory a pile-up of reads costs — a collapsed repeat can put
-    /// thousands of reads on a position in a sample sequenced at 3× — and at 1,000 it leaves
-    /// every honestly covered position alone at the depths the caller is for.
-    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
-    pub max_reads_per_position: u32,
-
-    /// The fewest motif copies a tract needs before this run treats it as a repeat: six
-    /// comma-separated numbers, one per period 1 to 6. Any other count is refused.
-    ///
-    /// The default is the copy count at which each period starts to stutter, measured over a
-    /// tomato archive on 2026-08-10. Below its floor, a tract is ordinary sequence and the
-    /// SNP/indel path handles it.
+    /// Below these, a stretch is ordinary sequence and is called as SNPs and indels. Every psp
+    /// records these six settings, and the psp commands that follow use them.
     #[arg(
         long,
         value_parser = crate::cli::parsers::parse_min_copies,
@@ -181,8 +174,7 @@ pub struct GeneratePspsArgs {
     )]
     pub min_copies: MinCopies,
 
-    /// The shortest repeat unit this run treats as a repeat. 1 puts homopolymers on the
-    /// repeat path.
+    /// The shortest repeat unit stored as a repeat, in bases. 1 includes homopolymers.
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PERIOD,
@@ -191,8 +183,7 @@ pub struct GeneratePspsArgs {
     )]
     pub min_period: u8,
 
-    /// The longest repeat unit this run treats as a repeat. Six is the longest the catalog
-    /// holds, and the longest a motif can be.
+    /// The longest repeat unit stored as a repeat, in bases. At most 6.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_PERIOD,
@@ -201,12 +192,10 @@ pub struct GeneratePspsArgs {
     )]
     pub max_period: u8,
 
-    /// A tract longer than this many bases is a satellite: no generator speaks for it, so no
-    /// observation of it reaches the psp.
+    /// A repeat longer than this, in bases, is a satellite and nothing of it is stored.
     ///
-    /// A round number at the read-length limit rather than a measured one — with 150 bp reads
-    /// a read spans a tract plus an anchor each side only up to about 90 bp, so past 100 the
-    /// repeat path has nothing to offer.
+    /// With 150 bp reads, a read spans a repeat plus a flank on each side only up to about
+    /// 90 bp, so longer repeats cannot be genotyped from reads that cross them.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_STR_LEN,
@@ -214,13 +203,8 @@ pub struct GeneratePspsArgs {
     )]
     pub max_str_len: u64,
 
-    /// An STR bundle — two or more repeats within 15 bases of each other, typed as one region —
-    /// whose stretch, from its first repeat's start to the furthest end of any of them, is
-    /// longer than this many bases is a satellite instead. 0 makes every bundle a satellite.
-    ///
-    /// Its own limit rather than `--max-str-len`'s, so that widening what one repeat may be
-    /// does not also widen bundles. 100 for the reason `--max-str-len` is: with 150 bp reads a
-    /// read crosses a bundle and an anchor each side only up to about that length.
+    /// An STR bundle — repeats within 15 bases of each other, called as one locus — longer
+    /// than this, in bases, is a satellite. 0 makes every bundle one.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
@@ -228,8 +212,8 @@ pub struct GeneratePspsArgs {
     )]
     pub max_str_bundle_len: u64,
 
-    /// How much of a tract must match a perfect tiling of its motif, from 0 to 1. Below this
-    /// the tract is ordinary sequence.
+    /// How much of a repeat must match a perfect run of its unit, from 0 to 1. Below this it is
+    /// ordinary sequence.
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PURITY,
@@ -243,6 +227,10 @@ pub struct GeneratePspsArgs {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GeneratePspsCliError {
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] crate::cli::run_output::LogFileError),
+
     /// The reference could not be read.
     #[error("reading the reference {}", path.display())]
     Reference {
@@ -550,9 +538,19 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
 /// the first sample whose walk stops ends the run naming that sample — with every earlier
 /// sample's psp finished on disk, and nothing left at the stopped sample's own path.
 pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliError> {
+    let started = std::time::Instant::now();
     let report = walk_every_sample(args)?;
-    for line in report.lines() {
-        println!("{line}");
+    // **The report goes to the last sample's log, and its total to the terminal** — every
+    // sample's own line was said as it finished, so the total is all the terminal still lacks.
+    let lines = report.lines();
+    for line in &lines {
+        tracing::debug!("report: {line}");
+    }
+    if let Some(total) = lines.last() {
+        tracing::info!(
+            "done: {total}, in {}",
+            crate::cli::run_output::elapsed_text(started.elapsed())
+        );
     }
     Ok(())
 }
@@ -682,9 +680,44 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
     // sample (spec §11 question 8), not across samples.
     let mut walked: Vec<SampleWalkOutcome> =
         Vec::with_capacity(read_groups.read_groups_per_sample().len());
-    for sample in read_groups.read_groups_per_sample() {
+    let how_many = read_groups.read_groups_per_sample().len();
+    let ground_said = format!(
+        "{} ({})",
+        args.regions.as_ref().map_or_else(
+            || "the whole genome".to_owned(),
+            |bed| bed.display().to_string()
+        ),
+        crate::cli::run_output::size_of_ground(analysed.iter().map(|region| region.len()).sum())
+    );
+    tracing::info!(
+        "pvc generate-psps: storing {how_many} sample{}' evidence over {ground_said}, one after \
+         another",
+        if how_many == 1 { "" } else { "s" },
+    );
+    for (index, sample) in read_groups.read_groups_per_sample().iter().enumerate() {
         let files = alignment_files_of(sample, &read_groups);
         let psp_path = psp_path_for(&args.output_dir, sample.sample.as_ref());
+        // **A log of its own beside each psp**, `<sample>.psp.log`, because a cohort's samples
+        // are usually written by separate commands at once and one shared log would interleave
+        // them (`doc/devel/ng/spec/command_line.md` §7.3). **Always replaced**: an existing psp
+        // was refused above unless `--force`, so a log here without its psp is a failed walk's,
+        // and walking that sample again is this command's advertised repair.
+        let mut log_name = psp_path.as_os_str().to_os_string();
+        log_name.push(".log");
+        // **The previous sample's log is closed first**, with how its sample ended: its psp is
+        // on disk, or the loop would have returned. Opening the next log alone would leave every
+        // log but the last without the line saying the run finished, so it would read as a run
+        // that was killed. The last is closed by the binary, after the cohort's report.
+        if index > 0 {
+            crate::cli::run_output::close_log(0);
+        }
+        crate::cli::run_output::open_log(std::path::Path::new(&log_name), true)?;
+        tracing::info!("sample {} of {how_many}: {}", index + 1, sample.sample);
+        tracing::debug!("this sample's run stores {how_many} sample(s) over {ground_said}");
+        for file in &files {
+            tracing::debug!("input: alignments {}", file.display());
+        }
+        tracing::debug!("output: {}", psp_path.display());
         // **Written beside the psp and renamed once it is whole.** `PspWriter::create`
         // truncates what it finds, and this command's advertised repair is *re-run the one
         // sample that failed* — so writing straight to the final path would destroy a good
@@ -706,7 +739,7 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
                     reference: &reference,
                     read_filters: ReadFilterConfig::default(),
                     locus_generator_settings: PileupGeneratorConfig::with_max_reads_per_position(
-                        args.max_reads_per_position,
+                        args.max_depth,
                     ),
                     build_index_if_missing: args.build_index_if_missing,
                 },
@@ -759,7 +792,7 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         // hung one. **To stderr**, so a shell capturing the report gets the report and a
         // person watching gets the progress — and in the same words, because both come from
         // `SampleWalkOutcome::line`.
-        eprintln!("{}", outcome.line());
+        tracing::info!("{}", outcome.line());
         walked.push(outcome);
     }
     Ok(WalkReport {

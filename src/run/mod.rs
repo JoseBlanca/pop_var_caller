@@ -67,7 +67,7 @@ pub use census_fit::{
     parameters_from_the_fit, refuse_another_selection, the_tract_strata_of_a_cohort,
 };
 pub use census_freshness::{
-    CensusVerdict, CensusesToRegenerate, JudgedPsp, THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+    CensusVerdict, CensusesToRegenerate, JudgedPsp, THE_COMMAND_THAT_REWRITES_A_PSP,
     what_the_footer_and_the_trailers_head_say_about_a_census,
     what_the_heads_say_about_every_census_in_a_cohort,
     what_the_run_says_about_every_census_in_a_cohort,

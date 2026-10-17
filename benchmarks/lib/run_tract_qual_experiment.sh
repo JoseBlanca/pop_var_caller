@@ -232,20 +232,23 @@ run_simulator() {
                 --reference "$dir/reference.fa" \
                 --catalog "$dir/reference.fa.repeats.parquet" \
                 "${alignments[@]}" --regions "$dir/confident.bed" \
-                --output "$dir/ng.vcf" --defaults > "$dir/ng.log" 2>&1
+                --output "$dir/ng.vcf" --defaults --log "$dir/ng.pvc.log" \
+                > "$dir/ng.log" 2>&1
 
             # The same reads scored under the model that made them. The empty
             # slippage table is deleted and the true rows appended at the end,
             # because an array-of-tables closes the table it sits in.
-            grep -v '^slippage_by_stratum_and_group = \[\]$' \
-                "$dir/ng.parameters.toml" > "$dir/fitted.parameters.toml"
+            # The defaults run's numbers are in its log, between two marker lines.
+            sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' \
+                "$dir/ng.pvc.log" | sed '1d;$d' \
+                | grep -v '^slippage_by_stratum_and_group = \[\]$' > "$dir/fitted.parameters.toml"
             cat "$dir/slippage_rows.toml" >> "$dir/fitted.parameters.toml"
             NG_REFERENCE_CHECK=skip "$NG_BIN" call-from-alignments \
                 --reference "$dir/reference.fa" \
                 --catalog "$dir/reference.fa.repeats.parquet" \
                 "${alignments[@]}" --regions "$dir/confident.bed" \
                 --output "$dir/ng_fitted.vcf" \
-                --parameters "$dir/fitted.parameters.toml" \
+                --parameters "$dir/fitted.parameters.toml" --log "$dir/ng_fitted.pvc.log" \
                 > "$dir/ng_fitted.log" 2>&1
 
             # **The calibration and the sweep are the cohort's and the

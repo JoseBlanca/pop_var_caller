@@ -55,7 +55,7 @@ fn only_the_filter_and_info_columns_ever_move() {
     let line = a_record_line();
     let before = columns(&line);
 
-    let after = patched_columns(&line, Some("hiddenParalog"), &the_two_info_fields());
+    let after = patched_columns(&line, Some("hiddenDup"), &the_two_info_fields());
 
     assert_eq!(after.len(), before.len(), "a column was added or lost");
     for (index, (was, now)) in before.iter().zip(&after).enumerate() {
@@ -71,9 +71,9 @@ fn only_the_filter_and_info_columns_ever_move() {
 
 #[test]
 fn a_passing_record_carries_the_filter_in_place_of_pass() {
-    let after = patched_columns(&a_record_line(), Some("hiddenParalog"), &[]);
+    let after = patched_columns(&a_record_line(), Some("hiddenDup"), &[]);
 
-    assert_eq!(after[6], "hiddenParalog");
+    assert_eq!(after[6], "hiddenDup");
 }
 
 #[test]
@@ -82,14 +82,14 @@ fn a_record_that_already_carries_a_filter_keeps_it_and_gains_the_new_one() {
     // carries both, `;`-separated. Replacing would erase what the loop said.
     let line = b"SL4.0ch04\t1000000\t.\tA\tG\t12.0\tEMNoConv\tAF=0.5\tGT\t0/1\t0/0".to_vec();
 
-    let after = patched_columns(&line, Some("hiddenParalog"), &[]);
+    let after = patched_columns(&line, Some("hiddenDup"), &[]);
 
-    assert_eq!(after[6], "EMNoConv;hiddenParalog");
+    assert_eq!(after[6], "EMNoConv;hiddenDup");
 }
 
 #[test]
 fn a_missing_filter_is_replaced_rather_than_joined_to_though_ng_never_writes_one() {
-    // `.;hiddenParalog` would say "no filter was applied, and this one was".
+    // `.;hiddenDup` would say "no filter was applied, and this one was".
     //
     // **Defensive.** `FilterVerdict` has five values and all are words, so this column is never
     // `.` on a line ng emits — `the_encoder_writes_neither_a_missing_nor_an_empty_filter_or_info`
@@ -97,9 +97,9 @@ fn a_missing_filter_is_replaced_rather_than_joined_to_though_ng_never_writes_one
     // joined to, is pinned in `encoded_lines`.
     let line = b"SL4.0ch04\t1000000\t.\tA\tG\t12.0\t.\tAF=0.5\tGT\t0/1".to_vec();
 
-    let after = patched_columns(&line, Some("hiddenParalog"), &[]);
+    let after = patched_columns(&line, Some("hiddenDup"), &[]);
 
-    assert_eq!(after[6], "hiddenParalog");
+    assert_eq!(after[6], "hiddenDup");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn an_info_that_says_nothing_is_replaced_rather_than_appended_to_though_ng_never
 fn the_filter_and_the_info_are_independent() {
     let line = a_record_line();
 
-    let filter_only = patched_columns(&line, Some("hiddenParalog"), &[]);
+    let filter_only = patched_columns(&line, Some("hiddenDup"), &[]);
     let info_only = patched_columns(&line, None, &the_two_info_fields());
 
     assert_eq!(
@@ -155,10 +155,10 @@ fn a_record_with_one_sample_and_one_with_a_thousand_patch_the_same_two_columns()
 
     for line in [one.as_bytes(), thousand.as_bytes()] {
         let before = columns(line);
-        let after = patched_columns(line, Some("hiddenParalog"), &the_two_info_fields());
+        let after = patched_columns(line, Some("hiddenDup"), &the_two_info_fields());
 
         assert_eq!(after.len(), before.len());
-        assert_eq!(after[6], "hiddenParalog");
+        assert_eq!(after[6], "hiddenDup");
         assert_eq!(after[7], "AF=0.5;PARALOG_LR=4.2117;PARALOG_POST=0.9931");
         assert_eq!(
             after[8..],
@@ -186,7 +186,7 @@ fn a_line_with_too_few_columns_is_refused_rather_than_patched_in_the_wrong_place
     // the line and patching it would append to a record's `FILTER` with no `INFO` behind it.
     let line = b"SL4.0ch04\t1000000\t.\tA\tG\t42.5\tPASS".to_vec();
 
-    match rewrite_filter_and_info(&line, Some("hiddenParalog"), &[]) {
+    match rewrite_filter_and_info(&line, Some("hiddenDup"), &[]) {
         Err(LinePatchError::TooFewColumns { columns }) => assert_eq!(columns, 7),
         other => panic!("expected the line to be refused, got {other:?}"),
     }
@@ -219,9 +219,9 @@ fn an_empty_filter_is_replaced_rather_than_joined_to_though_ng_never_writes_one(
     // column.
     let line = b"SL4.0ch04\t1000000\t.\tA\tG\t12.0\t\tAF=0.5\tGT\t0/1".to_vec();
 
-    let after = patched_columns(&line, Some("hiddenParalog"), &[]);
+    let after = patched_columns(&line, Some("hiddenDup"), &[]);
 
-    assert_eq!(after[6], "hiddenParalog");
+    assert_eq!(after[6], "hiddenDup");
 }
 
 #[test]
@@ -241,18 +241,14 @@ fn patching_a_line_twice_adds_the_verdict_twice() {
     // costs so a pass-three retry does not discover it in a cohort VCF.
     let once = rewrite_filter_and_info(
         &a_record_line(),
-        Some("hiddenParalog"),
+        Some("hiddenDup"),
         &["PARALOG_LR=4.2117".to_string()],
     )
     .expect("a well-formed line");
 
-    let twice = patched_columns(
-        &once,
-        Some("hiddenParalog"),
-        &["PARALOG_LR=4.2117".to_string()],
-    );
+    let twice = patched_columns(&once, Some("hiddenDup"), &["PARALOG_LR=4.2117".to_string()]);
 
-    assert_eq!(twice[6], "hiddenParalog;hiddenParalog");
+    assert_eq!(twice[6], "hiddenDup;hiddenDup");
     assert_eq!(twice[7], "AF=0.5;AC=1;PARALOG_LR=4.2117;PARALOG_LR=4.2117");
 }
 
@@ -267,7 +263,7 @@ fn the_capacity_is_never_an_under_estimate() {
         "SL4.0ch04\t1000000\t.\tA\tG\t42.5\tEMNoConv\t",
         "SL4.0ch04\t1000000\t.\tA\tG\t42.5\t\tAF=0.5",
     ];
-    let filters = [None, Some("hiddenParalog"), Some("x")];
+    let filters = [None, Some("hiddenDup"), Some("x")];
     let infos: [Vec<String>; 3] = [
         vec![],
         vec!["PARALOG_LR=4.2117".to_string()],
@@ -623,9 +619,8 @@ mod encoded_lines {
             let line = encoded(&record);
             let before = columns(&line);
 
-            let patched =
-                rewrite_filter_and_info(&line, Some("hiddenParalog"), &the_two_info_fields())
-                    .unwrap_or_else(|error| panic!("{name} was refused: {error}"));
+            let patched = rewrite_filter_and_info(&line, Some("hiddenDup"), &the_two_info_fields())
+                .unwrap_or_else(|error| panic!("{name} was refused: {error}"));
             let after = columns(&patched);
 
             assert_eq!(
@@ -656,14 +651,14 @@ mod encoded_lines {
             let line = encoded(&record);
             let before = columns(&line);
 
-            let patched = rewrite_filter_and_info(&line, Some("hiddenParalog"), &added)
+            let patched = rewrite_filter_and_info(&line, Some("hiddenDup"), &added)
                 .unwrap_or_else(|error| panic!("{name} was refused: {error}"));
             let after = columns(&patched);
 
             let expected_filter = if before[6] == "PASS" {
-                "hiddenParalog".to_string()
+                "hiddenDup".to_string()
             } else {
-                format!("{};hiddenParalog", before[6])
+                format!("{};hiddenDup", before[6])
             };
             assert_eq!(after[6], expected_filter, "{name}: the FILTER column");
             assert_eq!(
@@ -724,7 +719,7 @@ mod laws {
             let line = fields.join("\t").into_bytes();
 
             let patched =
-                rewrite_filter_and_info(&line, Some("hiddenParalog"), &the_two_info_fields())
+                rewrite_filter_and_info(&line, Some("hiddenDup"), &the_two_info_fields())
                     .expect("ten columns or more");
 
             let before = columns(&line);

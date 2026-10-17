@@ -65,3 +65,7 @@ disallowed-methods = [
     { path = "f32::acosh", reason = "use crate::float on an f64: std's may round differently on each platform" },
     { path = "f32::atanh", reason = "use crate::float on an f64: std's may round differently on each platform" },
 ]
+
+# **The library never prints** (`src/lib.rs`, `doc/devel/ng/spec/command_line.md` §7.7), but a
+# test may: what it prints is for whoever runs it with `--nocapture`.
+allow-print-in-tests = true

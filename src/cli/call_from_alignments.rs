@@ -1,6 +1,6 @@
 //! The `call-from-alignments` subcommand: **call a cohort of alignment files and write a VCF**,
-//! in one process, with nothing written to disk in between — and, beside that VCF, the model
-//! parameters the run scored with.
+//! in one process, with nothing written to disk in between — and a log holding, among the rest,
+//! the model parameters the run scored with.
 //!
 //! This is ng's direct mode (`doc/devel/ng/spec/run_streaming.md` §2 and §5.1) at the command
 //! line. Every sample's file is opened and held for the whole run, every sample's reads are
@@ -14,13 +14,12 @@
 //! sample, the stretch of genome to call over, and the model's numbers — either a parameters
 //! file or `--defaults`.
 //!
-//! Out: **two files**. The VCF, and a `<output stem>.parameters.toml` beside it holding every
-//! number the run scored with. The second is not optional and there is no flag to switch it off
-//! (`doc/devel/ng/spec/parameters_file.md` §7): a run is then reproducible from its own output,
-//! a run that guessed its numbers is auditable in the same form as one that measured them, and
-//! somebody who wants to change one number starts from a file rather than from a document. It
-//! is also why a run whose `--parameters` file is the one it would write is refused — that is
-//! the second command a person types, and it would destroy the edit they just made.
+//! Out: **two files**. The VCF, and the run's log (`pvc_calls.log` beside it unless `--log` says
+//! otherwise), which holds every number the run scored with as a parameters file between two
+//! marker lines (`doc/devel/ng/spec/command_line.md` §7.3). A run is then reproducible from its
+//! own output, a run that guessed its numbers is auditable in the same form as one that measured
+//! them, and somebody who wants to change one number copies the block out and starts from a file
+//! rather than from a document.
 //!
 //! **The catalog is not optional and it is not a repeat caller's input.** It is what says where
 //! the repeat tracts are, so the run can route them; every locus is called down the SNP/indel
@@ -43,8 +42,10 @@
 //! concurrently on the rayon pool while assembling and genotyping stay on one thread — the
 //! output is identical at every thread count. Nothing is printed while it works.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use clap::Args;
 use thiserror::Error;
@@ -53,14 +54,14 @@ use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run;
 use crate::cli::run_ground::{self, GroundError};
+use crate::cli::run_output::{self, LogFileError};
 use crate::fasta::ContigList;
 use crate::locus_generation::pileup::PileupGeneratorConfig;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
 use crate::read::ReadFilterConfig;
-use crate::read::input::read_groups::{ReadGroupError, build_read_groups};
+use crate::read::input::read_groups::{ReadGroupError, ReadGroups, build_read_groups};
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
@@ -69,7 +70,7 @@ use crate::reference_info::{
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
-use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
+use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN, GenomeRegions};
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
@@ -77,14 +78,14 @@ use crate::run::report::BoundsTheRunCalledUnder;
 use crate::run::{AlignedFilesVariantCaller, AlignmentInputs, RunError, RunReport};
 use crate::types::InbreedingF;
 use crate::types::MAX_MOTIF_LEN;
-use crate::vcf::writer::{VcfWriteError, VcfWriter};
+use crate::vcf::writer::{VcfWriteError, VcfWriter, is_standard_output};
 
 /// Default target false-discovery rate for the hidden-duplication filter — spec §3.6's.
 ///
 /// **About one record in a hundred of those the filter removes was really a variant.** It was
 /// `0` while the filter's scoring and writing passes did not exist, because that default would
 /// have parked every record and produced no VCF; both passes are built now, so the spec's value
-/// stands and the filter is on unless an operator turns it off with `--paralog-fdr 0`.
+/// stands and the filter is on unless an operator turns it off with `--hidden-dup-fdr 0`.
 const DEFAULT_PARALOG_FDR: f64 = 0.01;
 
 /// `call-from-alignments` arguments.
@@ -99,188 +100,150 @@ const DEFAULT_PARALOG_FDR: f64 = 0.01;
         .args(["parameters", "defaults"])
 ))]
 pub struct CallFromAlignmentsArgs {
-    /// Reference FASTA — the one every alignment file was made against. A `.fai` is built
+    /// The reference FASTA every alignment file was made against. A `.fai` index is built
     /// beside it if there is none.
     #[arg(long)]
     pub reference: PathBuf,
 
-    /// The tandem-repeat catalog, which says where the repeat tracts are. Build it first with
-    /// `pvc repeat-catalog --reference <reference>`; it is not optional.
+    /// The repeat catalogue. Defaults to `<reference>.repeats.parquet`, where
+    /// `pvc repeat-catalog` writes it.
     ///
-    /// Defaults to `<reference>.repeats.parquet`, which is where that command writes it. A
-    /// catalog built on another reference is refused: its coordinates would put every tract in
-    /// the wrong place, genome-wide, with nothing to notice.
+    /// A catalogue built on another reference is refused.
     #[arg(long)]
     pub catalog: Option<PathBuf>,
 
-    /// One alignment file per sample (BAM or CRAM, indexed). Repeat the flag.
+    /// A sample's BAM or CRAM file, indexed. Repeat the option, once per file.
     ///
-    /// A sample is named by its files' `@RG SM` tag, and those names, in the order the flags
-    /// were given, are the VCF's sample columns. Two files carrying one `SM` are one sample.
+    /// Samples are named by their files' `@RG SM` tag, and are the VCF's sample columns in the
+    /// order given. Two files with the same `SM` are one sample.
     #[arg(long = "alignment", required = true, num_args = 1..)]
     pub alignments: Vec<PathBuf>,
 
-    /// Where to write the VCF. `.vcf.gz` or `.vcf.bgz` writes bgzf; anything else is plain
-    /// text.
+    /// Where to write the VCF; `-` writes it to standard output, uncompressed. A name ending in
+    /// `.vcf.gz` or `.vcf.bgz` is written compressed (bgzip); any other is plain text.
     ///
-    /// The named file appears whole or not at all: the bytes go to `<output>.tmp` and are
-    /// renamed into place only once the last record is on disk. A run that stops leaves that
-    /// `.tmp` behind.
+    /// A file appears whole or not at all: it is written as `<output>.tmp` and renamed when the
+    /// last record is on disk. Standard output cannot be taken back: a run that fails part-way
+    /// has sent part of a VCF, and its exit status says it failed.
     #[arg(long)]
     pub output: PathBuf,
 
-    /// BED of the stretch of genome to call over. Without it, every base of every contig.
+    /// A BED file of the regions to call. Without it, the whole genome.
     #[arg(long)]
     pub regions: Option<PathBuf>,
 
-    /// The model's numbers, as a parameters file — what a fit over this cohort wrote, or a copy
-    /// of one edited by hand. It is refused if it was fitted against another reference or names
-    /// read groups this cohort does not have.
+    /// A parameters file, as `pvc estimate-parameters` writes it for this cohort.
+    ///
+    /// It is refused if it was fitted against another reference, or for other samples or read
+    /// groups.
     #[arg(long)]
     pub parameters: Option<PathBuf>,
 
-    /// Call with the defaults compiled into this binary instead of a parameters file.
+    /// Call with the numbers built into pvc instead of a parameters file.
     ///
-    /// Not the same claim as a fit. A defaults run assumes no base-quality calibration, no
-    /// contamination and no inbreeding; its genotypes are what the reads alone say under those
-    /// assumptions.
+    /// These assume no base-quality miscalibration, no contamination and no inbreeding, and use
+    /// built-in repeat stutter rates. Fitted numbers come from psp mode, through
+    /// `pvc estimate-parameters`.
     #[arg(long)]
     pub defaults: bool,
 
-    /// How many copies of each chromosome every sample carries. Two when nothing says
-    /// otherwise.
+    /// Copies of each chromosome in every sample. Defaults to 2, or to the parameters file's.
     ///
-    /// A parameters file states its own, and where one is given this flag may only agree with
-    /// it: a file records the ploidy its numbers were fitted at, and calling at another one
-    /// would score genotypes the fit never saw. A run that types a different number is refused
-    /// rather than quietly called at the file's.
-    ///
-    /// At most 16 copies, which is what the read likelihood scores.
+    /// With a parameters file it may only repeat the file's ploidy, which the numbers were
+    /// fitted at. At most 16.
     #[arg(long)]
     pub ploidy: Option<u8>,
 
-    /// Build a `.bai`/`.crai` beside any alignment file that has none.
-    #[arg(long, help_heading = "Advanced")]
-    pub build_index_if_missing: bool,
-
-    /// The most reads of one read group used at one position. Where a read group has more, the
-    /// walk keeps this many, chosen by a hash of the read name so the same reads are kept at
-    /// neighbouring positions, and counts the rest as discarded. The same cap applies at every
-    /// position, including where reads carry an insertion or deletion.
+    /// The site quality (QUAL) below which a site is not written. 0 writes every site.
     ///
-    /// It bounds the work and memory a pile-up of reads costs — a collapsed repeat can put
-    /// thousands of reads on a position in a sample sequenced at 3× — and at 1,000 it leaves
-    /// every honestly covered position alone at the depths the caller is for.
-    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
-    pub max_reads_per_position: u32,
-
-    /// The most reads one read group may have at a locus before the locus is dropped.
-    ///
-    /// Where any sample has a read group deeper than this, **no variant is called there for any
-    /// sample**, and none of that ground's evidence is held in memory. Such depth, far above a
-    /// sample's usual coverage, is almost always a collapsed repeat: many copies of a sequence
-    /// mapped onto one. Reads the read cap (`--max-reads-per-position`) discarded and reads that
-    /// showed nothing are counted with the deepest read group. The run report says, per sample,
-    /// how many loci were dropped this way.
-    #[arg(long, default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
-    pub max_read_group_depth: u32,
-
-    /// Explain, at every locus overlapping the regions of a BED, why the run decided what it
-    /// did — candidates kept and dropped, samples set aside, genotype likelihoods, GT and GQ,
-    /// how partial reads were weighed, QUAL with its penalties, and what became of the record
-    /// — and write it as a TSV. The first value is the BED, the second the TSV. **It changes
-    /// nothing that is called**, and costs nothing when not given
-    /// (doc/devel/ng/spec/explain_loci.md).
-    #[arg(
-        long,
-        num_args = 2,
-        value_names = ["REGIONS_BED", "OUTPUT_TSV"],
-        help_heading = "Advanced"
-    )]
-    pub explain_loci: Option<Vec<PathBuf>>,
-
-    /// The widest a locus may be, in reference bases, before the caller declines to assemble it.
-    ///
-    /// A deletion joins the positions it covers into one locus, so this is what decides how
-    /// long a deletion can be and still be called — and everything else chained into that
-    /// locus goes with it. The run report says how many loci were refused and how long they
-    /// were; raise this and call again if their lengths cluster just above it. Long reads want
-    /// a larger number than short ones.
-    #[arg(long, default_value_t = DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
-    pub max_cohort_locus_span: u32,
-
-    /// The most alleles a locus may be called over, the reference counted among them.
-    ///
-    /// Where more alleles segregate than this, the worst-evidenced are cut — and a sample whose
-    /// own reads earned one of the cut sequences is set aside at that locus rather than called
-    /// over a set that cannot hold what it carries. The run report says where that left nobody
-    /// callable at all.
-    #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
-    pub max_candidate_alleles: u16,
-
-    /// The site quality below which a called locus is not written: the `QUAL` the record would
-    /// carry, after the artifact correction. **Zero writes every called locus.** The default, 1,
-    /// drops the sites whose artifact penalties outweigh their evidence — most of the false calls
-    /// measured on GIAB from 5× to 300× and on 63 tomato accessions at about 3× — and costs few
-    /// true ones; GATK's 30 costs more than a hundred true calls at 5× and 10× on GIAB.
+    /// The default, 1, drops the sites whose artifact penalties outweigh their evidence, which
+    /// removes most false calls at little cost in true ones.
     #[arg(
         long,
         default_value_t = crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        value_parser = crate::cli::calling_run::parse_min_site_quality,
-        help_heading = "Advanced"
+        value_parser = crate::cli::calling_run::parse_min_site_quality
     )]
     pub min_site_quality: f32,
 
-    /// Target false-discovery rate among the records the hidden-duplication filter removes —
-    /// calls better explained by two reference-collapsed copies piling their reads onto one
-    /// position than by a real variant. **Zero turns the filter off**, and a run with it off
-    /// writes byte for byte what it wrote before the filter existed.
-    ///
-    /// **Above zero, the run needs scratch space beside the output.** It parks every called
-    /// record in `<output>.paralog-spill.tmp` and reads it twice, because no record's fate is
-    /// known until every record has been scored — so it needs free space on the output's own
-    /// filesystem of several times a compressed VCF's size. The file is removed when the run
-    /// ends, however it ends.
-    #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
-    pub paralog_fdr: f64,
-
-    /// Keep the records the hidden-duplication filter removes, on the `hiddenParalog` filter,
-    /// instead of dropping them.
-    ///
-    /// **What it is for**: a run that drops can be audited against one that tags, since the two
-    /// files differ by exactly the tagged lines.
-    #[arg(long, help_heading = "Advanced")]
-    pub paralog_filter_tag: bool,
-
-    /// How much reference one round of locus building covers, in bases. Chosen from the
-    /// cohort's size when it is not given.
-    ///
-    /// The run advances in rounds: it draws every sample's observations over the next stretch
-    /// of reference, then builds and calls the loci in it. A wider stretch means fewer rounds
-    /// and more of each sample's reading done at once — which is what the threads overlap —
-    /// and more observations held at once, which is what it costs in memory. Both scale with
-    /// the cohort, so a single number cannot be right at three samples and at three thousand.
-    /// Left unset, the run picks a width that holds one round's observations to a fixed
-    /// budget: about 8,000 bases at sixty-three samples, 500 at a thousand.
-    #[arg(long, help_heading = "Advanced")]
-    pub cohort_locus_builder_regions_len: Option<u32>,
-
-    /// How many threads to use. Zero means every core.
-    ///
-    /// What they parallelise is the reading: each round draws the cohort's samples at once,
-    /// and everything after — building the loci, calling them, writing the VCF — stays on one
-    /// thread in genome order, so the output does not depend on this number. The other two
-    /// subcommands take the same flag; before this one did, a run could only be narrowed
-    /// through `RAYON_NUM_THREADS`.
+    /// Threads to use; 0 uses every core. The output is the same at any number.
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
 
-    /// The fewest motif copies a tract needs before this run treats it as a repeat: six
-    /// comma-separated numbers, one per period 1 to 6. Any other count is refused.
+    /// Replace the VCF and the log if they are already there. Without it, a run refuses before
+    /// reading anything.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Where to write the run's log. Defaults to `pvc_calls.log` beside the VCF.
     ///
-    /// The default is the copy count at which each period starts to stutter, measured over a
-    /// tomato archive on 2026-08-10. Below its floor, a tract is ordinary sequence and the
-    /// SNP/indel caller handles it.
+    /// The log holds the inputs by name, every setting's value, and the run's full report.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+
+    /// The directory for the run's scratch files. Defaults to the VCF's directory, or the
+    /// working directory when the VCF goes to standard output.
+    ///
+    /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
+    /// it ends, whether it succeeded or failed; a run that is killed, or stops on an internal
+    /// error, leaves it behind. While the hidden-dup filter is on, every call waits there until
+    /// the whole genome is called: several times the compressed VCF's size.
+    #[arg(long)]
+    pub tmp_dir: Option<PathBuf>,
+
+    /// A locus where any sample has a read group deeper than this is not called, for any sample.
+    ///
+    /// Such depth, far above a sample's usual coverage, is almost always a collapsed repeat:
+    /// many copies of a sequence mapped onto one copy in the reference. Reading also keeps no
+    /// more than this many reads of a read group at one position. The default, 1,000, is about
+    /// three times the depth of a 300× sample.
+    #[arg(
+        long,
+        default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Advanced"
+    )]
+    pub max_depth: u32,
+
+    /// The most alleles a SNP/indel locus is called over, the reference among them.
+    ///
+    /// Where more segregate, the worst supported are left out. Repeat (STR) loci are not
+    /// affected: they have their own limit of 32.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        help_heading = "Advanced"
+    )]
+    pub max_generic_alleles: u16,
+
+    /// The widest locus assembled, in reference bases — and so the longest deletion called.
+    ///
+    /// The run's log says how many loci were too wide and how long they were. Long reads want a
+    /// larger value than short ones.
+    #[arg(long, default_value_t = DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
+    pub max_locus_span: u32,
+
+    /// The false-discovery rate allowed among the calls the hidden-dup filter removes. 0 turns
+    /// the filter off.
+    ///
+    /// The filter removes calls better explained by a hidden duplication — two copies of a
+    /// sequence collapsed onto one in the reference — than by a variant. While it is on, the
+    /// run needs scratch space in --tmp-dir of several times the compressed VCF's size.
+    #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
+    pub hidden_dup_fdr: f64,
+
+    /// Keep the calls the hidden-dup filter removes, marked `hiddenDup` in the FILTER column,
+    /// instead of dropping them.
+    #[arg(long, help_heading = "Advanced")]
+    pub hidden_dup_tag: bool,
+
+    /// Build a `.bai` or `.crai` index beside any alignment file that has none.
+    #[arg(long, help_heading = "Advanced")]
+    pub build_index_if_missing: bool,
+
+    /// The fewest repeat-unit copies a stretch needs to be called as a repeat: six
+    /// comma-separated numbers, for repeat units of 1 to 6 bases.
+    ///
+    /// Below these, a stretch is ordinary sequence and is called as SNPs and indels.
     #[arg(
         long,
         value_parser = crate::cli::parsers::parse_min_copies,
@@ -289,8 +252,7 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub min_copies: MinCopies,
 
-    /// The shortest repeat unit this run treats as a repeat. 1 puts homopolymers on the
-    /// repeat path.
+    /// The shortest repeat unit called as a repeat, in bases. 1 includes homopolymers.
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PERIOD,
@@ -299,8 +261,7 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub min_period: u8,
 
-    /// The longest repeat unit this run treats as a repeat. Six is the longest the catalog
-    /// holds, and the longest a motif can be.
+    /// The longest repeat unit called as a repeat, in bases. At most 6.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_PERIOD,
@@ -309,12 +270,10 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub max_period: u8,
 
-    /// A tract longer than this many bases is a satellite: neither caller speaks for it, and
-    /// the run report counts its ground as refused.
+    /// A repeat longer than this, in bases, is a satellite and is not called.
     ///
-    /// A round number at the read-length limit rather than a measured one — with 150 bp reads
-    /// a read spans a tract plus an anchor each side only up to about 90 bp, so past 100 the
-    /// repeat path has nothing to offer.
+    /// With 150 bp reads, a read spans a repeat plus a flank on each side only up to about
+    /// 90 bp, so longer repeats cannot be genotyped from reads that cross them.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_STR_LEN,
@@ -322,13 +281,8 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub max_str_len: u64,
 
-    /// An STR bundle — two or more repeats within 15 bases of each other, typed as one region —
-    /// whose stretch, from its first repeat's start to the furthest end of any of them, is
-    /// longer than this many bases is a satellite instead. 0 makes every bundle a satellite.
-    ///
-    /// Its own limit rather than `--max-str-len`'s, so that widening what one repeat may be
-    /// does not also widen bundles. 100 for the reason `--max-str-len` is: with 150 bp reads a
-    /// read crosses a bundle and an anchor each side only up to about that length.
+    /// An STR bundle — repeats within 15 bases of each other, called as one locus — longer
+    /// than this, in bases, is a satellite and is not called. 0 calls no bundle.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
@@ -336,8 +290,8 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub max_str_bundle_len: u64,
 
-    /// How much of a tract must match a perfect tiling of its motif, from 0 to 1. Below this
-    /// the tract is ordinary sequence.
+    /// How much of a repeat must match a perfect run of its unit, from 0 to 1. Below this it is
+    /// ordinary sequence.
     #[arg(
         long,
         default_value_t = DEFAULT_MIN_PURITY,
@@ -345,6 +299,43 @@ pub struct CallFromAlignmentsArgs {
         help_heading = "What counts as a repeat"
     )]
     pub min_purity: f32,
+
+    /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
+    ///
+    /// Set apart from `--max-depth`, a position above this is thinned to it, by a hash of the
+    /// read names so neighbouring positions keep the same reads. At equal values a thinned
+    /// position is always dropped by `--max-depth`.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Developer"
+    )]
+    pub max_reads_per_position: Option<u32>,
+
+    /// How much reference one round of locus building covers, in bases. Chosen from the cohort
+    /// size when not given; it trades memory for speed and changes no call.
+    #[arg(long, help_heading = "Developer")]
+    pub locus_builder_regions_len: Option<u32>,
+
+    /// Explain every decision at the loci overlapping a BED, written as a table: candidates,
+    /// genotype likelihoods, GT, GQ, QUAL and its penalties, and the record's fate. Changes no
+    /// call.
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["REGIONS_BED", "OUTPUT_TSV"],
+        help_heading = "Developer"
+    )]
+    pub explain_loci: Option<Vec<PathBuf>>,
+}
+
+impl CallFromAlignmentsArgs {
+    /// The read cap the walk applies: `--max-reads-per-position` where it was given, and
+    /// `--max-depth` otherwise (`doc/devel/ng/spec/command_line.md` §5.4).
+    #[must_use]
+    pub fn read_cap(&self) -> u32 {
+        self.max_reads_per_position.unwrap_or(self.max_depth)
+    }
 }
 
 /// Everything that can stop a run, rendered for a person at a terminal.
@@ -372,7 +363,7 @@ pub enum CallFromAlignmentsCliError {
     },
 
     /// The hidden-duplication filter's target is not a false-discovery rate.
-    #[error("--paralog-fdr is not a false-discovery rate")]
+    #[error("--hidden-dup-fdr is not a false-discovery rate")]
     ParalogTargetIsNotAFraction {
         /// What the type said was wrong with it.
         #[source]
@@ -419,29 +410,6 @@ pub enum CallFromAlignmentsCliError {
         source: ReferenceInfoError,
     },
 
-    /// The parameters file could not be written beside the output.
-    ///
-    /// **The VCF is already whole when this can happen**, since the parameters go to disk after
-    /// the last record is renamed into place — so a run that reaches this has its calls and not
-    /// its provenance, which is what the message has to let an operator work out.
-    #[error(
-        "the calls are complete and written to {}, but the parameters that produced them could \
-         not be saved to {} — keep the VCF and re-run to recover its parameters",
-        calls.display(),
-        path.display()
-    )]
-    ParametersNotWritten {
-        /// Where they would have gone.
-        path: PathBuf,
-        /// The VCF that is finished and on disk. **Named because the run still fails**: a
-        /// `set -e` pipeline would otherwise throw away a complete, correctly-headed file, and
-        /// nothing else in the message says it is there.
-        calls: PathBuf,
-        /// What the write said.
-        #[source]
-        source: std::io::Error,
-    },
-
     /// The ground this run would walk could not be worked out — the reference's contigs, the
     /// BED, the catalog, or what this run counts as a repeat.
     ///
@@ -478,6 +446,20 @@ pub enum CallFromAlignmentsCliError {
         source: VcfWriteError,
     },
 
+    /// The VCF is already there, and the run was not asked to replace it.
+    #[error(
+        "{} is already there — give --force to replace it, or another --output",
+        path.display()
+    )]
+    OutputAlreadyThere {
+        /// The VCF.
+        path: PathBuf,
+    },
+
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] LogFileError),
+
     /// The run itself stopped.
     #[error("the run stopped")]
     Run {
@@ -504,7 +486,7 @@ fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_
     }
 }
 
-/// Call `--alignment`'s cohort over `--regions` and write `--output`. Prints a summary when it
+/// Call `--alignment`'s cohort over `--regions` and write `--output`. Logs the run report when it
 /// finishes.
 ///
 /// # Errors
@@ -535,23 +517,33 @@ pub fn run_call_from_alignments(
     // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which
     // of those is a false-discovery rate.
     let asked_for = paralog_filter::WhatTheOperatorAskedFor::from_the_flags(
-        args.paralog_fdr,
-        args.paralog_filter_tag,
+        args.hidden_dup_fdr,
+        args.hidden_dup_tag,
     )
     .map_err(|source| CallFromAlignmentsCliError::ParalogTargetIsNotAFraction { source })?;
 
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let merge_parameters = calling_run::merge_parameters_for(
-        args.max_cohort_locus_span,
-        args.cohort_locus_builder_regions_len,
+        args.max_locus_span,
+        args.locus_builder_regions_len,
         args.alignments.len(),
     )?;
-    let candidate_selection = calling_run::candidate_selection_for(args.max_candidate_alleles)?;
+    let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
-    calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-        &args.output,
-        args.parameters.as_deref(),
-    )?;
+    calling_run::refuse_a_tmp_dir_that_is_not_a_directory(args.tmp_dir.as_deref())?;
+    if !is_standard_output(&args.output) && args.output.exists() && !args.force {
+        return Err(CallFromAlignmentsCliError::OutputAlreadyThere {
+            path: args.output.clone(),
+        });
+    }
+    // **The log opens once the command line has been judged**, so a typing mistake leaves no log
+    // behind, and before the reference is read, so everything that takes time is in it.
+    let started = Instant::now();
+    let log = args
+        .log
+        .clone()
+        .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
+    let run_log = run_output::open_log(&log, args.force)?;
 
     // **The FASTA is read to the end before a file is opened.** Two of the run's construction
     // checks compare per-contig checksums — that each sample was aligned to this reference, and
@@ -604,6 +596,7 @@ pub fn run_call_from_alignments(
 
     let read_groups = build_read_groups(&args.alignments)
         .map_err(|source| CallFromAlignmentsCliError::ReadGroups { source })?;
+    say_what_this_run_does(args, &read_groups, &analysed, &log);
     let numbers = calling_run::run_parameters(
         args.parameters.as_deref(),
         args.ploidy,
@@ -645,6 +638,9 @@ pub fn run_call_from_alignments(
         &digest,
         &segmentation.inputs().repeat_tract_criteria,
     );
+    // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
+    // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).
+    run_log.record_parameters(&parameters_file.to_toml());
 
     let caller = AlignedFilesVariantCaller::open(
         AlignmentInputs {
@@ -653,7 +649,7 @@ pub fn run_call_from_alignments(
             read_filters: ReadFilterConfig::default(),
             build_index_if_missing: args.build_index_if_missing,
             locus_generator_settings: PileupGeneratorConfig::with_max_reads_per_position(
-                args.max_reads_per_position,
+                args.read_cap(),
             ),
             reference_with_checksums: &with_checksums,
         },
@@ -664,9 +660,7 @@ pub fn run_call_from_alignments(
         merge_parameters,
     )
     .map_err(|source| CallFromAlignmentsCliError::Run { source })?
-    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(
-        args.max_read_group_depth,
-    ));
+    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(args.max_depth));
     let caller = match &explain {
         Some((regions, _)) => caller.with_explain_loci(regions.clone()),
         None => caller,
@@ -678,7 +672,8 @@ pub fn run_call_from_alignments(
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let metadata = calling_run::header_for(
-        &args.output,
+        &log,
+        args.parameters.as_deref(),
         &args.reference,
         &contigs,
         &with_checksums,
@@ -686,15 +681,25 @@ pub fn run_call_from_alignments(
     )?;
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what
-    // makes `--paralog-fdr 0` byte-identical by construction rather than by hope. With it on, the
+    // makes `--hidden-dup-fdr 0` byte-identical by construction rather than by hope. With it on, the
     // records are parked and **the VCF is not opened at all**: no record's fate is known until
     // every record has been scored, so a file opened now would stand beside a run that has
     // decided nothing.
-    let mut sink = if asked_for.is_some() {
+    // **The run's own scratch directory, made only where something will be parked in it**, and
+    // removed when `scratch` is dropped — at the end of this function, on its success or on any
+    // error that returns through it.
+    let scratch = match asked_for {
+        Some(_) => Some(calling_run::scratch_directory_for(
+            &args.output,
+            args.tmp_dir.as_deref(),
+        )?),
+        None => None,
+    };
+    let mut sink = if let Some(scratch) = &scratch {
         // The spill's lines are encoded against the same contigs the header names, taken from
         // the metadata itself rather than re-derived.
-        CalledRecordSink::ParkedOnTheSpill(SpillingSink::beside(
-            &args.output,
+        CalledRecordSink::ParkedOnTheSpill(SpillingSink::in_directory(
+            scratch.path(),
             metadata.contigs().to_vec(),
             ploidy,
         ))
@@ -768,32 +773,6 @@ pub fn run_call_from_alignments(
         None => None,
     };
 
-    // **After the VCF is on disk, not before.** Spec §7's three purposes — a run reproducible
-    // from its own output, a defaults run auditable, an edit that starts from something — are
-    // all about a run that finished, and a parameters file standing beside a VCF that does not
-    // exist would answer none of them. The file goes to a temporary in the same directory and is
-    // renamed over its destination, so what lands is whole or is not there at all.
-    // **A file already there is replaced, and the run says so.** Spec §7 makes writing
-    // unconditional, so this is not a refusal — but a person who edited the parameters in place
-    // and then re-ran to compare has just lost the edit, and a run that did that in silence was
-    // measured doing exactly that. The `--parameters` route is refused outright
-    // (`refuse_an_output_whose_parameters_file_is_this_run_s_input`); this is the other route to
-    // the same loss, where no flag names the file.
-    let would_write = beside_the_vcf(&args.output);
-    if would_write.exists() {
-        eprintln!(
-            "note: replacing the parameters file already at {}",
-            would_write.display()
-        );
-    }
-    let parameters_at = parameters_file
-        .write_beside_the_vcf(&args.output)
-        .map_err(|source| CallFromAlignmentsCliError::ParametersNotWritten {
-            path: would_write,
-            calls: args.output.clone(),
-            source,
-        })?;
-
     if let Some(verdicts) = paralog_explanations {
         verdicts.add_to(&mut written.calling.explanations);
     }
@@ -816,9 +795,8 @@ pub fn run_call_from_alignments(
         .as_ref()
         .map(paralog_filter::what_to_tell_the_operator)
         .unwrap_or_default();
-    calling_run::print_report_with_the_filter_s_lines(
+    calling_run::log_the_report(
         &args.output,
-        &parameters_at,
         &RunReport::of(
             &written,
             &contigs,
@@ -832,7 +810,63 @@ pub fn run_call_from_alignments(
         ),
         &filter_lines,
     );
+    let records = filtered
+        .as_ref()
+        .map_or(written.calling.records_written, |run| run.did.written);
+    tracing::info!(
+        "done: {} records written to {} in {}",
+        run_output::with_thousands(records),
+        calling_run::where_the_calls_went(&args.output),
+        run_output::elapsed_text(started.elapsed())
+    );
+    tracing::info!("log: {}", log.display());
     Ok(())
+}
+
+/// **The run's first words**: on the terminal, what it is doing and on how much; in the log, the
+/// inputs by name (`doc/devel/ng/spec/command_line.md` §7.2, §7.3).
+fn say_what_this_run_does(
+    args: &CallFromAlignmentsArgs,
+    read_groups: &ReadGroups,
+    analysed: &GenomeRegions,
+    log: &Path,
+) {
+    let samples: BTreeSet<&str> = read_groups
+        .iter()
+        .map(|(_, group)| &*group.sample)
+        .collect();
+    let bases: u64 = analysed.iter().map(|region| region.len()).sum();
+    let ground = match &args.regions {
+        Some(bed) => format!("{} ({})", bed.display(), run_output::size_of_ground(bases)),
+        None => format!("the whole genome ({})", run_output::size_of_ground(bases)),
+    };
+    let threads = rayon::current_num_threads();
+    tracing::info!(
+        "pvc call-from-alignments: calling {} sample{} over {ground}, {threads} thread{}",
+        samples.len(),
+        if samples.len() == 1 { "" } else { "s" },
+        if threads == 1 { "" } else { "s" },
+    );
+    tracing::info!("log: {}", log.display());
+
+    tracing::debug!("input: reference {}", args.reference.display());
+    let catalog = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+    tracing::debug!("input: repeat catalogue {}", catalog.display());
+    if let Some(bed) = &args.regions {
+        tracing::debug!("input: regions {} ({bases} bases)", bed.display());
+    }
+    for (_, group) in read_groups.iter() {
+        tracing::debug!(
+            "input: alignments {} — sample {}, read group {}",
+            group.file.display(),
+            group.sample,
+            group.id
+        );
+    }
+    tracing::debug!(
+        "output: {}",
+        calling_run::where_the_calls_went(&args.output)
+    );
 }
 
 #[cfg(test)]

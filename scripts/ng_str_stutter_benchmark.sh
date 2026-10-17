@@ -166,7 +166,12 @@ ng_defaults() {
     "$ng" call-from-alignments --reference "$reference" --catalog "$catalog" "${args[@]}" \
         --regions "$out/confident.bed" --defaults --threads "$threads" \
         --explain-loci "$out/segments.bed" "$out/ng_defaults.explain.tsv" \
-        --output "$out/ng_defaults.vcf" > "$out/ng_defaults.log" 2>&1
+        --output "$out/ng_defaults.vcf" --log "$out/ng_defaults.pvc.log" \
+        > "$out/ng_defaults.log" 2>&1
+    # **The numbers the defaults run scored with are in its log**, between two marker lines;
+    # ng_str_stutter_true_parameters.py starts from them.
+    sed -n '/^# ---- parameters file begins ----$/,/^# ---- parameters file ends ----$/p' \
+        "$out/ng_defaults.pvc.log" | sed '1d;$d' > "$out/ng_defaults.parameters.toml"
 }
 
 ng_psps() {
@@ -198,13 +203,14 @@ ng_fit() {
         --output "$out/ng_fit.parameters.toml" --force > "$out/ng_estimate_parameters.log" 2>&1
 }
 
-# The fit has its own name: ng writes `<output>.parameters.toml` beside every VCF, and refuses
-# to overwrite the file it was handed.
+# **Each calling run names its own log**: the default, `pvc_calls.log`, is one name a directory,
+# and a second run into `$out` would be refused on the first one's.
 ng_fitted() {
     "$ng" call-from-psps --reference "$reference" --catalog "$catalog" --psp "$out/psps" \
         --parameters "$out/ng_fit.parameters.toml" --threads "$threads" \
         --explain-loci "$out/segments.bed" "$out/ng_fitted.explain.tsv" \
-        --output "$out/ng_fitted.vcf" > "$out/ng_call_from_psps.log" 2>&1
+        --output "$out/ng_fitted.vcf" --log "$out/ng_fitted.pvc.log" \
+        > "$out/ng_call_from_psps.log" 2>&1
 }
 
 # **ng with the true stutter** (owner, 2026-10-09): the defaults run's parameters file with its
@@ -216,7 +222,8 @@ ng_true_stutter() {
     "$ng" call-from-psps --reference "$reference" --catalog "$catalog" --psp "$out/psps" \
         --parameters "$out/true_stutter.parameters.toml" --threads "$threads" \
         --explain-loci "$out/segments.bed" "$out/ng_true_stutter.explain.tsv" \
-        --output "$out/ng_true_stutter.vcf" > "$out/ng_true_stutter.log" 2>&1
+        --output "$out/ng_true_stutter.vcf" --log "$out/ng_true_stutter.pvc.log" \
+        > "$out/ng_true_stutter.log" 2>&1
 }
 
 # **The same calls made by main** (owner, 2026-10-09), when MAIN_BIN names a build of main: the

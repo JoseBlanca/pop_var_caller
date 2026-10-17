@@ -77,7 +77,6 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
-    use crate::calling::parameters_file::beside_the_vcf;
     use crate::cli::call_from_alignments::{CallFromAlignmentsArgs, run_call_from_alignments};
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
@@ -126,17 +125,23 @@ mod tests {
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output: output.to_path_buf(),
+            // **Several runs share one directory here**, as they would for a person comparing
+            // them, so each is given its own log and replaces what an earlier run of the same
+            // name left.
+            force: true,
+            log: Some(output.with_extension("log")),
+            tmp_dir: None,
             regions: None,
             parameters: None,
             defaults: true,
             ploidy: None,
             build_index_if_missing: false,
-            max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            paralog_fdr: 0.0,
+            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            hidden_dup_fdr: 0.0,
             min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-            paralog_filter_tag: false,
-            cohort_locus_builder_regions_len: None,
+            hidden_dup_tag: false,
+            locus_builder_regions_len: None,
             threads: 0,
             min_copies: MinCopies::default(),
             min_period: DEFAULT_MIN_PERIOD,
@@ -144,8 +149,8 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            max_reads_per_position: None,
+            max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
         }
     }
@@ -189,7 +194,7 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
         psps
@@ -214,25 +219,22 @@ mod tests {
                 .map(|sample| psp_path_for(psps, sample))
                 .collect::<Vec<PathBuf>>(),
             output: output.to_path_buf(),
+            force: true,
+            log: Some(output.with_extension("log")),
+            tmp_dir: None,
             parameters: None,
             defaults: true,
             ploidy: None,
-            max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            paralog_fdr: 0.0,
+            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            hidden_dup_fdr: 0.0,
             min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-            paralog_filter_tag: false,
-            cohort_locus_builder_regions_len: None,
+            hidden_dup_tag: false,
+            locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
-            min_copies: MinCopies::default(),
-            min_period: DEFAULT_MIN_PERIOD,
-            max_period: DEFAULT_MAX_PERIOD,
-            max_str_len: DEFAULT_MAX_STR_LEN,
-            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-            min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            max_reads_per_position: None,
+            max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
         }
     }
@@ -300,7 +302,7 @@ mod tests {
                 !(line.starts_with("##paralogFilter=")
                     || line.starts_with("##INFO=<ID=PARALOG_LR,")
                     || line.starts_with("##INFO=<ID=PARALOG_POST,")
-                    || line.starts_with("##FILTER=<ID=hiddenParalog,"))
+                    || line.starts_with("##FILTER=<ID=hiddenDup,"))
             })
             .cloned()
             .collect()
@@ -351,13 +353,13 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut off = alignments_args(&cohort, &output);
-        off.paralog_fdr = 0.0;
+        off.hidden_dup_fdr = 0.0;
         run_call_from_alignments(&off).expect("the cohort calls with the filter off");
         let unfiltered = comparable(&output);
         std::fs::remove_file(&output).expect("the off run's file makes way for the on run's");
 
         let mut on = alignments_args(&cohort, &output);
-        on.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        on.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&on).expect("the cohort calls with the filter on");
         let filtered = comparable(&output);
 
@@ -400,7 +402,7 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut from_alignments_args = alignments_args(&cohort, &output);
-        from_alignments_args.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        from_alignments_args.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&from_alignments_args)
             .expect("the cohort calls from its alignment files, filtered");
         let from_alignments = comparable(&output);
@@ -408,7 +410,7 @@ mod tests {
         std::fs::remove_file(&output).expect("the first route's file makes way for the second's");
         let psps = walked_into_psps(&cohort);
         let mut from_psps_args = psps_args(&cohort, &output, &psps, &["one", "two"]);
-        from_psps_args.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        from_psps_args.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_psps(&from_psps_args).expect("the stored cohort calls, filtered");
         let from_psps = comparable(&output);
 
@@ -443,20 +445,20 @@ mod tests {
         let output = cohort.directory.path().join("calls.vcf");
 
         let mut dropping = alignments_args(&cohort, &output);
-        dropping.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
+        dropping.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
         run_call_from_alignments(&dropping).expect("the cohort calls, dropping");
         let dropped = comparable(&output);
         std::fs::remove_file(&output).expect("the dropping run's file makes way");
 
         let mut tagging = alignments_args(&cohort, &output);
-        tagging.paralog_fdr = A_TARGET_NO_RECORD_REACHES;
-        tagging.paralog_filter_tag = true;
+        tagging.hidden_dup_fdr = A_TARGET_NO_RECORD_REACHES;
+        tagging.hidden_dup_tag = true;
         run_call_from_alignments(&tagging).expect("the cohort calls, tagging");
         let tagged = comparable(&output);
 
         let untagged: Vec<String> = tagged
             .iter()
-            .filter(|line| line.starts_with('#') || !line.contains("hiddenParalog\t"))
+            .filter(|line| line.starts_with('#') || !line.contains("hiddenDup\t"))
             .cloned()
             .collect();
         assert_eq!(
@@ -615,7 +617,14 @@ mod tests {
         // the only way to get a parameters file naming exactly this cohort's read groups.
         called_from_alignments(&cohort, &output);
         let parameters = cohort.directory.path().join("differing.parameters.toml");
-        std::fs::rename(beside_the_vcf(&output), &parameters).expect("the file moves");
+        std::fs::rename(
+            crate::cli::calling_run::parameters_the_run_logged(
+                &output,
+                Some(&output.with_extension("log")),
+            ),
+            &parameters,
+        )
+        .expect("the file moves");
         make_the_read_groups_score_differently(&parameters);
 
         let from_alignments = called_from_alignments_under(&cohort, &output, &parameters);
@@ -808,8 +817,7 @@ mod tests {
                 max_str_len: DEFAULT_MAX_STR_LEN,
                 max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
-                max_reads_per_position:
-                    crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+                max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
             })
             .expect("one sample walks on its own");
             apart.push(psp_path_for(&directory, sample));
@@ -857,7 +865,7 @@ mod tests {
             max_str_len: DEFAULT_MAX_STR_LEN,
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+            max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
         })
         .expect("the cohort walks into psps");
 
@@ -903,25 +911,22 @@ mod tests {
             catalog: Some(catalog.to_path_buf()),
             psps: Vec::new(),
             output: output.to_path_buf(),
+            force: true,
+            log: Some(output.with_extension("log")),
+            tmp_dir: None,
             parameters: None,
             defaults: true,
             ploidy: None,
-            max_cohort_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
-            max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
-            paralog_fdr: 0.0,
+            max_locus_span: DEFAULT_MAX_COHORT_LOCUS_SPAN,
+            max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+            hidden_dup_fdr: 0.0,
             min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-            paralog_filter_tag: false,
-            cohort_locus_builder_regions_len: None,
+            hidden_dup_tag: false,
+            locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
-            min_copies: MinCopies::default(),
-            min_period: DEFAULT_MIN_PERIOD,
-            max_period: DEFAULT_MAX_PERIOD,
-            max_str_len: DEFAULT_MAX_STR_LEN,
-            max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
-            min_purity: DEFAULT_MIN_PURITY,
-            max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
-            max_read_group_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+            max_reads_per_position: None,
+            max_depth: crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
             explain_loci: None,
         }
     }

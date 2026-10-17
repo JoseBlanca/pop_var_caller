@@ -37,7 +37,8 @@ fn metadata() -> VcfHeaderMetadata {
         vec!["one".to_string()],
         "ng call".to_string(),
         "/genomes/ref.fa".to_string(),
-        "run.parameters.toml".to_string(),
+        "pvc_calls.log".to_owned(),
+        "defaults".to_owned(),
     )
     .expect("well-formed header metadata")
 }

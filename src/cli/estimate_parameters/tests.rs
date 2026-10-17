@@ -88,7 +88,7 @@ fn walked_into_psps(
         max_str_len: DEFAULT_MAX_STR_LEN,
         max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
         min_purity: DEFAULT_MIN_PURITY,
-        max_reads_per_position: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
+        max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };
     run_generate_psps(&walk).expect("the cohort walks into psps");
     (cohort, psps)
@@ -101,10 +101,12 @@ fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateP
         psps: vec![psps.to_path_buf()],
         output,
         force: false,
+        log: None,
         ploidy: 2,
         inbreeding: None,
         str_param_estimates_at_once: None,
         skip_contamination: false,
+        threads: 0,
     }
 }
 
@@ -589,8 +591,7 @@ fn a_catalog_the_psps_were_not_walked_with_is_refused_before_segments_are_cut() 
         "and what to do: {rendered}",
     );
     assert!(
-        !rendered.contains("--min-copies")
-            && !rendered.contains(THE_COMMAND_THAT_REBUILDS_A_CENSUS),
+        !rendered.contains("--min-copies") && !rendered.contains(THE_COMMAND_THAT_REWRITES_A_PSP),
         "no flag on this command line can move the criteria, and regenerating fixes nothing: \
          {rendered}",
     );
@@ -653,7 +654,7 @@ fn a_reference_the_psps_were_not_walked_against_is_refused_before_the_selection_
         "and which psp says so, and how: {rendered}",
     );
     assert!(
-        !rendered.contains(THE_COMMAND_THAT_REBUILDS_A_CENSUS),
+        !rendered.contains(THE_COMMAND_THAT_REWRITES_A_PSP),
         "regenerating against the wrong reference fixes nothing: {rendered}",
     );
 }
@@ -831,7 +832,9 @@ fn a_psp_carrying_no_census_is_refused_and_the_report_names_it() {
     );
     assert!(
         said.contains(&format!(
-            "{THE_COMMAND_THAT_REBUILDS_A_CENSUS} --reference {} --catalog {} --psp {}",
+            "pvc {THE_COMMAND_THAT_REWRITES_A_PSP} --reference {} --catalog {} --alignment \
+             <each sample's BAM or CRAM> --regions <the BED they were written over> \
+             --output-dir {} --force",
             cohort.reference.display(),
             cohort.catalog.display(),
             psps.display(),
@@ -909,7 +912,7 @@ fn a_cohort_recorded_under_another_position_budget_is_refused_naming_the_budget(
             );
         }
         assert!(
-            said.ends_with(&the_command_that_regenerates(&args)),
+            said.ends_with(&the_command_that_rewrites(&args)),
             "at a budget of {budget}, and the command, last: {said}",
         );
     }
@@ -949,29 +952,27 @@ fn a_census_that_disagrees_with_the_rest_of_its_cohort_is_named_alone() {
     );
 }
 
-/// **The command the report names is one a person can run, and it is the repair.**
-///
-/// Until plan step D1 it named nothing that existed — deliberately, because the command it must
-/// never name is the one that wrote a census *file* beside the psp, which no fit reads: following
-/// that would cost the rebuild and leave the psp exactly as stale. Now the name is
-/// `regenerate-census`'s own, and this parses the word the report prints, so a report that sent
-/// somebody after a word the binary does not know fails here.
+/// **The command the report names is one a person can run, and it is the repair**: writing the
+/// psp again from the sample's alignments. This parses the line the report prints, with its
+/// placeholders filled, so a report that sent somebody after a word the binary does not know
+/// fails here.
 #[test]
-fn the_report_names_the_command_that_rebuilds_a_psps_census() {
-    // `regenerate_census::SUBCOMMAND` *is* this constant, so comparing the two is `X == X`;
-    // what carries the claim is the parse below.
+fn the_report_names_the_command_that_writes_a_psp_again() {
     let parsed = Cli::try_parse_from([
         "pvc",
-        THE_COMMAND_THAT_REBUILDS_A_CENSUS,
+        THE_COMMAND_THAT_REWRITES_A_PSP,
         "--reference",
         "ref.fa",
-        "--psp",
-        "zeta.psp",
+        "--alignment",
+        "zeta.bam",
+        "--output-dir",
+        "psps",
+        "--force",
     ])
     .expect("the command this report prints is one clap answers to");
 
     assert!(
-        matches!(parsed.cmd, PopVarCallerCommand::RegenerateCensus(_)),
+        matches!(parsed.cmd, PopVarCallerCommand::GeneratePsps(_)),
         "and it is the repair rather than another subcommand: {:?}",
         parsed.cmd,
     );
@@ -1003,10 +1004,9 @@ fn the_report_names_no_catalog_when_the_run_named_none() {
     assert!(!said.contains("--catalog"), "{said}");
     assert!(
         said.contains(&format!(
-            "{THE_COMMAND_THAT_REBUILDS_A_CENSUS} --reference {} --psp {}",
+            "pvc {THE_COMMAND_THAT_REWRITES_A_PSP} --reference {} --alignment",
             cohort.reference.display(),
-            psps.display(),
-        )),
+        )) && said.contains(&format!("--output-dir {} --force", psps.display())),
         "and the rest of the line is as it was typed: {said}",
     );
 }

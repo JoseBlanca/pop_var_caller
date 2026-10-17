@@ -1,5 +1,6 @@
-//! **Where a calling run has got to**, printed to stderr every
-//! [`LOCI_BETWEEN_PROGRESS_LINES`] loci.
+//! **Where a calling run has got to**, stated as a progress event every
+//! [`LOCI_BETWEEN_PROGRESS_LINES`] loci — drawn in place on a terminal, a line of its own in the
+//! run's log ([`crate::cli::run_output`]).
 //!
 //! A calling run writes nothing a person can watch until it ends: with the hidden-duplication
 //! filter on, every record is parked on a temporary file and the VCF is only written once the
@@ -18,6 +19,8 @@
 //! locus is one increment and one comparison, and nothing here touches what the run writes.
 
 use std::time::{Duration, Instant};
+
+use crate::cli::run_output::{PROGRESS, elapsed_text as elapsed, with_thousands};
 
 use crate::fasta::ContigList;
 use crate::types::GenomeRegion;
@@ -64,13 +67,14 @@ impl<'a> CallingProgress<'a> {
         self.loci += 1;
         if self.loci.is_multiple_of(LOCI_BETWEEN_PROGRESS_LINES) {
             let line = self.line(locus, records_written, self.started.elapsed());
-            eprintln!("{line}");
+            tracing::info!(target: PROGRESS, "{line}");
         }
     }
 
-    /// The last line of a run: how many loci it called and how long that took.
+    /// The last progress line of a run: how many loci it called and how long that took.
     pub(crate) fn finished(&self, records_written: u64) {
-        eprintln!(
+        tracing::info!(
+            target: PROGRESS,
             "calling: done, {} loci, {} records, {} elapsed",
             with_thousands(self.loci),
             with_thousands(records_written),
@@ -113,33 +117,6 @@ impl<'a> CallingProgress<'a> {
             _ => 0,
         };
         self.bases_before_region + within
-    }
-}
-
-/// `1234567` as `1,234,567`.
-fn with_thousands(number: u64) -> String {
-    let digits = number.to_string();
-    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(digit);
-    }
-    grouped
-}
-
-/// A duration as `1h12m`, `12m05s` or `42s` — to the second, since a line comes every few
-/// minutes at the least.
-fn elapsed(took: Duration) -> String {
-    let seconds = took.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        format!("{seconds}s")
     }
 }
 

@@ -191,3 +191,46 @@ fn the_min_site_quality_parser_takes_zero_and_refuses_a_negative_or_non_number()
         );
     }
 }
+
+/// **The scratch directory is the run's own**: made inside `--tmp-dir` when one is given and
+/// inside the VCF's directory when not, named `pvc_tmp_…`, and gone once the run lets it go —
+/// while the directory it was made in stays.
+#[test]
+fn the_scratch_directory_is_made_where_asked_and_removed_after() {
+    std::fs::create_dir_all("tmp").expect("the project's tmp directory");
+    let parent = tempfile::tempdir_in("tmp").expect("a directory to work in");
+    let output = parent.path().join("out").join("calls.vcf.gz");
+    std::fs::create_dir_all(output.parent().expect("a parent")).expect("the output directory");
+
+    let beside = scratch_directory_for(&output, None).expect("made beside the VCF");
+    assert_eq!(beside.path().parent(), output.parent());
+    let given = parent.path().join("scratch");
+    std::fs::create_dir_all(&given).expect("the --tmp-dir");
+    let inside = scratch_directory_for(&output, Some(&given)).expect("made inside --tmp-dir");
+    assert_eq!(inside.path().parent(), Some(given.as_path()));
+    assert!(
+        inside
+            .path()
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("pvc_tmp_"))
+    );
+
+    let (made_beside, made_inside) = (beside.path().to_path_buf(), inside.path().to_path_buf());
+    drop((beside, inside));
+    assert!(!made_beside.exists() && !made_inside.exists());
+    assert!(given.is_dir(), "the user's --tmp-dir itself is left alone");
+}
+
+/// A `--tmp-dir` that is not there is refused, naming it.
+#[test]
+fn a_tmp_dir_that_is_not_there_is_refused() {
+    let refused = scratch_directory_for(Path::new("calls.vcf"), Some(Path::new("no/such/dir")))
+        .expect_err("there is nowhere to make it");
+    assert!(matches!(refused, CallingRunError::ScratchDirectory { .. }));
+}
+
+#[test]
+fn standard_output_is_named_as_such() {
+    assert_eq!(where_the_calls_went(Path::new("-")), "standard output");
+    assert_eq!(where_the_calls_went(Path::new("calls.vcf")), "calls.vcf");
+}

@@ -3,7 +3,7 @@
 //! Pass one parked every record the run would have written; pass two scored them all and
 //! resolved the operator's target false-discovery rate to a cut. This reads the spill a second
 //! time, in the same order, and writes the VCF — dropping the records the cut removes, or, when
-//! the operator asked to see them, writing them on the `hiddenParalog` filter instead.
+//! the operator asked to see them, writing them on the `hiddenDup` filter instead.
 //!
 //! **The *i*th record read here is the *i*th ratio pass two kept**, and that pairing is the whole
 //! of how a verdict reaches a record: the ratios carry no contig and no position. So this walks
@@ -101,8 +101,8 @@ pub enum PassThreeError {
 
 /// **Write the VCF, applying each record's verdict.**
 ///
-/// `tag_instead_of_dropping` is the operator's `--paralog-filter-tag`: with it, a record the cut
-/// removes is written on the `hiddenParalog` filter rather than left out, so a run that drops can
+/// `tag_instead_of_dropping` is the operator's `--hidden-dup-tag`: with it, a record the cut
+/// removes is written on the `hiddenDup` filter rather than left out, so a run that drops can
 /// be audited against one that does not.
 ///
 /// The writer is not finished here — the caller owns that, because a run has more to do after the

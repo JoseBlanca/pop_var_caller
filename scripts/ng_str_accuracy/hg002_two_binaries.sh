@@ -40,8 +40,15 @@ for cov in 30x 50x; do
         vcf=$out/${arm}_${cov}.vcf
         if [[ ! -s $vcf ]]; then
             if [[ $arm == experiment ]]; then bin=$experiment_bin; else bin=$base_bin; fi
+            # **A log of each run's own**, since the default `pvc_calls.log` is one a directory —
+            # given only to a build that has `--log`, because the other may predate it.
+            log_flag=()
+            if "$bin" call-from-alignments --help 2>/dev/null | grep -q -- '--log'; then
+                log_flag=(--log "$out/${arm}_${cov}.pvc.log")
+            fi
             NG_REFERENCE_CHECK=skip "$bin" call-from-alignments --reference "$ref" --catalog "$ref.repeats.parquet" \
-                --alignment "$bam" --regions "$out/tier_sorted.bed" --output "$vcf" --defaults > "$out/${arm}_${cov}.log" 2>&1
+                --alignment "$bam" --regions "$out/tier_sorted.bed" --output "$vcf" --defaults \
+                "${log_flag[@]}" > "$out/${arm}_${cov}.log" 2>&1
         fi
         python3 "$root/benchmarks/lib/tract_qual_experiment.py" --reference "$ref" --truth "$truth" --query "$vcf" \
             --confident-bed "$out/tier_sorted.bed" --tract-bed "$out/tier.bed" \

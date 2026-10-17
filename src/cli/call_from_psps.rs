@@ -26,7 +26,9 @@
 //! applied, which every psp records and the format never checks — and says so where the
 //! cohort's files disagree (owner's ruling, 2026-09-04).
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clap::Args;
 use thiserror::Error;
@@ -35,29 +37,27 @@ use crate::calling::allele_candidates::DEFAULT_MAX_CANDIDATE_ALLELES;
 use crate::calling::genotype_prior::dirichlet_multinomial::MarginalizedDirichletPrior;
 use crate::calling::inference::summarise_condition::SummariseConditionLoop;
 use crate::calling::likelihood::ssr_emission::StutterSubstitutionEmission;
-use crate::calling::parameters_file::beside_the_vcf;
 use crate::cli::calling_run::{self, CallingRunError};
 use crate::cli::generate_psps::PSP_FILE_EXTENSION;
 use crate::cli::psp_inputs::{PspArgumentRefusal, psps_named};
 use crate::cli::run_ground::{self, GroundError};
+use crate::cli::run_output::{self, LogFileError};
 use crate::fasta::ContigList;
 use crate::parameter_estimation::joint::loci::ReferenceDigest;
+use crate::read::input::read_groups::ReadGroups;
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError,
     read_reference_verifying_or_creating_fai,
 };
-use crate::region_typing::segment_criteria::{
-    DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
-};
-use crate::region_typing::{DEFAULT_MAX_STR_BUNDLE_LEN, DEFAULT_MAX_STR_LEN};
+use crate::region_typing::GenomeRegions;
 use crate::run::cohort_merge::DEFAULT_MAX_COHORT_LOCUS_SPAN;
 use crate::run::explain::{ExplainRegions, ParalogExplanations, write_explanations};
 use crate::run::paralog_filter::{self, CalledRecordSink, SpillingSink};
 use crate::run::report::BoundsTheRunCalledUnder;
 use crate::run::{OpenPspCohort, PspVariantCaller, RunError, RunReport, StoredCohortInputs};
-use crate::types::{InbreedingF, MAX_MOTIF_LEN};
-use crate::vcf::writer::{VcfWriteError, VcfWriter};
+use crate::types::InbreedingF;
+use crate::vcf::writer::{VcfWriteError, VcfWriter, is_standard_output};
 
 #[cfg(test)]
 mod tests;
@@ -70,7 +70,7 @@ pub const SUBCOMMAND: &str = "call-from-psps";
 /// **About one record in a hundred of those the filter removes was really a variant.** It was
 /// `0` while the filter's scoring and writing passes did not exist, because that default would
 /// have parked every record and produced no VCF; both passes are built now, so the spec's value
-/// stands and the filter is on unless an operator turns it off with `--paralog-fdr 0`.
+/// stands and the filter is on unless an operator turns it off with `--hidden-dup-fdr 0`.
 const DEFAULT_PARALOG_FDR: f64 = 0.01;
 
 /// Call a cohort of stored psps and write a VCF.
@@ -84,228 +84,184 @@ const DEFAULT_PARALOG_FDR: f64 = 0.01;
         .args(["parameters", "defaults"])
 ))]
 pub struct CallFromPspsArgs {
-    /// Reference FASTA — the one every psp's samples were aligned to. A `.fai` is built beside
-    /// it if there is none.
+    /// The reference FASTA the psps' samples were aligned to. A `.fai` index is built beside it
+    /// if there is none.
     #[arg(long)]
     pub reference: PathBuf,
 
-    /// The tandem-repeat catalog the psps were walked against. Defaults to
+    /// The repeat catalogue the psps were written with. Defaults to
     /// `<reference>.repeats.parquet`.
     ///
-    /// **A cohort walked under another catalog is refused**, naming the field that differs:
-    /// every psp records the catalog its segmentation came from, and calling over a different
-    /// one would score stored loci against a routing that never produced them.
+    /// A catalogue other than the psps' is refused.
     #[arg(long)]
     pub catalog: Option<PathBuf>,
 
-    /// One psp per sample, or a directory holding them. Repeat the flag.
+    /// A psp file, or a directory whose `.psp` files are all read. Repeat the option.
     ///
-    /// A directory contributes every `.psp` file directly inside it, in name order. **The order
-    /// makes no difference to the calls**: samples are matched to their parameters by name, and
-    /// the VCF's sample columns follow the order given here.
+    /// The VCF's sample columns follow the order given; a directory's files are taken in name
+    /// order.
     #[arg(long = "psp", required = true, num_args = 1..)]
     pub psps: Vec<PathBuf>,
 
-    /// Where to write the VCF. `.vcf.gz` or `.vcf.bgz` writes bgzf; anything else is plain
-    /// text.
+    /// Where to write the VCF; `-` writes it to standard output, uncompressed. A name ending in
+    /// `.vcf.gz` or `.vcf.bgz` is written compressed (bgzip); any other is plain text.
     ///
-    /// The named file appears whole or not at all: the bytes go to `<output>.tmp` and are
-    /// renamed into place only once the last record is on disk. A run that stops leaves that
-    /// `.tmp` behind.
+    /// A file appears whole or not at all: it is written as `<output>.tmp` and renamed when the
+    /// last record is on disk. Standard output cannot be taken back: a run that fails part-way
+    /// has sent part of a VCF, and its exit status says it failed.
     #[arg(long)]
     pub output: PathBuf,
 
-    /// The model's numbers, as a parameters file. It is refused if it was fitted against
-    /// another reference or does not name this cohort's samples and read groups.
+    /// A parameters file, as `pvc estimate-parameters` writes it for these psps.
+    ///
+    /// It is refused if it was fitted against another reference, or for other samples or read
+    /// groups.
     #[arg(long)]
     pub parameters: Option<PathBuf>,
 
-    /// Call with the defaults compiled into this binary instead of a parameters file.
+    /// Call with the numbers built into pvc instead of a parameters file.
     ///
-    /// Not the same claim as a fit. A defaults run assumes no base-quality calibration, no
-    /// contamination and no inbreeding; its genotypes are what the stored reads alone say under
-    /// those assumptions.
+    /// These assume no base-quality miscalibration, no contamination and no inbreeding, and use
+    /// built-in repeat stutter rates.
     #[arg(long)]
     pub defaults: bool,
 
-    /// How many copies of each chromosome every sample carries. Two when nothing says
-    /// otherwise; where a parameters file is given this flag may only agree with it.
+    /// Copies of each chromosome in every sample. Defaults to 2, or to the parameters file's.
+    ///
+    /// With a parameters file it may only repeat the file's ploidy, which the numbers were
+    /// fitted at. At most 16.
     #[arg(long)]
     pub ploidy: Option<u8>,
 
-    /// The widest a locus may be, in reference bases, before the caller declines to assemble it.
-    #[arg(long, default_value_t = DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
-    pub max_cohort_locus_span: u32,
-
-    /// The most alleles a locus may be called over, the reference counted among them.
-    #[arg(long, default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(), help_heading = "Advanced")]
-    pub max_candidate_alleles: u16,
-
-    /// The site quality below which a called locus is not written: the `QUAL` the record would
-    /// carry, after the artifact correction. **Zero writes every called locus.** The default, 1,
-    /// drops the sites whose artifact penalties outweigh their evidence — most of the false calls
-    /// measured on GIAB from 5× to 300× and on 63 tomato accessions at about 3× — and costs few
-    /// true ones; GATK's 30 costs more than a hundred true calls at 5× and 10× on GIAB.
+    /// The site quality (QUAL) below which a site is not written. 0 writes every site.
+    ///
+    /// The default, 1, drops the sites whose artifact penalties outweigh their evidence, which
+    /// removes most false calls at little cost in true ones.
     #[arg(
         long,
         default_value_t = crate::run::records::DEFAULT_MIN_SITE_QUALITY,
-        value_parser = crate::cli::calling_run::parse_min_site_quality,
-        help_heading = "Advanced"
+        value_parser = crate::cli::calling_run::parse_min_site_quality
     )]
     pub min_site_quality: f32,
 
-    /// Target false-discovery rate among the records the hidden-duplication filter removes —
-    /// calls better explained by two reference-collapsed copies piling their reads onto one
-    /// position than by a real variant. **Zero turns the filter off**, and a run with it off
-    /// writes byte for byte what it wrote before the filter existed.
+    /// Threads to use; 0 uses every core. The output is the same at any number.
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
+
+    /// Replace the VCF and the log if they are already there. Without it, a run refuses before
+    /// reading anything.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Where to write the run's log. Defaults to `pvc_calls.log` beside the VCF.
     ///
-    /// **Above zero, the run needs scratch space beside the output.** It parks every called
-    /// record in `<output>.paralog-spill.tmp` and reads it twice, because no record's fate is
-    /// known until every record has been scored — so it needs free space on the output's own
-    /// filesystem of several times a compressed VCF's size. The file is removed when the run
-    /// ends, however it ends.
+    /// The log holds the inputs by name, every setting's value, and the run's full report.
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+
+    /// The directory for the run's scratch files. Defaults to the VCF's directory, or the
+    /// working directory when the VCF goes to standard output.
+    ///
+    /// The run makes a directory of its own inside it, `pvc_tmp_<random>`, and removes it when
+    /// it ends, whether it succeeded or failed; a run that is killed, or stops on an internal
+    /// error, leaves it behind. While the hidden-dup filter is on, every call waits there until
+    /// the whole genome is called: several times the compressed VCF's size.
+    #[arg(long)]
+    pub tmp_dir: Option<PathBuf>,
+
+    /// A locus where any sample has a read group deeper than this is not called, for any sample.
+    ///
+    /// Such depth, far above a sample's usual coverage, is almost always a collapsed repeat:
+    /// many copies of a sequence mapped onto one copy in the reference. A psp holding more
+    /// reads of a read group at a position is also thinned to this many as it is read. The
+    /// default, 1,000, is about three times the depth of a 300× sample.
+    #[arg(
+        long,
+        default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Advanced"
+    )]
+    pub max_depth: u32,
+
+    /// The most alleles a SNP/indel locus is called over, the reference among them.
+    ///
+    /// Where more segregate, the worst supported are left out. Repeat (STR) loci are not
+    /// affected: they have their own limit of 32.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_CANDIDATE_ALLELES.get(),
+        help_heading = "Advanced"
+    )]
+    pub max_generic_alleles: u16,
+
+    /// The widest locus assembled, in reference bases — and so the longest deletion called.
+    ///
+    /// The run's log says how many loci were too wide and how long they were. Long reads want a
+    /// larger value than short ones.
+    #[arg(long, default_value_t = DEFAULT_MAX_COHORT_LOCUS_SPAN, help_heading = "Advanced")]
+    pub max_locus_span: u32,
+
+    /// The false-discovery rate allowed among the calls the hidden-dup filter removes. 0 turns
+    /// the filter off.
+    ///
+    /// The filter removes calls better explained by a hidden duplication — two copies of a
+    /// sequence collapsed onto one in the reference — than by a variant. While it is on, the
+    /// run needs scratch space in --tmp-dir of several times the compressed VCF's size.
     #[arg(long, default_value_t = DEFAULT_PARALOG_FDR, help_heading = "Advanced")]
-    pub paralog_fdr: f64,
+    pub hidden_dup_fdr: f64,
 
-    /// Keep the records the hidden-duplication filter removes, on the `hiddenParalog` filter,
+    /// Keep the calls the hidden-dup filter removes, marked `hiddenDup` in the FILTER column,
     /// instead of dropping them.
-    ///
-    /// **What it is for**: a run that drops can be audited against one that tags, since the two
-    /// files differ by exactly the tagged lines.
     #[arg(long, help_heading = "Advanced")]
-    pub paralog_filter_tag: bool,
+    pub hidden_dup_tag: bool,
 
-    /// How much reference one round of locus building covers, in bases. Chosen from the
-    /// cohort's size when it is not given.
-    #[arg(long, help_heading = "Advanced")]
-    pub cohort_locus_builder_regions_len: Option<u32>,
-
-    /// How much of the operating system's file cache to fill ahead of the calling, in bytes.
-    /// Zero turns it off.
+    /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
     ///
-    /// A background thread reads each psp a stretch of genome ahead of where the calling is,
-    /// so the disk works while the cores compute rather than in turn with them. **The output
-    /// does not depend on it**: the calling reads the same bytes either way, from memory rather
-    /// than from the disk. The memory is the kernel's file cache, which it takes back under
-    /// pressure, not this process's own. On a spinning disk with thousands of psps, more is
-    /// faster — each refill of a file is half its share of this, read in one go.
-    #[arg(long, default_value_t = crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES, help_heading = "Advanced")]
+    /// A psp holding more is thinned to this as it is read: each allele keeps its share of the
+    /// reads, chosen by a hash so neighbouring positions keep the same reads. At equal values a
+    /// thinned position is always dropped by `--max-depth`.
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32).range(1..),
+        help_heading = "Developer"
+    )]
+    pub max_reads_per_position: Option<u32>,
+
+    /// How much reference one round of locus building covers, in bases. Chosen from the cohort
+    /// size when not given; it trades memory for speed and changes no call.
+    #[arg(long, help_heading = "Developer")]
+    pub locus_builder_regions_len: Option<u32>,
+
+    /// How much of the psps to read ahead into the operating system's file cache, in bytes. 0
+    /// turns it off. Changes no call.
+    ///
+    /// On a spinning disk with thousands of psps, more is faster.
+    #[arg(
+        long,
+        default_value_t = crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
+        help_heading = "Developer"
+    )]
     pub psp_prefetch_bytes: u64,
 
-    /// The most reads of one read group used at one position. A psp written under a looser cap
-    /// — every psp written before this option existed was capped at 8,000 reads a sample — has
-    /// its records thinned to it as they are read: where a read group has more reads at a
-    /// position, each allele keeps the same share of its reads, chosen by a hash of each read's
-    /// number in the file so the same reads are kept at neighbouring positions. A psp written
-    /// at this cap or a tighter one is read as it is.
-    ///
-    /// Thinning a stored file is close to, but not the same as, capping when the psps are
-    /// written: a psp stores each allele's error and mapping quality as totals, so the reads
-    /// removed take their share of the totals rather than their own values. The run report
-    /// says, per sample, how many positions and reads it thinned.
-    #[arg(long, default_value_t = crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
-    pub max_reads_per_position: u32,
-
-    /// The most reads one read group may have at a locus before the locus is dropped.
-    ///
-    /// Where any sample has a read group deeper than this, **no variant is called there for any
-    /// sample**, and none of that ground's evidence is held in memory. Such depth, far above a
-    /// sample's usual coverage, is almost always a collapsed repeat: many copies of a sequence
-    /// mapped onto one. Reads the read cap (`--max-reads-per-position`) discarded and reads that
-    /// showed nothing are counted with the deepest read group. The run report says, per sample,
-    /// how many loci were dropped this way.
-    #[arg(long, default_value_t = crate::run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH, value_parser = clap::value_parser!(u32).range(1..), help_heading = "Advanced")]
-    pub max_read_group_depth: u32,
-
-    /// Explain, at every locus overlapping the regions of a BED, why the run decided what it
-    /// did — candidates kept and dropped, samples set aside, genotype likelihoods, GT and GQ,
-    /// how partial reads were weighed, QUAL with its penalties, and what became of the record
-    /// — and write it as a TSV. The first value is the BED, the second the TSV. **It changes
-    /// nothing that is called**, and costs nothing when not given
-    /// (doc/devel/ng/spec/explain_loci.md).
+    /// Explain every decision at the loci overlapping a BED, written as a table: candidates,
+    /// genotype likelihoods, GT, GQ, QUAL and its penalties, and the record's fate. Changes no
+    /// call.
     #[arg(
         long,
         num_args = 2,
         value_names = ["REGIONS_BED", "OUTPUT_TSV"],
-        help_heading = "Advanced"
+        help_heading = "Developer"
     )]
     pub explain_loci: Option<Vec<PathBuf>>,
+}
 
-    /// How many threads to use. Zero means every core.
-    ///
-    /// **The output does not depend on this number.** What the threads parallelise is the
-    /// reading of each sample's stored records, and then the building and calling of a round
-    /// of regions at once; the records fold back into genome order before anything is written,
-    /// so the VCF is the same at one thread and at every core.
-    ///
-    /// It also sets how many regions a round holds, and so the run's memory: the ground a round
-    /// covers is divided between them rather than multiplied by them, so a wider pool costs
-    /// narrower regions and not more resident memory.
-    #[arg(long, default_value_t = 0)]
-    pub threads: usize,
-
-    /// The fewest motif copies a tract needs before this run treats it as a repeat: six
-    /// comma-separated numbers, one per period 1 to 6.
-    ///
-    /// **These must be what the psps were walked with**, or the cohort is refused: a run's
-    /// segmentation has to be the one that produced the stored loci.
-    #[arg(
-        long,
-        value_parser = crate::cli::parsers::parse_min_copies,
-        default_value = "8,6,6,6,5,4",
-        help_heading = "What counts as a repeat"
-    )]
-    pub min_copies: MinCopies,
-
-    /// The shortest repeat unit this run treats as a repeat. 1 puts homopolymers on the
-    /// repeat path.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MIN_PERIOD,
-        value_parser = clap::value_parser!(u8).range(1..=MAX_MOTIF_LEN as i64),
-        help_heading = "What counts as a repeat"
-    )]
-    pub min_period: u8,
-
-    /// The longest repeat unit this run treats as a repeat.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_PERIOD,
-        value_parser = clap::value_parser!(u8).range(1..=MAX_MOTIF_LEN as i64),
-        help_heading = "What counts as a repeat"
-    )]
-    pub max_period: u8,
-
-    /// A tract longer than this many bases is a satellite: neither caller speaks for it.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_STR_LEN,
-        help_heading = "What counts as a repeat"
-    )]
-    pub max_str_len: u64,
-
-    /// An STR bundle — two or more repeats within 15 bases of each other, typed as one region —
-    /// whose stretch, from its first repeat's start to the furthest end of any of them, is
-    /// longer than this many bases is a satellite instead. 0 makes every bundle a satellite.
-    ///
-    /// Its own limit rather than `--max-str-len`'s, so that widening what one repeat may be
-    /// does not also widen bundles. 100 for the reason `--max-str-len` is: with 150 bp reads a
-    /// read crosses a bundle and an anchor each side only up to about that length.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MAX_STR_BUNDLE_LEN,
-        help_heading = "What counts as a repeat"
-    )]
-    pub max_str_bundle_len: u64,
-
-    /// How much of a tract must match a perfect tiling of its motif, from 0 to 1.
-    #[arg(
-        long,
-        default_value_t = DEFAULT_MIN_PURITY,
-        value_parser = crate::cli::parsers::parse_min_purity,
-        help_heading = "What counts as a repeat"
-    )]
-    pub min_purity: f32,
+impl CallFromPspsArgs {
+    /// The read cap stored records are thinned to: `--max-reads-per-position` where it was given,
+    /// and `--max-depth` otherwise (`doc/devel/ng/spec/command_line.md` §5.4).
+    #[must_use]
+    pub fn read_cap(&self) -> u32 {
+        self.max_reads_per_position.unwrap_or(self.max_depth)
+    }
 }
 
 /// Everything that can stop a run over stored files, rendered for a person at a terminal.
@@ -333,7 +289,7 @@ pub enum CallFromPspsCliError {
     },
 
     /// The hidden-duplication filter's target is not a false-discovery rate.
-    #[error("--paralog-fdr is not a false-discovery rate")]
+    #[error("--hidden-dup-fdr is not a false-discovery rate")]
     ParalogTargetIsNotAFraction {
         /// What the type said was wrong with it.
         #[source]
@@ -422,29 +378,19 @@ pub enum CallFromPspsCliError {
         source: VcfWriteError,
     },
 
-    /// The parameters file could not be written beside the output.
-    ///
-    /// **The VCF is already whole when this can happen**, since the parameters go to disk after
-    /// the last record is renamed into place — so a run that reaches this has its calls and not
-    /// its provenance, which is what the message has to let an operator work out. **The same
-    /// sentence direct mode writes**, because the loss and the repair are the same: a `set -e`
-    /// pipeline that read only *could not be written* would throw away a complete,
-    /// correctly-headed file.
+    /// The VCF is already there, and the run was not asked to replace it.
     #[error(
-        "the calls are complete and written to {}, but the parameters that produced them could \
-         not be saved to {} — keep the VCF and re-run to recover its parameters",
-        calls.display(),
+        "{} is already there — give --force to replace it, or another --output",
         path.display()
     )]
-    ParametersNotWritten {
-        /// Where it would have gone.
+    OutputAlreadyThere {
+        /// The VCF.
         path: PathBuf,
-        /// The VCF that is on disk.
-        calls: PathBuf,
-        /// What the write said.
-        #[source]
-        source: std::io::Error,
     },
+
+    /// The run's log could not be opened.
+    #[error(transparent)]
+    Log(#[from] LogFileError),
 
     /// The run itself was refused, or stopped.
     #[error("the run stopped")]
@@ -453,27 +399,6 @@ pub enum CallFromPspsCliError {
         #[source]
         source: RunError,
     },
-}
-
-/// This command's flags, as the shared ground assembly asks for them.
-///
-/// **`regions` is `None` and that is not an omission**: psp mode takes its analysed ground from
-/// the files' own headers, so the only thing this request is used for is the catalog and the
-/// routing criteria.
-fn ground_request(args: &CallFromPspsArgs) -> run_ground::GroundRequest<'_> {
-    run_ground::GroundRequest {
-        reference: &args.reference,
-        catalog: args.catalog.as_deref(),
-        regions: None,
-        routing: run_ground::RepeatRouting {
-            min_copies: args.min_copies,
-            min_period: args.min_period,
-            max_period: args.max_period,
-            max_str_len: args.max_str_len,
-            max_str_bundle_len: args.max_str_bundle_len,
-            min_purity: args.min_purity,
-        },
-    }
 }
 
 /// **The psps this run calls, with every directory expanded** — the rule every psp-taking command
@@ -509,27 +434,37 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which
     // of those is a false-discovery rate.
     let asked_for = paralog_filter::WhatTheOperatorAskedFor::from_the_flags(
-        args.paralog_fdr,
-        args.paralog_filter_tag,
+        args.hidden_dup_fdr,
+        args.hidden_dup_tag,
     )
     .map_err(|source| CallFromPspsCliError::ParalogTargetIsNotAFraction { source })?;
 
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
-    let candidate_selection = calling_run::candidate_selection_for(args.max_candidate_alleles)?;
+    let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;
     calling_run::refuse_an_output_that_cannot_be_written(&args.output)?;
-    calling_run::refuse_an_output_whose_parameters_file_is_this_run_s_input(
-        &args.output,
-        args.parameters.as_deref(),
-    )?;
+    calling_run::refuse_a_tmp_dir_that_is_not_a_directory(args.tmp_dir.as_deref())?;
+    if !is_standard_output(&args.output) && args.output.exists() && !args.force {
+        return Err(CallFromPspsCliError::OutputAlreadyThere {
+            path: args.output.clone(),
+        });
+    }
     let paths = psps_named_by(args)?;
     // **The round width comes from the cohort's size**, and the cohort is the psps — so this
     // waits for the directories to be expanded, where direct mode can count its `--alignment`
     // flags straight away.
     let merge_parameters = calling_run::merge_parameters_for(
-        args.max_cohort_locus_span,
-        args.cohort_locus_builder_regions_len,
+        args.max_locus_span,
+        args.locus_builder_regions_len,
         paths.len(),
     )?;
+    // **The log opens once the command line has been judged**, so a typing mistake leaves no log
+    // behind, and before the reference is read, so everything that takes time is in it.
+    let started = Instant::now();
+    let log = args
+        .log
+        .clone()
+        .unwrap_or_else(|| run_output::beside(&args.output, "pvc_calls.log"));
+    let run_log = run_output::open_log(&log, args.force)?;
 
     // **The FASTA is read to the end before a psp is opened**: every file's contig table is
     // compared against the reference's per-contig checksums, and a reference whose verification
@@ -577,9 +512,21 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // files have already been forced to agree about them.
     let cohort =
         OpenPspCohort::open(&paths).map_err(|source| CallFromPspsCliError::Run { source })?;
-    let ground = ground_request(args);
     let analysed = cohort.analysed_regions().clone();
-    let segmentation = run_ground::segments_over(&ground, &analysed, &with_checksums)?;
+    // **What counts as a repeat is the psps' own**, recorded by the walk that wrote them: a run
+    // over stored loci has to cut the genome the way that walk did, so it has no option that
+    // could say otherwise (`doc/devel/ng/spec/command_line.md` §4.4).
+    let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
+    let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+    let segmentation = run_ground::segments_cut_with(
+        &catalog_path,
+        &args.reference,
+        &criteria,
+        run_ground::CriteriaSource::ThePspHeaders,
+        &analysed,
+        &with_checksums,
+    )?;
+    say_what_this_run_does(args, &paths, cohort.read_groups(), &analysed, &log);
 
     let numbers = calling_run::run_parameters(
         args.parameters.as_deref(),
@@ -604,6 +551,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &digest,
         &segmentation.inputs().repeat_tract_criteria,
     );
+    // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
+    // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).
+    run_log.record_parameters(&parameters_file.to_toml());
 
     let caller = PspVariantCaller::open(
         cohort,
@@ -619,10 +569,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     )
     .map_err(|source| CallFromPspsCliError::Run { source })?
     .with_psp_prefetch_budget(args.psp_prefetch_bytes)
-    .with_max_reads_per_position(args.max_reads_per_position)
-    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(
-        args.max_read_group_depth,
-    ));
+    .with_max_reads_per_position(args.read_cap())
+    .with_depth_ceiling(crate::run::depth_ceiling::DepthCeiling::at(args.max_depth));
     let caller = match &explain {
         Some((regions, _)) => caller.with_explain_loci(regions.clone()),
         None => caller,
@@ -635,7 +583,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
 
     let read_groups = caller.read_groups().clone();
     let metadata = calling_run::header_for(
-        &args.output,
+        &log,
+        args.parameters.as_deref(),
         &args.reference,
         &contigs,
         &with_checksums,
@@ -643,15 +592,25 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     )?;
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what
-    // makes `--paralog-fdr 0` byte-identical by construction rather than by hope. With it on, the
+    // makes `--hidden-dup-fdr 0` byte-identical by construction rather than by hope. With it on, the
     // records are parked and **the VCF is not opened at all**: no record's fate is known until
     // every record has been scored, so a file opened now would stand beside a run that has
     // decided nothing.
-    let mut sink = if asked_for.is_some() {
+    // **The run's own scratch directory, made only where something will be parked in it**, and
+    // removed when `scratch` is dropped — at the end of this function, on its success or on any
+    // error that returns through it.
+    let scratch = match asked_for {
+        Some(_) => Some(calling_run::scratch_directory_for(
+            &args.output,
+            args.tmp_dir.as_deref(),
+        )?),
+        None => None,
+    };
+    let mut sink = if let Some(scratch) = &scratch {
         // The spill's lines are encoded against the same contigs the header names, taken from
         // the metadata itself rather than re-derived.
-        CalledRecordSink::ParkedOnTheSpill(SpillingSink::beside(
-            &args.output,
+        CalledRecordSink::ParkedOnTheSpill(SpillingSink::in_directory(
+            scratch.path(),
             metadata.contigs().to_vec(),
             ploidy,
         ))
@@ -729,24 +688,6 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         None => None,
     };
 
-    // **After the VCF is on disk, not before** — direct mode's rule and its reasons: a
-    // parameters file standing beside a VCF that does not exist answers none of spec §7's three
-    // purposes.
-    let would_write = beside_the_vcf(&args.output);
-    if would_write.exists() {
-        eprintln!(
-            "note: replacing the parameters file already at {}",
-            would_write.display()
-        );
-    }
-    let parameters_at = parameters_file
-        .write_beside_the_vcf(&args.output)
-        .map_err(|source| CallFromPspsCliError::ParametersNotWritten {
-            path: would_write,
-            calls: args.output.clone(),
-            source,
-        })?;
-
     if let Some(verdicts) = paralog_explanations {
         verdicts.add_to(&mut calling.explanations);
     }
@@ -769,9 +710,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         .as_ref()
         .map(paralog_filter::what_to_tell_the_operator)
         .unwrap_or_default();
-    calling_run::print_report_with_the_filter_s_lines(
+    calling_run::log_the_report(
         &args.output,
-        &parameters_at,
         &RunReport::of_a_stored_cohort(
             &calling,
             &stored,
@@ -786,5 +726,60 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         ),
         &filter_lines,
     );
+    let records = filtered
+        .as_ref()
+        .map_or(calling.records_written, |run| run.did.written);
+    tracing::info!(
+        "done: {} records written to {} in {}",
+        run_output::with_thousands(records),
+        calling_run::where_the_calls_went(&args.output),
+        run_output::elapsed_text(started.elapsed())
+    );
+    tracing::info!("log: {}", log.display());
     Ok(())
+}
+
+/// **The run's first words**: on the terminal, what it is doing and on how much; in the log, the
+/// inputs by name (`doc/devel/ng/spec/command_line.md` §7.2, §7.3).
+fn say_what_this_run_does(
+    args: &CallFromPspsArgs,
+    psps: &[PathBuf],
+    read_groups: &ReadGroups,
+    analysed: &GenomeRegions,
+    log: &Path,
+) {
+    let samples: BTreeSet<&str> = read_groups
+        .iter()
+        .map(|(_, group)| &*group.sample)
+        .collect();
+    let bases: u64 = analysed.iter().map(|region| region.len()).sum();
+    let threads = rayon::current_num_threads();
+    tracing::info!(
+        "pvc call-from-psps: calling {} sample{} from psp files over {}, {threads} thread{}",
+        samples.len(),
+        if samples.len() == 1 { "" } else { "s" },
+        run_output::size_of_ground(bases),
+        if threads == 1 { "" } else { "s" },
+    );
+    tracing::info!("log: {}", log.display());
+
+    tracing::debug!("input: reference {}", args.reference.display());
+    let catalog = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+    tracing::debug!("input: repeat catalogue {}", catalog.display());
+    for psp in psps {
+        tracing::debug!("input: psp {}", psp.display());
+    }
+    for (_, group) in read_groups.iter() {
+        tracing::debug!(
+            "input: sample {}, read group {}, from {}",
+            group.sample,
+            group.id,
+            group.file.display()
+        );
+    }
+    tracing::debug!("input: ground the psps were written over, {bases} bases");
+    tracing::debug!(
+        "output: {}",
+        calling_run::where_the_calls_went(&args.output)
+    );
 }
