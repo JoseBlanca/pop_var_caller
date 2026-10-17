@@ -983,6 +983,8 @@ fn run_on_psps(cli: &Cli) {
         inbreeding: None,
         str_param_estimates_at_once: None,
         skip_contamination: false,
+        log: None,
+        threads: 0,
     };
     let OpenedCensuses {
         mut evidence, plan, ..
