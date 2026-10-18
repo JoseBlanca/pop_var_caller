@@ -96,6 +96,10 @@ def main():
         except (SuiteError, CommandFailed) as err:
             ctx.log(f"error: {err}")
             code = 2
+        except Exception:
+            import traceback
+            ctx.log("error:\n" + traceback.format_exc())
+            code = 2
         except KeyboardInterrupt:
             ctx.log("interrupted; the step that was running will be redone next time")
             code = 130

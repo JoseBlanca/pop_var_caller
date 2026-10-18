@@ -61,8 +61,13 @@ def read_roc(path):
             elif line.startswith("#score"):
                 header = line[1:].split()
             elif not line.startswith("#") and line.strip():
-                rows.append(dict(zip(header, (float(x) for x in line.split()))))
+                # A caller with no QUAL gives one row whose score is "None".
+                rows.append(dict(zip(header, (_number(x) for x in line.split()))))
     return total_baseline, rows
+
+
+def _number(text):
+    return None if text == "None" else float(text)
 
 
 def class_metrics(roc_path):
@@ -82,7 +87,10 @@ def class_metrics(roc_path):
         "precision": round(last["precision"], 5),
         "f1": round(last["f_measure"], 5),
     }
-    best = max(roc, key=lambda r: r["f_measure"])
+    scored = [r for r in roc if r["score"] is not None]
+    if not scored:
+        return out, None
+    best = max(scored, key=lambda r: r["f_measure"])
     best_out = {"best_f1": round(best["f_measure"], 5), "best_f1_qual_threshold": best["score"],
                 "best_f1_recall": round(best["sensitivity"], 5),
                 "best_f1_precision": round(best["precision"], 5)}
