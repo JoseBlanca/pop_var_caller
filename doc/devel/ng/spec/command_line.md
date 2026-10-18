@@ -233,9 +233,9 @@ What the options mean for each subcommand:
   the repeat settings, so `call-from-psps` and `estimate-parameters` follow the psps, and a cohort
   mixing psps written under different settings is refused.
 - **`estimate-parameters`** with `--generic-path-only` psps fits no stutter, since there are no
-  STR loci to fit it from, and writes a parameters file without the stutter section; a calling
-  run under that setting reads no stutter numbers. `--call-satellites` changes nothing in the fit:
-  satellites never fed the stutter fit.
+  STR loci to fit it from, and writes a parameters file whose stutter section is empty (settled
+  below; the ruling said without one); a calling run under that setting reads no stutter
+  numbers. `--call-satellites` changes nothing in the fit: satellites never fed the stutter fit.
 - **One limit stays under both.** A generic locus wider than `--max-locus-span` (100 bp) is not
   assembled. Inside a long satellite, reads that disagree about its length chain positions into
   loci wider than that, so **what these options add on satellites is mostly SNPs and short
@@ -245,10 +245,35 @@ What the options mean for each subcommand:
 **Before `--call-satellites` could become the default**, its calls on satellites have to be
 compared with GATK's on GIAB over that ground. Until then it stays off.
 
-To check in implementation: whether the segmentation can be built with no catalogue at all, or
-needs an empty one; how refused satellite ground is handed to the generic path at its edges with
-neighbouring STR segments; and whether the parameters file and its readers accept a missing
-stutter section.
+**Settled in implementation (2026-10-18,** plan [`call_satellites.md`](../impl_plan/call_satellites.md)**)**:
+the three questions this section left open, a change to one of its rulings, and three things
+the rulings did not say:
+
+- **No catalogue at all, not an empty one.** Under `--generic-path-only` a run opens no catalogue:
+  each analysed span is one generic region. An empty catalogue would have worked, but it is a file
+  the user would have to build or be handed, and a psp would record a catalogue that played no
+  part. A `--catalog` named for psps written with the option is refused by `call-from-psps` and
+  `estimate-parameters`, which read none for them.
+- **A satellite's edges are always ordinary sequence.** When the ground is typed, a satellite
+  absorbs every tract and bundle member within 15 bp of it, so ordinary sequence, a contig end or
+  a BED edge lies on each side, never an STR segment. Under `--call-satellites` each satellite is
+  clipped to the analysed regions and merged with the ordinary sequence either side into one
+  generic region; left as a region of its own, an indel across either old edge would be called by
+  neither side. The STR edges further out are the junctions every run already has.
+- **The parameters file is written with its stutter section empty, not without it** (owner,
+  2026-10-18, changing the ruling above). The section is required by the file's format; an empty one
+  is what a fit over zero repeat tracts already writes, every reader accepts it, and the file says in
+  words that nothing was fitted. Leaving it out would have meant a new file format for a file one
+  section shorter. The file records no `[repeat_routing]`, since no catalogue was asked anything.
+- **`--call-satellites` keeps the fit unchanged by leaving satellite loci out of the census.** The
+  census's positions never lay on satellites, but it also tallies every ordinary-sequence locus's
+  read errors for the base-quality calibration, and with satellite loci in that tally each
+  library's error multiplier moved in its seventh figure. Psps written with and without the option
+  now fit to one file.
+- **The psp format went back to 1.0** with the new header key, and every earlier psp is refused
+  ([`psp_file_format.md`](psp_file_format.md), *Format 1.0 again*).
+- **The run report** says how many satellite bases `--call-satellites` handed to the generic path,
+  in both calling modes, beside the count of loci too wide to assemble.
 
 ### 4.5 `estimate-parameters`
 

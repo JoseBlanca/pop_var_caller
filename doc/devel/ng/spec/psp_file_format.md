@@ -481,6 +481,29 @@ every record. An index past the record's observations, or a flank other than 0 o
 - **A 2.1 reader reads 2.0 files**, their observations without a recorded flank
   (`RecordLayout::from_manifest` recognises the 2.0 field list). The writer writes 2.1 only.
 
+#### Format 1.0 again — the setting for repeat ground, and the number reset (2026-10-18)
+
+**The header's `[segmentation]` table gains `repeat-ground`**, one of `str-paths` (the default),
+`call-satellites` or `generic-path-only`: which path each kind of repeat ground was sent to
+([`command_line.md`](command_line.md) §4.4.1). Under `generic-path-only` the table holds no
+`catalog` and no `repeat-tract-criteria`, since no catalog was read; under the other two it holds
+both, as before. A cohort whose psps record different settings is refused, naming the setting.
+
+**And the number goes back to 1.0** (owner, 2026-10-18): the caller is in development, a psp is
+written again rather than migrated, and the number should not climb with every change. So every
+earlier psp is refused, as `WrittenByAnotherPvc` — one refusal for what were two,
+`UnsupportedVersion` and `OlderVersion`, since after the reset a 2.x file is neither newer nor
+older in any sense a reader can act on:
+
+- **a 2.x psp by its major**: this reader reads 1.x only;
+- **a 1.x psp written before 2026-10-11**, whose number this format reuses and whose records are
+  laid out differently, **by its missing `repeat-ground` key**. That key is looked for in the raw
+  TOML straight after the version, before the rest of the header is interpreted, so no part of
+  such a file's older layout is ever read, and the refusal says the file was written by another
+  pvc rather than naming a key that failed to parse.
+
+A later minor of 1 still reads, as before. `OLDEST_READABLE_MAJOR` is gone.
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

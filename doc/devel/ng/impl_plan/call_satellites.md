@@ -1,6 +1,7 @@
 # `--call-satellites` and `--generic-path-only` — implementation plan
 
-**Status:** draft for the owner's review, 2026-10-18. Step 6 of
+**Status:** approved 2026-10-18; steps 1 to 5 built (see *Progress*), the accuracy check next.
+Step 6 of
 [`command_line.md`](command_line.md), which says this step gets its own short plan before any
 code. The design is spec [`command_line.md`](../spec/command_line.md) §4.4.1 (owner's rulings,
 2026-10-16); this plan answers the three questions that section leaves to implementation, says
@@ -215,6 +216,18 @@ around human centromeric satellites (HSat2/3, period 5).
 (`max_record_span`) behind the walk's position. Releasing is a hint; a base asked for after it was
 released is read again (`generator.rs:1282-1284`), so no call can change. `resident_reference_bases`
 (`generator.rs:1310`) gives the test its measure.
+
+## Progress
+
+Each step left the identity oracle's seven checksums at their baseline.
+
+| Step | Commit | What happened that the plan did not say |
+|---|---|---|
+| 1, reference release | 9e871caa | — |
+| 2, the setting in the psp header | a2b71ccc | Until steps 3 and 4, psps written under the two new settings were refused by the commands that read psps; that refusal is gone. |
+| 3, `--call-satellites` | 8a1474c4 | **The census had to leave satellite loci out.** Marking satellite ground walked changed nothing, as expected, but the census also tallies every generic locus's read errors for the base-quality calibration, and with satellite loci in it the error multipliers moved in their seventh figure. The deletion across a satellite's old edge is pinned by the merge's unit test rather than end to end. On tomato2 (4 samples, about 5 reads a position, 4 Mb): 12 satellites, 1,956 bases, 5 records added, none lost or changed outside INFO. |
+| 4, `--generic-path-only` | b9b559d1 | **The census's terms record the catalogue's settings and criteria as optional**, digested as before when present, so default censuses keep their bytes. On the same tomato slice: 7,530 records against 7,509, none from the repeat path; the fit's SNP/indel numbers move by under 1 in 100; peak memory 1.0 GB against 0.97 GB by default. |
+| 5, spec and help | — | Spec §4.4.1 records what was settled; `psp_file_format.md` records format 1.0. The help text went in with steps 3 and 4. |
 
 ## Build order
 
