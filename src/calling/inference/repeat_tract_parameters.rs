@@ -2730,6 +2730,7 @@ mod tests {
     fn the_penalised_fits_outcome_at_one_sample_reaches_every_calling_lookup() {
         use crate::parameter_estimation::joint::stratum_fits::{
             AlleleLengthVariationRung, OwnFitStandardErrors, STATED_FLAT_CONCENTRATION,
+            STATED_OWN_SHARES_CONCENTRATION,
         };
         let fits = StratumFits::over(
             &[
@@ -2749,7 +2750,7 @@ mod tests {
                 AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
             );
             assert_eq!(spectrum.fitted_weights(), Some(&[0.1, 0.8, 0.1][..]));
-            assert_eq!(spectrum.concentration(), STATED_FLAT_CONCENTRATION);
+            assert_eq!(spectrum.concentration(), STATED_OWN_SHARES_CONCENTRATION);
 
             let cell = fits
                 .at(ReadGroupId(0), period, u64::from(repeat_count))

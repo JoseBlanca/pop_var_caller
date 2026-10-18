@@ -235,12 +235,19 @@
 #   as on main, since the fit holds the cohort's own median.
 # - from_fit.comparable (8e0d0c3a -> 262460a4): only `##pvcParameters`, carrying the fitted file's new md5; no record moves.
 # They were 82a9575b (both) / d083cd87 / 56798acf / b2fc1bfa / bff818c5 / 8e0d0c3a.
+# Re-recorded 2026-10-18 (macOS host, arm64) when the tract ladder's second rung got its own stated between-locus share
+# (parameters file format 5, `fallback_between_locus_share_with_own_shares`; doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md
+# §8). main 50115d40 reproduced every line below's old value on the same host first. No call moves on either route. The
+# defaults run's file gains the key at its built-in 1/2 and says format 5 (e0d6661a -> 6ab95191); the fitted file gains it at
+# the cohort's own median, 0.6101, the same number `fallback_between_locus_share` carries, and says format 5 (69da6ed0 ->
+# 954dd14f); from_fit.comparable moves by that md5 in its header alone (262460a4 -> 2cc2a44f). Both files' notes also name the
+# two built-in values.
 slice: 20 regions, 4 alignments
 # records: 7509
 5bfcecbf636130aa1a09443bbfc0dc6d  from_alignments.comparable
 5bfcecbf636130aa1a09443bbfc0dc6d  from_psps.comparable
-e0d6661a4800251eb8df7d1ead736cc4  from_alignments.parameters.toml
+6ab95191fcd31d9bf3b435d98043e7db  from_alignments.parameters.toml
 e1c726723e8dd4ffc0e6e9e7d2d7d705  from_alignments.windows.sorted
 b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
-69da6ed0535399f3996e3b5659392eeb  fitted.parameters.toml
-262460a4c76db850532e645978fca16b  from_fit.comparable
+954dd14f78926ff7773cd93530214e4f  fitted.parameters.toml
+2cc2a44f3d500213227c994fd3d740d3  from_fit.comparable

@@ -477,6 +477,10 @@ impl ParametersFile {
             })
             .collect();
 
+        let with_own_shares = tracts
+            .fallback_between_locus_share_with_own_shares
+            .as_ref()
+            .unwrap_or(&tracts.fallback_between_locus_share);
         Ok(StratumFits::of_gathered_rows(
             slippage_group_of,
             slippage_by_stratum,
@@ -492,6 +496,13 @@ impl ParametersFile {
             // run fitted anything, and re-deriving would turn every demoted file back into a
             // fitted one on the way out.
             tracts.fallback_between_locus_share.warrant.into(),
+            // **The second rung's own number, or the bottom rung's in a file from before format
+            // 5**, which held both rungs at one value and is read as it was written.
+            concentration_of(
+                BetweenLocusShare::new(with_own_shares.value)
+                    .expect("validation refuses a fallback that is not a between-locus share"),
+            ),
+            with_own_shares.warrant.into(),
         ))
     }
 
@@ -835,7 +846,9 @@ pub(super) mod tests {
     use crate::repeat_catalog::StrRepeatCriteria;
 
     use super::super::tests::{THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape};
-    use super::super::validate::the_built_in_fallback_share;
+    use super::super::validate::{
+        the_built_in_fallback_share, the_built_in_fallback_share_with_own_shares,
+    };
     use super::super::{
         ParametersFile, ParametersFileError, ReadsBehindEachCalibration, Warrant, WarrantedValue,
     };
@@ -1143,6 +1156,14 @@ pub(super) mod tests {
             observations: None,
             standard_error: None,
         };
+        small
+            .repeat_tracts
+            .fallback_between_locus_share_with_own_shares = Some(WarrantedValue {
+            value: the_built_in_fallback_share_with_own_shares(),
+            warrant: Warrant::Defaulted,
+            observations: None,
+            standard_error: None,
+        });
 
         let run = small
             .to_run_parameters()
@@ -1407,7 +1428,9 @@ mod the_north_star_round_trip {
     use super::super::{ParametersFile, ReadsBehindEachCalibration};
     // **The one helper both modules need**, rather than a second copy of it: the counts `of_run`
     // writes back are read out of the projection the same way whichever fixture they came from.
-    use super::super::validate::the_built_in_fallback_share;
+    use super::super::validate::{
+        the_built_in_fallback_share, the_built_in_fallback_share_with_own_shares,
+    };
     use super::tests::the_counts_the_projection_out_reads;
     use super::*;
     use crate::calling::genotype_prior::{SeedRegime, SpectrumSeed};
@@ -2214,6 +2237,15 @@ mod the_north_star_round_trip {
                 observations: None,
                 standard_error: None,
             };
+            small
+                .repeat_tracts
+                .fallback_between_locus_share_with_own_shares =
+                Some(super::super::WarrantedValue {
+                    value: the_built_in_fallback_share_with_own_shares(),
+                    warrant: super::super::Warrant::Defaulted,
+                    observations: None,
+                    standard_error: None,
+                });
             small
         };
         let read_groups = ReadGroups::of_lanes(&[(

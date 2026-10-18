@@ -21,6 +21,11 @@ a TOML text file you can read and edit.
 heterozygotes, so with one sample F is set to 0 and marked as such in the file. If you know how
 your material was bred, state it with `estimate-parameters --inbreeding F`.
 
+**So does the strength of the spread of allele lengths between repeats.** With one sample, pvc
+estimates which lengths each class of repeat carries, but not how much that varies from one repeat
+to the next; it holds those lengths at a between-repeat share of 1/2, marked `defaulted`. A class
+with no estimate at all gets an even spread at 1/11, as with `--defaults`.
+
 ## The built-in values (`--defaults`)
 
 | Quantity | Built-in value |
