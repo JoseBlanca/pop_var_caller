@@ -252,11 +252,19 @@ slice: 20 regions, 4 alignments
 # overlapping a changed STR call moves a sample from 1/1 to 1/2, its second allele the spanning-deletion `*`; 1,574 non-STR
 # records move only in PARALOG_LR / PARALOG_POST (by at most 0.00094 in posterior), because the hidden-duplication filter
 # fits one rate over every record. They were 5bfcecbf / 6ab95191 / 954dd14f / 2cc2a44f.
+# Re-recorded 2026-10-18 (macOS host, arm64) when the SNP/indel fit's census went from 128 chunks to 512
+# (`CHUNKS_PER_CENSUS`; doc/devel/reports/reviews/perf_snp-fit_2026-10-18.md, finding L3): the fit's sums are split at other
+# positions, so its numbers move once, the same at every pool width (the fitted file identical at 4 and 18 threads). The
+# branch at 5c741b11 (main 04077a95 merged in) reproduced both old values on the same host first, from the same stored psps.
+# Only the fitted route moves. fitted.parameters.toml (8eb7fe42 -> 29a339ae): 119 of 721 lines — 19 in the SNP/indel tables
+# (33 numbers), the largest move 2.9e-8 of its value; 100 in the repeat-tract tables fitted afterwards from them (1,276
+# numbers), the largest 5.3e-5 of its value. from_fit.comparable (e74465ad -> a415b14e): only `##pvcParameters`, carrying the
+# fitted file's new md5; no record, QUAL or genotype moves. They were 8eb7fe42 / e74465ad.
 # records: 7509
 916e114f654103ef9475dc3f25bd5118  from_alignments.comparable
 916e114f654103ef9475dc3f25bd5118  from_psps.comparable
 786618495184d417504467f521198153  from_alignments.parameters.toml
 e1c726723e8dd4ffc0e6e9e7d2d7d705  from_alignments.windows.sorted
 b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
-8eb7fe4266c4e8c9260e6f34e7434b95  fitted.parameters.toml
-e74465ad2f20121023dc3a5e3d99aab4  from_fit.comparable
+29a339aee74221ff91a122b241e5a3e2  fitted.parameters.toml
+a415b14eea74255a6771af5183639240  from_fit.comparable

@@ -3751,11 +3751,24 @@ fn expectation_pass(
 
 /// How many chunks a census is cut into. **The chunk size comes from the census's length and
 /// these two constants, never from the pool's width**, so a census is cut at the same positions on
-/// every machine. 128 chunks keep up to about a hundred threads busy while each chunk's setup — a
-/// scratch, a set of totals, one binary search into each sample's sparse list — stays small against
-/// its work: on four tomato samples' two-million-position census, 7,813 chunks of 256 positions
-/// made the fit 28% slower than 123 chunks of 16,384 (one run each, not interleaved).
-const CHUNKS_PER_CENSUS: usize = 128;
+/// every machine.
+///
+/// **What sets the number: the wait at the end of every pass.** A pass ends when its last chunk
+/// does, and the chunks cost the same to within about 2%, so with too few of them most threads
+/// finish their last chunk and wait while a few run one more. At 128 chunks on 18 threads (7.1
+/// chunks a thread) the workers idled 6.6% of a 59-sample fit; on four samples, 5.8 of the 6.4
+/// idle points were that tail. 512 chunks are a quarter the size, so the tail is about a quarter
+/// as long, and took the 59-sample fit (18 threads, two runs each, interleaved) from 880.9 and
+/// 866.9 s to 827.8 and 829.6 s with the same instructions retired
+/// (`doc/devel/reports/reviews/perf_snp-fit_2026-10-18.md`, L3). That leaves about 28 chunks a
+/// thread at 18 threads and 4 at 128. Each chunk's setup — a scratch, a set of totals, one binary
+/// search into each sample's sparse list — stays small against its work at 512: about 3,900
+/// positions a chunk at two million positions; a census under 131,072 positions gets fewer chunks
+/// than 512, because no chunk is shorter than `MIN_POSITIONS_PER_CHUNK`. The iterating passes'
+/// join tree is two levels deeper than at 128, so each thread holds up to two more partial totals.
+/// Far more chunks are too many: 7,813 chunks of 256 positions made the four-sample fit 28% slower
+/// than 123 chunks of 16,384 (one run each, not interleaved).
+const CHUNKS_PER_CENSUS: usize = 512;
 
 /// The smallest chunk, so a census of a few thousand positions is not cut into chunks whose setup
 /// outweighs their work. Measured on the joint-fit bench at four threads: 256-position chunks

@@ -71,8 +71,8 @@ contamination fit it calls, which built 58 to 74 MB of arrays for a cohort too s
 marker. That is gone (H4). At 59 samples the peak is elsewhere and did not move.
 
 **Two decisions for the owner.** Cutting the census into 512 chunks instead of 128 (§5, L3): 5.2% less
-wall time at 59 samples, the output moved once by at most 4 × 10⁻⁸ of a standard error — recommended.
-Profile-guided optimisation (§4): 3.4% fewer instructions for a build flow three times as long — not
+wall time at 59 samples, the output moved once by at most 4 × 10⁻⁸ of a standard error — recommended,
+adopted by the owner, and applied after this report (the oracle's calls do not move). Profile-guided optimisation (§4): 3.4% fewer instructions for a build flow three times as long — not
 recommended now.
 
 ---
@@ -242,7 +242,7 @@ decoding is 1.2%.
   run each) — about 4% of a pass that runs three times in a fit of about 130.
 - **Complexity cost:** six lines.
 
-- [fit.rs:3758](../../../../src/parameter_estimation/joint/fit.rs#L3758) — **[Likely]** L3: the workers' idle time is the tail of each pass; 512 chunks would shorten it but move the output — **owner's decision**
+- [fit.rs:3758](../../../../src/parameter_estimation/joint/fit.rs#L3758) — **[Likely]** L3: the workers' idle time is the tail of each pass; 512 chunks shorten it and move the output once — **adopted by the owner, applied after this report was filed** (the commit that changes `CHUNKS_PER_CENSUS`)
 - **Confidence:** High on the mechanism; see the measurement for the gain.
 - **Hot-path evidence:** workers idle 6.6% of their samples at 59 samples, 18 threads. Per-chunk
   timestamps on 4 samples (18 threads, 137 passes): 5.77 of the 6.36 points of idle are the tail, from a
@@ -288,7 +288,7 @@ decoding is 1.2%.
 ### Note
 
 - **Nothing is allocated per position.** 7,200 allocations a pass at 4 samples against 2 million
-  positions; `Statistics::new` 129 times a pass. The memsets the profile shows (0.8% of the workers) are
+  positions; `Statistics::new` 129 times a pass at 128 chunks (once a chunk, plus the total). The memsets the profile shows (0.8% of the workers) are
   per-position resets of buffers the next position needs.
 - **What grows with the cohort, measured on drawn cohorts with judging from the start.** The work done
   between passes on the main thread — the maximisation (about 35 µs a sample), the standard errors, the
@@ -334,7 +334,8 @@ decoding is 1.2%.
 
 Address each finding by its identifier with one of: `applied in <commit>` / `experiment shows no gain —
 closing` / `disputed because …` / `deferred to <issue>` / `won't fix because …`. H1–H4, L1 and L2 are
-applied; L3 and profile-guided optimisation wait on the owner.
+applied; L3 was adopted by the owner and applied afterwards; profile-guided optimisation waits on the
+owner.
 
 ## Where the evidence is
 
