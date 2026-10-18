@@ -1,6 +1,6 @@
 """The benchmarks, in the order a full run takes them."""
 
-from . import giab_panel, giab_trio, hg002_5mb, hg002_tr, smoke, stutter_sim
+from . import giab_panel, giab_trio, hg002_5mb, hg002_tr, smoke, speed, stutter_sim, tomato_agreement
 
 BENCHMARKS = {
     "giab_panel": giab_panel,
@@ -8,5 +8,7 @@ BENCHMARKS = {
     "hg002_5mb": hg002_5mb,
     "hg002_tr": hg002_tr,
     "stutter_sim": stutter_sim,
+    "speed": speed,
+    "tomato_agreement": tomato_agreement,
     "smoke": smoke,
 }
