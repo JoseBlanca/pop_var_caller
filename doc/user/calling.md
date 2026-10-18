@@ -43,7 +43,8 @@ split over several alignment files gets one psp from all of them: pass every fil
 `--alignment`.
 
 Several samples can go to one command, but they are processed one after another. To use more
-cores or machines, run one command per sample at the same time.
+cores or machines, run one command per sample at the same time, all with the same `--regions`.
+psp files written over different regions are refused when they are combined.
 
 If a psp for a sample is already in the directory, the command refuses before reading anything.
 `--force` replaces it. A psp is written under a temporary name, `<sample>.psp.<number>.partial`,
