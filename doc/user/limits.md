@@ -6,7 +6,6 @@
 - **Satellites**: repeats, or STR bundles, longer than 100 bases. The log reports how many bases
   of the genome they cover, and also the clusters of repeats too close together to be called.
 - **Repeats with units longer than 6 bases.** They are called as ordinary sequence.
-- **Sites where every sample matches the reference.** There is no gVCF.
 - **Loci deeper than `--max-depth`** (1,000 reads a position in any read group), because such
   depth usually comes from collapsed duplications.
 

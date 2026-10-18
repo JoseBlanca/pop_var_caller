@@ -428,6 +428,11 @@ pub struct StartRecord {
     pub ended: StartEnding,
     /// Passes over the data, the final pass not counted — as the start's log line prints them.
     pub passes: u32,
+    /// **How many of those passes also summed the information** — each pass that judged the
+    /// distances to the maximum, and each Newton try — the final pass not counted, though it
+    /// always sums it. Neither the parameters file nor the log prints it; the joint-fit bench
+    /// reads it to check that what it times is the judging work it names.
+    pub judging_passes: u32,
     /// At the values the start returned: its final pass's, or for a start that agreed, the pass
     /// that judged it.
     pub log_likelihood: f64,
@@ -2054,6 +2059,7 @@ pub fn fit_jointly(
                 number,
                 ended: outcome.ended,
                 passes: outcome.passes,
+                judging_passes: outcome.judging_passes,
                 log_likelihood: score,
                 furthest_from_settled: outcome.furthest_from_settled.clone(),
             });
@@ -3420,7 +3426,52 @@ struct PassModel<'a> {
     /// How the density's rule's nodes and weights move with its two shapes — what the
     /// likelihood's slope in the shapes is made of, taken every pass for the shapes' update.
     density_slopes: RuleSlopes,
+    /// The log of each branch's and each noise class's share, and the `ln 3` and `ln k` the
+    /// candidates are weighted by.
+    branches: BranchShares,
     parameters: &'a Parameters,
+}
+
+/// **The logarithms a position's branches are weighted by, which depend on the parameters
+/// alone**: each branch's share, each noise class's share, and how many alleles a candidate
+/// stands for. The same at every position of a pass, so they are taken once a pass, beside the
+/// read tables. Each share is floored at `f64::MIN_POSITIVE` before its logarithm is taken.
+#[derive(Debug)]
+struct BranchShares {
+    /// Whether the run fits the duplicated class.
+    duplicated_fitted: bool,
+    /// `ln(1 − duplicated share)`: what the three ordinary branches share between them.
+    ln_ordinary: f64,
+    /// The log of the invariant, fixed-non-reference, segregating and duplicated shares.
+    ln_invariant: f64,
+    ln_fixed_alt: f64,
+    ln_segregating: f64,
+    ln_duplicated: f64,
+    /// The log of the three non-reference bases a fixed or segregating branch spreads over.
+    ln_three: f64,
+    /// `[class]` — the log of the ordinary (0) and the mismapped (1) class's share.
+    ln_class: [f64; 2],
+    /// `ln k`, indexed by how many alleles `k` a candidate stands for (one to three).
+    ln_multiplicity: [f64; CANDIDATE_ALTERNATIVES + 1],
+}
+
+impl BranchShares {
+    fn of(parameters: &Parameters, duplicated_fitted: bool) -> Self {
+        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
+        let density = &parameters.density;
+        let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
+        Self {
+            duplicated_fitted,
+            ln_ordinary: ln(1.0 - duplicated_share),
+            ln_invariant: ln(density.p_invariant),
+            ln_fixed_alt: ln(density.p_fixed_alt),
+            ln_segregating: ln(density.p_segregating()),
+            ln_duplicated: ln(duplicated_share),
+            ln_three: float::ln(CANDIDATE_ALTERNATIVES as f64),
+            ln_class: [ln(1.0 - parameters.noisy_share), ln(parameters.noisy_share)],
+            ln_multiplicity: std::array::from_fn(|k| float::ln(k as f64)),
+        }
+    }
 }
 
 /// **The carrier Beta's rule and how it moves with the carrier's two shapes**, held together so
@@ -3473,6 +3524,7 @@ impl<'a> PassModel<'a> {
             group_index,
             ploidy: config.ploidy,
             read_logs,
+            branches: BranchShares::of(parameters, carrier.is_some()),
             quadrature,
             carrier,
             density_slopes,
@@ -3648,10 +3700,17 @@ fn expectation_pass(
     // `reduce` may join them in any tree it likes, which is wrong for the per-position lists and,
     // for the sums, makes their last bits depend on the pool.
     if collect_noisy_posterior {
-        // The reported pass: the chunks are collected in position order and added once each into
-        // a total sized for the whole census, so each per-position list is copied once.
+        // The reported pass: the chunks are added once each, in position order, into a total sized
+        // for the whole census, so each per-position list is copied once.
+        //
+        // **A window of chunks at a time, not every chunk at once.** Collecting all of them before
+        // adding any held every chunk's per-position lists — a second copy of the whole census's,
+        // 8 MB at two million positions — and every chunk's sums, whose genotype counts and
+        // information grow with the cohort: about a kilobyte a sample a chunk, so 0.2 to 0.3 GB of
+        // chunks at 2,000 samples. The window only decides how many chunks are held at once; they
+        // are still added in position order, so the totals are the same bits at any window and
+        // any pool.
         use rayon::prelude::*;
-        let chunks: Vec<Statistics> = bounds.par_iter().copied().map(one_chunk).collect();
         let mut into = empty();
         into.noisy_posterior.reserve(positions);
         if collect_genotype_posterior {
@@ -3659,8 +3718,12 @@ fn expectation_pass(
                 .reserve(positions * samples.len() * 3);
             into.duplicated_posterior.reserve(positions);
         }
-        for chunk in &chunks {
-            into.absorb(chunk);
+        let window = 2 * rayon::current_num_threads().max(1);
+        for some in bounds.chunks(window) {
+            let chunks: Vec<Statistics> = some.par_iter().copied().map(one_chunk).collect();
+            for chunk in &chunks {
+                into.absorb(chunk);
+            }
         }
         return into;
     }
@@ -3745,11 +3808,21 @@ struct Scratch {
     /// `[class]` — the integral over how much of the panel carries an extra copy, before the
     /// duplicated share multiplies it; `−∞` when the class is not fitted.
     duplicated_ln: [f64; 2],
+    /// `[class]` — each branch's log-sum over its candidates (and nodes) before `ln 3` is taken
+    /// off: **the totals the attribution divides each share by**, kept so it does not sum the
+    /// same terms a second time. Likewise the next two fields.
+    fixed_sum_ln: [f64; 2],
+    segregating_sum_ln: [f64; 2],
+    /// `−∞` when the duplicated class is not fitted.
+    duplicated_sum_ln: [f64; 2],
+    /// `[class]` — the four branches' log-sum, which the attribution and the scorer divide by.
+    within_ln: [f64; 2],
     /// The position's whole log-likelihood, once [`one_position`] has computed it.
     position_ln: f64,
-    /// The candidate alleles this position sums over, and how many alleles each stands for.
+    /// The candidate alleles this position sums over, and the log of how many alleles each stands
+    /// for — the only form the multiplicity is ever read in.
     candidates: Vec<usize>,
-    multiplicity: Vec<f64>,
+    ln_multiplicity: Vec<f64>,
     /// `[sample][genotype]` — the segregating branch's genotype weight, collapsed over the
     /// nodes and candidates it was spread across.
     genotype_weight: Vec<f64>,
@@ -3790,9 +3863,13 @@ impl Scratch {
             fixed_alt_ln: [f64::NEG_INFINITY; 2],
             segregating_ln: [f64::NEG_INFINITY; 2],
             duplicated_ln: [f64::NEG_INFINITY; 2],
+            fixed_sum_ln: [f64::NEG_INFINITY; 2],
+            segregating_sum_ln: [f64::NEG_INFINITY; 2],
+            duplicated_sum_ln: [f64::NEG_INFINITY; 2],
+            within_ln: [f64::NEG_INFINITY; 2],
             position_ln: f64::NEG_INFINITY,
             candidates: Vec::with_capacity(MAX_CANDIDATES),
-            multiplicity: Vec::with_capacity(MAX_CANDIDATES),
+            ln_multiplicity: Vec::with_capacity(MAX_CANDIDATES),
             genotype_weight: vec![0.0; samples * 3],
             carrier_weight: vec![0.0; samples],
             position_genotype: vec![0.0; samples * 3],
@@ -3840,6 +3917,7 @@ fn one_position(
     let quadrature = &model.quadrature;
     let carrier = model.carrier.as_ref().map(|rule| &rule.quadrature);
     let parameters = model.parameters;
+    let shares = &model.branches;
     let samples = scratch.samples;
     let nodes = scratch.nodes;
     statistics.positions += 1.0;
@@ -3861,10 +3939,10 @@ fn one_position(
     // The three non-reference bases, with the ones no sample showed a read on folded into one
     // term counted as many times as there are of them: they give the identical likelihood.
     scratch.candidates.clear();
-    scratch.multiplicity.clear();
+    scratch.ln_multiplicity.clear();
     for &code in &scratch.evidence.observed_alternatives {
         scratch.candidates.push(code);
-        scratch.multiplicity.push(1.0);
+        scratch.ln_multiplicity.push(shares.ln_multiplicity[1]);
     }
     let unobserved = CANDIDATE_ALTERNATIVES.saturating_sub(scratch.candidates.len());
     if unobserved > 0 {
@@ -3872,7 +3950,9 @@ fn one_position(
             .find(|code| !scratch.candidates.contains(code))
             .expect("with an unobserved allele left there is a base no read fell on");
         scratch.candidates.push(stand_in);
-        scratch.multiplicity.push(unobserved as f64);
+        scratch
+            .ln_multiplicity
+            .push(shares.ln_multiplicity[unobserved]);
     }
     let candidates = scratch.candidates.len();
 
@@ -4031,44 +4111,43 @@ fn one_position(
     }
 
     // ---- the four branches, and the two classes ---------------------------------------------
-    let ln_three = float::ln(CANDIDATE_ALTERNATIVES as f64);
-    let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
+    let ln_three = shares.ln_three;
     for class in 0..2 {
         scratch.shares.clear();
         for candidate in 0..candidates {
             scratch.shares.push(
                 scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                    + float::ln(scratch.multiplicity[candidate]),
+                    + scratch.ln_multiplicity[candidate],
             );
         }
-        let fixed_alt = ln_sum_exp(&scratch.shares) - ln_three;
+        let fixed_sum = ln_sum_exp(&scratch.shares);
+        scratch.fixed_sum_ln[class] = fixed_sum;
+        let fixed_alt = fixed_sum - ln_three;
         scratch.shares.clear();
         for candidate in 0..candidates {
-            let multiplicity = float::ln(scratch.multiplicity[candidate]);
+            let multiplicity = scratch.ln_multiplicity[candidate];
             for node in 0..nodes {
                 scratch
                     .shares
                     .push(scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity);
             }
         }
-        let segregating = ln_sum_exp(&scratch.shares) - ln_three;
+        let segregating_sum = ln_sum_exp(&scratch.shares);
+        scratch.segregating_sum_ln[class] = segregating_sum;
+        let segregating = segregating_sum - ln_three;
         scratch.fixed_alt_ln[class] = fixed_alt;
         scratch.segregating_ln[class] = segregating;
-        let density = &parameters.density;
         // The three ordinary branches share what is left when the duplicated class has taken
         // its share, so the four still sum to one.
-        let ordinary = float::ln((1.0 - duplicated_share).max(f64::MIN_POSITIVE));
-        scratch.branch_ln[class * BRANCHES] = ordinary
-            + float::ln(density.p_invariant.max(f64::MIN_POSITIVE))
-            + scratch.invariant_ln[class];
-        scratch.branch_ln[class * BRANCHES + 1] =
-            ordinary + float::ln(density.p_fixed_alt.max(f64::MIN_POSITIVE)) + fixed_alt;
-        scratch.branch_ln[class * BRANCHES + 2] =
-            ordinary + float::ln(density.p_segregating().max(f64::MIN_POSITIVE)) + segregating;
+        let ordinary = shares.ln_ordinary;
+        scratch.branch_ln[class * BRANCHES] =
+            ordinary + shares.ln_invariant + scratch.invariant_ln[class];
+        scratch.branch_ln[class * BRANCHES + 1] = ordinary + shares.ln_fixed_alt + fixed_alt;
+        scratch.branch_ln[class * BRANCHES + 2] = ordinary + shares.ln_segregating + segregating;
         scratch.branch_ln[class * BRANCHES + DUPLICATED] = if let Some(carrier) = carrier {
             scratch.shares.clear();
             for candidate in 0..candidates {
-                let multiplicity = float::ln(scratch.multiplicity[candidate]);
+                let multiplicity = scratch.ln_multiplicity[candidate];
                 for node in 0..carrier.nodes.len() {
                     scratch.shares.push(
                         scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
@@ -4077,21 +4156,20 @@ fn one_position(
                 }
             }
             let summed = ln_sum_exp(&scratch.shares);
-            // Kept for the scores, and not reused below: `ln d + summed − ln 3` is added left to
-            // right, and taking `summed − ln 3` first would move the branch's last bits.
+            scratch.duplicated_sum_ln[class] = summed;
+            // `duplicated_ln` is kept for the scores and not reused in the branch's own sum:
+            // `ln d + summed − ln 3` is added left to right, and taking `summed − ln 3` first
+            // would move the branch's last bits.
             scratch.duplicated_ln[class] = summed - ln_three;
-            float::ln(duplicated_share.max(f64::MIN_POSITIVE)) + summed - ln_three
+            shares.ln_duplicated + summed - ln_three
         } else {
+            scratch.duplicated_sum_ln[class] = f64::NEG_INFINITY;
             scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
-        let share = if class == 0 {
-            1.0 - parameters.noisy_share
-        } else {
-            parameters.noisy_share
-        };
-        scratch.class_ln[class] = float::ln(share.max(f64::MIN_POSITIVE))
-            + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        scratch.within_ln[class] = within;
+        scratch.class_ln[class] = shares.ln_class[class] + within;
     }
     let position_ln = ln_sum_exp(&scratch.class_ln);
     scratch.position_ln = position_ln;
@@ -4147,7 +4225,7 @@ fn one_position(
             statistics.noisy += class_posterior;
         }
         let branches = &scratch.branch_ln[class * BRANCHES..][..BRANCHES];
-        let within = ln_sum_exp(branches);
+        let within = scratch.within_ln[class];
         let branch = [
             class_posterior * float::exp(branches[0] - within),
             class_posterior * float::exp(branches[1] - within),
@@ -4185,16 +4263,14 @@ fn one_position(
 
         // The fixed-alternative branch: every sample carries two copies of the candidate.
         if branch[1] > 1e-12 {
-            scratch.shares.clear();
+            let branch_sum_ln = scratch.fixed_sum_ln[class];
             for candidate in 0..candidates {
-                scratch.shares.push(
-                    scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                        + float::ln(scratch.multiplicity[candidate]),
-                );
-            }
-            let total = ln_sum_exp(&scratch.shares);
-            for candidate in 0..candidates {
-                let share = branch[1] * float::exp(scratch.shares[candidate] - total);
+                let share = branch[1]
+                    * float::exp(
+                        scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
+                            + scratch.ln_multiplicity[candidate]
+                            - branch_sum_ln,
+                    );
                 if share <= 1e-12 {
                     continue;
                 }
@@ -4224,22 +4300,17 @@ fn one_position(
         // not on the node, so the inner loop over read groups runs once per candidate rather
         // than once per candidate per node.
         if branch[2] > 1e-12 {
-            scratch.shares.clear();
-            for candidate in 0..candidates {
-                let multiplicity = float::ln(scratch.multiplicity[candidate]);
-                for node in 0..nodes {
-                    scratch.shares.push(
-                        scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity,
-                    );
-                }
-            }
-            let total = ln_sum_exp(&scratch.shares);
+            let branch_sum_ln = scratch.segregating_sum_ln[class];
             scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
             scratch.genotype_weight.fill(0.0);
             for candidate in 0..candidates {
+                let multiplicity = scratch.ln_multiplicity[candidate];
                 for node in 0..nodes {
-                    let share =
-                        branch[2] * float::exp(scratch.shares[candidate * nodes + node] - total);
+                    let share = branch[2]
+                        * float::exp(
+                            scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity
+                                - branch_sum_ln,
+                        );
                     if share <= 1e-12 {
                         continue;
                     }
@@ -4327,23 +4398,18 @@ fn one_position(
         {
             {
                 let carrier_nodes = carrier.nodes.len();
-                scratch.shares.clear();
-                for candidate in 0..candidates {
-                    let multiplicity = float::ln(scratch.multiplicity[candidate]);
-                    for node in 0..carrier_nodes {
-                        scratch.shares.push(
-                            scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
-                                + multiplicity,
-                        );
-                    }
-                }
-                let total = ln_sum_exp(&scratch.shares);
+                let branch_sum_ln = scratch.duplicated_sum_ln[class];
                 scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
                 scratch.carrier_weight.fill(0.0);
                 for candidate in 0..candidates {
+                    let multiplicity = scratch.ln_multiplicity[candidate];
                     for node in 0..carrier_nodes {
                         let share = branch[DUPLICATED]
-                            * float::exp(scratch.shares[candidate * carrier_nodes + node] - total);
+                            * float::exp(
+                                scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
+                                    + multiplicity
+                                    - branch_sum_ln,
+                            );
                         if share <= 1e-12 {
                             continue;
                         }

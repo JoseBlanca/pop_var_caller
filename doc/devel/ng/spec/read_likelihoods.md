@@ -1376,9 +1376,11 @@ Without somewhere to put them, one such read drives every candidate genotype's l
 of from the individual's alleles.
 
 **Production sets `λ` to 0.01 and spreads it uniformly over `D`, the number of distinct sequences the
-whole cohort showed at that locus** ([`em.rs:393`](../../../../src/ssr/cohort/em.rs)). **ng inherits
-the 0.01 and declares it inherited**: it is not fitted, the parameters fit has no source for it, and
-§1.2 requires that be said rather than left blank. **`D` is the defect.** A single sample showing two distinct sequences gets a junk floor of 0.005; a 63-accession
+whole cohort showed at that locus** ([`em.rs:393`](../../../../src/ssr/cohort/em.rs)). **ng
+inherited the 0.01 and declared it inherited**: it is not fitted, the parameters fit has no source
+for it, and §1.2 requires that be said rather than left blank. *Since then the value has been set by
+sweeps against genotype accuracy — 0.05 and 0.20 on 2026-09-03, **0.07 on 2026-10-18** — and is
+still not fitted; `doc/devel/ng/research/str_outlier_share_plan.md` is the program to fit it.* **`D` is the defect.** A single sample showing two distinct sequences gets a junk floor of 0.005; a 63-accession
 panel showing twenty gets 0.0005, ten times lower. So a sample's own genotype likelihood changes when
 an unrelated sample is added to the run, which is not a property a per-sample likelihood may have.
 

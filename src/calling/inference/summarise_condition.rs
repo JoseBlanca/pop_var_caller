@@ -8829,8 +8829,8 @@ mod tests {
     /// **Requires:** the genotypes match. That is the failing state a differential needs.
     ///
     /// **Reports, by asserting the numbers so they cannot go stale:** the tighter tolerance takes
-    /// **five passes against three** on this tract — most of a run's extra work for the same
-    /// three genotypes — and the two stopping points land **1.8 × 10⁻⁶ of a chromosome** apart,
+    /// **five passes against two** on this tract — most of a run's extra work for the same
+    /// three genotypes — and the two stopping points land **5.1 × 10⁻⁵ of a chromosome** apart,
     /// far inside the looser tolerance. *(That is how far apart the two answers
     /// finished, not a promise either rule makes: a convergence rule bounds the **last step**
     /// between two passes and says nothing about the distance to another rule's answer.)*
@@ -8841,13 +8841,13 @@ mod tests {
     #[test]
     fn a_tract_called_under_both_tolerances_gives_one_answer_and_says_what_moved() {
         /// Measured on this fixture, not predicted from it — at the shipped outlier weight,
-        /// so the counts moved when that constant moved to 0.20 (the shipped rule took two
-        /// passes at 0.05).
+        /// so the counts move when that constant moves (the shipped rule took two passes at
+        /// 0.05, three at 0.20, and two again at 0.07).
         const PASSES_AT_THE_TIGHT_TOLERANCE: u32 = 5;
         /// The shipped tolerance's count on the same tract.
-        const PASSES_AT_THE_SHIPPED_TOLERANCE: u32 = 3;
+        const PASSES_AT_THE_SHIPPED_TOLERANCE: u32 = 2;
         /// How far apart the two stopping points landed, per chromosome — see the doc above.
-        const CHROMOSOMES_APART: f64 = 1.8e-6;
+        const CHROMOSOMES_APART: f64 = 5.1e-5;
 
         let reads_of_each_sample = three_samples_at_four_reads();
         let reads: [&[SequenceObservation]; 3] = [

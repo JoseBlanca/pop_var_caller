@@ -77,7 +77,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 5
+format_version = 6
 ploidy = 2
 
 [fitted_from]
@@ -428,7 +428,7 @@ substitution_rate_by_stratum = [
 # Not measured: this value was chosen by sweeping it against genotype accuracy
 # on one human sample, so it is a stated constant rather than an estimate of
 # that share
-repeat_tract_outlier_weight = { value = 0.2, warrant = "defaulted" }
+repeat_tract_outlier_weight = { value = 0.07, warrant = "defaulted" }
 
 [repeat_routing]
 # What this run counted as a repeat. A tandem-repeat catalog is built below

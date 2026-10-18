@@ -66,7 +66,8 @@ use pop_var_caller::parameter_estimation::joint::fit::bench_fixtures::{
 };
 #[cfg(feature = "bench-fixtures")]
 use pop_var_caller::parameter_estimation::joint::fit::{
-    FrequencyDensity, JointFitConfig, StartingPoint as GenericStart, fit_jointly,
+    FrequencyDensity, JointFit, JointFitConfig, StartEnding, StartingPoint as GenericStart,
+    fit_jointly,
 };
 
 // ---------------------------------------------------------------------------
@@ -278,6 +279,211 @@ fn generic_by_samples(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// The judging passes: the expectation and the information together
+// ---------------------------------------------------------------------------
+
+/// The pass limit the judging fit is given, the final pass not counted.
+///
+/// **Ten, so that most passes sum the information.** The first cycle — three passes — is always
+/// plain, because `maximise` starts judging only after a cycle has gained less than
+/// `log_likelihood_stillness` a position; from the second cycle on every first pass judges, every
+/// Newton try sums the information too, and so does the final pass, whatever happened before it.
+/// Production sums it on nearly every pass: judging starts by about pass 13 of 131 at 59 tomato
+/// samples, and every Newton try sums it as well.
+#[cfg(feature = "bench-fixtures")]
+const JUDGING_PASSES: u32 = 10;
+
+/// **How many of the judging fit's passes must sum the information, the final pass included.**
+///
+/// Every case of the group measured 8 of 11 when it was written (2026-10-18). The check allows one
+/// fewer, so that a change which moves one Newton try's outcome does not stop the bench, while a fit
+/// that stopped judging — only its final pass summing the information, 1 of 11 — still fails it.
+#[cfg(feature = "bench-fixtures")]
+const FEWEST_INFORMATION_PASSES: usize = 7;
+
+/// The fit as a production run looks after its first few cycles: **every cycle judges**, no
+/// start ever converges, and nothing runs after the alternation.
+///
+/// - `log_likelihood_stillness` is infinite, so the first cycle's gain — any finite gain — turns
+///   judging on, and the second cycle's first pass is the first that sums the information: the
+///   earliest `maximise` allows.
+/// - `decrement_threshold` is zero, so no judging pass finds the start converged and the fit runs
+///   until too few passes remain for another cycle or Newton try. That can leave it one or two
+///   short of [`JUDGING_PASSES`]; on these draws it is ten, which the setup checks, and the fit is
+///   deterministic, so every iteration times the same passes. A drawn cohort that converged at
+///   pass 5 would time a different amount of work in every tree whose numbers moved.
+/// - Contamination is off. It runs once, after the alternation, and is not the code this group
+///   watches; at ten passes it would hold a far larger share of a timed fit than of a production
+///   one (see [`PASSES`] for the same caveat on the group above).
+/// - The per-pass trace is on: it is how the setup check finds the first judging pass.
+#[cfg(feature = "bench-fixtures")]
+fn judging_config() -> JointFitConfig {
+    JointFitConfig {
+        max_passes: JUDGING_PASSES,
+        log_likelihood_stillness: f64::INFINITY,
+        decrement_threshold: 0.0,
+        estimate_contamination: false,
+        pass_trace: true,
+        ..generic_config()
+    }
+}
+
+/// **The population the judging fit's positions are drawn from**, chosen so that the positions
+/// carry as many candidate alleles as a real cohort's: nine hundred and ninety in a thousand
+/// invariant, one fixed for the non-reference base, the rest segregating at the rare-allele-heavy
+/// density the groups above use.
+///
+/// What the fit's per-position work grows with is how many candidate alleles a position sums over
+/// — one when no sample showed a non-reference read, two when they showed one base, three when
+/// they showed two or more. On 59 tomato2 samples' census (two million positions, 2026-10-18)
+/// **67.5, 27.6 and 4.9% of positions had one, two and three candidates**. This density, at
+/// [`JUDGING_DEPTH`] and [`JUDGING_HOM_EXCESS`], draws 67.9, 26.7 and 5.4% at 32 samples; the
+/// groups above' density, at eight reads, drew 53.0, 36.8 and 10.3% — 1.57 candidates a position
+/// against the real cohort's 1.37, about 15% more work a position-sample. The match is at 32 samples only; fewer samples see fewer
+/// non-reference reads a position and so fewer candidates, as a real cohort would.
+#[cfg(feature = "bench-fixtures")]
+fn judging_density() -> FrequencyDensity {
+    FrequencyDensity {
+        p_invariant: 0.99,
+        p_fixed_alt: 0.001,
+        a: 0.7,
+        b: 2.5,
+    }
+}
+
+/// Reads a sample puts on a position in the judging fit: five and a half, tomato2's median sample
+/// depth (59 samples, 4.2 to 13.7 reads a position).
+#[cfg(feature = "bench-fixtures")]
+const JUDGING_DEPTH: f64 = 5.5;
+
+/// Each drawn sample's homozygote excess in the judging fit: 0.9, near the 0.94 to 1.00 the fit
+/// returns for the oracle's four tomato samples — a selfing crop's.
+#[cfg(feature = "bench-fixtures")]
+const JUDGING_HOM_EXCESS: f64 = 0.9;
+
+/// The passes of the fit's only start that summed the information, the final pass included — read
+/// from the fit's own count, `StartRecord::judging_passes`, which leaves the final pass out though
+/// it always sums it.
+#[cfg(feature = "bench-fixtures")]
+fn information_pass_count(fit: &JointFit) -> usize {
+    fit.starts[0].judging_passes as usize + 1
+}
+
+/// **The guard against timing a judging fit that did not judge.**
+///
+/// The information pass is what this group exists for, and nothing in a wall number says it ran:
+/// a fit that never left its first cycle, or one that converged at the first judging pass, is
+/// fast and finite. So the setup fits once and checks the claims the group's name makes — one
+/// start, which ran to its pass limit without converging; judging began at pass 4 (the second
+/// cycle, the earliest `maximise` allows); and most passes summed the information — beside the
+/// older check's guards against an empty or shallow draw, and prints the count.
+#[cfg(feature = "bench-fixtures")]
+fn check_the_fit_judged(drawn: &DrawnCohort, positions: usize, samples: usize, depth: f64) {
+    let mut cohort = as_cohort(&drawn.samples);
+    let fit = fit_jointly(&mut cohort, &judging_config()).expect("a drawn cohort pools");
+    assert_eq!(fit.noisy_posterior.len(), positions);
+    assert_eq!(fit.rates.len(), samples);
+    assert!(
+        fit.log_likelihood.is_finite(),
+        "the fit's log-likelihood came back as {}",
+        fit.log_likelihood
+    );
+    assert!(
+        fit.rates["s0"].value.positions_with_reads > (positions as u64) / 2,
+        "the first sample carried reads at {} of {positions} positions, so the draw is not the \
+         {depth}× one this bench names",
+        fit.rates["s0"].value.positions_with_reads
+    );
+    assert_eq!(fit.starts.len(), 1, "the judging fit runs one start");
+    assert_eq!(
+        fit.starts[0].ended,
+        StartEnding::AtTheLimit,
+        "the judging fit's start was to stop at its pass limit"
+    );
+    assert!(
+        !fit.converged && fit.passes == JUDGING_PASSES,
+        "the judging fit was to run to its limit of {JUDGING_PASSES} passes; it ran {} and \
+         converged = {}",
+        fit.passes,
+        fit.converged
+    );
+    let first_judged = fit
+        .trace
+        .iter()
+        .find(|summary| summary.decrement.is_some())
+        .map(|summary| summary.pass);
+    assert_eq!(
+        first_judged,
+        Some(4),
+        "judging was to begin with the second cycle's first pass"
+    );
+    let summed = information_pass_count(&fit);
+    let all = fit.passes as usize + 1;
+    assert!(
+        summed >= FEWEST_INFORMATION_PASSES,
+        "only {summed} of {all} passes summed the information; at least \
+         {FEWEST_INFORMATION_PASSES} were to"
+    );
+    eprintln!(
+        "ng_joint_fit/generic_judging/{samples}: {summed} of {all} passes summed the information"
+    );
+}
+
+/// **The judging fit by sample count, at twenty thousand positions** — the bench that sees the
+/// hot path of a production fit since the Newton step landed (2026-10-16), where nearly every pass
+/// is a judging pass: about half its CPU in `one_position`, the expectation, and about two fifths
+/// in the information scoring (`score_position`'s helpers and `InformationSums::add_position`),
+/// measured on 59 tomato samples. The two groups above run one information pass in nine.
+///
+/// The points: one sample, the cohort-less case; eight, a small cohort; thirty-two, above the
+/// twenty at which the information switches from the whole matrix to its blocks
+/// (`information::FULL_MATRIX_SAMPLES`), which is the layout every cohort of production size
+/// takes. The positions are drawn at tomato2's median depth, five and a half reads, with as many
+/// candidate alleles a position as tomato2's 59 samples carry ([`judging_density`]).
+///
+/// **Twenty thousand positions cut a pass into chunks of 256**, the smallest the pass allows,
+/// where production's two million positions make chunks of about 16,000: each chunk's setup — its
+/// scratch, its information sums, and adding them into the pass's total — is therefore paid about
+/// sixty times as often a position here as in production, and is over-weighted in this group
+/// (adding the chunks' totals and the allocator were under 0.2% of the workers' samples at 32
+/// samples, 2026-10-18). At one sample the work between passes
+/// — the maximisation, the quadrature — is over-weighted too, since a real one-sample fit has a
+/// hundred times the positions; that case checks the one-sample code path, not production's
+/// proportions.
+#[cfg(feature = "bench-fixtures")]
+fn generic_judging(c: &mut Criterion) {
+    const POSITIONS: usize = 20_000;
+    let pool = fixed_pool();
+    let config = judging_config();
+
+    let mut group = c.benchmark_group("ng_joint_fit/generic_judging");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    for &samples in &[1_usize, 8, 32] {
+        let drawn = draw_cohort(
+            samples,
+            POSITIONS,
+            JUDGING_DEPTH,
+            NOISE,
+            judging_density(),
+            JUDGING_HOM_EXCESS,
+            0x9E37_79B9_7F4A_7C17,
+        );
+        pool.install(|| check_the_fit_judged(&drawn, POSITIONS, samples, JUDGING_DEPTH));
+        let mut cohort = as_cohort(&drawn.samples);
+        group.bench_with_input(BenchmarkId::from_parameter(samples), &samples, |b, _| {
+            b.iter(|| {
+                pool.install(|| {
+                    black_box(fit_jointly(black_box(&mut cohort), black_box(&config)))
+                        .expect("a drawn cohort pools")
+                })
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
 
@@ -296,6 +502,7 @@ fn every_bench(c: &mut Criterion) {
     {
         generic_by_positions(c);
         generic_by_samples(c);
+        generic_judging(c);
     }
 }
 

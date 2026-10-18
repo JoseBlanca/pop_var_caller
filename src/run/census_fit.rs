@@ -1541,6 +1541,7 @@ mod the_starts_in_the_file {
             number,
             ended,
             passes,
+            judging_passes: 0,
             log_likelihood: -1.0,
             furthest_from_settled: None,
         };
