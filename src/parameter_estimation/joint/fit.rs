@@ -428,6 +428,11 @@ pub struct StartRecord {
     pub ended: StartEnding,
     /// Passes over the data, the final pass not counted — as the start's log line prints them.
     pub passes: u32,
+    /// **How many of those passes also summed the information** — each pass that judged the
+    /// distances to the maximum, and each Newton try — the final pass not counted, though it
+    /// always sums it. Neither the parameters file nor the log prints it; the joint-fit bench
+    /// reads it to check that what it times is the judging work it names.
+    pub judging_passes: u32,
     /// At the values the start returned: its final pass's, or for a start that agreed, the pass
     /// that judged it.
     pub log_likelihood: f64,
@@ -2054,6 +2059,7 @@ pub fn fit_jointly(
                 number,
                 ended: outcome.ended,
                 passes: outcome.passes,
+                judging_passes: outcome.judging_passes,
                 log_likelihood: score,
                 furthest_from_settled: outcome.furthest_from_settled.clone(),
             });
