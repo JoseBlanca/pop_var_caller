@@ -236,7 +236,7 @@ pub struct CallFromAlignmentsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub hidden_dup_tag: bool,
 
-    /// Build a `.bai` or `.crai` index beside any alignment file that has none.
+    /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
 

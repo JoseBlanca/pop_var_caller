@@ -700,18 +700,21 @@ mod tests {
         assert_eq!(read.format_version, 3);
         read.validate()
             .expect("a version-1 file passes the checks a run applies");
-        assert_eq!(read, the_fixture_without_what_versions_two_to_four_added());
+        assert_eq!(read, the_fixture_without_what_versions_two_to_five_added());
     }
 
     /// Today's fixture with every key added since version 1 taken out — the keys version 2 added,
-    /// F's standard error and the row on penalised curves, which version 3 added, and the two
-    /// informational tables version 4 added — as a file written before format 3 reads back. It
+    /// F's standard error and the row on penalised curves, which version 3 added, the two
+    /// informational tables version 4 added, and the second rung's stated share version 5 added —
+    /// as a file written before format 3 reads back. It
     /// says version 3, which is what reading such a file stamps on it.
-    pub(super) fn the_fixture_without_what_versions_two_to_four_added() -> ParametersFile {
+    pub(super) fn the_fixture_without_what_versions_two_to_five_added() -> ParametersFile {
         let mut file = a_file_using_every_shape();
         file.format_version = 3;
         file.ordinary_site_prior.fitted_density = None;
         file.duplicated_positions = None;
+        file.repeat_tracts
+            .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;
         for row in &mut file.base_quality_calibration.by_read_group {
             row.error_probability_multiplier.standard_error = None;
@@ -1238,7 +1241,7 @@ mod files_written_before_format_3 {
     use super::super::{
         Warrant, between_locus_share_error_of, between_locus_share_of, concentration_of,
     };
-    use super::tests::the_fixture_without_what_versions_two_to_four_added;
+    use super::tests::the_fixture_without_what_versions_two_to_five_added;
     use super::*;
 
     /// The fixture as the last version-1 build wrote it.
@@ -1348,7 +1351,7 @@ mod files_written_before_format_3 {
             );
             assert_eq!(
                 read,
-                the_fixture_without_what_versions_two_to_four_added(),
+                the_fixture_without_what_versions_two_to_five_added(),
                 "{spelling}: every other number is the fixture's own"
             );
             read.validate()
@@ -1477,6 +1480,11 @@ mod files_written_before_format_3 {
             .expect("a file main's build wrote reads");
         assert_eq!(read.format_version, 3, "the migration writes format 3");
         read.format_version = super::super::FORMAT_VERSION;
+        // **A file from before format 5 held both rungs at one value**, so a run that reads it
+        // writes that value under both keys: the file it writes back means what this one meant.
+        read.repeat_tracts
+            .fallback_between_locus_share_with_own_shares =
+            Some(read.repeat_tracts.fallback_between_locus_share);
         let once = written_back(&read);
         assert_eq!(once, read, "the run writes the migrated file");
         assert_eq!(once.to_toml(), read.to_toml(), "byte for byte");

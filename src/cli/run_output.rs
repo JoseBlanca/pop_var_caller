@@ -233,17 +233,23 @@ pub fn close_log(exit_status: i32) {
     ));
 }
 
+/// The exit status the shell reports for a panicking pvc. **A release build aborts on a panic**
+/// (`panic = "abort"` in `Cargo.toml`), so the process dies of `SIGABRT` and the shell reports
+/// 128 + 6 = 134; a build that unwinds, such as a test build, exits with Rust's 101.
+const EXIT_STATUS_AFTER_A_PANIC: i32 = if cfg!(panic = "abort") { 134 } else { 101 };
+
 /// **Close the run's log after a panic**: the panic's message as the log's last event, then how
-/// the run ended, with the exit status a panicking Rust process has. Called from the binary's
-/// panic hook, because a release build aborts on a panic and nothing after it runs — without
-/// this the log would end at its last event, which reads as a run that was killed.
+/// the run ended, with the exit status the shell will report
+/// ([`EXIT_STATUS_AFTER_A_PANIC`]). Called from the binary's panic hook, because a release build
+/// aborts on a panic and nothing after it runs — without this the log would end at its last
+/// event, which reads as a run that was killed.
 ///
 /// Written to the file only: the terminal gets Rust's own panic message.
 pub fn close_log_after_a_panic(message: &str) {
     if let Some(log) = lock_the_log().clone() {
         log.write_line(&format!("{} ERROR {message}\n", rfc3339_now()));
     }
-    close_log(101);
+    close_log(EXIT_STATUS_AFTER_A_PANIC);
 }
 
 /// The log's lock. **A panic while it was held does not stop logging**: a line half-written by a

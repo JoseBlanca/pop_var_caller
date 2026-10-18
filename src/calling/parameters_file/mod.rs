@@ -230,7 +230,14 @@ use serde::{Deserialize, Serialize};
 /// (`doc/devel/ng/spec/parameter_prepass_joint_fit.md` §2.1.3; `parameters_file.md` §3.6). Every
 /// table refuses a key it does not know, so a version-3 build refuses a version-4 file rather than
 /// misreading it; this build reads a version-3 file with both tables absent.
-pub const FORMAT_VERSION: u32 = 4;
+///
+/// **Version 5** gives the tract ladder's second rung — a class's own shares where the fit placed
+/// no F — its own stated between-locus share, `fallback_between_locus_share_with_own_shares`, where
+/// `fallback_between_locus_share` held both rungs before
+/// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md` §8). A version-4 build refuses a
+/// version-5 file; this build reads a version-4 file with the key absent and holds both rungs at
+/// the one value, which is what that file meant.
+pub const FORMAT_VERSION: u32 = 5;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -1166,8 +1173,10 @@ pub enum SeedRung {
 #[serde(deny_unknown_fields)]
 pub struct RepeatTracts {
     /// The between-locus share the tract ladder states where a class has none of its own — the
-    /// **bottom** rung's flat shape over whatever lengths the locus offers is held at it, and so
-    /// is a class's own shape where the fit could not place the class's F. Checked as a
+    /// **bottom** rung's flat shape over whatever lengths the locus offers is held at it. A class's
+    /// own shape where the fit could not place the class's F is held at
+    /// [`Self::fallback_between_locus_share_with_own_shares`] instead, since format 5; in a file
+    /// without that key it is held at this one, as it was before. Checked as a
     /// [`BetweenLocusShare`] by validation: strictly between 0 and 1, and above about 5.6×10⁻³⁰⁹,
     /// below which its concentration is infinite.
     ///
@@ -1185,6 +1194,20 @@ pub struct RepeatTracts {
     /// carried per locus; this warrant answers the different question of whether the number in
     /// the file came out of this run's data or out of the binary.
     pub fallback_between_locus_share: WarrantedValue,
+    /// **The between-locus share a class's own fitted shares are held at where the fit could not
+    /// place the class's F** — the tract ladder's second rung, and every class of a one-sample
+    /// fit. The run's own median where any class has an F, written `fitted_here` exactly as
+    /// [`Self::fallback_between_locus_share`] is; otherwise the built-in one half, `defaulted`
+    /// (`STATED_OWN_SHARES_CONCENTRATION`). The two keys hold different constants because they
+    /// hold different shapes: ten chromosomes keep a flat shape from leaning homozygous, while a
+    /// class's real shares need about one to match how often a genome's two copies agree
+    /// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md` §8).
+    ///
+    /// **Absent in a file written before format 5**, and a reader then holds the second rung at
+    /// [`Self::fallback_between_locus_share`], which is what that file was written to mean. Every
+    /// file this build writes carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_between_locus_share_with_own_shares: Option<WarrantedValue>,
     /// Which set of slippage numbers each read group's reads are drawn under. **The run's own
     /// declaration, not something inferred.**
     pub slippage_group_by_read_group: Vec<SlippageGroupRow>,
@@ -1973,6 +1996,15 @@ mod tests {
                     observations: None,
                     standard_error: None,
                 },
+                // A run's own median holds both rungs, so the two keys carry one number.
+                fallback_between_locus_share_with_own_shares: Some(WarrantedValue {
+                    value: between_locus_share_of(3.5)
+                        .expect("a concentration of 3.5 has an F")
+                        .get(),
+                    warrant: Warrant::FittedHere,
+                    observations: None,
+                    standard_error: None,
+                }),
                 slippage_group_by_read_group: vec![
                     SlippageGroupRow {
                         read_group: 0,
@@ -2517,7 +2549,7 @@ mod tests {
         stripped
     }
 
-    /// **Every warranted number in the file is written the same way, and these five are all of
+    /// **Every warranted number in the file is written the same way, and these six are all of
     /// them** — which is the whole of what this shape is for: a reader who has understood one has
     /// understood all of them.
     ///
@@ -2548,10 +2580,11 @@ mod tests {
                 ".base_quality_calibration.by_read_group.error_probability_multiplier",
                 ".inbreeding.by_sample.inbreeding_coefficient",
                 ".repeat_tracts.fallback_between_locus_share",
+                ".repeat_tracts.fallback_between_locus_share_with_own_shares",
                 ".repeat_tracts.substitution_rate_by_stratum.rate",
                 ".stated_constants.repeat_tract_outlier_weight",
             ],
-            "these five numbers carry a warrant and nothing else does"
+            "these six numbers carry a warrant and nothing else does"
         );
 
         for (path, table) in &found {
@@ -3037,23 +3070,26 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_four() {
-        assert_eq!(FORMAT_VERSION, 4);
-        assert_eq!(a_file_using_every_shape().format_version, 4);
+    fn the_format_version_this_build_writes_is_five() {
+        assert_eq!(FORMAT_VERSION, 5);
+        assert_eq!(a_file_using_every_shape().format_version, 5);
     }
 
     /// **A version-3 file reads, with both informational tables absent** — the fixture with its
-    /// version set back and the two tables taken out of its text — and passes a run's checks; **a
-    /// version-5 file is refused**; and a version-3 build's reader, which knows neither table,
+    /// version set back and the two tables and format 5's key taken out of its text — and passes
+    /// a run's checks; **a version-6 file is refused**; and a version-3 build's reader, which knows neither table,
     /// would refuse a version-4 file rather than misread it: every table refuses a key it does not
     /// know, so the written text of either table, put in a file whose shape lacks it, is refused
     /// naming the key.
     #[test]
-    fn a_version_three_file_reads_without_the_tables_and_a_version_five_file_is_refused() {
+    fn a_version_three_file_reads_without_the_tables_and_a_version_six_file_is_refused() {
         let mut version_three = a_file_using_every_shape();
         version_three.format_version = 3;
         version_three.ordinary_site_prior.fitted_density = None;
         version_three.duplicated_positions = None;
+        version_three
+            .repeat_tracts
+            .fallback_between_locus_share_with_own_shares = None;
         let read = ParametersFile::from_toml(&version_three.to_toml())
             .expect("a version-3 file is a parameters file");
         assert_eq!(read, version_three);
@@ -3062,10 +3098,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         read.validate()
             .expect("a version-3 file passes the checks a run applies");
 
-        let mut version_five = a_file_using_every_shape();
-        version_five.format_version = 5;
-        let read = ParametersFile::from_toml(&version_five.to_toml())
-            .expect("a version-5 file with this build's keys parses");
+        let mut version_six = a_file_using_every_shape();
+        version_six.format_version = 6;
+        let read = ParametersFile::from_toml(&version_six.to_toml())
+            .expect("a version-6 file with this build's keys parses");
         assert!(matches!(
             read.validate(),
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"

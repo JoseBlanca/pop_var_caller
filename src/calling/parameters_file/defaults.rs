@@ -484,10 +484,13 @@ mod tests {
     use crate::calling::parameters_file::ParametersFile;
     use crate::calling::parameters_file::ReadsBehindEachCalibration;
     use crate::calling::parameters_file::Warrant;
+    use crate::calling::parameters_file::WarrantedValue;
     use crate::calling::parameters_file::tests::{
         THE_REFERENCE_A_RUN_FITTED_AGAINST, a_file_using_every_shape, unwrapped_comments,
     };
-    use crate::calling::parameters_file::validate::the_built_in_fallback_share;
+    use crate::calling::parameters_file::validate::{
+        the_built_in_fallback_share, the_built_in_fallback_share_with_own_shares,
+    };
     use crate::calling::run_parameters::RunParameters;
     use crate::float;
     use crate::parameter_estimation::Estimate;
@@ -650,6 +653,13 @@ mod tests {
         file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Defaulted;
         file.repeat_tracts.fallback_between_locus_share.value = the_built_in_fallback_share();
         file.repeat_tracts.fallback_between_locus_share.observations = None;
+        file.repeat_tracts
+            .fallback_between_locus_share_with_own_shares = Some(WarrantedValue {
+            value: the_built_in_fallback_share_with_own_shares(),
+            warrant: Warrant::Defaulted,
+            observations: None,
+            standard_error: None,
+        });
 
         let projected = file
             .to_run_parameters()
@@ -1493,6 +1503,8 @@ mod tests {
             )]),
             BTreeMap::new(),
             BTreeMap::new(),
+            STATED_FLAT_CONCENTRATION,
+            Provenance::Defaulted,
             STATED_FLAT_CONCENTRATION,
             Provenance::Defaulted,
         );

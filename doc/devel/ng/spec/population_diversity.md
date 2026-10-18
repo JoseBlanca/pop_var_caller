@@ -502,8 +502,10 @@ read-only thereafter.
 4. **What concentration does the bottom rung state?** A flat shape has an obvious answer; its
    strength does not. **Leaning:** the run's own median fitted concentration where the run fitted
    any stratum, and a stated constant only where it fitted none. **Confirm before code.**
-   *Built that way; the stated constant is a concentration of 10 (F = 1/11) since 2026-10-17, one
-   before (`../../reports/ng_str_single_sample_prior_2026-10-17.md`).*
+   *Built that way. Where nothing was fitted, the flat rung states a concentration of 10 (F = 1/11)
+   since 2026-10-17 (one before), and a stratum's own shares are held at one (F = 1/2) — two
+   constants since 2026-10-18, one per shape (`../../reports/ng_str_single_sample_prior_2026-10-17.md`
+   §8).*
 
 **Deferred, with a recommended home.**
 

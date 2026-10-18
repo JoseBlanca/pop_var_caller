@@ -280,7 +280,10 @@ The largest section, and the one whose axes matter:
 - **the run's stated concentration** — the bottom rung: the median fitted concentration where any
   stratum was fitted, and `STATED_FLAT_CONCENTRATION`
   ([`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs), 10.0 since 2026-10-17, 1.0 before)
-  where none was.
+  where none was. **Since format 5 (2026-10-18) the second rung — a stratum's own shares with no
+  concentration — has its own key, `fallback_between_locus_share_with_own_shares`**: the same
+  median where there is one, and `STATED_OWN_SHARES_CONCENTRATION` (1.0) where there is none. A
+  file without the key holds both rungs at `fallback_between_locus_share`.
 - **per stratum: the substitution rate** inside the tract.
 
 ### 3.8 The constants no fit produces

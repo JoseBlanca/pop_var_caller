@@ -42,16 +42,17 @@
 # its `observations`, is that of the fit that first produced it. If you edit a
 # number, delete its `standard_error` with its `observations`.
 #
-# **Two keys do not take every warrant.**
-# `repeat_tracts.fallback_between_locus_share` is `fitted_here` only where a
-# stratum row of this file carries a `between_locus_share` for it to be the
-# median of, and `defaulted` only at the built-in 1/11 (0.0909…);
-# `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the
-# built-in constant. Both take `supplied` freely, which is what you write when
-# you change one. Anything else is refused, and says so.
+# **Three keys do not take every warrant.**
+# `repeat_tracts.fallback_between_locus_share` and
+# `repeat_tracts.fallback_between_locus_share_with_own_shares` are `fitted_here`
+# only where a stratum row of this file carries a `between_locus_share` for them
+# to be the median of, and `defaulted` only at their built-in 1/11 (0.0909…) and
+# 1/2; `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the
+# built-in constant. All three take `supplied` freely, which is what you write
+# when you change one. Anything else is refused, and says so.
 #
-# **What that checking reaches, and what it cannot.** It reaches those two keys
-# and nowhere else. It cannot catch a number you changed that still says
+# **What that checking reaches, and what it cannot.** It reaches those three
+# keys and nowhere else. It cannot catch a number you changed that still says
 # `fitted_here` or `borrowed`: nothing in this file can tell your value from a
 # fitted one, so the run will report it as measured, with the old `observations`
 # count still beside it. And on every other key a `defaulted` warrant is checked
@@ -76,7 +77,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 4
+format_version = 5
 ploidy = 2
 
 [fitted_from]
@@ -362,18 +363,23 @@ share_with_carriers_above_stated_frequency = { value = 0.026 }
 # where its stratum has none of its own. A between-locus share says how much of
 # a stratum's variation in allele length lies between its loci rather than
 # within one: near 0, every locus carries the stratum's whole spread of lengths;
-# near 1, each locus is fixed at one length. A stratum row with shares and no
-# `between_locus_share` keeps its shares, held at this one; a tract whose
-# stratum and period have no row gets a flat shape over whatever lengths it
-# offers, held at this one. A smaller share makes the prior harder for the reads
-# to move. A run in which any stratum has a between-locus share states the
-# median of those shares and marks it `fitted_here`. The median counts only the
-# strata whose fit had at least 8 loci with reads, the same count below which a
-# stratum carries no own-fit standard error on its between-locus share or its
-# `share_of_reads_that_slip`; where no stratum with a share has that many, it
-# counts every stratum with a share. This file does not carry the counts, so the
-# median cannot be recomputed from the rows below. A run in which no stratum has
-# a between-locus share states the built-in 1/11 (0.0909…) and marks it
+# near 1, each locus is fixed at one length. A tract whose stratum and period
+# have no row gets a flat shape over whatever lengths it offers, held at this
+# one; a stratum row with shares and no `between_locus_share` keeps its shares,
+# held at `fallback_between_locus_share_with_own_shares`. The two differ only
+# where no stratum has a between-locus share, and then they are two stated
+# constants for two different shapes: ten chromosomes keep a flat shape from
+# leaning homozygous, and about one makes a stratum's real shares match how
+# often a genome's two copies agree. A smaller share makes the prior harder for
+# the reads to move. A run in which any stratum has a between-locus share states
+# the median of those shares and marks it `fitted_here`. The median counts only
+# the strata whose fit had at least 8 loci with reads, the same count below
+# which a stratum carries no own-fit standard error on its between-locus share
+# or its `share_of_reads_that_slip`; where no stratum with a share has that
+# many, it counts every stratum with a share. This file does not carry the
+# counts, so the median cannot be recomputed from the rows below. A run in which
+# no stratum has a between-locus share states the built-in 1/11 (0.0909…) here
+# and 1/2 for `fallback_between_locus_share_with_own_shares`, and marks both
 # `defaulted`. A run handed this file writes back the warrant it found there,
 # because a file's warrants survive being read — demoting them on every read
 # would have the same cohort report different warrants depending on which way it
@@ -381,6 +387,7 @@ share_with_carriers_above_stated_frequency = { value = 0.026 }
 # no `observations` in any of those cases — a median over strata is not a
 # measurement with a sample size.
 fallback_between_locus_share = { value = 0.22222222222222224, warrant = "fitted_here" }
+fallback_between_locus_share_with_own_shares = { value = 0.22222222222222224, warrant = "fitted_here" }
 slippage_group_by_read_group = [
     { read_group = 0, slippage_group = 0 },
     { read_group = 1, slippage_group = 0 },

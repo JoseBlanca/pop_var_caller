@@ -1,120 +1,131 @@
-# Pop Var Caller
+# pvc
 
-A population variant caller: SNPs, indels and repeat tracts, from aligned reads to one VCF, for
-one sample to a cohort. The `pvc` binary ([src/main.rs](src/main.rs)) has the
-subcommands `repeat-catalog`, `call-from-alignments`, `generate-psps`, `estimate-parameters`
-and `call-from-psps`, and developer tools under `pvc dev`;
-`pvc <subcommand> --help` describes each.
+pvc is a variant caller, focused on speed, memory usage and accuracy.
 
-> This caller was written as "ng", beside an older six-stage caller (per-sample pileup → `.psp`
-> → DUST → grouping → merger → posterior engine), and replaced it on 2026-09-13. Its design is
-> under [doc/devel/ng/](doc/devel/ng/); the specs listed below describe the older caller and are
-> kept as its record.
+> **Status: under active development.** pvc gives good results on our benchmarks, but we have
+> only started testing it on real projects. Options and the output format may still change. We
+> welcome feedback: please open an
+> [issue](https://github.com/JoseBlanca/pop_var_caller/issues) with what you ran and what you
+> saw.
 
-## Authoritative documentation
+Supported on Linux and macOS.
 
-- **This caller's design:** [doc/devel/ng/](doc/devel/ng/) (`spec/`, `arch/`)
-- **The older caller's pipeline architecture (spec):**
-  [doc/devel/specs/calling_pipeline_architecture.md](doc/devel/specs/calling_pipeline_architecture.md)
-- **Design principles:**
-  [doc/devel/specs/design_principles.md](doc/devel/specs/design_principles.md)
-- **Current implementation status, per stage:**
-  [PROJECT_STATUS.md](PROJECT_STATUS.md)
-- **Per-feature implementation plans:**
-  [doc/devel/implementation_plans/](doc/devel/implementation_plans/)
-- **Implementation and review reports:**
-  [doc/devel/reports/](doc/devel/reports/)
+## What it aims for
 
-## Development container
+- **Fast and small in memory.** pvc is written in Rust and uses a streaming architecture
+  designed for a small memory footprint. For example, it called more than 2,000 whole tomato
+  genomes in a week using less than 30 GB.
+- **From one sample to thousands, and from 3 reads a position to hundreds.**
+- **Accurate calls in model and non-model species alike.** It can take into account
+  contamination between samples, per-sample inbreeding coefficients (F) and different error
+  priors.
+- **STR-aware models.** It uses specialised models for STR and STR-bundle regions.
 
-A [Containerfile](Containerfile) is provided for reproducible
-development with [podman](https://podman.io/). The image pins Rust
-and includes `bcftools` / `tabix` for inspecting VCF output, plus the
-[Claude Code](https://claude.com/claude-code) CLI for in-container
-agent sessions.
+## How it performs
 
-```
-./scripts/dev.sh                 # interactive shell inside the container
-./scripts/dev.sh cargo test      # run a one-off command
-./scripts/dev.sh cargo build --release
-```
+| what | data | pvc | GATK | freebayes |
+|---|---|---|---|---|
+| STR genotypes right, of 56,621 at variant sites / false calls at 80,279 reference sites | simulated: 50 samples, 30×, 2,738 STRs, PCR stutter [^str] | 55,978 / 76 | 53,290 / 9,445 | 53,456 / 9,864 |
+| SNP recall / precision | human, GIAB HG002 | *to be measured* | *to be measured* | *to be measured* |
+| indel recall / precision | human, GIAB HG002 | *to be measured* | *to be measured* | *to be measured* |
+| run time and peak memory, whole pipeline | 59 tomato accessions, about 5.5 reads a position, 32 Mb | *to be measured* [^speed] | *to be measured* | *to be measured* |
 
-The first invocation builds the image (~4 min); subsequent runs reuse
-the cached image.
+[^str]: Measured 2026-10-11. In this run pvc was given the true stutter rates rather than
+    fitting them. The full grid, one sample and 50, 5× to 60×, PCR and PCR-free, is in
+    [doc/devel/reports/implementations/str_edge_deletion_2026-10-11.md](doc/devel/reports/implementations/str_edge_deletion_2026-10-11.md).
+    To be rerun on the current version.
 
-### Running Claude Code in the container
+[^speed]: What exists so far is pvc alone, on one 18-core Apple laptop (2026-10-17): estimating
+    the parameters of the 59 accessions takes 16 minutes with a peak of 410 MB, then calling them
+    takes 33 seconds. The time to read the alignments is not included.
 
-```
-./scripts/claude.sh              # new Claude Code session
-./scripts/claude.sh --continue   # resume last session
-```
+## What it does
 
-The container acts as the sandbox: Claude can freely
-read/write/execute inside the mounted project directory but cannot
-touch anything else on the host, so `--dangerously-skip-permissions`
-is passed by default. Host `~/.claude.json` and `~/.claude/` are
-mounted so login and per-project auto-memory persist.
+- **Calls** SNPs, indels (up to 100 bp by default), and STRs with repeat units of 1 to 6 bases
+  spanning up to 100 bp by default.
+- **Lets you add samples to a cohort later** without re-reading the alignments of the samples you
+  already have. To do that, you generate intermediate pileup files, which are then reused for
+  the cohort calling.
+- **Estimates the calling model's priors from the data** before calling: base-quality calibration
+  and contamination for each read group, the inbreeding coefficient F of each sample,
+  the population's diversity, and stutter for each kind of repeat. They are written to a
+  parameters file that you can read, edit and reuse.
+- **Estimates contamination**: what share of each read group's reads came from another individual.
+  Calling then takes it into account.
+- **Flags hidden duplications**: places where two copies of a sequence exist in the genome but
+  only one in the reference, so both copies' reads pile onto one place and look like
+  heterozygous variants.
 
-### Design notes
+It does not call structural variants, satellite repeats longer than 100 bp, or deletions longer
+than 100 bp.
 
-- The project directory is bind-mounted at the **same absolute path**
-  inside and outside the container. This keeps paths consistent for
-  tools that embed `cwd` into state (notably Claude auto-memory).
-- Container builds write to `target-container/` instead of `target/`
-  so host and container don't invalidate each other's incremental
-  compilation state.
-- Rootless podman maps container UID 0 to the host user, so files
-  created inside the container appear with the correct ownership on
-  the host.
+## Install
 
-## Memory tuning
+pvc is installed from source for now. You need:
 
-The cohort `var-calling` driver opens one `PspReader` per sample per
-chromosome worker, each holding one decoded block live, so peak heap
-scales as
+- Rust 1.98 or newer, from [rustup](https://rustup.rs);
+- a C compiler (`cc` on Linux, the Xcode command-line tools on macOS).
 
 ```
-peak_RSS ≈ ~5 GB + n_threads × N × per_block × 7
+cargo install --locked --git https://github.com/JoseBlanca/pop_var_caller
 ```
 
-where `N` is the number of samples, `n_threads` is the rayon worker
-count (capped at `n_chromosomes`), and `per_block` is roughly
-`block-target-bytes × 7` (the writer's projected-byte threshold
-under-counts the live in-RAM footprint of decoded columns by about
-that factor).
+This puts the `pvc` binary in `~/.cargo/bin`. A prebuilt Linux binary for testing is planned.
 
-The PSP writer's `--block-target-bytes` knob on `pop_var_caller
-pileup` is the lever for this. Lower values cut peak heap; higher
-values shrink the .psp on disk. Wall time is essentially flat across
-the entire range. Sweep on tomato1 (N=18, T=4, real per-sample PSPs):
+## Quick start
 
-| `--block-target-bytes` | peak cohort RSS | cohort .psp size | wall  |
-|------------------------|----------------:|-----------------:|------:|
-| 16 MiB                 |         2501 MB |           183 MB | 10.4s |
-|  4 MiB                 |          757 MB |           189 MB | 10.3s |
-|  1 MiB (default)       |          261 MB |           206 MB | 10.6s |
-|  512 KiB               |          161 MB |           233 MB | 10.6s |
-|  256 KiB               |          108 MB |           246 MB | 10.9s |
-|   64 KiB               |           59 MB |           321 MB | 10.8s |
+pvc needs the reference FASTA the reads were aligned to, and coordinate-sorted, indexed BAM or
+CRAM files. Each file's read groups (`@RG`) must name their sample with `SM`.
 
-Picking a value:
+First, once per reference, find the reference's tandem repeats:
 
-- **Single-sample / archival** workflows pay only the on-disk axis —
-  dial up (4 MiB, 16 MiB) for the smallest .psp.
-- **Large-cohort joint genotyping** (N in the hundreds to thousands)
-  pays the cohort-step memory axis — start from the default and dial
-  down if the formula above projects past the memory budget.
+```
+pvc repeat-catalog --reference genome.fa
+```
 
-The knob is exposed only on `pileup` (it's a writer-side setting);
-the cohort subcommands read whatever block size each input was
-written with, no extra flag needed. The accepted range is 16 KiB
-to 16 MiB — values outside that are rejected at parse time. Below
-16 KiB zstd loses meaningful compression context; above 16 MiB sits
-the legacy hardcoded default that motivated this knob in the first
-place. The full per-stage rationale is in
-[doc/devel/specs/per_sample_pileup_format.md §"Block sizing"](doc/devel/specs/per_sample_pileup_format.md).
+Then call in one of two ways.
+
+**Direct mode: one step, with built-in parameter values.** Quickest; reads every sample's
+alignments in one run.
+
+```
+pvc call-from-alignments --reference genome.fa \
+    --alignment s1.bam --alignment s2.bam \
+    --defaults --output calls.vcf.gz
+```
+
+**psp mode: three steps, with parameters estimated from your data.** First summarise each
+sample's reads into a per-sample pileup file (*psp*), then estimate the parameters from the
+cohort, then call. A sample added later needs only its own psp.
+
+```
+pvc generate-psps --reference genome.fa --alignment s1.bam --output-dir psps/   # once per sample
+pvc estimate-parameters --reference genome.fa --psp psps/ --output cohort.parameters.toml
+pvc call-from-psps --reference genome.fa --psp psps/ \
+    --parameters cohort.parameters.toml --output calls.vcf.gz
+```
+
+`pvc <command> --help` describes every option. The [user guide](doc/user/calling.md) says which
+mode to choose: for inbred or structured material, use psp mode, because direct mode assumes
+every sample is outbred.
+
+## Documentation
+
+- **User guide** — how to do each task and which options to change: [doc/user/](doc/user/)
+  *(in preparation)*.
+- **Methods** — the statistical models and how they compare with other callers':
+  [doc/methods/](doc/methods/) *(in preparation)*.
+- **Contributing** — building, testing and the design documents:
+  [CONTRIBUTING.md](CONTRIBUTING.md) *(in preparation)*.
+
+## How it was built
+
+Most of pvc's code was written with an AI coding assistant (Claude Code). Each part of the
+caller was first specified in a design document ([doc/devel/ng/spec/](doc/devel/ng/spec/)), then
+implemented and reviewed, and checked against freebayes, GATK and HipSTR on real and simulated
+data. Where pvc adapts a method from another caller, it was ported from that caller's source
+code, which the repository keeps for reference.
 
 ## License
 
-Licensed under the MIT License — see [LICENSE](LICENSE) for the full
-text.
+MIT — see [LICENSE](LICENSE).
