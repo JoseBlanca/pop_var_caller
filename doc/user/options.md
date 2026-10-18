@@ -1,8 +1,7 @@
 # Options
 
-Most runs need only the options in [Calling](calling.md). This page covers the ones you may need
-for unusual material, and says when to change each. `pvc <command> --help` lists every option
-with its default.
+Most runs need only the options in [Calling](calling.md). This page covers some advanced or
+unusual ones. `pvc <command> --help` lists every option with its default.
 
 The calling options apply to both `call-from-alignments` and `call-from-psps` unless the table
 says otherwise.
@@ -12,7 +11,7 @@ says otherwise.
 | Option | Default | Change it when |
 |---|---|---|
 | `--ploidy` | 2 | your samples are haploid or polyploid. At most 16. In psp mode set it on `estimate-parameters`; the calling step takes it from the parameters file. |
-| `estimate-parameters --inbreeding` | estimated per sample | you know how the material was bred, for example `1` for fully inbred lines. It applies the same value to every sample. |
+| `estimate-parameters --inbreeding` | estimated per sample | you know the samples' inbreeding coefficient, for example `1` for fully inbred lines. It applies the same value to every sample. |
 | `estimate-parameters --skip-contamination` | contamination estimated | the samples are known to be clean. |
 
 ## Which sites are written
