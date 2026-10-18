@@ -125,3 +125,31 @@ improve. The rise is reads from outside stutter's reach, as the truth count abov
 and smoothed; a heavier stutter tail is not needed. The largest input to it at homopolymers is the
 minority flank-deletion spellings (about 1 in 100 reads), and whether those are reads from
 elsewhere or a spelling artefact of the mapper at the tract's edge is not yet known.
+
+## Addendum 2: the minority flank-deletion reads are not reads from elsewhere
+
+Script `flank_reads.py`. At homopolymer tracts (30x, psps generated with the held edge fix), reads
+spelled with a flank deletion whose spelling carries under 20% of its tract's reads — what calling
+sends to the outlier term — number 1,967. For each, its total length change (the tract's change
+minus the flank bases it deletes) was compared with the tract's true allele lengths:
+
+| truth at the tract | total length is a true allele's | total length is no true allele's |
+|---|---|---|
+| homozygous reference | — | 684 (32 in 10,000 of those tracts' reads) |
+| heterozygous | 558 | 170 |
+| homozygous deletion | 461 | 81 |
+| homozygous insertion | — | 13 |
+
+In every one the deleted flank base differs from the repeat's base (907 on the left, 1,060 on the
+right). 10x gives the same picture at a third of the counts.
+
+- **About half are a true allele spelled at the tract's edge**: the deletion is real, and the mapper
+  placed it on the flank base — the mechanism of the spelling defect behind the held edge fix.
+- **The other half are one-base length errors beside the tract**, mostly at homozygous-reference
+  tracts, where the tract reads at full length and the neighbouring base is lost. They are errors of
+  stutter's size placed outside the tract, not reads from another locus.
+
+**So they should not raise the stray share.** Both kinds are a question of how a read is compared
+with an allele: scored by its total length, each would be a match or a one-step slip. That belongs
+to the edge fix's spec amendment, not to the outlier share; the share fitted without them is the
+one to carry forward (30x homopolymers: 1.5–2.3 in 1,000 at 9–15 repeats, 10–15 in 1,000 at 21–26).
