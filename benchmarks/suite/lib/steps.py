@@ -139,7 +139,7 @@ class Runner:
         }
         tmp = os.path.join(directory, DONE + ".tmp")
         with open(tmp, "w") as fh:
-            json.dump(record, fh, indent=1)
+            json.dump(record, fh, indent=1, default=str)
         os.replace(tmp, os.path.join(directory, DONE))
         self.done_count += 1
         if result.get("measurement"):

@@ -1,0 +1,183 @@
+"""How each caller is run, so that every benchmark runs it the same way.
+
+Each function returns shell commands, as (label, command) pairs for measure.run_commands, and the
+caller of the function decides how many run at once. The parallelism follows each caller's own
+documentation (plan §3.4):
+
+- one-sample tools run one process per sample, as many at a time as the suite has cores: GATK
+  HaplotypeCaller making GVCFs, and pvc `generate-psps`;
+- cohort tools are one process using every core: pvc `estimate-parameters`, `call-from-psps`,
+  `call-from-alignments`, and GATK GenomicsDBImport and GenotypeGVCFs;
+- freebayes has no threads, so it runs one process per block of regions, as `freebayes-parallel`
+  does, and the blocks' VCFs are joined.
+"""
+
+import os
+import shlex
+
+q = shlex.quote
+
+
+# ---- pvc --------------------------------------------------------------------------------------
+
+def pvc_catalog(ctx, reference, out, log):
+    return ("repeat_catalog",
+            f"{q(ctx.pvc_bin)} repeat-catalog --reference {q(reference)} --output {q(out)} "
+            f"--log {q(log)} --force")
+
+
+def pvc_call_from_alignments(ctx, reference, catalog, alignments, regions, out, log,
+                             parameters=None):
+    alignment_args = " ".join(f"--alignment {q(a)}" for a in alignments)
+    source = f"--parameters {q(parameters)}" if parameters else "--defaults"
+    regions_arg = f"--regions {q(regions)}" if regions else ""
+    return ("call_from_alignments",
+            f"{q(ctx.pvc_bin)} call-from-alignments --reference {q(reference)} "
+            f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} "
+            f"--threads {ctx.threads} --output {q(out)} --log {q(log)} --force")
+
+
+def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, out_dir, log_dir):
+    """One command per sample. `alignments_by_sample` maps sample name to its alignment files."""
+    cmds = []
+    regions_arg = f"--regions {q(regions)}" if regions else ""
+    for sample, files in alignments_by_sample.items():
+        alignment_args = " ".join(f"--alignment {q(a)}" for a in files)
+        cmds.append((f"generate_psps.{sample}",
+                     f"{q(ctx.pvc_bin)} generate-psps --reference {q(reference)} "
+                     f"--catalog {q(catalog)} {alignment_args} {regions_arg} "
+                     f"--output-dir {q(out_dir)} --force"))
+    return cmds
+
+
+def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log):
+    psp_args = " ".join(f"--psp {q(p)}" for p in psps)
+    return ("estimate_parameters",
+            f"{q(ctx.pvc_bin)} estimate-parameters --reference {q(reference)} "
+            f"--catalog {q(catalog)} {psp_args} --threads {ctx.threads} --output {q(out)} "
+            f"--log {q(log)} --force")
+
+
+def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None):
+    psp_args = " ".join(f"--psp {q(p)}" for p in psps)
+    source = f"--parameters {q(parameters)}" if parameters else "--defaults"
+    return ("call_from_psps",
+            f"{q(ctx.pvc_bin)} call-from-psps --reference {q(reference)} --catalog {q(catalog)} "
+            f"{psp_args} {source} --threads {ctx.threads} --output {q(out)} --log {q(log)} "
+            f"--force")
+
+
+# ---- GATK -------------------------------------------------------------------------------------
+
+def _gatk(ctx, tool, args, heap=None):
+    return (f"{q(ctx.gatk)} --java-options {q('-Xmx' + (heap or ctx.java_heap))} {tool} {args} "
+            f"--tmp-dir {q(os.path.join(ctx.results_root, 'java_tmp'))}")
+
+
+def gatk_haplotypecaller(ctx, reference, alignment, intervals, out, threads):
+    """One sample straight to a VCF, using `threads` pair-HMM threads (GATK's native threading)."""
+    return ("haplotypecaller",
+            _gatk(ctx, "HaplotypeCaller",
+                  f"-R {q(reference)} -I {q(alignment)} -L {q(intervals)} -O {q(out)} "
+                  f"--native-pair-hmm-threads {threads}"))
+
+
+def gatk_gvcfs(ctx, reference, alignment_by_sample, intervals, out_dir):
+    """One single-threaded HaplotypeCaller process per sample, each writing `<sample>.g.vcf.gz`."""
+    cmds = []
+    heap = "2g"
+    for sample, alignment in alignment_by_sample.items():
+        out = os.path.join(out_dir, f"{sample}.g.vcf.gz")
+        cmds.append((f"haplotypecaller.{sample}",
+                     _gatk(ctx, "HaplotypeCaller",
+                           f"-R {q(reference)} -I {q(alignment)} -L {q(intervals)} -O {q(out)} "
+                           f"-ERC GVCF --native-pair-hmm-threads 1", heap=heap)))
+    return cmds
+
+
+def gatk_joint(ctx, reference, gvcfs, intervals, workspace, out):
+    """GenomicsDBImport then GenotypeGVCFs; returns two commands to run one after the other."""
+    vs = " ".join(f"-V {q(g)}" for g in gvcfs)
+    imp = ("genomicsdbimport",
+           _gatk(ctx, "GenomicsDBImport",
+                 f"{vs} -L {q(intervals)} --merge-input-intervals "
+                 f"--genomicsdb-workspace-path {q(workspace)} --reader-threads {ctx.threads}",
+                 heap="8g"))
+    gen = ("genotypegvcfs",
+           _gatk(ctx, "GenotypeGVCFs",
+                 f"-R {q(reference)} -V gendb://{workspace} -L {q(intervals)} -O {q(out)}",
+                 heap="8g"))
+    return imp, gen
+
+
+# ---- freebayes --------------------------------------------------------------------------------
+
+def split_regions(regions_bed, out_dir, blocks):
+    """Split a BED into about `blocks` files of similar total length, keeping intervals whole.
+
+    Intervals longer than 200 kb are cut into 200 kb pieces first, so one long interval cannot
+    become one slow block.
+    """
+    pieces = []
+    with open(regions_bed) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith(("#", "track", "browser")):
+                continue
+            chrom, start, end = line.split()[:3]
+            start, end = int(start), int(end)
+            while start < end:
+                stop = min(end, start + 200_000)
+                pieces.append((chrom, start, stop))
+                start = stop
+    total = sum(e - s for _, s, e in pieces)
+    target = max(1, total // max(1, blocks))
+    os.makedirs(out_dir, exist_ok=True)
+    files, current, size = [], [], 0
+    for piece in pieces:
+        current.append(piece)
+        size += piece[2] - piece[1]
+        if size >= target:
+            files.append(current)
+            current, size = [], 0
+    if current:
+        files.append(current)
+    paths = []
+    for i, block in enumerate(files):
+        path = os.path.join(out_dir, f"block{i:04d}.bed")
+        with open(path, "w") as fh:
+            for chrom, s, e in block:
+                fh.write(f"{chrom}\t{s}\t{e}\n")
+        paths.append(path)
+    return paths
+
+
+def freebayes_blocks(reference, alignments, block_beds, out_dir):
+    """One freebayes process per block of regions, all samples together."""
+    alignment_args = " ".join(q(a) for a in alignments)
+    cmds = []
+    for bed in block_beds:
+        name = os.path.splitext(os.path.basename(bed))[0]
+        out = os.path.join(out_dir, f"{name}.vcf")
+        cmds.append((f"freebayes.{name}",
+                     f"freebayes -f {q(reference)} -t {q(bed)} --ploidy 2 {alignment_args} "
+                     f"> {q(out)}"))
+    return cmds
+
+
+def freebayes_join(block_vcfs, out):
+    """Join the blocks' VCFs into one sorted, compressed, indexed VCF."""
+    inputs = " ".join(q(v) for v in block_vcfs)
+    return ("freebayes_join",
+            f"bcftools concat --no-version {inputs} | bcftools sort -Oz -o {q(out)} "
+            f"&& bcftools index -t {q(out)}")
+
+
+# ---- inputs -----------------------------------------------------------------------------------
+
+def downsample(reference, alignment, fraction, out, seed=42):
+    """`samtools view -s`, the way the GIAB panel's depths were made, to a BAM with an index."""
+    sub = f"{seed + fraction:.10f}" if fraction < 1 else None
+    sample_arg = f"-s {sub}" if sub else ""
+    return ("downsample",
+            f"samtools view -@ 4 -T {q(reference)} -b {sample_arg} -o {q(out)} {q(alignment)} "
+            f"&& samtools index {q(out)}")

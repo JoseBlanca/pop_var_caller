@@ -52,8 +52,10 @@ def selected_benchmarks(ctx):
 
 def build_pvc(ctx):
     ctx.log("building pvc (release)")
-    subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "pvc"],
-                   cwd=ctx.project_dir, check=True)
+    out = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "pvc"],
+                         cwd=ctx.project_dir, capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit("pvc did not build:\n" + out.stderr[-4000:])
 
 
 def status(ctx, names):
