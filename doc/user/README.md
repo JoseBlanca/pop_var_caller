@@ -6,7 +6,7 @@ statistical models behind the calls, see [doc/methods/](../methods/) *(in prepar
 ## Contents
 
 - [Preparing the inputs](inputs.md): the FASTA reference and how to build its repeat catalogue,
-  what pvc requires of the BAM or CRAM files, which reads it ignores, and the open-file limit.
+  what pvc requires of the BAM or CRAM files, and which reads it ignores.
 - [Calling](calling.md): the two ways to call, direct mode and psp mode, and how to choose
   between them; adding samples to a cohort; large cohorts; outputs, logs and scratch space.
 - [Estimated parameters](parameters.md): the parameters pvc estimates from your reads and uses as

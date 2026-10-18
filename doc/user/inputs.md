@@ -1,13 +1,14 @@
 # Preparing the inputs
 
-pvc needs three things: the reference genome the reads were aligned to, its repeat catalogue,
-and one or more alignment files. It checks all of them before it reads any data, and a run that
-cannot use an input refuses to start and says why.
+The required input files are:
+
+- the reference genome the reads were aligned to,
+- its repeat catalogue, and
+- one or more alignment files.
 
 ## The reference
 
-A FASTA file. If it has no `.fai` index beside it, pvc builds one. pvc reads the whole FASTA once
-at the start of each run and checks it against its index.
+A FASTA file. If it has no `.fai` index beside it, pvc builds one.
 
 ## The repeat catalogue
 
@@ -18,18 +19,12 @@ pvc repeat-catalog --reference genome.fa
 ```
 
 This writes `genome.fa.repeats.parquet` beside the reference, and every later command looks for
-it there. If the reference's directory is read-only, write it elsewhere with `--output` and pass
-`--catalog` to every later command. A catalogue built on another reference is refused.
+it there. If the reference's directory is read-only, you can write it elsewhere with `--output`
+and pass `--catalog` to every later command.
 
 `repeat-catalog` uses one thread by default, because each thread holds a whole chromosome in
 memory: six threads on the human genome need more than 16 GB. One thread builds the human
 catalogue in under two minutes. The catalogue is the same at any thread count.
-
-`repeat-catalog` also has options that change how repeats are found (under *Advanced* in its
-`--help`). Leave them alone. A catalogue built with stricter settings than a calling run asks
-for, such as a higher `--min-copies`, is refused. But a catalogue built with other scoring
-weights (`--match-reward`, `--mismatch-penalty`) is accepted without complaint, and the calls
-quietly change.
 
 ## The alignments
 
@@ -38,7 +33,7 @@ BAM or CRAM files, with these properties:
 - **Coordinate-sorted**, as declared in the header (`@HD SO:coordinate`).
 - **Indexed**: `.csi` or `.bai` for BAM, `.crai` for CRAM. A `.bai` cannot index chromosomes
   longer than about 537 Mb; use `.csi` for those genomes. `--build-index-if-missing` builds a
-  missing index, but on a CRAM whose slices span chromosomes it can crash, so build CRAM indexes
+  missing index, but it can crash on a CRAM whose slices span chromosomes, so build CRAM indexes
   with `samtools index` instead.
 - **Aligned to the same reference**: the `@SQ` lines must match the FASTA in chromosome names,
   lengths and order, and in MD5 checksum where both carry one.
@@ -55,9 +50,9 @@ the sample, the read-group `ID` and the file name.
 In psp mode the sample name becomes a file name, so a name that is empty, is `.` or `..`, or
 contains `/` is refused. Dots elsewhere in a name, as in `S.1`, are fine.
 
-## Reads pvc ignores
+## Read filters
 
-These filters are fixed:
+pvc ignores these reads:
 
 - duplicates, QC failures, secondary, supplementary and unmapped reads;
 - mapping quality below 20;
