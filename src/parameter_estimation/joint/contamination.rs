@@ -749,6 +749,12 @@ fn markers(
     config: &ContaminationConfig,
 ) -> Vec<Marker> {
     let count = samples.len();
+    // **A cohort smaller than a marker's quorum has no marker**, so nothing below is built for it:
+    // the position-length arrays below hold up to 29 bytes a position at once, 58 MB at the
+    // two-million-position budget, whatever the cohort.
+    if count < MIN_SAMPLES_WITH_DATA {
+        return Vec::new();
+    }
     let positions = positions_in(samples);
     let major = major_alleles(samples, positions);
 
