@@ -24,6 +24,7 @@ class Context:
         self.only = _split(args.only)
         self.depths = _split(args.depth)
         self.callers = _split(args.caller)
+        self.external_config = getattr(args, "external_config", None)
         self.pvc_bin = os.path.join(PROJECT_DIR, "target-container", "release", "pvc")
         self.gatk = os.environ.get("GATK_BIN", "/opt/gatk/gatk")
         self.rtg_jar = os.path.join(PROJECT_DIR, "tmp", "tools", "rtg-tools-3.13", "RTG.jar")

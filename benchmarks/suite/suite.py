@@ -29,6 +29,7 @@ def parse_args():
     p.add_argument("--rerun-competitors", action="store_true")
     p.add_argument("--rescore", action="store_true", help="redo every scoring step")
     p.add_argument("--redo-step", action="append", help="redo this step (its name), any kind")
+    p.add_argument("--external-config", help="configuration file of an external benchmark")
     p.add_argument("--summary-only", action="store_true")
     p.add_argument("--status", action="store_true")
     p.add_argument("--no-build", action="store_true")
@@ -63,6 +64,15 @@ def build_pvc(ctx):
         sys.exit("pvc did not build:\n" + out.stderr[-4000:])
 
 
+def _steps(ctx, name):
+    try:
+        return BENCHMARKS[name].steps(ctx)
+    except SuiteError:
+        raise
+    except FileNotFoundError as err:
+        raise SuiteError(f"{name}: {err}")
+
+
 def status(ctx, names):
     runner = Runner(ctx)
     for name in names:
@@ -92,7 +102,7 @@ def main():
         try:
             for name in names:
                 ctx.log(f"== {name}")
-                for step in BENCHMARKS[name].steps(ctx):
+                for step in _steps(ctx, name):
                     if ctx.selected(step):
                         runner.run(step)
         except StopRequested:
