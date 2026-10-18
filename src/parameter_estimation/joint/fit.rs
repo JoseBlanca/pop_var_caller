@@ -3694,10 +3694,16 @@ fn expectation_pass(
     // `reduce` may join them in any tree it likes, which is wrong for the per-position lists and,
     // for the sums, makes their last bits depend on the pool.
     if collect_noisy_posterior {
-        // The reported pass: the chunks are collected in position order and added once each into
-        // a total sized for the whole census, so each per-position list is copied once.
+        // The reported pass: the chunks are added once each, in position order, into a total sized
+        // for the whole census, so each per-position list is copied once.
+        //
+        // **A window of chunks at a time, not every chunk at once.** Collecting all of them before
+        // adding any held every chunk's per-position lists — a second copy of the whole census's,
+        // 8 MB at two million positions — and every chunk's sums, whose genotype counts and
+        // information grow with the cohort: about a kilobyte a sample a chunk, so 0.2 to 0.3 GB of
+        // chunks at 2,000 samples. The window only decides how many chunks are held at once; they are still
+        // added in position order, so the totals are the same bits at any window and any pool.
         use rayon::prelude::*;
-        let chunks: Vec<Statistics> = bounds.par_iter().copied().map(one_chunk).collect();
         let mut into = empty();
         into.noisy_posterior.reserve(positions);
         if collect_genotype_posterior {
@@ -3705,8 +3711,12 @@ fn expectation_pass(
                 .reserve(positions * samples.len() * 3);
             into.duplicated_posterior.reserve(positions);
         }
-        for chunk in &chunks {
-            into.absorb(chunk);
+        let window = 2 * rayon::current_num_threads().max(1);
+        for some in bounds.chunks(window) {
+            let chunks: Vec<Statistics> = some.par_iter().copied().map(one_chunk).collect();
+            for chunk in &chunks {
+                into.absorb(chunk);
+            }
         }
         return into;
     }
