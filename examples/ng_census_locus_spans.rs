@@ -119,14 +119,11 @@ fn run(
             generic_target: (analysed_bases / keep_one_in).max(1),
             ssr_cap: CensusSelection::SHIPPED.ssr_cap,
         },
-        &catalog,
+        Some(&catalog),
         &analysed,
         &unambiguous,
         &with_checksums,
-        segmentation
-            .inputs()
-            .repeat_tract_criteria()
-            .expect("the ground was sorted with a catalog"),
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     drop(catalog);
     let kept = plan.loci.generic();

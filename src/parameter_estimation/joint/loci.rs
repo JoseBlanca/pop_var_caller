@@ -483,6 +483,19 @@ impl PartialEq for CatalogBuildSettings {
 /// purity floor, and the `==` that `derive(PartialEq)` generates answers `false` for two
 /// `NaN` floors that came from the same configuration file — which is the one answer this
 /// check must not give, since it would refuse a run that is in fact identical.
+/// [`same_criteria`], for two runs either of which may have asked no catalog anything: two that
+/// asked nothing agree, and one that asked against one that did not do not.
+fn same_optional_criteria(
+    left: Option<&StrRepeatCriteria>,
+    right: Option<&StrRepeatCriteria>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_criteria(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn same_criteria(left: &StrRepeatCriteria, right: &StrRepeatCriteria) -> bool {
     if left.classification.min_purity.to_bits() != right.classification.min_purity.to_bits() {
         return false;
@@ -514,11 +527,16 @@ pub struct SelectionTerms {
     pub reference: ReferenceDigest,
     /// Which analysed regions.
     pub analysed_regions: RegionSetDigest,
-    /// What the catalog file was built at.
-    pub catalog_built_under: CatalogBuildSettings,
+    /// What the catalog file was built at, or `None` for a run that read no catalog
+    /// (`--generic-path-only`, `command_line.md` §4.4.1).
+    ///
+    /// **This and [`Self::ssr_criteria`] are present together or absent together**: a run reads a
+    /// catalog and asks it something, or reads none and asks nothing.
+    pub catalog_built_under: Option<CatalogBuildSettings>,
     /// What *this run* asked the catalog for — a reader chooses its floors freely within
-    /// what the file was built at, so this is a second value and not the one above.
-    pub ssr_criteria: StrRepeatCriteria,
+    /// what the file was built at, so this is a second value and not the one above. `None` for a
+    /// run that read no catalog.
+    pub ssr_criteria: Option<StrRepeatCriteria>,
     /// The generic target position count.
     pub generic_target: u64,
     /// The STR per-stratum cap.
@@ -543,7 +561,7 @@ impl PartialEq for SelectionTerms {
             && reference == &other.reference
             && analysed_regions == &other.analysed_regions
             && catalog_built_under == &other.catalog_built_under
-            && same_criteria(ssr_criteria, &other.ssr_criteria)
+            && same_optional_criteria(ssr_criteria.as_ref(), other.ssr_criteria.as_ref())
             && generic_target == &other.generic_target
             && ssr_cap == &other.ssr_cap
     }
@@ -580,7 +598,7 @@ impl SelectionTerms {
         if catalog_built_under != &other.catalog_built_under {
             return Some("repeat catalog build settings");
         }
-        if !same_criteria(ssr_criteria, &other.ssr_criteria) {
+        if !same_optional_criteria(ssr_criteria.as_ref(), other.ssr_criteria.as_ref()) {
             return Some("STR routing criteria");
         }
         if generic_target != &other.generic_target {
@@ -819,43 +837,66 @@ impl CensusLociDigest {
 /// stretch of real sequence by construction, and cutting the scope at every `N` run would
 /// split scope spans without changing which tracts they hold.
 ///
+/// **Under `--generic-path-only` there is no catalog**, and `catalog` and the terms' criteria are
+/// both `None`: the generic domain is the analysed regions, masked, whole — every repeat is
+/// generic ground in that run, so none is cut out — and there is no STR sample. `contig_names` are
+/// the reference's, in its order, which a catalog checked against it shares.
+///
 /// # Errors
 ///
 /// Passes through the catalog's refusal when the run asks for a copy floor or a flank the
 /// file was not built at — the catalog refuses rather than serving a short list, and a short
 /// list here is a stratum that looks depleted rather than unasked for.
+///
+/// # Panics
+///
+/// When `catalog` and the terms' criteria are not both present or both absent: the caller
+/// asked a catalog nothing, or recorded criteria for a catalog it did not read.
 pub fn select_kept_loci(
     terms: &SelectionTerms,
-    catalog: &RepeatCatalog,
+    catalog: Option<&RepeatCatalog>,
+    contig_names: &[String],
     analysed: &SelectableRegions,
     unambiguous: &SelectableRegions,
 ) -> Result<CensusLoci, SelectionError> {
-    let names: Vec<String> = catalog.contigs().iter().map(|c| c.name.clone()).collect();
-
     let masked = analysed.intersect(unambiguous);
-    let mut generic_spans = Vec::new();
-    for segment in catalog
-        .genome_segments(&terms.ssr_criteria, ReadScope::Regions(masked.spans()))
-        .map_err(SelectionError::Catalog)?
-    {
-        let segment = segment.map_err(SelectionError::Catalog)?;
-        if segment.kind == RegionKind::Generic {
-            generic_spans.push(segment.region);
+    let (generic_domain, ssr_stratum_counts, ssr) = match (catalog, &terms.ssr_criteria) {
+        (Some(catalog), Some(criteria)) => {
+            let mut generic_spans = Vec::new();
+            for segment in catalog
+                .genome_segments(criteria, ReadScope::Regions(masked.spans()))
+                .map_err(SelectionError::Catalog)?
+            {
+                let segment = segment.map_err(SelectionError::Catalog)?;
+                if segment.kind == RegionKind::Generic {
+                    generic_spans.push(segment.region);
+                }
+            }
+            let (ssr_stratum_counts, ssr) = catalog
+                .sample_loci_per_stratum(
+                    criteria,
+                    ReadScope::Regions(analysed.spans()),
+                    terms.ssr_cap,
+                    terms.seed,
+                )
+                .map_err(SelectionError::Catalog)?;
+            (
+                SelectableRegions::new(generic_spans)?,
+                ssr_stratum_counts,
+                ssr,
+            )
         }
-    }
-    let generic_domain = SelectableRegions::new(generic_spans)?;
+        (None, None) => (masked, StratumCounts::default(), StratumSample::default()),
+        (catalog, criteria) => panic!(
+            "a selection reads a catalog exactly when its terms record criteria for one; given \
+             a catalog: {}, criteria: {}",
+            catalog.is_some(),
+            criteria.is_some()
+        ),
+    };
 
     let threshold = threshold_for(terms.generic_target, generic_domain.total_length());
-    let generic = select_generic_positions(&generic_domain, &names, terms.seed, threshold)?;
-
-    let (ssr_stratum_counts, ssr) = catalog
-        .sample_loci_per_stratum(
-            &terms.ssr_criteria,
-            ReadScope::Regions(analysed.spans()),
-            terms.ssr_cap,
-            terms.seed,
-        )
-        .map_err(SelectionError::Catalog)?;
+    let generic = select_generic_positions(&generic_domain, contig_names, terms.seed, threshold)?;
 
     Ok(CensusLoci {
         generic,
@@ -1134,12 +1175,12 @@ mod tests {
             seed: 42,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
-            catalog_built_under: CatalogBuildSettings {
+            catalog_built_under: Some(CatalogBuildSettings {
                 criteria: StrRepeatCriteria::default(),
                 scan: ScanParams::default(),
                 tool_version: "0.1.0".to_string(),
-            },
-            ssr_criteria: StrRepeatCriteria::default(),
+            }),
+            ssr_criteria: Some(StrRepeatCriteria::default()),
             generic_target: 2_000_000,
             ssr_cap: 1_000,
         }
@@ -1150,7 +1191,11 @@ mod tests {
         // The one case `derive(PartialEq)` gets wrong: a run refusing itself because a
         // configuration file put a NaN in the purity floor of both copies.
         let mut left = terms();
-        left.ssr_criteria.classification.min_purity = f32::NAN;
+        left.ssr_criteria
+            .as_mut()
+            .expect("the fixture asked a catalog")
+            .classification
+            .min_purity = f32::NAN;
         let right = left.clone();
         assert_eq!(left, right);
         assert_eq!(left.first_disagreement(&right), None);
@@ -1160,7 +1205,12 @@ mod tests {
     fn a_different_purity_floor_is_a_different_selection() {
         let left = terms();
         let mut right = left.clone();
-        right.ssr_criteria.classification.min_purity += 0.01;
+        right
+            .ssr_criteria
+            .as_mut()
+            .expect("the fixture asked a catalog")
+            .classification
+            .min_purity += 0.01;
         assert_ne!(left, right);
         assert_eq!(
             left.first_disagreement(&right),
@@ -1191,7 +1241,11 @@ mod tests {
         );
 
         let mut built = left.clone();
-        built.catalog_built_under.tool_version = "0.2.0".to_string();
+        built
+            .catalog_built_under
+            .as_mut()
+            .expect("the fixture read a catalog")
+            .tool_version = "0.2.0".to_string();
         assert_eq!(
             left.first_disagreement(&built),
             Some("repeat catalog build settings")

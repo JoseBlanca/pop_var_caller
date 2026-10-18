@@ -686,33 +686,47 @@ pub fn open_the_censuses(
     // moves one of them — on tomato about 1 position in 400 is kept (spec §2) — so it is the
     // backstop and not the check.
     let analysed = cohort.analysed_regions().clone();
-    let (setting, walked_with) = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?;
-    let criteria = walked_with.repeat_tract_criteria.clone();
-    let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
-    let catalog = run_ground::open_catalog(&catalog_path, &args.reference, &with_checksums)?;
-    // **The catalog against the psps, before a segment is cut** (spec §6). Cut with the psps'
-    // criteria, a catalog that is not theirs can fail as one too coarse to serve them — true, and
-    // a message about the file's contents where the fault is which file was named.
-    refuse_a_catalog_the_psps_were_not_walked_with(
-        &catalog_path,
-        catalog.header(),
-        &walked_with.catalog,
-    )?;
-    let segmentation = run_ground::segments_cut_from(
-        &catalog,
-        &catalog_path,
-        setting,
-        &criteria,
-        run_ground::CriteriaSource::ThePspHeaders,
-        &analysed,
-    )?;
+    // **Psps written with `--generic-path-only` read no catalog**, and neither does this run: its
+    // census keeps ordinary sequence only, and its fit has no repeat tract to fit stutter from, so
+    // the file it writes holds an empty stutter section (`command_line.md` §4.4.1).
+    let (catalog, segmentation) =
+        match run_ground::sorting_of_the_psps(cohort.segmentation_inputs()) {
+            Some((setting, walked_with)) => {
+                let criteria = walked_with.repeat_tract_criteria.clone();
+                let catalog_path =
+                    run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+                let catalog =
+                    run_ground::open_catalog(&catalog_path, &args.reference, &with_checksums)?;
+                // **The catalog against the psps, before a segment is cut** (spec §6). Cut with the psps'
+                // criteria, a catalog that is not theirs can fail as one too coarse to serve them — true, and
+                // a message about the file's contents where the fault is which file was named.
+                refuse_a_catalog_the_psps_were_not_walked_with(
+                    &catalog_path,
+                    catalog.header(),
+                    &walked_with.catalog,
+                )?;
+                let segmentation = run_ground::segments_cut_from(
+                    &catalog,
+                    &catalog_path,
+                    setting,
+                    &criteria,
+                    run_ground::CriteriaSource::ThePspHeaders,
+                    &analysed,
+                )?;
+                (Some(catalog), segmentation)
+            }
+            None => {
+                run_ground::refuse_a_catalog_the_psps_never_read(args.catalog.as_deref())?;
+                (None, run_ground::segments_without_a_catalog(&analysed))
+            }
+        };
     let plan = CensusPlan::of_run(
         CensusSelection::SHIPPED,
-        &catalog,
+        catalog.as_ref(),
         &analysed,
         &unambiguous,
         &with_checksums,
-        &criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )
     .map_err(|source| EstimateParametersCliError::CensusNotPlanned {
         source: Box::new(source),

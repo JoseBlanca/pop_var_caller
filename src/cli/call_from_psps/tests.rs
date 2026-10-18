@@ -192,6 +192,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
     let psps = cohort.directory.path().join("psps");
     run_generate_psps(&GeneratePspsArgs {
         call_satellites: false,
+        generic_path_only: false,
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
@@ -304,6 +305,7 @@ fn a_cohort_of_psps_that_disagree_about_the_criteria_is_refused_by_the_command()
     let strictly_typed = cohort.directory.path().join("psps-strict");
     run_generate_psps(&GeneratePspsArgs {
         call_satellites: false,
+        generic_path_only: false,
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         // **`alpha` alone**, since that is the only psp of this walk the cohort below uses.
@@ -350,6 +352,7 @@ fn a_cohort_is_called_under_the_repeat_settings_its_psps_were_written_with() {
     let psps = cohort.directory.path().join("psps-pure");
     run_generate_psps(&GeneratePspsArgs {
         call_satellites: false,
+        generic_path_only: false,
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),

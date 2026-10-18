@@ -199,14 +199,11 @@ fn run(
     };
     let plan = CensusPlan::of_run(
         selection,
-        &catalog,
+        Some(&catalog),
         &analysed,
         &unambiguous,
         &with_checksums,
-        segmentation
-            .inputs()
-            .repeat_tract_criteria()
-            .expect("the ground was sorted with a catalog"),
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     drop(catalog);
 

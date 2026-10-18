@@ -251,6 +251,28 @@ pub struct CallFromAlignmentsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub call_satellites: bool,
 
+    /// Call every repeat with the SNP/indel model, and read no repeat catalogue. Refused together
+    /// with --catalog, --call-satellites and the settings of what counts as a repeat.
+    ///
+    /// This gives up the repeat model everywhere: repeat length variants are called as indels, and
+    /// on satellites the length variation mostly stays uncalled, because reads that disagree about
+    /// a long repeat's length make loci wider than --max-locus-span, which are not called. For a
+    /// reference with no catalogue, or a comparison with a caller that has no repeat model.
+    #[arg(
+        long,
+        help_heading = "Advanced",
+        conflicts_with_all = [
+            "catalog",
+            "min_copies",
+            "min_period",
+            "max_period",
+            "max_str_len",
+            "max_str_bundle_len",
+            "min_purity",
+        ]
+    )]
+    pub generic_path_only: bool,
+
     /// The fewest repeat-unit copies a stretch needs to be called as a repeat: six
     /// comma-separated numbers, for repeat units of 1 to 6 bases.
     ///
@@ -494,7 +516,10 @@ fn ground_request(args: &CallFromAlignmentsArgs) -> run_ground::GroundRequest<'_
             max_str_bundle_len: args.max_str_bundle_len,
             min_purity: args.min_purity,
         },
-        setting: crate::run::RepeatGroundSetting::from_options(args.call_satellites, false),
+        setting: crate::run::RepeatGroundSetting::from_options(
+            args.call_satellites,
+            args.generic_path_only,
+        ),
     }
 }
 
@@ -524,6 +549,10 @@ pub fn run_call_from_alignments(
             .num_threads(args.threads)
             .build_global();
     }
+
+    // **`--call-satellites` and `--generic-path-only` together are refused here**, before the
+    // reference is read (`command_line.md` §4.4.1).
+    run_ground::setting_of_the_options(args.call_satellites, args.generic_path_only)?;
 
     // **A target that is not a fraction is refused before anything else looks at it.** `clap`
     // parses any `f64`, so `7`, `inf` and `nan` all arrive here, and the type is what says which

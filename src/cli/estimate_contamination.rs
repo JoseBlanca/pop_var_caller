@@ -656,18 +656,25 @@ fn prepare(args: &EstimateContaminationArgs) -> Result<Prepared, EstimateContami
         seed: args.seed,
         reference: ReferenceDigest::of(&info).map_err(EstimateContaminationCliError::Selection)?,
         analysed_regions: RegionSetDigest::of(&analysed),
-        catalog_built_under: CatalogBuildSettings::of(&catalog),
-        ssr_criteria: criteria.clone(),
+        catalog_built_under: Some(CatalogBuildSettings::of(&catalog)),
+        ssr_criteria: Some(criteria.clone()),
         generic_target: args.kept_positions,
         // **No repeat tracts at all.** Contamination is fitted on ordinary positions; a cap of
         // zero keeps none, so nothing about a tract is recorded, walked or fitted.
         ssr_cap: 0,
     };
-    let kept =
-        select_kept_loci(&terms, &catalog, &analysed, &unambiguous).map_err(|e| match e {
-            SelectionError::Catalog(inner) => EstimateContaminationCliError::Catalog(inner),
-            other => EstimateContaminationCliError::Selection(other),
-        })?;
+    let contig_names: Vec<String> = catalog.contigs().iter().map(|c| c.name.clone()).collect();
+    let kept = select_kept_loci(
+        &terms,
+        Some(&catalog),
+        &contig_names,
+        &analysed,
+        &unambiguous,
+    )
+    .map_err(|e| match e {
+        SelectionError::Catalog(inner) => EstimateContaminationCliError::Catalog(inner),
+        other => EstimateContaminationCliError::Selection(other),
+    })?;
     if kept.generic().is_empty() {
         return Err(EstimateContaminationCliError::NothingToKeep {
             analysed: analysed.total_length().get(),

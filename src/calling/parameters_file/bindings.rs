@@ -893,12 +893,12 @@ fn a_runs_selection_terms() -> SelectionTerms {
         seed: 42,
         reference: ReferenceDigest([7; 16]),
         analysed_regions: RegionSetDigest([9; 16]),
-        catalog_built_under: CatalogBuildSettings {
+        catalog_built_under: Some(CatalogBuildSettings {
             criteria: built_under,
             scan: ScanParams::default(),
             tool_version: "0.1.0".to_string(),
-        },
-        ssr_criteria: StrRepeatCriteria::default(),
+        }),
+        ssr_criteria: Some(StrRepeatCriteria::default()),
         generic_target: 2_000_000,
         ssr_cap: 1_000,
     }
@@ -987,11 +987,18 @@ mod tests {
                 selection.analysed_regions = RegionSetDigest([10; 16]);
             }),
             ("what the catalog was built at", |selection, _| {
-                selection.catalog_built_under.tool_version = "0.2.0".to_string();
+                selection
+                    .catalog_built_under
+                    .as_mut()
+                    .expect("the fixture read a catalog")
+                    .tool_version = "0.2.0".to_string();
             }),
             ("what this run asked the catalog for", |selection, _| {
-                selection.ssr_criteria.max_str_len_bp =
-                    Bp(selection.ssr_criteria.max_str_len_bp.get() + 1);
+                let criteria = selection
+                    .ssr_criteria
+                    .as_mut()
+                    .expect("the fixture asked a catalog");
+                criteria.max_str_len_bp = Bp(criteria.max_str_len_bp.get() + 1);
             }),
             ("the generic target", |selection, _| {
                 selection.generic_target = 3_000_000;

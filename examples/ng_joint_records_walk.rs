@@ -162,8 +162,8 @@ fn main() {
         seed: SEED,
         reference: ReferenceDigest::of(&info).expect("the reference has a digest"),
         analysed_regions: RegionSetDigest::of(&analysed),
-        catalog_built_under: CatalogBuildSettings::of(&catalog),
-        ssr_criteria: criteria.clone(),
+        catalog_built_under: Some(CatalogBuildSettings::of(&catalog)),
+        ssr_criteria: Some(criteria.clone()),
         generic_target,
         // **5,000 tracts a stratum, which is the figure the design settled on and not a number
         // chosen here.** `str_stratum_size_sweep_2026-08-13.md` drew strata at a known truth and
@@ -185,8 +185,15 @@ fn main() {
         ssr_cap: 5_000,
     };
 
-    let kept = select_kept_loci(&terms, &catalog, &analysed, &unambiguous)
-        .expect("the catalog serves these criteria");
+    let contig_names: Vec<String> = catalog.contigs().iter().map(|c| c.name.clone()).collect();
+    let kept = select_kept_loci(
+        &terms,
+        Some(&catalog),
+        &contig_names,
+        &analysed,
+        &unambiguous,
+    )
+    .expect("the catalog serves these criteria");
     println!(
         "analysed regions {} — {} spans, {} bases",
         bed.display(),

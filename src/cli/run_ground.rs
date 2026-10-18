@@ -24,7 +24,7 @@ use thiserror::Error;
 use crate::fasta::ContigList;
 use crate::reference_info::ReferenceInfo;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
-use crate::region_typing::{GenomeRegions, TypedRegionConfig};
+use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
 use crate::regions::{BedError, ContigBounds};
 use crate::repeat_catalog::{
     CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
@@ -183,19 +183,26 @@ pub enum GroundError {
         source: RunError,
     },
 
-    /// The psps were written under a setting for repeat ground this build cannot yet sort
-    /// ground for.
-    ///
-    /// **Transitional** (`doc/devel/ng/impl_plan/call_satellites.md`, step 2): the psp header
-    /// records the setting from step 2, and the two settings it names here are built in steps 3
-    /// and 4, which remove this.
+    /// Both `--call-satellites` and `--generic-path-only` were given (`command_line.md`
+    /// §4.4.1). The second already sends satellites to the generic path, so the pair means
+    /// nothing of its own, and the refusal names the one to keep for each intent.
     #[error(
-        "the psps were written with --{setting}, which this pvc cannot call; write them again \
-         without it"
+        "--generic-path-only already sends satellites to the SNP/indel model, so it is never \
+         given with --call-satellites: keep --generic-path-only to call every repeat that way, \
+         or --call-satellites to keep the repeat model for repeats up to --max-str-len"
     )]
-    SettingNotYetBuilt {
-        /// The setting's name, as the option spells it.
-        setting: &'static str,
+    BothSettingsForRepeatGround,
+
+    /// A catalog was named for psps written with `--generic-path-only`, which read none and
+    /// sorted no repeats. Reading one now could only disagree with them.
+    #[error(
+        "--catalog {} was given, but the psps were written with --generic-path-only, which reads \
+         no catalog; leave --catalog out",
+        path.display()
+    )]
+    CatalogUnderGenericPathOnly {
+        /// The catalog named.
+        path: PathBuf,
     },
 }
 
@@ -298,6 +305,9 @@ pub fn routing_criteria(routing: &RepeatRouting) -> Result<StrRepeatCriteria, Gr
 /// value the walk routed under — calls [`segments_cut_with`] instead, and everything past the
 /// flags is shared.
 ///
+/// **Under `--generic-path-only` no catalog is opened**, and the segments are
+/// [`segments_without_a_catalog`]'s.
+///
 /// # Errors
 ///
 /// [`GroundError::MissingCatalog`] first, then [`GroundError::PeriodRange`] when the two period
@@ -307,6 +317,9 @@ pub fn segments_over(
     analysed: &GenomeRegions,
     with_checksums: &ReferenceInfo,
 ) -> Result<Segmentation, GroundError> {
+    if request.setting == RepeatGroundSetting::GenericPathOnly {
+        return Ok(segments_without_a_catalog(analysed));
+    }
     let path = request.catalog_path();
     // **Before the flags are converted**, so that a run whose catalog is not there is told that
     // and not which of its period flags it typed backwards. [`segments_cut_with`] checks the
@@ -324,22 +337,70 @@ pub fn segments_over(
     )
 }
 
-/// The setting, catalog and criteria a cohort of psps was walked with, which a command reading
-/// them sorts its own ground with again.
+/// The setting for repeat ground the two options choose, refusing both at once
+/// ([`GroundError::BothSettingsForRepeatGround`]). **Asked before anything is read**, so a run
+/// given both stops at its command line.
 ///
 /// # Errors
 ///
-/// [`GroundError::SettingNotYetBuilt`] for psps written under `--generic-path-only`.
+/// [`GroundError::BothSettingsForRepeatGround`] when both are given.
+pub fn setting_of_the_options(
+    call_satellites: bool,
+    generic_path_only: bool,
+) -> Result<RepeatGroundSetting, GroundError> {
+    if call_satellites && generic_path_only {
+        return Err(GroundError::BothSettingsForRepeatGround);
+    }
+    Ok(RepeatGroundSetting::from_options(
+        call_satellites,
+        generic_path_only,
+    ))
+}
+
+/// **The segments of a run that sorts no repeats** (`--generic-path-only`): one generic region
+/// per analysed span, and no catalog opened.
+///
+/// Every repeat is ordinary sequence to such a run, so there is nothing to cut the analysed
+/// ground at; and a generic region must be maximal, since an indel across a region's edge is
+/// called by neither side (`region_typing::fill_generic_gaps`). The spans are the BED's as
+/// [`GenomeRegions`] normalised them, as generic ground is clipped to them in every run.
+#[must_use]
+pub fn segments_without_a_catalog(analysed: &GenomeRegions) -> Segmentation {
+    let segments = analysed
+        .iter()
+        .map(|region| TypedRegion {
+            region,
+            kind: RegionKind::Generic,
+        })
+        .collect();
+    Segmentation::of_segments(segments, analysed.clone(), RepeatGround::GenericPathOnly)
+}
+
+/// The setting, catalog and criteria a cohort of psps was walked with, which a command reading
+/// them sorts its own ground with again — `None` for psps written with `--generic-path-only`,
+/// which sorted no repeats and read no catalog ([`segments_without_a_catalog`]).
+#[must_use]
 pub fn sorting_of_the_psps(
     inputs: &SegmentationInputs,
-) -> Result<(RepeatGroundSetting, &RepeatSorting), GroundError> {
-    match &inputs.repeat_ground {
-        RepeatGround::StrPaths(sorting) | RepeatGround::CallSatellites(sorting) => {
-            Ok((inputs.repeat_ground.setting(), sorting))
-        }
-        other => Err(GroundError::SettingNotYetBuilt {
-            setting: other.setting_name(),
+) -> Option<(RepeatGroundSetting, &RepeatSorting)> {
+    inputs
+        .repeat_ground
+        .sorting()
+        .map(|sorting| (inputs.repeat_ground.setting(), sorting))
+}
+
+/// Refuse a `--catalog` named for psps written with `--generic-path-only`
+/// ([`GroundError::CatalogUnderGenericPathOnly`]). A catalog left unnamed is not looked for.
+///
+/// # Errors
+///
+/// As above.
+pub fn refuse_a_catalog_the_psps_never_read(catalog: Option<&Path>) -> Result<(), GroundError> {
+    match catalog {
+        Some(path) => Err(GroundError::CatalogUnderGenericPathOnly {
+            path: path.to_path_buf(),
         }),
+        None => Ok(()),
     }
 }
 
@@ -444,6 +505,11 @@ pub fn open_catalog(
 /// As [`segments_cut_with`], less [`GroundError::MissingCatalog`]. [`GroundError::Catalog`] still
 /// arrives, for a catalog too coarse for criteria that came from a psp header, and
 /// [`GroundError::RoutingBelowCatalog`] for the same asked by this command line's own flags.
+///
+/// # Panics
+///
+/// Given [`RepeatGroundSetting::GenericPathOnly`], which reads no catalog: such a run's segments
+/// are [`segments_without_a_catalog`]'s, and every caller routes it there.
 pub fn segments_cut_from(
     catalog: &RepeatCatalog,
     catalog_path: &Path,
@@ -485,11 +551,10 @@ pub fn segments_cut_from(
         // **The satellites are handed to the generic path as the segmentation is built**
         // ([`Segmentation::of_segments`]), so no route can record this setting without them.
         RepeatGroundSetting::CallSatellites => RepeatGround::CallSatellites(sorting),
-        RepeatGroundSetting::GenericPathOnly => {
-            return Err(GroundError::SettingNotYetBuilt {
-                setting: setting.name(),
-            });
-        }
+        RepeatGroundSetting::GenericPathOnly => panic!(
+            "a run that sorts no repeats is given its segments by segments_without_a_catalog, \
+             not cut from a catalog"
+        ),
     };
     Ok(Segmentation::of_segments(
         segments,

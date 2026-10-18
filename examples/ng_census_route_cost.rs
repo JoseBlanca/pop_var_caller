@@ -212,14 +212,11 @@ fn run(
     let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, &with_checksums)?;
     let plan = CensusPlan::of_run(
         CensusSelection::SHIPPED,
-        &catalog,
+        Some(&catalog),
         &analysed,
         &unambiguous,
         &with_checksums,
-        segmentation
-            .inputs()
-            .repeat_tract_criteria()
-            .expect("the ground was sorted with a catalog"),
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     drop(catalog);
 

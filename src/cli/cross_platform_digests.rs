@@ -899,6 +899,7 @@ mod tests {
         let psps = directory.join("psps");
         run_generate_psps(&GeneratePspsArgs {
             call_satellites: false,
+            generic_path_only: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),

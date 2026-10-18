@@ -986,6 +986,10 @@ pub struct SelectionTermsDigest {
     fields: Vec<(&'static str, [u8; 16])>,
 }
 
+/// What a census digests for the catalog's build settings and the routing criteria of a run that
+/// read no catalog (`--generic-path-only`).
+const NO_CATALOG_READ: &[u8] = b"no catalog was read";
+
 /// The seven, in the order [`SelectionTerms::first_disagreement`] checks them and under the
 /// names it gives them. **One list, so the writer, the reader and the refusal cannot drift.**
 pub const SELECTION_FIELDS: [&str; 7] = [
@@ -1016,8 +1020,17 @@ impl SelectionTermsDigest {
             digest_of(&seed.to_le_bytes()),
             digest_of(&reference.0),
             digest_of(&analysed_regions.0),
-            digest_of(format!("{catalog_built_under:?}").as_bytes()),
-            digest_of(format!("{ssr_criteria:?}").as_bytes()),
+            // **A value is digested as it always was**, so a census written before a run could
+            // read no catalog digests to the same bytes; absence has its own spelling, which no
+            // value's `Debug` text can be.
+            catalog_built_under.as_ref().map_or_else(
+                || digest_of(NO_CATALOG_READ),
+                |settings| digest_of(format!("{settings:?}").as_bytes()),
+            ),
+            ssr_criteria.as_ref().map_or_else(
+                || digest_of(NO_CATALOG_READ),
+                |criteria| digest_of(format!("{criteria:?}").as_bytes()),
+            ),
             digest_of(&generic_target.to_le_bytes()),
             digest_of(&(*ssr_cap as u64).to_le_bytes()),
         ];
@@ -3793,12 +3806,12 @@ mod tests {
             seed: 42,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
-            catalog_built_under: CatalogBuildSettings {
+            catalog_built_under: Some(CatalogBuildSettings {
                 criteria: StrRepeatCriteria::default(),
                 scan: ScanParams::default(),
                 tool_version: "0.1.0".to_string(),
-            },
-            ssr_criteria: StrRepeatCriteria::default(),
+            }),
+            ssr_criteria: Some(StrRepeatCriteria::default()),
             generic_target: 2_000_000,
             ssr_cap: 1_000,
         }

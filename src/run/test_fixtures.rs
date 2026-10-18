@@ -182,14 +182,11 @@ pub(crate) fn a_census_plan_over_selecting(
             generic_target,
             ..CensusSelection::SHIPPED
         },
-        &catalog,
+        Some(&catalog),
         &analysed,
         &unambiguous,
         &reference,
-        segmentation
-            .inputs()
-            .repeat_tract_criteria()
-            .expect("the ground was sorted with a catalog"),
+        segmentation.inputs().repeat_tract_criteria(),
     )
     .expect("the fixture's ground can be selected from");
     (segmentation, plan)
