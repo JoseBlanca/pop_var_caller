@@ -63,12 +63,14 @@
 
 use super::{
     BetweenLocusShare, ContaminationMeasurement, EvidenceCount, InformationalNumber,
-    LevelSmoothing, PairedNumber, ParametersFile, ParametersFileError, ShareCurve, ShareSmoothing,
-    SlippageCurve, StartOutcome, Warrant, WarrantedValue, between_locus_share_of,
+    LevelSmoothing, PairedNumber, ParametersFile, ParametersFileError, RepeatTracts, ShareCurve,
+    ShareSmoothing, SlippageCurve, StartOutcome, Warrant, WarrantedValue, between_locus_share_of,
     concentration_error_of,
 };
 use crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
-use crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION;
+use crate::parameter_estimation::joint::stratum_fits::{
+    STATED_FLAT_CONCENTRATION, STATED_OWN_SHARES_CONCENTRATION,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// How far an allele length variation's shares may sum from one and still be a distribution.
@@ -814,60 +816,39 @@ impl ParametersFile {
 
     fn the_repeat_tract_numbers_are_what_they_claim(&self) -> Result<(), ParametersFileError> {
         let tracts = &self.repeat_tracts;
-        let at = "repeat_tracts.fallback_between_locus_share";
-        // **A median over strata has no count of its own**, so any unit here is wrong; the
-        // `defaulted` rule above already refuses one on the flat rung, and `reads` is named only
-        // because the check needs a word and this key should carry no `observations` at all.
-        a_warranted_value(
-            at,
-            &tracts.fallback_between_locus_share,
-            EvidenceCount::Reads(0),
-        )?;
-        no_error_is_computed_for(at, &tracts.fallback_between_locus_share)?;
-        // **Whether the number is an F at all comes before what its warrant claims**: a
-        // `defaulted` 0 refused for its warrant tells the reader to change the warrant, and doing
-        // so only exposes this refusal.
-        a_between_locus_share(at, tracts.fallback_between_locus_share.value)?;
-        // **Two of the four warrants are claims this file's own rows can refute** — and the
-        // other two are not, which is the whole of what changed on 2026-08-30 when the warrant
-        // began travelling through `StratumFits` instead of being re-derived by the writer.
-        //
-        // `fitted_here` says the number is the median of the between-locus shares this file's
-        // strata fitted, so a file in which no stratum row carries one has no median to have
-        // taken. **A row with shares and no F does not count**: a single-sample run fits every
-        // class's shares and no F, and its fallback is the built-in one, `defaulted`.
-        // `defaulted` says it is the caller's own constant, so any other number contradicts it —
-        // the same rule the outlier weight carries, for the same reason.
-        //
-        // **`supplied` and `borrowed` are free, and that is the point.** A file demoted under
-        // spec §2.1 marks every number `supplied`, including this one; nothing about the strata
-        // beside it can say whether the number was handed over. An earlier version of this check
-        // required `fitted_here` exactly where any stratum was fitted, which refused every
-        // demoted file — recorded here because the check looked complete and was not.
-        let warrant = tracts.fallback_between_locus_share.warrant;
-        let value = tracts.fallback_between_locus_share.value;
-        let no_stratum_has_an_f = tracts
-            .allele_length_variation_by_stratum
-            .iter()
-            .all(|row| row.between_locus_share.is_none());
-        if warrant == Warrant::FittedHere && no_stratum_has_an_f {
+        // **Not in a file stamped before format 5**, which had no such key: a file that says an
+        // older version and holds it cannot say which format it was written in — the refusal the
+        // informational tables of format 4 give.
+        if tracts
+            .fallback_between_locus_share_with_own_shares
+            .is_some()
+            && self.format_version < FORMAT_THAT_SPLIT_THE_STATED_SHARE
+        {
             return Err(refuse(
-                at,
-                "is `fitted_here`, and no stratum in this file has a between-locus share of its \
-                 own, so there is no median for it to be the median of",
-            ));
-        }
-        let built_in = the_built_in_fallback_share();
-        if warrant == Warrant::Defaulted && value != built_in {
-            return Err(refuse(
-                at,
+                "repeat_tracts.fallback_between_locus_share_with_own_shares",
                 format!(
-                    "is {value:?}, and its warrant is `defaulted`, which says no stratum of this \
-                     run has a between-locus share and the run fell back to the built-in \
-                     {built_in:?}; a number you changed is one the run was handed, so change the \
-                     warrant beside it to `supplied`"
+                    "is a format-{FORMAT_THAT_SPLIT_THE_STATED_SHARE} key in a file whose \
+                     `format_version` says {}, so it is not clear which format the file was \
+                     written in; set `format_version` to the format the file was written in",
+                    self.format_version
                 ),
             ));
+        }
+        a_stated_fallback_share(
+            "repeat_tracts.fallback_between_locus_share",
+            &tracts.fallback_between_locus_share,
+            tracts,
+            the_built_in_fallback_share(),
+        )?;
+        // **The second rung's number takes the same checks, against its own built-in value**; a
+        // file from before format 5 has none, and the second rung reads the key above.
+        if let Some(with_own_shares) = &tracts.fallback_between_locus_share_with_own_shares {
+            a_stated_fallback_share(
+                "repeat_tracts.fallback_between_locus_share_with_own_shares",
+                with_own_shares,
+                tracts,
+                the_built_in_fallback_share_with_own_shares(),
+            )?;
         }
 
         for row in &tracts.slippage_by_stratum_and_group {
@@ -1233,6 +1214,10 @@ fn the_unit_of(count: EvidenceCount) -> &'static str {
 /// 4. A file stamped with an earlier version and holding either is refused.
 const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
 
+/// The format that gave the tract ladder's second rung its own stated between-locus share,
+/// `repeat_tracts.fallback_between_locus_share_with_own_shares`.
+const FORMAT_THAT_SPLIT_THE_STATED_SHARE: u32 = 5;
+
 /// The refusal, with the key's path in the file's own spelling.
 ///
 /// **Shared with the projection** (`to_run_parameters`), which refuses in the same words where a
@@ -1475,11 +1460,79 @@ fn no_count_is_a_saturation(
     Ok(())
 }
 
+/// **The checks a stated between-locus share takes, whichever rung it is for**: a warranted value
+/// with no unit and no error, an F, and a warrant its file's own rows cannot refute.
+fn a_stated_fallback_share(
+    at: &str,
+    stated: &WarrantedValue,
+    tracts: &RepeatTracts,
+    built_in: f64,
+) -> Result<(), ParametersFileError> {
+    // **A median over strata has no count of its own**, so any unit here is wrong; the
+    // `defaulted` rule above already refuses one on the flat rung, and `reads` is named only
+    // because the check needs a word and this key should carry no `observations` at all.
+    a_warranted_value(at, stated, EvidenceCount::Reads(0))?;
+    no_error_is_computed_for(at, stated)?;
+    // **Whether the number is an F at all comes before what its warrant claims**: a
+    // `defaulted` 0 refused for its warrant tells the reader to change the warrant, and doing
+    // so only exposes this refusal.
+    a_between_locus_share(at, stated.value)?;
+    // **Two of the four warrants are claims this file's own rows can refute** — and the
+    // other two are not, which is the whole of what changed on 2026-08-30 when the warrant
+    // began travelling through `StratumFits` instead of being re-derived by the writer.
+    //
+    // `fitted_here` says the number is the median of the between-locus shares this file's
+    // strata fitted, so a file in which no stratum row carries one has no median to have
+    // taken. **A row with shares and no F does not count**: a single-sample run fits every
+    // class's shares and no F, and its fallback is the built-in one, `defaulted`.
+    // `defaulted` says it is the caller's own constant, so any other number contradicts it —
+    // the same rule the outlier weight carries, for the same reason.
+    //
+    // **`supplied` and `borrowed` are free, and that is the point.** A file demoted under
+    // spec §2.1 marks every number `supplied`, including this one; nothing about the strata
+    // beside it can say whether the number was handed over. An earlier version of this check
+    // required `fitted_here` exactly where any stratum was fitted, which refused every
+    // demoted file — recorded here because the check looked complete and was not.
+    let warrant = stated.warrant;
+    let value = stated.value;
+    let no_stratum_has_an_f = tracts
+        .allele_length_variation_by_stratum
+        .iter()
+        .all(|row| row.between_locus_share.is_none());
+    if warrant == Warrant::FittedHere && no_stratum_has_an_f {
+        return Err(refuse(
+            at,
+            "is `fitted_here`, and no stratum in this file has a between-locus share of its \
+                 own, so there is no median for it to be the median of",
+        ));
+    }
+    if warrant == Warrant::Defaulted && value != built_in {
+        return Err(refuse(
+            at,
+            format!(
+                "is {value:?}, and its warrant is `defaulted`, which says no stratum of this \
+                     run has a between-locus share and the run fell back to the built-in \
+                     {built_in:?}; a number you changed is one the run was handed, so change the \
+                     warrant beside it to `supplied`"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// **The fallback's F when no stratum has one**: the F of the built-in concentration, ten
 /// chromosomes' worth of belief, which is 1/11.
 pub(super) fn the_built_in_fallback_share() -> f64 {
     between_locus_share_of(STATED_FLAT_CONCENTRATION)
         .expect("the built-in concentration, ten, has an F of 1/11")
+        .get()
+}
+
+/// **The second rung's F when no stratum has one**: the F of
+/// [`STATED_OWN_SHARES_CONCENTRATION`], one chromosome's worth of belief, which is one half.
+pub(super) fn the_built_in_fallback_share_with_own_shares() -> f64 {
+    between_locus_share_of(STATED_OWN_SHARES_CONCENTRATION)
+        .expect("the built-in concentration, one, has an F of one half")
         .get()
 }
 
@@ -1748,6 +1801,14 @@ mod tests {
             standard_error: None,
         };
         small
+            .repeat_tracts
+            .fallback_between_locus_share_with_own_shares = Some(WarrantedValue {
+            value: the_built_in_fallback_share_with_own_shares(),
+            warrant: Warrant::Defaulted,
+            observations: None,
+            standard_error: None,
+        });
+        small
             .validate()
             .expect("one sample with no repeat tracts is the bottom of the committed range");
     }
@@ -1968,6 +2029,11 @@ mod tests {
                     .allele_length_variation_by_stratum
                     .clear();
                 file.repeat_tracts.fallback_between_locus_share.warrant = warrant;
+                file.repeat_tracts
+                    .fallback_between_locus_share_with_own_shares
+                    .as_mut()
+                    .expect("the fixture writes the second rung's share")
+                    .warrant = warrant;
             });
         }
     }
@@ -1981,9 +2047,16 @@ mod tests {
             file.format_version = 3;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
+            file.repeat_tracts
+                .fallback_between_locus_share_with_own_shares = None;
         });
-        accepted(|file| file.format_version = 4);
-        let (field, _) = refused(|file| file.format_version = 5);
+        accepted(|file| {
+            file.format_version = 4;
+            file.repeat_tracts
+                .fallback_between_locus_share_with_own_shares = None;
+        });
+        accepted(|file| file.format_version = 5);
+        let (field, _) = refused(|file| file.format_version = 6);
         assert_eq!(field, "format_version");
     }
 
@@ -2071,8 +2144,28 @@ mod tests {
             file.format_version = 3;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
+            file.repeat_tracts
+                .fallback_between_locus_share_with_own_shares = None;
         });
-        accepted(|file| file.format_version = 4);
+        accepted(|file| {
+            file.format_version = 4;
+            file.repeat_tracts
+                .fallback_between_locus_share_with_own_shares = None;
+        });
+    }
+
+    /// **The second rung's stated share is a format-5 key**: a file stamped 4 that holds it is
+    /// refused naming it, as a format-4 table in a file stamped 3 is; the same file without it is
+    /// accepted, and its second rung is then held at `fallback_between_locus_share`.
+    #[test]
+    fn the_second_rungs_stated_share_in_a_version_four_file_is_refused() {
+        let (field, problem) = refused(|file| file.format_version = 4);
+        assert_eq!(
+            field,
+            "repeat_tracts.fallback_between_locus_share_with_own_shares"
+        );
+        assert!(problem.contains("format-5 key"), "{problem}");
+        assert!(problem.contains("says 4"), "{problem}");
     }
 
     /// **What version 2 added is checked as the rest is.** A standard error is a spread — finite
@@ -2238,6 +2331,8 @@ mod tests {
     fn a_version_one_file_is_accepted() {
         let mut file = a_file_using_every_shape();
         file.format_version = 1;
+        file.repeat_tracts
+            .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;
         file.ordinary_site_prior.fitted_density = None;
         file.duplicated_positions = None;
@@ -2806,6 +2901,12 @@ mod tests {
             file.repeat_tracts.allele_length_variation_by_stratum[0].between_locus_share = None;
             // With no F in any stratum the fallback cannot be a median of them.
             file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Supplied;
+            if let Some(with_own_shares) = &mut file
+                .repeat_tracts
+                .fallback_between_locus_share_with_own_shares
+            {
+                with_own_shares.warrant = Warrant::Supplied;
+            }
         });
         assert!(
             field.ends_with("between_locus_share_standard_error"),
@@ -2838,6 +2939,12 @@ mod tests {
             row.between_locus_share_standard_error = None;
             // With no F in any stratum the fallback cannot be a median of them.
             file.repeat_tracts.fallback_between_locus_share.warrant = Warrant::Supplied;
+            if let Some(with_own_shares) = &mut file
+                .repeat_tracts
+                .fallback_between_locus_share_with_own_shares
+            {
+                with_own_shares.warrant = Warrant::Supplied;
+            }
         });
     }
 

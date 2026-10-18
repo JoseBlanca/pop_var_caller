@@ -465,9 +465,11 @@ pub struct FittedAlleleLengthVariation {
 /// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`). At two candidates ten gives
 /// 0.27 / 0.45 / 0.27; results were flat between ten and thirty.
 ///
-/// **Measured on one human trio, so still soft.** At one sample fitted on its own reads, where
-/// this total holds the stratum's own reference-heavy shares, it costs 4 tract genotypes net at 5x
-/// (same report, §3.4).
+/// **Measured on one human trio, so still soft — and only for a flat shape.** Ten is what makes
+/// a *flat* shape behave: the shape is itself wrong at a real tract (it gives the reference
+/// length no more weight than any other), and a large total keeps it from pushing near ties
+/// to a homozygote. Over a stratum's own fitted shares it is the wrong number, which is why the
+/// second rung has its own, [`STATED_OWN_SHARES_CONCENTRATION`].
 ///
 /// **The shape it is spread over is the locus's candidate lengths, where
 /// `population_diversity.md` §4.4's table says the *reachable* lengths** — every length the
@@ -483,6 +485,26 @@ pub struct FittedAlleleLengthVariation {
 /// no stratum with a concentration: a run that has any takes its own median instead
 /// ([`StratumFits::stated_concentration`]), which is §9's question 4 and its leaning.
 pub const STATED_FLAT_CONCENTRATION: f64 = 10.0;
+
+/// **The concentration the tract ladder's second rung holds a stratum's own fitted shares at,
+/// where the run fitted no stratum's concentration** — one chromosome, a between-locus share of
+/// `F = 1/(1 + 1) = 1/2`. This is every stratum of a one-sample fit: at one sample the fit measures
+/// how a stratum's chromosomes spread over lengths but cannot separate how much of that spread lies
+/// between loci from the sample's own homozygote excess (`str_fit_to_calling.md` §3.2).
+///
+/// **Measured, on HG002's assembly truth** (GIAB tandem-repeat benchmark v1.0.1, 50,000 regions):
+/// a stratum's concentration is what makes the shares reproduce how often the genome's two copies
+/// carry the same length, `A = (1 − P_same)/(P_same − Σ m²)` for shares `m`, and it comes out at
+/// 0.9–1.6 over the homopolymer strata with 30 or more tracts and 1.0–2.5 over the dinucleotide
+/// ones, while the one-sample fit's shares match the truth's to about 0.02 in most homopolymer
+/// strata (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md` §8). Holding those shares
+/// at the flat rung's ten instead pulled true homozygous-alternative tracts to heterozygous: at 5x,
+/// correct genotypes fell from 2,758 to 2,487.
+///
+/// **One human genome, and an outbred one.** For an inbred sample the same `P_same` includes its
+/// own homozygote excess, which is the sample's inbreeding coefficient's to carry, not this
+/// number's; nothing here has been measured on one.
+pub const STATED_OWN_SHARES_CONCENTRATION: f64 = 1.0;
 
 /// How far a stratum's allele length variation may sum from one before it is refused as not a
 /// distribution.
@@ -546,11 +568,18 @@ pub struct StratumFits {
     /// that period pooled** — the tract ladder's pooled rung. **No fit produces one now**: only
     /// an older parameters file, read by [`Self::of_gathered_rows`], fills it.
     allele_length_variation_by_period: BTreeMap<u8, FittedAlleleLengthVariation>,
-    /// The strength the second rung and the bottom rung state: the run's own median fitted
+    /// The strength the bottom rung states, over a flat shape: the run's own median fitted
     /// concentration, taken on the between-locus share over the strata with enough loci (see
     /// `median_concentration`), where any stratum has a concentration, and
     /// [`STATED_FLAT_CONCENTRATION`] where none has.
     stated_concentration: f64,
+    /// The strength the second rung states, over a stratum's own fitted shares: the same median
+    /// where there is one, and [`STATED_OWN_SHARES_CONCENTRATION`] where there is none — a
+    /// different constant from the flat rung's, because the shape it holds is a different claim.
+    stated_concentration_with_own_shares: f64,
+    /// Where [`Self::stated_concentration_with_own_shares`] came from, carried as the flat rung's
+    /// warrant is: a file may supply one of the two numbers and leave the other defaulted.
+    stated_concentration_with_own_shares_warrant: Provenance,
     /// **Where that strength came from, carried rather than re-derived.**
     ///
     /// [`Provenance::FittedHere`] where the run took the median of its own strata's
@@ -686,7 +715,12 @@ impl StratumFits {
                 allele_length_variation_by_stratum.insert(stratum, checked);
             }
         }
-        let stated_concentration = median_concentration(&concentration_and_loci_of_each_class);
+        let median = median_concentration(&concentration_and_loci_of_each_class);
+        let stated_warrant = if median.is_some() {
+            Provenance::FittedHere
+        } else {
+            Provenance::Defaulted
+        };
         Self {
             slippage_group_of,
             // **The fit's own warrant for it**: a median over this run's strata is a number the
@@ -696,18 +730,17 @@ impl StratumFits {
             // and none has a concentration, and the constant would otherwise be written as
             // fitted, where the file's validator checks a `defaulted` value against the constant
             // and cannot catch a `fitted_here` one.
-            stated_concentration_warrant: if allele_length_variation_by_stratum
-                .values()
-                .any(|fit| fit.concentration.is_some())
-            {
-                Provenance::FittedHere
-            } else {
-                Provenance::Defaulted
-            },
+            //
+            // **Both stated strengths are that median where there is one**; only the constants
+            // they fall back to differ (`STATED_FLAT_CONCENTRATION`,
+            // `STATED_OWN_SHARES_CONCENTRATION`).
+            stated_concentration_warrant: stated_warrant,
+            stated_concentration_with_own_shares_warrant: stated_warrant,
             by_stratum,
             allele_length_variation_by_stratum,
             allele_length_variation_by_period: BTreeMap::new(),
-            stated_concentration,
+            stated_concentration: median.unwrap_or(STATED_FLAT_CONCENTRATION),
+            stated_concentration_with_own_shares: median.unwrap_or(STATED_OWN_SHARES_CONCENTRATION),
         }
     }
 
@@ -740,6 +773,12 @@ impl StratumFits {
     /// [`Self::over`] runs, for the same reason, and here they also stand behind
     /// `ParametersFile::validate`, which refuses the same shapes earlier and naming the key. On a
     /// period's pool with no concentration, which no rung of the ladder can hold.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a parameters file's repeat-tract section, row table by row table and each stated \
+                  value with its warrant; the two stated values are passed apart because a file \
+                  may supply one and leave the other defaulted"
+    )]
     #[must_use]
     pub fn of_gathered_rows(
         slippage_group_of: BTreeMap<ReadGroupId, u32>,
@@ -748,6 +787,8 @@ impl StratumFits {
         allele_length_variation_by_period: BTreeMap<u8, FittedAlleleLengthVariation>,
         stated_concentration: f64,
         stated_concentration_warrant: Provenance,
+        stated_concentration_with_own_shares: f64,
+        stated_concentration_with_own_shares_warrant: Provenance,
     ) -> Self {
         let by_stratum = slippage_by_stratum
             .into_iter()
@@ -825,6 +866,10 @@ impl StratumFits {
             ),
             stated_concentration: checked_stated_concentration(stated_concentration),
             stated_concentration_warrant,
+            stated_concentration_with_own_shares: checked_stated_concentration(
+                stated_concentration_with_own_shares,
+            ),
+            stated_concentration_with_own_shares_warrant,
         }
     }
 
@@ -876,6 +921,8 @@ impl StratumFits {
             pools,
             self.stated_concentration,
             self.stated_concentration_warrant,
+            self.stated_concentration_with_own_shares,
+            self.stated_concentration_with_own_shares_warrant,
         );
         for (stratum, row) in read.by_stratum {
             assert!(
@@ -919,7 +966,7 @@ impl StratumFits {
             let (concentration, from) = match fitted.concentration {
                 Some(own) => (own, FittedFrom::ThisStratum),
                 None => (
-                    self.stated_concentration,
+                    self.stated_concentration_with_own_shares,
                     FittedFrom::ThisStratumsSharesStatedSpread,
                 ),
             };
@@ -937,8 +984,8 @@ impl StratumFits {
         AlleleLengthVariation::stated_flat(self.stated_concentration)
     }
 
-    /// **The strength the tract ladder states where a stratum has no concentration of its own**:
-    /// read by the second rung (a stratum's own shares) and the bottom rung (a flat shape). It is
+    /// **The strength the tract ladder's bottom rung states, over a flat shape**; the second rung
+    /// (a stratum's own shares) reads [`Self::stated_concentration_with_own_shares`]. It is
     /// the median of the run's strata's between-locus shares `F = 1 / (1 + c)`, converted back to
     /// a concentration `c`. The median counts the strata with a concentration and at least
     /// [`LOCI_FOR_AN_ERROR`] loci with reads, or every stratum with a concentration where none has
@@ -969,6 +1016,22 @@ impl StratumFits {
     #[must_use]
     pub fn stated_concentration_warrant(&self) -> Provenance {
         self.stated_concentration_warrant
+    }
+
+    /// **The strength the tract ladder's second rung holds a stratum's own shares at**, where the
+    /// fit gave the stratum shares and no concentration — every stratum of a one-sample fit. The
+    /// run's own median where it has one, as for [`Self::stated_concentration`]; otherwise
+    /// [`STATED_OWN_SHARES_CONCENTRATION`].
+    #[must_use]
+    pub fn stated_concentration_with_own_shares(&self) -> f64 {
+        self.stated_concentration_with_own_shares
+    }
+
+    /// **Where the second rung's stated strength came from** — carried, never inferred, as
+    /// [`Self::stated_concentration_warrant`] is.
+    #[must_use]
+    pub fn stated_concentration_with_own_shares_warrant(&self) -> Provenance {
+        self.stated_concentration_with_own_shares_warrant
     }
 
     /// How many strata carry an allele length variation of their own — the tract ladder's top rung,
@@ -1300,7 +1363,7 @@ fn fitted_at(row: &StratumRow, stratum: Stratum, index: usize) -> Option<FittedS
 ///
 /// The values are finite and positive by [`checked_allele_length_variation`], so the sort is total
 /// and every share lies strictly between 0 and 1.
-fn median_concentration(fitted: &[(f64, usize)]) -> f64 {
+fn median_concentration(fitted: &[(f64, usize)]) -> Option<f64> {
     let with_enough_loci: Vec<f64> = fitted
         .iter()
         .filter(|&&(_, loci_with_reads)| loci_with_reads >= LOCI_FOR_AN_ERROR)
@@ -1315,11 +1378,11 @@ fn median_concentration(fitted: &[(f64, usize)]) -> f64 {
         with_enough_loci
     };
     if concentrations.is_empty() {
-        return STATED_FLAT_CONCENTRATION;
+        return None;
     }
     concentrations.sort_by(f64::total_cmp);
     let middle = concentrations.len() / 2;
-    if concentrations.len() % 2 == 1 {
+    Some(if concentrations.len() % 2 == 1 {
         concentrations[middle]
     } else {
         // The mean of the two middle shares, `F̄ = (1/(1 + c1) + 1/(1 + c2)) / 2`, converted back
@@ -1336,7 +1399,7 @@ fn median_concentration(fitted: &[(f64, usize)]) -> f64 {
         // positive for any two positive concentrations.
         let (c1, c2) = (concentrations[middle - 1], concentrations[middle]);
         (c1 + c2 + 2.0 * c1 * c2) / (2.0 + c1 + c2)
-    }
+    })
 }
 
 #[cfg(test)]
@@ -2307,7 +2370,8 @@ mod tests {
     }
 
     /// **The second rung, from a hand-built table**: the same answer when the rows come from a
-    /// parameters file instead of the fit, held at the stated concentration the file gives.
+    /// parameters file instead of the fit, held at the stated concentration the file gives for that
+    /// rung — not the flat rung's, which is a different number.
     #[test]
     fn a_hand_built_row_with_no_concentration_is_held_at_the_files_stated_one() {
         let own_shares = vec![0.25, 0.5, 0.25];
@@ -2330,6 +2394,8 @@ mod tests {
                     concentration_standard_error: None,
                 },
             )]),
+            7.0,
+            Provenance::Defaulted,
             2.5,
             Provenance::Supplied,
         );
@@ -2420,6 +2486,8 @@ mod tests {
             BTreeMap::new(),
             1.0,
             Provenance::Supplied,
+            1.0,
+            Provenance::Supplied,
         );
     }
 
@@ -2440,6 +2508,8 @@ mod tests {
                     concentration_standard_error: None,
                 },
             )]),
+            1.0,
+            Provenance::Supplied,
             1.0,
             Provenance::Supplied,
         );

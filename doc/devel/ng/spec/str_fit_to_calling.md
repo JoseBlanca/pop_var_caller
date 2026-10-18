@@ -190,13 +190,16 @@ tests now pass their hand-built tables through the file's own door, `of_gathered
 ### 3.5 The stated F
 
 **The median of the fitted classes' F, taken in F** *(lead, 2026-10-14)*: at an even count, the mean of
-the middle two F values, not F of the mean of the middle two concentrations, which differs. F = 1/11
-(concentration 10, `STATED_FLAT_CONCENTRATION`) where no class has an F. Calling holds it as its
-concentration.
+the middle two F values, not F of the mean of the middle two concentrations, which differs. Where no class has an F there is no median, and **the two rungs that read the
+stated F state different values** (since 2026-10-18, format 5 of the parameters file): the flat rung
+F = 1/11 (concentration 10, `STATED_FLAT_CONCENTRATION`, key `fallback_between_locus_share`), and the
+own-shares rung F = 1/2 (concentration 1, `STATED_OWN_SHARES_CONCENTRATION`, key
+`fallback_between_locus_share_with_own_shares`). Where there is a median, both hold it. Calling holds
+each as its concentration.
 
 **Which classes the median counts** *(owner, 2026-10-15)*: **only classes with an F and at least
 `LOCI_FOR_AN_ERROR` (8) loci with reads.** If no class has both, the median is taken over every class
-with an F, as before 2026-10-15. Where no class has an F, F = 1/11 as above.
+with an F, as before 2026-10-15. Where no class has an F, the two stated values above.
 
 Why: on the tomato2 oracle (4 accessions, 20 regions, about 5 reads a sample), the milestone C review
 (`doc/devel/reports/reviews/str_penalised_fit_milestone_C_2026-10-15.md`) found that the median
@@ -227,9 +230,17 @@ lengths, `(K + 1)/2` at K — which at one outbred sample tipped near ties to th
 (a colleague's GIAB chr22 benchmark: 167 records at 5x, 56 at 10x). Measured on the GIAB per-sample
 set, one sample at a time with `--defaults`, the move makes 17 repeat-tract genotypes right and 1 wrong
 over 5x–30x and moves nothing at 300x; a fitted cohort never reads the value and is unchanged
-(`../../reports/ng_str_single_sample_prior_2026-10-17.md`). *Not settled:* a one-sample run with its
-own fit, where this value holds the class's reference-heavy shares, loses 4 genotypes net at 5x (same
-report, §3.4).
+(`../../reports/ng_str_single_sample_prior_2026-10-17.md`).
+
+**On 2026-10-18 the own-shares rung went back to F = 1/2, under a key of its own.** One value had
+served two shapes. Ten chromosomes keep a *flat* shape from leaning homozygous, but over a class's
+own shares — about 80% of the mass on the reference length — they pull true homozygous-alternative
+tracts to heterozygous: on the HG002 tandem-repeat benchmark, called alone and fitted on its own
+reads, correct genotypes at 5x fell from 2,758 to 2,487. HG002's assembly truth gives the
+concentration that makes a class's shares reproduce how often the genome's two copies agree, and it
+is 0.9–1.6 over the homopolymer classes and 1.0–2.5 over the dinucleotide ones, while the
+one-sample fit's shares match the truth's to about 0.02 in most homopolymer classes (same report,
+§8).
 
 Before step A5 of the plan the warrant was set by whether any class had an allele length variation,
 so at one sample, where every class with reads has shares and none has F, the compiled-in 0.5 would

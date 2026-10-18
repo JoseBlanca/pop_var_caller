@@ -259,3 +259,63 @@ All under the worktree's `tmp/`: `experiment_knobs.patch` (the dump and the thre
 switches used for the settings above: `PVC_EXP_STATED_CONC`, `PVC_EXP_PER_ALLELE`,
 `PVC_EXP_REF_ANCHOR`), `run_one.sh` and `sweep.sh` (the GIAB runs), `fitted_one.sh` (the one-sample
 fits), `score_str.py`, `paired.py`, `truth_classes.py` and `cohort_diff.py` (the scoring).
+
+## 8. The second rung needs its own value (2026-10-18)
+
+**The value of 10 adopted in §6 is right for a flat shape and wrong for a stratum's own fitted
+shares**, and until this section both read it. A one-sample fit gives every stratum its shares and
+no concentration (§2.1), so every repeat tract of such a run is held at the stated value over shares
+that put most of the mass on the reference length. At ten chromosomes those shares become a strong
+claim that each copy carries the reference length, and true homozygous-alternative tracts are called
+heterozygous.
+
+**Measured on the GIAB HG002 tandem-repeat benchmark** (v1.0.1, 50,000 regions, truth from the
+assembly; `benchmarks/ssr_hg002/`), one sample at a time, the sample fitted on its own 30x reads and
+called at each depth. Correct genotypes, summing truth heterozygous, homozygous-alternative and
+homozygous-reference tracts:
+
+| | 5x | 10x | 30x |
+|---|---:|---:|---:|
+| `--defaults` (flat shape at 10) | 2,822 | 4,599 | 7,101 |
+| own fit, shares held at 10 (main until this change) | 2,487 | 4,476 | 7,046 |
+| own fit, shares held at 1 (this change) | 2,758 | 4,518 | 7,056 |
+
+At 5x the larger value cost 471 correct homozygous-alternative calls (1,286 against 815) to gain
+205 heterozygous ones.
+
+**What the truth says the value should be.** Over the catalog's tracts in those regions, the
+assembly gives each tract HG002's two allele lengths. Per stratum (motif period and reference
+repeat count) that yields the true share of chromosomes at each length offset, and how often the
+two copies match, `P_same`. For a Dirichlet with shares `m` and concentration `A`,
+`P_same = (A Σm² + 1)/(A + 1)`, so the concentration that reproduces the genome is
+`A = (1 − P_same)/(P_same − Σm²)` — valid for an outbred genome, as HG002 is:
+
+| stratum (period, reference repeats) | tracts | true share at the reference length | fitted share | concentration from the truth |
+|---|---:|---:|---:|---:|
+| homopolymer, 10 repeats | 1,489 | 0.911 | 0.905 | 0.97 |
+| homopolymer, 12 repeats | 1,202 | 0.797 | 0.793 | 1.20 |
+| homopolymer, 15 repeats | 727 | 0.700 | 0.692 | 1.04 |
+| homopolymer, 20 repeats | 251 | 0.590 | 0.588 | 1.16 |
+| dinucleotide, 8 repeats | 620 | 0.890 | 0.893 | 1.16 |
+| dinucleotide, 12 repeats | 330 | 0.691 | 0.644 | 1.28 |
+| dinucleotide, 18 repeats | 188 | 0.468 | 0.356 | 1.69 |
+
+Over every homopolymer stratum with 30 or more tracts the concentration runs from 0.9 to 1.6, and
+over the dinucleotide ones from 1.0 to 2.5. The fitted shares match the truth's to about 0.02 in most
+homopolymer strata; long dinucleotide tracts are under-estimated at the reference length (0.36
+against 0.47 at 18 repeats). So the shares are right, and the value that holds them should be
+about one.
+
+**The change.** The tract ladder now states two values where no stratum has a fitted concentration:
+`STATED_FLAT_CONCENTRATION` = 10 for the flat shape, and `STATED_OWN_SHARES_CONCENTRATION` = 1 for a
+stratum's own shares. Where any stratum has a fitted concentration, both hold the run's median, as
+the one value did, so a fitted cohort is unchanged. The parameters file carries the second value
+under `fallback_between_locus_share_with_own_shares` (format 5); a file written before it holds both
+rungs at `fallback_between_locus_share`, as it was written to mean.
+
+**What this does not settle.** Even with the shares held at one, the fitted model does not beat
+`--defaults` (table above), and it should: its shares are the genome's own. The fitted run loses
+truth heterozygotes to the prior, 76 at 5x and 149 at 10x, where the likelihood preferred the
+heterozygote and the prior moved the call. With a prior that matches the genome, that points at the
+read likelihood being too ready to explain reads that do not fit a homozygote as stutter or outliers
+— the same thing that makes the colleague's group b. That is the next investigation.

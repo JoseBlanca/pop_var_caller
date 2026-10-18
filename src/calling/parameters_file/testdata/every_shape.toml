@@ -1,4 +1,4 @@
-format_version = 4
+format_version = 5
 ploidy = 2
 
 [fitted_from]
@@ -241,6 +241,10 @@ standard_error = 0.522
 value = 0.026
 
 [repeat_tracts.fallback_between_locus_share]
+value = 0.22222222222222224
+warrant = "fitted_here"
+
+[repeat_tracts.fallback_between_locus_share_with_own_shares]
 value = 0.22222222222222224
 warrant = "fitted_here"
 

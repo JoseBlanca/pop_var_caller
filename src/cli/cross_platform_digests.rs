@@ -258,7 +258,13 @@ mod tests {
     /// became 1/11): putting the old two back gives the branch's `18ed96038479b4f9c860f1cb830038b0`
     /// exactly (`tmp/merge3/swap_back.py`). Recorded on the macOS host (arm64); it was
     /// `096c7151d55f21cd000c3209b07923e7` on main.
-    const FITTED_PARAMETERS_MD5: &str = "3ac3a2ae4c3e7e2fa38af1d6a3b827cc";
+    ///
+    /// **Re-recorded 2026-10-18** when the tract ladder's second rung got its own stated
+    /// between-locus share (format 5, `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`
+    /// §8): this fixture's fit has a median of its own, so both keys carry it and no call moves.
+    /// The file moves by `format_version`, the new key and the notes naming the two built-in
+    /// values, and by nothing else. Recorded on the macOS host (arm64); it was `3ac3a2ae4c3e7e2fa38af1d6a3b827cc`.
+    const FITTED_PARAMETERS_MD5: &str = "ae20f59532f41838b4b63c0b2cf3fb5c";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -382,7 +388,11 @@ mod tests {
     /// `##pvcParameters` md5 moved, with the fitted file's note — putting the branch's md5 back
     /// gives the branch's `7672e055a1dbe6a9a642fc8badba944c` exactly; no record moved. It was
     /// `bd3ec1e0648501deaff70599412f80a4` on main. Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "2b5fedb559b16c8dfed07ab39f7cc5d2";
+    ///
+    /// **Re-recorded 2026-10-18** with the fit above: only the `##pvcParameters` md5 moved —
+    /// putting the old one back reproduces the old checksum exactly. It was `2b5fedb559b16c8dfed07ab39f7cc5d2`. Recorded on
+    /// the macOS host (arm64).
+    const CALLS_MD5: &str = "d90fefc996dca55d37c45c43cd392170";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -483,7 +493,13 @@ mod tests {
     /// passages alone; putting the old two back gives the branch's
     /// `0138ccccf14e750e671290de06b58afd` exactly. Recorded on the macOS host (arm64); it was
     /// `af39cc216bf85d18914a6112e8403d5b` on main.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "49bd109f04196c5d2a3f39341002f691";
+    ///
+    /// **Re-recorded 2026-10-18** when the tract ladder's second rung got its own stated
+    /// between-locus share (format 5, `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`
+    /// §8): this fixture's fit has a median of its own, so both keys carry it and no call moves.
+    /// The file moves by `format_version`, the new key and the notes naming the two built-in
+    /// values, and by nothing else. Recorded on the macOS host (arm64); it was `49bd109f04196c5d2a3f39341002f691`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "ca1be8e12b7f816755ba43d1e5fcd4c9";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -585,7 +601,11 @@ mod tests {
     /// **Merged 2026-10-18 again**, as [`CALLS_MD5`]'s last note: the `##pvcParameters` md5 alone;
     /// putting the branch's back gives the branch's `c81df78823bf9aa0836eee9dca56e85f` exactly. It
     /// was `69eebab6d26ad5a44d9512631851fbba` on main. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "23c98fcb501498aa7167d74fedcd51fe";
+    ///
+    /// **Re-recorded 2026-10-18** with the fit above: only the `##pvcParameters` md5 moved —
+    /// putting the old one back reproduces the old checksum exactly. It was `23c98fcb501498aa7167d74fedcd51fe`. Recorded on
+    /// the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "38ee2760d8b096add2b6019fa58765b5";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -693,7 +713,13 @@ mod tests {
     /// passages alone; putting the old two back gives the branch's
     /// `abdbf13bab51eb6d15ba9b57944d214d` exactly. Recorded on the macOS host (arm64); it was
     /// `d623fef0663ce22a276fe551882dc06e` on main.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "c47b81917edfbfa6f5c877eeae6087db";
+    ///
+    /// **Re-recorded 2026-10-18** when the tract ladder's second rung got its own stated
+    /// between-locus share (format 5, `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`
+    /// §8): this fixture's fit has a median of its own, so both keys carry it and no call moves.
+    /// The file moves by `format_version`, the new key and the notes naming the two built-in
+    /// values, and by nothing else. Recorded on the macOS host (arm64); it was `c47b81917edfbfa6f5c877eeae6087db`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "48480f4ee21a23f1580c059dec5e6bc5";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -793,7 +819,11 @@ mod tests {
     /// **Merged 2026-10-18 again**, as [`CALLS_MD5`]'s last note: the `##pvcParameters` md5 alone;
     /// putting the branch's back gives the branch's `11ed05df550c9f1038bb07edf4975adc` exactly. It
     /// was `61cc1dbcd0bd87a01eadbdfadd64bd4e` on main. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "2b753fd7c6d6e453645bb4b31fe6a364";
+    ///
+    /// **Re-recorded 2026-10-18** with the fit above: only the `##pvcParameters` md5 moved —
+    /// putting the old one back reproduces the old checksum exactly. It was `2b753fd7c6d6e453645bb4b31fe6a364`. Recorded on
+    /// the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "2883bcaad4b3f7552c384bf5fcf36335";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

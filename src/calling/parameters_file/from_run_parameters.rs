@@ -697,7 +697,7 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
         // saying `fitted_here`.
         //
         // **The value and the warrant can disagree about how interesting they are**: a median
-        // over fitted strata can land on exactly the stated 1.0, which is why the warrant
+        // over fitted strata can land on exactly the stated 10.0, which is why the warrant
         // travels at all.
         //
         // **Written as F**, converted at the file's edge (`between_locus_share.rs`). The stated
@@ -713,6 +713,18 @@ fn repeat_tracts_of(run: &RunParameters) -> RepeatTracts {
             observations: None,
             standard_error: None,
         },
+        // **The second rung's own number, written every time** — a reader of a file from before
+        // format 5, which lacks it, holds the second rung at the bottom rung's value.
+        fallback_between_locus_share_with_own_shares: Some(WarrantedValue {
+            value: the_share_of(
+                fits.stated_concentration_with_own_shares(),
+                &format_args!("the stated concentration of a stratum's own shares"),
+            )
+            .get(),
+            warrant: fits.stated_concentration_with_own_shares_warrant().into(),
+            observations: None,
+            standard_error: None,
+        }),
         // **One row a read group the run declared a slippage group for.** A read group the
         // declaration does not name has no row, which is what the fit itself says about it —
         // `StratumFits::at` answers `UnknownReadGroup` and no slippage number is ever looked up
@@ -3635,7 +3647,10 @@ mod tests {
             AlleleLengthVariationRung::StratumsOwnSharesStatedSpread
         );
         assert_eq!(variation.fitted_weights(), Some(&[0.1, 0.8, 0.1][..]));
-        assert_eq!(variation.concentration(), fits.stated_concentration());
+        assert_eq!(
+            variation.concentration(),
+            fits.stated_concentration_with_own_shares()
+        );
     }
 
     /// **A stratum's concentration error is written as F's, and reads back as the
@@ -3668,6 +3683,8 @@ mod tests {
                     },
                 )]),
                 BTreeMap::new(),
+                3.5,
+                Provenance::FittedHere,
                 3.5,
                 Provenance::FittedHere,
             ),

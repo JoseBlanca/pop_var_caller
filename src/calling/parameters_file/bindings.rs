@@ -732,6 +732,7 @@ impl ParametersFile {
         }
         let RepeatTracts {
             fallback_between_locus_share,
+            fallback_between_locus_share_with_own_shares,
             slippage_group_by_read_group: _,
             slippage_by_stratum_and_group: _,
             allele_length_variation_by_stratum: _,
@@ -740,6 +741,9 @@ impl ParametersFile {
         } = repeat_tracts;
         fallback_between_locus_share.warrant =
             no_better_than_supplied(fallback_between_locus_share.warrant);
+        if let Some(with_own_shares) = fallback_between_locus_share_with_own_shares {
+            with_own_shares.warrant = no_better_than_supplied(with_own_shares.warrant);
+        }
         for SubstitutionRateRow {
             read_group: _,
             period: _,
