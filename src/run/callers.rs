@@ -2185,8 +2185,9 @@ pub(super) const DESCRIPTORS_A_RUN_NEEDS_BESIDES_ITS_ALIGNMENT_FILES: u64 = 32;
 /// A run that would run out of file descriptors refuses now, naming the arithmetic.
 ///
 /// **The count is of files, not of samples**, because a sample sequenced across four lanes is
-/// four files. At two a file, a Linux soft limit of 1,024 is reached at 496 files and macOS's
-/// 256 at 112 — while the memory bill spec §7.2 budgets is 500 kB a sample, so 1,000 samples is
+/// four files. With one BAM a sample (two a file plus two a sample), a Linux soft limit of 1,024
+/// is reached at 248 samples and macOS's 256 at 56 — while the memory bill spec §7.2 budgets is
+/// 500 kB a sample, so 1,000 samples is
 /// 500 MB. The descriptors bind first, by a wide margin.
 fn refuse_without_descriptor_headroom(read_groups: &ReadGroups) -> Result<(), RunError> {
     // `current` is the soft limit — what this process may open now.
