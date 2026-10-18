@@ -280,6 +280,9 @@ samples, and 5, 15, 30 and 60×.
   - it can resume a run that stopped part-way;
   - it records each stage's time.
 - `scripts/ng_str_stutter_score.py` scores STR segments and bundles, and runs vcfeval on the rest.
+  The suite runs it without vcfeval. vcfeval there means one run per sample, caller and stretch,
+  about 150 runs per caller in a 50-sample run. The benchmark is quoted for its STR genotypes, and
+  the human benchmarks carry the SNP and indel figures.
 
 **What is stale or missing.**
 - **No simulated data survive.** They lived in worktrees that are gone, so every run is regenerated

@@ -52,7 +52,12 @@ def selected_benchmarks(ctx):
 
 def build_pvc(ctx):
     ctx.log("building pvc (release)")
-    out = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "pvc"],
+    # The stuttering benchmark's simulator and typing checks are examples of this crate.
+    examples = ["ng_str_stutter_benchmark", "ng_typed_region_dump", "ng_str_bundle_runs"]
+    cmd = ["cargo", "build", "--release", "--quiet", "--bin", "pvc"]
+    for e in examples:
+        cmd += ["--example", e]
+    out = subprocess.run(cmd,
                          cwd=ctx.project_dir, capture_output=True, text=True)
     if out.returncode != 0:
         sys.exit("pvc did not build:\n" + out.stderr[-4000:])
