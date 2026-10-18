@@ -756,8 +756,12 @@ fn markers(
     let mut alternative = vec![0_u32; positions];
     let mut depth = vec![0_u32; positions];
 
-    // **First pass: what choosing a marker reads, as sums across samples.**
-    let mut covered = vec![0_usize; positions];
+    // **First pass: what choosing a marker reads, as sums across samples.** These three totals are
+    // the largest thing contamination holds, 20 bytes a position — 40 MB at the two-million-position
+    // budget whatever the cohort — so they are dropped as soon as the markers are chosen, before
+    // the position-to-marker index is built. `covered` counts samples, so four bytes hold it.
+    u32::try_from(count).expect("fewer samples than a u32 can count");
+    let mut covered = vec![0_u32; positions];
     let mut total_alternative = vec![0_u64; positions];
     let mut total_depth = vec![0_u64; positions];
     for sections in samples {
@@ -771,7 +775,6 @@ fn markers(
         }
     }
 
-    let mut marker_at = vec![DROPPED; positions];
     // Where each marker sits and its genotype prior, both read again in the second pass.
     let mut marker_positions: Vec<usize> = Vec::new();
     let mut priors: Vec<[f64; 3]> = Vec::new();
@@ -789,7 +792,7 @@ fn markers(
         } else {
             1.0
         };
-        if covered[index] < MIN_SAMPLES_WITH_DATA {
+        if (covered[index] as usize) < MIN_SAMPLES_WITH_DATA {
             continue;
         }
         let (alt, total) = (total_alternative[index], total_depth[index]);
@@ -803,7 +806,6 @@ fn markers(
         if !(MIN_FREQUENCY..=1.0 - MIN_FREQUENCY).contains(&pooled) {
             continue;
         }
-        marker_at[index] = u32::try_from(out.len()).expect("fewer markers than a u32 can index");
         marker_positions.push(index);
         priors.push(genotype_priors(pooled, 0.0));
         out.push(Marker {
@@ -817,6 +819,11 @@ fn markers(
             dosage: vec![0.0; count],
             cleanliness,
         });
+    }
+    drop((covered, total_alternative, total_depth));
+    let mut marker_at = vec![DROPPED; positions];
+    for (marker, &index) in marker_positions.iter().enumerate() {
+        marker_at[index] = u32::try_from(marker).expect("fewer markers than a u32 can index");
     }
 
     // **Second pass: each sample's dosage, at the markers only.**
