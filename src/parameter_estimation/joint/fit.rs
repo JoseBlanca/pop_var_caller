@@ -3420,7 +3420,50 @@ struct PassModel<'a> {
     /// How the density's rule's nodes and weights move with its two shapes — what the
     /// likelihood's slope in the shapes is made of, taken every pass for the shapes' update.
     density_slopes: RuleSlopes,
+    /// The log of each branch's and each noise class's share.
+    branches: BranchShares,
     parameters: &'a Parameters,
+}
+
+/// **The logarithms a position's branches are weighted by, which depend on the parameters
+/// alone**: each branch's share, each noise class's share, and how many alleles a candidate
+/// stands for. The same at every position of a pass, so they are taken once a pass, beside the
+/// read tables — taken per position they were about twenty logarithms a position in the
+/// likelihood and as many again in the attribution and the scores.
+#[derive(Debug)]
+struct BranchShares {
+    /// Whether the run fits the duplicated class.
+    duplicated_fitted: bool,
+    /// `ln(1 − duplicated share)`: what the three ordinary branches share between them.
+    ln_ordinary: f64,
+    ln_invariant: f64,
+    ln_fixed_alt: f64,
+    ln_segregating: f64,
+    ln_duplicated: f64,
+    ln_three: f64,
+    /// `[class]` — the log of the ordinary (0) and the mismapped (1) class's share.
+    ln_class: [f64; 2],
+    /// `ln k`, indexed by how many alleles `k` a candidate stands for (one to three).
+    ln_multiplicity: [f64; CANDIDATE_ALTERNATIVES + 1],
+}
+
+impl BranchShares {
+    fn of(parameters: &Parameters, duplicated_fitted: bool) -> Self {
+        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
+        let density = &parameters.density;
+        let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
+        Self {
+            duplicated_fitted,
+            ln_ordinary: ln(1.0 - duplicated_share),
+            ln_invariant: ln(density.p_invariant),
+            ln_fixed_alt: ln(density.p_fixed_alt),
+            ln_segregating: ln(density.p_segregating()),
+            ln_duplicated: ln(duplicated_share),
+            ln_three: float::ln(CANDIDATE_ALTERNATIVES as f64),
+            ln_class: [ln(1.0 - parameters.noisy_share), ln(parameters.noisy_share)],
+            ln_multiplicity: std::array::from_fn(|k| float::ln(k as f64)),
+        }
+    }
 }
 
 /// **The carrier Beta's rule and how it moves with the carrier's two shapes**, held together so
@@ -3473,6 +3516,7 @@ impl<'a> PassModel<'a> {
             group_index,
             ploidy: config.ploidy,
             read_logs,
+            branches: BranchShares::of(parameters, carrier.is_some()),
             quadrature,
             carrier,
             density_slopes,
@@ -3747,9 +3791,10 @@ struct Scratch {
     duplicated_ln: [f64; 2],
     /// The position's whole log-likelihood, once [`one_position`] has computed it.
     position_ln: f64,
-    /// The candidate alleles this position sums over, and how many alleles each stands for.
+    /// The candidate alleles this position sums over, and the log of how many alleles each stands
+    /// for — the only form the multiplicity is ever read in.
     candidates: Vec<usize>,
-    multiplicity: Vec<f64>,
+    ln_multiplicity: Vec<f64>,
     /// `[sample][genotype]` — the segregating branch's genotype weight, collapsed over the
     /// nodes and candidates it was spread across.
     genotype_weight: Vec<f64>,
@@ -3792,7 +3837,7 @@ impl Scratch {
             duplicated_ln: [f64::NEG_INFINITY; 2],
             position_ln: f64::NEG_INFINITY,
             candidates: Vec::with_capacity(MAX_CANDIDATES),
-            multiplicity: Vec::with_capacity(MAX_CANDIDATES),
+            ln_multiplicity: Vec::with_capacity(MAX_CANDIDATES),
             genotype_weight: vec![0.0; samples * 3],
             carrier_weight: vec![0.0; samples],
             position_genotype: vec![0.0; samples * 3],
@@ -3840,6 +3885,7 @@ fn one_position(
     let quadrature = &model.quadrature;
     let carrier = model.carrier.as_ref().map(|rule| &rule.quadrature);
     let parameters = model.parameters;
+    let shares = &model.branches;
     let samples = scratch.samples;
     let nodes = scratch.nodes;
     statistics.positions += 1.0;
@@ -3861,10 +3907,10 @@ fn one_position(
     // The three non-reference bases, with the ones no sample showed a read on folded into one
     // term counted as many times as there are of them: they give the identical likelihood.
     scratch.candidates.clear();
-    scratch.multiplicity.clear();
+    scratch.ln_multiplicity.clear();
     for &code in &scratch.evidence.observed_alternatives {
         scratch.candidates.push(code);
-        scratch.multiplicity.push(1.0);
+        scratch.ln_multiplicity.push(shares.ln_multiplicity[1]);
     }
     let unobserved = CANDIDATE_ALTERNATIVES.saturating_sub(scratch.candidates.len());
     if unobserved > 0 {
@@ -3872,7 +3918,9 @@ fn one_position(
             .find(|code| !scratch.candidates.contains(code))
             .expect("with an unobserved allele left there is a base no read fell on");
         scratch.candidates.push(stand_in);
-        scratch.multiplicity.push(unobserved as f64);
+        scratch
+            .ln_multiplicity
+            .push(shares.ln_multiplicity[unobserved]);
     }
     let candidates = scratch.candidates.len();
 
@@ -4031,20 +4079,19 @@ fn one_position(
     }
 
     // ---- the four branches, and the two classes ---------------------------------------------
-    let ln_three = float::ln(CANDIDATE_ALTERNATIVES as f64);
-    let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
+    let ln_three = shares.ln_three;
     for class in 0..2 {
         scratch.shares.clear();
         for candidate in 0..candidates {
             scratch.shares.push(
                 scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                    + float::ln(scratch.multiplicity[candidate]),
+                    + scratch.ln_multiplicity[candidate],
             );
         }
         let fixed_alt = ln_sum_exp(&scratch.shares) - ln_three;
         scratch.shares.clear();
         for candidate in 0..candidates {
-            let multiplicity = float::ln(scratch.multiplicity[candidate]);
+            let multiplicity = scratch.ln_multiplicity[candidate];
             for node in 0..nodes {
                 scratch
                     .shares
@@ -4054,21 +4101,17 @@ fn one_position(
         let segregating = ln_sum_exp(&scratch.shares) - ln_three;
         scratch.fixed_alt_ln[class] = fixed_alt;
         scratch.segregating_ln[class] = segregating;
-        let density = &parameters.density;
         // The three ordinary branches share what is left when the duplicated class has taken
         // its share, so the four still sum to one.
-        let ordinary = float::ln((1.0 - duplicated_share).max(f64::MIN_POSITIVE));
-        scratch.branch_ln[class * BRANCHES] = ordinary
-            + float::ln(density.p_invariant.max(f64::MIN_POSITIVE))
-            + scratch.invariant_ln[class];
-        scratch.branch_ln[class * BRANCHES + 1] =
-            ordinary + float::ln(density.p_fixed_alt.max(f64::MIN_POSITIVE)) + fixed_alt;
-        scratch.branch_ln[class * BRANCHES + 2] =
-            ordinary + float::ln(density.p_segregating().max(f64::MIN_POSITIVE)) + segregating;
+        let ordinary = shares.ln_ordinary;
+        scratch.branch_ln[class * BRANCHES] =
+            ordinary + shares.ln_invariant + scratch.invariant_ln[class];
+        scratch.branch_ln[class * BRANCHES + 1] = ordinary + shares.ln_fixed_alt + fixed_alt;
+        scratch.branch_ln[class * BRANCHES + 2] = ordinary + shares.ln_segregating + segregating;
         scratch.branch_ln[class * BRANCHES + DUPLICATED] = if let Some(carrier) = carrier {
             scratch.shares.clear();
             for candidate in 0..candidates {
-                let multiplicity = float::ln(scratch.multiplicity[candidate]);
+                let multiplicity = scratch.ln_multiplicity[candidate];
                 for node in 0..carrier.nodes.len() {
                     scratch.shares.push(
                         scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
@@ -4080,18 +4123,13 @@ fn one_position(
             // Kept for the scores, and not reused below: `ln d + summed − ln 3` is added left to
             // right, and taking `summed − ln 3` first would move the branch's last bits.
             scratch.duplicated_ln[class] = summed - ln_three;
-            float::ln(duplicated_share.max(f64::MIN_POSITIVE)) + summed - ln_three
+            shares.ln_duplicated + summed - ln_three
         } else {
             scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
-        let share = if class == 0 {
-            1.0 - parameters.noisy_share
-        } else {
-            parameters.noisy_share
-        };
-        scratch.class_ln[class] = float::ln(share.max(f64::MIN_POSITIVE))
-            + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        scratch.class_ln[class] =
+            shares.ln_class[class] + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
     }
     let position_ln = ln_sum_exp(&scratch.class_ln);
     scratch.position_ln = position_ln;
@@ -4189,7 +4227,7 @@ fn one_position(
             for candidate in 0..candidates {
                 scratch.shares.push(
                     scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                        + float::ln(scratch.multiplicity[candidate]),
+                        + scratch.ln_multiplicity[candidate],
                 );
             }
             let total = ln_sum_exp(&scratch.shares);
@@ -4226,7 +4264,7 @@ fn one_position(
         if branch[2] > 1e-12 {
             scratch.shares.clear();
             for candidate in 0..candidates {
-                let multiplicity = float::ln(scratch.multiplicity[candidate]);
+                let multiplicity = scratch.ln_multiplicity[candidate];
                 for node in 0..nodes {
                     scratch.shares.push(
                         scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity,
@@ -4329,7 +4367,7 @@ fn one_position(
                 let carrier_nodes = carrier.nodes.len();
                 scratch.shares.clear();
                 for candidate in 0..candidates {
-                    let multiplicity = float::ln(scratch.multiplicity[candidate]);
+                    let multiplicity = scratch.ln_multiplicity[candidate];
                     for node in 0..carrier_nodes {
                         scratch.shares.push(
                             scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]

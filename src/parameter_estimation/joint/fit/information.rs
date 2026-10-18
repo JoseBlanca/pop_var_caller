@@ -78,8 +78,8 @@
 use crate::float;
 
 use super::{
-    BRANCHES, BetaQuadrature, CANDIDATE_ALTERNATIVES, MAX_CANDIDATES, Parameters, PassModel,
-    Scratch, candidate_read_probability, candidate_read_probability_slope, class_rate,
+    BRANCHES, BetaQuadrature, BranchShares, MAX_CANDIDATES, PassModel, Scratch,
+    candidate_read_probability, candidate_read_probability_slope, class_rate,
     expected_reference_reads, genotype_frequencies_slope_in_excess,
     genotype_frequencies_slope_in_frequency, ln_sum_exp, reference_read_probability,
     reference_read_probability_slope,
@@ -146,12 +146,12 @@ impl RuleSlopes {
 
 /// **What the scorer needs that depends on the parameters alone**, built once a pass: how the two
 /// rules move with their shapes (the frequency density's and, when the run fits the duplicated
-/// class, the carrier Beta's), and the log of each branch's share.
+/// class, the carrier Beta's). The log of each branch's share it reads from the pass's model
+/// ([`BranchShares`]), where the likelihood reads it too.
 #[derive(Debug)]
 pub(super) struct ScoringTables {
     density: RuleSlopes,
     carrier: Option<RuleSlopes>,
-    branches: BranchShares,
 }
 
 impl ScoringTables {
@@ -161,7 +161,6 @@ impl ScoringTables {
         Self {
             density: model.density_slopes.clone(),
             carrier: model.carrier.as_ref().map(|carrier| carrier.slopes.clone()),
-            branches: BranchShares::of(model),
         }
     }
 }
@@ -347,9 +346,9 @@ pub(super) fn score_position(
         return;
     }
     fill_read_slopes(scratch, model, into);
-    let branches = &tables.branches;
+    let branches = &model.branches;
     for class in 0..2 {
-        let class_terms = NoiseClassTerms::of(scratch, branches, parameters, class);
+        let class_terms = NoiseClassTerms::of(scratch, branches, class);
         score_the_shares(scratch, branches, &class_terms, into);
         score_the_invariant_and_fixed_branches(
             scratch,
@@ -390,36 +389,6 @@ pub(super) fn score_position(
     }
 }
 
-/// The log of each branch's share, the same for both noise classes and every position of a pass.
-#[derive(Debug)]
-struct BranchShares {
-    /// Whether the run fits the duplicated class.
-    duplicated_fitted: bool,
-    ln_ordinary: f64,
-    ln_invariant: f64,
-    ln_fixed_alt: f64,
-    ln_segregating: f64,
-    ln_duplicated: f64,
-    ln_three: f64,
-}
-
-impl BranchShares {
-    fn of(model: &PassModel<'_>) -> Self {
-        let ln = |p: f64| float::ln(p.max(f64::MIN_POSITIVE));
-        let density = &model.parameters.density;
-        let duplicated_share = model.parameters.duplicated.map_or(0.0, |d| d.share);
-        Self {
-            duplicated_fitted: model.carrier.is_some(),
-            ln_ordinary: ln(1.0 - duplicated_share),
-            ln_invariant: ln(density.p_invariant),
-            ln_fixed_alt: ln(density.p_fixed_alt),
-            ln_segregating: ln(density.p_segregating()),
-            ln_duplicated: ln(duplicated_share),
-            ln_three: float::ln(CANDIDATE_ALTERNATIVES as f64),
-        }
-    }
-}
-
 /// One noise class at this position: its index, the log of its share, and the log of any
 /// ordinary branch's posterior with that branch's own share divided back out.
 struct NoiseClassTerms {
@@ -432,18 +401,8 @@ struct NoiseClassTerms {
 }
 
 impl NoiseClassTerms {
-    fn of(
-        scratch: &Scratch,
-        branches: &BranchShares,
-        parameters: &Parameters,
-        class: usize,
-    ) -> Self {
-        let share = if class == 0 {
-            1.0 - parameters.noisy_share
-        } else {
-            parameters.noisy_share
-        };
-        let ln_class = float::ln(share.max(f64::MIN_POSITIVE));
+    fn of(scratch: &Scratch, branches: &BranchShares, class: usize) -> Self {
+        let ln_class = branches.ln_class[class];
         Self {
             class,
             ln_class,
@@ -570,7 +529,7 @@ fn score_the_invariant_and_fixed_branches(
             class_terms.ln_posterior_per_share
                 + branches.ln_fixed_alt
                 + scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                + float::ln(scratch.multiplicity[candidate])
+                + scratch.ln_multiplicity[candidate]
                 - branches.ln_three,
         );
         for (s, own) in group_index.iter().enumerate() {
@@ -596,7 +555,7 @@ fn score_the_segregating_branch(
     let quadrature = &model.quadrature;
     let samples = scratch.samples;
     for candidate in 0..scratch.candidates.len() {
-        let multiplicity = float::ln(scratch.multiplicity[candidate]);
+        let multiplicity = scratch.ln_multiplicity[candidate];
         for node in 0..scratch.nodes {
             let at_node = float::exp(
                 class_terms.ln_posterior_per_share
@@ -673,7 +632,7 @@ fn score_the_duplicated_branch(
 ) {
     let class = class_terms.class;
     for candidate in 0..scratch.candidates.len() {
-        let multiplicity = float::ln(scratch.multiplicity[candidate]);
+        let multiplicity = scratch.ln_multiplicity[candidate];
         for node in 0..carrier.nodes.len() {
             let at_node = float::exp(
                 class_terms.ln_class + branches.ln_duplicated - scratch.position_ln
