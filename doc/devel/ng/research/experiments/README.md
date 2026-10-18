@@ -51,3 +51,17 @@ refuted a change.
 
 Raw profiles, heap dumps and gate outputs were **not** kept; they were hundreds of megabytes and
 are reproducible from the commands each report records.
+
+---
+
+## `str_outlier_share/` — fitting the repeat-tract outlier share (program in progress)
+
+Scripts behind [../str_outlier_share_phase1_2026-10-18.md](../str_outlier_share_phase1_2026-10-18.md)
+and [../str_outlier_share_phase2_2026-10-18.md](../str_outlier_share_phase2_2026-10-18.md), under
+the plan [../str_outlier_share_plan.md](../str_outlier_share_plan.md).
+
+| files | what it measured |
+|---|---|
+| `phase1.py`, `phase1b.py` | Where reads land at HG002 truth-homozygous tracts, from `pvc dev inspect-psp` dumps of psps generated with the held edge-deletion fix; one rate, a beta-binomial and two or three tract classes fitted to the per-tract counts. Paths point at the `str-group-b` worktree's `tmp/`. |
+| `sim.py`, `phase2_grid_seed1.txt` | A simulator of repeat-tract reads with stray reads and noisy tracts, and a truth-free fit of the stray share; the grid over 1/10/100 samples and 3x–300x, seed 1. |
+| `real_fit.py`, `phase3_real_fit_{5x,10x,30x}.tsv` | The same fit on HG002's real reads, per stratum, from phase 1's psp dumps; see [../str_outlier_share_phase3_real_2026-10-18.md](../str_outlier_share_phase3_real_2026-10-18.md). |

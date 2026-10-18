@@ -2,8 +2,46 @@
 
 **Started:** 2026-10-18. **Owner's request:** make the repeat-tract outlier share a number
 `estimate-parameters` fits, instead of a stated constant. Simulations are allowed.
-**Worktree:** `../pop_var_caller-str-group-b`, branch `str-group-b` (experiment branch, never
-merged; this plan moves to a research branch when the program settles).
+
+## Status: stopped 2026-10-18, nothing fitted
+
+**The share was not made a fitted number, because a fitted share calls no better than the stated
+one.** The owner's decision, on these measurements (HG002 tandem-repeat benchmark, one sample,
+every arm with the edge fix below; correct tract genotypes over the tracts every arm built):
+
+| | 5x | 10x | 30x |
+|---|---|---|---|
+| `--defaults`, stated share 0.07 | 2,873 | 4,709 | 7,225 |
+| fitted model, share fitted per stratum | 2,873 | 4,709 | 7,210 |
+
+**What the program changed on `main`:**
+
+- the built-in share went from 0.20 to **0.07** (parameters file format 6; `fd7901a6`);
+- a deletion that touches a tract's edge now counts as a flank deletion
+  (`str_edge_deletion_alleles.md` §5.1; `../../reports/ng_str_edge_touching_2026-10-18.md`).
+
+**What it found** (reports in this folder):
+
+- **Phase 1** ([`str_outlier_share_phase1_2026-10-18.md`](str_outlier_share_phase1_2026-10-18.md)):
+  read literally the share is 1–5 reads in 1,000; 2–5 tracts in 100 are noisy, the counterpart of
+  the generic path's noisy sites.
+- **Phase 2** ([`str_outlier_share_phase2_2026-10-18.md`](str_outlier_share_phase2_2026-10-18.md)):
+  in simulation a fit that never sees the truth recovers the share within about 10% from 10 samples
+  at any depth and from one sample at 30x and above; noisy tracts do not bias it.
+- **Phase 3** ([`str_outlier_share_phase3_real_2026-10-18.md`](str_outlier_share_phase3_real_2026-10-18.md)):
+  on HG002's reads the fitted share is 2–4 in 1,000 at periods 1 and 2 and rises with tract length,
+  because reads from beyond stutter's reach do; smoothing it along repeat count beats both one share
+  per period and independent strata on held-out tracts; a heavier stutter tail does not help. Read
+  the correction at its end: reads a non-whole number of repeats off and flank-deletion reads are
+  scored by calling, not sent to the outlier term.
+
+**To reopen it,** first repeat the calling comparison above with shares fitted without those reads
+(the comparison used shares that included them, which run to 5–10% at long homopolymers). The
+remaining gap to `--defaults` at 30x was mostly the prior: the fitted prior predicts about a third
+of the heterozygotes with two non-reference alleles one repeat apart that HG002's truth has.
+
+The scripts are in `experiments/str_outlier_share/`; they read inputs from the `str-group-b`
+worktree's `tmp/` (psp dumps, runs), which is not kept in the repository.
 
 ## 1. The question
 
