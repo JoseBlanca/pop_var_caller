@@ -131,7 +131,7 @@ Leaving the section out, as the spec's ruling words it, means format 6 of the pa
 and about ten readers learn to handle `None` (`to_run_parameters.rs:369, 510`, `bindings.rs:711,
 733`, `what_was_fitted.rs:136-163`, `validate.rs:436-529`, `from_run_parameters.rs:419, 688`). It
 also moves all four parameters-file and VCF digests in `src/cli/cross_platform_digests.rs` (`:267`,
-`:395`, `:502`, `:608`), since every file's version line changes. **Decision A** below.
+`:395`, `:502`, `:608`), since every file's version line changes. **Decision A** below: written empty.
 
 ---
 
@@ -163,25 +163,32 @@ compares, so the existing `RunError::CohortWalkedUnderDifferentSettings`
 not agree on the setting for repeat ground". `call-from-psps`, `estimate-parameters` and
 `regenerate-census` all open psps through that check.
 
-**The format version: 2.1 → 3.0, and a 2.x psp still reads, as `str-paths`.**
+**The format version goes back to 1.0, and every psp written before this branch is refused
+(owner, 2026-10-18).** The caller is in development: psps are rewritten rather than migrated, and
+the version should not climb with every change. Two consequences for the reader:
 
-- *Why a major bump.* A 2.x reader ignores keys it does not know (`header.rs:2206` pins that). A
-  2.1 build handed a `call-satellites` psp would read it as a default one, sort the ground with
-  satellites, and meet generic records inside what it thinks is a satellite. A major bump makes
-  it refuse the file by version instead (`header.rs:725-733`), as 2.0 was bumped for the same
-  reason (`header.rs:483-490`).
-- *Why 2.x still reads.* Every 2.x psp was written by a build that had only the default, so
-  reading it as `str-paths` is a fact about that version, not a guess about a missing key.
-  `OLDEST_READABLE_MAJOR` (`header.rs:511`) stays 2. In a 3.x psp the key is required, and a
-  missing one is refused by name, as `max-str-bundle-len-bp` is (`segmentation_section.rs:394-400`).
-  Nobody has to write their psps again. **Decision B** below.
+- *A version is accepted only if it is this build's own.* Today a later major is refused as
+  "written by a newer pvc" and an earlier one as "older" (`header.rs:725-733`). Once the number
+  goes back down, a 2.1 psp is not newer, so both refusals become one: "written by another pvc;
+  write it again with this pvc". `OLDEST_READABLE_MAJOR` (`header.rs:511`) goes, and with it
+  the `OlderVersion` error (`src/psp/mod.rs:284-297`), whose only job was the distinction.
+- *A psp from before 2026-10-11 also says 1.x*, and its records have another layout
+  (`header.rs:483-490`). The version cannot tell it from a new 1.0. **The required
+  `repeat-ground` key does**: no psp before this branch carries it, so the header is refused at
+  that key, and the refusal says the psp was written by an earlier pvc and must be written again
+  — not merely that a key is missing, which would send the user looking for a setting. It is
+  read before anything else in `[segmentation]`, so no record of the old layout is ever reached.
+  A test pins it with a header written before 2.0.
+
+The 1.x record layouts kept for record-level tests (`header.rs:505-509`, `RecordLayout`) stay as
+they are; they describe records, not versions a reader accepts.
 
 The oracle does not compare psp bytes (the header holds a timestamp), so the default runs stay
 byte-identical in everything it does compare.
 
 ## What does not change
 
-- **The parameters file**, under Decision A's recommendation: no format change, so a default run's
+- **The parameters file**, under Decision A: no format change, so a default run's
   file is byte-identical. Its `[repeat_routing]` section records the six repeat settings and only
   reports a disagreement, never refuses (`bindings.rs:261`); a file fitted under
   `--generic-path-only` and used by a default run makes every tract fall back to HipSTR's
@@ -216,7 +223,7 @@ Each step is built, its tests run, and committed; the owner looks before the nex
 1. **Release the reference inside a long stretch.** No call changes; the identity oracle is run
    once here to show it.
 2. **The setting as a type, in the psp header.** The `RepeatGround` enum in
-   `SegmentationInputs`; the psp header's key, format 3.0, 2.x read as `str-paths`; the cohort
+   `SegmentationInputs`; the psp header's key, format back to 1.0, every earlier psp refused; the cohort
    check naming the setting. Every run still writes `str-paths`, so no call changes.
 3. **`--call-satellites`.** The flag on `generate-psps` and `call-from-alignments` (*Advanced*),
    refusing it together with `--generic-path-only`; the clip-and-merge step in
@@ -224,8 +231,7 @@ Each step is built, its tests run, and committed; the owner looks before the nex
    line.
 4. **`--generic-path-only`.** The flag; the refusals of `--catalog` and the six repeat settings
    alongside it; the segmentation with no catalogue; the census with no STR sample;
-   `estimate-parameters` writing the empty stutter section (or, under Decision A's other
-   option, none).
+   `estimate-parameters` writing the stutter section empty (Decision A).
 5. **Help text and spec.** Both options' help carries the spec's warning: on satellites they add
    mostly SNPs and short indels, and the satellite's own length variation mostly stays uncalled.
    The spec's §4.4.1 gets the answers settled here.
@@ -237,8 +243,8 @@ Each step is built, its tests run, and committed; the owner looks before the nex
 |---|---|---|
 | 1 | a walk over one 1 Mb generic stretch holds no more reference than `max_record_span` plus a read's window per reader | the memory bound, measured with `resident_reference_bases` |
 | 2 | each of the three settings round-trips through the psp header | the encoding |
-| 2 | a 2.1 header reads as `str-paths` | old psps keep working |
-| 2 | a 3.0 header without `repeat-ground` is refused naming the key | no silent default |
+| 2 | a 2.1 header is refused as written by another pvc | one refusal for every other version |
+| 2 | a header written before 2.0, which says 1.x, is refused at the missing `repeat-ground` key with the "write it again" message | old 1.x psps never reach their records |
 | 2 | a cohort of one `str-paths` and one `call-satellites` psp is refused naming the setting | the spec's mixing rule |
 | 3 | both options together are refused before anything is read, on both subcommands | the spec's rule |
 | 3 | a satellite between two generic stretches comes back as one generic stretch, and no two generic stretches are adjacent anywhere | the merge |
@@ -256,8 +262,7 @@ Each step is built, its tests run, and committed; the owner looks before the nex
 **The identity oracle** (`scripts/promote_ng_oracle.sh`, four tomato2 accessions at low depth
 over 20 regions, fitted run included): every checksum it compares must match the baseline. It
 compares VCFs, window coverage and parameters files, not psp bytes, so the psp header change does
-not reach it. Under Decision A's other option the parameters file's version line moves and the
-baseline is re-recorded with a note.
+not reach it.
 
 **The accuracy check: `--call-satellites` against GATK on GIAB HG002, over satellite ground only.**
 
@@ -278,30 +283,36 @@ baseline is re-recorded with a note.
     cover repeats. GATK has to be run, but only over the satellite intervals there.
   - Both are one sample. Cohort size is not exercised by this check; it is an accuracy check
     on ground the default does not call, not a check of the cohort machinery.
-- *Scoring.* In repeats one variant has many spellings, and an exact match on position and alleles
-  (`benchmarks/lib/compare_to_truth.sh`, bcftools) counts a differently spelled correct call as
-  both a false call and a miss. RTG `vcfeval` compares haplotypes instead and is what the
-  2026-10-03 GIAB review recommended (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md`).
-  It is not installed on the host or in the container. **Decision D** below.
+- *Scoring: both methods side by side, `vcfeval` as the headline* (Decision D). In repeats one
+  variant can be spelled several ways.
+  - **The exact matcher the GIAB benchmarks already use**, `benchmarks/lib/compare_to_truth.sh`,
+    left-aligns and splits multi-allelic records (`:59-65`), then needs position and alleles to
+    agree. It does not split an allele that carries both an indel and a substitution, so a correct
+    call spelled as one record where the truth has two counts as a false call and a miss. On GIAB
+    this happened at five truth indels that `vcfeval` matched
+    (`doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md`, finding 4).
+  - **RTG `vcfeval`** replays both call sets onto the reference and compares the sequences. It is
+    the method that report recommends, and `scripts/ng_str_stutter_score.py:417-458` already runs
+    it (`java -jar RTG.jar`, because the `rtg` launcher refuses the container's arm64 CPU). RTG
+    Tools 3.13 is already unpacked in another worktree; it is copied into this worktree's
+    `tmp/tools/`, where that script looks for it, so nothing is downloaded.
+  - **Both are reported**, per caller: the difference between the two counts is how many calls in
+    satellite ground are spelling disagreements rather than calling errors. `vcfeval` is run in
+    its default genotype mode and again with `--squash-ploidy` (alleles only), so its allele-level
+    figure is comparable with the exact matcher's.
 
-## Decisions for the owner
+## Decisions (owner, 2026-10-18)
 
-**A. The stutter section under `--generic-path-only`: write it empty (recommended), or leave it out.**
-Empty needs no change to the file format or its readers, keeps every digest, and is the file a fit
-over zero repeats already writes, which already says in words that nothing was fitted. Leaving it
-out is what the 2026-10-16 ruling says; it costs format 6, about ten readers, and moves all four
-pinned digests, and gains a file one section shorter.
+**A. The stutter section under `--generic-path-only` is written empty, not left out.** No change to
+the parameters file's format or its readers; every digest stays. The spec's §4.4.1 is corrected to
+say so in step 5.
 
-**B. psp format: 3.0 that still reads 2.x as default (recommended), 3.0 that refuses 2.x, or 2.2.**
-2.2 lets an older build read a `call-satellites` psp as a default one, which is wrong silently.
-Refusing 2.x makes every user write their psps again for an option they did not use.
+**B. The psp format goes back to 1.0, and every earlier psp is refused** (section *The psp
+header*). In development, files are rewritten rather than migrated.
 
-**C. Accuracy data: both sets above (recommended), or only the 300× set.** The 300× set is one pvc
-run and the GATK calls exist; but it is one depth, and its truth may hold few variants in
-satellites. The Tandem-Repeat set adds a truth built for repeats and two lower depths, for a
-GATK run over a few satellite intervals per depth.
+**C. Both accuracy sets**: HG002 at 300× over 1,000 regions, and the Tandem-Repeat benchmark at 30×
+and 10×.
 
-**D. Scoring: fetch RTG Tools 3.13 into the project's `tmp/` and run `vcfeval` with the
-container's Java (recommended), or score with bcftools exact matching.** The fetch is a download
-from GitHub (the RTG release archive, about 50 MB). Exact matching undercounts both callers in
-repeats by an amount nobody knows, which is what the comparison is about.
+**D. Scoring — recommended, not yet ruled:** `vcfeval` from the copy already on this machine,
+with the existing exact matcher beside it (section *The checks before merging*). Nothing is
+downloaded.
