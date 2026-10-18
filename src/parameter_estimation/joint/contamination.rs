@@ -763,10 +763,11 @@ fn markers(
     let mut depth = vec![0_u32; positions];
 
     // **First pass: what choosing a marker reads, as sums across samples.** These three totals are
-    // the largest thing contamination holds, 20 bytes a position — 40 MB at the two-million-position
-    // budget whatever the cohort — so they are dropped as soon as the markers are chosen, before
-    // the position-to-marker index is built. `covered` counts samples, so four bytes hold it.
-    u32::try_from(count).expect("fewer samples than a u32 can count");
+    // the largest thing contamination holds, 20 bytes a position — 40 MB at the
+    // two-million-position budget whatever the cohort — so they are dropped as soon as the markers
+    // are chosen, before the position-to-marker index is built. `covered` counts samples, so four
+    // bytes hold it: the guard below is what keeps its `+= 1` from wrapping.
+    let _samples_fit_a_u32 = u32::try_from(count).expect("fewer samples than a u32 can count");
     let mut covered = vec![0_u32; positions];
     let mut total_alternative = vec![0_u64; positions];
     let mut total_depth = vec![0_u64; positions];

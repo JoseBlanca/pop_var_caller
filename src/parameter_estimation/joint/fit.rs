@@ -3701,8 +3701,9 @@ fn expectation_pass(
         // adding any held every chunk's per-position lists — a second copy of the whole census's,
         // 8 MB at two million positions — and every chunk's sums, whose genotype counts and
         // information grow with the cohort: about a kilobyte a sample a chunk, so 0.2 to 0.3 GB of
-        // chunks at 2,000 samples. The window only decides how many chunks are held at once; they are still
-        // added in position order, so the totals are the same bits at any window and any pool.
+        // chunks at 2,000 samples. The window only decides how many chunks are held at once; they
+        // are still added in position order, so the totals are the same bits at any window and
+        // any pool.
         use rayon::prelude::*;
         let mut into = empty();
         into.noisy_posterior.reserve(positions);

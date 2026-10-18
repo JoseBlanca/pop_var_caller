@@ -935,9 +935,10 @@ impl InformationSums {
 /// ([`cohort`]), then each sample's own parameters in turn ([`sample`]) — so two samples' parameters
 /// are paired too, which the blocks leave out. Kept only for a cohort of at most
 /// [`FULL_MATRIX_SAMPLES`] samples and [`FULL_MATRIX_PARAMETERS`] parameters. It is symmetric, so
-/// only its upper triangle is held, row after row. The pass that sums it keeps one for each chunk
-/// it holds at once — at most 128 — and the totals they are added into; at 20 samples of one
-/// library each is 2,346 numbers, 19 kB.
+/// only its upper triangle is held, row after row. The reported pass holds one for each chunk in
+/// its window (twice the pool's width, at most 128) and the total they are added into; the
+/// iterating passes hold one for each level of the join. At 20 samples of one library each is
+/// 2,346 numbers, 19 kB.
 #[derive(Clone)]
 pub(super) struct FullInformation {
     /// How many parameters the matrix pairs: its side.
