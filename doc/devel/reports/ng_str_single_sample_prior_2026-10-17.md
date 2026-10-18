@@ -242,15 +242,16 @@ defaulted`. Re-run with the built binary, not the experiment switch:
   re-recorded. Each fixture's fit has a median of its own, so the value is not read; the parameters
   file moves by that comment alone, and the VCF by the parameters file's md5 in its header.
   Putting the old md5 back reproduces each old VCF checksum exactly.
-- **The tomato identity oracle** (`scripts/promote_ng_oracle.sh`, 4 accessions, 20 regions), run
-  natively on the macOS host with main's binary (354754b8) and with this branch's. Its fitted calls
-  are identical record for record; only the `##pvcParameters` md5 in the header moves. Its
-  `--defaults` calls move 15 sample genotypes and 4 records (1 gone, 3 new), all at STR loci; the
-  window-coverage file gains 8 rows, the 2 extra records' windows for 4 samples.
-  **The checked-in baseline was not re-recorded, because main does not reproduce it either**: main's
-  binary on this slice writes 15,064 records, against the baseline's 7,508, and none of the seven
-  checksums matches. Whatever separates the two predates this branch and needs its own look before
-  the baseline can judge a change again.
+- **The tomato identity oracle** (`scripts/promote_ng_oracle.sh`: four tomato2 accessions, 20
+  regions, about 5 reads a window), run on the macOS host after merging main 7a1e2417, whose own
+  binary reproduced every recorded checksum first. With the fit, the calls do not move: only the
+  comment naming the built-in value, and with it the parameters file's md5 in the VCF header. With
+  default parameters, 138 of about 30,000 sample genotypes change, all at STR loci, and heterozygous
+  calls go from 3,478 to 3,525. Three STR records are new, and one SNP record is gone: it sits inside
+  a poly-A tract where the second sample moves from 0/0 to 0/1 for the deletion. The baseline was
+  re-recorded with these explanations (`scripts/promote_ng_oracle.baseline`).
+  *Corrected 2026-10-18:* an earlier version of this section said main did not reproduce the
+  baseline. That run used tomato1 accessions, not the tomato2 ones the baseline is recorded on.
 
 ## 7. Reproducing
 

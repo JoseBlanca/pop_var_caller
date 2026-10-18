@@ -38,6 +38,7 @@ mod accumulator;
 /// the second caller: an oracle that reimplemented the rule would be testing its own copy of it
 /// rather than the cache's walk, which is the only thing that differs between them.
 pub mod depth;
+mod depth_grid;
 
 #[cfg(test)]
 mod production_parity;
@@ -76,35 +77,47 @@ pub const GC_BINS: u32 = 50;
 /// Nothing measured forces this count either way; what it decides is the 80.2 kB.
 pub const DEPTH_BINS: u32 = 400;
 
-/// How many windows a sample buffers before it sets its depth bin width — **kept at 10,000 by
-/// measurement 2026-09-07** (spec §3.4, plan step D2).
+/// How many bins the fixed depth grid has, before its overflow bin — the grid every window is
+/// folded on as the pass runs, before the depth axis the histogram is handed over on is known
+/// (spec §3.4).
 ///
-/// The width is the sample's own: the accumulator holds its first windows back, takes the median
-/// of their mean depths, and sets the width so the bins span [`DEPTH_RANGE_IN_MEDIANS`] times that
-/// median. A sample that finalises fewer than this many sets the width from what it has when the
-/// pass ends.
+/// **Why a fixed grid, and not the sample's own axis from the start.** The histogram's depth axis
+/// is scaled to the sample's median window depth ([`DEPTH_RANGE_IN_MEDIANS`]), and that median is
+/// only known once the pass has seen every window. Until 2026-10-17 the axis was fitted from the
+/// first 10,000 windows instead, and a prefix of the run's ground is not the ground: the prefix
+/// median came out below the whole run's in eight of ten stores, by 34% at worst, and **a prefix
+/// twenty times too shallow loses the coverage model outright**: on a synthetic HG003 input whose
+/// first 19 kb were thinned to 5%, 0.949 of the windows fell past the top of the axis and the fit
+/// refused the sample. A GIAB run of chromosome 22 alone at 201–223 reads a position was refused
+/// the same way, with 0.346 over the top, at all three samples. A prefix ten times too deep
+/// is the silent half: on a synthetic HG003 input whose first 19 kb were at ten times the depth
+/// of the rest, every one-copy window landed in the axis's first five bins and the fitted scatter
+/// sat on the fit's own resolution floor (report `ng_coverage_depth_scale_2026-10-17.md`).
 ///
-/// **These windows are a prefix of the run's ground, and a prefix is not the ground.** Measured
-/// over ten sample-stores, the median fitted from the first 10,000 windows came out **below** the
-/// median over every window of the same store in eight of the ten — by 13% on average and 34% at
-/// worst (6.41 against 9.77, on one tomato accession over 80 intervals of 100 kb). The two that
-/// came out above did so by 2% and 8%.
+/// So every window is folded at once on this grid, whose bins are **equal steps of relative
+/// depth** from [`DEPTH_GRID_LOWEST_READS`] to [`DEPTH_GRID_HIGHEST_READS`], and at the end of the
+/// pass the grid is re-cut on the sample's own linear axis, fitted from the median over every
+/// window. A relative step serves three reads a position and three hundred alike, so no depth
+/// needs to be known before the first window arrives.
 ///
-/// **A longer prefix is not the fix.** On that store the fitted median barely moves from 100
-/// windows to 100,000 — 5.25, 6.50, 6.41, 6.25 — and only reaches 9.43 at a million, which is ten
-/// whole intervals. What would fix it is sampling across the run's ground rather than taking the
-/// first windows of it, and nothing needs that yet. A million windows held back is **16.8 MB** a
-/// sample against 262 kB at 10,000 — both as the capacity a doubling `Vec` of `f64` pairs
-/// reaches, which is the basis spec §3.4's 262 kB is stated on — so the affordable prefixes are
-/// all biased and the one that is not is unaffordable.
-///
-/// **What makes the bias harmless is [`DEPTH_RANGE_IN_MEDIANS`]'s headroom**, and the two are
-/// therefore not independent: a prefix a third shallow makes the axis a third short, and a third
-/// short is what the range absorbs. On the store where the prefix is worst, the axis it shortens
-/// puts 2.6 windows in every 10,000 over the top, against a fit that rejects a sample at 2,000 in
-/// 10,000. That margin is not the range's to spend twice: at a range of 5 the same prefix puts 35
-/// in 10,000 over. A step that narrows the range has to re-check this first.
-pub const DEPTH_SCALE_WINDOWS: u32 = 10_000;
+/// **400 bins over four decades is a step of 2.33% of the depth**, against the 2.5% of the median
+/// that one bin of the linear axis spans at the median. Re-cutting spreads each grid bin's count
+/// over the linear bins it overlaps, which blurs every window by at most one grid step: against a
+/// one-copy scatter of 8% at 300 reads a position, the narrowest measured, that widens the scatter
+/// by 0.03%.
+pub const DEPTH_GRID_BINS: u32 = 400;
+
+/// The lowest mean depth the fixed grid resolves, in reads a position. **One**, because a window's
+/// mean is over covered positions only and a covered position has at least one read; nothing a
+/// window reports is below it.
+pub const DEPTH_GRID_LOWEST_READS: f64 = 1.0;
+
+/// The mean depth at which the fixed grid's overflow bin begins, in reads a position. **Ten times
+/// the default depth ceiling** (`run::depth_ceiling::DEFAULT_MAX_READ_GROUP_DEPTH`, 1,000 reads),
+/// above which a record is not measured at all, so a default run never reaches it; a window past
+/// it lands past the top of every linear axis a median under 1,000 reads can produce, which is
+/// where re-cutting puts it.
+pub const DEPTH_GRID_HIGHEST_READS: f64 = 10_000.0;
 
 /// How many times the sample's median window depth the regular bins are to span — **kept at ten
 /// by measurement 2026-09-07** (spec §3.4, plan step D2).
@@ -132,9 +145,10 @@ pub const DEPTH_SCALE_WINDOWS: u32 = 10_000;
 /// kept for the size of its margin, not because a neighbour failed, and 40 is where the settings
 /// tried stop rather than where a cost appears. Halving to 5 would double the resolution and cut
 /// the margin under the guard thirteenfold, from 780 times under to 57; nothing measured asks for
-/// that resolution, and that margin is what absorbs [`DEPTH_SCALE_WINDOWS`]'s prefix bias — the
-/// whole of the worst store's overflow comes from the prefix, and vanishes when the width is
-/// fitted from every window.
+/// that resolution. That margin was measured while the width was fitted from a prefix of 10,000
+/// windows, and the whole of the worst store's overflow came from the prefix and vanished when
+/// the width was fitted from every window — which is what the run does since 2026-10-17
+/// ([`DEPTH_GRID_BINS`]).
 pub const DEPTH_RANGE_IN_MEDIANS: f64 = 10.0;
 
 /// How many covered positions a window must hold before it is allowed to speak. Below this many,
@@ -183,8 +197,7 @@ pub const MIN_WINDOW_POSITIONS: u32 = 50;
 ///
 /// Production's `CoverageBinScheme`, under the name spec §3.6 gives it, with three of ng's own
 /// additions in place of production's fixed depth bin width: a floor under how thin a window may
-/// be, the size of the sample the depth width is fitted from, and how far past that sample's
-/// median the regular bins are to reach. Every field must be positive; [`assert_valid`] asserts
+/// be, and how far past the sample's median the regular bins are to reach. Every field must be positive; [`assert_valid`] asserts
 /// that in both debug and release rather than silently using a scheme the caller never chose.
 ///
 /// **The width of a depth bin is not here, because it is not configuration.** It is fitted from
@@ -197,9 +210,9 @@ pub const MIN_WINDOW_POSITIONS: u32 = 50;
 /// run fails there rather than quietly measuring something else.
 ///
 /// **The constants are not all of the same kind.** [`WINDOW_BP`] and [`GC_BINS`] are
-/// production's, inherited and not re-argued here. [`MIN_WINDOW_POSITIONS`], [`DEPTH_BINS`],
-/// [`DEPTH_SCALE_WINDOWS`] and [`DEPTH_RANGE_IN_MEDIANS`] are ng's own, and each was measured on
-/// real stores in September 2026 and kept: a reader who finds a run's behaviour turning on one of
+/// production's, inherited and not re-argued here. [`MIN_WINDOW_POSITIONS`], [`DEPTH_BINS`] and
+/// [`DEPTH_RANGE_IN_MEDIANS`] are ng's own, and each was measured on real stores in September
+/// 2026 and kept: a reader who finds a run's behaviour turning on one of
 /// them will find, beside that constant, what the alternatives were measured to cost.
 ///
 /// [`assert_valid`]: WindowCoverageConfig::assert_valid
@@ -214,10 +227,6 @@ pub struct WindowCoverageConfig {
     /// Number of regular depth bins; one overflow bin follows them. [`DEPTH_BINS`] in a run —
     /// measured, and its doc comment carries what the count decides.
     pub depth_bins: u32,
-    /// How many windows to buffer before fitting this sample's depth bin width from their
-    /// median. [`DEPTH_SCALE_WINDOWS`] in a run — measured, and its doc comment carries the bias
-    /// a prefix of that length reads with.
-    pub depth_scale_windows: u32,
     /// How many times the sample's fitted median the regular bins span.
     /// [`DEPTH_RANGE_IN_MEDIANS`] in a run — measured, and its doc comment carries what each
     /// setting overflows.
@@ -232,16 +241,6 @@ pub struct WindowCoverageConfig {
 }
 
 impl WindowCoverageConfig {
-    /// Cells per GC row: the regular depth bins plus one overflow bin.
-    fn depth_columns(&self) -> usize {
-        self.depth_bins as usize + 1
-    }
-
-    /// Total histogram cells — `gc_bins * (depth_bins + 1)`.
-    fn cell_count(&self) -> usize {
-        self.gc_bins as usize * self.depth_columns()
-    }
-
     /// Panic (in both debug and release) if any field is non-positive, or
     /// `depth_range_in_medians` is not finite. The configuration is chosen by the run, not by
     /// the data, so a bad one is a programmer error and fails loudly rather than quietly
@@ -258,10 +257,6 @@ impl WindowCoverageConfig {
         assert!(self.window_bp >= 1, "window_bp must be >= 1");
         assert!(self.gc_bins >= 1, "gc_bins must be >= 1");
         assert!(self.depth_bins >= 1, "depth_bins must be >= 1");
-        assert!(
-            self.depth_scale_windows >= 1,
-            "depth_scale_windows must be >= 1",
-        );
         assert!(
             self.depth_range_in_medians.is_finite() && self.depth_range_in_medians > 0.0,
             "depth_range_in_medians must be finite and > 0, got {}",
@@ -286,19 +281,11 @@ impl WindowCoverageConfig {
         );
     }
 
-    /// Map a window's `(GC fraction in [0, 1], mean depth >= 0)` to a row-major cell index,
-    /// against a depth bin width fitted to this sample.
-    ///
-    /// GC saturates into the last GC bin at 1.0; a depth at or above `depth_bins * width` lands
-    /// in the overflow column. `mean_depth` is always `>= 0` (a sum of non-negative counts over
-    /// a positive divisor), so `0` maps to depth bin `0`; the `as usize` cast also saturates a
-    /// hypothetical negative to `0`.
-    fn cell_index(&self, gc_fraction: f64, mean_depth: f64, depth_bin_width: f64) -> usize {
+    /// The GC bin a window of GC fraction `gc_fraction` (in `[0, 1]`) lands in. GC saturates
+    /// into the last bin at 1.0.
+    fn gc_bin(&self, gc_fraction: f64) -> usize {
         let gc_bins = self.gc_bins as usize;
-        let gc_bin = ((gc_fraction * gc_bins as f64) as usize).min(gc_bins - 1);
-        let depth_bins = self.depth_bins as usize;
-        let depth_bin = ((mean_depth / depth_bin_width) as usize).min(depth_bins);
-        gc_bin * self.depth_columns() + depth_bin
+        ((gc_fraction * gc_bins as f64) as usize).min(gc_bins - 1)
     }
 }
 

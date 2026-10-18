@@ -910,3 +910,117 @@ fn finishing_pass_one_twice_keeps_the_size_it_measured() {
         "the size is the one pass one measured, not a second reading"
     );
 }
+
+/// **A sample with no coverage model is also a terminal warning**, once for the run: the
+/// per-sample lines above go to the log, which an operator may never open, and a sample with no
+/// model contributes no coverage evidence to any record. The line counts them and names each
+/// with its reason; the report's `warning: ` prefix is what puts it on the terminal.
+#[test]
+fn a_run_with_samples_lacking_a_coverage_model_warns_once() {
+    let (spill, output) = a_spill_and_an_output(
+        "a_run_with_samples_lacking_a_coverage_model_warns_once",
+        vec![a_record(100, 3, ONE_COPY_DEPTH)],
+    );
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![
+            a_fittable_histogram(),
+            SampleHistogram::NoWindowFinalised,
+            SampleHistogram::EveryWindowUnderTheFloor,
+        ],
+        &outbred(3),
+        an_ordinary_request(),
+        &output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    let lines = what_to_tell_the_operator(&run);
+    let warnings: Vec<&String> = lines
+        .iter()
+        .filter(|line| {
+            line.trim_start()
+                .starts_with("warning: 2 of 3 sample(s) have no coverage model")
+        })
+        .collect();
+    assert_eq!(warnings.len(), 1, "one warning for the run: {lines:#?}");
+    assert!(
+        warnings[0].contains("SRR7279401 (no window was finalised")
+            && warnings[0].contains("SRR7279402 (every window this sample finalised held"),
+        "both are named with their reasons: {}",
+        warnings[0],
+    );
+    assert!(
+        !warnings[0].contains("more"),
+        "nobody is left unnamed: {}",
+        warnings[0]
+    );
+}
+
+/// **Past three samples the warning stops naming and says where the rest are**, so a cohort of
+/// thousands still gets one line rather than one per refused sample.
+#[test]
+fn the_coverage_model_warning_names_three_and_counts_the_rest() {
+    let (spill, output) = a_spill_and_an_output(
+        "the_coverage_model_warning_names_three_and_counts_the_rest",
+        vec![a_record(100, 6, ONE_COPY_DEPTH)],
+    );
+    let mut histograms = vec![a_fittable_histogram()];
+    histograms.extend((0..5).map(|_| SampleHistogram::NoWindowFinalised));
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        histograms,
+        &outbred(6),
+        an_ordinary_request(),
+        &output,
+        metadata_over(6),
+        diploid(),
+    )
+    .expect("the run finishes");
+
+    let lines = what_to_tell_the_operator(&run);
+    let warning = lines
+        .iter()
+        .find(|line| line.contains("have no coverage model"))
+        .expect("a warning");
+    assert!(
+        warning
+            .trim_start()
+            .starts_with("warning: 5 of 6 sample(s)"),
+        "{warning}"
+    );
+    assert_eq!(
+        warning.matches("(no window was finalised").count(),
+        3,
+        "{warning}"
+    );
+    assert!(
+        warning.ends_with("and 2 more, each named with its reason in the log"),
+        "{warning}"
+    );
+}
+
+/// A run where every sample has a model raises no such warning.
+#[test]
+fn a_run_where_every_sample_has_a_coverage_model_does_not_warn_about_it() {
+    let (spill, output) = a_spill_and_an_output(
+        "a_run_where_every_sample_has_a_coverage_model_does_not_warn_about_it",
+        vec![a_record(100, 2, ONE_COPY_DEPTH)],
+    );
+    let run = fit_score_and_write_the_calls(
+        &spill,
+        vec![a_fittable_histogram(), a_fittable_histogram()],
+        &outbred(2),
+        an_ordinary_request(),
+        &output,
+        metadata_over(2),
+        diploid(),
+    )
+    .expect("the run finishes");
+    assert!(
+        !what_to_tell_the_operator(&run)
+            .iter()
+            .any(|line| line.contains("have no coverage model")),
+    );
+}

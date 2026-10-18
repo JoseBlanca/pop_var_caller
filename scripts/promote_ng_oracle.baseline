@@ -139,12 +139,43 @@
 # Putting `ng`, the old `##parametersFile` line and `hiddenParalog` back reproduces all three old checksums exactly;
 # the records (7,508), both parameters files, the windows and the histograms did not move. They were 67bfe9a1… /
 # 67bfe9a1… / 61b09b60….
+# Re-recorded 2026-10-17 (macOS host, arm64) with the coverage histogram's depth axis fitted from every window through a
+# fixed relative-depth grid, where it was fitted from each sample's first 10,000 (window_coverage.md §3.4; report
+# doc/devel/reports/ng_coverage_depth_scale_2026-10-17.md). The pre-change binary reproduced every line below's old value on
+# this host first. Windows and both parameters files do not move; the histograms do (0d61963f → 09635117), and with them the
+# four samples' fitted one-copy depths (by at most 2.8%, 4.66 → 4.53 reads) and scatters (by at most 0.006). The fitted
+# duplication rates barely move (0.031618 → 0.031693; 0.050664 → 0.051914 with the fit). Apart from PARALOG_LR / PARALOG_POST
+# no record changes. Defaults (92758b01 → 3d91e3a2, 7,508 → 7,507 records): ch01:12776029 A>T and ch01:37011736 T>C are now
+# dropped, ch01:33042122 C>T is kept. With the fit (e7dc72eb → 9a4f49c2, 6,680 → 6,682): ch01:12776369 C>T is now dropped,
+# ch01:33037237 (an A/T homopolymer deletion), ch01:37087746 T>C and ch01:67912984 A>G are kept.
+# Re-recorded 2026-10-17 (macOS host, arm64) when a read stopping inside an indel's slide stopped counting as a reference read
+# (doc/devel/reports/ng_ref_reads_in_repeats_2026-10-17.md): on the STR path a reference read that stops before the end of the
+# stretch an indel in the tract can slide to is a partial observation, and on the generic path a read stopping short of a
+# slide cut at the region's end is set aside. The pre-change binary (main at 2c6eac36) reproduced every line below's old value
+# on this host first. The defaults run's parameters file does not move. Defaults (3d91e3a2 → 82a9575b, 7,507 records both): no
+# record appears or vanishes; 18 change, 3 sample genotypes with them, all at homopolymer length variants at GQ ≤ 47 —
+# ch01:56740653 CTT>CTTT 0/1 → 1/1 in the third sample (the other two called samples are 1/1), ch01:79360746 0/1 → 1/1,
+# ch01:85912272 0/0 → 0/1. Windows (4acdda68 → 56798acf): 3 of 30,632 change their depth sums, and the histograms with them
+# (09635117 → b2fc1bfa). The fit (5ea720b6 → 14a09b0a) moves in 206 of 665 lines: base-quality multipliers in the fifth
+# significant digit, inbreeding coefficients by at most 0.0003, and all 49 repeat-tract slippage rows (median 1.1%, largest
+# 27%). With the fit (9a4f49c2 → 58bfad8f, 6,682 → 6,684 records): ch01:85900664 A>C and ch01:85900669 A>G (AC=1, DP=7) are
+# new, one genotype changes (ch01:56740653 again, 0/1 → 1/1), and the rest move in AF or GQ only.
+# Re-recorded 2026-10-18 (macOS host, arm64) when the tract ladder's stated concentration went from one chromosome to ten
+# (F 0.5 -> 1/11; doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md). main 7a1e2417 reproduced every line below's
+# old value on the same host first. Default parameters (82a9575b -> 5bfcecbf, 7,507 -> 7,509 records): 138 of about 30,000
+# sample genotypes change, all at STR loci (1/1 -> 0/1 62, 0/1 -> 1/1 38, 0/0 -> 0/1 27, 11 others), heterozygous calls
+# 3,478 -> 3,525; three STR records are new (ch01:4382904, 68068006, 75403004) and one SNP record is gone (ch01:86032995
+# T>A,*, inside the tract at 86032986 where the second sample moves 0/0 -> 0/1 for the deletion). Window rows follow the
+# records (56798acf -> e1c72672, 12 rows for the 3 new records' 4 samples); the histograms do not move. The defaults run's
+# file moves in its fallback_between_locus_share value (0.5 -> 1/11) and the comment naming it (920e36b7 -> 66d13204).
+# With the fit the calls do not move: the fitted file holds the cohort's own median, so the number is not read, and the file
+# moves by that comment alone (14a09b0a -> 5be66645); from_fit.comparable moves by that md5 in its header (58bfad8f -> 99881d2a).
 slice: 20 regions, 4 alignments
-# records: 7508
-92758b01922e1f1b080c6d6e5dccd156  from_alignments.comparable
-92758b01922e1f1b080c6d6e5dccd156  from_psps.comparable
-920e36b7ffc97fc49664c44c720aff38  from_alignments.parameters.toml
-4acdda6810237c942d79f14384953fbe  from_alignments.windows.sorted
-0d61963f33f82e691aa8fdef322384bb  from_alignments.windows.histograms
-5ea720b63c4674239720087f21a72674  fitted.parameters.toml
-e7dc72ebde9c69c10cf4a02e5105041c  from_fit.comparable
+# records: 7509
+5bfcecbf636130aa1a09443bbfc0dc6d  from_alignments.comparable
+5bfcecbf636130aa1a09443bbfc0dc6d  from_psps.comparable
+66d132048e819af896f71c37e8a01ea5  from_alignments.parameters.toml
+e1c726723e8dd4ffc0e6e9e7d2d7d705  from_alignments.windows.sorted
+b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
+5be666456887e0b3956709487a489629  fitted.parameters.toml
+99881d2aaaa081c4eb8bfaddd02c5b9c  from_fit.comparable
