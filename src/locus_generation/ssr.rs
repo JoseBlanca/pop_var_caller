@@ -1117,8 +1117,12 @@ mod classify {
         if let Some(span) = &input_span {
             let (aligned_before, aligned_after) =
                 aligned_bases_beyond_the_tract(cigar, fp.ref_start, tract_start, tract_end);
-            if deletion_crosses_a_tract_edge(cigar, fp.ref_start, tract_start, tract_end)
-                && aligned_before >= MIN_ALIGNED_FLANK_BASES
+            if deletion_takes_flank_bases_at_a_tract_edge(
+                cigar,
+                fp.ref_start,
+                tract_start,
+                tract_end,
+            ) && aligned_before >= MIN_ALIGNED_FLANK_BASES
                 && aligned_after >= MIN_ALIGNED_FLANK_BASES
             {
                 return complete_or_low_quality(read, span.clone(), flank_deletion, qual_buffer);
@@ -1333,7 +1337,7 @@ mod classify {
 
     /// **How many reference bases the read's deletions take inside each flank of the window**,
     /// as `(left flank, right flank)` — the flanks being `window` less `tract`. Coordinates as in
-    /// [`deletion_crosses_a_tract_edge`].
+    /// [`deletion_takes_flank_bases_at_a_tract_edge`].
     fn reference_bases_deleted_in_the_flanks(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -1366,10 +1370,22 @@ mod classify {
     /// the value the measurement in [`classify_read`]'s comment was taken at.
     const MIN_ALIGNED_FLANK_BASES: u32 = 5;
 
-    /// **Does a deletion in the CIGAR take bases from both a flank and the tract?** — from both
-    /// sides of the tract's first base, or of its last. `tract_start`/`tract_end` are 0-based
-    /// reference positions, the end exclusive, as is `ref_start`.
-    fn deletion_crosses_a_tract_edge(
+    /// **Does a deletion in the CIGAR take flank bases at the tract's edge?** — either crossing
+    /// the edge, taking bases from both sides of the tract's first base or of its last, or lying
+    /// in the flank and ending at the tract's first base or starting just after its last.
+    /// `tract_start`/`tract_end` are 0-based reference positions, the end exclusive, as is
+    /// `ref_start`.
+    ///
+    /// **A deletion that touches the edge counts** (`str_edge_deletion_alleles.md` §5.1, amended
+    /// 2026-10-18). Where a run of one base is followed by a different base, a read that misreads
+    /// that base as the run's carries a run one base too long; minimap2 writes such a read as the
+    /// run at full length and the neighbouring base deleted, a deletion that ends at the edge
+    /// without crossing it. Left out, the read was spelled over the tract's positions alone and
+    /// counted as the reference length: at HG002's homozygous one-base-deletion homopolymers at
+    /// 30x, 565 of the 926 reference-length reads were such reads. Recorded, the read keeps its
+    /// flank deletion, and calling compares it with each allele over the wider extent (§5.6), where
+    /// it matches the deletion allele but for the misread base.
+    fn deletion_takes_flank_bases_at_a_tract_edge(
         cigar: &[CigarOp],
         ref_start: u32,
         tract_start: u32,
@@ -1384,8 +1400,8 @@ mod classify {
                 | CigarOp::Skip(n) => at += n,
                 CigarOp::Deletion(n) => {
                     let (from, to) = (at, at + n);
-                    if (from < tract_start && to > tract_start)
-                        || (from < tract_end && to > tract_end)
+                    if (from < tract_start && to >= tract_start)
+                        || (from <= tract_end && to > tract_end)
                     {
                         return true;
                     }
@@ -1398,10 +1414,11 @@ mod classify {
     }
 
     /// **How many flank bases the read's deletions take beside the tract**, or `None` when no
-    /// deletion crosses either edge (or one takes more than 255 flank bases, which no flank this
-    /// path holds is long enough for). A deletion crossing the tract's first base takes the flank
-    /// bases before it; one crossing its last base, the flank bases after; one covering the whole
-    /// tract, both. Coordinates as in [`deletion_crosses_a_tract_edge`].
+    /// deletion crosses or touches either edge (or one takes more than 255 flank bases, which no
+    /// flank this path holds is long enough for). A deletion crossing the tract's first base, or
+    /// ending at it, takes the flank bases before it; one crossing its last base, or starting just
+    /// after it, the flank bases after; one covering the whole tract, both. Coordinates as in
+    /// [`deletion_takes_flank_bases_at_a_tract_edge`], which says why touching counts.
     fn flank_bases_deleted(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -1417,10 +1434,10 @@ mod classify {
                 | CigarOp::Skip(n) => at += n,
                 CigarOp::Deletion(n) => {
                     let (from, to) = (at, at + n);
-                    if from < tract_start && to > tract_start {
+                    if from < tract_start && to >= tract_start {
                         left = tract_start - from;
                     }
-                    if from < tract_end && to > tract_end {
+                    if from <= tract_end && to > tract_end {
                         right = to - tract_end;
                     }
                     at = to;
@@ -1477,7 +1494,7 @@ mod classify {
 
     /// **How many aligned bases a read has before the tract and after it**, as `(before,
     /// after)` — match operations only, so deleted, skipped, clipped and inserted bases do not
-    /// count. Coordinates as in [`deletion_crosses_a_tract_edge`].
+    /// count. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
     fn aligned_bases_beyond_the_tract(
         cigar: &[CigarOp],
         ref_start: u32,
@@ -2420,6 +2437,16 @@ mod classify {
                 flank_bases_deleted(&[Match(40), Deletion(5), Match(40)], 0, 30, 60),
                 None
             );
+            assert_eq!(
+                flank_bases_deleted(&[Match(29), Deletion(1), Match(40)], 0, 30, 60),
+                Some(FlankDeletion { left: 1, right: 0 }),
+                "a deletion ending at the tract's first base takes the flank base before it"
+            );
+            assert_eq!(
+                flank_bases_deleted(&[Match(60), Deletion(2), Match(20)], 0, 30, 60),
+                Some(FlankDeletion { left: 0, right: 2 }),
+                "a deletion starting just after the tract's last base takes the flank bases after it"
+            );
         }
 
         /// The two CIGAR measurements behind that rule: a deletion crosses an edge only when it
@@ -2430,19 +2457,46 @@ mod classify {
             use CigarOp::{Deletion, Match, SoftClip};
             // Tract at [30, 60).
             let across_the_end = [Match(51), Deletion(13), Match(26)];
-            assert!(deletion_crosses_a_tract_edge(&across_the_end, 0, 30, 60));
+            assert!(deletion_takes_flank_bases_at_a_tract_edge(
+                &across_the_end,
+                0,
+                30,
+                60
+            ));
             assert_eq!(
                 aligned_bases_beyond_the_tract(&across_the_end, 0, 30, 60),
                 (30, 26)
             );
             let across_the_start = [Match(27), Deletion(6), Match(40)];
-            assert!(deletion_crosses_a_tract_edge(&across_the_start, 0, 30, 60));
+            assert!(deletion_takes_flank_bases_at_a_tract_edge(
+                &across_the_start,
+                0,
+                30,
+                60
+            ));
             let inside = [Match(40), Deletion(5), Match(40)];
-            assert!(!deletion_crosses_a_tract_edge(&inside, 0, 30, 60));
-            let touching_the_start = [Match(30), Deletion(5), Match(40)];
+            assert!(!deletion_takes_flank_bases_at_a_tract_edge(
+                &inside, 0, 30, 60
+            ));
+            let starting_at_the_first_base = [Match(30), Deletion(5), Match(40)];
             assert!(
-                !deletion_crosses_a_tract_edge(&touching_the_start, 0, 30, 60),
+                !deletion_takes_flank_bases_at_a_tract_edge(&starting_at_the_first_base, 0, 30, 60),
                 "a deletion that starts at the tract's first base takes nothing from the flank"
+            );
+            let ending_at_the_last_base = [Match(55), Deletion(5), Match(40)];
+            assert!(
+                !deletion_takes_flank_bases_at_a_tract_edge(&ending_at_the_last_base, 0, 30, 60),
+                "a deletion that ends at the tract's last base takes nothing from the flank"
+            );
+            let touching_the_start = [Match(29), Deletion(1), Match(40)];
+            assert!(
+                deletion_takes_flank_bases_at_a_tract_edge(&touching_the_start, 0, 30, 60),
+                "a flank deletion ending at the tract's first base touches the edge"
+            );
+            let touching_the_end = [Match(60), Deletion(1), Match(40)];
+            assert!(
+                deletion_takes_flank_bases_at_a_tract_edge(&touching_the_end, 0, 30, 60),
+                "a flank deletion starting just after the tract's last base touches the edge"
             );
             assert_eq!(
                 aligned_bases_beyond_the_tract(&[SoftClip(10), Match(80)], 10, 30, 60),
