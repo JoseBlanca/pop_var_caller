@@ -82,6 +82,9 @@ pub struct RunReport<'a> {
     max_cohort_locus_span: u32,
     /// The most alleles this run called a locus over, for the same reason.
     max_candidate_alleles: u16,
+    /// How many bases of satellite the run handed to the generic path (`--call-satellites`);
+    /// zero, and unprinted, on a run without it.
+    satellite_bases_on_the_generic_path: u64,
 }
 
 /// **How this run came by its observations, and therefore what it can say about each sample.**
@@ -131,6 +134,7 @@ impl<'a> RunReport<'a> {
             analysed_bases: analysed.iter().map(|region| region.len()).sum(),
             max_cohort_locus_span: bounds.max_cohort_locus_span,
             max_candidate_alleles: bounds.max_candidate_alleles,
+            satellite_bases_on_the_generic_path: 0,
         }
     }
 
@@ -160,7 +164,17 @@ impl<'a> RunReport<'a> {
             analysed_bases: analysed.iter().map(|region| region.len()).sum(),
             max_cohort_locus_span: bounds.max_cohort_locus_span,
             max_candidate_alleles: bounds.max_candidate_alleles,
+            satellite_bases_on_the_generic_path: 0,
         }
+    }
+
+    /// The same report, saying how many bases of satellite the run handed to the generic path
+    /// (`--call-satellites`, `command_line.md` §4.4.1). Those bases are counted as called ground
+    /// with the rest, so without this line nothing on the page would say the run called them.
+    #[must_use]
+    pub fn with_satellite_bases_on_the_generic_path(mut self, bases: u64) -> Self {
+        self.satellite_bases_on_the_generic_path = bases;
+        self
     }
 
     /// **A read group as its file named it** — the sample and the `@RG ID`, not an index.
@@ -227,6 +241,7 @@ impl<'a> RunReport<'a> {
     /// whenever they differ so nobody has to work out why.
     fn what_was_not_called(&self, lines: &mut Vec<String>) {
         self.the_ground_the_run_spoke_for(lines);
+        self.the_satellites_handed_to_the_generic_path(lines);
         self.what_the_loci_came_to(lines);
     }
 
@@ -285,6 +300,24 @@ impl<'a> RunReport<'a> {
             "  not called — tandem arrays longer than this run types as callable: {} bases ({})",
             ground.unhandled_out_of_scope_bp,
             share_of(ground.unhandled_out_of_scope_bp, covered),
+        ));
+    }
+
+    /// The satellite ground `--call-satellites` handed to the generic path, in bases — a line
+    /// only when there was some. Printed in both modes: the setting is the segmentation's, which
+    /// both have.
+    ///
+    /// **Said with its limit beside it** (`command_line.md` §4.4.1): on that ground the run adds
+    /// mostly SNPs and short indels, and the satellites' own length variation shows up as the
+    /// loci refused for width below.
+    fn the_satellites_handed_to_the_generic_path(&self, lines: &mut Vec<String>) {
+        if self.satellite_bases_on_the_generic_path == 0 {
+            return;
+        }
+        lines.push(format!(
+            "satellites handed to the SNP/indel model (--call-satellites): {} bases; their length \
+             variation mostly ends in loci too wide to call, counted below",
+            self.satellite_bases_on_the_generic_path,
         ));
     }
 

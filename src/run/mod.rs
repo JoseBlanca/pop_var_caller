@@ -79,7 +79,9 @@ pub use psp_caller::{
 };
 pub use psp_source::{PspObservationSource, PspSourceError, StoredSampleTallies};
 pub use report::RunReport;
-pub use segments::{Segmentation, SegmentationInputs};
+pub use segments::{
+    RepeatGround, RepeatGroundSetting, RepeatSorting, Segmentation, SegmentationInputs,
+};
 pub use walker::{AlignmentFilesWalker, RunSegments};
 
 use std::path::PathBuf;

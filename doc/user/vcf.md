@@ -1,9 +1,8 @@
-# Reading the VCF
+# The VCF
 
 pvc writes one VCF (version 4.4) holding SNPs, indels and STRs, in genome order. A site appears
 only if at least one sample is called with an alternative allele, and its QUAL reaches
-`--min-site-quality` (1 by default). There is no gVCF: sites where every sample matches the
-reference are not written.
+`--min-site-quality` (1 by default).
 
 ## Header
 
@@ -25,8 +24,6 @@ Besides the usual lines, the header records how the file was made:
   variable at all. It is at least 0 and at most 9999. QUAL does not grow with the number of
   samples that match the reference.
 - **GQ**: the Phred-scaled probability that this sample's genotype is wrong, at most 99.
-
-pvc does not write genotype likelihoods (`PL`, `GL`) or genotype probabilities (`GP`).
 
 ## INFO
 

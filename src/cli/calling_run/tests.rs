@@ -103,7 +103,7 @@ fn a_calling_run_writes_back_the_fit_starts_it_read() {
     let written = numbers.parameters_file(
         &read_groups,
         &ReferenceDigest([3; 16]),
-        &StrRepeatCriteria::default(),
+        Some(&StrRepeatCriteria::default()),
     );
     assert_eq!(written.fitted_from.snp_indel_fit_starts, Some(starts));
 
@@ -114,7 +114,7 @@ fn a_calling_run_writes_back_the_fit_starts_it_read() {
     let written = with_none.parameters_file(
         &read_groups,
         &ReferenceDigest([3; 16]),
-        &StrRepeatCriteria::default(),
+        Some(&StrRepeatCriteria::default()),
     );
     assert_eq!(written.fitted_from.snp_indel_fit_starts, None);
 }
@@ -171,7 +171,7 @@ fn a_calling_run_writes_back_the_informational_tables_it_read() {
     let written = numbers.parameters_file(
         &read_groups,
         &ReferenceDigest([3; 16]),
-        &StrRepeatCriteria::default(),
+        Some(&StrRepeatCriteria::default()),
     );
     assert_eq!(written.ordinary_site_prior.fitted_density, Some(density));
     assert_eq!(written.duplicated_positions, Some(duplicated));

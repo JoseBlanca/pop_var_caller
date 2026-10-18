@@ -199,6 +199,7 @@ fn run(
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
+        setting: pop_var_caller::run::RepeatGroundSetting::StrPaths,
     };
     let analysed = run_ground::analysed_regions(&ground, &contigs)?;
     let analysed_bases: u64 = analysed.iter().map(|region| region.len()).sum();
@@ -211,11 +212,11 @@ fn run(
     let catalog = RepeatCatalog::open_checking_against_reference(catalog_path, &with_checksums)?;
     let plan = CensusPlan::of_run(
         CensusSelection::SHIPPED,
-        &catalog,
+        Some(&catalog),
         &analysed,
         &unambiguous,
         &with_checksums,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     drop(catalog);
 

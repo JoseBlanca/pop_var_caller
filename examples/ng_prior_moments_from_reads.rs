@@ -1240,12 +1240,12 @@ fn draw(
             seed,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
-            catalog_built_under: CatalogBuildSettings {
+            catalog_built_under: Some(CatalogBuildSettings {
                 criteria: StrRepeatCriteria::default(),
                 scan: ScanParams::default(),
                 tool_version: "0.1.0".to_string(),
-            },
-            ssr_criteria: StrRepeatCriteria::default(),
+            }),
+            ssr_criteria: Some(StrRepeatCriteria::default()),
             generic_target: positions as u64,
             ssr_cap: 1_000,
         }),

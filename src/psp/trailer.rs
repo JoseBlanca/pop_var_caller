@@ -219,7 +219,7 @@ fn write_the_replacement(
 ///
 /// **This is the one thing this operation reads that spec §6.7's table does not account for**,
 /// and it earns a refusal class that table does not list for it: a file written by a newer format
-/// comes back as `UnsupportedVersion` rather than being rewritten. That is the safe answer and
+/// comes back as `WrittenByAnotherPvc` rather than being rewritten. That is the safe answer and
 /// the spec's table should gain the row.
 fn check_the_trailer_is_past_the_header(
     path: &Path,

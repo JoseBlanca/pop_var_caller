@@ -547,10 +547,10 @@ pub fn parameters_file_of(
     inbreeding: &[Estimate<InbreedingF>],
     reference: &ReferenceDigest,
     terms: &RecordingTerms,
-    repeat_routing: &StrRepeatCriteria,
+    repeat_routing: Option<&StrRepeatCriteria>,
     snp_indel_fit: &JointFit,
 ) -> ParametersFile {
-    let file = ParametersFile::of_run(
+    let file = ParametersFile::of_run_under(
         parameters,
         read_groups,
         &ReadsBehindEachCalibration::no_count_in_reads(read_groups.len()),
@@ -783,6 +783,8 @@ mod tests {
         let cohort = a_varying_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
         let walk = GeneratePspsArgs {
+            call_satellites: false,
+            generic_path_only: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
@@ -1346,7 +1348,7 @@ mod writing_the_parameters_file {
             &stated,
             &plan.terms.reference,
             &terms,
-            &plan.terms.ssr_criteria,
+            plan.terms.ssr_criteria.as_ref(),
             &fit.generic,
         );
         (parameters, file)
@@ -1484,7 +1486,7 @@ mod a_sample_with_repeat_tracts_only {
             &inbreeding,
             &ReferenceDigest([7; 16]),
             &terms,
-            &StrRepeatCriteria::default(),
+            Some(&StrRepeatCriteria::default()),
             &fit.generic,
         );
         let multiplier =

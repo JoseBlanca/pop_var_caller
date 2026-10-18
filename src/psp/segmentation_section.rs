@@ -31,7 +31,7 @@ use crate::region_typing::GenomeRegions;
 use crate::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
 use crate::regions::{ContigBounds, Region};
 use crate::repeat_catalog::{RepeatCatalogHeader, StrRepeatCriteria};
-use crate::segmentation_inputs::SegmentationInputs;
+use crate::segmentation_inputs::{RepeatGround, RepeatSorting, SegmentationInputs};
 use crate::tandem_repeat::{PeriodRange, ScanParams};
 use crate::types::{Bp, MAX_MOTIF_LEN};
 
@@ -48,19 +48,34 @@ use crate::types::{Bp, MAX_MOTIF_LEN};
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct WireSegmentation {
+    /// `repeat-ground` — which path each kind of repeat ground went to: `str-paths`,
+    /// `call-satellites` or `generic-path-only` ([`RepeatGround`]).
+    ///
+    /// **Optional on the wire only so that its absence can be refused by name.** Every psp this
+    /// build writes records it; one without it was written by an earlier pvc, whose records may be
+    /// laid out differently, and the header refuses it before this section is read
+    /// ([`REPEAT_GROUND_KEY`]). The check here is the same rule, for a section met on its own.
+    #[serde(default)]
+    pub(crate) repeat_ground: Option<String>,
     /// `[[segmentation.analysed-region]]` — the ground, in genomic order, each span
     /// naming its contig by the header's own contig list.
     #[serde(default)]
     analysed_region: Vec<WireAnalysedRegion>,
     /// `[segmentation.repeat-tract-criteria]` — the criteria this run asked the
     /// catalog with when routing the ground into segments, which decide where a
-    /// segment ends (the same value [`SegmentationInputs::repeat_tract_criteria`]
-    /// holds in memory).
-    repeat_tract_criteria: WireRepeatCriteria,
+    /// segment ends (the same value [`RepeatSorting::repeat_tract_criteria`]
+    /// holds in memory). Absent under `generic-path-only`, which read no catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repeat_tract_criteria: Option<WireRepeatCriteria>,
     /// `[segmentation.catalog]` — the repeat catalog's own header, whole, so a refusal
-    /// can name the exact field of it that differs.
-    catalog: WireCatalog,
+    /// can name the exact field of it that differs. Absent under `generic-path-only`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog: Option<WireCatalog>,
 }
+
+/// The header key every psp this build writes carries, in its `[segmentation]` table: the one a
+/// psp from an earlier pvc lacks. Spelled once, for the header's reader and this section.
+pub(crate) const REPEAT_GROUND_KEY: &str = "repeat-ground";
 
 /// One analysed span: 1-based inclusive, the same convention as every region in the
 /// pipeline (`src/regions.rs`).
@@ -185,8 +200,7 @@ impl WireSegmentation {
         // compile *here*, on the encode side — not only in the decode literal, where a
         // default could be filled in without the writer ever recording the field.
         let SegmentationInputs {
-            catalog,
-            repeat_tract_criteria,
+            repeat_ground,
             analysed_regions,
         } = inputs;
         let analysed_region = analysed_regions
@@ -205,10 +219,13 @@ impl WireSegmentation {
                 }
             })
             .collect();
+        let sorting = repeat_ground.sorting();
         WireSegmentation {
+            repeat_ground: Some(repeat_ground.setting_name().to_string()),
             analysed_region,
-            repeat_tract_criteria: WireRepeatCriteria::from_criteria(repeat_tract_criteria),
-            catalog: WireCatalog::from_catalog(catalog),
+            repeat_tract_criteria: sorting
+                .map(|sorting| WireRepeatCriteria::from_criteria(&sorting.repeat_tract_criteria)),
+            catalog: sorting.map(|sorting| WireCatalog::from_catalog(&sorting.catalog)),
         }
     }
 }
@@ -311,13 +328,83 @@ impl WireSegmentation {
                 BrokenRule::new("segmentation.analysed-region", broken.to_string())
             })?;
 
+        let repeat_ground = repeat_ground_of(
+            self.repeat_ground.as_deref(),
+            self.repeat_tract_criteria,
+            self.catalog,
+        )?;
         Ok(SegmentationInputs {
-            catalog: self.catalog.into_catalog()?,
-            repeat_tract_criteria: self
-                .repeat_tract_criteria
-                .into_criteria("segmentation.repeat-tract-criteria")?,
+            repeat_ground,
             analysed_regions,
         })
+    }
+}
+
+/// The setting for repeat ground, from its name and the two tables that go with it.
+///
+/// The tables must match the setting: present under the two settings that read a catalog,
+/// absent under `generic-path-only`, which read none. **Either mismatch is refused** rather than
+/// resolved — a catalog recorded for a run that read none, or a catalog missing from a run that
+/// read one, is a file this build did not write.
+fn repeat_ground_of(
+    setting: Option<&str>,
+    criteria: Option<WireRepeatCriteria>,
+    catalog: Option<WireCatalog>,
+) -> Result<RepeatGround, BrokenRule> {
+    let key = format!("segmentation.{REPEAT_GROUND_KEY}");
+    let Some(setting) = setting else {
+        return Err(BrokenRule::new(
+            key,
+            "is missing; this psp was written by an earlier pvc — write it again with \
+             generate-psps",
+        ));
+    };
+    let sorting = |criteria: Option<WireRepeatCriteria>, catalog: Option<WireCatalog>| {
+        let missing = |table: &str| {
+            BrokenRule::new(
+                format!("segmentation.{table}"),
+                format!("is missing; a psp written under {setting} records the catalog it read"),
+            )
+        };
+        Ok::<_, BrokenRule>(RepeatSorting {
+            catalog: catalog.ok_or_else(|| missing("catalog"))?.into_catalog()?,
+            repeat_tract_criteria: criteria
+                .ok_or_else(|| missing("repeat-tract-criteria"))?
+                .into_criteria("segmentation.repeat-tract-criteria")?,
+        })
+    };
+    match setting {
+        RepeatGround::STR_PATHS => Ok(RepeatGround::StrPaths(sorting(criteria, catalog)?)),
+        RepeatGround::CALL_SATELLITES => {
+            Ok(RepeatGround::CallSatellites(sorting(criteria, catalog)?))
+        }
+        RepeatGround::GENERIC_PATH_ONLY => {
+            let present = |table: &str| {
+                BrokenRule::new(
+                    format!("segmentation.{table}"),
+                    format!(
+                        "is present; a psp written under {} read no catalog",
+                        RepeatGround::GENERIC_PATH_ONLY
+                    ),
+                )
+            };
+            if criteria.is_some() {
+                return Err(present("repeat-tract-criteria"));
+            }
+            if catalog.is_some() {
+                return Err(present("catalog"));
+            }
+            Ok(RepeatGround::GenericPathOnly)
+        }
+        other => Err(BrokenRule::new(
+            key,
+            format!(
+                "is {other:?}; a psp records one of {}, {} or {}",
+                RepeatGround::STR_PATHS,
+                RepeatGround::CALL_SATELLITES,
+                RepeatGround::GENERIC_PATH_ONLY
+            ),
+        )),
     }
 }
 
@@ -499,11 +586,16 @@ pub(crate) fn check_segmentation(
         }
     }
 
+    // Nothing else to check under `generic-path-only`: the setting itself is an enum, and the
+    // encoder writes no catalog for it.
+    let Some(sorting) = inputs.repeat_ground.sorting() else {
+        return Ok(());
+    };
     check_criteria(
         "segmentation.repeat-tract-criteria",
-        &inputs.repeat_tract_criteria,
+        &sorting.repeat_tract_criteria,
     )?;
-    check_catalog(&inputs.catalog)
+    check_catalog(&sorting.catalog)
 }
 
 /// The criteria's own invariants, as the classifier release-asserts them
@@ -677,20 +769,33 @@ pub(crate) fn segmentation_inputs_for_tests(contigs: &[ContigIdentity]) -> Segme
         .collect();
     let longest_tract_bp = (0..catalog_contigs.len()).map(|i| 88 + i as u64).collect();
     SegmentationInputs {
-        catalog: RepeatCatalogHeader {
-            contigs: catalog_contigs,
-            longest_tract_bp,
-            reference_md5: [0x0a; 16],
-            built_under,
-            scan: ScanParams {
-                match_reward: 3,
-                mismatch_penalty: 5,
-                min_copies: 4,
+        // The setting that is not the default, so a round trip that read every psp as the
+        // default fails.
+        repeat_ground: RepeatGround::CallSatellites(RepeatSorting {
+            catalog: RepeatCatalogHeader {
+                contigs: catalog_contigs,
+                longest_tract_bp,
+                reference_md5: [0x0a; 16],
+                built_under,
+                scan: ScanParams {
+                    match_reward: 3,
+                    mismatch_penalty: 5,
+                    min_copies: 4,
+                },
+                tool_version: "trf-port-0.9.1".to_string(),
             },
-            tool_version: "trf-port-0.9.1".to_string(),
-        },
-        repeat_tract_criteria,
+            repeat_tract_criteria,
+        }),
         analysed_regions,
+    }
+}
+
+/// The catalog and criteria of a test fixture that read a catalog, for the tests that vary them.
+#[cfg(test)]
+pub(crate) fn sorting_of(inputs: &mut SegmentationInputs) -> &mut RepeatSorting {
+    match &mut inputs.repeat_ground {
+        RepeatGround::StrPaths(sorting) | RepeatGround::CallSatellites(sorting) => sorting,
+        RepeatGround::GenericPathOnly => panic!("the fixture sorts its repeats with a catalog"),
     }
 }
 
@@ -734,7 +839,8 @@ mod tests {
     /// of them fails the round trip above instead of passing by coincidence.
     #[test]
     fn the_fixture_differs_from_every_default_the_operands_have() {
-        let inputs = segmentation_inputs_for_tests(&contigs());
+        let mut inputs = segmentation_inputs_for_tests(&contigs());
+        let inputs = sorting_of(&mut inputs);
         assert_ne!(inputs.repeat_tract_criteria, StrRepeatCriteria::default());
         assert_ne!(inputs.catalog.built_under, StrRepeatCriteria::default());
         assert_ne!(inputs.catalog.scan, ScanParams::default());
@@ -746,6 +852,116 @@ mod tests {
             DEFAULT_MISMATCH_PENALTY
         );
         assert_ne!(inputs.catalog.scan.min_copies, DEFAULT_MIN_COPIES);
+    }
+
+    /// **Each of the three settings for repeat ground round-trips**, and its name is written
+    /// under `repeat-ground` — `generic-path-only` with neither the catalog nor the criteria,
+    /// which it never read.
+    #[test]
+    fn each_setting_for_repeat_ground_round_trips() {
+        let contigs = contigs();
+        let call_satellites = segmentation_inputs_for_tests(&contigs);
+        let RepeatGround::CallSatellites(sorting) = call_satellites.repeat_ground.clone() else {
+            panic!("the fixture is written under call-satellites");
+        };
+        for repeat_ground in [
+            RepeatGround::StrPaths(sorting.clone()),
+            RepeatGround::CallSatellites(sorting),
+            RepeatGround::GenericPathOnly,
+        ] {
+            let written = SegmentationInputs {
+                repeat_ground,
+                ..call_satellites.clone()
+            };
+            check_segmentation(&written, &contigs).expect("each setting is legal");
+            let wire = WireSegmentation::from_inputs(&written, &contigs);
+            let text = toml::to_string(&wire).expect("the section serialises");
+            let name = written.repeat_ground.setting_name();
+            assert!(
+                text.contains(&format!("repeat-ground = \"{name}\"")),
+                "the setting is written by name:\n{text}"
+            );
+            let reads_a_catalog = written.repeat_ground.sorting().is_some();
+            assert_eq!(
+                text.contains("[catalog]"),
+                reads_a_catalog,
+                "a catalog is recorded exactly when one was read:\n{text}"
+            );
+            let parsed: WireSegmentation = toml::from_str(&text).expect("and parses back");
+            let read = parsed
+                .into_inputs(&contigs)
+                .expect("this build's own section reads back");
+            assert_eq!(read, written);
+        }
+    }
+
+    /// The section text with one key or table changed, parsed and read back.
+    fn read_altered(alter: impl Fn(&str) -> String) -> Result<SegmentationInputs, BrokenRule> {
+        let contigs = contigs();
+        let wire =
+            WireSegmentation::from_inputs(&segmentation_inputs_for_tests(&contigs), &contigs);
+        let text = alter(&toml::to_string(&wire).expect("the section serialises"));
+        let parsed: WireSegmentation = toml::from_str(&text).expect("the altered text parses");
+        parsed.into_inputs(&contigs)
+    }
+
+    /// **A section with no `repeat-ground` was written by an earlier pvc**, and the refusal
+    /// says so and says what to do, rather than reading it as the default.
+    #[test]
+    fn a_section_without_the_setting_is_refused_as_written_by_an_earlier_pvc() {
+        let refused = read_altered(|text| {
+            text.lines()
+                .filter(|line| !line.starts_with("repeat-ground"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .expect_err("a section with no setting is refused");
+        assert_eq!(refused.field, "segmentation.repeat-ground");
+        assert!(
+            refused.reason.contains("earlier pvc") && refused.reason.contains("generate-psps"),
+            "{}",
+            refused.reason
+        );
+    }
+
+    /// The tables must match the setting, both ways round, and a setting this build does not
+    /// know is refused naming the three it does.
+    #[test]
+    fn tables_that_do_not_match_the_setting_are_refused() {
+        let generic_only_with_a_catalog = read_altered(|text| {
+            text.replace(
+                "repeat-ground = \"call-satellites\"",
+                "repeat-ground = \"generic-path-only\"",
+            )
+        })
+        .expect_err("a catalog under generic-path-only is refused");
+        assert!(
+            generic_only_with_a_catalog
+                .reason
+                .contains("read no catalog"),
+            "{}: {}",
+            generic_only_with_a_catalog.field,
+            generic_only_with_a_catalog.reason
+        );
+
+        let contigs = contigs();
+        let mut wire =
+            WireSegmentation::from_inputs(&segmentation_inputs_for_tests(&contigs), &contigs);
+        wire.catalog = None;
+        let missing = wire
+            .into_inputs(&contigs)
+            .expect_err("call-satellites without its catalog is refused");
+        assert_eq!(missing.field, "segmentation.catalog");
+
+        let unknown = read_altered(|text| {
+            text.replace(
+                "repeat-ground = \"call-satellites\"",
+                "repeat-ground = \"call-everything\"",
+            )
+        })
+        .expect_err("an unknown setting is refused");
+        assert_eq!(unknown.field, "segmentation.repeat-ground");
+        assert!(unknown.reason.contains("str-paths"), "{}", unknown.reason);
     }
 
     /// The purity floor survives the trip through TOML's `f64` bit-for-bit, and its
@@ -811,14 +1027,14 @@ mod tests {
     fn a_criteria_value_at_the_toml_ceiling_is_accepted_and_one_more_refused() {
         let contigs = contigs();
         let mut inputs = segmentation_inputs_for_tests(&contigs);
-        inputs.repeat_tract_criteria.min_flank_bp = Bp(MAX_TOML_INTEGER);
+        sorting_of(&mut inputs).repeat_tract_criteria.min_flank_bp = Bp(MAX_TOML_INTEGER);
         check_segmentation(&inputs, &contigs).expect("the widest TOML integer is legal");
         let read = WireSegmentation::from_inputs(&inputs, &contigs)
             .into_inputs(&contigs)
             .expect("and round-trips");
         assert_eq!(read, inputs);
 
-        inputs.repeat_tract_criteria.min_flank_bp = Bp(MAX_TOML_INTEGER + 1);
+        sorting_of(&mut inputs).repeat_tract_criteria.min_flank_bp = Bp(MAX_TOML_INTEGER + 1);
         let broken = check_segmentation(&inputs, &contigs).expect_err("one more is refused");
         assert_eq!(
             broken.field,
@@ -879,7 +1095,11 @@ mod tests {
         let contigs = contigs();
         let mut wire =
             WireSegmentation::from_inputs(&segmentation_inputs_for_tests(&contigs), &contigs);
-        wire.repeat_tract_criteria.min_copies_by_period.pop();
+        wire.repeat_tract_criteria
+            .as_mut()
+            .expect("the fixture reads a catalog")
+            .min_copies_by_period
+            .pop();
         let refused = wire
             .into_inputs(&contigs)
             .expect_err("a short table is refused");
@@ -899,8 +1119,12 @@ mod tests {
 
         let mut inverted =
             WireSegmentation::from_inputs(&segmentation_inputs_for_tests(&contigs), &contigs);
-        inverted.repeat_tract_criteria.period_min = 5;
-        inverted.repeat_tract_criteria.period_max = 3;
+        let criteria = inverted
+            .repeat_tract_criteria
+            .as_mut()
+            .expect("the fixture reads a catalog");
+        criteria.period_min = 5;
+        criteria.period_max = 3;
         let refused = inverted
             .into_inputs(&contigs)
             .expect_err("an inverted range is refused");
@@ -913,7 +1137,10 @@ mod tests {
 
         let mut zero =
             WireSegmentation::from_inputs(&segmentation_inputs_for_tests(&contigs), &contigs);
-        zero.repeat_tract_criteria.period_min = 0;
+        zero.repeat_tract_criteria
+            .as_mut()
+            .expect("the fixture reads a catalog")
+            .period_min = 0;
         let refused = zero
             .into_inputs(&contigs)
             .expect_err("a zero period floor is refused");
@@ -939,7 +1166,10 @@ mod tests {
         // The classifier's own invariants, met from a file: a purity outside [0, 1]
         // (NaN included), a zero bundle radius, a period past the widest motif.
         let broken = refused(&|inputs| {
-            inputs.repeat_tract_criteria.classification.min_purity = f32::NAN;
+            sorting_of(inputs)
+                .repeat_tract_criteria
+                .classification
+                .min_purity = f32::NAN;
         });
         assert_eq!(
             broken.field,
@@ -947,7 +1177,10 @@ mod tests {
         );
 
         let broken = refused(&|inputs| {
-            inputs.repeat_tract_criteria.classification.min_purity = 7.0;
+            sorting_of(inputs)
+                .repeat_tract_criteria
+                .classification
+                .min_purity = 7.0;
         });
         assert_eq!(
             broken.field,
@@ -955,7 +1188,10 @@ mod tests {
         );
 
         let broken = refused(&|inputs| {
-            inputs.repeat_tract_criteria.classification.bundle_threshold = 0;
+            sorting_of(inputs)
+                .repeat_tract_criteria
+                .classification
+                .bundle_threshold = 0;
         });
         assert_eq!(
             broken.field,
@@ -963,18 +1199,22 @@ mod tests {
         );
 
         let broken = refused(&|inputs| {
-            inputs.catalog.built_under.classification.periods =
+            sorting_of(inputs)
+                .catalog
+                .built_under
+                .classification
+                .periods =
                 PeriodRange::new(1, MAX_MOTIF_LEN as u8 + 3).expect("a range the scanner allows");
         });
         assert_eq!(broken.field, "segmentation.catalog.built-under.period-max");
 
         let broken = refused(&|inputs| {
-            inputs.catalog.longest_tract_bp.pop();
+            sorting_of(inputs).catalog.longest_tract_bp.pop();
         });
         assert_eq!(broken.field, "segmentation.catalog.contig");
 
         let broken = refused(&|inputs| {
-            inputs.catalog.built_under.max_str_len_bp = Bp(u64::MAX);
+            sorting_of(inputs).catalog.built_under.max_str_len_bp = Bp(u64::MAX);
         });
         assert_eq!(
             broken.field,
@@ -983,7 +1223,9 @@ mod tests {
         // `--max-str-bundle-len 18446744073709551615` is a legal flag and an obvious way to
         // write "no cap"; TOML cannot hold it, and the header says so rather than wrapping.
         let broken = refused(&|inputs| {
-            inputs.repeat_tract_criteria.max_str_bundle_len_bp = Bp(u64::MAX);
+            sorting_of(inputs)
+                .repeat_tract_criteria
+                .max_str_bundle_len_bp = Bp(u64::MAX);
         });
         assert_eq!(
             broken.field,
@@ -993,12 +1235,12 @@ mod tests {
         // The forged-line hole: a newline in a catalog contig name or the tool version
         // would land in the body as further lines.
         let broken = refused(&|inputs| {
-            inputs.catalog.contigs[0].name = "evil\nfabricated-key = \"x\"".to_string();
+            sorting_of(inputs).catalog.contigs[0].name = "evil\nfabricated-key = \"x\"".to_string();
         });
         assert_eq!(broken.field, "segmentation.catalog.contig.name");
 
         let broken = refused(&|inputs| {
-            inputs.catalog.tool_version = "trf\nport".to_string();
+            sorting_of(inputs).catalog.tool_version = "trf\nport".to_string();
         });
         assert_eq!(broken.field, "segmentation.catalog.tool-version");
 

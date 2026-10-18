@@ -516,16 +516,29 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // **What counts as a repeat is the psps' own**, recorded by the walk that wrote them: a run
     // over stored loci has to cut the genome the way that walk did, so it has no option that
     // could say otherwise (`doc/devel/ng/spec/command_line.md` §4.4).
-    let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
-    let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
-    let segmentation = run_ground::segments_cut_with(
-        &catalog_path,
-        &args.reference,
-        &criteria,
-        run_ground::CriteriaSource::ThePspHeaders,
-        &analysed,
-        &with_checksums,
-    )?;
+    // **And so is whether there were repeats to sort at all**: psps written with
+    // `--generic-path-only` read no catalog, and this run reads none either.
+    let segmentation = match run_ground::sorting_of_the_psps(cohort.segmentation_inputs()) {
+        Some((setting, walked_with)) => {
+            let criteria = walked_with.repeat_tract_criteria.clone();
+            let catalog_path =
+                run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
+            run_ground::segments_cut_with(
+                &catalog_path,
+                &args.reference,
+                setting,
+                &criteria,
+                run_ground::CriteriaSource::ThePspHeaders,
+                &analysed,
+                &with_checksums,
+            )?
+        }
+        None => {
+            run_ground::refuse_a_catalog_the_psps_never_read(args.catalog.as_deref())?;
+            run_ground::segments_without_a_catalog(&analysed)
+        }
+    };
+    let satellite_bases_on_the_generic_path = segmentation.satellite_bases_on_the_generic_path();
     say_what_this_run_does(args, &paths, cohort.read_groups(), &analysed, &log);
 
     let numbers = calling_run::run_parameters(
@@ -534,7 +547,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         cohort.read_groups(),
         &with_checksums,
         asked_ploidy,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     let ploidy = numbers.parameters.ploidy();
     // **Captured before the parameters move into the caller.** The filter reads one coefficient
@@ -549,7 +562,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let parameters_file = numbers.parameters_file(
         cohort.read_groups(),
         &digest,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     );
     // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
     // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).
@@ -723,7 +736,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 max_cohort_locus_span: merge_parameters.max_cohort_locus_span.get(),
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
-        ),
+        )
+        .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
         &filter_lines,
     );
     let records = filtered

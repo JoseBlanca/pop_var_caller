@@ -1223,3 +1223,47 @@ fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
         );
     }
 }
+
+/// **A `--call-satellites` run says how many satellite bases it called, with the limit beside
+/// it, and a run without the option says nothing about it.** The handed-over bases are counted
+/// as called ground with the rest, so without this line nothing on the page says the run called
+/// satellites at all.
+#[test]
+fn a_run_that_called_satellites_says_how_many_bases_and_one_that_did_not_is_silent() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let written = a_run(
+        10,
+        0,
+        Vec::new(),
+        Vec::new(),
+        vec![walked("zeta", ground_mostly_called(), Vec::new())],
+    );
+    let parameters = a_defaults_runs_parameters(&read_groups);
+    let contigs = contigs();
+    let ground = ground_of(1_000);
+    let report = || {
+        RunReport::of(
+            &written,
+            &contigs,
+            &read_groups,
+            &parameters,
+            &ground,
+            shipped_bounds(),
+        )
+    };
+
+    let silent = report().lines().join("\n");
+    assert!(!silent.contains("--call-satellites"), "{silent}");
+
+    let told = report()
+        .with_satellite_bases_on_the_generic_path(120)
+        .lines()
+        .join("\n");
+    assert!(
+        told.contains(
+            "satellites handed to the SNP/indel model (--call-satellites): 120 bases; their \
+             length variation mostly ends in loci too wide to call"
+        ),
+        "{told}"
+    );
+}

@@ -7,7 +7,9 @@ use std::path::Path;
 
 use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, run_generate_psps};
-use crate::cli::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
+use crate::cli::test_fixtures::{
+    AVaryingCohort, a_varying_cohort_on_disk, a_varying_cohort_with_a_satellite_on_disk,
+};
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
@@ -68,15 +70,31 @@ fn walked_into_psps(
     min_copies: MinCopies,
     regions: Option<&str>,
 ) -> (AVaryingCohort, PathBuf) {
-    let psps = cohort.directory.path().join("psps");
+    let psps = walked_into(&cohort, "psps", false, false, min_copies, regions);
+    (cohort, psps)
+}
+
+/// `cohort` walked into psps in the directory `directory` beside it, with `--call-satellites` and
+/// `--generic-path-only` given or not; answers the directory.
+fn walked_into(
+    cohort: &AVaryingCohort,
+    directory: &str,
+    call_satellites: bool,
+    generic_path_only: bool,
+    min_copies: MinCopies,
+    regions: Option<&str>,
+) -> PathBuf {
+    let psps = cohort.directory.path().join(directory);
     let regions = regions.map(|bed| {
         let path = cohort.directory.path().join("walked.bed");
         std::fs::write(&path, bed).expect("the scratch dir is ours");
         path
     });
     let walk = GeneratePspsArgs {
+        call_satellites,
+        generic_path_only,
         reference: cohort.reference.clone(),
-        catalog: Some(cohort.catalog.clone()),
+        catalog: (!generic_path_only).then(|| cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
         output_dir: psps.clone(),
         regions,
@@ -91,7 +109,7 @@ fn walked_into_psps(
         max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };
     run_generate_psps(&walk).expect("the cohort walks into psps");
-    (cohort, psps)
+    psps
 }
 
 fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateParametersArgs {
@@ -1092,5 +1110,81 @@ fn a_stale_cohort_is_refused_before_the_reference_is_read() {
             EstimateParametersCliError::CohortCannotBeFitted { .. }
         ),
         "the psps were judged before the reference was opened, and got: {error:?}",
+    );
+}
+
+/// **`--call-satellites` changes nothing in the fit** (`command_line.md` §4.4.1): satellites never
+/// fed it. One cohort with a satellite, walked once without the option and once with it, fits to
+/// one file. What the two walks differ in is satellite ground, which the census does not sample —
+/// it draws its positions from the catalog's own ordinary sequence — so a census that started
+/// counting it, or a stutter fit that started seeing it, would move this.
+#[test]
+fn psps_written_with_call_satellites_fit_to_the_same_file_as_without() {
+    let cohort = a_varying_cohort_with_a_satellite_on_disk();
+    let by_default = walked_into(&cohort, "default", false, false, MinCopies::default(), None);
+    let calling_satellites = walked_into(
+        &cohort,
+        "satellites",
+        true,
+        false,
+        MinCopies::default(),
+        None,
+    );
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+
+    let (from_default, _) = fit_and_assemble(&args_over(&cohort, &by_default, output.clone()))
+        .expect("the default psps fit");
+    let (from_satellites, _) = fit_and_assemble(&args_over(&cohort, &calling_satellites, output))
+        .expect("the --call-satellites psps fit");
+
+    assert_eq!(from_default.to_toml(), from_satellites.to_toml());
+}
+
+/// **Psps written with `--generic-path-only` fit to a file with an empty stutter section, and no
+/// catalog is read for them** (`command_line.md` §4.4.1, plan `call_satellites.md` decision A).
+///
+/// The catalog file is deleted before the walk, so a step that still reached for it fails here.
+/// There is no repeat tract to fit stutter from, so every repeat-tract table is empty; the run
+/// asked no catalog anything, so the file records no routing; and a calling run reads the file.
+/// A `--catalog` named for such psps is refused rather than read.
+#[test]
+fn generic_path_only_psps_fit_to_an_empty_stutter_section_without_a_catalog() {
+    let cohort = a_varying_cohort_on_disk();
+    std::fs::remove_file(&cohort.catalog).expect("the fixture wrote a catalog");
+    let psps = walked_into(&cohort, "psps", false, true, MinCopies::default(), None);
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+    let mut args = args_over(&cohort, &psps, output.clone());
+    args.catalog = None;
+
+    let (file, _) = fit_and_assemble(&args).expect("the cohort fits with no catalog on disk");
+
+    let tracts = &file.repeat_tracts;
+    assert!(tracts.slippage_by_stratum_and_group.is_empty());
+    assert!(tracts.allele_length_variation_by_stratum.is_empty());
+    assert!(tracts.allele_length_variation_by_period.is_empty());
+    assert!(tracts.substitution_rate_by_stratum.is_empty());
+    assert!(
+        file.repeat_routing.is_none(),
+        "no catalog was asked anything"
+    );
+    let read_back = ParametersFile::from_toml(&file.to_toml()).expect("a calling run reads it");
+    assert_eq!(
+        read_back.repeat_tracts.slippage_by_stratum_and_group.len(),
+        0
+    );
+
+    let mut named = args_over(&cohort, &psps, output);
+    named.catalog = Some(cohort.catalog.clone());
+    let refused = fit_and_assemble(&named).expect_err("a catalog these psps never read");
+    let mut chain = refused.to_string();
+    let mut source = std::error::Error::source(&refused);
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    assert!(
+        chain.contains("--generic-path-only"),
+        "the refusal says why: {chain}"
     );
 }

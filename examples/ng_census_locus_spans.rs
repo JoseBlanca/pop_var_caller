@@ -107,6 +107,7 @@ fn run(
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
+        setting: pop_var_caller::run::RepeatGroundSetting::StrPaths,
     };
     let analysed = run_ground::analysed_regions(&ground, &contigs)?;
     let analysed_bases: u64 = analysed.iter().map(|region| region.len()).sum();
@@ -118,11 +119,11 @@ fn run(
             generic_target: (analysed_bases / keep_one_in).max(1),
             ssr_cap: CensusSelection::SHIPPED.ssr_cap,
         },
-        &catalog,
+        Some(&catalog),
         &analysed,
         &unambiguous,
         &with_checksums,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     drop(catalog);
     let kept = plan.loci.generic();

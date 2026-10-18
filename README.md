@@ -105,9 +105,8 @@ pvc call-from-psps --reference genome.fa --psp psps/ \
     --parameters cohort.parameters.toml --output calls.vcf.gz
 ```
 
-`pvc <command> --help` describes every option. The [user guide](doc/user/calling.md) says which
-mode to choose: for inbred or structured material, use psp mode, because direct mode assumes
-every sample is outbred.
+`pvc <command> --help` describes every option. The [user guide](doc/user/calling.md) compares
+the two modes.
 
 ## Documentation
 

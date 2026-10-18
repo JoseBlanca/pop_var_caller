@@ -243,11 +243,20 @@
 # 954dd14f); from_fit.comparable moves by that md5 in its header alone (262460a4 -> 2cc2a44f). Both files' notes also name the
 # two built-in values.
 slice: 20 regions, 4 alignments
+# Re-recorded 2026-10-18 (macOS host, arm64) when the built-in repeat-tract outlier weight went from 0.20 to 0.07 (parameters
+# file format 6; src/calling/likelihood/ssr.rs DEFAULT_OUTLIER_WEIGHT). main d1b6e54f reproduced every old value on the same host
+# first. Both parameters files move by two lines, format_version and the weight. Defaults route (5bfcecbf -> 916e114f): 453 of
+# 7,509 records move, all STR, in QUAL; 10 sample genotypes change, 5 heterozygous to homozygous and 5 the reverse, so the 238
+# heterozygous STR calls stay 238; no record appears or vanishes; no non-STR record moves. Fitted route (2cc2a44f -> e74465ad):
+# 3 STR records appear (6,680 -> 6,683); 6 STR sample genotypes change (heterozygous STR calls 8 -> 14 of 1,720); one deletion
+# overlapping a changed STR call moves a sample from 1/1 to 1/2, its second allele the spanning-deletion `*`; 1,574 non-STR
+# records move only in PARALOG_LR / PARALOG_POST (by at most 0.00094 in posterior), because the hidden-duplication filter
+# fits one rate over every record. They were 5bfcecbf / 6ab95191 / 954dd14f / 2cc2a44f.
 # records: 7509
-5bfcecbf636130aa1a09443bbfc0dc6d  from_alignments.comparable
-5bfcecbf636130aa1a09443bbfc0dc6d  from_psps.comparable
-6ab95191fcd31d9bf3b435d98043e7db  from_alignments.parameters.toml
+916e114f654103ef9475dc3f25bd5118  from_alignments.comparable
+916e114f654103ef9475dc3f25bd5118  from_psps.comparable
+786618495184d417504467f521198153  from_alignments.parameters.toml
 e1c726723e8dd4ffc0e6e9e7d2d7d705  from_alignments.windows.sorted
 b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
-954dd14f78926ff7773cd93530214e4f  fitted.parameters.toml
-2cc2a44f3d500213227c994fd3d740d3  from_fit.comparable
+8eb7fe4266c4e8c9260e6f34e7434b95  fitted.parameters.toml
+e74465ad2f20121023dc3a5e3d99aab4  from_fit.comparable

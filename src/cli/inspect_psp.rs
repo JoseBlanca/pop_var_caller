@@ -435,6 +435,8 @@ mod tests {
         let cohort = crate::cli::test_fixtures::a_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
         run_generate_psps(&GeneratePspsArgs {
+            call_satellites: false,
+            generic_path_only: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
@@ -476,7 +478,7 @@ mod tests {
         let text = dump(&zeta, "chr1\t0\t100\n", cohort.directory.path());
 
         assert!(text.contains(&format!("#inspect_psp_columns_version={COLUMNS_VERSION}\n")));
-        assert!(text.contains("#psp_format_version=2.1\n"));
+        assert!(text.contains("#psp_format_version=1.0\n"));
         assert!(text.contains("#sample=zeta\n"));
         let mut lines = text.lines().filter(|line| !line.starts_with('#'));
         assert_eq!(lines.next(), Some(COLUMNS.join("\t").as_str()));

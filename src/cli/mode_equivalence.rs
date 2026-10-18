@@ -81,8 +81,8 @@ mod tests {
     use crate::cli::call_from_psps::{CallFromPspsArgs, run_call_from_psps};
     use crate::cli::generate_psps::{GeneratePspsArgs, psp_path_for, run_generate_psps};
     use crate::cli::test_fixtures::{
-        AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SECOND_SAMPLES_SUBSTITUTION, TRACT,
-        a_varying_cohort_on_disk,
+        AVaryingCohort, FIRST_SAMPLES_SUBSTITUTION, SATELLITE, SECOND_SAMPLES_SUBSTITUTION, TRACT,
+        VARYING_CONTIG, a_varying_cohort_on_disk, a_varying_cohort_with_a_satellite_on_disk,
     };
     use crate::region_typing::segment_criteria::{
         DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
@@ -121,6 +121,8 @@ mod tests {
     /// which the supplied-parameters run below then edits.
     fn alignments_args(cohort: &AVaryingCohort, output: &Path) -> CallFromAlignmentsArgs {
         CallFromAlignmentsArgs {
+            call_satellites: false,
+            generic_path_only: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
@@ -179,10 +181,24 @@ mod tests {
 
     /// Walk the cohort into psps and hand back the directory they are in.
     fn walked_into_psps(cohort: &AVaryingCohort) -> PathBuf {
+        walked_into_psps_under(cohort, crate::run::RepeatGroundSetting::StrPaths)
+    }
+
+    /// The same, under `setting`: with `--call-satellites`, `--generic-path-only` (and so no
+    /// `--catalog`), or neither.
+    fn walked_into_psps_under(
+        cohort: &AVaryingCohort,
+        setting: crate::run::RepeatGroundSetting,
+    ) -> PathBuf {
+        use crate::run::RepeatGroundSetting;
+
         let psps = cohort.directory.path().join("psps");
+        let generic_path_only = setting == RepeatGroundSetting::GenericPathOnly;
         run_generate_psps(&GeneratePspsArgs {
+            call_satellites: setting == RepeatGroundSetting::CallSatellites,
+            generic_path_only,
             reference: cohort.reference.clone(),
-            catalog: Some(cohort.catalog.clone()),
+            catalog: (!generic_path_only).then(|| cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),
             output_dir: psps.clone(),
             regions: None,
@@ -535,6 +551,7 @@ mod tests {
                 max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
                 min_purity: DEFAULT_MIN_PURITY,
             },
+            setting: crate::run::RepeatGroundSetting::StrPaths,
         };
         let (_info, with_checksums) = the_references_two_views(&cohort.reference);
         let analysed = run_ground::analysed_regions(&request, &with_checksums.contig_list())
@@ -566,6 +583,223 @@ mod tests {
             (kinds[1].0, kinds[1].1),
             (TRACT.0 as u64 + 1, TRACT.1 as u64),
             "the tract is where the fixture put it, 1-based and inclusive: {kinds:?}",
+        );
+    }
+
+    // ------------------------------------------------------------------ satellites
+
+    /// The satellite cohort's ground under one setting: each region's span and whether it is
+    /// generic, and how many satellite bases were handed to the generic path.
+    fn the_satellite_cohorts_ground(
+        cohort: &AVaryingCohort,
+        setting: crate::run::RepeatGroundSetting,
+    ) -> (Vec<(u64, u64, bool)>, u64) {
+        use crate::cli::run_ground::{self, GroundRequest, RepeatRouting};
+        use crate::region_typing::RegionKind;
+
+        let request = GroundRequest {
+            reference: &cohort.reference,
+            catalog: Some(&cohort.catalog),
+            regions: None,
+            routing: RepeatRouting {
+                min_copies: MinCopies::default(),
+                min_period: DEFAULT_MIN_PERIOD,
+                max_period: DEFAULT_MAX_PERIOD,
+                max_str_len: DEFAULT_MAX_STR_LEN,
+                max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
+                min_purity: DEFAULT_MIN_PURITY,
+            },
+            setting,
+        };
+        let (_info, with_checksums) = the_references_two_views(&cohort.reference);
+        let analysed = run_ground::analysed_regions(&request, &with_checksums.contig_list())
+            .expect("the whole reference");
+        let segmentation =
+            run_ground::segments_over(&request, &analysed, &with_checksums).expect("it types");
+        let regions = segmentation
+            .segments()
+            .iter()
+            .map(|region| {
+                (
+                    region.region.start.get(),
+                    region.region.end.get(),
+                    region.kind == RegionKind::Generic,
+                )
+            })
+            .collect();
+        (regions, segmentation.satellite_bases_on_the_generic_path())
+    }
+
+    /// **The satellite cohort's ground has a satellite by default, and none under
+    /// `--call-satellites`**, where the satellite and the ordinary sequence either side of it are
+    /// one generic region — the merge the plan rests on, through the real catalog.
+    #[test]
+    fn under_call_satellites_the_satellite_is_one_generic_region_with_its_neighbours() {
+        use crate::run::RepeatGroundSetting;
+
+        let cohort = a_varying_cohort_with_a_satellite_on_disk();
+        let (satellite_start, satellite_end) = (SATELLITE.0 as u64 + 1, SATELLITE.1 as u64);
+
+        let (by_default, none_handed) =
+            the_satellite_cohorts_ground(&cohort, RepeatGroundSetting::StrPaths);
+        assert_eq!(
+            by_default.len(),
+            5,
+            "ordinary sequence, the tract, ordinary sequence, the satellite, ordinary sequence — \
+             and got {by_default:?}",
+        );
+        assert_eq!(
+            (by_default[3].0, by_default[3].1, by_default[3].2),
+            (satellite_start, satellite_end, false),
+            "the satellite is typed where the fixture put it: {by_default:?}",
+        );
+        assert_eq!(none_handed, 0);
+
+        let (calling_satellites, handed) =
+            the_satellite_cohorts_ground(&cohort, RepeatGroundSetting::CallSatellites);
+        assert_eq!(
+            calling_satellites,
+            vec![
+                by_default[0],
+                by_default[1],
+                (by_default[2].0, by_default[4].1, true),
+            ],
+            "the tract is left alone, and everything after it is one generic region",
+        );
+        assert_eq!(handed, satellite_end - satellite_start + 1);
+    }
+
+    /// **A variant on a satellite is called only under `--call-satellites`, and both routes call
+    /// it alike.** The second sample's substitution lies inside the fixture's satellite: a
+    /// default run leaves that ground uncalled, and the option hands it to the SNP/indel model.
+    /// The psp route must record the setting and follow it, so the two VCFs are one.
+    #[test]
+    fn a_variant_on_a_satellite_is_called_under_call_satellites_by_both_routes_alike() {
+        let cohort = a_varying_cohort_with_a_satellite_on_disk();
+        let output = cohort.directory.path().join("calls.vcf");
+        let on_the_satellite = |lines: &[String]| -> Vec<u64> {
+            lines
+                .iter()
+                .filter(|line| !line.starts_with('#'))
+                .map(|line| {
+                    line.split('\t')
+                        .nth(1)
+                        .expect("a record names its position")
+                        .parse::<u64>()
+                        .expect("a VCF position is a number")
+                })
+                .filter(|position| (SATELLITE.0 as u64..=SATELLITE.1 as u64).contains(position))
+                .collect()
+        };
+
+        let by_default = called_from_alignments(&cohort, &output);
+        assert_eq!(
+            on_the_satellite(&by_default),
+            Vec::<u64>::new(),
+            "a default run calls nothing on satellite ground",
+        );
+
+        let mut args = alignments_args(&cohort, &output);
+        args.call_satellites = true;
+        run_call_from_alignments(&args).expect("the cohort calls with --call-satellites");
+        let from_alignments = comparable(&output);
+        assert_eq!(
+            on_the_satellite(&from_alignments),
+            vec![SECOND_SAMPLES_SUBSTITUTION as u64 + 1],
+            "the substitution on the satellite is called, and nothing else there",
+        );
+
+        std::fs::remove_file(&output).expect("the first route wrote the file this one replaces");
+        let psps = walked_into_psps_under(&cohort, crate::run::RepeatGroundSetting::CallSatellites);
+        run_call_from_psps(&psps_args(&cohort, &output, &psps, &["one", "two"]))
+            .expect("the stored cohort calls");
+        assert_eq!(
+            from_alignments,
+            comparable(&output),
+            "direct mode and psp mode give one VCF under --call-satellites",
+        );
+    }
+
+    /// **`--generic-path-only` needs no catalog, and both routes call alike under it.** The
+    /// catalog file is deleted before either route runs, so a route that still reached for one
+    /// fails here. The whole contig is one generic region; every variant the fixture carries —
+    /// the tract's length variant, the substitution on the satellite and the other — is called by
+    /// the SNP/indel model, so no record carries the repeat path's `RU` annotation.
+    #[test]
+    fn under_generic_path_only_no_catalog_is_read_and_both_routes_call_alike() {
+        use crate::run::RepeatGroundSetting;
+
+        let cohort = a_varying_cohort_with_a_satellite_on_disk();
+        std::fs::remove_file(&cohort.catalog).expect("the fixture wrote a catalog");
+        let (ground, handed) =
+            the_satellite_cohorts_ground(&cohort, RepeatGroundSetting::GenericPathOnly);
+        assert_eq!(ground, vec![(1, VARYING_CONTIG.1 as u64, true)]);
+        assert_eq!(handed, 0, "no satellite was typed, so none was handed over");
+
+        let output = cohort.directory.path().join("calls.vcf");
+        let mut args = alignments_args(&cohort, &output);
+        args.catalog = None;
+        args.generic_path_only = true;
+        run_call_from_alignments(&args).expect("the cohort calls with no catalog on disk");
+        let from_alignments = comparable(&output);
+
+        let positions: Vec<u64> = from_alignments
+            .iter()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                line.split('\t')
+                    .nth(1)
+                    .expect("a record names its position")
+                    .parse()
+                    .expect("a VCF position is a number")
+            })
+            .collect();
+        for (varies_at, what) in [
+            (
+                FIRST_SAMPLES_SUBSTITUTION as u64 + 1,
+                "the first sample's substitution",
+            ),
+            (TRACT.0 as u64, "the tract's length variant"),
+            (
+                SECOND_SAMPLES_SUBSTITUTION as u64 + 1,
+                "the substitution on the satellite",
+            ),
+        ] {
+            assert!(
+                positions
+                    .iter()
+                    .any(|position| position.abs_diff(varies_at) <= 2),
+                "{what}, near {varies_at}, is called: {positions:?}",
+            );
+        }
+        assert!(
+            from_alignments
+                .iter()
+                .filter(|line| !line.starts_with('#'))
+                .all(|line| !line.contains("RU=")),
+            "no record comes from the repeat path:\n{}",
+            from_alignments.join("\n"),
+        );
+
+        std::fs::remove_file(&output).expect("the first route wrote the file this one replaces");
+        let psps = walked_into_psps_under(&cohort, RepeatGroundSetting::GenericPathOnly);
+        let mut stored = psps_args(&cohort, &output, &psps, &["one", "two"]);
+        stored.catalog = None;
+        run_call_from_psps(&stored).expect("the stored cohort calls with no catalog on disk");
+        assert_eq!(
+            from_alignments,
+            comparable(&output),
+            "direct mode and psp mode give one VCF under --generic-path-only",
+        );
+
+        // **A catalog named for these psps is refused**: they read none, so it could only
+        // disagree with them.
+        let mut named = psps_args(&cohort, &output, &psps, &["one", "two"]);
+        named.catalog = Some(cohort.catalog.clone());
+        let refused = run_call_from_psps(&named).expect_err("a catalog the psps never read");
+        assert!(
+            refused.to_string().contains("--generic-path-only"),
+            "the refusal says why: {refused}"
         );
     }
 
@@ -804,6 +1038,8 @@ mod tests {
         for (sample, alignment) in ["one", "two"].iter().zip(&cohort.alignments) {
             let directory = cohort.directory.path().join(format!("walked-{sample}"));
             run_generate_psps(&GeneratePspsArgs {
+                call_satellites: false,
+                generic_path_only: false,
                 reference: cohort.reference.clone(),
                 catalog: Some(cohort.catalog.clone()),
                 alignments: vec![alignment.clone()],
@@ -852,6 +1088,8 @@ mod tests {
         let cohort = a_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
         run_generate_psps(&GeneratePspsArgs {
+            call_satellites: false,
+            generic_path_only: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),

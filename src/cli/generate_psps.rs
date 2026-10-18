@@ -161,6 +161,41 @@ pub struct GeneratePspsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
 
+    /// Call satellites with the SNP/indel model instead of leaving them uncalled. A satellite is
+    /// a repeat longer than --max-str-len, or a cluster of repeats longer than
+    /// --max-str-bundle-len.
+    ///
+    /// What this adds on satellites is mostly SNPs and short indels: the satellite's own length
+    /// variation mostly stays uncalled, because reads that disagree about its length make loci
+    /// wider than --max-locus-span (an option of the calling commands), which are not called.
+    /// The calling run's report says how many satellite bases were handed over and how many loci
+    /// were too wide.
+    #[arg(long, help_heading = "Advanced")]
+    pub call_satellites: bool,
+
+    /// Call every repeat with the SNP/indel model, and read no repeat catalogue. Refused together
+    /// with --catalog, --call-satellites and the settings of what counts as a repeat.
+    ///
+    /// This gives up the repeat model everywhere: repeat length variants are called as indels, and
+    /// on satellites the length variation mostly stays uncalled, because reads that disagree about
+    /// a long repeat's length make loci wider than --max-locus-span (an option of the calling
+    /// commands), which are not called. For a reference with no catalogue, or a comparison with a
+    /// caller that has no repeat model.
+    #[arg(
+        long,
+        help_heading = "Advanced",
+        conflicts_with_all = [
+            "catalog",
+            "min_copies",
+            "min_period",
+            "max_period",
+            "max_str_len",
+            "max_str_bundle_len",
+            "min_purity",
+        ]
+    )]
+    pub generic_path_only: bool,
+
     /// The fewest repeat-unit copies a stretch needs to be stored as a repeat: six
     /// comma-separated numbers, for repeat units of 1 to 6 bases.
     ///
@@ -524,6 +559,10 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
             max_str_bundle_len: args.max_str_bundle_len,
             min_purity: args.min_purity,
         },
+        setting: crate::run::RepeatGroundSetting::from_options(
+            args.call_satellites,
+            args.generic_path_only,
+        ),
     }
 }
 
@@ -539,6 +578,9 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
 /// sample's psp finished on disk, and nothing left at the stopped sample's own path.
 pub fn run_generate_psps(args: &GeneratePspsArgs) -> Result<(), GeneratePspsCliError> {
     let started = std::time::Instant::now();
+    // **`--call-satellites` and `--generic-path-only` together are refused before anything is
+    // read** (`command_line.md` §4.4.1).
+    run_ground::setting_of_the_options(args.call_satellites, args.generic_path_only)?;
     let report = walk_every_sample(args)?;
     // **The report goes to the last sample's log, and its total to the terminal** — every
     // sample's own line was said as it finished, so the total is all the terminal still lacks.
@@ -649,21 +691,27 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
     // the seed, the reference, the analysed ground and the catalog — so a run that chose per
     // sample would be choosing the same set N times, and a run whose samples chose *differently*
     // could not be fitted at all. Refused here rather than at the third sample's walk.
-    let catalog =
-        RepeatCatalog::open_checking_against_reference(&ground.catalog_path(), &with_checksums)
-            .map_err(|source| {
-                GeneratePspsCliError::Ground(GroundError::Catalog {
-                    path: ground.catalog_path(),
-                    source,
-                })
-            })?;
+    // **A walk that sorted no repeats (`--generic-path-only`) opens no catalog here either**: its
+    // census keeps ordinary sequence only.
+    let catalog = match segmentation.inputs().catalog() {
+        None => None,
+        Some(_) => Some(
+            RepeatCatalog::open_checking_against_reference(&ground.catalog_path(), &with_checksums)
+                .map_err(|source| {
+                    GeneratePspsCliError::Ground(GroundError::Catalog {
+                        path: ground.catalog_path(),
+                        source,
+                    })
+                })?,
+        ),
+    };
     let census = CensusPlan::of_run(
         CensusSelection::SHIPPED,
-        &catalog,
+        catalog.as_ref(),
         &analysed,
         &unambiguous,
         &with_checksums,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )
     .map_err(|source| GeneratePspsCliError::CensusNotPlanned { source })?;
     drop(catalog);

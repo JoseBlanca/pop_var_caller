@@ -231,13 +231,17 @@ impl CensusPlan {
     /// [`RunError::CensusNotPlanned`] when the reference carries no digest to bind the selection
     /// to, when the analysed regions overlap, or when the catalog cannot serve the criteria this
     /// run routed under.
+    ///
+    /// **`catalog` and `criteria` are `None` together for a run that read no catalog**
+    /// (`--generic-path-only`): its census samples ordinary sequence from the whole analysed
+    /// ground and keeps no repeat tract (`select_kept_loci`).
     pub fn of_run(
         selection: CensusSelection,
-        catalog: &RepeatCatalog,
+        catalog: Option<&RepeatCatalog>,
         analysed: &GenomeRegions,
         unambiguous: &SelectableRegions,
         reference: &ReferenceInfo,
-        criteria: &StrRepeatCriteria,
+        criteria: Option<&StrRepeatCriteria>,
     ) -> Result<Self, RunError> {
         let planned = |source: SelectionError| RunError::CensusNotPlanned {
             source: Box::new(source),
@@ -247,12 +251,19 @@ impl CensusPlan {
             seed: selection.seed,
             reference: ReferenceDigest::of(reference).map_err(planned)?,
             analysed_regions: RegionSetDigest::of(&analysed),
-            catalog_built_under: CatalogBuildSettings::of(catalog),
-            ssr_criteria: criteria.clone(),
+            catalog_built_under: catalog.map(CatalogBuildSettings::of),
+            ssr_criteria: criteria.cloned(),
             generic_target: selection.generic_target,
             ssr_cap: selection.ssr_cap,
         };
-        let loci = select_kept_loci(&terms, catalog, &analysed, unambiguous).map_err(planned)?;
+        let contig_names: Vec<String> = reference
+            .contig_list()
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        let loci = select_kept_loci(&terms, catalog, &contig_names, &analysed, unambiguous)
+            .map_err(planned)?;
         Ok(Self {
             loci: Arc::new(loci),
             terms,
@@ -317,6 +328,9 @@ impl CensusPlan {
                 writer.mark_walked(region.region);
             }
         }
+        // **Satellites handed to the generic path are walked and called, and not counted**
+        // (`--call-satellites` changes nothing in the fit, `command_line.md` §4.4.1).
+        writer.leave_out(segmentation.satellites_on_the_generic_path());
         writer
     }
 

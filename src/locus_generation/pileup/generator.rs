@@ -752,7 +752,24 @@ struct RegionWalk {
     /// It is still the same moment: nothing touches the allocator between `begin_segment`
     /// and the region opening.
     chain_ids_at_open: ChainIdAllocatorCounters,
+    /// The position the reference readers were last told to keep from. The walk releases
+    /// again once the locus it yields is [`REFERENCE_RELEASE_STRIDE_BP`] past the one it last
+    /// released behind.
+    reference_kept_from: u64,
 }
+
+/// How far the walk advances inside one region between releases of the reference behind it.
+///
+/// **Why a region needs releasing inside it at all.** The reference readers are released when
+/// a region opens, and a region was never long enough for that to matter: repeats cut human
+/// sequence into generic regions of a few kilobases. A run that sends repeat ground to the
+/// generic path (`--call-satellites`, `--generic-path-only`) makes regions of megabases, up to a
+/// whole contig, and each of the three readers would then hold every base it had walked.
+///
+/// **Why 64 kb.** Each reader keeps its allocation when it releases, so its peak is the stride
+/// plus the margin behind the walk, whatever the region's length. A shorter stride buys a few
+/// kilobytes and costs a mutex and a buffer shift more often; nothing here is measured as close.
+const REFERENCE_RELEASE_STRIDE_BP: u64 = 64 * 1024;
 
 /// ng's generic locus generator: a streaming pileup walk over one `Generic`
 /// region, emitting one
@@ -848,6 +865,10 @@ pub struct PileupGenerator<
     /// [`WalkerState`](super::genome_walk)'s junction claim on an insertion anchored one
     /// base before the region.
     region_adjoins_repeat_ground: bool,
+    /// How far the walk advances inside one region between releases of the reference:
+    /// [`REFERENCE_RELEASE_STRIDE_BP`], except in tests, whose fixture contigs are a few hundred
+    /// bases long.
+    reference_release_stride_bp: u64,
     /// The walker and the sample's cursor, for as long as the run stays on one chromosome.
     /// Minted by the first `next_locus` on each, and rebuilt at every boundary — nothing in
     /// a cursor survives a chromosome change (`spec/alignment_cursor.md` §4).
@@ -940,6 +961,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
             counts: PileupGeneratorCounts::default(),
             current_region: None,
             region_adjoins_repeat_ground: false,
+            reference_release_stride_bp: REFERENCE_RELEASE_STRIDE_BP,
             chromosome: None,
             walk: None,
             retired_cursor_counts: CursorCounts::default(),
@@ -1150,6 +1172,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
                         }
                     }
                     if clamp.contains(locus.region.start) {
+                        self.release_reference_inside_the_region(locus.region.start);
                         return Ok(Some(locus));
                     }
                     self.counts.records_outside_region += 1;
@@ -1220,7 +1243,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
             // unclaimed and a retry with the same sample still works.
             self.sample = Some(sample);
         }
-        self.release_reference_behind(region);
+        let reference_kept_from = self.release_reference_behind(region.start);
         // Saturating, and in the safe direction: the walker's positions are
         // `u32`, so a region ending past 4 Gb cannot be walked at all, and a
         // stop bound clamped to `u32::MAX` makes the walk run long rather than
@@ -1246,6 +1269,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
         self.walk = Some(RegionWalk {
             region,
             chain_ids_at_open,
+            reference_kept_from,
         });
         Ok(())
     }
@@ -1275,17 +1299,22 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
     ///
     /// # The bound, and why it is generous
     ///
-    /// Everything any of them will read from here on lies at or after this region's start,
-    /// less a margin: a read overlapping the region may begin before it, and a record's
-    /// footprint may reach back to the read that opened it. `max_record_span` is a bound on
-    /// both, so this releases everything before `region.start - max_record_span`.
+    /// Everything any of them will read from here on lies at or after `walked_to`, less a
+    /// margin: a read overlapping it may begin before it, and a record's footprint may reach
+    /// back to the read that opened it. `max_record_span` is a bound on both, so this releases
+    /// everything before `walked_to - max_record_span`, and answers that position.
+    ///
+    /// `walked_to` is a region's start when the region opens, and a locus the walk has just
+    /// yielded inside a long region
+    /// ([`release_reference_inside_the_region`](Self::release_reference_inside_the_region)).
+    /// The bound holds for the second for the same reason: the walk has reached that locus, and
+    /// no record still open can start more than `max_record_span` behind where the walk is.
     ///
     /// **Being wrong here costs a re-read, never an answer.** Releasing is a hint: a base
     /// asked for after it was released is simply read again. That is what lets the margin be
     /// generous rather than exact.
-    fn release_reference_behind(&mut self, region: GenomeRegion) {
-        let keep_from = region
-            .start
+    fn release_reference_behind(&mut self, walked_to: Position) -> u64 {
+        let keep_from = walked_to
             .get()
             .saturating_sub(u64::from(self.config.max_record_span));
         self.reference.evict_before(keep_from);
@@ -1298,6 +1327,26 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
                 .reads()
                 .reads
                 .evict_reference_before(keep_from);
+        }
+        keep_from
+    }
+
+    /// Release the reference behind `locus_start` once it is [`REFERENCE_RELEASE_STRIDE_BP`] past
+    /// the position the last release was made behind, so that a region of
+    /// megabases holds no more reference than a region of kilobases.
+    fn release_reference_inside_the_region(&mut self, locus_start: Position) {
+        let Some(walk) = self.walk.as_ref() else {
+            return;
+        };
+        let next_release_at = walk.reference_kept_from
+            + u64::from(self.config.max_record_span)
+            + self.reference_release_stride_bp;
+        if locus_start.get() < next_release_at {
+            return;
+        }
+        let kept_from = self.release_reference_behind(locus_start);
+        if let Some(walk) = self.walk.as_mut() {
+            walk.reference_kept_from = kept_from;
         }
     }
 
@@ -3078,6 +3127,86 @@ mod tests {
             "the cursor's reader is released at the same mark and as often as the walk's — \
              the release runs after the cursor is minted, so even the first region reaches it: \
              {by_cursor:?}",
+        );
+    }
+
+    /// **A long region releases the reference as the walk advances inside it, not only when
+    /// it opens.**
+    ///
+    /// A region was never long enough for the release at its start to be too rare: repeats
+    /// cut human sequence into generic regions of a few kilobases. Sending repeat ground to
+    /// the generic path makes regions of megabases, up to a whole contig, and a release only
+    /// at the start would let each reader hold every base the walk had passed — about 250 MB
+    /// a reader on human chromosome 1. The stride here is 20 bases so the fixture's 200-base
+    /// contig can show it; the run's is [`REFERENCE_RELEASE_STRIDE_BP`].
+    #[test]
+    fn a_long_region_releases_the_reference_as_the_walk_advances_inside_it() {
+        let records: Vec<RecordBuf> = (0..17)
+            .map(|index| read_named_with_length(&format!("r{index}"), 1, 1 + index * 10, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+
+        let released = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let released_by_cursor = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = ReleaseSpy {
+            inner: fixture_bases(),
+            released: Arc::clone(&released),
+        };
+        let make_reference = {
+            let released_by_cursor = Arc::clone(&released_by_cursor);
+            move || ReleaseSpy {
+                inner: fixture_bases(),
+                released: Arc::clone(&released_by_cursor),
+            }
+        };
+        let max_record_span = 5;
+        let stride = 20;
+        let mut generator = PileupGenerator::new(
+            Arc::new(spy),
+            make_reference,
+            PassthroughPreparer,
+            PileupGeneratorConfig {
+                max_record_span,
+                ..PileupGeneratorConfig::default()
+            },
+        )
+        .expect("config");
+        generator.reference_release_stride_bp = stride;
+
+        let walked = anchors(&loci_of(&mut generator, region(1, 1, 200), &reads));
+        let last_locus = *walked.last().expect("the reads cover the region");
+
+        let marks = released.lock().expect("no panic holds this").clone();
+        assert!(
+            marks.len() >= 5,
+            "a 180-base walk with a 20-base stride releases several times inside its one \
+             region, not once at its start: {marks:?}",
+        );
+        assert_eq!(
+            marks[0], 0,
+            "the region's own release, at its start less the margin"
+        );
+        assert!(
+            marks
+                .windows(2)
+                .all(|pair| { pair[1] >= pair[0] + stride && pair[1] - pair[0] <= stride + 1 }),
+            "each release is one stride past the last, so the reader holds a stride and a \
+             margin at most, however long the region: {marks:?}",
+        );
+        assert!(
+            marks
+                .iter()
+                .all(|&mark| mark + u64::from(max_record_span) <= last_locus),
+            "no release reaches past the margin behind a locus the walk has yielded: \
+             {marks:?}, last locus {last_locus}",
+        );
+        let by_cursor = released_by_cursor
+            .lock()
+            .expect("no panic holds this")
+            .clone();
+        assert_eq!(
+            by_cursor, marks,
+            "the cursor's reader is released at the same marks as the walk's: {by_cursor:?}",
         );
     }
 

@@ -213,6 +213,8 @@ performance work is changing on `main`; that work should have settled first.
 **Its check is an accuracy one**: `--call-satellites` against GATK on GIAB over satellite ground,
 before it is considered as a default.
 
+**Its plan:** [`call_satellites.md`](call_satellites.md) (2026-10-18).
+
 ## After the plan
 
 The user documentation, written from the spec once step 5 is merged: the interface it describes

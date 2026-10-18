@@ -1,9 +1,8 @@
 # Estimated parameters
 
-Before it can call, a caller has to know some numbers about the data: how often the sequencer is
-wrong, how diverse the population is, how inbred each sample is, how often a repeat stutters. pvc
-estimates them from your reads with `estimate-parameters` and writes them to a parameters file,
-a TOML text file you can read and edit.
+The caller uses some priors: how often the sequencer is wrong, how diverse the population is, how
+inbred each sample is, how often a repeat stutters. pvc estimates them from your reads with
+`estimate-parameters` and writes them to a TOML parameters file.
 
 ## What is estimated
 
@@ -17,14 +16,15 @@ a TOML text file you can read and edit.
 | Spread of allele lengths between repeats | class of repeat | how likely a repeat is to carry an allele of a new length |
 | Substitution rate inside repeats | read group × class of repeat | how much a base difference inside a repeat counts |
 
-**Inbreeding needs a cohort.** One genome alone cannot show whether it carries too few
-heterozygotes, so with one sample F is set to 0 and marked as such in the file. If you know how
-your material was bred, state it with `estimate-parameters --inbreeding F`.
+**Inbreeding, and how much allele lengths spread between repeats, need a cohort.** One genome
+alone cannot show whether it carries too few heterozygotes, so with one sample F is set to 0 and
+marked as such in the file. If you prefer another value, state it with
+`estimate-parameters --inbreeding F`.
 
-**So does the strength of the spread of allele lengths between repeats.** With one sample, pvc
-estimates which lengths each class of repeat carries, but not how much that varies from one repeat
-to the next; it holds those lengths at a between-repeat share of 1/2, marked `defaulted`. A class
-with no estimate at all gets an even spread at 1/11, as with `--defaults`.
+With one sample, pvc estimates which lengths each class of repeat carries, but not how much that
+varies from one repeat to the next; it holds those lengths at a between-repeat share of 1/2,
+marked `defaulted`. A class with no estimate at all gets an even spread at 1/11, as with
+`--defaults`.
 
 ## The built-in values (`--defaults`)
 
@@ -33,13 +33,10 @@ with no estimate at all gets an even spread at 1/11, as with `--defaults`.
 | base-quality calibration | none: the sequencer's qualities are taken as they are |
 | contamination | none |
 | inbreeding F | 0, for every sample: outbred, Hardy–Weinberg proportions |
-| stutter | HipSTR's built-in rates: 1 read in 20 a unit short and 1 in 20 a unit long, for every repeat |
+| stutter | 1 read in 20 a unit short and 1 in 20 a unit long, for every repeat |
 | spread of allele lengths between repeats | a between-repeat share of 1/11 |
 | substitution rate inside repeats | 1 base in 1,000 |
-| weight given to a read that fits no allele at a repeat | 0.20 |
-
-The inbreeding value is wrong in a known direction for inbred or structured material: it makes pvc
-call too many heterozygotes. Use psp mode for such material.
+| weight given to a read that fits no allele at a repeat | 0.07 |
 
 ## Reading the file
 
@@ -53,8 +50,6 @@ substitution rate inside repeats, and the weight of a read that fits no allele a
 | `borrowed` | this read group had too little data, so the mean of the same sample's other read groups was taken |
 | `supplied` | given by you, for example with `--inbreeding` |
 | `defaulted` | a built-in value, because nothing could be estimated |
-
-The other sections say where their numbers came from in their own entries.
 
 Contamination appears only for read groups where it was estimated. A read group with no row is
 treated as uncontaminated.

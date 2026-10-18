@@ -986,6 +986,10 @@ pub struct SelectionTermsDigest {
     fields: Vec<(&'static str, [u8; 16])>,
 }
 
+/// What a census digests for the catalog's build settings and the routing criteria of a run that
+/// read no catalog (`--generic-path-only`).
+const NO_CATALOG_READ: &[u8] = b"no catalog was read";
+
 /// The seven, in the order [`SelectionTerms::first_disagreement`] checks them and under the
 /// names it gives them. **One list, so the writer, the reader and the refusal cannot drift.**
 pub const SELECTION_FIELDS: [&str; 7] = [
@@ -1016,8 +1020,17 @@ impl SelectionTermsDigest {
             digest_of(&seed.to_le_bytes()),
             digest_of(&reference.0),
             digest_of(&analysed_regions.0),
-            digest_of(format!("{catalog_built_under:?}").as_bytes()),
-            digest_of(format!("{ssr_criteria:?}").as_bytes()),
+            // **A value is digested as it always was**, so a census written before a run could
+            // read no catalog digests to the same bytes; absence has its own spelling, which no
+            // value's `Debug` text can be.
+            catalog_built_under.as_ref().map_or_else(
+                || digest_of(NO_CATALOG_READ),
+                |settings| digest_of(format!("{settings:?}").as_bytes()),
+            ),
+            ssr_criteria.as_ref().map_or_else(
+                || digest_of(NO_CATALOG_READ),
+                |criteria| digest_of(format!("{criteria:?}").as_bytes()),
+            ),
             digest_of(&generic_target.to_le_bytes()),
             digest_of(&(*ssr_cap as u64).to_le_bytes()),
         ];
@@ -2390,6 +2403,9 @@ pub struct CensusWriter {
     /// Scratch for the accumulator, cleared and refilled once a locus rather than allocated.
     minted_scratch: Vec<(ReadGroupId, MintedReadErrors)>,
     sample: String,
+    /// Ground whose loci this census does not count, in genome order: the satellites a
+    /// `--call-satellites` walk handed to the generic path ([`Self::leave_out`]). Empty otherwise.
+    left_out: Vec<GenomeRegion>,
 }
 
 /// How many of `reads` survive when a position's `depth` reads are thinned down to `cap`.
@@ -2510,6 +2526,7 @@ impl CensusWriter {
             minted: BTreeMap::new(),
             minted_scratch: Vec::new(),
             sample,
+            left_out: Vec::new(),
         }
     }
 
@@ -2519,6 +2536,9 @@ impl CensusWriter {
     /// denominator, and a locus in a region never walked keeps [`DepthCode::NeverWalked`], so
     /// the three states survive.
     pub fn add_locus(&mut self, locus: &SampleLocusObservations) {
+        if self.is_left_out(locus.region) {
+            return;
+        }
         // **Every generic locus the walk hands over, not only the kept ones.** This is the
         // accumulator the per-sample calibration pre-pass uses, with its own unit unchanged: a
         // read at a position, counted once for every position it is seen at, at generic loci,
@@ -2539,6 +2559,30 @@ impl CensusWriter {
             LocusKind::Ssr(_) => self.add_ssr(locus),
             LocusKind::SsrBundle(_) => {}
         }
+    }
+
+    /// **Count nothing from loci that start on `spans`**, which must be in genome order and not
+    /// overlap.
+    ///
+    /// For the satellites a `--call-satellites` walk hands to the generic path
+    /// (`command_line.md` §4.4.1): the option changes nothing in the fit, so their loci must not
+    /// reach it. The positions the census keeps are drawn from the catalog's ordinary sequence
+    /// and never lie there, but [`add_locus`](Self::add_locus) also tallies every generic
+    /// locus's read errors for the base-quality calibration, and satellite loci in that tally
+    /// moved each library's error multiplier in its seventh figure on the test cohort.
+    pub fn leave_out(&mut self, spans: &[GenomeRegion]) {
+        self.left_out = spans.to_vec();
+    }
+
+    /// Whether `region` starts on ground [`leave_out`](Self::leave_out) named.
+    fn is_left_out(&self, region: GenomeRegion) -> bool {
+        let at = (region.contig, region.start);
+        let first = self
+            .left_out
+            .partition_point(|span| (span.contig, span.end) < at);
+        self.left_out
+            .get(first)
+            .is_some_and(|span| (span.contig, span.start) <= at)
     }
 
     /// This stretch of genome was walked, whatever the walk found in it.
@@ -3762,12 +3806,12 @@ mod tests {
             seed: 42,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
-            catalog_built_under: CatalogBuildSettings {
+            catalog_built_under: Some(CatalogBuildSettings {
                 criteria: StrRepeatCriteria::default(),
                 scan: ScanParams::default(),
                 tool_version: "0.1.0".to_string(),
-            },
-            ssr_criteria: StrRepeatCriteria::default(),
+            }),
+            ssr_criteria: Some(StrRepeatCriteria::default()),
             generic_target: 2_000_000,
             ssr_cap: 1_000,
         }

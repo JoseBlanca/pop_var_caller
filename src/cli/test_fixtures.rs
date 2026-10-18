@@ -138,6 +138,15 @@ pub(crate) const TRACT: (usize, usize) = (200, 220);
 /// The motif that tiles [`TRACT`].
 pub(crate) const TRACT_MOTIF: &[u8; 2] = b"GT";
 
+/// **Where the satellite cohort's satellite sits**, 0-based and half-open: sixty copies of
+/// [`TRACT_MOTIF`], 120 bases, longer than the 100 a repeat may be before it is a satellite
+/// (`--max-str-len`), and 160 bases clear of [`TRACT`], so it absorbs nothing.
+///
+/// [`SECOND_SAMPLES_SUBSTITUTION`] lies inside it, so that sample's one variant is on satellite
+/// ground: a default run cannot call it, and a `--call-satellites` run hands it to the SNP/indel
+/// model ([`a_varying_cohort_with_a_satellite_on_disk`]).
+pub(crate) const SATELLITE: (usize, usize) = (380, 500);
+
 /// Where the cohort's samples carry a substitution, 0-based.
 ///
 /// **One in each sample and neither in both**, so the two samples' stored files differ in what
@@ -221,12 +230,18 @@ fn a_reference_with_no_repeat_in_it(length: usize) -> Vec<u8> {
 /// Exposed so a test can read a base out of it and say what it expects a read carrying the
 /// alternative to look like, rather than restating the sequence.
 pub(crate) fn the_varying_cohorts_reference() -> Vec<u8> {
-    let (name, length) = VARYING_CONTIG;
-    let _ = name;
+    the_reference_tiled_over(&[TRACT])
+}
+
+/// [`a_reference_with_no_repeat_in_it`] with each of `repeats` overwritten by copies of
+/// [`TRACT_MOTIF`].
+fn the_reference_tiled_over(repeats: &[(usize, usize)]) -> Vec<u8> {
+    let (_, length) = VARYING_CONTIG;
     let mut bases = a_reference_with_no_repeat_in_it(length);
-    let (from, to) = TRACT;
-    for (offset, base) in bases[from..to].iter_mut().enumerate() {
-        *base = TRACT_MOTIF[offset % TRACT_MOTIF.len()];
+    for &(from, to) in repeats {
+        for (offset, base) in bases[from..to].iter_mut().enumerate() {
+            *base = TRACT_MOTIF[offset % TRACT_MOTIF.len()];
+        }
     }
     bases
 }
@@ -258,7 +273,7 @@ fn a_base_that_is_not(reference: u8) -> u8 {
 ///
 /// On any failure to build the fixture, which is a broken test rather than a finding.
 pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(false, 0, false)
+    a_varying_cohort_built(false, 0, false, false)
 }
 
 /// **The same cohort with a sequencing error in about one read in four**, at an offset and to a base
@@ -272,7 +287,7 @@ pub(crate) fn a_varying_cohort_on_disk() -> AVaryingCohort {
 /// error, and the tract's substitution count is no longer zero
 /// (`cli::cross_platform_digests`, plan `fit_precision.md`, checkpoint E).
 pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0, false)
+    a_varying_cohort_built(true, 0, false, false)
 }
 
 /// **The same, with `further_samples` samples beside the first two**, each read from one library
@@ -283,7 +298,7 @@ pub(crate) fn a_varying_cohort_with_sequencing_errors_on_disk() -> AVaryingCohor
 pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
     further_samples: usize,
 ) -> AVaryingCohort {
-    a_varying_cohort_built(true, further_samples, false)
+    a_varying_cohort_built(true, further_samples, false, false)
 }
 
 /// **The cohort with sequencing errors, whose first sample's header lists its read groups in the
@@ -294,13 +309,20 @@ pub(crate) fn a_larger_varying_cohort_with_sequencing_errors_on_disk(
 /// tell a run that sorts a sample's read groups by declared ID from one that keeps the header's
 /// order. A walk numbers groups in header order, so this one gives `rg-one-b` the first number.
 pub(crate) fn a_varying_cohort_declaring_read_groups_out_of_order_on_disk() -> AVaryingCohort {
-    a_varying_cohort_built(true, 0, true)
+    a_varying_cohort_built(true, 0, true, false)
+}
+
+/// **The varying cohort with a satellite in its reference** ([`SATELLITE`]), over which the second
+/// sample's substitution falls. Everything else is [`a_varying_cohort_on_disk`]'s.
+pub(crate) fn a_varying_cohort_with_a_satellite_on_disk() -> AVaryingCohort {
+    a_varying_cohort_built(false, 0, false, true)
 }
 
 fn a_varying_cohort_built(
     with_sequencing_errors: bool,
     further_samples: usize,
     first_samples_header_reversed: bool,
+    with_a_satellite: bool,
 ) -> AVaryingCohort {
     use crate::read::input::test_fixtures::{
         FixtureReadGroup, header_with_read_groups, indexed_named_bam,
@@ -316,7 +338,11 @@ fn a_varying_cohort_built(
     use noodles_sam::alignment::{RecordBuf, record::Flags};
 
     let (name, length) = VARYING_CONTIG;
-    let bases = the_varying_cohorts_reference();
+    let bases = if with_a_satellite {
+        the_reference_tiled_over(&[TRACT, SATELLITE])
+    } else {
+        the_varying_cohorts_reference()
+    };
 
     let directory = tempfile::tempdir().expect("a temporary directory");
     let reference = directory.path().join("ref.fa");

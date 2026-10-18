@@ -2394,7 +2394,7 @@ mod tests {
         let locus = gathered.locus_parameters(&alleles, &contexts, &[]);
 
         assert_eq!(locus.outlier_weight, DEFAULT_OUTLIER_WEIGHT);
-        assert_eq!(locus.outlier_weight, 0.20);
+        assert_eq!(locus.outlier_weight, 0.07);
         assert!(locus.contamination.is_none());
         assert_eq!(gathered.weakest_warrant(), Provenance::FittedHere);
 
