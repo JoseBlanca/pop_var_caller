@@ -84,8 +84,8 @@ What was measured, and how each number is protected from a shared machine:
 1. **Profile first.** `sample` on the 59-sample fit for 120 s mid-fit, and again for 90 s on a build
    with `#[inline(never)]` on each of the expectation pass's callees, so that each is a separate symbol
    (`sample` merges addresses, so it cannot attribute lines; the split build can attribute functions).
-   Raw files: `tmp/perf/prof/sample_judging.txt`, `tmp/perf/prof/sample_attr.txt` in the worktree
-   `pop_var_caller-snp-fit-perf`.
+   Raw files: `prof/sample_judging.txt`, `prof/sample_attr.txt` under
+   `tmp/perf_snp-fit_2026-10-18/` in the main checkout (ignored by git).
 2. **Gate on instructions retired, not wall time.** `/usr/bin/time -l` reports instructions retired;
    for one binary and one input it repeats to within 0.02%, whatever else the machine is doing. Every
    candidate was gated on it, A B B A, at 2 threads (the owner's rule after the first hour: five agents
@@ -97,7 +97,7 @@ What was measured, and how each number is protected from a shared machine:
    load is below 3. The first 59-sample round ended at loads of 21 to 35 — a Python simulation from
    another session held one core throughout — and showed the new code *slower* (1,280 s against
    1,114 s), which contradicted its 7.9% fewer instructions. It was rerun main, new, new, main with the
-   load logged every 30 seconds (`tmp/perf/timing2/load.log`): load 18 to 20 during every run, which
+   load logged every 30 seconds (`timing2/load.log` there): load 18 to 20 during every run, which
    the fit's own 18 threads account for, except two minutes at 38 to 53 in the first main run. That
    rerun is the 59-sample row of §2.
 5. **A bench that sees the hot path** (§4) for the next round.
@@ -339,7 +339,10 @@ owner.
 
 ## Where the evidence is
 
-In the worktree `pop_var_caller-snp-fit-perf`, under `tmp/perf/`: `prof/` (the profiles), `runs/` and
-`timing/`, `timing2/` (every timed run's parameters file, log, `/usr/bin/time -l` output and load),
-`brief_common.md` (what every sub-agent was told). Each sub-agent's own measurements are in its worktree
-under `.claude/worktrees/agent-*/tmp/`; those worktrees are to be deleted once this report is filed.
+In the main checkout, under `tmp/perf_snp-fit_2026-10-18/` (ignored by git, so on that machine only):
+`prof/` (the profiles), `runs/`, `timing/`, `timing2/` and `timing3/` (every timed run's parameters file,
+log, `/usr/bin/time -l` output and load; `timing3/` is the 128- against 512-chunk comparison),
+`oracle_main_fit/` and `oracle_main5490_fit/` (main's fitted files the 512-chunk move was measured
+against), `brief_common.md` (what every sub-agent was told), and the scripts `fit.sh`, `queue.sh`,
+`lines.py`, `compare_move.py`. The sub-agents' own worktrees, and the one this review worked in, were
+deleted once the work was merged.
