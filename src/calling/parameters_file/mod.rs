@@ -112,7 +112,7 @@
 //! substitution_rate_by_stratum = [ … ]
 //!
 //! [stated_constants]               # §3.8 — the numbers no fit produces
-//! repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
+//! repeat_tract_outlier_weight = { value = 0.07, warrant = "defaulted" }
 //! ```
 //!
 //! # Three conventions the whole tree keeps
@@ -237,7 +237,14 @@ use serde::{Deserialize, Serialize};
 /// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md` §8). A version-4 build refuses a
 /// version-5 file; this build reads a version-4 file with the key absent and holds both rungs at
 /// the one value, which is what that file meant.
-pub const FORMAT_VERSION: u32 = 5;
+///
+/// **Version 6** lowers the built-in repeat-tract outlier weight from 0.20 to 0.07
+/// ([`DEFAULT_OUTLIER_WEIGHT`](crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT)); no key
+/// changes. A `defaulted` weight records the built-in of the build that wrote the file, so this
+/// build reads an earlier file's `defaulted` 0.20, and its run takes today's built-in, as
+/// `defaulted` asks. A version-5 build refuses a version-6 file, whose `defaulted` 0.07 it would
+/// otherwise refuse as a changed number.
+pub const FORMAT_VERSION: u32 = 6;
 
 /// **Why a parameters file could not be used.**
 ///
@@ -3070,19 +3077,20 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
     /// Pinned so that bumping it is a deliberate act with a test to change, rather than a literal
     /// somebody edits in a fixture.
     #[test]
-    fn the_format_version_this_build_writes_is_five() {
-        assert_eq!(FORMAT_VERSION, 5);
-        assert_eq!(a_file_using_every_shape().format_version, 5);
+    fn the_format_version_this_build_writes_is_six() {
+        assert_eq!(FORMAT_VERSION, 6);
+        assert_eq!(a_file_using_every_shape().format_version, 6);
     }
 
     /// **A version-3 file reads, with both informational tables absent** — the fixture with its
-    /// version set back and the two tables and format 5's key taken out of its text — and passes
-    /// a run's checks; **a version-6 file is refused**; and a version-3 build's reader, which knows neither table,
+    /// version set back, the two tables and format 5's key taken out of its text, and the outlier
+    /// weight at the 0.20 a build before format 6 recorded — and passes a run's checks; **a
+    /// version-7 file is refused**; and a version-3 build's reader, which knows neither table,
     /// would refuse a version-4 file rather than misread it: every table refuses a key it does not
     /// know, so the written text of either table, put in a file whose shape lacks it, is refused
     /// naming the key.
     #[test]
-    fn a_version_three_file_reads_without_the_tables_and_a_version_six_file_is_refused() {
+    fn a_version_three_file_reads_without_the_tables_and_a_version_seven_file_is_refused() {
         let mut version_three = a_file_using_every_shape();
         version_three.format_version = 3;
         version_three.ordinary_site_prior.fitted_density = None;
@@ -3090,6 +3098,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         version_three
             .repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
+        version_three
+            .stated_constants
+            .repeat_tract_outlier_weight
+            .value = 0.20;
         let read = ParametersFile::from_toml(&version_three.to_toml())
             .expect("a version-3 file is a parameters file");
         assert_eq!(read, version_three);
@@ -3098,10 +3110,10 @@ repeat_tract_outlier_weight = { value = 0.20, warrant = "defaulted" }
         read.validate()
             .expect("a version-3 file passes the checks a run applies");
 
-        let mut version_six = a_file_using_every_shape();
-        version_six.format_version = 6;
-        let read = ParametersFile::from_toml(&version_six.to_toml())
-            .expect("a version-6 file with this build's keys parses");
+        let mut version_seven = a_file_using_every_shape();
+        version_seven.format_version = 7;
+        let read = ParametersFile::from_toml(&version_seven.to_toml())
+            .expect("a version-7 file with this build's keys parses");
         assert!(matches!(
             read.validate(),
             Err(ParametersFileError::Meaningless { field, .. }) if field == "format_version"

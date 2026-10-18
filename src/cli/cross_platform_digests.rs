@@ -264,7 +264,10 @@ mod tests {
     /// §8): this fixture's fit has a median of its own, so both keys carry it and no call moves.
     /// The file moves by `format_version`, the new key and the notes naming the two built-in
     /// values, and by nothing else. Recorded on the macOS host (arm64); it was `3ac3a2ae4c3e7e2fa38af1d6a3b827cc`.
-    const FITTED_PARAMETERS_MD5: &str = "ae20f59532f41838b4b63c0b2cf3fb5c";
+    /// **Re-recorded 2026-10-18** when the built-in repeat-tract outlier weight went from 0.20 to
+    /// 0.07 (parameters file format 6): the file moves by `format_version` and the weight's line,
+    /// and by nothing else. Recorded on the macOS host (arm64); it was `ae20f59532f41838b4b63c0b2cf3fb5c`.
+    const FITTED_PARAMETERS_MD5: &str = "467baf41a66b1053543571737bc7b48f";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -392,7 +395,11 @@ mod tests {
     /// **Re-recorded 2026-10-18** with the fit above: only the `##pvcParameters` md5 moved —
     /// putting the old one back reproduces the old checksum exactly. It was `2b5fedb559b16c8dfed07ab39f7cc5d2`. Recorded on
     /// the macOS host (arm64).
-    const CALLS_MD5: &str = "d90fefc996dca55d37c45c43cd392170";
+    /// **Re-recorded 2026-10-18** with the outlier weight above: besides the `##pvcParameters` md5,
+    /// the one STR record (`chrV:201`) moves in QUAL and in its heterozygous sample's GQ — more
+    /// confident at the lower floor — with every genotype unchanged. Recorded on the macOS host
+    /// (arm64); it was `d90fefc996dca55d37c45c43cd392170`.
+    const CALLS_MD5: &str = "0999e9cf0affd975c1ef46d6d829f923";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -499,7 +506,10 @@ mod tests {
     /// §8): this fixture's fit has a median of its own, so both keys carry it and no call moves.
     /// The file moves by `format_version`, the new key and the notes naming the two built-in
     /// values, and by nothing else. Recorded on the macOS host (arm64); it was `49bd109f04196c5d2a3f39341002f691`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "ca1be8e12b7f816755ba43d1e5fcd4c9";
+    /// **Re-recorded 2026-10-18** when the built-in repeat-tract outlier weight went from 0.20 to
+    /// 0.07 (parameters file format 6): the file moves by `format_version` and the weight's line,
+    /// and by nothing else. Recorded on the macOS host (arm64); it was `ca1be8e12b7f816755ba43d1e5fcd4c9`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "d80331a16f4cd86bfbdf885c90cc7188";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -605,7 +615,11 @@ mod tests {
     /// **Re-recorded 2026-10-18** with the fit above: only the `##pvcParameters` md5 moved —
     /// putting the old one back reproduces the old checksum exactly. It was `23c98fcb501498aa7167d74fedcd51fe`. Recorded on
     /// the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "38ee2760d8b096add2b6019fa58765b5";
+    /// **Re-recorded 2026-10-18** with the outlier weight above: besides the `##pvcParameters` md5,
+    /// the one STR record (`chrV:201`) moves in QUAL and in its heterozygous sample's GQ — more
+    /// confident at the lower floor — with every genotype unchanged. Recorded on the macOS host
+    /// (arm64); it was `38ee2760d8b096add2b6019fa58765b5`.
+    const WITH_ERRORS_CALLS_MD5: &str = "a7215a1ca6142fa3ebe3e846ef96bd24";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -719,7 +733,10 @@ mod tests {
     /// §8): this fixture's fit has a median of its own, so both keys carry it and no call moves.
     /// The file moves by `format_version`, the new key and the notes naming the two built-in
     /// values, and by nothing else. Recorded on the macOS host (arm64); it was `c47b81917edfbfa6f5c877eeae6087db`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "48480f4ee21a23f1580c059dec5e6bc5";
+    /// **Re-recorded 2026-10-18** when the built-in repeat-tract outlier weight went from 0.20 to
+    /// 0.07 (parameters file format 6): the file moves by `format_version` and the weight's line,
+    /// and by nothing else. Recorded on the macOS host (arm64); it was `48480f4ee21a23f1580c059dec5e6bc5`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "ced2576a45b958bd719a0e8720e7b9bb";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -823,7 +840,11 @@ mod tests {
     /// **Re-recorded 2026-10-18** with the fit above: only the `##pvcParameters` md5 moved —
     /// putting the old one back reproduces the old checksum exactly. It was `2b753fd7c6d6e453645bb4b31fe6a364`. Recorded on
     /// the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "2883bcaad4b3f7552c384bf5fcf36335";
+    /// **Re-recorded 2026-10-18** with the outlier weight above: besides the `##pvcParameters` md5,
+    /// the one STR record (`chrV:201`) moves in QUAL and in its heterozygous sample's GQ — more
+    /// confident at the lower floor — with every genotype unchanged. Recorded on the macOS host
+    /// (arm64); it was `2883bcaad4b3f7552c384bf5fcf36335`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "65c158aec014804780d5560220169f13";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

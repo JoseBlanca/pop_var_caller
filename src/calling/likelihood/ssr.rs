@@ -77,8 +77,8 @@ use crate::parameter_estimation::Provenance;
 use crate::types::{LogProb, ReadGroupId};
 
 /// How often a read at a repeat tract came from somewhere other than this individual's copies
-/// of it — **0.05, chosen by a sweep against genotype accuracy, and it is not a measurement of
-/// that share.**
+/// of it — **0.07, chosen against genotype accuracy, and it is not a measurement of that
+/// share.**
 ///
 /// # What it does, which is not what its name says
 ///
@@ -144,6 +144,27 @@ use crate::types::{LogProb, ReadGroupId};
 /// records down 3 in 100, and about one tract heterozygote in eleven no longer called het —
 /// the accepted cost.
 ///
+/// # Why 0.07 since 2026-10-18
+///
+/// **0.20 was the best value for a model that also shipped the stated stutter and a near-flat
+/// prior, and it hurts a fitted one.** With the cohort's own stutter and allele-length prior, a
+/// floor that high makes a read on a second allele count for too little, and the fitted prior then
+/// overrules heterozygotes the reads support. Measured on the HG002 tandem-repeat benchmark, one
+/// sample, correct tract genotypes over the tracts every arm built
+/// (`doc/devel/ng/research/str_outlier_share_plan.md` §1):
+///
+/// | | 5x | 10x | 30x | 50x | 300x |
+/// |---|---|---|---|---|---|
+/// | stated parameters, 0.20 | 2,854 | 4,679 | 7,194 | 8,925 | 12,048 |
+/// | stated parameters, **0.07** | 2,857 | 4,686 | 7,176 | 8,904 | 12,036 |
+/// | fitted parameters, 0.20 | 2,789 | 4,588 | 7,148 | — | — |
+/// | fitted parameters, 0.03 | 2,853 | 4,673 | 7,156 | — | — |
+///
+/// 0.07 is the owner's choice (2026-10-18): under the stated parameters it gives up about 2
+/// tracts in 1,000 at 30x and 50x and 1 in 1,000 at 300x, and gains a few at 5x and 10x. It is a stopgap. The share is to be
+/// fitted by `estimate-parameters` (`str_outlier_share_plan.md`); counted literally it is 1 to 5
+/// reads in 1,000 (`str_outlier_share_phase1_2026-10-18.md`).
+///
 /// # What is still open, and why this is not called fitted
 ///
 /// **The literal reading of this number disagrees with the sweep.** Read as what it is named —
@@ -154,8 +175,9 @@ use crate::types::{LogProb, ReadGroupId};
 /// estimate.
 ///
 /// Production's value, which ng carried until 2026-09-03, is 0.01
-/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)); 0.05 held for the rest of that day.
-pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.20;
+/// ([`em.rs`](../../../../src/ssr/cohort/em.rs)); 0.05 held for the rest of that day, and 0.20
+/// from then until 2026-10-18.
+pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.07;
 
 /// **The outlier weight this run scored with, and whether the run was handed it or inherited
 /// it.**
@@ -1741,10 +1763,10 @@ mod tests {
 
         // And the copy weights really are what the fixture claims: a row whose weights summed
         // to the ploidy rather than to one would be about seven nats away from this. Measured
-        // at the shipped outlier weight; it was −11.465 at 0.05 and moved here when the
-        // constant moved to 0.20.
+        // at the shipped outlier weight; it was −11.465 at 0.05, −11.070 at 0.20, and moved
+        // here when the constant moved to 0.07.
         assert!(
-            (row[0].0 - (-11.069_500)).abs() < 1e-5,
+            (row[0].0 - (-11.330_165)).abs() < 1e-5,
             "the fixture moved: {}",
             row[0].0
         );

@@ -291,8 +291,13 @@ The largest section, and the one whose axes matter:
 **Written explicitly, so that a run's inherited numbers are visible and editable rather than buried
 in the binary.** The one that exists today is the share of repeat-tract reads that came from
 nowhere the model can explain: `DEFAULT_OUTLIER_WEIGHT`
-([`likelihood/ssr.rs:82`](../../../../src/ng/calling/likelihood/ssr.rs)), 0.01, inherited from the
-existing caller and never measured here.
+([`likelihood/ssr.rs`](../../../../src/calling/likelihood/ssr.rs)). **It is 0.07 since format 6
+(2026-10-18)**; it was 0.01, inherited from the existing caller, until 2026-09-03, then 0.05, then
+0.20. Each value was chosen by a sweep against genotype accuracy and none is a measurement: counted
+literally, the share of reads nothing explains is 1 to 5 in 1,000
+(`doc/devel/ng/research/str_outlier_share_phase1_2026-10-18.md`). A `defaulted` weight records the
+built-in of the build that wrote the file, so a file stamped before format 6 says 0.20; a run that
+reads it takes today's built-in, as `defaulted` asks.
 
 **Marking it soft is the point of writing it down.** A number that appears in a file the user can
 edit is a number the project has admitted is a guess; one that only appears in the source reads as
@@ -506,7 +511,7 @@ user has to find first.
 **Not every parameter has an honest default, and the file must not hide which.** Three cases:
 
 - **has one**: the base-quality calibration scale (1.0 — no calibration), the repeat-tract outlier
-  weight (0.01, inherited, §3.8), the flat concentration (1.0). All marked `Defaulted`.
+  weight (0.07, a swept constant, §3.8), the flat concentration (1.0). All marked `Defaulted`.
 - **absence is the default**: contamination. A run told nothing about contamination is
   uncontaminated, which is a real model state and not a guess (§3.4).
 - **has one, and it has to be measured before it exists** — decided 2026-08-28: the
