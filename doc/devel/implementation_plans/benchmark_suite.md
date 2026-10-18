@@ -1,7 +1,7 @@
 # One script that reruns every benchmark — implementation plan
 
-*Status: plan, 2026-10-18, for the owner's review. Branch `benchmark-suite`, from main at `bbcc9f46`,
-worktree `../pop_var_caller-benchmark-suite`. No code yet.*
+*Status: plan, 2026-10-18, revised the same day after the owner's review (§2). Branch
+`benchmark-suite`, from main at `bbcc9f46`, worktree `../pop_var_caller-benchmark-suite`.*
 
 ## 1. What this builds
 
@@ -15,20 +15,33 @@ competitors, scores every caller the same way, and writes three things:
 - **`logs/`**: the exact command, its standard error, and its time and memory for every step, so any
   row of the table can be traced to the command that produced it.
 
-The script can run one benchmark, one depth or one caller alone. It reuses a competitor's calls when
-neither the competitor's version nor its input has changed. A full refresh reruns everything.
+The script can run one benchmark, one depth or one caller alone. **The competitors (GATK, freebayes,
+HipSTR) are run once.** After that, a refresh reruns only pvc, scores it, and puts it beside the
+competitors' stored calls. A competitor is rerun only when asked for by name (`--rerun-competitors`).
+It is also rerun when its stored calls are missing, or when its input files have changed.
+
+**A run can be stopped at any point and resumed later without redoing finished work** (§6.1).
+Every step that finishes leaves a marker, and a resumed run skips every step that has one.
 
 It starts from the inventory of 2026-10-18
 (`pop_var_caller-docs/tmp/docs_inventory/benchmark_inventory.md`). That inventory and three surveys
 of the scripts and data behind it are the source of every "exists" and "stale" statement below.
 
-## 2. Decisions for the owner
+## 2. Settled with the owner
 
-Each comes with a recommendation. The rest of the plan assumes the recommendation, and says where
-the other answer would change it.
+The owner's review of the first draft settled four things:
 
-**D1. Run every caller inside the dev container, with its virtual machine given the whole laptop:
-18 cores and 56 GB.** I recommend this.
+- **Competitors are run once; a refresh reruns only pvc.**
+- **Every run uses the laptop's 6 fast cores only**, not all 18. This replaces the first draft's
+  proposal to measure speed at 18 threads.
+- **A run must stop and resume without redoing finished work**, because a full run takes about a day
+  and the laptop is needed for other work.
+- **The 2,169-sample cohort on `kimura` is left out** of this plan, to be discussed separately.
+
+The two proposals below received no objection and are built as written.
+
+**D1. Run every caller inside the dev container, with its virtual machine given the 6 cores the suite
+uses and 32 GB.**
 
 - **Why not the host.** GATK and the scorer, vcfeval, are Java programs. This Mac has no Java
   runtime, so neither can run on the host without installing one. Every other tool could run on
@@ -36,17 +49,17 @@ the other answer would change it.
 - **What one environment buys.** All speed and memory figures come from the same Linux machine, with
   the same compiler for pvc and the same tool builds.
 - **What it costs.** The figures are measured inside Apple's Linux virtual machine, not natively on
-  macOS. The summary will say so beside every speed figure. The dev container's default size is
-  8 cores and 16 GB. At that size GATK and freebayes would be measured on less than half the
-  machine, and the 63-sample freebayes run was killed for memory at 16 GB before (`run_freebayes.sh`
-  header, lines 26–40). So the suite raises the size, using the `DEV_CPUS` and `DEV_MEM` settings
-  that already exist.
+  macOS. The summary will say so beside every speed figure.
+- **How big the virtual machine is.** The suite sets its size with the existing `DEV_CPUS` and
+  `DEV_MEM` settings: 6 cores, and 32 GB. The 32 GB is because the 63-sample freebayes run was killed
+  for memory at 16 GB before (`run_freebayes.sh` header, lines 26–40). It leaves 32 GB for the rest
+  of the laptop.
 - **The other answer.** Installing a Java runtime on the host would let everything run natively. It
   writes outside the project, so I would not do it without your say.
 
 **D2. Score each caller's records as it writes them: records that pass its own filters, with no
-extra quality threshold. The one exception is freebayes, kept at QUAL 20 or more.** I recommend
-this, plus one more row per caller giving its best F1 over a sweep of the quality threshold.
+extra quality threshold. The one exception is freebayes, kept at QUAL 20 or more.** Each caller also
+gets one more row, its best F1 over a sweep of the quality threshold.
 
 - **Why freebayes is the exception.** freebayes writes every candidate it considers. Its
   documentation recommends a quality filter, and the earlier STR comparison used QUAL 20.
@@ -60,12 +73,12 @@ this, plus one more row per caller giving its best F1 over a sweep of the qualit
   the callers more uniformly. But QUAL means a different thing in each caller, so the same number is
   not the same strictness.
 
-**D3. Measure speed at 18 threads only, not also at 6.** I recommend this.
-
-- **The cores.** This laptop has 6 fast cores and 12 slower ones.
-- **Why 18.** It is what a user running pvc on this machine gets.
-- **The cost of also measuring 6.** It would double the speed benchmark, about 2½ more hours. The
-  thread count is an option, so a 6-thread run can be added later without code changes.
+**Six cores, and what the suite cannot guarantee about them.** This laptop has 6 fast cores and 12
+slower ones. macOS gives no way to pin a process to the fast cores. The suite gives the virtual
+machine 6 cores and runs every caller at 6 threads or 6 processes. macOS normally schedules a busy
+virtual machine's 6 threads on the fast cores, but this is not guaranteed. To show whether it held,
+the suite records the host's load before and after each benchmark. The summary states every speed
+figure as "6 threads". `--threads` can change the count for a later run.
 
 ## 3. How things run and how they are measured
 
@@ -118,24 +131,24 @@ rows from there.
 
 This follows the rule settled in June for these comparisons:
 
-- **One-sample tools run one process per sample**, up to 18 at once, each single-threaded:
+- **One-sample tools run one process per sample**, up to 6 at once, each single-threaded:
   - GATK HaplotypeCaller, making one GVCF per sample;
   - pvc `generate-psps`, whose help says "to spread a cohort over cores, run one command per sample".
 - **Cohort tools run as one multi-threaded process:**
-  - pvc `estimate-parameters`, `call-from-psps` and `call-from-alignments`, at `--threads 18`;
+  - pvc `estimate-parameters`, `call-from-psps` and `call-from-alignments`, at `--threads 6`;
   - GATK GenomicsDBImport, then GenotypeGVCFs.
 - **freebayes has no threads**, so it runs as its own `freebayes-parallel` does: one process per
-  region, up to 18 at once.
+  region, up to 6 at once.
 - **A one-sample run** has nothing to spread over samples:
-  - GATK HaplotypeCaller runs as one process with `--native-pair-hmm-threads 18`;
+  - GATK HaplotypeCaller runs as one process with `--native-pair-hmm-threads 6`;
   - freebayes still runs by region.
 
 For cohort joint calling I chose GenomicsDBImport over the CombineGVCFs used before. GATK's Best
 Practices name it for cohorts, so it is what a GATK user with 63 samples would run.
 
 **A memory risk for the tomato freebayes run.** At 50 samples, four freebayes processes reached
-9.6 GB together, and 18 processes may not fit in 56 GB. The tomato slice test measures one region's
-process at 63 samples. If 18 at once would not fit, the suite lowers freebayes' process count and
+9.6 GB together, so 6 processes at 63 samples may not fit in 32 GB. The tomato slice test measures one region's
+process at 63 samples. If 6 at once would not fit, the suite lowers freebayes' process count and
 says so in the table.
 
 ## 4. The benchmarks
@@ -289,8 +302,9 @@ samples, and 5, 15, 30 and 60×.
 - the 1-sample runs total about 1½ hours.
 
 **Disk.** About 35 GB if the read alignments are kept (0.9 GB at 50 samples and 5× up to 8.9 GB at
-60×). About 5 GB if they are deleted after scoring. The suite keeps them by default, because a later
-refresh that reuses the competitors' calls must be able to check that their input has not changed.
+60×). About 5 GB if they are deleted after scoring. The suite keeps them, because a later pvc
+refresh calls the same alignments the competitors called. Regenerating them would cost hours, and the
+competitors' fingerprints would then have to be checked against the regenerated files.
 
 ### 4.6 Speed and peak memory, whole pipelines
 
@@ -348,18 +362,19 @@ from GATK, and the allele-level marimo dashboard. The suite's scorer is new
 
 **Estimate.** Minutes.
 
-### 4.8 Benchmarks this laptop cannot run
+### 4.8 The colleague's chr22 trio: not run here
 
-The suite has an entry for each, so it can run them when pointed at the data. This report lists them
-as not run.
+This benchmark is HG002, HG003 and HG004 over all of chromosome 22, at 5, 10, 30× and full depth. Its
+data are not on this laptop. The suite has an entry for it that runs when pointed at the data. The
+entry takes a configuration file naming:
 
-- **The colleague's chr22 trio.** HG002, HG003 and HG004 over all of chromosome 22, at 5, 10, 30×
-  and full depth. The entry takes a configuration file naming the three alignment files per depth,
-  the truth files and the confident regions, and runs §4.1's arms on them.
-- **The 2,169-sample cohort on `kimura`.** It is pvc only, measuring speed and peak memory of the
-  four steps. The entry takes a list of alignment files and a regions file. It is meant for a Linux
-  machine with no container runtime, so it runs `cargo` directly, as CLAUDE.md describes for
-  machines like `rick`.
+- the three alignment files at each depth;
+- the truth files;
+- the confident regions.
+
+It then runs §4.1's arms on them. The build report will list this benchmark as not run.
+
+The 2,169-sample cohort on `kimura` is left out of this plan (§2).
 
 ## 5. Scoring
 
@@ -402,32 +417,86 @@ except for what §4.4 and §4.5 list.
 
 ## 6. Results, options and layout
 
-**Where results go.**
-- Every run writes to `benchmark_results/<date>_<pvc commit>/` at the repository root, which is
-  added to `.gitignore`.
-- `benchmark_results/latest` points at the newest run.
-- Competitors' reusable calls live in `benchmark_results/cache/`, keyed by a fingerprint of three
-  things:
-  - the tool's version string;
-  - the command line, with the output path left out;
-  - each input file's path, size and modification time. Small files are checksummed instead.
+**Where results go.** Everything is under `benchmark_results/` at the repository root, which is
+added to `.gitignore`. It holds three directories, which change at different rates:
+
+| directory | what it holds | rerun when |
+|---|---|---|
+| `inputs/` | inputs the suite makes: downsampled alignments (§4.2, §4.3) and the simulated genomes, reads and alignments (§4.5) | never, unless deleted; they are deterministic |
+| `competitors/` | each competitor's calls, its time and memory, and its scored rows, one directory per benchmark, configuration and caller | only on `--rerun-competitors`, a missing directory, or a changed fingerprint (below) |
+| `pvc/<commit>/` | pvc's calls, time, memory and scored rows for one pvc commit, then that commit's `results.tsv` and `summary.md` | every new pvc commit |
+
+**Results for one commit.** A commit's `results.tsv` joins its own pvc rows with the competitors'
+stored rows. Each competitor row keeps the date it was measured, so the table shows that GATK's
+figures date from the first run.
+
+**The competitor fingerprint.** Stored calls are reused only if the fingerprint written beside them
+still matches. It covers three things:
+
+- the tool's version string;
+- the command line, with output paths left out;
+- each input file's path, size and modification time. Small files, such as region lists and
+  references' indexes, are checksummed instead.
+
+A mismatch is never silently rerun. The suite stops and names the file or version that changed. It
+reruns only when `--rerun-competitors` is given, because a competitor rerun costs hours.
+
+`benchmark_results/latest` points at the newest commit's directory.
 
 **A full run.** About 50 GB with the simulated read alignments kept, or about 20 GB without them
-(§4.5).
+(§4.5). A later pvc refresh adds about 3 GB a commit, which is pvc's calls and psps. Old commits'
+directories can be deleted freely.
+
+### 6.1 Stopping and resuming
+
+A run is a list of small steps. One step is one caller's one stage on one configuration, for
+example:
+
+- GATK HaplotypeCaller on HG003 at 10×;
+- pvc `estimate-parameters` on the 50-sample PCR run at 30×;
+- scoring one caller's calls.
+
+**How a step finishes.** Each step writes into a temporary directory and renames it into place only
+when it has finished and its outputs pass a check: the files exist, are not empty, and a VCF parses.
+It then writes a `.done` marker holding its measurement. The longest single steps are expected to be
+GATK HaplotypeCaller at 300× over the 6 Mb tandem-repeat regions, and freebayes on 63 tomato
+samples, at about an hour each.
+
+**Two ways to stop:**
+
+- **`run_suite.sh --stop`** stops after the step that is running. It creates
+  `benchmark_results/STOP`, which the suite checks between steps, and the next run removes it.
+- **Ctrl-C, or closing the terminal,** stops at once. The container is stopped, and the step that
+  was running is discarded and starts over next time.
+
+**Resuming.** Run the same command again. Every step with a `.done` marker is skipped, and its
+result is read from the marker. Nothing finished is rerun, so the cost of stopping is at most the
+step that was cut short.
+
+**What stopping does to the speed figures.** A step timed while the laptop was busy is wrong, and the
+suite cannot prevent that. A host-side process records the host's load every 30 seconds into the
+results directory for as long as the suite runs. Each step's row carries the mean host load over its
+run. The summary marks any speed figure whose step ran with a mean load above 7, which is the 6
+cores plus one. Such a step can be rerun on its own with `--redo-step <name>`.
 
 **Commands:**
 
 ```
-benchmarks/suite/run_suite.sh                        # everything, reusing unchanged competitor calls
-benchmarks/suite/run_suite.sh --refresh-all          # everything, nothing reused
-benchmarks/suite/run_suite.sh --only giab_panel --depth 30 --caller gatk
+benchmarks/suite/run_suite.sh                        # everything not already done; pvc at this commit
+benchmarks/suite/run_suite.sh --stop                 # finish the running step, then stop
+benchmarks/suite/run_suite.sh --only giab_panel --depth 30 --caller pvc
+benchmarks/suite/run_suite.sh --rerun-competitors --only hg002_tr --caller hipstr
 benchmarks/suite/run_suite.sh --only stutter_sim --slice     # the small test of §7
+benchmarks/suite/run_suite.sh --status               # steps done, remaining, and estimated time left
 benchmarks/suite/run_suite.sh --summary-only         # rebuild summary.md from results.tsv
 ```
 
-**Options.** `--only` takes a comma-separated list of benchmarks; `--depth` and `--caller` likewise.
-`--threads` defaults to 18. `--data-root` points at the checkout that holds `benchmarks/`; it defaults
-to this checkout, and from a worktree it must be the main checkout.
+**Options.**
+
+- `--only` takes a comma-separated list of benchmarks; `--depth` and `--caller` likewise.
+- `--threads` defaults to 6.
+- `--data-root` points at the checkout that holds `benchmarks/`. It defaults to this checkout; from a
+  worktree it must be the main checkout.
 
 **Files:**
 
@@ -437,9 +506,11 @@ benchmarks/suite/
   fetch_tools.sh          the pinned RTG Tools download
   bench/                  one script per benchmark: giab_panel.sh, giab_trio.sh, hg002_5mb.sh,
                           hg002_tr.sh, stutter_sim.sh, speed.sh, tomato_agreement.sh,
-                          external_chr22.sh, external_kimura.sh
+                          external_chr22.sh
   lib/
     callers.sh            how each caller is run, so every benchmark runs them the same way
+    steps.sh              the step runner of §6.1: markers, temporary directories, the stop file
+    host_load.sh          the host-side load recorder of §6.1
     measure.py            time and memory (§3.3)
     vcfeval_score.sh      §5.1
     mendelian.sh          §4.2
@@ -457,12 +528,14 @@ end to end and put rows in the table. No full run is launched.
 
 1. **The frame:**
    - `run_suite.sh` and its options;
+   - the step runner, the stop file and the host load recorder;
    - `measure.py`, `cache.sh` and `summarise.py`;
    - `fetch_tools.sh`;
    - `.gitignore`.
 
-   *Slice:* a step that times `samtools faidx`, run through the whole frame to a one-row table and
-   summary.
+   *Slice:* two steps that time `samtools faidx`, run through the whole frame to a table and
+   summary. The run is stopped once with `--stop` and once with Ctrl-C, and resumed after each. The
+   check is that finished steps are not rerun.
 2. **GIAB per-sample panel**, with the shared caller runners and vcfeval scoring. *Slice:* HG002, 10×,
    one region.
 3. **GIAB trio** and the Mendelian check. *Slice:* 10×, one region.
@@ -472,8 +545,7 @@ end to end and put rows in the table. No full run is launched.
    2 samples, 5×, both designs.
 7. **Speed and tomato agreement.** *Slice:* 2 samples, one region. This step also measures one
    freebayes process's memory at 63 samples over one region, to settle the §3.4 risk.
-8. **The external entries** (chr22, kimura): written and checked to refuse cleanly when their data
-   are absent.
+8. **The chr22 entry**: written and checked to refuse cleanly when its data are absent.
 9. **Stale files fixed:**
    - the `benchmarks/tomato1/bench.config.sh` header;
    - `benchmarks/ssr_hg002/README.txt`;
@@ -487,21 +559,29 @@ end to end and put rows in the table. No full run is launched.
 
 ## 8. A full run
 
-**Time and disk by benchmark:**
+There are two kinds of run. **The first run** makes the inputs and runs every competitor and pvc.
+**A refresh** for a new pvc commit runs pvc alone, on the stored inputs, and scores it.
 
-| benchmark | estimated time | disk |
-|---|---:|---:|
-| GIAB per-sample panel | 1½ h | 3 GB |
-| GIAB trio | ¾ h | 2 GB |
-| HG002, 5 Mb | ¾ h | 2 GB |
-| HG002 tandem repeats | 3 h | 3 GB |
-| simulated stuttering grid | 13 h | 35 GB |
-| speed, tomato | 2½ h | 10 GB |
-| tomato agreement | minutes | — |
-| **total** | **about 21 h** | **about 55 GB** |
+All times are at 6 cores.
 
-- **Uncertainty.** The total could fall anywhere from 15 to 30 hours. The slice tests give per-region
-  and per-sample rates, and the estimate is redone from them before the full run.
-- **Running it in parts.** The suite resumes where it stopped, so a full refresh can run over several
-  nights, one benchmark at a time.
+| benchmark | first run | refresh (pvc only) | disk, first run |
+|---|---:|---:|---:|
+| GIAB per-sample panel | 2 h | ½ h | 3 GB |
+| GIAB trio | 1 h | ¼ h | 2 GB |
+| HG002, 5 Mb | 1 h | ¼ h | 2 GB |
+| HG002 tandem repeats | 4 h | 1 h | 3 GB |
+| simulated stuttering grid | 16 h | 2½ h | 35 GB |
+| speed, tomato | 4 h | ¾ h | 10 GB |
+| tomato agreement | minutes | minutes | — |
+| **total** | **about 28 h** | **about 5 h** | **about 55 GB** |
+
+- **Where the first run's time goes.** Most of it is the competitors and the simulation, which are
+  made once.
+- **Where a refresh's time goes.** Mostly pvc's fit and calls on the 50-sample simulated cohorts.
+- **Uncertainty.** These figures are scaled from the 18-core estimate of the first draft, by about
+  1⅓, because the steps that run several processes at once get a third as many cores. The first run
+  could fall anywhere from 20 to 40 hours, and a refresh from 3 to 8. The slice tests give
+  per-region and per-sample rates, and both estimates are redone from them before any full run.
+- **Running it in parts.** Either kind can be stopped and resumed as often as needed (§6.1). One
+  benchmark at a time also works, through `--only`.
 - **Space.** The disk holds 487 GB free.
