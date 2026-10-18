@@ -259,6 +259,15 @@ pub(super) struct PositionScores {
     read_slopes: Vec<f64>,
     /// How many read groups the fit has, which the table is laid out over.
     libraries: usize,
+    /// `[node]` — each node's posterior weight, for one candidate of one branch; scratch, refilled
+    /// for every candidate.
+    node_weight: Vec<f64>,
+    /// `[node]` — the slope of each node's product over samples in the node's frequency, for one
+    /// candidate of one branch; scratch, refilled for every candidate.
+    node_along_frequency: Vec<f64>,
+    /// `[node]` — how the genotype prior moves with the homozygote excess at each node's
+    /// frequency; scratch for the segregating branch alone, refilled on every call to it.
+    node_along_excess: Vec<[f64; 3]>,
 }
 
 impl PositionScores {
@@ -273,6 +282,9 @@ impl PositionScores {
                 .collect(),
             read_slopes: vec![0.0; read_slope_table_len(libraries)],
             libraries,
+            node_weight: Vec::new(),
+            node_along_frequency: Vec::new(),
+            node_along_excess: Vec::new(),
         }
     }
 
@@ -540,8 +552,8 @@ fn score_the_invariant_and_fixed_branches(
     }
 }
 
-/// The segregating branch, node by node: each library's error rate, each sample's homozygote
-/// excess, and the density's two shapes.
+/// The segregating branch, over the density rule's nodes: each library's error rate, each
+/// sample's homozygote excess, and the density's two shapes.
 fn score_the_segregating_branch(
     scratch: &Scratch,
     model: &PassModel<'_>,
@@ -553,67 +565,109 @@ fn score_the_segregating_branch(
     let class = class_terms.class;
     let quadrature = &model.quadrature;
     let samples = scratch.samples;
+    let nodes = scratch.nodes;
+    let PositionScores {
+        cohort: cohort_row,
+        samples: rows,
+        read_slopes,
+        libraries,
+        node_weight,
+        node_along_frequency,
+        node_along_excess,
+    } = into;
+    let libraries = *libraries;
+    // The sample loop below walks the rows and indexes the priors by `samples`; both come from
+    // the same `group_index`, and a mismatch would read one sample's numbers as another's.
+    debug_assert_eq!(
+        rows.len(),
+        samples,
+        "one score row per sample the scratch holds"
+    );
+    node_along_excess.clear();
+    node_along_excess.extend(
+        quadrature.nodes[..nodes]
+            .iter()
+            .map(|&f| genotype_frequencies_slope_in_excess(f)),
+    );
     for candidate in 0..scratch.candidates.len() {
         let multiplicity = scratch.ln_multiplicity[candidate];
-        for node in 0..scratch.nodes {
-            let at_node = float::exp(
+        node_weight.clear();
+        node_weight.extend((0..nodes).map(|node| {
+            float::exp(
                 class_terms.ln_posterior_per_share
                     + branches.ln_segregating
                     + scratch.node_ln[scratch.node_at(class, candidate, node)]
                     + multiplicity
                     - branches.ln_three,
-            );
-            if at_node == 0.0 {
-                continue;
-            }
-            let f = quadrature.nodes[node];
-            let prior_along_excess = genotype_frequencies_slope_in_excess(f);
-            // How the node's whole product over samples moves with the frequency — each
-            // sample's term's slope in `f` over the term, summed.
-            let mut along_frequency = 0.0;
-            for s in 0..samples {
+            )
+        }));
+        // How each node's whole product over samples moves with the frequency — each sample's
+        // term's slope in `f` over the term, summed in the samples' order.
+        node_along_frequency.clear();
+        node_along_frequency.resize(nodes, 0.0);
+        // **Sample by sample, and node by node within a sample**: a sample's likelihoods and its
+        // libraries' read slopes are the same at every node, so they are read once a sample. Each
+        // slot of a sample's row still takes its nodes' terms in the nodes' order, and each node's
+        // slope in the frequency its samples' terms in the samples' order — the same sums.
+        for (s, row) in rows.iter_mut().enumerate() {
+            let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+            let excess = model.parameters.hom_excess[s];
+            let own = &model.group_index[s];
+            for node in 0..nodes {
+                let at_node = node_weight[node];
+                if at_node == 0.0 {
+                    continue;
+                }
+                let f = quadrature.nodes[node];
                 let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
-                let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
                 let joint = [prior[0] * lik[0], prior[1] * lik[1], prior[2] * lik[2]];
                 let total = joint[0] + joint[1] + joint[2];
                 if total <= 0.0 {
                     continue;
                 }
+                let prior_along_excess = &node_along_excess[node];
                 let excess_slope = (prior_along_excess[0] * lik[0]
                     + prior_along_excess[1] * lik[1]
                     + prior_along_excess[2] * lik[2])
                     / total;
-                into.samples[s][sample::HOMOZYGOTE_EXCESS] += at_node * excess_slope;
-                let prior_along_f =
-                    genotype_frequencies_slope_in_frequency(f, model.parameters.hom_excess[s]);
-                along_frequency += (prior_along_f[0] * lik[0]
+                row[sample::HOMOZYGOTE_EXCESS] += at_node * excess_slope;
+                let prior_along_f = genotype_frequencies_slope_in_frequency(f, excess);
+                node_along_frequency[node] += (prior_along_f[0] * lik[0]
                     + prior_along_f[1] * lik[1]
                     + prior_along_f[2] * lik[2])
                     / total;
                 // Each library's reads move with its own rate, weighted by the genotype posterior
                 // its sample's libraries share.
-                for (section, &library) in model.group_index[s].iter().enumerate() {
+                for (section, &library) in own.iter().enumerate() {
+                    let slopes = &read_slopes
+                        [read_slope_index(libraries, class, candidate, library, 0)..][..3];
                     let mut reads = 0.0;
-                    for (j, weight) in joint.iter().enumerate() {
-                        reads += weight * into.read_slope(class, candidate, library, j);
+                    for (weight, slope) in joint.iter().zip(slopes) {
+                        reads += weight * slope;
                     }
-                    into.samples[s][sample::rate(section, class)] += at_node * reads / total;
+                    row[sample::rate(section, class)] += at_node * reads / total;
                 }
+            }
+        }
+        for node in 0..nodes {
+            let at_node = node_weight[node];
+            if at_node == 0.0 {
+                continue;
             }
             for (shape, slot) in [cohort::DENSITY_A, cohort::DENSITY_B]
                 .into_iter()
                 .enumerate()
             {
-                into.cohort[slot] += at_node
+                cohort_row[slot] += at_node
                     * (rule_slopes.ln_weight_slope[shape][node]
-                        + along_frequency * rule_slopes.node_slope[shape][node]);
+                        + node_along_frequency[node] * rule_slopes.node_slope[shape][node]);
             }
         }
     }
 }
 
-/// The duplicated branch, node by node over the carrier frequency: each library's error rate and
-/// the carrier Beta's two shapes.
+/// The duplicated branch, over the carrier rule's nodes: each library's error rate and the
+/// carrier Beta's two shapes.
 #[allow(
     clippy::too_many_arguments,
     reason = "the position, the carrier rule and its slopes, the coverage odds, the library map, \
@@ -630,42 +684,70 @@ fn score_the_duplicated_branch(
     into: &mut PositionScores,
 ) {
     let class = class_terms.class;
+    let nodes = carrier.nodes.len();
+    let PositionScores {
+        cohort: cohort_row,
+        samples: rows,
+        read_slopes,
+        libraries,
+        node_weight,
+        node_along_frequency,
+        ..
+    } = into;
+    let libraries = *libraries;
     for candidate in 0..scratch.candidates.len() {
         let multiplicity = scratch.ln_multiplicity[candidate];
-        for node in 0..carrier.nodes.len() {
-            let at_node = float::exp(
+        node_weight.clear();
+        node_weight.extend((0..nodes).map(|node| {
+            float::exp(
                 class_terms.ln_class + branches.ln_duplicated - scratch.position_ln
                     + scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
                     + multiplicity
                     - branches.ln_three,
-            );
-            if at_node == 0.0 {
-                continue;
-            }
-            let q = carrier.nodes[node];
-            let mut along_frequency = 0.0;
-            for (s, own) in group_index.iter().enumerate() {
-                let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
-                let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
+            )
+        }));
+        node_along_frequency.clear();
+        node_along_frequency.resize(nodes, 0.0);
+        // Sample by sample, node by node within a sample, as on the segregating branch.
+        for (s, own) in group_index.iter().enumerate() {
+            let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+            let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
+            // The numerator of this sample's term's slope in the carrier frequency, the same at
+            // every node; divided by each node's `total` below.
+            let frequency_slope_numerator = odds * lik[1] - lik[0];
+            let row = &mut rows[s];
+            for node in 0..nodes {
+                let at_node = node_weight[node];
+                if at_node == 0.0 {
+                    continue;
+                }
+                let q = carrier.nodes[node];
                 let joint = [(1.0 - q) * lik[0], q * odds * lik[1]];
                 let total = joint[0] + joint[1];
                 if total <= 0.0 {
                     continue;
                 }
-                along_frequency += (odds * lik[1] - lik[0]) / total;
+                node_along_frequency[node] += frequency_slope_numerator / total;
                 for (section, &library) in own.iter().enumerate() {
-                    let reads = joint[0] * into.read_slope(class, candidate, library, 0)
-                        + joint[1] * into.read_slope(class, candidate, library, 1);
-                    into.samples[s][sample::rate(section, class)] += at_node * reads / total;
+                    let slopes = &read_slopes
+                        [read_slope_index(libraries, class, candidate, library, 0)..][..2];
+                    let reads = joint[0] * slopes[0] + joint[1] * slopes[1];
+                    row[sample::rate(section, class)] += at_node * reads / total;
                 }
+            }
+        }
+        for node in 0..nodes {
+            let at_node = node_weight[node];
+            if at_node == 0.0 {
+                continue;
             }
             for (shape, slot) in [cohort::CARRIER_A, cohort::CARRIER_B]
                 .into_iter()
                 .enumerate()
             {
-                into.cohort[slot] += at_node
+                cohort_row[slot] += at_node
                     * (rule_slopes.ln_weight_slope[shape][node]
-                        + along_frequency * rule_slopes.node_slope[shape][node]);
+                        + node_along_frequency[node] * rule_slopes.node_slope[shape][node]);
             }
         }
     }
