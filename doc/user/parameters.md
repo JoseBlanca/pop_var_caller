@@ -10,7 +10,7 @@ a TOML text file you can read and edit.
 | Quantity | For each | What it changes |
 |---|---|---|
 | Base-quality calibration: a correction to the error rates the sequencer reports | read group | how much a base that disagrees with the genotype counts against it |
-| Contamination: the share of reads that came from another individual | read group | a few reads of another allele are less likely to be called a heterozygote |
+| Contamination: the share of reads that came from another individual | read group (a read group with too little data gets its sample's value) | a few reads of another allele are less likely to be called a heterozygote |
 | Inbreeding coefficient F | sample | how likely a homozygote is compared with a heterozygote |
 | Population diversity | run | how likely a site is to be variable before the reads are seen |
 | Stutter rates | class of repeat (unit length × number of copies) | how many reads a unit short or long a genotype is expected to produce |
@@ -29,20 +29,27 @@ your material was bred, state it with `estimate-parameters --inbreeding F`.
 | contamination | none |
 | inbreeding F | 0, for every sample: outbred, Hardy–Weinberg proportions |
 | stutter | HipSTR's built-in rates: 1 read in 20 a unit short and 1 in 20 a unit long, for every repeat |
+| spread of allele lengths between repeats | a between-repeat share of 1/11 |
+| substitution rate inside repeats | 1 base in 1,000 |
+| weight given to a read that fits no allele at a repeat | 0.20 |
 
 The inbreeding value is wrong in a known direction for inbred or structured material: it makes pvc
 call too many heterozygotes. Use psp mode for such material.
 
 ## Reading the file
 
-Each number in the file carries a mark that says where it came from:
+Five kinds of number carry a `warrant` that says where the value came from: the base-quality
+calibration, the inbreeding coefficient, the spread of allele lengths between repeats, the
+substitution rate inside repeats, and the weight of a read that fits no allele at a repeat.
 
-| Mark | Meaning |
+| `warrant` | Meaning |
 |---|---|
 | `fitted_here` | estimated from this cohort's reads |
-| `borrowed` | taken from a related class that had enough data, because this one had too little |
+| `borrowed` | this read group had too little data, so the mean of the same sample's other read groups was taken |
 | `supplied` | given by you, for example with `--inbreeding` |
 | `defaulted` | a built-in value, because nothing could be estimated |
+
+The other sections say where their numbers came from in their own entries.
 
 Contamination appears only for read groups where it was estimated. A read group with no row is
 treated as uncontaminated.
@@ -64,7 +71,7 @@ used on the same data:
 |---|---|
 | the reference | refuses |
 | the set of samples (order does not matter) | refuses |
-| the read groups | refuses |
+| the read groups, or a read group's library name | refuses |
 | `--ploidy` | refuses; leave `--ploidy` out and the file's ploidy is used |
 | what counts as a repeat | warns and continues |
 

@@ -26,8 +26,10 @@ memory: six threads on the human genome need more than 16 GB. One thread builds 
 catalogue in under two minutes. The catalogue is the same at any thread count.
 
 `repeat-catalog` also has options that change how repeats are found (under *Advanced* in its
-`--help`). Leave them alone. A catalogue built with other values is accepted without complaint,
-and the calls quietly change.
+`--help`). Leave them alone. A catalogue built with stricter settings than a calling run asks
+for, such as a higher `--min-copies`, is refused. But a catalogue built with other scoring
+weights (`--match-reward`, `--mismatch-penalty`) is accepted without complaint, and the calls
+quietly change.
 
 ## The alignments
 
@@ -47,11 +49,11 @@ BAM or CRAM files, with these properties:
   Rename them with `samtools addreplacerg`.
 
 Two files with the same `SM` are taken as the same sample, and their reads are pooled. One file
-may hold several samples. If a read group has no `LB` (library) tag, pvc takes the library from
-the file name.
+may hold several samples. If a read group has no `LB` (library) tag, pvc names its library from
+the sample, the read-group `ID` and the file name.
 
-In psp mode the sample name becomes a file name, so a name that is empty or contains `/`, `.` or
-`..` is refused.
+In psp mode the sample name becomes a file name, so a name that is empty, is `.` or `..`, or
+contains `/` is refused. Dots elsewhere in a name, as in `S.1`, are fine.
 
 ## Reads pvc ignores
 
@@ -60,14 +62,17 @@ These filters are fixed:
 - duplicates, QC failures, secondary, supplementary and unmapped reads;
 - mapping quality below 20;
 - reads shorter than 30 bases;
-- reads that disagree with the reference at more than 1 base in 10, counting only bases of
-  quality 10 or more.
+- reads whose alignment is malformed: an insertion next to a deletion, or a deletion at either
+  end of the read;
+- reads where more than 1 base in 10 disagrees with the reference. Only disagreeing bases of
+  quality 10 or more count as disagreements.
 
 ## Open-file limit
 
 A one-step (direct mode) run keeps every alignment open for the whole run: 2 open files per BAM,
 3 per CRAM, 2 more per sample, plus 32. The default limit is 256 open files on macOS and 1,024 on
-most Linux systems. That is reached at about 112 BAM files on macOS and 496 on Linux.
+most Linux systems. With one BAM per sample, that is reached at 56 samples on macOS and 248 on
+Linux; with one CRAM per sample, at 44 and 198.
 
 pvc checks this before starting, and if the limit is too low it says which value to set:
 

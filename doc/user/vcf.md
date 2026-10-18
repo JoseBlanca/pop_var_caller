@@ -59,7 +59,9 @@ pvc does not write genotype likelihoods (`PL`, `GL`) or genotype probabilities (
 
 **A sample whose reads cannot tell the genotypes apart is not called** (`./.`, with `GQ` as `.`),
 and this includes samples with no reads. Its `DP` and `AD` are still written if it had reads. A
-sample is never called homozygous reference just because it has no evidence.
+sample is never called homozygous reference just because it has no evidence. A sample is also
+not called when an allele its own reads supported was among those left out at a site with too
+many alleles (`--max-generic-alleles`).
 
 ## STR records
 
@@ -68,7 +70,10 @@ sample is never called homozygous reference just because it has no evidence.
 - All the alleles at one repeat are in one record.
 - Select STR records with `bcftools view -i 'STR=1'`, or exclude them with `-e 'STR=1'`.
 - If an allele would be empty (a repeat deleted entirely), every allele gets the reference base
-  to its left, and `POS` moves one base left.
+  to its left, and `POS` moves one base left. At a chromosome's first base, the base to the right
+  is added instead.
+- A deletion that runs from the repeat into the sequence beside it widens the STR record over
+  those bases. A SNP or indel record that overlaps it marks the overlapping allele as `*`.
 
 ## FILTER
 
@@ -76,13 +81,19 @@ sample is never called homozygous reference just because it has no evidence.
 |---|---|
 | `PASS` | no filter applied |
 | `EMNoConv` | the model's allele-frequency estimate did not settle in the allowed rounds; the call is written but less certain |
-| `notPeriodic` | STR record whose allele lengths do not step by the repeat unit |
-| `tooManyAlleles` | STR record with more than 32 candidate alleles; only the 32 best-supported were considered |
+| `tooManyAlleles` | STR record with more candidate alleles than the limit of 32, reference included; only the best-supported were considered |
 | `hiddenDup` | written only with `--hidden-dup-tag`: the site looks like a hidden duplication, explained below |
 
+The header also declares `notPeriodic` and `lowDepth`, but pvc never writes them. A repeat whose
+allele lengths do not step by its repeat unit is called over the reference allele alone, so it is
+not written; the log counts these repeats.
+
 **Hidden duplications.** Where the genome holds two copies of a sequence but the reference holds
-only one, both copies' reads align to one place. A difference between the copies then looks like
-a heterozygous variant in every sample. pvc compares each sample's depth with what one copy would
-give and removes such sites, accepting by default that 1 in 100 removed sites was a true variant
-(`--hidden-dup-fdr`). The check needs a coverage model per sample; if some samples have none, pvc
-warns on the terminal.
+only one, both copies' reads align to one place. In the samples that carry both copies, a
+difference between them looks like a heterozygous variant. At each site pvc weighs two
+explanations against each other: a real variant, or a hidden duplication. A duplication predicts
+more reads than one copy gives, in the samples that carry it, and an allele balance that matches
+the number of copies, never a homozygous alternative genotype. pvc measures each sample's
+expected depth for one copy from its own reads. It removes sites that the duplication explains
+better, accepting by default that 1 in 100 removed sites was a true variant (`--hidden-dup-fdr`).
+If some samples have no depth model, pvc warns on the terminal.

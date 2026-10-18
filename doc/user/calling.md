@@ -51,8 +51,9 @@ the same `--regions`**, or none. psp files written over different regions are re
 are combined.
 
 If a psp for a sample is already in the directory, the command refuses before reading anything.
-`--force` replaces it. A psp appears only once it is complete, so an interrupted run leaves no
-half-written file.
+`--force` replaces it. A psp is written under a temporary name, `<sample>.psp.<number>.partial`,
+and takes its final name only once it is complete. A run that fails deletes its partial file; a
+run that is killed leaves it behind for you to delete.
 
 ### 2. Estimate the parameters
 
@@ -98,12 +99,13 @@ samples it was estimated on.
 ## Large cohorts
 
 - **Use psp mode.** Writing psps can be spread over as many machines as you like, one sample per
-  command, and the calling step keeps one open file per sample instead of two or three.
+  command, and the calling step keeps one open file per sample instead of four or five.
 - **Raise the open-file limit** if pvc asks you to (`ulimit -n`). It checks before starting and
   says which value to set.
-- **Memory while calling** is held to about 500,000 read observations at a time across the
-  cohort, which was about 300 MB on the tomato benchmark. It is designed to stay about flat as
-  samples are added. So far that has been measured from 1 to 63 samples.
+- **Memory while calling.** pvc builds loci a stretch of genome at a time, and shortens the
+  stretch as samples are added, so that it holds about 500,000 read observations at once. Up to
+  about 1,000 samples this keeps that part of the memory flat. Beyond that the stretch is at its
+  shortest, 500 bases, and memory grows with the number of samples.
 - **Disk:** `call-from-psps` reads up to 8 GiB of psp data ahead into the operating system's
   file cache.
 
@@ -111,10 +113,10 @@ samples it was estimated on.
 
 - `--output calls.vcf.gz` (or `.vcf.bgz`) writes a bgzipped VCF, and any other name writes plain
   text. `--output -` writes uncompressed VCF to standard output.
-- The VCF is written under a temporary name and renamed when the run ends, so a finished file is
-  always complete. A failed run leaves `<output>.tmp` behind.
+- The VCF is written under a temporary name, `<output>.tmp`, and renamed when the run ends, so a
+  finished file is always complete. A failed run can leave `<output>.tmp` behind.
 - No command overwrites an existing output or log without `--force`, and it refuses before
-  reading any data.
+  reading any data. The exception is a log left by a failed run, which is replaced.
 - Every run writes a log: `pvc_calls.log` beside the VCF (change with `--log`). The log records
   the command, every warning, the parameter values the run used and its peak memory. The terminal
   shows only what needs attention; `--quiet` reduces it to warnings and errors.
