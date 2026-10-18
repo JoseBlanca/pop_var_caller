@@ -78,11 +78,10 @@
 use crate::float;
 
 use super::{
-    BRANCHES, BetaQuadrature, BranchShares, MAX_CANDIDATES, PassModel, Scratch,
-    candidate_read_probability, candidate_read_probability_slope, class_rate,
-    expected_reference_reads, genotype_frequencies_slope_in_excess,
-    genotype_frequencies_slope_in_frequency, ln_sum_exp, reference_read_probability,
-    reference_read_probability_slope,
+    BetaQuadrature, BranchShares, MAX_CANDIDATES, PassModel, Scratch, candidate_read_probability,
+    candidate_read_probability_slope, class_rate, expected_reference_reads,
+    genotype_frequencies_slope_in_excess, genotype_frequencies_slope_in_frequency, ln_sum_exp,
+    reference_read_probability, reference_read_probability_slope,
 };
 
 /// How far each shape is moved, relative to itself, when [`RuleSlopes`] differences the rule.
@@ -468,7 +467,7 @@ fn score_the_shares(
 ) {
     let class = class_terms.class;
     let position_ln = scratch.position_ln;
-    let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+    let within = scratch.within_ln[class];
     let slope_of_class = float::exp(within - position_ln);
     into.cohort[cohort::NOISY_SHARE] += if class == 1 {
         slope_of_class

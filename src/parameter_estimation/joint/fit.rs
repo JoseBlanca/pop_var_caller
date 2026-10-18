@@ -3789,6 +3789,13 @@ struct Scratch {
     /// `[class]` — the integral over how much of the panel carries an extra copy, before the
     /// duplicated share multiplies it; `−∞` when the class is not fitted.
     duplicated_ln: [f64; 2],
+    /// `[class]` — each branch's sum over its candidates (and nodes) before `ln 3` is taken off,
+    /// and the four branches' sum: **the totals the attribution divides each share by**, kept
+    /// so it does not sum the same terms a second time.
+    fixed_sum_ln: [f64; 2],
+    segregating_sum_ln: [f64; 2],
+    duplicated_sum_ln: [f64; 2],
+    within_ln: [f64; 2],
     /// The position's whole log-likelihood, once [`one_position`] has computed it.
     position_ln: f64,
     /// The candidate alleles this position sums over, and the log of how many alleles each stands
@@ -3835,6 +3842,10 @@ impl Scratch {
             fixed_alt_ln: [f64::NEG_INFINITY; 2],
             segregating_ln: [f64::NEG_INFINITY; 2],
             duplicated_ln: [f64::NEG_INFINITY; 2],
+            fixed_sum_ln: [f64::NEG_INFINITY; 2],
+            segregating_sum_ln: [f64::NEG_INFINITY; 2],
+            duplicated_sum_ln: [f64::NEG_INFINITY; 2],
+            within_ln: [f64::NEG_INFINITY; 2],
             position_ln: f64::NEG_INFINITY,
             candidates: Vec::with_capacity(MAX_CANDIDATES),
             ln_multiplicity: Vec::with_capacity(MAX_CANDIDATES),
@@ -4088,7 +4099,9 @@ fn one_position(
                     + scratch.ln_multiplicity[candidate],
             );
         }
-        let fixed_alt = ln_sum_exp(&scratch.shares) - ln_three;
+        let fixed_sum = ln_sum_exp(&scratch.shares);
+        scratch.fixed_sum_ln[class] = fixed_sum;
+        let fixed_alt = fixed_sum - ln_three;
         scratch.shares.clear();
         for candidate in 0..candidates {
             let multiplicity = scratch.ln_multiplicity[candidate];
@@ -4098,7 +4111,9 @@ fn one_position(
                     .push(scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity);
             }
         }
-        let segregating = ln_sum_exp(&scratch.shares) - ln_three;
+        let segregating_sum = ln_sum_exp(&scratch.shares);
+        scratch.segregating_sum_ln[class] = segregating_sum;
+        let segregating = segregating_sum - ln_three;
         scratch.fixed_alt_ln[class] = fixed_alt;
         scratch.segregating_ln[class] = segregating;
         // The three ordinary branches share what is left when the duplicated class has taken
@@ -4120,6 +4135,7 @@ fn one_position(
                 }
             }
             let summed = ln_sum_exp(&scratch.shares);
+            scratch.duplicated_sum_ln[class] = summed;
             // Kept for the scores, and not reused below: `ln d + summed − ln 3` is added left to
             // right, and taking `summed − ln 3` first would move the branch's last bits.
             scratch.duplicated_ln[class] = summed - ln_three;
@@ -4128,8 +4144,9 @@ fn one_position(
             scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
-        scratch.class_ln[class] =
-            shares.ln_class[class] + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        let within = ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
+        scratch.within_ln[class] = within;
+        scratch.class_ln[class] = shares.ln_class[class] + within;
     }
     let position_ln = ln_sum_exp(&scratch.class_ln);
     scratch.position_ln = position_ln;
@@ -4185,7 +4202,7 @@ fn one_position(
             statistics.noisy += class_posterior;
         }
         let branches = &scratch.branch_ln[class * BRANCHES..][..BRANCHES];
-        let within = ln_sum_exp(branches);
+        let within = scratch.within_ln[class];
         let branch = [
             class_posterior * float::exp(branches[0] - within),
             class_posterior * float::exp(branches[1] - within),
@@ -4223,16 +4240,14 @@ fn one_position(
 
         // The fixed-alternative branch: every sample carries two copies of the candidate.
         if branch[1] > 1e-12 {
-            scratch.shares.clear();
+            let total = scratch.fixed_sum_ln[class];
             for candidate in 0..candidates {
-                scratch.shares.push(
-                    scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
-                        + scratch.ln_multiplicity[candidate],
-                );
-            }
-            let total = ln_sum_exp(&scratch.shares);
-            for candidate in 0..candidates {
-                let share = branch[1] * float::exp(scratch.shares[candidate] - total);
+                let share = branch[1]
+                    * float::exp(
+                        scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
+                            + scratch.ln_multiplicity[candidate]
+                            - total,
+                    );
                 if share <= 1e-12 {
                     continue;
                 }
@@ -4262,22 +4277,17 @@ fn one_position(
         // not on the node, so the inner loop over read groups runs once per candidate rather
         // than once per candidate per node.
         if branch[2] > 1e-12 {
-            scratch.shares.clear();
-            for candidate in 0..candidates {
-                let multiplicity = scratch.ln_multiplicity[candidate];
-                for node in 0..nodes {
-                    scratch.shares.push(
-                        scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity,
-                    );
-                }
-            }
-            let total = ln_sum_exp(&scratch.shares);
+            let total = scratch.segregating_sum_ln[class];
             scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
             scratch.genotype_weight.fill(0.0);
             for candidate in 0..candidates {
+                let multiplicity = scratch.ln_multiplicity[candidate];
                 for node in 0..nodes {
-                    let share =
-                        branch[2] * float::exp(scratch.shares[candidate * nodes + node] - total);
+                    let share = branch[2]
+                        * float::exp(
+                            scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity
+                                - total,
+                        );
                     if share <= 1e-12 {
                         continue;
                     }
@@ -4365,23 +4375,18 @@ fn one_position(
         {
             {
                 let carrier_nodes = carrier.nodes.len();
-                scratch.shares.clear();
-                for candidate in 0..candidates {
-                    let multiplicity = scratch.ln_multiplicity[candidate];
-                    for node in 0..carrier_nodes {
-                        scratch.shares.push(
-                            scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
-                                + multiplicity,
-                        );
-                    }
-                }
-                let total = ln_sum_exp(&scratch.shares);
+                let total = scratch.duplicated_sum_ln[class];
                 scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
                 scratch.carrier_weight.fill(0.0);
                 for candidate in 0..candidates {
+                    let multiplicity = scratch.ln_multiplicity[candidate];
                     for node in 0..carrier_nodes {
                         let share = branch[DUPLICATED]
-                            * float::exp(scratch.shares[candidate * carrier_nodes + node] - total);
+                            * float::exp(
+                                scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
+                                    + multiplicity
+                                    - total,
+                            );
                         if share <= 1e-12 {
                             continue;
                         }
