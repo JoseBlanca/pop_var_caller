@@ -663,7 +663,11 @@ fn walk_every_sample(args: &GeneratePspsArgs) -> Result<WalkReport, GeneratePsps
         &analysed,
         &unambiguous,
         &with_checksums,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation
+            .inputs()
+            .repeat_tract_criteria()
+            // PANIC-FREE: `segments_over` sorts with the catalog it opened, so it records one.
+            .expect("the ground was sorted with a catalog"),
     )
     .map_err(|source| GeneratePspsCliError::CensusNotPlanned { source })?;
     drop(catalog);

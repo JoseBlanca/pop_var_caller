@@ -637,9 +637,9 @@ impl TheRunsNumbers {
         &self,
         read_groups: &ReadGroups,
         reference: &ReferenceDigest,
-        repeat_routing: &StrRepeatCriteria,
+        repeat_routing: Option<&StrRepeatCriteria>,
     ) -> ParametersFile {
-        ParametersFile::of_run(
+        ParametersFile::of_run_under(
             &self.parameters,
             read_groups,
             &self.reads_behind_each_calibration,
@@ -673,7 +673,7 @@ pub fn run_parameters(
     read_groups: &ReadGroups,
     with_checksums: &ReferenceInfo,
     ploidy: Ploidy,
-    routing: &StrRepeatCriteria,
+    routing: Option<&StrRepeatCriteria>,
 ) -> Result<TheRunsNumbers, CallingRunError> {
     let Some(path) = supplied else {
         // **The defaults run's warrants are a pure function of what it was told**, which is what
@@ -711,7 +711,11 @@ pub fn run_parameters(
     // ever were, and only the ground they are applied to has moved. What the operator is owed is
     // knowing it happened, because a tract this run admits and the fit's selection did not is
     // scored from strata fitted over other loci.
-    if let Some(axis) = file.routing_disagreement(routing) {
+    // A run that sorted no repeats (`--generic-path-only`) calls no repeat tract, so no routing
+    // the file records can disagree with anything it does.
+    if let Some(routing) = routing
+        && let Some(axis) = file.routing_disagreement(routing)
+    {
         tracing::warn!(
             "{} was written by a run that routed on a different {axis}; calling on",
             path.display()

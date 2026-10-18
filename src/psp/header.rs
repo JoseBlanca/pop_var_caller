@@ -21,7 +21,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{PspReadError, PspWriteError};
-use crate::psp::segmentation_section::{self, WireSegmentation};
+use crate::psp::segmentation_section::{self, REPEAT_GROUND_KEY, WireSegmentation};
 use crate::segmentation_inputs::SegmentationInputs;
 use crate::types::{Bp, ReadGroupId};
 
@@ -479,35 +479,18 @@ pub const HEADER_FRAMING_BYTES: usize = HEAD_MAGIC.len() + 8 + HEAD_SENTINEL.len
 /// written once and read once per file, so nothing on any hot path notices the room.
 pub const MAX_HEADER_BODY_BYTES: u64 = (16 * 1024 * 1024) - HEADER_FRAMING_BYTES as u64;
 
-/// The format this writer produces and the newest this reader understands. A file whose
-/// **major** is later is refused as [`PspReadError::UnsupportedVersion`], and one earlier than
-/// [`OLDEST_READABLE_MAJOR`] as [`PspReadError::OlderVersion`] — neither read as damaged.
+/// The format this writer produces, and the only major this reader reads. A file of any other
+/// major is refused as [`PspReadError::WrittenByAnotherPvc`], not read as damaged; a later
+/// minor of this major still reads.
 ///
-/// **2.0 since 2026-10-11, when STR bundle records gained a payload** (their flanks and
-/// reference runs, `str_bundle_loci.md` §6.2). The payload is the body's last field, so a 1.x
-/// reader handed a later 1.x minor would skip it as an unknown final field — and so read every
-/// bundle as one with no runs, and ignore the header's `max-str-bundle-len-bp`, the bundle cap it
-/// cannot apply. A 1.x reader accepts any later 1.x minor; only a major bump makes it refuse
-/// these files, by name.
-///
-/// **2.1 since 2026-10-12, when observations gained the flank they held** where their witness
-/// cannot say it (`str_bundle_loci.md` §7.6), as the body's new last field. A minor bump: a 2.0
-/// reader walks past it as an unknown final field and scores such a read as 2.0 did, from both
-/// flanks one half each — a proper mixture over a side it does not know, not a misreading.
-pub const FORMAT_VERSION: (u16, u16) = (2, 1);
-
-/// The oldest major this reader reads: **2, so a 1.x psp is refused up front, by its version**
-/// (session lead, 2026-10-11, in building `str_bundle_loci.md` §7).
-///
-/// Before this, a 1.x header passed this check and was refused one step later all the same: the
-/// typing section refuses a psp that does not record `max-str-bundle-len-bp`
-/// (`segmentation_section.rs`), and no released build wrote that key — only builds of the
-/// `str-bundles` branch from 270da29f to format 2.0 did. Refusing by version says the true reason
-/// in the error a user reads ("written by an older pvc; write it again") rather than naming a key
-/// they never set. **Every psp written by main must be written again.** The record layouts of 1.x
-/// stay recognised from a manifest ([`RecordLayout`](crate::psp::record::RecordLayout)), for the
-/// record-level tests that read them.
-pub const OLDEST_READABLE_MAJOR: u16 = 2;
+/// **1.0 since 2026-10-18, when the header gained `segmentation.repeat-ground`** (the setting
+/// for repeat ground, `command_line.md` §4.4.1) **and the number went back to 1** (owner,
+/// 2026-10-18). The caller is in development: a psp is written again rather than migrated, and
+/// the number should not climb with every change. Formats 1.0 to 2.1 came before; every psp
+/// they wrote is refused — 2.x by its major, and 1.x, whose number this one reuses, by the
+/// missing `repeat-ground` key ([`REPEAT_GROUND_KEY`]), checked straight after the version so
+/// none of such a file's older layout is ever read.
+pub const FORMAT_VERSION: (u16, u16) = (1, 0);
 
 /// The largest integer a TOML value can carry: TOML's integer is signed 64-bit.
 ///
@@ -640,11 +623,11 @@ impl Header {
     ///
     /// `path` names the file in any error; it is not read.
     ///
-    /// **The version is checked before the rest of the body is interpreted.** A file written
-    /// by a newer format has to come back as
-    /// [`UnsupportedVersion`](PspReadError::UnsupportedVersion) — *upgrade the reader* —
-    /// rather than as a header full of keys this reader does not know, which would send
-    /// whoever sees it looking for a damaged file.
+    /// **The version, and the one key every psp this pvc writes carries, are checked before the
+    /// rest of the body is interpreted.** A file written by another pvc has to come back as
+    /// [`WrittenByAnotherPvc`](PspReadError::WrittenByAnotherPvc) — *write it again* — rather
+    /// than as a header full of keys this reader does not know, which would send whoever sees
+    /// it looking for a damaged file.
     pub fn decode(bytes: &[u8], path: &Path) -> Result<(Self, usize), PspReadError> {
         let malformed = |reason: String| PspReadError::MalformedHeader {
             path: path.to_path_buf(),
@@ -716,19 +699,29 @@ impl Header {
             .map_err(|e| malformed_by("the header body is not valid TOML", Box::new(e)))?;
 
         let format_version = version_in(&table, path)?;
-        if format_version.0 < OLDEST_READABLE_MAJOR {
-            return Err(PspReadError::OlderVersion {
-                path: path.to_path_buf(),
-                found: format_version,
-                oldest_major: OLDEST_READABLE_MAJOR,
-            });
+        let written_by_another_pvc = |reason: String| PspReadError::WrittenByAnotherPvc {
+            path: path.to_path_buf(),
+            found: format_version,
+            reason,
+        };
+        if format_version.0 != FORMAT_VERSION.0 {
+            return Err(written_by_another_pvc(format!(
+                "this pvc reads format {}.x",
+                FORMAT_VERSION.0
+            )));
         }
-        if format_version.0 > FORMAT_VERSION.0 {
-            return Err(PspReadError::UnsupportedVersion {
-                path: path.to_path_buf(),
-                found: format_version,
-                supported: FORMAT_VERSION,
-            });
+        // **Before the body is deserialised**, because a 1.x psp from before 2026-10-11 shares
+        // this major and may not deserialise as this version's shape at all; refused here, it
+        // is told the true reason rather than which key of an old layout failed to parse.
+        let records_the_setting = table
+            .get("segmentation")
+            .and_then(|segmentation| segmentation.get(REPEAT_GROUND_KEY))
+            .is_some();
+        if !records_the_setting {
+            return Err(written_by_another_pvc(format!(
+                "it has no segmentation.{REPEAT_GROUND_KEY}, which every psp this pvc writes \
+                 records"
+            )));
         }
 
         // **The body is parsed twice, and it has to be.** The version must be read before the
@@ -2052,7 +2045,7 @@ mod tests {
         assert_eq!(&bytes[..4], b"NGP\n");
         let body = body_of(&bytes);
         for expected in [
-            "format-version = \"2.1\"",
+            "format-version = \"1.0\"",
             "sample = \"SRR7279481\"",
             "genomic-block-size-bp = 100000",
             "look-back-window-log = 15",
@@ -2079,6 +2072,7 @@ mod tests {
             // The segmentation section: an analysed span, a routing criterion spelled
             // as the short decimal a person would write, and the catalog's identity.
             "[[segmentation.analysed-region]]",
+            "repeat-ground = \"call-satellites\"",
             "min-purity = 0.93",
             "[segmentation.catalog.scan]",
             "[segmentation.catalog.built-under]",
@@ -2151,48 +2145,55 @@ mod tests {
     // Versions
     // -----------------------------------------------------------------
 
-    /// A file from a later format has to say so. The version is read from a bare TOML table
-    /// before the body is deserialised, so a body full of keys this reader has never seen
-    /// still yields the right answer instead of a parse failure.
+    /// A file of another major has to say it was written by another pvc. The version is read
+    /// from a bare TOML table before the body is deserialised, so a body full of keys this
+    /// reader has never seen still yields the right answer instead of a parse failure — and the
+    /// 2.x psps written before the number went back to 1 (2026-10-18) are among them.
     #[test]
-    fn a_newer_major_version_is_refused_as_a_version_and_not_as_damage() {
-        let bytes = framed(
-            "format-version = \"3.0\"\n\
-             whatever-version-three-added = { shape = \"nothing here knows\" }\n",
-        );
-        match decoded(&bytes) {
-            Err(PspReadError::UnsupportedVersion {
-                found, supported, ..
-            }) => {
-                assert_eq!(found, (3, 0));
-                assert_eq!(supported, FORMAT_VERSION);
+    fn a_file_of_another_major_is_refused_as_written_by_another_pvc() {
+        for (spelled, found) in [("3.0", (3, 0)), ("2.1", (2, 1)), ("0.9", (0, 9))] {
+            let bytes = framed(&format!(
+                "format-version = \"{spelled}\"\n\
+                 whatever-that-version-added = {{ shape = \"nothing here knows\" }}\n",
+            ));
+            match decoded(&bytes) {
+                Err(PspReadError::WrittenByAnotherPvc {
+                    found: read,
+                    reason,
+                    ..
+                }) => {
+                    assert_eq!(read, found);
+                    assert!(reason.contains("1.x"), "{spelled}: {reason}");
+                }
+                other => panic!("expected WrittenByAnotherPvc for {spelled}, got {other:?}"),
             }
-            other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
     }
 
-    /// **A 1.x header is refused as a version, and so is a major before it** — the oldest major
-    /// this reader reads is 2 ([`OLDEST_READABLE_MAJOR`]): a 1.x psp's typing has no bundle cap
-    /// and must be written again, and the error says that rather than naming a missing key.
+    /// **A psp from before 2026-10-11 also says 1.x**, and its records are laid out
+    /// differently, so its version cannot tell it from this format. It lacks
+    /// `segmentation.repeat-ground`, and that is checked straight after the version: such a
+    /// header is refused as written by another pvc, even when the rest of it would not
+    /// deserialise as this format at all — which is the case the early check exists for.
     #[test]
-    fn a_format_1_header_and_a_major_before_it_are_refused_as_versions() {
+    fn a_header_of_this_major_without_the_setting_is_refused_before_its_body_is_read() {
         let written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
-        for (spelled, major, minor) in [("1.2", 1, 2), ("1.0", 1, 0), ("0.9", 0, 9)] {
-            let body = body_of(&bytes).replace(
-                "format-version = \"2.1\"",
-                &format!("format-version = \"{spelled}\""),
-            );
-            match decoded(&framed(&body)) {
-                Err(PspReadError::OlderVersion {
-                    found,
-                    oldest_major,
-                    ..
-                }) => {
-                    assert_eq!(found, (major, minor));
-                    assert_eq!(oldest_major, OLDEST_READABLE_MAJOR);
+        let without_the_setting: String = body_of(&bytes)
+            .lines()
+            .filter(|line| !line.starts_with("repeat-ground"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let an_older_layout = "format-version = \"1.2\"\n\
+                               sample = 7\n\
+                               [segmentation]\n\
+                               whatever-1-2-had = true\n";
+        for body in [without_the_setting.as_str(), an_older_layout] {
+            match decoded(&framed(body)) {
+                Err(PspReadError::WrittenByAnotherPvc { reason, .. }) => {
+                    assert!(reason.contains("segmentation.repeat-ground"), "{reason}");
                 }
-                other => panic!("expected OlderVersion for {spelled}, got {other:?}"),
+                other => panic!("expected WrittenByAnotherPvc, got {other:?}"),
             }
         }
     }
@@ -2208,10 +2209,10 @@ mod tests {
         let mut written = a_written_header();
         let bytes = written.encode().expect("a valid header encodes");
         let body = body_of(&bytes)
-            .replace("format-version = \"2.1\"", "format-version = \"2.4\"")
+            .replace("format-version = \"1.0\"", "format-version = \"1.4\"")
             .replace("sample = ", "a-key-a-later-minor-added = 4000\nsample = ");
 
-        written.format_version = (2, 4);
+        written.format_version = (1, 4);
         let (read_back, _) = decoded(&framed(&body)).expect("a later minor of this major reads");
         assert_eq!(
             read_back, written,
@@ -2225,10 +2226,10 @@ mod tests {
     #[test]
     fn the_writer_refuses_to_stamp_a_version_it_does_not_produce() {
         let mut header = a_written_header();
-        header.format_version = (1, 7);
-        let refused = header.encode().expect_err("this writer produces 2.1");
+        header.format_version = (2, 1);
+        let refused = header.encode().expect_err("this writer produces 1.0");
         assert!(
-            refused.to_string().contains("produces 2.1"),
+            refused.to_string().contains("produces 1.0"),
             "got {refused}"
         );
     }
@@ -2563,15 +2564,19 @@ mod tests {
             (
                 "a catalog contig name holding a newline",
                 Box::new(|header| {
-                    header.segmentation_inputs.catalog.contigs[0].name =
-                        "evil\nfabricated-key = \"x\"".to_string()
+                    segmentation_section::sorting_of(&mut header.segmentation_inputs)
+                        .catalog
+                        .contigs[0]
+                        .name = "evil\nfabricated-key = \"x\"".to_string()
                 }),
                 "holds whitespace or a control character",
             ),
             (
                 "a catalog tool version holding a newline",
                 Box::new(|header| {
-                    header.segmentation_inputs.catalog.tool_version = "trf\nport".to_string()
+                    segmentation_section::sorting_of(&mut header.segmentation_inputs)
+                        .catalog
+                        .tool_version = "trf\nport".to_string()
                 }),
                 "holds whitespace or a control character",
             ),

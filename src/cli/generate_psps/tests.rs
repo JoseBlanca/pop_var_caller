@@ -423,7 +423,8 @@ fn the_min_purity_flag_reaches_the_criteria_the_catalog_is_asked_with() {
         reader
             .header()
             .segmentation_inputs
-            .repeat_tract_criteria
+            .repeat_tract_criteria()
+            .expect("the walk sorted its ground with a catalog")
             .classification
             .min_purity,
         0.95_f32,
@@ -605,8 +606,8 @@ fn every_psp_records_the_ground_and_the_criteria_the_walk_used() {
         "one invocation's psps must be joinable into one cohort",
     );
     assert_eq!(
-        zeta.repeat_tract_criteria,
-        run_ground::routing_criteria(&ground_request(&args).routing).expect("a range"),
+        zeta.repeat_tract_criteria().cloned(),
+        Some(run_ground::routing_criteria(&ground_request(&args).routing).expect("a range")),
         "and the criteria recorded are the ones the walk actually routed with",
     );
     assert!(

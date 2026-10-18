@@ -337,6 +337,34 @@ impl ParametersFile {
         census: CensusIdentity,
         repeat_routing: &StrRepeatCriteria,
     ) -> Self {
+        Self::of_run_under(
+            run,
+            read_groups,
+            reads_behind_each_calibration,
+            inbreeding_by_sample,
+            reference,
+            census,
+            Some(repeat_routing),
+        )
+    }
+
+    /// As [`of_run`](Self::of_run), for a run that may have sorted no repeats: `repeat_routing`
+    /// is `None` under `--generic-path-only`, which asked no catalog anything, and the file then
+    /// records no `[repeat_routing]` (spec §3.9: absent means the file does not say).
+    ///
+    /// # Panics
+    ///
+    /// As [`of_run`](Self::of_run).
+    #[must_use]
+    pub fn of_run_under(
+        run: &RunParameters,
+        read_groups: &ReadGroups,
+        reads_behind_each_calibration: &ReadsBehindEachCalibration,
+        inbreeding_by_sample: &[Estimate<InbreedingF>],
+        reference: &ReferenceDigest,
+        census: CensusIdentity,
+        repeat_routing: Option<&StrRepeatCriteria>,
+    ) -> Self {
         let read_group_count = run.read_group_count();
         let samples = read_groups.read_groups_per_sample();
         assert_eq!(
@@ -415,7 +443,7 @@ impl ParametersFile {
                 fitted_density: None,
             },
             duplicated_positions: None,
-            repeat_routing: Some(RepeatRouting::of(repeat_routing)),
+            repeat_routing: repeat_routing.map(RepeatRouting::of),
             repeat_tracts: repeat_tracts_of(run),
             stated_constants: StatedConstants {
                 // **Whatever this run scored under, and its warrant with it.** Until 2026-08-30

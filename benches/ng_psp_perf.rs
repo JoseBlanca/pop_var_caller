@@ -356,8 +356,15 @@ fn a_header(shape: &CorpusShape, records: u64) -> Header {
             pop_var_caller::locus_generation::pileup::MAX_RECORD_SPAN_CEILING,
         )),
         segmentation_inputs: pop_var_caller::run::SegmentationInputs {
-            catalog: pop_var_caller::repeat_catalog::RepeatCatalogHeader::no_catalog("ng_psp_perf"),
-            repeat_tract_criteria: pop_var_caller::repeat_catalog::StrRepeatCriteria::default(),
+            repeat_ground: pop_var_caller::run::RepeatGround::StrPaths(
+                pop_var_caller::run::RepeatSorting {
+                    catalog: pop_var_caller::repeat_catalog::RepeatCatalogHeader::no_catalog(
+                        "ng_psp_perf",
+                    ),
+                    repeat_tract_criteria:
+                        pop_var_caller::repeat_catalog::StrRepeatCriteria::default(),
+                },
+            ),
             analysed_regions: pop_var_caller::region_typing::GenomeRegions::whole_contigs(&[
                 pop_var_caller::regions::ContigBounds {
                     name: "chr1",

@@ -2271,7 +2271,11 @@ pub(super) fn refuse_a_catalog_built_on_another_reference(
     let Some(of_the_run) = with_checksums.md5 else {
         return Ok(());
     };
-    let of_the_catalog = segmentation.inputs().catalog.reference_md5;
+    // A run that read no catalog (`--generic-path-only`) has none to have been built elsewhere.
+    let Some(catalog) = segmentation.inputs().catalog() else {
+        return Ok(());
+    };
+    let of_the_catalog = catalog.reference_md5;
     if of_the_catalog != of_the_run {
         return Err(RunError::CatalogIsForAnotherReference {
             reference: reference_path.to_path_buf(),
@@ -2786,7 +2790,10 @@ mod tests {
         let caller = open_over(&paths, &reference).expect("opens");
 
         assert_eq!(caller.segmentation().segments().len(), 1);
-        assert_eq!(caller.segmentation().inputs().catalog, catalog_header());
+        assert_eq!(
+            caller.segmentation().inputs().catalog(),
+            Some(&catalog_header())
+        );
         assert_eq!(caller.segmentation().analysed_regions().len(), 1);
         assert_eq!(*caller.read_groups(), expected_table);
     }
@@ -3761,10 +3768,21 @@ mod checks_that_needed_their_own_fixtures {
     #[test]
     fn the_catalog_fixture_carries_the_digest_it_is_given() {
         let built = segmentation_built_on([9; 16]);
-        assert_eq!(built.inputs().catalog.reference_md5, [9; 16]);
+        assert_eq!(
+            built
+                .inputs()
+                .catalog()
+                .expect("built with a catalog")
+                .reference_md5,
+            [9; 16]
+        );
         assert_eq!(
             catalog_header().built_under,
-            built.inputs().catalog.built_under,
+            built
+                .inputs()
+                .catalog()
+                .expect("built with a catalog")
+                .built_under,
             "only the digest differs from the shared header",
         );
         let _: RepeatCatalogHeader = catalog_header();

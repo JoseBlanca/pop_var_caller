@@ -589,7 +589,8 @@ pub struct ParametersFile {
     /// **Absent means the file does not say**, and a reader must not read that as *the
     /// defaults* — §5's rule, and this is its sixth row. A file written by a build older than
     /// this section, or written by hand, records no routing at all. Every run this build makes
-    /// writes one.
+    /// writes one, except a `--generic-path-only` run, which asked no catalog anything
+    /// (`command_line.md` §4.4.1).
     pub repeat_routing: Option<RepeatRouting>,
 }
 

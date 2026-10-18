@@ -603,7 +603,7 @@ pub fn run_call_from_alignments(
         &read_groups,
         &with_checksums,
         asked_ploidy,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     // **The run's ploidy is the parameters', not the flag's.** A supplied file states the
     // ploidy its numbers were fitted at, and the records' `GT` has to be enumerated at the same
@@ -636,7 +636,7 @@ pub fn run_call_from_alignments(
     let parameters_file = numbers.parameters_file(
         &read_groups,
         &digest,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     );
     // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
     // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).

@@ -215,7 +215,10 @@ fn run(
         &analysed,
         &unambiguous,
         &with_checksums,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation
+            .inputs()
+            .repeat_tract_criteria()
+            .expect("the ground was sorted with a catalog"),
     )?;
     drop(catalog);
 

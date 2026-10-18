@@ -125,8 +125,8 @@ pub use writer::{PspWriter, WriteStats, ZSTD_COMPRESSION_LEVEL_KEY};
 /// half-written file was going to be needs this, and so does anything checking that a
 /// cohort's files agree on a reference before a run commits to them.
 ///
-/// **A newer format comes back as [`PspReadError::UnsupportedVersion`], not as a parse
-/// failure** — *upgrade the reader*, not *rebuild the file*. That is the whole reason the
+/// **A newer format comes back as [`PspReadError::WrittenByAnotherPvc`], not as a parse
+/// failure** — *write the psp again*, not *the file is damaged*. That is the whole reason the
 /// header is plain text and the version is read before anything else in it.
 ///
 /// **Nothing is allocated from a length this function has not checked.** The declared body
@@ -265,35 +265,27 @@ pub enum PspReadError {
     #[error("{} has no valid footer — the writer did not finish", path.display())]
     Incomplete { path: PathBuf },
 
-    /// Written by a newer format than this reader understands. Upgrade the reader; the
-    /// file is fine.
+    /// Written by another pvc: a format of another major, or, at this major, a header without
+    /// the setting every psp this pvc writes records (`header.rs`, [`FORMAT_VERSION`]). **Write
+    /// the psp again**; nothing here can read it.
     ///
-    /// **Reached by parsing the version and nothing else**, which is why the header stays
-    /// plain text: a reader must be able to learn the version of a file it cannot
-    /// otherwise read (spec §3.1).
+    /// **One refusal for both, because they share the instruction.** In development the format
+    /// number went back to 1 (2026-10-18), so a 2.x file is not newer and a 1.x file may be older
+    /// than this one; "upgrade the reader" and "older format" would each be wrong for one of
+    /// them. `reason` says which test it failed.
+    ///
+    /// **Reached by parsing the version and one key, nothing else**, which is why the header
+    /// stays plain text: a reader must be able to learn this about a file it cannot otherwise
+    /// read (spec §3.1).
     #[error(
-        "{} is format {}.{}; this reader understands up to {}.{}",
-        path.display(), found.0, found.1, supported.0, supported.1
+        "{} is format {}.{} and was written by another pvc ({reason}); write the psp again with \
+         this pvc's generate-psps",
+        path.display(), found.0, found.1
     )]
-    UnsupportedVersion {
+    WrittenByAnotherPvc {
         path: PathBuf,
         found: (u16, u16),
-        supported: (u16, u16),
-    },
-
-    /// Written by a format older than the oldest this reader reads. The file must be written
-    /// again with this `pvc` (found in review, 2026-10-11: such a file was reported as
-    /// [`UnsupportedVersion`](Self::UnsupportedVersion), "understands up to 2.0", which reads
-    /// as though a 1.2 file should load).
-    #[error(
-        "{} is format {}.{}, written by an older pvc; this reader reads format {}.0 and later, \
-         so write the psp again with this pvc",
-        path.display(), found.0, found.1, oldest_major
-    )]
-    OlderVersion {
-        path: PathBuf,
-        found: (u16, u16),
-        oldest_major: u16,
+        reason: String,
     },
 
     /// The file declares a compressor look-back window larger than this reader budgeted
@@ -337,8 +329,8 @@ pub enum PspReadError {
     /// instruction: the file is damaged, rebuild it. `reason` carries which rule broke, and
     /// `source` carries the parser's own account of it where there is one.
     ///
-    /// **Not the same thing as [`UnsupportedVersion`](Self::UnsupportedVersion)**, and the
-    /// order the two are checked in is the point: a file written by a newer format must say
+    /// **Not the same thing as [`WrittenByAnotherPvc`](Self::WrittenByAnotherPvc)**, and the
+    /// order the two are checked in is the point: a file written by another pvc must say
     /// so, not come back as unparseable TOML (spec §3.1).
     #[error("{}: {reason}", path.display())]
     MalformedHeader {
@@ -436,7 +428,7 @@ pub enum PspReadError {
     /// A record, or the record layout the file's manifest declares, names something this reader
     /// does not know. **Upgrade the reader**; the file is not damaged.
     ///
-    /// **Not [`UnsupportedVersion`](Self::UnsupportedVersion)**, which is the whole file's
+    /// **Not [`WrittenByAnotherPvc`](Self::WrittenByAnotherPvc)**, which is about the whole file's
     /// format number and is answered before a block is touched. This one is a field encoding
     /// inside a record, and it is the same instruction about a smaller subject.
     ///
@@ -836,25 +828,15 @@ mod tests {
             "SRR7279481.psp has no valid footer — the writer did not finish"
         );
 
-        let version = PspReadError::UnsupportedVersion {
+        let version = PspReadError::WrittenByAnotherPvc {
             path: PathBuf::from("SRR7279481.psp"),
-            found: (2, 0),
-            supported: (1, 0),
+            found: (2, 1),
+            reason: "this pvc reads format 1.x".to_string(),
         };
         assert_eq!(
             version.to_string(),
-            "SRR7279481.psp is format 2.0; this reader understands up to 1.0"
-        );
-
-        let older = PspReadError::OlderVersion {
-            path: PathBuf::from("SRR7279481.psp"),
-            found: (1, 2),
-            oldest_major: 2,
-        };
-        assert_eq!(
-            older.to_string(),
-            "SRR7279481.psp is format 1.2, written by an older pvc; this reader reads format 2.0 \
-             and later, so write the psp again with this pvc"
+            "SRR7279481.psp is format 2.1 and was written by another pvc (this pvc reads format \
+             1.x); write the psp again with this pvc's generate-psps"
         );
 
         let window = PspReadError::WindowTooLarge {
@@ -1031,9 +1013,9 @@ mod tests {
         assert_eq!(read_header(&path).expect("the header reads"), written);
     }
 
-    /// **A newer format is `UnsupportedVersion`, not a parse failure** — spec §6.7's
+    /// **A file of another major is `WrittenByAnotherPvc`, not a parse failure** — spec §6.7's
     /// distinction, and the reason the header is plain text. The body here carries a key no
-    /// 2.0 reader knows, which is what a real 3.0 file would do.
+    /// reader of this major knows, which is what a real file of another major would do.
     #[test]
     fn a_file_from_a_newer_format_says_so_rather_than_failing_to_parse() {
         let body = "format-version = \"3.0\"\n\
@@ -1046,13 +1028,8 @@ mod tests {
         let (_dir, path) = a_file_holding(&bytes);
 
         match read_header(&path) {
-            Err(PspReadError::UnsupportedVersion {
-                found, supported, ..
-            }) => {
-                assert_eq!(found, (3, 0));
-                assert_eq!(supported, FORMAT_VERSION);
-            }
-            other => panic!("expected UnsupportedVersion, got {other:?}"),
+            Err(PspReadError::WrittenByAnotherPvc { found, .. }) => assert_eq!(found, (3, 0)),
+            other => panic!("expected WrittenByAnotherPvc, got {other:?}"),
         }
     }
 

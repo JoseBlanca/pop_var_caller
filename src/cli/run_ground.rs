@@ -30,7 +30,7 @@ use crate::repeat_catalog::{
     CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
     sibling_catalog_path,
 };
-use crate::run::{RunError, Segmentation};
+use crate::run::{RepeatGround, RepeatSorting, RunError, Segmentation, SegmentationInputs};
 use crate::tandem_repeat::{PeriodRange, PeriodRangeError};
 use crate::types::Bp;
 
@@ -177,6 +177,21 @@ pub enum GroundError {
         #[source]
         source: RunError,
     },
+
+    /// The psps were written under a setting for repeat ground this build cannot yet sort
+    /// ground for.
+    ///
+    /// **Transitional** (`doc/devel/ng/impl_plan/call_satellites.md`, step 2): the psp header
+    /// records the setting from step 2, and the two settings it names here are built in steps 3
+    /// and 4, which remove this.
+    #[error(
+        "the psps were written with --{setting}, which this pvc cannot call; write them again \
+         without it"
+    )]
+    SettingNotYetBuilt {
+        /// The setting's name, as the option spells it.
+        setting: &'static str,
+    },
 }
 
 /// The ground this run walks: the BED it was given, or every base of every contig.
@@ -301,6 +316,21 @@ pub fn segments_over(
         analysed,
         with_checksums,
     )
+}
+
+/// The catalog and criteria a cohort of psps was walked with, which a command reading them sorts
+/// its own ground with again.
+///
+/// # Errors
+///
+/// [`GroundError::SettingNotYetBuilt`] for psps written under a setting other than the default.
+pub fn sorting_of_the_psps(inputs: &SegmentationInputs) -> Result<&RepeatSorting, GroundError> {
+    match &inputs.repeat_ground {
+        RepeatGround::StrPaths(sorting) => Ok(sorting),
+        other => Err(GroundError::SettingNotYetBuilt {
+            setting: other.setting_name(),
+        }),
+    }
 }
 
 /// **Where a run's repeat criteria came from** — which is what a catalog that cannot serve them

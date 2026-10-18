@@ -506,7 +506,7 @@ fn fields_of_body<'a>(
 /// record's own counts do. So a file whose extra field repeats per observation is *accepted*
 /// and decoded into plausible nonsense from the second observation onwards; it is not refused,
 /// and nothing here can refuse it. A later writer adding a per-observation field must raise the
-/// format version, which a reader does refuse (`header.rs`, `UnsupportedVersion`).
+/// format version, which a reader does refuse (`header.rs`, `WrittenByAnotherPvc`).
 ///
 /// **Nothing here checks a file's declared shape**, and it needs none: `Header::decode` has
 /// already refused any file whose shape disagrees with its encoding, and this walk steps over

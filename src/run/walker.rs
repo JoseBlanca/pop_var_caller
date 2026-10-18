@@ -52,7 +52,7 @@ use crate::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
 use crate::locus_generation::ssr_bundle::SsrBundleGenerator;
 use crate::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusCounts, LocusGenerationError, SampleLocusObservations,
-    SampleLocusObservationsIterator,
+    SampleLocusObservationsIterator, UnhandledReason,
 };
 use crate::read::input::SampleReads;
 use crate::read::input::reference::OpenReference;
@@ -1649,10 +1649,6 @@ pub(crate) fn generic_path_generators(
     config: PileupGeneratorConfig,
     segmentation_inputs: &crate::segmentation_inputs::SegmentationInputs,
 ) -> Result<GeneratorSet, RunError> {
-    let bundle_threshold = Bp(segmentation_inputs
-        .repeat_tract_criteria
-        .classification
-        .bundle_threshold);
     let make_reference = {
         let reference = WalkReference {
             fasta: reference.fasta.clone(),
@@ -1675,6 +1671,18 @@ pub(crate) fn generic_path_generators(
         config,
     )
     .map_err(|source| RunError::LocusGeneratorSettings { source })?;
+    // **A run that sorted no repeats has no STR ground for these two to walk**
+    // (`--generic-path-only`, `command_line.md` §4.4.1): every region is generic, so their slots
+    // are never reached, and they are left unfilled rather than built from criteria the run
+    // never asked with.
+    let Some(criteria) = segmentation_inputs.repeat_tract_criteria() else {
+        return Ok(GeneratorSet::new(
+            GeneratorSlot::Unfilled(UnhandledReason::OutOfScope),
+            GeneratorSlot::Generator(Box::new(generator)),
+            GeneratorSlot::Unfilled(UnhandledReason::OutOfScope),
+        ));
+    };
+    let bundle_threshold = Bp(criteria.classification.bundle_threshold);
     // **Its own accessors, like the generic generator's**, and for the same reason: the input
     // layer takes a factory precisely so that no two readers share a window. The two generators
     // also hold separate cursors on purpose — their regions interleave, and sharing one would
@@ -1710,10 +1718,7 @@ pub(crate) fn generic_path_generators(
         make_bundle_reference,
         SsrGeneratorConfig::default(),
         bundle_threshold,
-        segmentation_inputs
-            .repeat_tract_criteria
-            .classification
-            .min_copies,
+        criteria.classification.min_copies,
     )
     .map_err(|source| RunError::TractGeneratorSettings { source })?;
     Ok(GeneratorSet::new(

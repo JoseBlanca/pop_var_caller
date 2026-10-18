@@ -520,7 +520,7 @@ fn fit_and_assemble(
         &inbreeding,
         &reference,
         &terms,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
         &fit.generic,
     );
     Ok((a_file_the_next_run_can_read(file)?, samples))
@@ -686,7 +686,8 @@ pub fn open_the_censuses(
     // moves one of them — on tomato about 1 position in 400 is kept (spec §2) — so it is the
     // backstop and not the check.
     let analysed = cohort.analysed_regions().clone();
-    let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
+    let walked_with = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?;
+    let criteria = walked_with.repeat_tract_criteria.clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
     let catalog = run_ground::open_catalog(&catalog_path, &args.reference, &with_checksums)?;
     // **The catalog against the psps, before a segment is cut** (spec §6). Cut with the psps'
@@ -695,7 +696,7 @@ pub fn open_the_censuses(
     refuse_a_catalog_the_psps_were_not_walked_with(
         &catalog_path,
         catalog.header(),
-        &cohort.segmentation_inputs().catalog,
+        &walked_with.catalog,
     )?;
     let segmentation = run_ground::segments_cut_from(
         &catalog,
@@ -710,7 +711,7 @@ pub fn open_the_censuses(
         &analysed,
         &unambiguous,
         &with_checksums,
-        &segmentation.inputs().repeat_tract_criteria,
+        &criteria,
     )
     .map_err(|source| EstimateParametersCliError::CensusNotPlanned {
         source: Box::new(source),

@@ -476,7 +476,7 @@ mod tests {
         let text = dump(&zeta, "chr1\t0\t100\n", cohort.directory.path());
 
         assert!(text.contains(&format!("#inspect_psp_columns_version={COLUMNS_VERSION}\n")));
-        assert!(text.contains("#psp_format_version=2.1\n"));
+        assert!(text.contains("#psp_format_version=1.0\n"));
         assert!(text.contains("#sample=zeta\n"));
         let mut lines = text.lines().filter(|line| !line.starts_with('#'));
         assert_eq!(lines.next(), Some(COLUMNS.join("\t").as_str()));

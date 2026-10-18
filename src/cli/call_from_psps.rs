@@ -516,7 +516,9 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // **What counts as a repeat is the psps' own**, recorded by the walk that wrote them: a run
     // over stored loci has to cut the genome the way that walk did, so it has no option that
     // could say otherwise (`doc/devel/ng/spec/command_line.md` §4.4).
-    let criteria = cohort.segmentation_inputs().repeat_tract_criteria.clone();
+    let criteria = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?
+        .repeat_tract_criteria
+        .clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
     let segmentation = run_ground::segments_cut_with(
         &catalog_path,
@@ -534,7 +536,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         cohort.read_groups(),
         &with_checksums,
         asked_ploidy,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     )?;
     let ploidy = numbers.parameters.ploidy();
     // **Captured before the parameters move into the caller.** The filter reads one coefficient
@@ -549,7 +551,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     let parameters_file = numbers.parameters_file(
         cohort.read_groups(),
         &digest,
-        &segmentation.inputs().repeat_tract_criteria,
+        segmentation.inputs().repeat_tract_criteria(),
     );
     // **The numbers go into the log before a read is decoded**, so a run that stops part-way has
     // already recorded what it was scoring with (`doc/devel/ng/spec/command_line.md` §7.3).

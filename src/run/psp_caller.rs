@@ -1316,6 +1316,7 @@ mod tests {
     use crate::region_typing::segment_criteria::MinCopies;
     use crate::region_typing::{GenomeRegions, RegionKind, TypedRegion};
     use crate::regions::{ContigBounds, Region};
+    use crate::run::RepeatGround;
     use crate::run::test_fixtures::{
         build_segmentation_under, catalog_header, catalog_header_built_on,
     };
@@ -1721,7 +1722,7 @@ mod tests {
         let mut other_criteria = mine.inputs().clone();
         // A tract of five copies is a repeat tract to one walk and ordinary sequence to the
         // other, which is the difference that matters and the plan's own example.
-        other_criteria
+        crate::psp::segmentation_section::sorting_of(&mut other_criteria)
             .repeat_tract_criteria
             .classification
             .min_copies = MinCopies::uniform(5);
@@ -1738,6 +1739,34 @@ mod tests {
         };
         assert_eq!((left.as_str(), right.as_str()), ("alpha", "beta"));
         assert_eq!(field, "set of repeat-tract criteria");
+    }
+
+    /// **A cohort mixing psps written with and without `--call-satellites` is refused**, naming
+    /// the setting (`command_line.md` §4.4.1): one sample's satellites hold generic loci and the
+    /// other's hold none, so the two do not describe the same loci. Everything else about the two
+    /// walks agrees, so only the setting can be what is named.
+    #[test]
+    fn two_psps_written_under_different_settings_for_repeat_ground_are_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mine = a_segmentation(ground(false));
+        let mut calling_satellites = mine.inputs().clone();
+        let RepeatGround::StrPaths(sorting) = calling_satellites.repeat_ground.clone() else {
+            panic!("the fixture walks under the default setting");
+        };
+        calling_satellites.repeat_ground = RepeatGround::CallSatellites(sorting);
+        let paths = vec![
+            a_psp(&dir, "alpha", &mine, |_| {}),
+            a_psp(&dir, "beta", &mine, |header| {
+                header.segmentation_inputs = calling_satellites;
+            }),
+        ];
+
+        let refused = OpenPspCohort::open(&paths).expect_err("two settings, one cohort");
+        let RunError::CohortWalkedUnderDifferentSettings { left, right, field } = refused else {
+            panic!("both samples and the field must be named: {refused:?}");
+        };
+        assert_eq!((left.as_str(), right.as_str()), ("alpha", "beta"));
+        assert_eq!(field, "setting for repeat ground");
     }
 
     /// **A cohort walked against different catalogs is refused too**, and the catalog is what the

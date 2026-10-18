@@ -21,7 +21,7 @@ use super::RunError;
 /// [`SegmentationInputs`] moved to a top-level home when the psp header started carrying it
 /// ([`crate::psp`]) — an interchange type both stages hold belongs to neither
 /// (`doc/devel/ng/impl_plan/run_driver_psp_mode.md`, Checkpoint A).
-pub use crate::segmentation_inputs::SegmentationInputs;
+pub use crate::segmentation_inputs::{RepeatGround, RepeatSorting, SegmentationInputs};
 
 /// The run's segments, in genome order, beside the values they were computed from.
 ///
@@ -52,7 +52,8 @@ pub struct Segmentation {
 }
 
 impl Segmentation {
-    /// Consume the typed-region generator's stream once, and record what produced it.
+    /// Consume the typed-region generator's stream once, and record what produced it, under the
+    /// default setting for repeat ground ([`RepeatGround::StrPaths`]).
     ///
     /// **What the recording does and does not promise.** `analysed` is both recorded and used
     /// here, so the regions this reports and the regions the merge walks are the same value.
@@ -80,16 +81,36 @@ impl Segmentation {
                     path: catalog_path,
                     source,
                 })?;
-        let analysed_regions = analysed.iter().collect();
-        Ok(Self {
-            inputs: SegmentationInputs {
+        Ok(Self::of_segments(
+            segments,
+            analysed,
+            RepeatGround::StrPaths(RepeatSorting {
                 catalog,
                 repeat_tract_criteria,
+            }),
+        ))
+    }
+
+    /// The segmentation of `segments` over `analysed`, recorded as sorted under
+    /// `repeat_ground`.
+    ///
+    /// The same promise as [`build`](Self::build): the caller cut `segments` under
+    /// `repeat_ground`, and only the caller can guarantee it.
+    #[must_use]
+    pub fn of_segments(
+        segments: Vec<TypedRegion>,
+        analysed: GenomeRegions,
+        repeat_ground: RepeatGround,
+    ) -> Self {
+        let analysed_regions = analysed.iter().collect();
+        Self {
+            inputs: SegmentationInputs {
+                repeat_ground,
                 analysed_regions: analysed,
             },
             segments,
             analysed_regions,
-        })
+        }
     }
 
     /// What this segmentation was computed from — the operand of every compatibility check
@@ -225,10 +246,10 @@ mod tests {
         .expect("an empty stream is a segmentation over no segments");
 
         assert_eq!(segmentation.inputs().analysed_regions, analysed);
-        assert_eq!(segmentation.inputs().catalog, header());
+        assert_eq!(segmentation.inputs().catalog(), Some(&header()));
         assert_eq!(
-            segmentation.inputs().repeat_tract_criteria,
-            unusual_criteria()
+            segmentation.inputs().repeat_tract_criteria(),
+            Some(&unusual_criteria())
         );
         assert_ne!(
             unusual_criteria(),
