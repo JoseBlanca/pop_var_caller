@@ -1,21 +1,19 @@
 # Calling
 
-pvc calls a cohort in one of two ways. Both write one VCF holding SNPs, indels and STRs, and both
-need the [repeat catalogue](inputs.md#the-repeat-catalogue) first.
+pvc usually splits calling into two phases:
+
+1. gathering the sequence evidence into one pileup file (a psp file) per sample;
+2. the calling itself, from the psp files.
+
+Alternatively, it can call directly from the alignment files (BAM or CRAM). This mode does less,
+because the parameters used as priors can only be estimated from psp files.
 
 | | Direct mode | psp mode |
 |---|---|---|
 | commands | `call-from-alignments` | `generate-psps`, then `estimate-parameters`, then `call-from-psps` |
-| parameters | built-in values | estimated from your reads |
+| parameters | built-in values, or from a previous run | estimated from the psp files |
 | reads each alignment | once per call | once per sample, ever |
 | adding a sample later | call the whole cohort again from the alignments | write one psp file, then fit and call again |
-| best for | a quick look, test regions, outbred samples | inbred or structured material, large cohorts, cohorts that grow |
-
-**Choose psp mode for inbred lines, selfing crops or structured populations.** Direct mode uses
-built-in values. Among them, every sample's inbreeding coefficient is 0, meaning outbred. On inbred
-material that assumption makes pvc call too many heterozygotes. psp mode estimates each sample's
-inbreeding from its reads, along with the other parameters listed in
-[Estimated parameters](parameters.md).
 
 Given the same samples and the same parameters, the two modes write the same calls.
 
@@ -28,9 +26,7 @@ pvc call-from-alignments --reference genome.fa \
 ```
 
 - `--defaults` uses the built-in parameter values. The alternative, `--parameters`, takes a
-  parameters file, but a parameters file is bound to the samples it was estimated on (see
-  [Estimated parameters](parameters.md#what-a-parameters-file-is-bound-to)). In practice direct
-  mode runs with `--defaults`.
+  parameters file.
 - The VCF's sample columns follow the order of the `--alignment` options.
 - `--regions regions.bed` calls only those regions.
 
@@ -43,12 +39,11 @@ pvc generate-psps --reference genome.fa --alignment s1.bam --output-dir psps/
 ```
 
 This writes `psps/<sample>.psp` and its log, `psps/<sample>.psp.log`. A sample whose reads are
-split over several files gets one psp from all of them: pass every file with `--alignment`.
+split over several alignment files gets one psp from all of them: pass every file with
+`--alignment`.
 
-Several samples can go to one command, but they are processed one after another, each on about
-one core. To use more cores or machines, run one command per sample at the same time, **all with
-the same `--regions`**, or none. psp files written over different regions are refused when they
-are combined.
+Several samples can go to one command, but they are processed one after another. To use more
+cores or machines, run one command per sample at the same time.
 
 If a psp for a sample is already in the directory, the command refuses before reading anything.
 `--force` replaces it. A psp is written under a temporary name, `<sample>.psp.<number>.partial`,
@@ -64,16 +59,8 @@ pvc estimate-parameters --reference genome.fa --psp psps/ --output cohort.parame
 `--psp` takes psp files or directories; a directory contributes every `.psp` file in it. This step
 reads only a small summary stored at the end of each psp, not the whole file.
 
-On 59 tomato accessions over 32 Mb at about 5.5 reads a position, this step took 16 minutes and
-410 MB on an 18-core laptop. One sample took 24 seconds. *(Measured 2026-10-17; these figures
-will be replaced by the benchmark suite's.)*
-
 Options worth knowing:
 
-- `--ploidy N` if your samples are not diploid. The calling step then uses the file's ploidy.
-- `--inbreeding F` states one inbreeding coefficient for every sample instead of estimating it,
-  for example `--inbreeding 1` for fully inbred lines. Leave it out to have each sample's value
-  estimated.
 - `--skip-contamination` if the samples are known to be clean. It saves time, and the file then
   holds no contamination table.
 
