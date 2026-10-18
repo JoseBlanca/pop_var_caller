@@ -1,9 +1,6 @@
-# pvc — a population variant caller
+# pvc
 
-pvc calls SNPs, short indels and short tandem repeats (STRs) from aligned reads, for one sample
-or for a cohort, and writes one VCF. It does the job freebayes or GATK HaplotypeCaller do. It is
-one caller whose models are STR-aware: inside a repeat it calls whole repeat alleles and expects
-reads to be off by a repeat unit or two, and everywhere else it calls ordinary SNPs and indels.
+pvc is a variant caller, focused on speed, memory usage and accuracy.
 
 > **Status: under active development.** pvc gives good results on our benchmarks, but we have
 > only started testing it on real projects. Options and the output format may still change. We
@@ -15,28 +12,16 @@ Supported on Linux and macOS.
 
 ## What it aims for
 
-- **Accurate calls in model and non-model species alike.** A caller has to know some numbers
-  about the data before it can call: how often the sequencer is wrong, how diverse the
-  population is, how inbred each sample is. Most callers take these as built-in constants tuned
-  on human data. pvc estimates them from your own reads, so an inbred crop, a wild population or
-  a human trio each get their own values, with no truth set needed.
-- **STRs called as repeats.** When DNA is copied inside a repeat, the copy often gains or loses a
-  unit, so a sample with 12 copies shows some reads with 11 or 13. This is called stutter. A
-  caller that does not expect it reports those reads as new indel alleles. pvc treats each repeat
-  as one locus whose alleles are whole repeat sequences, and it estimates the stutter rates from
-  your reads, for each class of repeat. Repeats close enough together that one read spans several are called
-  together, as one locus.
-- **From one sample to thousands, from 3 reads a position to hundreds.** A single low-coverage
-  sample is the hardest case and will be the weakest. Where a method needs a cohort, pvc says
-  what it does with one sample instead of returning a confident wrong number.
-- **Fast and small in memory.** pvc is written in Rust and streams through the genome. Calling
-  memory is designed to stay about flat as samples are added. So far that has been measured from
-  1 to 63 samples.
+- **Fast and small in memory.** pvc is written in Rust and uses a streaming architecture
+  designed for a small memory footprint. For example, it called more than 2,000 whole tomato
+  genomes in a week using less than 30 GB.
+- **From one sample to thousands, and from 3 reads a position to hundreds.**
+- **Accurate calls in model and non-model species alike.** It can take into account
+  contamination between samples, per-sample inbreeding coefficients (F) and different error
+  priors.
+- **STR-aware models.** It uses specialised models for STR and STR-bundle regions.
 
 ## How it performs
-
-Every figure below names the data it was measured on. A figure from one corner of the range
-(one species, one depth, simulated or real) describes that corner only.
 
 | what | data | pvc | GATK | freebayes |
 |---|---|---|---|---|
@@ -56,9 +41,12 @@ Every figure below names the data it was measured on. A figure from one corner o
 
 ## What it does
 
-- **Calls** SNPs, indels up to 100 bp, and STRs with repeat units of 1 to 6 bases spanning up to
-  100 bp. Each sample's genotype comes with a genotype quality (GQ), and each site with a QUAL.
-- **Estimates the model's parameters from the data** before calling: base-quality calibration
+- **Calls** SNPs, indels (up to 100 bp by default), and STRs with repeat units of 1 to 6 bases
+  spanning up to 100 bp by default.
+- **Lets you add samples to a cohort later** without re-reading the alignments of the samples you
+  already have. To do that, you generate intermediate pileup files, which are then reused for
+  the cohort calling.
+- **Estimates the calling model's priors from the data** before calling: base-quality calibration
   and contamination for each read group, the inbreeding coefficient F of each sample,
   the population's diversity, and stutter for each kind of repeat. They are written to a
   parameters file that you can read, edit and reuse.
@@ -66,20 +54,17 @@ Every figure below names the data it was measured on. A figure from one corner o
   Calling then takes it into account.
 - **Flags hidden duplications**: places where two copies of a sequence exist in the genome but
   only one in the reference, so both copies' reads pile onto one place and look like
-  heterozygous variants. Common in plant genomes. On by default.
-- **Lets you add samples to a cohort later** without re-reading the alignments of the samples you
-  already have.
+  heterozygous variants.
 
 It does not call structural variants, satellite repeats longer than 100 bp, or deletions longer
-than 100 bp, and it does not write genotype likelihoods (PL) yet.
+than 100 bp.
 
 ## Install
 
 pvc is installed from source for now. You need:
 
 - Rust 1.98 or newer, from [rustup](https://rustup.rs);
-- a C compiler (`cc` on Linux, the Xcode command-line tools on macOS), for two compression
-  libraries pvc builds.
+- a C compiler (`cc` on Linux, the Xcode command-line tools on macOS).
 
 ```
 cargo install --locked --git https://github.com/JoseBlanca/pop_var_caller
@@ -109,9 +94,9 @@ pvc call-from-alignments --reference genome.fa \
     --defaults --output calls.vcf.gz
 ```
 
-**psp mode: three steps, with parameters estimated from your data.** First summarise each sample's reads
-into one file (a *psp* file), then estimate the parameters from the cohort, then call. A sample
-added later needs only its own psp.
+**psp mode: three steps, with parameters estimated from your data.** First summarise each
+sample's reads into a per-sample pileup file (*psp*), then estimate the parameters from the
+cohort, then call. A sample added later needs only its own psp.
 
 ```
 pvc generate-psps --reference genome.fa --alignment s1.bam --output-dir psps/   # once per sample
