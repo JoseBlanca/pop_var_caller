@@ -136,6 +136,24 @@ delimiter anchors whose own alignment is used for the spelling (`locus_generatio
 Every other read — partial reads, reads spelled by the delimiter, reads with no crossing deletion —
 records `(0, 0)`.
 
+**A deletion that touches the edge counts as crossing it** (amended 2026-10-18): one lying in the
+flank and ending at the segment's first base, or starting just after its last, records its flank
+bases as one that crosses the edge does, and makes the read complete by the same rule. The case is
+a misread base, not a variant the mapper split. Where a run of one base is followed by a different
+base, a read that misreads that base as the run's shows a run one base too long, and minimap2
+writes it as the run at full length and the neighbouring base deleted — a deletion that ends at the
+edge without crossing it. Before the amendment such a read was spelled over the segment's positions
+alone and counted as the reference length: at HG002's homozygous one-base-deletion homopolymers at
+30×, 565 of the 926 reads at the reference length carried such a deletion
+(`../../reports/ng_str_edge_touching_2026-10-18.md`). Recorded, the read keeps
+its flank deletion and is compared with each allele over the wider extent (§5.6): against the
+deletion allele it differs by the misread base alone, and is priced at the substitution rate.
+
+*This is not the variant §4 tried and did not adopt.* That counted a flank base the read shows
+**substituted** as part of the extent, which turned every flank sequencing error into an extra
+observation; this counts only a base the read's alignment **deletes**, which a substitution error
+does not produce.
+
 **A flank deletion longer than the flank stored with the segment is not recorded**: the read is
 measured as today. The record can only be widened over flank bases the locus holds.
 
