@@ -245,6 +245,12 @@ What the options mean for each subcommand:
 **Before `--call-satellites` could become the default**, its calls on satellites have to be
 compared with GATK's on GIAB over that ground. Until then it stays off.
 
+**Compared, and it stays off (owner, 2026-10-18).** On the GIAB Tandem-Repeat benchmark's satellites
+at 30 reads a position it finds 38% of the truth SNPs (GATK 41%) and 45% of the other variants (GATK
+54%), and 91% and 57% of its calls are true (GATK 95% and 65%): as a default it would add about four
+false indels in ten to every satellite it calls
+([report](../../reports/implementations/call_satellites_accuracy_2026-10-18.md)).
+
 **Settled in implementation (2026-10-18,** plan [`call_satellites.md`](../impl_plan/call_satellites.md)**)**:
 the three questions this section left open, a change to one of its rulings, and three things
 the rulings did not say:
