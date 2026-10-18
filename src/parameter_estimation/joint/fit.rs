@@ -3420,7 +3420,8 @@ struct PassModel<'a> {
     /// How the density's rule's nodes and weights move with its two shapes — what the
     /// likelihood's slope in the shapes is made of, taken every pass for the shapes' update.
     density_slopes: RuleSlopes,
-    /// The log of each branch's and each noise class's share.
+    /// The log of each branch's and each noise class's share, and the `ln 3` and `ln k` the
+    /// candidates are weighted by.
     branches: BranchShares,
     parameters: &'a Parameters,
 }
@@ -3428,18 +3429,19 @@ struct PassModel<'a> {
 /// **The logarithms a position's branches are weighted by, which depend on the parameters
 /// alone**: each branch's share, each noise class's share, and how many alleles a candidate
 /// stands for. The same at every position of a pass, so they are taken once a pass, beside the
-/// read tables — taken per position they were about twenty logarithms a position in the
-/// likelihood and as many again in the attribution and the scores.
+/// read tables. Each share is floored at `f64::MIN_POSITIVE` before its logarithm is taken.
 #[derive(Debug)]
 struct BranchShares {
     /// Whether the run fits the duplicated class.
     duplicated_fitted: bool,
     /// `ln(1 − duplicated share)`: what the three ordinary branches share between them.
     ln_ordinary: f64,
+    /// The log of the invariant, fixed-non-reference, segregating and duplicated shares.
     ln_invariant: f64,
     ln_fixed_alt: f64,
     ln_segregating: f64,
     ln_duplicated: f64,
+    /// The log of the three non-reference bases a fixed or segregating branch spreads over.
     ln_three: f64,
     /// `[class]` — the log of the ordinary (0) and the mismapped (1) class's share.
     ln_class: [f64; 2],
@@ -3789,12 +3791,14 @@ struct Scratch {
     /// `[class]` — the integral over how much of the panel carries an extra copy, before the
     /// duplicated share multiplies it; `−∞` when the class is not fitted.
     duplicated_ln: [f64; 2],
-    /// `[class]` — each branch's sum over its candidates (and nodes) before `ln 3` is taken off,
-    /// and the four branches' sum: **the totals the attribution divides each share by**, kept
-    /// so it does not sum the same terms a second time.
+    /// `[class]` — each branch's log-sum over its candidates (and nodes) before `ln 3` is taken
+    /// off: **the totals the attribution divides each share by**, kept so it does not sum the
+    /// same terms a second time. Likewise the next two fields.
     fixed_sum_ln: [f64; 2],
     segregating_sum_ln: [f64; 2],
+    /// `−∞` when the duplicated class is not fitted.
     duplicated_sum_ln: [f64; 2],
+    /// `[class]` — the four branches' log-sum, which the attribution and the scorer divide by.
     within_ln: [f64; 2],
     /// The position's whole log-likelihood, once [`one_position`] has computed it.
     position_ln: f64,
@@ -4136,11 +4140,13 @@ fn one_position(
             }
             let summed = ln_sum_exp(&scratch.shares);
             scratch.duplicated_sum_ln[class] = summed;
-            // Kept for the scores, and not reused below: `ln d + summed − ln 3` is added left to
-            // right, and taking `summed − ln 3` first would move the branch's last bits.
+            // `duplicated_ln` is kept for the scores and not reused in the branch's own sum:
+            // `ln d + summed − ln 3` is added left to right, and taking `summed − ln 3` first
+            // would move the branch's last bits.
             scratch.duplicated_ln[class] = summed - ln_three;
             shares.ln_duplicated + summed - ln_three
         } else {
+            scratch.duplicated_sum_ln[class] = f64::NEG_INFINITY;
             scratch.duplicated_ln[class] = f64::NEG_INFINITY;
             f64::NEG_INFINITY
         };
@@ -4240,13 +4246,13 @@ fn one_position(
 
         // The fixed-alternative branch: every sample carries two copies of the candidate.
         if branch[1] > 1e-12 {
-            let total = scratch.fixed_sum_ln[class];
+            let branch_sum_ln = scratch.fixed_sum_ln[class];
             for candidate in 0..candidates {
                 let share = branch[1]
                     * float::exp(
                         scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
                             + scratch.ln_multiplicity[candidate]
-                            - total,
+                            - branch_sum_ln,
                     );
                 if share <= 1e-12 {
                     continue;
@@ -4277,7 +4283,7 @@ fn one_position(
         // not on the node, so the inner loop over read groups runs once per candidate rather
         // than once per candidate per node.
         if branch[2] > 1e-12 {
-            let total = scratch.segregating_sum_ln[class];
+            let branch_sum_ln = scratch.segregating_sum_ln[class];
             scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
             scratch.genotype_weight.fill(0.0);
             for candidate in 0..candidates {
@@ -4286,7 +4292,7 @@ fn one_position(
                     let share = branch[2]
                         * float::exp(
                             scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity
-                                - total,
+                                - branch_sum_ln,
                         );
                     if share <= 1e-12 {
                         continue;
@@ -4375,7 +4381,7 @@ fn one_position(
         {
             {
                 let carrier_nodes = carrier.nodes.len();
-                let total = scratch.duplicated_sum_ln[class];
+                let branch_sum_ln = scratch.duplicated_sum_ln[class];
                 scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
                 scratch.carrier_weight.fill(0.0);
                 for candidate in 0..candidates {
@@ -4385,7 +4391,7 @@ fn one_position(
                             * float::exp(
                                 scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
                                     + multiplicity
-                                    - total,
+                                    - branch_sum_ln,
                             );
                         if share <= 1e-12 {
                             continue;
