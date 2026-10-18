@@ -21,7 +21,7 @@
 //! |---|---|---|
 //! | the base-quality multiplier, per read group | [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER), one | the value at which the model does nothing |
 //! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.20 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
-//! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), one — written in the file as the between-locus share one half | a stated uninformative prior |
+//! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), ten — written in the file as the between-locus share 1/11 | a stated prior, measured on one human trio |
 //! | contamination, per read group | **absence** — no `[contamination]` section | a model state, not a guess |
 //! | the repeat-tract substitution rate, per (read group × stratum) | [`DEFAULT_SSR_SUBSTITUTION_RATE`](crate::calling::inference::repeat_tract_parameters::DEFAULT_SSR_SUBSTITUTION_RATE), 0.001 | a default taken at the tract, not written in the file |
 //! | the slippage numbers, per (stratum × slippage group) | **no row**, and the tract falls back to another caller's shipped model | a default that is owed a measurement |
@@ -78,11 +78,12 @@
 //!   (`doc/devel/reports/ng_tract_genotype_improvement_2026-09-02.md` §5.2). What a run can look
 //!   at is how its repeat-tract calls move when the number is edited, which is why
 //!   §3.8 puts it in the file: *marking a number soft is the point of writing it down.*
-//! - **The fallback concentration is a stated uninformative prior, not an inherited one.** It is
-//!   one chromosome's worth of belief spread flat over a tract's candidate lengths — the same
-//!   quantity and the same reading `ALPHA_REF` carries on the ordinary-site path — and at one
-//!   chromosome the reads move the prior from the first read onward. It is reached only where a run
-//!   fitted no stratum at all; a run that fitted any takes its own median (§3.7).
+//! - **The fallback concentration is a stated prior, not an inherited one.** It is ten
+//!   chromosomes' worth of belief, a between-locus share of 1/11, spread over a tract's candidate
+//!   lengths. It was one chromosome until 2026-10-17, which made every homozygote more probable than
+//!   the heterozygote and tipped near ties at one outbred sample to the wrong homozygote
+//!   (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`). It is reached only where a
+//!   run fitted no stratum with a concentration; a run that fitted any takes its own median (§3.7).
 //! - **Contamination's default is absence, and absence is a real answer.** A run told nothing about
 //!   contamination is *scored as* uncontaminated: the read likelihood has no fraction to mix in, so
 //!   it computes its plain two-term formula rather than the three-term mixture. That is a modelling
@@ -600,7 +601,7 @@ mod tests {
     /// seeds every tract from the ladder's bottom rung.**
     ///
     /// All three matter together: the number alone cannot say where it came from — a run whose
-    /// own strata's median happened to be 1.0 would carry the same number — and the rung is what
+    /// own strata's median happened to be 10.0 would carry the same number — and the rung is what
     /// a tract's own record shows.
     #[test]
     fn a_run_that_fitted_no_stratum_seeds_every_tract_from_the_flat_rung() {
@@ -613,7 +614,7 @@ mod tests {
             nothing_fitted.stated_concentration_warrant(),
             Provenance::Defaulted
         );
-        assert_eq!(STATED_FLAT_CONCENTRATION, 1.0);
+        assert_eq!(STATED_FLAT_CONCENTRATION, 10.0);
 
         let spectrum = nothing_fitted.allele_length_variation_at(2, 11);
         assert_eq!(spectrum.rung(), AlleleLengthVariationRung::StatedFlat);

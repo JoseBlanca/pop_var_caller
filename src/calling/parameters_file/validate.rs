@@ -1475,11 +1475,11 @@ fn no_count_is_a_saturation(
     Ok(())
 }
 
-/// **The fallback's F when no stratum has one**: the F of the built-in concentration, one
-/// chromosome's worth of belief, which is one half.
+/// **The fallback's F when no stratum has one**: the F of the built-in concentration, ten
+/// chromosomes' worth of belief, which is 1/11.
 pub(super) fn the_built_in_fallback_share() -> f64 {
     between_locus_share_of(STATED_FLAT_CONCENTRATION)
-        .expect("the built-in concentration, one, has an F of one half")
+        .expect("the built-in concentration, ten, has an F of 1/11")
         .get()
 }
 
@@ -1738,11 +1738,11 @@ mod tests {
             .allele_length_variation_by_period
             .clear();
         small.repeat_tracts.substitution_rate_by_stratum.clear();
-        // **A run in which no stratum has an F takes the compiled-in share of one half**, which
+        // **A run in which no stratum has an F takes the compiled-in share of 1/11**, which
         // is what `defaulted` says; the fixture's `fitted_here` is a claim about a median over
         // strata this file has none of.
         small.repeat_tracts.fallback_between_locus_share = WarrantedValue {
-            value: 0.5,
+            value: the_built_in_fallback_share(),
             warrant: Warrant::Defaulted,
             observations: None,
             standard_error: None,

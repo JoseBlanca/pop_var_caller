@@ -45,7 +45,7 @@
 # **Two keys do not take every warrant.**
 # `repeat_tracts.fallback_between_locus_share` is `fitted_here` only where a
 # stratum row of this file carries a `between_locus_share` for it to be the
-# median of, and `defaulted` only at the built-in 0.5;
+# median of, and `defaulted` only at the built-in 1/11 (0.0909…);
 # `stated_constants.repeat_tract_outlier_weight` is `defaulted` only at the
 # built-in constant. Both take `supplied` freely, which is what you write when
 # you change one. Anything else is refused, and says so.
@@ -373,13 +373,13 @@ share_with_carriers_above_stated_frequency = { value = 0.026 }
 # `share_of_reads_that_slip`; where no stratum with a share has that many, it
 # counts every stratum with a share. This file does not carry the counts, so the
 # median cannot be recomputed from the rows below. A run in which no stratum has
-# a between-locus share states the built-in 0.5 and marks it `defaulted`. A run
-# handed this file writes back the warrant it found there, because a file's
-# warrants survive being read — demoting them on every read would have the same
-# cohort report different warrants depending on which way it was called. Mark it
-# `supplied` yourself if you change the number. It carries no `observations` in
-# any of those cases — a median over strata is not a measurement with a sample
-# size.
+# a between-locus share states the built-in 1/11 (0.0909…) and marks it
+# `defaulted`. A run handed this file writes back the warrant it found there,
+# because a file's warrants survive being read — demoting them on every read
+# would have the same cohort report different warrants depending on which way it
+# was called. Mark it `supplied` yourself if you change the number. It carries
+# no `observations` in any of those cases — a median over strata is not a
+# measurement with a sample size.
 fallback_between_locus_share = { value = 0.22222222222222224, warrant = "fitted_here" }
 slippage_group_by_read_group = [
     { read_group = 0, slippage_group = 0 },

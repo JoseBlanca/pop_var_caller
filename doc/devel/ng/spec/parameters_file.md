@@ -279,7 +279,7 @@ The largest section, and the one whose axes matter:
   asked for it.
 - **the run's stated concentration** — the bottom rung: the median fitted concentration where any
   stratum was fitted, and `STATED_FLAT_CONCENTRATION`
-  ([`stratum_fits.rs:342`](../../../../src/ng/parameter_estimation/joint/stratum_fits.rs), 1.0)
+  ([`stratum_fits.rs`](../../../../src/parameter_estimation/joint/stratum_fits.rs), 10.0 since 2026-10-17, 1.0 before)
   where none was.
 - **per stratum: the substitution rate** inside the tract.
 

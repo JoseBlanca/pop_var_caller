@@ -447,11 +447,27 @@ pub struct FittedAlleleLengthVariation {
 /// **The concentration the tract ladder's bottom rung states where the run fitted no stratum
 /// at all.**
 ///
-/// One chromosome's worth of belief, spread flat over whatever lengths the locus offers — the
-/// same quantity and the same reading [`ALPHA_REF`](crate::genetics::ALPHA_REF) carries on the
-/// ordinary-site path, where it is the *count of chromosomes* a neutral seed gives the reference
-/// allele. At one chromosome the reads move the prior from the first read onward, which is the
-/// honest posture for a number with no measurement behind it.
+/// Ten chromosomes' worth of belief, spread over whatever lengths the locus offers — a
+/// between-locus share of `F = 1/(1 + 10) = 1/11`, the chance that two chromosomes drawn at a tract
+/// carry the same length.
+///
+/// **Why ten and not one (owner, 2026-10-17).** The total sets how strongly the prior prefers a
+/// homozygote: at a flat shape over `K` candidates it makes each homozygote `(c/K + 1)/(2c/K)`
+/// times as likely as each heterozygote. At one chromosome — the value until 2026-10-17 — that is
+/// 1.5 at two candidates and 2 at three, so every run that reaches this rung, including every
+/// single sample, was told its genome is homozygous at three tracts in four. That is a homozygote
+/// excess of F = 0.5 layered under the sample's own inbreeding coefficient, which is a separate
+/// term of the prior (`calling_priors.md` §3.2) and the one that should carry it. On GIAB HG002,
+/// HG003 and HG004 called one at a time with `--defaults`, the biallelic repeat tracts pvc calls
+/// at 30x are 74 heterozygous, 49 homozygous for the other length and 5 for the reference. Moving
+/// from one to ten made 17 tract genotypes right and 1 wrong across 5x–30x, nearly all of them
+/// near ties the prior had tipped to a homozygote, and moved nothing at 300x
+/// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`). At two candidates ten gives
+/// 0.27 / 0.45 / 0.27; results were flat between ten and thirty.
+///
+/// **Measured on one human trio, so still soft.** At one sample fitted on its own reads, where
+/// this total holds the stratum's own reference-heavy shares, it costs 4 tract genotypes net at 5x
+/// (same report, §3.4).
 ///
 /// **The shape it is spread over is the locus's candidate lengths, where
 /// `population_diversity.md` §4.4's table says the *reachable* lengths** — every length the
@@ -466,7 +482,7 @@ pub struct FittedAlleleLengthVariation {
 /// (`doc/devel/ng/spec/population_diversity.md` §4.4). It is reached only where the run fitted
 /// no stratum with a concentration: a run that has any takes its own median instead
 /// ([`StratumFits::stated_concentration`]), which is §9's question 4 and its leaning.
-pub const STATED_FLAT_CONCENTRATION: f64 = 1.0;
+pub const STATED_FLAT_CONCENTRATION: f64 = 10.0;
 
 /// How far a stratum's allele length variation may sum from one before it is refused as not a
 /// distribution.

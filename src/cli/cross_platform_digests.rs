@@ -246,7 +246,19 @@ mod tests {
     /// version set back, the file's checksum is the old one; nothing a run reads moved, and the
     /// calls' checksum below did not. Recorded on macOS (arm64) only; it was
     /// `accb6b70b146bb0c83bfcedad8333871`.
-    const FITTED_PARAMETERS_MD5: &str = "18ed96038479b4f9c860f1cb830038b0";
+    ///
+    /// **Re-recorded 2026-10-17** when the tract ladder's stated concentration went from one to ten
+    /// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`): this fit has a fitted median,
+    /// so the number is not read, and only the repeat-tract note naming the built-in value moved
+    /// (0.5 to 1/11). Recorded on macOS (arm64) only; it was `66d72ee84c4a49d4b6271d3e5b68437c`.
+    ///
+    /// **Merged 2026-10-18 again**, main (the stated concentration above) into
+    /// `snp-fit-convergence`: the notes from plan step A2 to D2 are the branch's, the one above
+    /// main's. Against the branch's file only main's two note passages moved (the built-in 0.5
+    /// became 1/11): putting the old two back gives the branch's `18ed96038479b4f9c860f1cb830038b0`
+    /// exactly (`tmp/merge3/swap_back.py`). Recorded on the macOS host (arm64); it was
+    /// `096c7151d55f21cd000c3209b07923e7` on main.
+    const FITTED_PARAMETERS_MD5: &str = "3ac3a2ae4c3e7e2fa38af1d6a3b827cc";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -360,7 +372,17 @@ mod tests {
     /// two files are identical, all 3 records included. The fitted file did not move. It was
     /// `2661c66dac4f40502bda5f7e2e242713` on the branch and `ce76015b7bc2f654f0adf2c235062381` on
     /// main. Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "7672e055a1dbe6a9a642fc8badba944c";
+    ///
+    /// **Re-recorded 2026-10-18**, merging the tract ladder's stated concentration (one to ten,
+    /// `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`) onto the above: only the
+    /// `##pvcParameters` md5 moved — putting the old one back reproduces `ce76015b7bc2f654f0adf2c235062381` exactly.
+    /// Recorded on the macOS host (arm64).
+    ///
+    /// **Merged 2026-10-18 again**, as [`FITTED_PARAMETERS_MD5`]'s last note: only the
+    /// `##pvcParameters` md5 moved, with the fitted file's note — putting the branch's md5 back
+    /// gives the branch's `7672e055a1dbe6a9a642fc8badba944c` exactly; no record moved. It was
+    /// `bd3ec1e0648501deaff70599412f80a4` on main. Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "2b5fedb559b16c8dfed07ab39f7cc5d2";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -451,7 +473,17 @@ mod tests {
     /// shape 3.10), no number with an error. The tables deleted and the version set back give the
     /// old checksum; the calls' did not move. Recorded on macOS (arm64) only; it was
     /// `16cdb5d1f7ab2ece9d505bdba3586eb4`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "0138ccccf14e750e671290de06b58afd";
+    ///
+    /// **Re-recorded 2026-10-17** when the tract ladder's stated concentration went from one to ten
+    /// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`): this fit has a fitted median,
+    /// so the number is not read, and only the repeat-tract note naming the built-in value moved
+    /// (0.5 to 1/11). Recorded on macOS (arm64) only; it was `0586cd65f3dcbd192f0f8cf19e223ca9`.
+    ///
+    /// **Merged 2026-10-18 again**, as [`FITTED_PARAMETERS_MD5`]'s last note: main's two note
+    /// passages alone; putting the old two back gives the branch's
+    /// `0138ccccf14e750e671290de06b58afd` exactly. Recorded on the macOS host (arm64); it was
+    /// `af39cc216bf85d18914a6112e8403d5b` on main.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "49bd109f04196c5d2a3f39341002f691";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -544,7 +576,16 @@ mod tests {
     /// main's header lines, filter id and `PARALOG_LR`/`PARALOG_POST` differ from the branch's VCF.
     /// It was `25a1e5728030f1b0dbdfa916fbf4ee74` on the branch and
     /// `b1ae11de0ce915350cd2b76b2b72d630` on main. Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "c81df78823bf9aa0836eee9dca56e85f";
+    ///
+    /// **Re-recorded 2026-10-18**, merging the tract ladder's stated concentration (one to ten,
+    /// `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`) onto the above: only the
+    /// `##pvcParameters` md5 moved — putting the old one back reproduces `b1ae11de0ce915350cd2b76b2b72d630` exactly.
+    /// Recorded on the macOS host (arm64).
+    ///
+    /// **Merged 2026-10-18 again**, as [`CALLS_MD5`]'s last note: the `##pvcParameters` md5 alone;
+    /// putting the branch's back gives the branch's `c81df78823bf9aa0836eee9dca56e85f` exactly. It
+    /// was `69eebab6d26ad5a44d9512631851fbba` on main. Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "23c98fcb501498aa7167d74fedcd51fe";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -642,7 +683,17 @@ mod tests {
     /// figure; the informational tables' numbers by at most 0.09% (the duplicated class's share
     /// with carriers above the stated frequency). Recorded on macOS (arm64) only; it was
     /// `c548c669d12d20097217ff03e1299e3a`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "abdbf13bab51eb6d15ba9b57944d214d";
+    ///
+    /// **Re-recorded 2026-10-17** when the tract ladder's stated concentration went from one to ten
+    /// (`doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`): this fit has a fitted median,
+    /// so the number is not read, and only the repeat-tract note naming the built-in value moved
+    /// (0.5 to 1/11). Recorded on macOS (arm64) only; it was `e0902dab0b2d64082d42a40b134f6721`.
+    ///
+    /// **Merged 2026-10-18 again**, as [`FITTED_PARAMETERS_MD5`]'s last note: main's two note
+    /// passages alone; putting the old two back gives the branch's
+    /// `abdbf13bab51eb6d15ba9b57944d214d` exactly. Recorded on the macOS host (arm64); it was
+    /// `d623fef0663ce22a276fe551882dc06e` on main.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "c47b81917edfbfa6f5c877eeae6087db";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -733,7 +784,16 @@ mod tests {
     /// the branch's 23 records stay, with their genotypes, QUAL and GQ. It was
     /// `8c2025eaadcaf8f5e00a04688e2bd668` on the branch and `9d3c1c6c8243c41bb251d0d6cf7de7bb` on
     /// main. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "11ed05df550c9f1038bb07edf4975adc";
+    ///
+    /// **Re-recorded 2026-10-18**, merging the tract ladder's stated concentration (one to ten,
+    /// `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`) onto the above: only the
+    /// `##pvcParameters` md5 moved — putting the old one back reproduces `9d3c1c6c8243c41bb251d0d6cf7de7bb` exactly.
+    /// Recorded on the macOS host (arm64).
+    ///
+    /// **Merged 2026-10-18 again**, as [`CALLS_MD5`]'s last note: the `##pvcParameters` md5 alone;
+    /// putting the branch's back gives the branch's `11ed05df550c9f1038bb07edf4975adc` exactly. It
+    /// was `61cc1dbcd0bd87a01eadbdfadd64bd4e` on main. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "2b753fd7c6d6e453645bb4b31fe6a364";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

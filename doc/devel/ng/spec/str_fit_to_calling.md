@@ -190,13 +190,13 @@ tests now pass their hand-built tables through the file's own door, `of_gathered
 ### 3.5 The stated F
 
 **The median of the fitted classes' F, taken in F** *(lead, 2026-10-14)*: at an even count, the mean of
-the middle two F values, not F of the mean of the middle two concentrations, which differs. F = 0.5
-(concentration 1, `STATED_FLAT_CONCENTRATION`) where no class has an F. Calling holds it as its
+the middle two F values, not F of the mean of the middle two concentrations, which differs. F = 1/11
+(concentration 10, `STATED_FLAT_CONCENTRATION`) where no class has an F. Calling holds it as its
 concentration.
 
 **Which classes the median counts** *(owner, 2026-10-15)*: **only classes with an F and at least
 `LOCI_FOR_AN_ERROR` (8) loci with reads.** If no class has both, the median is taken over every class
-with an F, as before 2026-10-15. Where no class has an F, F = 0.5 as above.
+with an F, as before 2026-10-15. Where no class has an F, F = 1/11 as above.
 
 Why: on the tomato2 oracle (4 accessions, 20 regions, about 5 reads a sample), the milestone C review
 (`doc/devel/reports/reviews/str_penalised_fit_milestone_C_2026-10-15.md`) found that the median
@@ -217,9 +217,19 @@ owner:* after plan step D1 the shorter share and the fall-off got their own, low
 **Its warrant says whether it was measured** *(lead, 2026-10-14; restated 2026-10-15 for the owner's
 rule above)*: `fitted_here` whenever the median is taken from any class's F, whether over the classes
 with 8 or more loci or, failing those, over every class with an F; `defaulted` only when no class has
-an F and the stated 0.5 is used. So the test is still "does any class have an F", and the 2026-10-15
+an F and the stated 1/11 is used. So the test is still "does any class have an F", and the 2026-10-15
 rule changes the value, not the warrant. A median taken only from thin classes is written as
 `fitted_here` like any other; the file does not say how many loci stood behind it.
+
+**The stated value was F = 0.5 (concentration 1) until 2026-10-17, and the owner moved it to 1/11.** At
+one chromosome every homozygote is more probable than the heterozygote — 1.5 times at two candidate
+lengths, `(K + 1)/2` at K — which at one outbred sample tipped near ties to the wrong homozygote
+(a colleague's GIAB chr22 benchmark: 167 records at 5x, 56 at 10x). Measured on the GIAB per-sample
+set, one sample at a time with `--defaults`, the move makes 17 repeat-tract genotypes right and 1 wrong
+over 5x–30x and moves nothing at 300x; a fitted cohort never reads the value and is unchanged
+(`../../reports/ng_str_single_sample_prior_2026-10-17.md`). *Not settled:* a one-sample run with its
+own fit, where this value holds the class's reference-heavy shares, loses 4 genotypes net at 5x (same
+report, §3.4).
 
 Before step A5 of the plan the warrant was set by whether any class had an allele length variation,
 so at one sample, where every class with reads has shares and none has F, the compiled-in 0.5 would

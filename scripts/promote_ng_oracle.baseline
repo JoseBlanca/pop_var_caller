@@ -214,12 +214,33 @@
 #   `##pvcParameters` with the fitted file's new MD5. The two records main's fit gained (ch01:85900664, 85900669) were
 #   already in the branch's calls since its step B1.
 # They were 3d91e3a2 (both) / d083cd87 / 4acdda68 / 09635117 / ae0fcef9 / f3b69491.
+# Re-recorded 2026-10-18 (macOS host, arm64) when the tract ladder's stated concentration went from one chromosome to ten
+# (F 0.5 -> 1/11; doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md). main 7a1e2417 reproduced every line below's
+# old value on the same host first. Default parameters (82a9575b -> 5bfcecbf, 7,507 -> 7,509 records): 138 of about 30,000
+# sample genotypes change, all at STR loci (1/1 -> 0/1 62, 0/1 -> 1/1 38, 0/0 -> 0/1 27, 11 others), heterozygous calls
+# 3,478 -> 3,525; three STR records are new (ch01:4382904, 68068006, 75403004) and one SNP record is gone (ch01:86032995
+# T>A,*, inside the tract at 86032986 where the second sample moves 0/0 -> 0/1 for the deletion). Window rows follow the
+# records (56798acf -> e1c72672, 12 rows for the 3 new records' 4 samples); the histograms do not move. The defaults run's
+# file moves in its fallback_between_locus_share value (0.5 -> 1/11) and the comment naming it (920e36b7 -> 66d13204).
+# With the fit the calls do not move: the fitted file holds the cohort's own median, so the number is not read, and the file
+# moves by that comment alone (14a09b0a -> 5be66645); from_fit.comparable moves by that md5 in its header (58bfad8f -> 99881d2a).
+# Merged a third time 2026-10-18 (macOS host, arm64): main (fc73023b, the tract ladder's ten chromosomes) into the branch
+# after the merge above (dfa9a729). The paragraph "Merged again ..." is the branch's history, the one after it main's.
+# Oracle re-run in tmp/oracle_merge3, against tmp/oracle_merged2 (the previous merge's run), line by line:
+# - defaults comparable (7,509 records), windows.sorted, windows.histograms: main's 5bfcecbf / e1c72672 / b2fc1bfa, as
+#   main recorded. The branch has never moved the default-parameter VCFs.
+# - from_alignments.parameters.toml (d083cd87 -> e0d6661a): the branch's format-4 block with main's change alone —
+#   fallback_between_locus_share 0.5 -> 0.0909… (1/11) and the two comment passages naming the built-in value.
+# - fitted.parameters.toml (bff818c5 -> 69da6ed0): main's two comment passages alone (0.5 -> 1/11); no number moves,
+#   as on main, since the fit holds the cohort's own median.
+# - from_fit.comparable (8e0d0c3a -> 262460a4): only `##pvcParameters`, carrying the fitted file's new md5; no record moves.
+# They were 82a9575b (both) / d083cd87 / 56798acf / b2fc1bfa / bff818c5 / 8e0d0c3a.
 slice: 20 regions, 4 alignments
-# records: 7507
-82a9575b258c7763b4a2567918ac58b1  from_alignments.comparable
-82a9575b258c7763b4a2567918ac58b1  from_psps.comparable
-d083cd878e0e98a0e17a60625d7ebe27  from_alignments.parameters.toml
-56798acfa66618ab08fb98e420d54d68  from_alignments.windows.sorted
+# records: 7509
+5bfcecbf636130aa1a09443bbfc0dc6d  from_alignments.comparable
+5bfcecbf636130aa1a09443bbfc0dc6d  from_psps.comparable
+e0d6661a4800251eb8df7d1ead736cc4  from_alignments.parameters.toml
+e1c726723e8dd4ffc0e6e9e7d2d7d705  from_alignments.windows.sorted
 b2fc1bfacd4655c0167e7407b64e0352  from_alignments.windows.histograms
-bff818c5853807dff7f41bc39345c281  fitted.parameters.toml
-8e0d0c3a33a91fd7448ac758fb9ccfcb  from_fit.comparable
+69da6ed0535399f3996e3b5659392eeb  fitted.parameters.toml
+262460a4c76db850532e645978fca16b  from_fit.comparable

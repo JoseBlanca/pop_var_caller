@@ -1129,11 +1129,29 @@ mod tests {
         );
     }
 
-    /// The bottom rung's stated strength is one chromosome's worth of belief, which is what
-    /// lets the reads move the prior from the first read onward.
+    /// **The bottom rung does not lean homozygous** (owner, 2026-10-17;
+    /// `doc/devel/reports/ng_str_single_sample_prior_2026-10-17.md`). At two candidate lengths a
+    /// diploid's random-mating prior is `α_a(α_a + 1)` for a homozygote and `2·α_a·α_b` for the
+    /// heterozygote, up to a shared factor. At the old stated total of one chromosome each
+    /// homozygote was 1.5 times the heterozygote, which tipped near ties at one outbred sample to
+    /// the wrong homozygote; at ten the heterozygote is 5/3 of each homozygote.
     #[test]
-    fn the_stated_flat_concentration_is_one_chromosomes_worth() {
-        assert_eq!(STATED_FLAT_CONCENTRATION, 1.0);
+    fn the_stated_flat_rung_does_not_favour_a_homozygote_at_two_lengths() {
+        assert_eq!(STATED_FLAT_CONCENTRATION, 10.0);
+        let mut out = vec![f64::NAN; 2];
+        let alpha = seed(
+            &[REFERENCE_REPEATS, REFERENCE_REPEATS + 1],
+            REFERENCE_REPEATS,
+            AlleleLengthVariation::stated_flat(STATED_FLAT_CONCENTRATION),
+            &mut out,
+        );
+        let homozygote = alpha[0] * (alpha[0] + 1.0);
+        let heterozygote = 2.0 * alpha[0] * alpha[1];
+        assert!(
+            close(heterozygote / homozygote, 5.0 / 3.0),
+            "heterozygote to homozygote {}",
+            heterozygote / homozygote
+        );
     }
 
     // ── STR bundles (`str_bundle_loci.md` §7.4) ──

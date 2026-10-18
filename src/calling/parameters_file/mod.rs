@@ -104,7 +104,7 @@
 //! …
 //!
 //! [repeat_tracts]                  # §3.7
-//! fallback_between_locus_share = { value = 0.5, warrant = "defaulted" }
+//! fallback_between_locus_share = { value = 0.09090909090909091, warrant = "defaulted" }
 //! slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 //! slippage_by_stratum_and_group = [ … one row a (stratum × slippage group) … ]
 //! allele_length_variation_by_stratum = [ … only where the stratum was fitted on its own tracts … ]
@@ -2867,20 +2867,20 @@ mod tests {
         assert_eq!(read, empty);
     }
 
-    /// **A stated between-locus share of one half reads back saying whether it was fitted.**
+    /// **A stated between-locus share of 1/11 reads back saying whether it was fitted.**
     ///
-    /// The run's own median over the strata it fitted can land on exactly 0.5, which is also the
+    /// The run's own median over the strata it fitted can land on exactly 1/11, which is also the
     /// constant reached where it fitted none, and spec §8 names this among the three numbers that
     /// must be marked `defaulted` when they are. **The assertion is on what a reader recovers**,
     /// not on the two documents differing: since `warrant` is a required field of
     /// [`WarrantedValue`], two files whose warrants differ differ by construction, and a test
     /// asserting only that would pass for any shape at all.
     #[test]
-    fn a_stated_share_of_one_half_reads_back_saying_whether_it_was_fitted() {
+    fn a_stated_share_of_one_eleventh_reads_back_saying_whether_it_was_fitted() {
         for warrant in [Warrant::FittedHere, Warrant::Defaulted] {
             let mut file = a_file_using_every_shape();
             file.repeat_tracts.fallback_between_locus_share = WarrantedValue {
-                value: 0.5,
+                value: 1.0 / 11.0,
                 warrant,
                 observations: None,
                 standard_error: None,
@@ -2889,7 +2889,7 @@ mod tests {
             let read: ParametersFile = toml::from_str(&text).expect("parses");
             assert_eq!(
                 read.repeat_tracts.fallback_between_locus_share.warrant, warrant,
-                "a share of exactly 0.5 must not lose which of the two it was"
+                "a share of exactly 1/11 must not lose which of the two it was"
             );
         }
     }
@@ -2995,7 +2995,7 @@ alternative_concentration_total = 0.0006
 rung = "fitted_curve"
 
 [repeat_tracts]
-fallback_between_locus_share = { value = 0.5, warrant = "defaulted" }
+fallback_between_locus_share = { value = 0.09090909090909091, warrant = "defaulted" }
 slippage_group_by_read_group = [ { read_group = 0, slippage_group = 0 } ]
 slippage_by_stratum_and_group = [ { period = 2, reference_repeats = 6, slippage_group = 0, share_of_reads_that_slip = 0.04, shorter_share = 0.8, fall_off = 0.3, share_of_reads_that_slip_origin = { smoothing = { blend = { curve_weight = 0.37, reach = "inside_the_fitted_range", curve = { rise_shape = 0.5, intercept = 0.01, slope = 0.004, fitted_from_repeats = 5, fitted_to_repeats = 19, held_out_error = 0.2, cells = 23 } } }, expected_slipped_reads = 8000.5 } } ]
 allele_length_variation_by_stratum = []
