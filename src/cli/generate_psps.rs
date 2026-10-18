@@ -157,7 +157,7 @@ pub struct GeneratePspsArgs {
     )]
     pub max_depth: u32,
 
-    /// Build a `.bai` or `.crai` index beside any alignment file that has none.
+    /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
 

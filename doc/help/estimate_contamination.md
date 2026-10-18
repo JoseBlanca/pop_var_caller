@@ -1,6 +1,6 @@
 # Estimating cross-sample contamination
 
-`pvc estimate-contamination` estimates, for each sample in a
+`pvc dev estimate-contamination` estimates, for each sample in a
 panel of Illumina alignments, what share of that sample's sequencing reads
 came from a different individual. It is a side tool taken out of a variant
 caller under development: the caller fits contamination internally before
@@ -11,7 +11,7 @@ Two commands, run in this order:
 
 ```
 pvc repeat-catalog --reference ref.fa        # once per reference
-pvc estimate-contamination ...               # per panel of samples
+pvc dev estimate-contamination ...               # per panel of samples
 ```
 
 ## How it works
@@ -116,7 +116,7 @@ at every thread count.
 ## Step 2 — run the estimate
 
 ```
-pvc estimate-contamination \
+pvc dev estimate-contamination \
     --reference GRCh38.fa \
     --alignment sampleA.cram \
     --alignment sampleB.cram \
@@ -130,7 +130,7 @@ One `--alignment` flag per sample, twelve or more of them.
 
 Add `--regions my_regions.bed` to look at a stretch of your own choosing,
 and `--components 2` on a panel of fewer than about twelve samples.
-`pvc estimate-contamination --help` lists the remaining
+`pvc dev estimate-contamination --help` lists the remaining
 flags.
 
 `--threads` bounds both halves of the run: how many alignments are walked at
@@ -270,7 +270,7 @@ far from the rest of the panel, not that anything went wrong with its file.
 
 ## Getting help and reporting trouble
 
-`pvc estimate-contamination --help` describes every flag.
+`pvc dev estimate-contamination --help` describes every flag.
 Errors are written to name the file and the reason — a missing `.fai` names
 the FASTA and tells you to run `samtools faidx`, a file with two samples
 names the file and the count — so the message itself should say what to fix.
