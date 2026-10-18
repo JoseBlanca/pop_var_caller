@@ -153,3 +153,23 @@ right). 10x gives the same picture at a third of the counts.
 with an allele: scored by its total length, each would be a match or a one-step slip. That belongs
 to the edge fix's spec amendment, not to the outlier share; the share fitted without them is the
 one to carry forward (30x homopolymers: 1.5–2.3 in 1,000 at 9–15 repeats, 10–15 in 1,000 at 21–26).
+
+## Correction (2026-10-18, same day): no read here is "outlier-only"
+
+The two addenda above, and `smooth_fit.py`, treat reads a non-whole number of repeats off and
+minority flank-deletion spellings as reads calling sends wholly to the outlier term. **That is
+wrong for both.** Calling compares a read and an allele with different flank deletions over the
+wider of the two extents (`str_edge_deletion_alleles.md` §5.6; `fill_emissions` in
+`calling/likelihood/ssr.rs`): same length after respelling is priced at the substitution rate, a
+different length as an indel that is not whole repeats. Non-whole lengths are priced by the stutter
+model's part-repeat regime (`read_likelihoods.md` §4.2). So:
+
+- **the share to carry forward is the one fitted without those reads** (addendum 1's "without
+  them" row; 30x homopolymers 1.5–2.3 in 1,000 at 9–15 repeats, 10–15 in 1,000 at 21–26);
+- **the calling comparison in addendum 1 used per-stratum shares fitted with them**, which run to
+  5–10% at long homopolymers, and has to be repeated with shares fitted without them;
+- addendum 2's split of the flank-deletion reads stands — half a true allele spelled at the edge,
+  half a one-base error beside the tract — and under §5.6 both are already scored against the
+  alleles rather than sent to the outlier term. What decides how they score is whether the read
+  records its flank deletion at all, which is the held edge fix (a deletion that *ends at* the
+  tract's edge, not only one that crosses it).
