@@ -374,7 +374,8 @@ committed):
   3.5×10⁻⁵ and 1.1×10⁻⁵ (three bases at 6 repeats; four bases at 7).
 
 **What calling does with those numbers.** Calling scores a read as `(1 − λ)·[the genotype's emission]
-+ λ·(lengths the read allows)/R`, with λ = 0.2 (`DEFAULT_OUTLIER_WEIGHT`,
++ λ·(lengths the read allows)/R`, with λ = 0.2 when this was measured (0.07 since 2026-10-18;
+`DEFAULT_OUTLIER_WEIGHT`,
 `calling/likelihood/ssr.rs:158`; the term at `:699`) and R the reachable lengths (36 for one
 three-base candidate at 6 repeats). So every slip rate below about 10⁻⁴ scores as no stutter. Take a
 homozygote with one read one repeat shorter than its allele. **On likelihood alone, before the

@@ -706,8 +706,9 @@ mod tests {
     /// Today's fixture with every key added since version 1 taken out — the keys version 2 added,
     /// F's standard error and the row on penalised curves, which version 3 added, the two
     /// informational tables version 4 added, and the second rung's stated share version 5 added —
-    /// as a file written before format 3 reads back. It
-    /// says version 3, which is what reading such a file stamps on it.
+    /// as a file written before format 3 reads back, with the outlier weight at the 0.20 every
+    /// build before format 6 recorded. It says version 3, which is what reading such a file stamps
+    /// on it.
     pub(super) fn the_fixture_without_what_versions_two_to_five_added() -> ParametersFile {
         let mut file = a_file_using_every_shape();
         file.format_version = 3;
@@ -716,6 +717,7 @@ mod tests {
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;
         file.fitted_from.snp_indel_fit_starts = None;
+        file.stated_constants.repeat_tract_outlier_weight.value = 0.20;
         for row in &mut file.base_quality_calibration.by_read_group {
             row.error_probability_multiplier.standard_error = None;
         }
@@ -1485,6 +1487,10 @@ mod files_written_before_format_3 {
         read.repeat_tracts
             .fallback_between_locus_share_with_own_shares =
             Some(read.repeat_tracts.fallback_between_locus_share);
+        // **And its `defaulted` outlier weight is the built-in of its day**, 0.20; a run takes
+        // today's built-in in its place and writes that.
+        read.stated_constants.repeat_tract_outlier_weight.value =
+            crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT;
         let once = written_back(&read);
         assert_eq!(once, read, "the run writes the migrated file");
         assert_eq!(once.to_toml(), read.to_toml(), "byte for byte");

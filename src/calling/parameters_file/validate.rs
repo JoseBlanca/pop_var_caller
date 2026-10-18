@@ -1026,15 +1026,24 @@ impl ParametersFile {
         // beside a number that is not the built-in constant, and the file's own header names the
         // fix ("change its warrant to supplied and delete its observations"), so the refusal
         // says it too.
+        //
+        // **The constant is the one built in when the file was written**, which a file stamped
+        // before format 6 records as 0.20: such a file is read, and its run takes today's
+        // built-in, since `defaulted` says the writing run chose nothing.
+        let built_in = if self.format_version < FORMAT_THAT_LOWERED_THE_OUTLIER_WEIGHT {
+            OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6
+        } else {
+            DEFAULT_OUTLIER_WEIGHT
+        };
         match weight.warrant {
             Warrant::Supplied => Ok(()),
-            Warrant::Defaulted if weight.value == DEFAULT_OUTLIER_WEIGHT => Ok(()),
+            Warrant::Defaulted if weight.value == built_in => Ok(()),
             Warrant::Defaulted => Err(refuse(
                 at,
                 format!(
                     "is {:?}, and its warrant is `defaulted`, which says this run inherited the \
-                     built-in {DEFAULT_OUTLIER_WEIGHT:?}; a number you changed is one the run was \
-                     handed, so change the warrant beside it to `supplied`",
+                     built-in {built_in:?}; a number you changed is one the run was handed, so \
+                     change the warrant beside it to `supplied`",
                     weight.value
                 ),
             )),
@@ -1042,8 +1051,8 @@ impl ParametersFile {
                 at,
                 format!(
                     "has the warrant `{}`, and nothing fits this number: it is either the \
-                     built-in {DEFAULT_OUTLIER_WEIGHT:?}, which is `defaulted`, or one you \
-                     wrote here, which is `supplied`",
+                     built-in {built_in:?}, which is `defaulted`, or one you wrote here, which \
+                     is `supplied`",
                     the_word_for(other)
                 ),
             )),
@@ -1217,6 +1226,14 @@ const FORMAT_THAT_ADDED_THE_INFORMATIONAL_TABLES: u32 = 4;
 /// The format that gave the tract ladder's second rung its own stated between-locus share,
 /// `repeat_tracts.fallback_between_locus_share_with_own_shares`.
 const FORMAT_THAT_SPLIT_THE_STATED_SHARE: u32 = 5;
+
+/// The format that lowered the built-in repeat-tract outlier weight from 0.20 to
+/// [`DEFAULT_OUTLIER_WEIGHT`]. A file stamped before it records a `defaulted` weight as 0.20.
+const FORMAT_THAT_LOWERED_THE_OUTLIER_WEIGHT: u32 = 6;
+
+/// The built-in repeat-tract outlier weight a file stamped before format 6 records as
+/// `defaulted` — the value pvc shipped from 2026-09-03 until format 6.
+const OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6: f64 = 0.20;
 
 /// The refusal, with the key's path in the file's own spelling.
 ///
@@ -2043,21 +2060,47 @@ mod tests {
         let (field, problem) = refused(|file| file.format_version = 0);
         assert_eq!(field, "format_version");
         assert!(problem.contains("written by a newer build"), "{problem}");
+        // A file stamped before format 6 records the outlier weight it inherited as 0.20.
+        let as_written_before_format_6 = |file: &mut ParametersFile| {
+            file.stated_constants.repeat_tract_outlier_weight.value =
+                OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
+        };
         accepted(|file| {
             file.format_version = 3;
             file.ordinary_site_prior.fitted_density = None;
             file.duplicated_positions = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
+            as_written_before_format_6(file);
         });
         accepted(|file| {
             file.format_version = 4;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
+            as_written_before_format_6(file);
         });
-        accepted(|file| file.format_version = 5);
-        let (field, _) = refused(|file| file.format_version = 6);
+        accepted(|file| {
+            file.format_version = 5;
+            as_written_before_format_6(file);
+        });
+        accepted(|file| file.format_version = 6);
+        let (field, _) = refused(|file| file.format_version = 7);
         assert_eq!(field, "format_version");
+    }
+
+    /// **A `defaulted` outlier weight is the built-in of the format the file says it was written
+    /// in**: 0.20 before format 6, [`DEFAULT_OUTLIER_WEIGHT`] from it on. Either value under the
+    /// other format is a number somebody changed and left marked `defaulted`.
+    #[test]
+    fn a_defaulted_outlier_weight_is_the_built_in_of_its_own_format() {
+        let (field, problem) = refused(|file| {
+            file.stated_constants.repeat_tract_outlier_weight.value =
+                OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
+        });
+        assert_eq!(field, "stated_constants.repeat_tract_outlier_weight");
+        assert!(problem.contains("change the warrant"), "{problem}");
+        let (field, _) = refused(|file| file.format_version = 5);
+        assert_eq!(field, "stated_constants.repeat_tract_outlier_weight");
     }
 
     /// **The informational tables of format 4 hold numbers, and a marked number carries no error**
@@ -2146,11 +2189,15 @@ mod tests {
             file.duplicated_positions = None;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
+            file.stated_constants.repeat_tract_outlier_weight.value =
+                OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
         });
         accepted(|file| {
             file.format_version = 4;
             file.repeat_tracts
                 .fallback_between_locus_share_with_own_shares = None;
+            file.stated_constants.repeat_tract_outlier_weight.value =
+                OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
         });
     }
 
@@ -2336,6 +2383,8 @@ mod tests {
         file.fitted_from.snp_indel_fit_starts = None;
         file.ordinary_site_prior.fitted_density = None;
         file.duplicated_positions = None;
+        file.stated_constants.repeat_tract_outlier_weight.value =
+            OUTLIER_WEIGHT_BUILT_IN_BEFORE_FORMAT_6;
         file.validate().expect("a version-1 file is accepted");
     }
 
