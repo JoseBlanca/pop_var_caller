@@ -136,15 +136,17 @@ This follows the rule settled in June for these comparisons:
   - pvc `generate-psps`, whose help says "to spread a cohort over cores, run one command per sample".
 - **Cohort tools run as one multi-threaded process:**
   - pvc `estimate-parameters`, `call-from-psps` and `call-from-alignments`, at `--threads 6`;
-  - GATK GenomicsDBImport, then GenotypeGVCFs.
+  - GATK CombineGVCFs, then GenotypeGVCFs.
 - **freebayes has no threads**, so it runs as its own `freebayes-parallel` does: one process per
   region, up to 6 at once.
 - **A one-sample run** has nothing to spread over samples:
   - GATK HaplotypeCaller runs as one process with `--native-pair-hmm-threads 6`;
   - freebayes still runs by region.
 
-For cohort joint calling I chose GenomicsDBImport over the CombineGVCFs used before. GATK's Best
-Practices name it for cohorts, so it is what a GATK user with 63 samples would run.
+For cohort joint calling GATK's Best Practices name GenomicsDBImport, but it cannot run here: its
+native library is built only for x86-64, and the dev container is arm64. The suite uses
+CombineGVCFs, GATK's other supported route and the one the earlier tomato runs used. This was found
+while building, on the trio slice.
 
 **A memory risk for the tomato freebayes run.** At 50 samples, four freebayes processes reached
 9.6 GB together, so 6 processes at 63 samples may not fit in 32 GB. The tomato slice test measures one region's
@@ -205,7 +207,7 @@ confident regions.
 
 **What the suite runs, at 5, 10, 30× and full depth:**
 - pvc on all three samples jointly, with `--defaults` and fitted;
-- GATK: three GVCFs, then GenomicsDBImport, then GenotypeGVCFs;
+- GATK: three GVCFs, then CombineGVCFs, then GenotypeGVCFs;
 - freebayes on all three samples together.
 
 **Scoring.**
@@ -319,7 +321,7 @@ competitors' fingerprints would then have to be checked against the regenerated 
 |---|---|
 | pvc, in steps | `repeat-catalog` once per reference, `generate-psps`, `estimate-parameters`, `call-from-psps` |
 | pvc, in one step | `call-from-alignments` |
-| GATK | HaplotypeCaller GVCFs, GenomicsDBImport, GenotypeGVCFs |
+| GATK | HaplotypeCaller GVCFs, CombineGVCFs, GenotypeGVCFs |
 | freebayes | one step |
 
 **What exists.**

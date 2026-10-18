@@ -7,7 +7,7 @@ documentation (plan §3.4):
 - one-sample tools run one process per sample, as many at a time as the suite has cores: GATK
   HaplotypeCaller making GVCFs, and pvc `generate-psps`;
 - cohort tools are one process using every core: pvc `estimate-parameters`, `call-from-psps`,
-  `call-from-alignments`, and GATK GenomicsDBImport and GenotypeGVCFs;
+  `call-from-alignments`, and GATK CombineGVCFs and GenotypeGVCFs;
 - freebayes has no threads, so it runs one process per block of regions, as `freebayes-parallel`
   does, and the blocks' VCFs are joined.
 """
@@ -95,19 +95,22 @@ def gatk_gvcfs(ctx, reference, alignment_by_sample, intervals, out_dir):
     return cmds
 
 
-def gatk_joint(ctx, reference, gvcfs, intervals, workspace, out):
-    """GenomicsDBImport then GenotypeGVCFs; returns two commands to run one after the other."""
+def gatk_joint(ctx, reference, gvcfs, intervals, combined, out):
+    """CombineGVCFs then GenotypeGVCFs; returns two commands to run one after the other.
+
+    GATK's Best Practices name GenomicsDBImport for cohorts, but its native library exists only
+    for x86-64, and the dev container is arm64 ("can't load AMD 64 .so on a AARCH64 platform").
+    CombineGVCFs is GATK's other supported route and is what the earlier tomato runs used.
+    """
     vs = " ".join(f"-V {q(g)}" for g in gvcfs)
-    imp = ("genomicsdbimport",
-           _gatk(ctx, "GenomicsDBImport",
-                 f"{vs} -L {q(intervals)} --merge-input-intervals "
-                 f"--genomicsdb-workspace-path {q(workspace)} --reader-threads {ctx.threads}",
-                 heap="8g"))
+    comb = ("combinegvcfs",
+            _gatk(ctx, "CombineGVCFs", f"-R {q(reference)} {vs} -L {q(intervals)} -O {q(combined)}",
+                  heap="8g"))
     gen = ("genotypegvcfs",
            _gatk(ctx, "GenotypeGVCFs",
-                 f"-R {q(reference)} -V gendb://{workspace} -L {q(intervals)} -O {q(out)}",
+                 f"-R {q(reference)} -V {q(combined)} -L {q(intervals)} -O {q(out)}",
                  heap="8g"))
-    return imp, gen
+    return comb, gen
 
 
 # ---- freebayes --------------------------------------------------------------------------------

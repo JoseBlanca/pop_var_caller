@@ -69,7 +69,7 @@ def steps(ctx):
         for depth in depths:
             # The region length is read when the row is written, after the regions step ran.
             base = dict(benchmark="giab_panel", dataset=f"GIAB {s}, own 100 confident regions",
-                        samples=1, depth=depth, region_bp=_LazyLength(regions))
+                        samples=1, depth=depth, region_bp=arms.BedLength(regions))
             for arm in ARMS:
                 step, callset = arms.arm_steps(ctx, arm, f"giab_panel/{s}/{depth}", arms.GRCH38,
                                                catalog, {s: alignment(ctx, s, depth)}, regions,
@@ -78,16 +78,3 @@ def steps(ctx):
                 out.append(arms.score_step(ctx, callset, base, truth, regions, sdf,
                                            call_sample=s, truth_sample=s))
     return out
-
-
-class _LazyLength:
-    """A BED's total length, read when first turned into text (the BED may not exist yet)."""
-
-    def __init__(self, path):
-        self.path = path
-
-    def __str__(self):
-        return str(arms.bed_length(self.path))
-
-    def __repr__(self):
-        return str(self)

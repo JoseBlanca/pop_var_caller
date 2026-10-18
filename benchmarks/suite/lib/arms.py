@@ -6,7 +6,7 @@ An *arm* is one way of calling the same data:
 |-----------------|--------------------|----------------------------------------------------------------|
 | `pvc_defaults`  | pvc (defaults)     | `call-from-alignments --defaults`                              |
 | `pvc_fitted`    | pvc (fitted)       | `generate-psps`, `estimate-parameters`, `call-from-psps`       |
-| `gatk`          | GATK               | HaplotypeCaller (one sample), or GVCFs + GenomicsDB + genotyping |
+| `gatk`          | GATK               | HaplotypeCaller (one sample), or GVCFs, CombineGVCFs, GenotypeGVCFs |
 | `freebayes`     | freebayes          | one process per block of regions, all samples together         |
 
 Each arm is one step, and its scoring another. pvc's arms live under the pvc commit's directory and
@@ -73,6 +73,18 @@ def bed_length(path):
             if len(parts) >= 3 and not line.startswith(("#", "track", "browser")):
                 total += int(parts[2]) - int(parts[1])
     return total
+
+
+class BedLength:
+    """A BED's total length, read when first turned into text (the BED may not exist yet)."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __str__(self):
+        return str(bed_length(self.path))
+
+    __repr__ = __str__
 
 
 class CallSet:
@@ -154,15 +166,15 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             m_hc = run_commands(callers.gatk_gvcfs(
                 ctx, reference, {s: files[s][0] for s in samples}, regions, gvcf_dir), logs,
                 max_concurrent=ctx.threads)
-            imp, gen = callers.gatk_joint(
+            combined = os.path.join(d, "combined.g.vcf.gz")
+            comb, gen = callers.gatk_joint(
                 ctx, reference, [os.path.join(gvcf_dir, f"{s}.g.vcf.gz") for s in samples],
-                regions, os.path.join(d, "genomicsdb"), calls)
-            m_imp = run_commands([imp], logs)
+                regions, combined, calls)
+            m_imp = run_commands([comb], logs)
             m_gen = run_commands([gen], logs)
-            shutil.rmtree(os.path.join(d, "genomicsdb"))
             total = merge(m_hc, m_imp, m_gen)
             rows = (time_rows(row_base, m_hc, "HaplotypeCaller GVCFs")
-                    + time_rows(row_base, m_imp, "GenomicsDBImport")
+                    + time_rows(row_base, m_imp, "CombineGVCFs")
                     + time_rows(row_base, m_gen, "GenotypeGVCFs")
                     + time_rows(row_base, total, "whole pipeline"))
             return {"measurement": total, "rows": rows}
