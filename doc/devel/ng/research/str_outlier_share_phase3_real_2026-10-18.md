@@ -72,3 +72,56 @@ term, so a share fitted for calling has to account for these reads too.
 - Whether the rise with tract length is stutter's tail or real stray reads; the truth-based counts
   of phase 1 were not split by repeat count.
 - One sample only; the cohort case is simulated (phase 2), not measured.
+
+## Addendum: a smoothed per-stratum share, a heavier stutter tail, and calling with them
+
+Same data; scripts `smooth_fit.py`, `tail_fit.py`, `far_placement.py`, outputs `phase3_*` in
+`experiments/str_outlier_share/`.
+
+**Where the far reads sit, against truth.** At clean truth-homozygous homopolymers (30x), reads two
+repeats off are about a tenth as common as one repeat off, but three repeats off are half as common
+as two (at 18–22 repeats: 20.9 against 35.3 per 10,000), which one geometric fall-off cannot give.
+Reads six or more repeats off, which no stutter reaches, rise with tract length: 2.7, 6.7, 23.5 and
+40.7 per 10,000 at 8–12, 13–17, 18–22 and 23 or more repeats.
+
+**A share smoothed along repeat count beats both alternatives on held-out tracts.** Fitted on even
+tracts and scored on odd ones, a second-difference penalty on the share's logit beat independent
+strata and one share per period in all four cells (10x and 30x, periods 1 and 2). The fit here also
+counts the reads calling sends to the outlier term — non-whole lengths, and flank-deletion spellings
+under 20% of their tract's reads — at the outlier term's probability. With them, homopolymer shares
+run from 0.003 at 8 repeats to 0.05–0.10 at 22–26.
+
+**Calling with the fitted per-stratum shares ties `--defaults`.** HG002, the fitted model from the
+30x psps, the held edge fix in every arm, correct tract genotypes over common tracts:
+
+| | 5x | 10x | 30x |
+|---|---|---|---|
+| `--defaults`, 0.07 | 2,873 | 4,709 | 7,225 |
+| fitted, per-stratum shares | 2,873 | 4,709 | 7,210 |
+| fitted, one share 0.003 | 2,876 | 4,710 | 7,201 |
+| fitted, one share 0.03 | 2,874 | 4,715 | 7,228 |
+
+At 30x the fitted model's losses against `--defaults` are 30 homopolymer heterozygotes against 9
+gained; of the 49 heterozygotes where the reads favour the heterozygote and the prior overrules
+them, 22 have two non-reference alleles, the genotype class the fitted prior under-predicts about
+three-fold (`str_outlier_share_phase1_2026-10-18.md`).
+
+**A heavier stutter tail does not earn its place.** A mixture of two geometric fall-offs against
+one, with the smoothed share, held out on odd tracts (negative favours the mixture):
+
+| | 10x homopolymers | 30x homopolymers | 10x dinucleotides | 30x dinucleotides |
+|---|---|---|---|---|
+| with outlier-only reads | +1.2 | −2.9 | −22.7 | +27.7 |
+| without them | −0.8 | +9.4 | — | — |
+
+With the outlier-only reads the mixture's slow share fits to about zero everywhere: those reads can
+only be explained by the stray share, which they hold high enough to absorb the tail. Without them
+the mixture does take a slow tail (20–50% of slips at about half the homopolymer strata) and lowers
+the stray share by 10–30%, but the share still climbs about seven-fold from short tracts to long
+ones (30x: 1.5–2.3 in 1,000 at 9–15 repeats, 10–15 at 21–26), and the held-out score does not
+improve. The rise is reads from outside stutter's reach, as the truth count above shows.
+
+**What follows.** The stray share is a real, length-dependent quantity worth fitting per stratum
+and smoothed; a heavier stutter tail is not needed. The largest input to it at homopolymers is the
+minority flank-deletion spellings (about 1 in 100 reads), and whether those are reads from
+elsewhere or a spelling artefact of the mapper at the tract's edge is not yet known.
