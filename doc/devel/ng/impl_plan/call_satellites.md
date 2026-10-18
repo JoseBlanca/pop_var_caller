@@ -1,6 +1,6 @@
 # `--call-satellites` and `--generic-path-only` — implementation plan
 
-**Status:** approved 2026-10-18; steps 1 to 5 built (see *Progress*), the accuracy check next.
+**Status:** approved 2026-10-18; all six steps done (see *Progress*); the branch waits for the owner.
 Step 6 of
 [`command_line.md`](command_line.md), which says this step gets its own short plan before any
 code. The design is spec [`command_line.md`](../spec/command_line.md) §4.4.1 (owner's rulings,
@@ -228,6 +228,7 @@ Each step left the identity oracle's seven checksums at their baseline.
 | 3, `--call-satellites` | 8a1474c4 | **The census had to leave satellite loci out.** Marking satellite ground walked changed nothing, as expected, but the census also tallies every generic locus's read errors for the base-quality calibration, and with satellite loci in it the error multipliers moved in their seventh figure. The deletion across a satellite's old edge is pinned by the merge's unit test rather than end to end. On tomato2 (4 samples, about 5 reads a position, 4 Mb): 12 satellites, 1,956 bases, 5 records added, none lost or changed outside INFO. |
 | 4, `--generic-path-only` | b9b559d1 | **The census's terms record the catalogue's settings and criteria as optional**, digested as before when present, so default censuses keep their bytes. On the same tomato slice: 7,530 records against 7,509, none from the repeat path; the fit's SNP/indel numbers move by under 1 in 100; peak memory 1.0 GB against 0.97 GB by default. |
 | 5, spec and help | — | Spec §4.4.1 records what was settled; `psp_file_format.md` records format 1.0. The help text went in with steps 3 and 4. |
+| 6, accuracy check | — | [Report](../../reports/implementations/call_satellites_accuracy_2026-10-18.md). On the Tandem-Repeat benchmark's satellites at 30×, pvc `--call-satellites` finds 38% of the truth SNPs (GATK 41%) and 45% of the other variants (GATK 54%), 91% and 57% of its calls true (GATK 95% and 65%); fewer genotypes right. Only 3 loci were too wide. The exact matcher undercounts both callers about threefold there. Run after merging `main` (48bd2360). |
 
 ## Build order
 
