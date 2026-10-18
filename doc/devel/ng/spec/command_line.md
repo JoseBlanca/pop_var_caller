@@ -247,8 +247,8 @@ compared with GATK's on GIAB over that ground. Until then it stays off.
 
 **Compared, and it stays off (owner, 2026-10-18).** On the GIAB Tandem-Repeat benchmark's satellites
 at 30 reads a position it finds 38% of the truth SNPs (GATK 41%) and 45% of the other variants (GATK
-54%), and 91% and 57% of its calls are true (GATK 95% and 65%): as a default it would add about four
-false indels in ten to every satellite it calls
+54%), and 91% and 57% of its calls are true (GATK 95% and 65%): as a default, about four in ten of
+the indels and other non-SNP calls it adds on satellites would be false
 ([report](../../reports/implementations/call_satellites_accuracy_2026-10-18.md)).
 
 **Settled in implementation (2026-10-18,** plan [`call_satellites.md`](../impl_plan/call_satellites.md)**)**:
