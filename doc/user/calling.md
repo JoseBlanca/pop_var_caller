@@ -111,7 +111,7 @@ samples it was estimated on.
 - `--threads` sets the number of threads (0, the default, uses every core). The calls are the
   same at any number.
 - **Scratch space.** By default pvc checks every call for hidden duplications (see
-  [Reading the VCF](vcf.md#filter)), and that check needs the whole genome's calls before it can
+  [The VCF](vcf.md#filter)), and that check needs the whole genome's calls before it can
   write any. Until then the calls wait in a scratch directory, by default in the VCF's directory
   (change with `--tmp-dir`), and take several times the size of the final compressed VCF. For the
   same reason, with `--output -` nothing reaches standard output until the whole genome is called.

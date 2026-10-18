@@ -1,4 +1,4 @@
-# Reading the VCF
+# The VCF
 
 pvc writes one VCF (version 4.4) holding SNPs, indels and STRs, in genome order. A site appears
 only if at least one sample is called with an alternative allele, and its QUAL reaches

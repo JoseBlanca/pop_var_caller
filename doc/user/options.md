@@ -1,4 +1,4 @@
-# Options worth changing
+# Options
 
 Most runs need only the options in [Calling](calling.md). This page covers the ones you may need
 for unusual material, and says when to change each. `pvc <command> --help` lists every option
