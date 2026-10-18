@@ -317,6 +317,9 @@ impl CensusPlan {
                 writer.mark_walked(region.region);
             }
         }
+        // **Satellites handed to the generic path are walked and called, and not counted**
+        // (`--call-satellites` changes nothing in the fit, `command_line.md` §4.4.1).
+        writer.leave_out(segmentation.satellites_on_the_generic_path());
         writer
     }
 

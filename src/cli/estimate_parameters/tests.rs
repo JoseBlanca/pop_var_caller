@@ -7,7 +7,9 @@ use std::path::Path;
 
 use crate::cli::command_line::{Cli, PopVarCallerCommand};
 use crate::cli::generate_psps::{GeneratePspsArgs, run_generate_psps};
-use crate::cli::test_fixtures::{AVaryingCohort, a_varying_cohort_on_disk};
+use crate::cli::test_fixtures::{
+    AVaryingCohort, a_varying_cohort_on_disk, a_varying_cohort_with_a_satellite_on_disk,
+};
 use crate::region_typing::segment_criteria::{
     DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY, MinCopies,
 };
@@ -68,13 +70,27 @@ fn walked_into_psps(
     min_copies: MinCopies,
     regions: Option<&str>,
 ) -> (AVaryingCohort, PathBuf) {
-    let psps = cohort.directory.path().join("psps");
+    let psps = walked_into(&cohort, "psps", false, min_copies, regions);
+    (cohort, psps)
+}
+
+/// `cohort` walked into psps in the directory `directory` beside it, with `--call-satellites`
+/// given or not; answers the directory.
+fn walked_into(
+    cohort: &AVaryingCohort,
+    directory: &str,
+    call_satellites: bool,
+    min_copies: MinCopies,
+    regions: Option<&str>,
+) -> PathBuf {
+    let psps = cohort.directory.path().join(directory);
     let regions = regions.map(|bed| {
         let path = cohort.directory.path().join("walked.bed");
         std::fs::write(&path, bed).expect("the scratch dir is ours");
         path
     });
     let walk = GeneratePspsArgs {
+        call_satellites,
         reference: cohort.reference.clone(),
         catalog: Some(cohort.catalog.clone()),
         alignments: cohort.alignments.clone(),
@@ -91,7 +107,7 @@ fn walked_into_psps(
         max_depth: crate::locus_generation::pileup::DEFAULT_MAX_READS_PER_POSITION,
     };
     run_generate_psps(&walk).expect("the cohort walks into psps");
-    (cohort, psps)
+    psps
 }
 
 fn args_over(cohort: &AVaryingCohort, psps: &Path, output: PathBuf) -> EstimateParametersArgs {
@@ -1093,4 +1109,24 @@ fn a_stale_cohort_is_refused_before_the_reference_is_read() {
         ),
         "the psps were judged before the reference was opened, and got: {error:?}",
     );
+}
+
+/// **`--call-satellites` changes nothing in the fit** (`command_line.md` §4.4.1): satellites never
+/// fed it. One cohort with a satellite, walked once without the option and once with it, fits to
+/// one file. What the two walks differ in is satellite ground, which the census does not sample —
+/// it draws its positions from the catalog's own ordinary sequence — so a census that started
+/// counting it, or a stutter fit that started seeing it, would move this.
+#[test]
+fn psps_written_with_call_satellites_fit_to_the_same_file_as_without() {
+    let cohort = a_varying_cohort_with_a_satellite_on_disk();
+    let by_default = walked_into(&cohort, "default", false, MinCopies::default(), None);
+    let calling_satellites = walked_into(&cohort, "satellites", true, MinCopies::default(), None);
+    let output = cohort.directory.path().join("cohort.parameters.toml");
+
+    let (from_default, _) = fit_and_assemble(&args_over(&cohort, &by_default, output.clone()))
+        .expect("the default psps fit");
+    let (from_satellites, _) = fit_and_assemble(&args_over(&cohort, &calling_satellites, output))
+        .expect("the --call-satellites psps fit");
+
+    assert_eq!(from_default.to_toml(), from_satellites.to_toml());
 }

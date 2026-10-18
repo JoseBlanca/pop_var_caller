@@ -181,6 +181,7 @@ fn run(
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
+        setting: pop_var_caller::run::RepeatGroundSetting::StrPaths,
     };
     let analysed = run_ground::analysed_regions(&ground, &contigs)?;
     let analysed_bases: u64 = analysed.iter().map(|region| region.len()).sum();

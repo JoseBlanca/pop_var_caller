@@ -1431,6 +1431,82 @@ pub(crate) fn fill_generic_gaps(
     out
 }
 
+/// Hand every satellite in `segments` to the generic path (`--call-satellites`,
+/// `command_line.md` §4.4.1): each becomes generic ground, clipped to the `analysed` spans and
+/// merged with the generic ground either side into one region. Answers the new segments and the
+/// satellite spans handed over, clipped.
+///
+/// **Merged, not set beside its neighbours.** A generic region is where the SNP/indel model
+/// builds its loci, and no locus crosses a region's edge: a deletion running past the last base
+/// is cut there, and an insertion on it is left for a next region that only claims it after
+/// repeat ground. Relabelled in place, a satellite would leave two such edges inside what is now
+/// one stretch of generic ground, and an indel across either would be called by neither side —
+/// the failure [`fill_generic_gaps`]'s maximality rule exists to prevent.
+///
+/// **Its neighbours are always generic, so the merge is all there is to the junction.** A
+/// satellite absorbs every locus and bundle member within the bundle radius when the ground is
+/// typed, so ordinary sequence, a contig end or a BED edge lies on each side of it, never an STR
+/// tract or bundle. The edges of the merged region against the STR ground further out are the
+/// tract-to-generic junctions every run already has.
+///
+/// **Clipped because a satellite is emitted whole past a BED edge** ([`clips_at_a_bed_edge`]),
+/// as a finding is; generic ground is clipped to what the caller asked for, and so is a satellite
+/// once it is generic ground.
+///
+/// `segments` must be in genome order, non-overlapping and with no two generic regions adjacent,
+/// as typing produces them; `analysed` must be in the same order. Both stay true of the answer.
+#[must_use]
+pub fn hand_satellites_to_the_generic_path(
+    segments: Vec<TypedRegion>,
+    analysed: &[GenomeRegion],
+) -> (Vec<TypedRegion>, Vec<GenomeRegion>) {
+    let mut out: Vec<TypedRegion> = Vec::with_capacity(segments.len());
+    let mut handed_over = Vec::new();
+    for segment in segments {
+        if segment.kind != RegionKind::Satellite {
+            push_merging_generic(&mut out, segment);
+            continue;
+        }
+        let satellite = segment.region;
+        let order = |span: &GenomeRegion| (span.contig, span.end);
+        let first =
+            analysed.partition_point(|span| order(span) < (satellite.contig, satellite.start));
+        for span in &analysed[first..] {
+            if span.contig != satellite.contig || span.start > satellite.end {
+                break;
+            }
+            let piece = GenomeRegion {
+                contig: satellite.contig,
+                start: span.start.max(satellite.start),
+                end: span.end.min(satellite.end),
+            };
+            handed_over.push(piece);
+            push_merging_generic(
+                &mut out,
+                TypedRegion {
+                    region: piece,
+                    kind: RegionKind::Generic,
+                },
+            );
+        }
+    }
+    (out, handed_over)
+}
+
+/// Push `next`, merging it into the last region when both are generic and the two abut.
+fn push_merging_generic(out: &mut Vec<TypedRegion>, next: TypedRegion) {
+    if next.kind == RegionKind::Generic
+        && let Some(last) = out.last_mut()
+        && last.kind == RegionKind::Generic
+        && last.region.contig == next.region.contig
+        && last.region.end.get() + 1 == next.region.start.get()
+    {
+        last.region.end = next.region.end;
+        return;
+    }
+    out.push(next);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3706,5 +3782,105 @@ mod tests {
             GenomeRegions::from_bed_path(&bed, CONTIGS).is_err(),
             "an unknown contig is caught at construction, not mid-walk"
         );
+    }
+    // -----------------------------------------------------------------
+    // Satellites handed to the generic path (`--call-satellites`)
+    // -----------------------------------------------------------------
+
+    fn span(start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    fn typed(start: u64, end: u64, kind: RegionKind) -> TypedRegion {
+        TypedRegion {
+            region: span(start, end),
+            kind,
+        }
+    }
+
+    /// A bundle stands in for any repeat ground the hand-over must leave alone; its members do
+    /// not matter here.
+    fn bundle() -> RegionKind {
+        RegionKind::SsrBundle {
+            members: Box::new([]),
+        }
+    }
+
+    /// **A satellite between two generic regions becomes one generic region with them**, not a
+    /// third region beside them: an indel across either of its old edges must stay callable.
+    /// The repeat ground further out is left as it was.
+    #[test]
+    fn a_satellite_merges_with_the_generic_ground_either_side() {
+        let segments = vec![
+            typed(1, 40, RegionKind::Generic),
+            typed(41, 60, bundle()),
+            typed(61, 99, RegionKind::Generic),
+            typed(100, 450, RegionKind::Satellite),
+            typed(451, 700, RegionKind::Generic),
+            typed(701, 720, bundle()),
+            typed(721, 1_000, RegionKind::Generic),
+        ];
+
+        let (handed, satellites) = hand_satellites_to_the_generic_path(segments, &[span(1, 1_000)]);
+
+        assert_eq!(
+            handed,
+            vec![
+                typed(1, 40, RegionKind::Generic),
+                typed(41, 60, bundle()),
+                typed(61, 700, RegionKind::Generic),
+                typed(701, 720, bundle()),
+                typed(721, 1_000, RegionKind::Generic),
+            ]
+        );
+        assert_eq!(satellites, vec![span(100, 450)]);
+    }
+
+    /// **A satellite crossing a BED edge is clipped to the requested spans**, as generic ground
+    /// is: typed as a satellite it is emitted whole past the edge, and as generic ground it must
+    /// not reach ground the caller did not ask for. Each piece merges with the generic ground of
+    /// its own span.
+    #[test]
+    fn a_satellite_across_a_bed_edge_is_clipped_to_each_requested_span() {
+        let analysed = [span(1, 200), span(230, 400)];
+        // As typing emits them: the satellite whole, from 150 past the first span's end and
+        // into the second, and each span's generic ground clipped to the span.
+        let segments = vec![
+            typed(1, 149, RegionKind::Generic),
+            typed(150, 260, RegionKind::Satellite),
+            typed(261, 400, RegionKind::Generic),
+        ];
+
+        let (handed, satellites) = hand_satellites_to_the_generic_path(segments, &analysed);
+
+        assert_eq!(
+            handed,
+            vec![
+                typed(1, 200, RegionKind::Generic),
+                typed(230, 400, RegionKind::Generic),
+            ]
+        );
+        assert_eq!(satellites, vec![span(150, 200), span(230, 260)]);
+    }
+
+    /// With no satellite, nothing moves: the default setting's ground and this one's differ only
+    /// where there is a satellite.
+    #[test]
+    fn ground_without_a_satellite_is_returned_unchanged() {
+        let segments = vec![
+            typed(1, 40, RegionKind::Generic),
+            typed(41, 60, bundle()),
+            typed(61, 100, RegionKind::Generic),
+        ];
+
+        let (handed, satellites) =
+            hand_satellites_to_the_generic_path(segments.clone(), &[span(1, 100)]);
+
+        assert_eq!(handed, segments);
+        assert!(satellites.is_empty());
     }
 }

@@ -161,6 +161,17 @@ pub struct GeneratePspsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
 
+    /// Call satellites with the SNP/indel model instead of leaving them uncalled. A satellite is
+    /// a repeat longer than --max-str-len, or a cluster of repeats longer than
+    /// --max-str-bundle-len.
+    ///
+    /// What this adds on satellites is mostly SNPs and short indels: the satellite's own length
+    /// variation mostly stays uncalled, because reads that disagree about its length make loci
+    /// wider than --max-locus-span, which are not called. The run report says how many satellite
+    /// bases were handed over and how many loci were too wide.
+    #[arg(long, help_heading = "Advanced")]
+    pub call_satellites: bool,
+
     /// The fewest repeat-unit copies a stretch needs to be stored as a repeat: six
     /// comma-separated numbers, for repeat units of 1 to 6 bases.
     ///
@@ -524,6 +535,7 @@ fn ground_request(args: &GeneratePspsArgs) -> run_ground::GroundRequest<'_> {
             max_str_bundle_len: args.max_str_bundle_len,
             min_purity: args.min_purity,
         },
+        setting: crate::run::RepeatGroundSetting::from_options(args.call_satellites, false),
     }
 }
 

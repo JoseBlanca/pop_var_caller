@@ -517,6 +517,7 @@ fn a_cohort_on_disk() -> (
 ) {
     let cohort = crate::cli::test_fixtures::a_cohort_on_disk();
     let args = GeneratePspsArgs {
+        call_satellites: false,
         reference: cohort.reference,
         catalog: Some(cohort.catalog),
         alignments: cohort.alignments,
@@ -1318,4 +1319,27 @@ fn the_report_says_how_much_of_each_psp_is_its_census() {
         )),
         "and the summary totals the censuses rather than the psps twice:\n{lines}",
     );
+}
+
+/// **`--call-satellites` is off unless given, and listed under *Advanced*** (`command_line.md`
+/// §4.4.1): a default run leaves satellites uncalled, and the option is one a person reaches for
+/// knowing what it gives up.
+#[test]
+fn call_satellites_is_off_unless_given_and_is_an_advanced_option() {
+    use clap::CommandFactory;
+
+    assert!(!args_of(&a_walk()).call_satellites);
+    let mut asked = a_walk();
+    asked.push("--call-satellites");
+    assert!(args_of(&asked).call_satellites);
+
+    let command = Cli::command();
+    let heading = command
+        .find_subcommand("generate-psps")
+        .expect("the subcommand exists")
+        .get_arguments()
+        .find(|argument| argument.get_id() == "call_satellites")
+        .expect("the option exists")
+        .get_help_heading();
+    assert_eq!(heading, Some("Advanced"));
 }

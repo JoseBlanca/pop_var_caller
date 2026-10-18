@@ -261,6 +261,7 @@ mod tests {
         let cohort = a_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
         let walk = GeneratePspsArgs {
+            call_satellites: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),

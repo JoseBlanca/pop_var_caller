@@ -376,6 +376,7 @@ fn run(
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
+        setting: pop_var_caller::run::RepeatGroundSetting::StrPaths,
     };
     let segmentation = run_ground::segments_over(&ground, &analysed, &with_checksums)?;
 

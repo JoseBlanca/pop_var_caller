@@ -516,18 +516,19 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
     // **What counts as a repeat is the psps' own**, recorded by the walk that wrote them: a run
     // over stored loci has to cut the genome the way that walk did, so it has no option that
     // could say otherwise (`doc/devel/ng/spec/command_line.md` §4.4).
-    let criteria = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?
-        .repeat_tract_criteria
-        .clone();
+    let (setting, walked_with) = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?;
+    let criteria = walked_with.repeat_tract_criteria.clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
     let segmentation = run_ground::segments_cut_with(
         &catalog_path,
         &args.reference,
+        setting,
         &criteria,
         run_ground::CriteriaSource::ThePspHeaders,
         &analysed,
         &with_checksums,
     )?;
+    let satellite_bases_on_the_generic_path = segmentation.satellite_bases_on_the_generic_path();
     say_what_this_run_does(args, &paths, cohort.read_groups(), &analysed, &log);
 
     let numbers = calling_run::run_parameters(
@@ -725,7 +726,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
                 max_cohort_locus_span: merge_parameters.max_cohort_locus_span.get(),
                 max_candidate_alleles: candidate_selection.max_candidate_alleles.get(),
             },
-        ),
+        )
+        .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
         &filter_lines,
     );
     let records = filtered

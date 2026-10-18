@@ -30,7 +30,9 @@ use crate::repeat_catalog::{
     CriteriaRefusal, ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
     sibling_catalog_path,
 };
-use crate::run::{RepeatGround, RepeatSorting, RunError, Segmentation, SegmentationInputs};
+use crate::run::{
+    RepeatGround, RepeatGroundSetting, RepeatSorting, RunError, Segmentation, SegmentationInputs,
+};
 use crate::tandem_repeat::{PeriodRange, PeriodRangeError};
 use crate::types::Bp;
 
@@ -70,6 +72,9 @@ pub struct GroundRequest<'a> {
     /// What this run counts as a repeat. **Owned**, because it is six small values a
     /// subcommand builds from its flags rather than something it already holds.
     pub routing: RepeatRouting,
+    /// Which path each kind of repeat ground goes to (`--call-satellites`,
+    /// `--generic-path-only`).
+    pub setting: RepeatGroundSetting,
 }
 
 impl GroundRequest<'_> {
@@ -311,6 +316,7 @@ pub fn segments_over(
     segments_cut_with(
         &path,
         request.reference,
+        request.setting,
         &criteria,
         CriteriaSource::TheCommandLineFlags,
         analysed,
@@ -318,15 +324,19 @@ pub fn segments_over(
     )
 }
 
-/// The catalog and criteria a cohort of psps was walked with, which a command reading them sorts
-/// its own ground with again.
+/// The setting, catalog and criteria a cohort of psps was walked with, which a command reading
+/// them sorts its own ground with again.
 ///
 /// # Errors
 ///
-/// [`GroundError::SettingNotYetBuilt`] for psps written under a setting other than the default.
-pub fn sorting_of_the_psps(inputs: &SegmentationInputs) -> Result<&RepeatSorting, GroundError> {
+/// [`GroundError::SettingNotYetBuilt`] for psps written under `--generic-path-only`.
+pub fn sorting_of_the_psps(
+    inputs: &SegmentationInputs,
+) -> Result<(RepeatGroundSetting, &RepeatSorting), GroundError> {
     match &inputs.repeat_ground {
-        RepeatGround::StrPaths(sorting) => Ok(sorting),
+        RepeatGround::StrPaths(sorting) | RepeatGround::CallSatellites(sorting) => {
+            Ok((inputs.repeat_ground.setting(), sorting))
+        }
         other => Err(GroundError::SettingNotYetBuilt {
             setting: other.setting_name(),
         }),
@@ -374,13 +384,21 @@ pub enum CriteriaSource {
 pub fn segments_cut_with(
     catalog_path: &Path,
     reference: &Path,
+    setting: RepeatGroundSetting,
     criteria: &StrRepeatCriteria,
     criteria_from: CriteriaSource,
     analysed: &GenomeRegions,
     with_checksums: &ReferenceInfo,
 ) -> Result<Segmentation, GroundError> {
     let catalog = open_catalog(catalog_path, reference, with_checksums)?;
-    segments_cut_from(&catalog, catalog_path, criteria, criteria_from, analysed)
+    segments_cut_from(
+        &catalog,
+        catalog_path,
+        setting,
+        criteria,
+        criteria_from,
+        analysed,
+    )
 }
 
 /// **The catalog at `catalog_path`, opened and checked against the reference** — the first half
@@ -429,6 +447,7 @@ pub fn open_catalog(
 pub fn segments_cut_from(
     catalog: &RepeatCatalog,
     catalog_path: &Path,
+    setting: RepeatGroundSetting,
     criteria: &StrRepeatCriteria,
     criteria_from: CriteriaSource,
     analysed: &GenomeRegions,
@@ -448,14 +467,35 @@ pub fn segments_cut_from(
                 source,
             },
         })?;
-    Segmentation::build(
+    let segments =
+        segments
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| GroundError::Segmentation {
+                source: RunError::Catalog {
+                    path: catalog_path.to_path_buf(),
+                    source,
+                },
+            })?;
+    let sorting = RepeatSorting {
+        catalog: catalog.header().clone(),
+        repeat_tract_criteria: criteria.clone(),
+    };
+    let repeat_ground = match setting {
+        RepeatGroundSetting::StrPaths => RepeatGround::StrPaths(sorting),
+        // **The satellites are handed to the generic path as the segmentation is built**
+        // ([`Segmentation::of_segments`]), so no route can record this setting without them.
+        RepeatGroundSetting::CallSatellites => RepeatGround::CallSatellites(sorting),
+        RepeatGroundSetting::GenericPathOnly => {
+            return Err(GroundError::SettingNotYetBuilt {
+                setting: setting.name(),
+            });
+        }
+    };
+    Ok(Segmentation::of_segments(
         segments,
         analysed.clone(),
-        catalog.header().clone(),
-        criteria.clone(),
-        catalog_path.to_path_buf(),
-    )
-    .map_err(|source| GroundError::Segmentation { source })
+        repeat_ground,
+    ))
 }
 
 /// Refuse a catalog that is not on disk, naming the reference it should have been built from.

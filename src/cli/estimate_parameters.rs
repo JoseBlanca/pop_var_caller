@@ -686,7 +686,7 @@ pub fn open_the_censuses(
     // moves one of them — on tomato about 1 position in 400 is kept (spec §2) — so it is the
     // backstop and not the check.
     let analysed = cohort.analysed_regions().clone();
-    let walked_with = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?;
+    let (setting, walked_with) = run_ground::sorting_of_the_psps(cohort.segmentation_inputs())?;
     let criteria = walked_with.repeat_tract_criteria.clone();
     let catalog_path = run_ground::catalog_path_for(args.catalog.as_deref(), &args.reference);
     let catalog = run_ground::open_catalog(&catalog_path, &args.reference, &with_checksums)?;
@@ -701,6 +701,7 @@ pub fn open_the_censuses(
     let segmentation = run_ground::segments_cut_from(
         &catalog,
         &catalog_path,
+        setting,
         &criteria,
         run_ground::CriteriaSource::ThePspHeaders,
         &analysed,

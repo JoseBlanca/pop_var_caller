@@ -435,6 +435,7 @@ mod tests {
         let cohort = crate::cli::test_fixtures::a_cohort_on_disk();
         let psps = cohort.directory.path().join("psps");
         run_generate_psps(&GeneratePspsArgs {
+            call_satellites: false,
             reference: cohort.reference.clone(),
             catalog: Some(cohort.catalog.clone()),
             alignments: cohort.alignments.clone(),

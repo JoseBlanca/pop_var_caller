@@ -169,6 +169,7 @@ pub(crate) fn a_census_plan_over_selecting(
             max_str_bundle_len: DEFAULT_MAX_STR_BUNDLE_LEN,
             min_purity: DEFAULT_MIN_PURITY,
         },
+        setting: crate::run::RepeatGroundSetting::StrPaths,
     };
     let analysed = run_ground::analysed_regions(&request, &reference.contig_list())
         .expect("the whole reference");

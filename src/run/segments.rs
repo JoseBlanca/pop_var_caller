@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use crate::region_typing::{GenomeRegions, TypedRegion};
+use crate::region_typing::{GenomeRegions, TypedRegion, hand_satellites_to_the_generic_path};
 use crate::repeat_catalog::{RepeatCatalogError, RepeatCatalogHeader, StrRepeatCriteria};
 use crate::types::GenomeRegion;
 
@@ -21,7 +21,9 @@ use super::RunError;
 /// [`SegmentationInputs`] moved to a top-level home when the psp header started carrying it
 /// ([`crate::psp`]) — an interchange type both stages hold belongs to neither
 /// (`doc/devel/ng/impl_plan/run_driver_psp_mode.md`, Checkpoint A).
-pub use crate::segmentation_inputs::{RepeatGround, RepeatSorting, SegmentationInputs};
+pub use crate::segmentation_inputs::{
+    RepeatGround, RepeatGroundSetting, RepeatSorting, SegmentationInputs,
+};
 
 /// The run's segments, in genome order, beside the values they were computed from.
 ///
@@ -49,6 +51,9 @@ pub struct Segmentation {
     /// advances over the segments and the merge over these, and a run whose two halves
     /// disagreed about the ground would call positions no sample walked.
     analysed_regions: Vec<GenomeRegion>,
+    /// The satellite spans handed to the generic path, clipped to the analysed regions: empty
+    /// but under [`RepeatGround::CallSatellites`].
+    satellites_on_the_generic_path: Vec<GenomeRegion>,
 }
 
 impl Segmentation {
@@ -92,17 +97,26 @@ impl Segmentation {
     }
 
     /// The segmentation of `segments` over `analysed`, recorded as sorted under
-    /// `repeat_ground`.
+    /// `repeat_ground`, **with the setting applied**: under
+    /// [`RepeatGround::CallSatellites`] every satellite is handed to the generic path here
+    /// ([`hand_satellites_to_the_generic_path`]), so a segmentation recorded under that setting
+    /// cannot hold one.
     ///
-    /// The same promise as [`build`](Self::build): the caller cut `segments` under
-    /// `repeat_ground`, and only the caller can guarantee it.
+    /// The same promise as [`build`](Self::build) otherwise: the caller cut `segments` with the
+    /// catalog and criteria `repeat_ground` records, and only the caller can guarantee it.
     #[must_use]
     pub fn of_segments(
         segments: Vec<TypedRegion>,
         analysed: GenomeRegions,
         repeat_ground: RepeatGround,
     ) -> Self {
-        let analysed_regions = analysed.iter().collect();
+        let analysed_regions: Vec<GenomeRegion> = analysed.iter().collect();
+        let (segments, satellites_on_the_generic_path) = match repeat_ground {
+            RepeatGround::CallSatellites(_) => {
+                hand_satellites_to_the_generic_path(segments, &analysed_regions)
+            }
+            RepeatGround::StrPaths(_) | RepeatGround::GenericPathOnly => (segments, Vec::new()),
+        };
         Self {
             inputs: SegmentationInputs {
                 repeat_ground,
@@ -110,7 +124,25 @@ impl Segmentation {
             },
             segments,
             analysed_regions,
+            satellites_on_the_generic_path,
         }
+    }
+
+    /// The satellite spans this segmentation handed to the generic path, clipped to the analysed
+    /// regions and in genome order: empty but under `--call-satellites`.
+    #[must_use]
+    pub fn satellites_on_the_generic_path(&self) -> &[GenomeRegion] {
+        &self.satellites_on_the_generic_path
+    }
+
+    /// How many bases of satellite this segmentation handed to the generic path: zero but under
+    /// `--call-satellites`, which the run report states (`command_line.md` §4.4.1).
+    #[must_use]
+    pub fn satellite_bases_on_the_generic_path(&self) -> u64 {
+        self.satellites_on_the_generic_path
+            .iter()
+            .map(|span| span.len())
+            .sum()
     }
 
     /// What this segmentation was computed from — the operand of every compatibility check

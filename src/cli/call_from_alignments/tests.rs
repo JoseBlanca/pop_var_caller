@@ -298,6 +298,7 @@ fn an_existing_vcf_is_refused_unless_the_run_is_forced() {
 /// question.
 fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
     CallFromAlignmentsArgs {
+        call_satellites: false,
         reference: PathBuf::from("ref.fa"),
         catalog: None,
         alignments: vec![PathBuf::from("one.cram")],
@@ -379,6 +380,7 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let reference = directory.path().join("ref.fa");
     let args = CallFromAlignmentsArgs {
+        call_satellites: false,
         reference: reference.clone(),
         catalog: None,
         alignments: vec![directory.path().join("one.cram")],
@@ -598,6 +600,7 @@ fn a_cohort_on_disk() -> (
 ) {
     let cohort = crate::cli::test_fixtures::a_cohort_on_disk();
     let args = CallFromAlignmentsArgs {
+        call_satellites: false,
         reference: cohort.reference,
         catalog: Some(cohort.catalog),
         alignments: cohort.alignments,
@@ -1307,4 +1310,27 @@ fn a_paralog_target_that_is_not_a_fraction_is_refused_in_direct_mode_too() {
             "the run was refused after opening the output"
         );
     }
+}
+
+/// **`--call-satellites` is off unless given, and listed under *Advanced*** (`command_line.md`
+/// §4.4.1): a default run leaves satellites uncalled, and the option is one a person reaches for
+/// knowing what it gives up.
+#[test]
+fn call_satellites_is_off_unless_given_and_is_an_advanced_option() {
+    use clap::CommandFactory;
+
+    assert!(!args_of(&a_defaults_run()).call_satellites);
+    let mut asked = a_defaults_run();
+    asked.push("--call-satellites");
+    assert!(args_of(&asked).call_satellites);
+
+    let command = Cli::command();
+    let heading = command
+        .find_subcommand("call-from-alignments")
+        .expect("the subcommand exists")
+        .get_arguments()
+        .find(|argument| argument.get_id() == "call_satellites")
+        .expect("the option exists")
+        .get_help_heading();
+    assert_eq!(heading, Some("Advanced"));
 }

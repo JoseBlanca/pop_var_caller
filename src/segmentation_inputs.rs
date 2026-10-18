@@ -80,15 +80,21 @@ impl RepeatGround {
         }
     }
 
+    /// Which of the three settings this is, without what it sorted with.
+    #[must_use]
+    pub fn setting(&self) -> RepeatGroundSetting {
+        match self {
+            Self::StrPaths(_) => RepeatGroundSetting::StrPaths,
+            Self::CallSatellites(_) => RepeatGroundSetting::CallSatellites,
+            Self::GenericPathOnly => RepeatGroundSetting::GenericPathOnly,
+        }
+    }
+
     /// The setting's name as the command line and the psp header spell it: `str-paths`,
     /// `call-satellites` or `generic-path-only`.
     #[must_use]
     pub fn setting_name(&self) -> &'static str {
-        match self {
-            Self::StrPaths(_) => Self::STR_PATHS,
-            Self::CallSatellites(_) => Self::CALL_SATELLITES,
-            Self::GenericPathOnly => Self::GENERIC_PATH_ONLY,
-        }
+        self.setting().name()
     }
 
     /// The default setting's name, [`StrPaths`](Self::StrPaths).
@@ -97,6 +103,45 @@ impl RepeatGround {
     pub const CALL_SATELLITES: &'static str = "call-satellites";
     /// [`GenericPathOnly`](Self::GenericPathOnly)'s name, the option `--generic-path-only`.
     pub const GENERIC_PATH_ONLY: &'static str = "generic-path-only";
+}
+
+/// Which of the three settings for repeat ground a run was asked for — [`RepeatGround`] before
+/// the ground is sorted, when there is not yet a catalog to record.
+///
+/// What a command line says (`--call-satellites`, `--generic-path-only`, or neither) and what a
+/// command reading psps finds recorded in them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepeatGroundSetting {
+    /// Neither option: tracts and bundles to the STR paths, satellites not called.
+    #[default]
+    StrPaths,
+    /// `--call-satellites`: as the default, and satellites to the generic path.
+    CallSatellites,
+    /// `--generic-path-only`: every repeat to the generic path, and no catalog read.
+    GenericPathOnly,
+}
+
+impl RepeatGroundSetting {
+    /// The setting from the two options that choose it. The command line refuses both at once
+    /// before this is asked, so `--generic-path-only` is not weighed against the other.
+    #[must_use]
+    pub fn from_options(call_satellites: bool, generic_path_only: bool) -> Self {
+        match (call_satellites, generic_path_only) {
+            (_, true) => Self::GenericPathOnly,
+            (true, false) => Self::CallSatellites,
+            (false, false) => Self::StrPaths,
+        }
+    }
+
+    /// The setting's name as the command line and the psp header spell it.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::StrPaths => RepeatGround::STR_PATHS,
+            Self::CallSatellites => RepeatGround::CALL_SATELLITES,
+            Self::GenericPathOnly => RepeatGround::GENERIC_PATH_ONLY,
+        }
+    }
 }
 
 impl SegmentationInputs {
