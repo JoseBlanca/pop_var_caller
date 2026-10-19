@@ -17,6 +17,7 @@ of links holding the simulator's truth files and the callers' calls under the na
 
 import os
 import shlex
+import shutil
 
 from lib import arms, callers
 from lib.measure import run_commands
@@ -156,7 +157,7 @@ def _configuration(ctx, design, n_samples, depth):
         callsets[arm] = callset
 
     true_step, true_calls = _true_stutter_step(ctx, name, sim_dir, reference, catalog, callsets,
-                                               sample_names, base)
+                                               bams, confident, base)
     steps.append(true_step)
     hipstr_steps = [_hipstr_step(ctx, name, sim_dir, reference, bams, base, fixed)
                     for fixed in (False, True)]
@@ -166,14 +167,19 @@ def _configuration(ctx, design, n_samples, depth):
                  "ng_fitted": callsets["pvc_fitted"].path, "ng_true_stutter": true_calls}
     competitor_calls = {"gatk": callsets["gatk"].path, "freebayes": callsets["freebayes"].path,
                         "hipstr": hipstr_steps[0][1], "hipstr_fixed_stutter": hipstr_steps[1][1]}
-    steps.append(_score_step(ctx, name, "pvc", sim_dir, pvc_calls, base))
+    # Once pvc's calls are scored its psps are deleted: about 100 MB a sample at 30x, some 25 GB
+    # over the grid for every pvc commit. The true-stutter step remakes them if it must rerun.
+    steps.append(_score_step(ctx, name, "pvc", sim_dir, pvc_calls, base,
+                             prune=os.path.join(ctx.pvc_root(), name, "pvc_fitted", "psps")))
     steps.append(_score_step(ctx, name, "competitor", sim_dir, competitor_calls, base))
     return steps
 
 
-def _true_stutter_step(ctx, name, sim_dir, reference, catalog, callsets, samples, base):
+def _true_stutter_step(ctx, name, sim_dir, reference, catalog, callsets, bams, confident, base):
     """pvc given the simulator's own stutter: the defaults' parameters with the stutter tables
-    replaced (scripts/ng_str_stutter_true_parameters.py), over the fitted arm's psps."""
+    replaced (scripts/ng_str_stutter_true_parameters.py), over the fitted arm's psps — or over
+    psps it makes again, untimed, when scoring has already deleted those."""
+    samples = list(bams)
     step_name = f"{name}/pvc_true_stutter"
     calls = os.path.join(ctx.pvc_root(), step_name, "calls.vcf.gz")
     defaults_log = os.path.join(ctx.pvc_root(), name, "pvc_defaults", "pvc.log")
@@ -191,10 +197,19 @@ def _true_stutter_step(ctx, name, sim_dir, reference, catalog, callsets, samples
                 f"{q(defaults_log)} | sed '1d;$d' > {q(view)}/ng_defaults.parameters.toml "
                 f"&& python3 {q(script)} {q(view)}")
         run_commands([("true_parameters", prep)], os.path.join(d, "logs"))
-        psps = [os.path.join(psp_dir, f"{s}.psp") for s in samples]
+        source = psp_dir
+        if not all(os.path.exists(os.path.join(psp_dir, f"{s}.psp")) for s in samples):
+            source = os.path.join(d, "psps")
+            run_commands(callers.pvc_generate_psps(ctx, reference, catalog,
+                                                   {k: [v] for k, v in bams.items()}, confident, source,
+                                                   os.path.join(d, "logs")),
+                         os.path.join(d, "logs"), max_concurrent=ctx.threads)
+        psps = [os.path.join(source, f"{s}.psp") for s in samples]
         m = run_commands([callers.pvc_call_from_psps(ctx, reference, catalog, psps, calls,
                                                      os.path.join(d, "call.log"), parameters=params)],
                          os.path.join(d, "logs"))
+        if source != psp_dir:
+            shutil.rmtree(source)
         return {"measurement": m, "rows": time_rows(row_base, m, "call-from-psps")}
 
     step = Step(step_name, "pvc", action,
@@ -234,7 +249,7 @@ def _hipstr_step(ctx, name, sim_dir, reference, bams, base, fixed):
     return step, calls
 
 
-def _score_step(ctx, name, home, sim_dir, calls, base):
+def _score_step(ctx, name, home, sim_dir, calls, base, prune=None):
     """The driver's scorer over one side's callers, in a directory of links."""
     script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib",
                           "stutter_score_callers.py")
@@ -260,7 +275,10 @@ def _score_step(ctx, name, home, sim_dir, calls, base):
             args.append(f"{caller}={caller}.vcf.gz")
         run_commands([("score", f"python3 {q(script)} {q(view)} {' '.join(args)}")],
                      os.path.join(d, "logs"))
-        return {"rows": _rows(view, base, ctx)}
+        rows = _rows(view, base, ctx)
+        if prune and os.path.isdir(prune):
+            shutil.rmtree(prune)
+        return {"rows": rows}
 
     callers_for_attr = "pvc" if home == "pvc" else None
     attrs = {"depth": base["depth"], "home": home}
