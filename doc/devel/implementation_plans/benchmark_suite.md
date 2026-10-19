@@ -351,8 +351,10 @@ of §4.6, from pvc fitted, pvc with `--defaults`, and GATK, so it runs no caller
 
 **How the calls are compared.** Both callers' VCFs are normalised the same way: left-aligned,
 multi-allelic records split, and complex records decomposed (`bcftools norm -m -any -a`). The unit
-counted is one sample's genotype at one site. Sites are counted separately for SNPs and indels, and
-for inside and outside the STR segments pvc types.
+counted is one sample's genotype at one site. Sites are counted separately for SNPs and indels.
+The split into inside and outside the STR segments, planned here, is not built. It needs pvc's typed
+segments for the tomato regions, made the way §4.4 makes HG002's, and can be added if the README
+wants that figure.
 
 **What is reported per sample-site:**
 - both callers give the same genotype;
@@ -503,29 +505,32 @@ benchmarks/suite/run_suite.sh --summary-only         # rebuild summary.md from r
 - `--data-root` points at the checkout that holds `benchmarks/`. It defaults to this checkout; from a
   worktree it must be the main checkout.
 
-**Files:**
+**Files.** As built, the per-benchmark code and the helpers are Python modules run inside the
+container. The first draft planned shell scripts.
 
 ```
 benchmarks/suite/
-  run_suite.sh            host side: parse options, build pvc, record the machine, start each benchmark
-  fetch_tools.sh          the pinned RTG Tools download
-  bench/                  one script per benchmark: giab_panel.sh, giab_trio.sh, hg002_5mb.sh,
-                          hg002_tr.sh, stutter_sim.sh, speed.sh, tomato_agreement.sh,
-                          external_chr22.sh
+  run_suite.sh       host side: options, the machine's description, the host-load sampler, the container
+  suite.py           inside the container: builds pvc and the simulator, runs the steps, writes the table
+  fetch_tools.sh     the pinned RTG Tools download
+  bench/             one module per benchmark: giab_panel, giab_trio, hg002_5mb, hg002_tr, stutter_sim,
+                     speed, tomato_agreement, external_chr22 (and smoke, the frame test)
   lib/
-    callers.sh            how each caller is run, so every benchmark runs them the same way
-    steps.sh              the step runner of §6.1: markers, temporary directories, the stop file
-    host_load.sh          the host-side load recorder of §6.1
-    measure.py            time and memory (§3.3)
-    vcfeval_score.sh      §5.1
-    mendelian.sh          §4.2
-    agreement.py          §4.7
-    cache.sh              the reuse fingerprint
-    summarise.py          results.tsv → summary.md
-  README.md               how to run it, what each benchmark measures, and how long it takes
+    steps.py         the step runner of §6.1: markers, fingerprints, the stop file
+    measure.py       time and memory (§3.3)
+    callers.py       how each caller is run; arms.py builds the four arms of §4.1 from it
+    inputs.py        region lists, depth ladders, indexed truth copies
+    vcfeval.py       §5.1
+    mendelian.py     §4.2
+    agreement.py     §4.7
+    stutter_score_callers.py, hipstr_qual.py   adapters for §4.5's scorer and HipSTR's QUAL
+    results.py       results.tsv and summary.md
+  README.md          how to run it, what each benchmark measures, and how long it takes
 ```
 
 ## 7. Build order
+
+*All nine steps are built and pass their slices (2026-10-19).*
 
 There is one commit per step. Each step is tested on a small slice: one region (or one 100 kb
 stretch), one depth, and one sample where the benchmark allows it. Every arm and the scorer must run
@@ -567,26 +572,46 @@ end to end and put rows in the table. No full run is launched.
 There are two kinds of run. **The first run** makes the inputs and runs every competitor and pvc.
 **A refresh** for a new pvc commit runs pvc alone, on the stored inputs, and scores it.
 
-All times are at 6 cores.
+All times are at 6 cores. They were redone after the slice tests, from those tests, the freebayes
+memory measurement of step 7, and the times recorded in earlier reports for the same data.
 
 | benchmark | first run | refresh (pvc only) | disk, first run |
 |---|---:|---:|---:|
-| GIAB per-sample panel | 2 h | ½ h | 3 GB |
-| GIAB trio | 1 h | ¼ h | 2 GB |
-| HG002, 5 Mb | 1 h | ¼ h | 2 GB |
-| HG002 tandem repeats | 4 h | 1 h | 3 GB |
-| simulated stuttering grid | 16 h | 2½ h | 35 GB |
-| speed, tomato | 4 h | ¾ h | 10 GB |
+| GIAB per-sample panel | 1 h | ¾ h | 2 GB |
+| GIAB trio | ½ h | ¼ h | 1 GB |
+| HG002, 5 Mb | ½ h | ¼ h | 1 GB |
+| HG002 tandem repeats | 2¾ h | 1½ h | 3 GB |
+| simulated stuttering grid | 12½ h | 2¼ h | 38 GB |
+| speed, tomato | 1½ h | ½ h | 5 GB |
 | tomato agreement | minutes | minutes | — |
-| **total** | **about 28 h** | **about 5 h** | **about 55 GB** |
+| **total** | **about 19 h** | **about 5½ h** | **about 50 GB** |
 
-- **Where the first run's time goes.** Most of it is the competitors and the simulation, which are
-  made once.
-- **Where a refresh's time goes.** Mostly pvc's fit and calls on the 50-sample simulated cohorts.
-- **Uncertainty.** These figures are scaled from the 18-core estimate of the first draft, by about
-  1⅓, because the steps that run several processes at once get a third as many cores. The first run
-  could fall anywhere from 20 to 40 hours, and a refresh from 3 to 8. The slice tests give
-  per-region and per-sample rates, and both estimates are redone from them before any full run.
+**How the larger figures were reached:**
+
+- **GIAB panel.** 21 sample-depths at about 3 minutes each: pvc's fitted arm 1 to 2 minutes, its
+  defaults 10 to 30 seconds, GATK under a minute, freebayes seconds, and 25 seconds of vcfeval. The
+  slice's pvc steps took 10 s (defaults) and 35 s (fitted) on 26 kb, which is mostly fixed start-up
+  cost.
+- **Tandem repeats.** GATK is about 30 minutes over the seven depths, scaled from its 10 minutes at
+  4 threads on the 5 Mb set at 300×. HipSTR is about 8 minutes in total, from its July logs. The
+  per-tract scorer is the least known: 2 seconds for 200 regions in the slice, so about 3 minutes
+  per caller and depth over 50,000. That is 1½ hours over 28 call sets, and most of a refresh.
+- **Simulated grid.** Per 50-sample run, about 1½ hours: simulating and mapping 15 minutes, GATK 20,
+  freebayes 15, HipSTR's two runs 25, pvc 10 and scoring 8. 60× takes about 1.7 times as long and
+  5× half as long. The eight one-sample runs take about 10 minutes each. GATK and HipSTR come from
+  the first pass's recorded times (19 and 10 minutes at 30×). freebayes is scaled from the slice.
+  pvc's fit is the new penalised one, measured in minutes on 59 tomato samples over 32 Mb.
+- **Speed.** freebayes on 63 accessions about 30 minutes: one process over 300 kb took 384 s and
+  1.45 GB, so 6 at once fit easily in 32 GB. GATK's 63 GVCFs about 30 minutes, from the
+  188 CPU-minutes recorded in June. pvc about 20 minutes over the three sizes.
+
+**Disk.** The simulated runs' alignments are most of it (0.9 GB at 50 samples and 5× up to 8.9 GB
+at 60×, both designs). A refresh adds about 5 GB, because the simulated runs' psps (about 25 GB a
+commit) are deleted once pvc's calls are scored.
+
+**Uncertainty.** The first run could fall anywhere from 14 to 30 hours, and a refresh from 3 to 8.
+The two least known figures are freebayes on the simulated 50-sample runs and the per-tract scorer
+on the 50,000 tandem-repeat regions.
 - **Running it in parts.** Either kind can be stopped and resumed as often as needed (§6.1). One
   benchmark at a time also works, through `--only`.
 - **Space.** The disk holds 487 GB free.

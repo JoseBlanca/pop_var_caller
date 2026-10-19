@@ -120,6 +120,11 @@ def main():
             code = 130
         ctx.log(f"{runner.done_count} steps run, {runner.skipped_count} already done")
     rows = build_table(ctx)
+    latest = os.path.join(ctx.results_root, "latest")
+    if os.path.islink(latest):
+        os.remove(latest)
+    if not os.path.exists(latest):
+        os.symlink(os.path.relpath(ctx.pvc_root(), ctx.results_root), latest)
     path = write_summary(ctx, rows, BENCHMARKS)
     ctx.log(f"{len(rows)} rows in {os.path.join(ctx.pvc_root(), 'results.tsv')}; summary {path}")
     return code
