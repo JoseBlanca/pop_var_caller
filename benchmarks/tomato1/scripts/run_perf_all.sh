@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Run the tomato1 performance benchmark suite that feeds perf_dashboard.py
-# (freebayes and GATK). The production caller's scripts (`perf_ours_*`) were
-# deleted with that caller in promotion Milestone D; the dashboard still reads
-# the results they wrote.
+# Run the tomato1 performance measurements that feed perf_dashboard.py
+# (freebayes and GATK, June 2026, 4 threads, up to 50 samples). Superseded for
+# every figure quoted about pvc by benchmarks/suite/ (`run_suite.sh --only speed`),
+# which times pvc, GATK and freebayes on all 63 accessions at 6 threads. The
+# deleted caller's scripts (`perf_ours_*`) went with it on 2026-09-13; the
+# dashboard still reads the results they wrote.
 #
 # Split by where each tool lives:
 #   - HOST  (uv run --script): freebayes.

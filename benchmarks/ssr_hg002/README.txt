@@ -2,11 +2,25 @@
 ssr_hg002 — GIAB HG002 Tandem-Repeat benchmark (SSR gold standard, single sample)
 ================================================================================
 
+CURRENT STATUS (2026-10-19)
+---------------------------
+The data below — truth, regions, BAM ladder — are current. The caller this file was
+written for (ssr-catalog / ssr-pileup / ssr-call) was deleted on 2026-09-13: its
+catalog/, its run sketch ("HOW TO RUN"), and the headline numbers under "RESULTS"
+describe that caller and must not be quoted. pvc, HipSTR and GATK are run and scored
+on this benchmark by the benchmark suite:
+
+  benchmarks/suite/run_suite.sh --only hg002_tr
+
+which writes results.tsv and summary.md under benchmark_results/ (see
+benchmarks/suite/README.md).
+
+
 WHAT THIS IS
 ------------
 The GIAB HG002 Tandem-Repeat benchmark v1.0.1 (GRCh38), sliced to a 50,000-region
-"Tier" subset, packaged so we can score the SSR caller (ssr-catalog / ssr-pileup /
-ssr-call) against an ORTHOGONAL, assembly-based truth set.
+"Tier" subset, packaged so we can score STR genotype callers against an ORTHOGONAL,
+assembly-based truth set.
 
 It is ONE human sample (HG002), so it is a genuine gold standard for single-sample
 SSR genotyping accuracy, but it does NOT exercise the cohort machinery. See
@@ -21,7 +35,7 @@ allele failure mode — which is exactly what makes it usable as truth.
 DIRECTORY LAYOUT
 ----------------
   README.txt                     this file
-  catalog/                       genome-wide SSR locus catalog (OUR ssr-catalog output; INPUT)
+  catalog/                       the deleted caller's SSR locus catalog (not used by pvc)
   truth/                         GIAB assembly-based truth genotypes (GOLD; VCF)
   regions/                       benchmark confident regions (scoring mask; BED)
   bam/<cov>x/                    HG002 short reads at a ladder of coverages (INPUT reads)
@@ -76,7 +90,7 @@ bam/{50,30,20,15,10,5}x/HG002_TR_v1.0.1_Tier_<cov>x.bam (+ .bai)
   "300x" label is nominal. Subsample fractions are cov/288.32.)
 
 
-HOW TO RUN THE PIPELINE (sketch)
+HOW TO RUN THE PIPELINE (sketch) — THE DELETED CALLER'S; use benchmarks/suite instead
 --------------------------------
   REF=../giab/ref_genome_GRCh38/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna
   CAT=catalog/CA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.cat
@@ -135,7 +149,8 @@ Truth-matching note: GIAB anchors an STR indel at the base BEFORE the tract
 interval by the longest allele before overlapping it with a catalog locus —
 without that, ~1000 correct calls per caller mis-score as false positives.
 
-Headline (DETECTION: did the caller flag a length change; period-aware truth,
+Headline — THE DELETED CALLER ("ours"), 2026-07-09; do not quote.
+(DETECTION: did the caller flag a length change; period-aware truth,
 2,653 truth-positive loci of 13,272). Recall / precision at 300x -> 30x -> 10x -> 5x:
   ours       R 0.72 -> 0.55 -> 0.10 -> 0.003    P ~0.94 at every depth
   HipSTR     R 0.88 -> 0.87 -> 0.54 -> 0.17     P ~0.91

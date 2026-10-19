@@ -26,21 +26,25 @@ Runners and dashboards (benchmarks/giab/src/)
 Three callers are run over the per_sample dataset, each restricted to the
 sample's own confident BED, and scored against that sample's GIAB truth VCF:
 
-- run_ours_per_sample.sh   the production caller (pileup -> .psp -> var-calling)
 - run_freebayes_per_sample.sh
-- run_ng_per_sample.sh     ng, the experimental caller, alignments -> VCF in
-                           one process
+- run_ng_per_sample.sh     pvc, alignments -> VCF in one process
+
+(`run_ours_per_sample.sh`, the deleted caller's runner, went with it on
+2026-09-13.) The figures quoted about pvc on this panel, scored by vcfeval for
+pvc, GATK and freebayes alike, come from the benchmark suite:
+`benchmarks/suite/run_suite.sh --only giab_panel,giab_trio` (see
+benchmarks/suite/README.md). The scripts here score by allele match and are
+kept for the older analyses.
 
 Each takes a coverage tier and an optional sample list, e.g.
 
     benchmarks/giab/src/run_ng_per_sample.sh 30x HG002
 
-Two things to hold against ng's numbers, both of which cost it recall and not
-precision. It does not build loci inside tandem repeats yet, so a truth variant
-inside one is unreachable for it and scores as a false negative. And nothing is
-fitted: no command writes a fitted parameters file yet, so every run is
-`--defaults`, with no base-quality calibration, contamination or inbreeding
-coefficient.
+Until mid-September pvc did not call inside tandem repeats and nothing was
+fitted, and the older figures recorded below and in the reports of that time
+carry both limits. Both are gone: pvc calls repeat tracts on its STR path, and
+`pvc estimate-parameters` writes a fitted parameters file (the suite runs pvc
+both with `--defaults` and fitted).
 
 **How much ground the first of those costs changed on 2026-09-02, and by about
 seven times.** A run used to ask the repeat catalog with the floors the *file*

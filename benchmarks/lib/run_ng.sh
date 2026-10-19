@@ -18,13 +18,12 @@
 #     `<reference>.repeats.parquet`; where the reference sits on a read-only
 #     mount, set NG_CATALOG to somewhere writable. The catalog is built once
 #     if missing (about 100 s on GRCh38, at one thread).
-#   * It needs either a fitted parameters file or `--defaults`. No command
-#     writes a fitted file yet, so the default here is `--defaults`: no
-#     base-quality calibration, no contamination, no inbreeding.
-#   * It does NOT call inside tandem repeats. Every repeat tract in the BED is
-#     counted as ground it cannot speak for and named in the run report, which
-#     is in pvc's own log beside the VCF (`<name>.pvc.log`) — read it before
-#     reading the recall.
+#   * It needs either a fitted parameters file or `--defaults`. The default
+#     here is `--defaults`; set NG_PARAMETERS to a file written by
+#     `pvc estimate-parameters` to call with fitted parameters.
+#   * The figures quoted about pvc come from benchmarks/suite/, which runs pvc
+#     both ways and scores every caller with vcfeval; this runner is kept for
+#     the older analyses.
 #
 # Unlike run_ours.sh, ng takes a BED, so it is restricted to the benchmark
 # regions exactly as GATK and freebayes are.
