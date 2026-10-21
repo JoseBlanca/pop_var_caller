@@ -41,11 +41,12 @@ use crate::calling::quality::{
     ArtifactTestCounts, SiteQualityPrior, score_best_genotype, score_uncorrected_site_quality,
 };
 use crate::calling::{
-    CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture, ErrorSpreadTable,
+    CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture,
     ExpectedAlleleCopies, FrozenParameters, GenericLocusSample, GenericSampleEvidence,
     GenotypeTable, LocusEvidence, LocusInference, ReadGroupParameters, RepeatTractProvenance,
     SampleGenotypeCall, SampleScoringBuffers, SsrLocusShape, SsrSampleEvidence,
-    fill_batch_allele_copies, fill_contaminant_allele_frequencies, fill_error_spreads,
+    WrongReadChargeTable, fill_batch_allele_copies, fill_contaminant_allele_frequencies,
+    fill_wrong_read_charges,
 };
 use crate::float;
 use crate::locus_generation::SsrBundleDetail;
@@ -1671,7 +1672,7 @@ fn tract_evidence_of<'a>(evidence: &'a LocusEvidence<'a>) -> TractEvidence<'a> {
 /// **On the SNP/indel path, the emissions and nothing else.**
 /// [`assemble_genotype_likelihood_table`] then folds them into a per-genotype row, once per
 /// locus or once per pass depending on contamination. Three things are filled and none of them
-/// reads a frequency: the locus's error-spread table, which is a property of the candidate
+/// reads a frequency: the locus's wrong-read charge table, which is a property of the candidate
 /// sequences and of the genotype being scored; each sample's charged error per observation; and
 /// its compatibility verdict per `(partial read, candidate)`.
 ///
@@ -1784,7 +1785,7 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
     // **Once per locus rather than once per sample**: how far an allele's own error mass is
     // spread across the locus's others depends on the candidate sequences and on nothing a
     // sample showed.
-    fill_error_spreads(candidates, genotypes, scratch.error_spreads_mut());
+    fill_wrong_read_charges(candidates, genotypes, scratch.wrong_read_charges_mut());
 
     scratch.charge_emission_build();
     let calibration = ReadGroupCalibrations::over(parameters.calibration_by_read_group());
@@ -2265,7 +2266,7 @@ fn assemble_genotype_likelihood_table<SsrEmissionScratch>(
             &sample,
             genotypes,
             ReadGroupParameters::new(calibration, mixture),
-            ErrorSpreadTable::over(buffers.error_spreads, genotypes),
+            WrongReadChargeTable::over(buffers.wrong_read_charges, genotypes),
             buffers.row_scratch,
             buffers.genotype_likelihoods,
         );

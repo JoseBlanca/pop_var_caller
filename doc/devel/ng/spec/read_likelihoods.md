@@ -420,6 +420,10 @@ scale  =  ───────────────────────�
           geometric mean, over that group's admitted reads, of ε as minted
 ```
 
+**Except an error that only an indel could have made**, which §3.5's 2026-10-21 amendment charges
+at the minted error, unscaled: the fitted rate is learned from substitutions and says nothing about
+indels.
+
 > **Written per read, applied per observation — the caller never holds a per-read `ε` at all.**
 > The merge keeps, for each allele in each read group at each locus, how many reads support it and
 > the **sum of their log error probabilities**; the reads themselves are gone from there on (§1.4).
@@ -665,7 +669,7 @@ them side by side is the quickest way to see what is genuinely new here and what
 | | freebayes, default branch | this document |
 |---|---|---|
 | a read the genotype explains | `log(k_a / P)`, no `(1 − ε)` factor | **the same**, and §3.3's first approximation is the same omission |
-| a read the genotype cannot explain | `log[ 1 − (1 − ε_base)(1 − ε_map) ]` | `log[ max(ε_base, ε_map) ] + log scale − log m` |
+| a read the genotype cannot explain | `log[ 1 − (1 − ε_base)(1 − ε_map) ]` | `log[ max(ε_base, ε_map) ] + log scale − log m` (no `log scale` for an indel error, §3.5) |
 | combining base and mapping error | a **sum** — the read is wrong if either is | the **worse of the two**, which is production's mint |
 | which base's quality, on a multi-base allele | the **average** over the allele's bases, and the **minimum** across alleles merged into one haplotype ([`Allele.cpp:158`](../../../../freebayes/src/Allele.cpp), [`AlleleParser.cpp:3154`](../../../../freebayes/src/AlleleParser.cpp)) | the **minimum** across the whole locus window ([`open_record.rs:944`](../../../../src/pileup/walker/open_record.rs)) |
 | where the error mass goes | nowhere — the full `ε` is charged | divided by 3 for a plain substitution (§3.5) |
@@ -803,7 +807,10 @@ reading is clearly right and the scaled charge is the one already validated. The
 property of the allele pair, computed beside `m` once per `(allele, genotype)`.
 
 **Ends of the range.** Nothing is estimated, so the rule behaves the same at one sample and at a
-thousand, at 3 reads a position and at 300. A `--defaults` run, whose scale is 1, is byte-identical
+thousand, at 3 reads a position and at 300. **It holds at any scale, below one as well as above**:
+the argument is that the fitted rate carries no information about indels in either direction, so a
+read group whose substitutions come out better than its qualities claim does not make its indel
+errors rarer either. (Every fit seen so far is above one: 2.7 to 19.6 on GIAB and tomato.) A `--defaults` run, whose scale is 1, is byte-identical
 to the formula before this amendment. On the three GIAB samples it restored the defaults' generic
 indel counts at every depth from 5× to 300× and left every SNP count at the fitted run's; on tomato
 at about 3× it moved 46 generic indel records and 43 genotypes among 6,888, with no truth set to

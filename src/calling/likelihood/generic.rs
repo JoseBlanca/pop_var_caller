@@ -35,19 +35,21 @@ pub const ERROR_SPREAD_BASES: f64 = 3.0;
 pub const NO_ERROR_SPREAD: f64 = 1.0;
 
 /// **How a read the genotype cannot explain is charged**, at one `(genotype, observed allele)`
-/// pair — one cell of the table [`fill_error_spreads`] fills.
+/// pair — one cell of the table [`fill_wrong_read_charges`] fills.
 ///
 /// Two questions decide the charge and both are answered by the allele pair, never by the read:
 /// what the charge is divided by (`m`, spec §3.5) and whether the read group's calibration
 /// scale applies (spec §3.5's 2026-10-21 amendment). They are one value rather than two
 /// tables so that they cannot be filled from different loci or read at different strides.
 ///
-/// **Why the scale skips an indel.** The scale is the parameters fit's error rate over the
-/// reads' mean minted error (spec §3.2), and that rate is learned almost wholly from
-/// substitutions. Indel errors are far rarer: on HG002 at 300× a read shows an indel the sample
-/// does not carry 0.4 to 13 times in 10,000 on ordinary ground, while a fitted scale of 6 to 14
-/// lifts the charge to 30 to 95 in 10,000 and a fitted run misses the indels whose reads it
-/// explains away. So an indel error is charged the read's own minted error.
+/// **Why the scale skips an indel.** The scale is the parameter pre-pass's fitted error rate
+/// over the reads' mean minted error (spec §3.2), and that rate is learned almost wholly from
+/// substitutions, so it says nothing about indel errors in either direction. On HG002 at 300× a
+/// read shows an indel the sample does not carry 0.4 to 13 times in 10,000 on the SNP/indel
+/// path's ground (no repeat up to a 5-copy dinucleotide), while a fitted scale of 6 to 14 lifts
+/// the charge to 30 to 95 in 10,000 and a fitted run misses the indels whose reads it explains
+/// away. So an indel error is charged the read's own minted error, whatever the scale — below
+/// one as well as above, where the charge is the `--defaults` one either way.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum WrongReadCharge {
     /// The observation differs from **every** carried allele by a substitution at exactly one
@@ -135,7 +137,7 @@ impl WrongReadCharge {
 ///
 /// `out` is `genotype_count × allele_count`, **row-major by genotype** — the same shape and the
 /// same order as [`GenotypeTableView::genotype_allele_counts`], so a reader holding one row of
-/// counts holds the matching row of spreads at the same offset. [`ErrorSpreadTable`] is
+/// counts holds the matching row of spreads at the same offset. [`WrongReadChargeTable`] is
 /// the one way to read it, and it carries the stride so no caller has to supply one.
 ///
 /// # Panics
@@ -150,9 +152,9 @@ impl WrongReadCharge {
 /// **The length check is an equality and not "at least enough", which matters twice over.** A
 /// longer buffer leaves its tail unwritten, so every genotype past the first reads a slot the
 /// fill never touched — a real number and a wrong one. And it is what makes
-/// [`ErrorSpreadTable`]'s own bound meaningful: a longer table admits a genotype index that
+/// [`WrongReadChargeTable`]'s own bound meaningful: a longer table admits a genotype index that
 /// should have been out of range.
-pub fn fill_error_spreads(
+pub fn fill_wrong_read_charges(
     alleles: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     out: &mut [WrongReadCharge],
@@ -177,7 +179,7 @@ pub fn fill_error_spreads(
     assert_eq!(
         out.len(),
         genotypes.genotype_count() * allele_count,
-        "the error-spread table needs one entry per (genotype, allele) — {} genotypes × {} alleles \
+        "the wrong-read charge table needs one entry per (genotype, allele) — {} genotypes × {} alleles \
          = {}, not {}",
         genotypes.genotype_count(),
         allele_count,
@@ -229,7 +231,7 @@ pub fn fill_error_spreads(
     }
 }
 
-/// A filled error-spread table, with the stride it was filled at.
+/// A filled wrong-read charge table, with the stride it was filled at.
 ///
 /// **The stride travels with the buffer rather than being handed in at each lookup, and that
 /// is the whole reason this type exists.** An accessor taking `(values, allele_count, genotype,
@@ -247,13 +249,13 @@ pub fn fill_error_spreads(
 ///
 /// [`CandidateAlleles::bases_of`]: super::super::CandidateAlleles::bases_of
 #[derive(Copy, Clone, Debug)]
-pub struct ErrorSpreadTable<'a> {
+pub struct WrongReadChargeTable<'a> {
     values: &'a [WrongReadCharge],
     allele_count: usize,
 }
 
-impl<'a> ErrorSpreadTable<'a> {
-    /// Wrap a buffer [`fill_error_spreads`] filled, against the genotype table it was
+impl<'a> WrongReadChargeTable<'a> {
+    /// Wrap a buffer [`fill_wrong_read_charges`] filled, against the genotype table it was
     /// filled for.
     ///
     /// **The genotype view is the argument rather than a bare stride**, so the two dimensions
@@ -269,7 +271,7 @@ impl<'a> ErrorSpreadTable<'a> {
         assert_eq!(
             values.len(),
             genotypes.genotype_count() * genotypes.allele_count(),
-            "an error-spread table for {} genotypes over {} alleles holds {} entries, not {}",
+            "an wrong-read charge table for {} genotypes over {} alleles holds {} entries, not {}",
             genotypes.genotype_count(),
             genotypes.allele_count(),
             genotypes.genotype_count() * genotypes.allele_count(),
@@ -290,7 +292,7 @@ impl<'a> ErrorSpreadTable<'a> {
     /// row 4 of a triallelic diploid table and row 4 of a tetraploid one are different
     /// genotypes, so an index from another shape must not quietly resolve.
     #[must_use]
-    pub fn spreads_for(&self, genotype: GenotypeIdx) -> Option<&'a [WrongReadCharge]> {
+    pub fn charges_for(&self, genotype: GenotypeIdx) -> Option<&'a [WrongReadCharge]> {
         let start = (genotype.get() as usize).checked_mul(self.allele_count)?;
         self.values.get(start..start + self.allele_count)
     }
@@ -310,7 +312,7 @@ impl<'a> ErrorSpreadTable<'a> {
             "allele {allele} is past the {} this locus is called over",
             self.allele_count
         );
-        let row = self.spreads_for(genotype).unwrap_or_else(|| {
+        let row = self.charges_for(genotype).unwrap_or_else(|| {
             panic!(
                 "genotype {} is past the {} this table was filled for",
                 genotype.get(),
@@ -331,7 +333,7 @@ impl<'a> ErrorSpreadTable<'a> {
     /// # Panics
     ///
     /// **In release as well as debug**, on an allele this locus is not called over.
-    pub fn spreads_of(&self, allele: AlleleId) -> impl Iterator<Item = WrongReadCharge> + use<'a> {
+    pub fn charges_of(&self, allele: AlleleId) -> impl Iterator<Item = WrongReadCharge> + use<'a> {
         let allele = usize::from(allele.get());
         assert!(
             allele < self.allele_count,
@@ -649,7 +651,10 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 ///
 /// **A read either shows something the genotype can produce, in which case it is charged only
 /// for which copy it came from, or it does not, in which case it is charged for being wrong** —
-/// that is `own(o | g)`, `k_a/P` on the first branch and `ε̄/m` on the second. Beside it sits the
+/// that is `own(o | g)`, `k_a/P` on the first branch and `ε̄/m` on the second — `ε̄` scaled by the
+/// read group's calibration, except where every carried allele is one indel away
+/// ([`WrongReadCharge::OneIndelAway`], spec §3.5 amended 2026-10-21), where it is the unscaled
+/// minted error. Beside it sits the
 /// chance the read is not this individual's at all: `c` of this read group's reads came from
 /// somebody else, and `q(o)` is how often that somebody else shows the allele this observation
 /// shows. `q_sum_other` is the same number in every row so it cancels when the caller
@@ -660,7 +665,8 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 ///
 /// With a `ContaminationMixture` of none the mixture is `1 · own(o | g) + 0`, which is
 /// `own(o | g)` bit for bit, and the row computes spec §3.3. It does not compute it *bitwise*:
-/// §3.3 charges a wrong read `q_sum + n·(log scale − log m)` in log space where this takes one
+/// §3.3 charges a wrong read `q_sum + n·(log scale − log m)` in log space (no `log scale` for an
+/// indel error) where this takes one
 /// logarithm of `ε̄/m` in probability space, and `ε̄` is `exp(q_sum/n)` by construction — so the
 /// two forms differ by an `exp`/`log` round trip, a few units in the last place.
 /// `tests::the_mixture_at_no_contamination_is_the_plain_formula` measures it across the sweep.
@@ -746,7 +752,7 @@ pub fn genotype_log_likelihood_row(
     alleles: &CandidateAlleles,
     genotypes: &GenotypeTableView<'_>,
     read_groups: super::ReadGroupParameters<'_>,
-    error_spreads: ErrorSpreadTable<'_>,
+    wrong_read_charges: WrongReadChargeTable<'_>,
     scratch: &mut super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
@@ -761,7 +767,7 @@ pub fn genotype_log_likelihood_row(
         evidence,
         genotypes,
         read_groups,
-        error_spreads,
+        wrong_read_charges,
         scratch,
         out,
     );
@@ -781,6 +787,8 @@ pub fn genotype_log_likelihood_row(
 ///
 /// - **per observation**, the charged error `ε̄` — the geometric mean of its reads' own error
 ///   probabilities, scaled by the read group's calibration. It reads no frequency;
+/// - **per complete observation**, the same geometric mean **without** the scale — what an
+///   indel error is charged (spec §3.5, amended 2026-10-21);
 /// - **per `(partial read, candidate)`**, whether that allele could have produced that read.
 ///   This is the byte comparison, and it is the reason the split is worth making: without a
 ///   cache surviving the loop it is redone at every pass.
@@ -884,7 +892,7 @@ pub fn assemble_genotype_log_likelihood_row(
     evidence: &super::GenericSampleEvidence<'_>,
     genotypes: &GenotypeTableView<'_>,
     read_groups: super::ReadGroupParameters<'_>,
-    error_spreads: ErrorSpreadTable<'_>,
+    wrong_read_charges: WrongReadChargeTable<'_>,
     scratch: &super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
@@ -918,11 +926,11 @@ pub fn assemble_genotype_log_likelihood_row(
         evidence.partials.len()
     );
     assert_eq!(
-        error_spreads.allele_count(),
+        wrong_read_charges.allele_count(),
         allele_count,
-        "the error-spread table is for {} alleles and this genotype table for {allele_count}, so \
+        "the wrong-read charge table is for {} alleles and this genotype table for {allele_count}, so \
          one of them belongs to a different locus",
-        error_spreads.allele_count()
+        wrong_read_charges.allele_count()
     );
     // **The genotype count as well as the stride**, because the inner loop walks a column by
     // striding and `zip` stops at the shorter of the two: a table filled at another ploidy
@@ -931,11 +939,11 @@ pub fn assemble_genotype_log_likelihood_row(
     // `0.0` against its own `−0.863`, and won. (Found by C1's review; the check was missing
     // from B2, which added the stride check beside it.)
     assert_eq!(
-        error_spreads.genotype_count(),
+        wrong_read_charges.genotype_count(),
         genotype_count,
-        "the error-spread table was filled for {} genotypes and this row is over \
+        "the wrong-read charge table was filled for {} genotypes and this row is over \
          {genotype_count}, so one of them belongs to a different ploidy",
-        error_spreads.genotype_count()
+        wrong_read_charges.genotype_count()
     );
     // **Both halves of the mixture are checked against what they index, and both are checked
     // here rather than per observation** — which is what makes `contaminant_frequency_of` and
@@ -1023,7 +1031,7 @@ pub fn assemble_genotype_log_likelihood_row(
         // term. A bounds-checked accessor per `(observation, genotype)` would put a
         // `checked_mul` and a formatting closure inside the loop.
         let carried_copies = counts[allele..].iter().step_by(allele_count);
-        let spreads = error_spreads.spreads_of(observation.allele);
+        let spreads = wrong_read_charges.charges_of(observation.allele);
 
         for ((slot, &copies), charge) in out.iter_mut().zip(carried_copies).zip(spreads) {
             slot.0 += reads
@@ -1163,18 +1171,21 @@ mod tests {
         GenotypeTable::build(Ploidy::try_new(2).expect("two is a ploidy"), allele_count)
     }
 
-    /// Fill the table, so a test reads it through [`ErrorSpreadTable`] rather than
+    /// Fill the table, so a test reads it through [`WrongReadChargeTable`] rather than
     /// open-coding the stride.
     fn spreads(alleles: &CandidateAlleles, table: &GenotypeTable) -> Vec<WrongReadCharge> {
         let view = table.view();
         let mut out = vec![WrongReadCharge::default(); view.genotype_count() * alleles.len()];
-        fill_error_spreads(alleles, &view, &mut out);
+        fill_wrong_read_charges(alleles, &view, &mut out);
         out
     }
 
     /// The filled buffer, read through the type that carries its stride.
-    fn table_over<'a>(out: &'a [WrongReadCharge], table: &GenotypeTable) -> ErrorSpreadTable<'a> {
-        ErrorSpreadTable::over(out, &table.view())
+    fn table_over<'a>(
+        out: &'a [WrongReadCharge],
+        table: &GenotypeTable,
+    ) -> WrongReadChargeTable<'a> {
+        WrongReadChargeTable::over(out, &table.view())
     }
 
     /// Which genotype index carries exactly these copies, so a test can name a genotype by what
@@ -1421,7 +1432,7 @@ mod tests {
                 // row function walk a genotype's spreads beside its copy counts.
                 assert_eq!(
                     table_over(&out, &table)
-                        .spreads_for(GenotypeIdx(genotype as u32))
+                        .charges_for(GenotypeIdx(genotype as u32))
                         .expect("the table holds this genotype")[observed]
                         .divisor(),
                     expected
@@ -1439,7 +1450,7 @@ mod tests {
         let tetraploid = GenotypeTable::build(Ploidy::try_new(4).expect("four is a ploidy"), 3);
         let view = tetraploid.view();
         let mut out = vec![WrongReadCharge::default(); view.genotype_count() * 3];
-        fill_error_spreads(&alleles, &view, &mut out);
+        fill_wrong_read_charges(&alleles, &view, &mut out);
 
         let three_ref_one_deletion = genotype_carrying(&tetraploid, &[3, 0, 1]);
         let four_ref = genotype_carrying(&tetraploid, &[4, 0, 0]);
@@ -1471,7 +1482,7 @@ mod tests {
             assert_eq!(view.genotype_count(), 1);
 
             let mut out = vec![WrongReadCharge::default(); 1];
-            fill_error_spreads(&alleles, &view, &mut out);
+            fill_wrong_read_charges(&alleles, &view, &mut out);
 
             assert_eq!(
                 table_over(&out, &table)
@@ -1505,7 +1516,7 @@ mod tests {
             let view = table.view();
             let mut out = vec![WrongReadCharge::default(); view.genotype_count() * allele_count];
 
-            fill_error_spreads(&alleles, &view, &mut out);
+            fill_wrong_read_charges(&alleles, &view, &mut out);
 
             let spread_table = table_over(&out, &table);
             assert_eq!(spread_table.allele_count(), allele_count);
@@ -1516,7 +1527,7 @@ mod tests {
                 .collect();
             let hom_ref = genotype_carrying(&table, &hom_ref_counts);
             let row = spread_table
-                .spreads_for(hom_ref)
+                .charges_for(hom_ref)
                 .expect("a genotype the table holds");
             assert_eq!(row[0].divisor(), NO_ERROR_SPREAD);
             assert!(
@@ -1541,8 +1552,8 @@ mod tests {
             vec![WrongReadCharge::OneSubstitutionAway; view.genotype_count() * 3];
         let mut over_indels = vec![WrongReadCharge::OneIndelAway; view.genotype_count() * 3];
 
-        fill_error_spreads(&alleles, &view, &mut over_substitutions);
-        fill_error_spreads(&alleles, &view, &mut over_indels);
+        fill_wrong_read_charges(&alleles, &view, &mut over_substitutions);
+        fill_wrong_read_charges(&alleles, &view, &mut over_indels);
 
         assert_eq!(over_substitutions, over_indels);
     }
@@ -1554,14 +1565,14 @@ mod tests {
         let table = diploid(2);
         let mut out = vec![WrongReadCharge::default(); 5];
 
-        fill_error_spreads(&alleles, &table.view(), &mut out);
+        fill_wrong_read_charges(&alleles, &table.view(), &mut out);
     }
 
     /// **A buffer that is too long is a caller bug too, and only this test says so.** The
     /// check has to be an equality rather than "at least enough": the trailing entries would
     /// never be written, and every genotype past the first would then read a slot the fill
     /// left alone — which is a real number and a wrong one. It is also what makes
-    /// [`ErrorSpreadTable`]'s bound meaningful, since a longer table admits a genotype
+    /// [`WrongReadChargeTable`]'s bound meaningful, since a longer table admits a genotype
     /// should have been out of range.
     #[test]
     #[should_panic(expected = "one entry per (genotype, allele)")]
@@ -1571,7 +1582,7 @@ mod tests {
         let needed = table.view().genotype_count() * 2;
         let mut out = vec![WrongReadCharge::default(); needed + 1];
 
-        fill_error_spreads(&alleles, &table.view(), &mut out);
+        fill_wrong_read_charges(&alleles, &table.view(), &mut out);
     }
 
     /// A repeat tract's substitution term is a different rate on a different model, so a
@@ -1590,7 +1601,7 @@ mod tests {
         let table = diploid(1);
         let mut out = vec![WrongReadCharge::default(); table.view().genotype_count()];
 
-        fill_error_spreads(&alleles, &table.view(), &mut out);
+        fill_wrong_read_charges(&alleles, &table.view(), &mut out);
     }
 
     /// An allele id from another locus, or a genotype index past what the table holds, is
@@ -1634,8 +1645,8 @@ mod tests {
         let out = spreads(&alleles, &table);
         let spread_table = table_over(&out, &table);
 
-        assert!(spread_table.spreads_for(GenotypeIdx(2)).is_some());
-        assert!(spread_table.spreads_for(GenotypeIdx(3)).is_none());
+        assert!(spread_table.charges_for(GenotypeIdx(2)).is_some());
+        assert!(spread_table.charges_for(GenotypeIdx(3)).is_none());
         assert_eq!(spread_table.allele_count(), 2);
     }
 
@@ -1646,7 +1657,7 @@ mod tests {
         let table = diploid(3);
         let mut out = vec![WrongReadCharge::default(); table.view().genotype_count() * 2];
 
-        fill_error_spreads(&alleles, &table.view(), &mut out);
+        fill_wrong_read_charges(&alleles, &table.view(), &mut out);
     }
 
     /// The size the divisor is worth, **taken from a filled table rather than from a literal**:
@@ -1767,7 +1778,7 @@ mod tests {
             alleles,
             &view,
             ReadGroupParameters::new(calibration, contamination),
-            ErrorSpreadTable::over(&spreads, &view),
+            WrongReadChargeTable::over(&spreads, &view),
             &mut GenericRowScratch::default(),
             &mut out,
         );
@@ -1931,6 +1942,42 @@ mod tests {
 
         let unscaled = row(&evidence, &alleles, &table, &uncalibrated());
         assert!((unscaled[hom_ref] - ((-6.0 - LOG_SPREAD) + -7.0)).abs() < 1e-12);
+    }
+
+    /// **"Every carried allele", where the genotype carries two different indels.** An
+    /// insertion `ACGGT` and a deletion `AT` are each one indel from the reference `ACGT`, so a
+    /// reference read under the heterozygote of the two is an indel error — at ploidy two and at
+    /// four. (The two alternatives are also one indel from each other: `ACGGT` less `CGG` is
+    /// `AT`.)
+    #[test]
+    fn a_heterozygote_of_two_indels_charges_a_reference_read_unscaled() {
+        let alleles = locus(&[b"ACGT", b"ACGGT", b"AT"]);
+        let table = diploid(3);
+        let out = spreads(&alleles, &table);
+        let insertion_and_deletion = genotype_carrying(&table, &[0, 1, 1]);
+        assert_eq!(
+            table_over(&out, &table).at(insertion_and_deletion, AlleleId(0)),
+            WrongReadCharge::OneIndelAway
+        );
+
+        let tetraploid = GenotypeTable::build(Ploidy::try_new(4).expect("four is a ploidy"), 3);
+        let mut tetraploid_out =
+            vec![WrongReadCharge::default(); tetraploid.view().genotype_count() * 3];
+        fill_wrong_read_charges(&alleles, &tetraploid.view(), &mut tetraploid_out);
+        assert_eq!(
+            table_over(&tetraploid_out, &tetraploid)
+                .at(genotype_carrying(&tetraploid, &[0, 2, 2]), AlleleId(0)),
+            WrongReadCharge::OneIndelAway
+        );
+    }
+
+    /// An empty allele — a deletion projected with no anchor base — is one indel from any
+    /// non-empty one, and not from itself.
+    #[test]
+    fn an_empty_allele_is_one_deletion_from_any_other() {
+        assert!(differ_by_one_indel(b"", b"A"));
+        assert!(differ_by_one_indel(b"ACG", b""));
+        assert!(!differ_by_one_indel(b"", b""));
     }
 
     /// At a scale of one the unscaled charge and the scaled one are the same number to the last
@@ -2326,7 +2373,7 @@ mod tests {
         let scale = 2.5_f64;
         let log_scale = float::ln(scale);
         let spread_values = spreads(&alleles, &table);
-        let spread_table = ErrorSpreadTable::over(&spread_values, &view);
+        let spread_table = WrongReadChargeTable::over(&spread_values, &view);
         let mut ours = vec![LogProb(f64::NAN); view.genotype_count()];
         genotype_log_likelihood_row(
             &evidence,
@@ -2381,9 +2428,17 @@ mod tests {
 
             // Production charges a wrong read its bare `q_sum`; ng charges it
             // `q_sum + n·log scale`. Taking the scale back out is the third and last difference.
+            // (Spec §3.5's 2026-10-21 amendment leaves the scale off an indel error; this fixture
+            // is substitutions only, so no cell reaches that case, and the filter keeps the
+            // reconciliation right if one ever does.)
             let scale_effect: f64 = supported
                 .iter()
                 .filter(|o| counts[usize::from(o.allele.get())] == 0)
+                .filter(|o| {
+                    spread_table
+                        .at(GenotypeIdx(genotype as u32), o.allele)
+                        .is_scaled()
+                })
                 .map(|o| f64::from(o.num_reads) * log_scale)
                 .sum();
 
@@ -2566,7 +2621,7 @@ mod tests {
         );
     }
 
-    /// An error-spread table filled at another locus's stride must not reach the row: its lookups
+    /// An wrong-read charge table filled at another locus's stride must not reach the row: its lookups
     /// would return real numbers off the wrong rows.
     #[test]
     #[should_panic(expected = "belongs to a different locus")]
@@ -2586,7 +2641,7 @@ mod tests {
             &narrow,
             &narrow_view,
             ReadGroupParameters::uncontaminated(&uncalibrated()),
-            ErrorSpreadTable::over(&spread_values, &wide_view),
+            WrongReadChargeTable::over(&spread_values, &wide_view),
             &mut GenericRowScratch::default(),
             &mut out,
         );
@@ -2615,7 +2670,7 @@ mod tests {
     }
 
     /// A buffer longer than the table it is wrapped against admits a genotype index that should
-    /// have been out of range — the case [`ErrorSpreadTable`]'s own documentation names, and
+    /// have been out of range — the case [`WrongReadChargeTable`]'s own documentation names, and
     /// which only the *fill*'s length check was tested for.
     #[test]
     #[should_panic(expected = "holds 6 entries, not 8")]
@@ -2623,7 +2678,7 @@ mod tests {
         let table = diploid(2);
         let values = vec![WrongReadCharge::default(); 8];
 
-        let _ = ErrorSpreadTable::over(&values, &table.view());
+        let _ = WrongReadChargeTable::over(&values, &table.view());
     }
 
     #[test]
@@ -2640,7 +2695,7 @@ mod tests {
             &alleles,
             &view,
             ReadGroupParameters::uncontaminated(&uncalibrated()),
-            ErrorSpreadTable::over(&spread_values, &view),
+            WrongReadChargeTable::over(&spread_values, &view),
             &mut GenericRowScratch::default(),
             &mut out,
         );
@@ -2708,7 +2763,7 @@ mod tests {
             &GenericSampleEvidence::empty(),
             &narrow_view,
             ReadGroupParameters::uncontaminated(&calibration),
-            ErrorSpreadTable::over(&spread_values, &narrow_view),
+            WrongReadChargeTable::over(&spread_values, &narrow_view),
             &scratch,
             &mut out,
         );
@@ -2742,7 +2797,7 @@ mod tests {
             &GenericSampleEvidence::new(&folded, 0.0, &[]),
             &view,
             ReadGroupParameters::uncontaminated(&calibration),
-            ErrorSpreadTable::over(&spread_values, &view),
+            WrongReadChargeTable::over(&spread_values, &view),
             &scratch,
             &mut out,
         );
@@ -2766,7 +2821,7 @@ mod tests {
             &alleles,
             &view,
             ReadGroupParameters::uncontaminated(&calibration),
-            ErrorSpreadTable::over(&spread_values, &view),
+            WrongReadChargeTable::over(&spread_values, &view),
             &mut GenericRowScratch::default(),
             &mut composed,
         );
@@ -2784,7 +2839,7 @@ mod tests {
             &evidence,
             &view,
             ReadGroupParameters::uncontaminated(&calibration),
-            ErrorSpreadTable::over(&spread_values, &view),
+            WrongReadChargeTable::over(&spread_values, &view),
             &scratch,
             &mut apart,
         );
@@ -2852,7 +2907,7 @@ mod tests {
                     &calibration,
                     frozen.with_frequencies(frequencies, 2),
                 ),
-                ErrorSpreadTable::over(&spread_values, &view),
+                WrongReadChargeTable::over(&spread_values, &view),
                 &scratch,
                 &mut out,
             );
@@ -2906,7 +2961,7 @@ mod tests {
                 &evidence,
                 &view,
                 ReadGroupParameters::uncontaminated(&calibration),
-                ErrorSpreadTable::over(&spread_values, &view),
+                WrongReadChargeTable::over(&spread_values, &view),
                 scratch,
                 &mut out,
             );
@@ -2944,7 +2999,7 @@ mod tests {
     /// under a flag — a shared implementation would agree with itself whatever either of them
     /// did.
     ///
-    /// **It reads its spreads from [`fill_error_spreads`]** rather than from a literal
+    /// **It reads its spreads from [`fill_wrong_read_charges`]** rather than from a literal
     /// `ln 3`, so deleting that filler is a compile error here rather than a quiet subtraction
     /// (the gate B1's review put on this file).
     fn plain_log_likelihood_row(
@@ -2957,7 +3012,7 @@ mod tests {
         let allele_count = view.allele_count();
         let ploidy = f64::from(view.ploidy().get());
         let spread_values = spreads(alleles, table);
-        let spread_table = ErrorSpreadTable::over(&spread_values, &view);
+        let spread_table = WrongReadChargeTable::over(&spread_values, &view);
         let counts = view.genotype_allele_counts();
 
         (0..view.genotype_count())
@@ -3525,7 +3580,7 @@ mod tests {
         let table = diploid(2);
         let values = spreads(&alleles, &table);
 
-        let _ = table_over(&values, &table).spreads_of(AlleleId(2)).count();
+        let _ = table_over(&values, &table).charges_of(AlleleId(2)).count();
     }
 
     /// **A column holds only the two numbers the model has, exactly** — `3` where the error
@@ -3545,7 +3600,7 @@ mod tests {
         let mut spread_seen = false;
         let mut unspread_seen = false;
         for allele in [AlleleId(0), AlleleId(1), AlleleId(2)] {
-            for spread in read.spreads_of(allele).map(WrongReadCharge::divisor) {
+            for spread in read.charges_of(allele).map(WrongReadCharge::divisor) {
                 assert!(
                     spread == ERROR_SPREAD_BASES || spread == NO_ERROR_SPREAD,
                     "a spread came back as {spread}, which is neither                      {ERROR_SPREAD_BASES} nor {NO_ERROR_SPREAD}"
@@ -3603,7 +3658,7 @@ mod tests {
             &alleles,
             &tetraploid_view,
             ReadGroupParameters::uncontaminated(&uncalibrated()),
-            ErrorSpreadTable::over(&diploid_spreads, &diploid_table.view()),
+            WrongReadChargeTable::over(&diploid_spreads, &diploid_table.view()),
             &mut GenericRowScratch::default(),
             &mut out,
         );
@@ -3717,6 +3772,41 @@ mod tests {
         // **No spread**: `ln 3` per read away from what the complete path charges a
         // one-substitution mismatch.
         assert!((scored[hom_ref] - (3.0 * -7.0 - 3.0 * LOG_SPREAD)).abs() > 3.0);
+    }
+
+    /// **A partial read that no allele fits keeps the scale** (spec §5.3, as amended 2026-10-21),
+    /// even at an indel locus where a complete read showing the same allele does not. Reference
+    /// `ACG`, insertion `ACCG`, scale four. Under the reference homozygote a complete read of the
+    /// insertion is charged its unscaled `−7`; a partial flush left showing `ACC` — only the
+    /// insertion starts that way — is charged `−7 + ln 4` a read.
+    #[test]
+    fn a_partial_no_allele_fits_keeps_the_scale_where_a_complete_read_drops_it() {
+        let alleles = locus(&[b"ACG", b"ACCG"]);
+        let table = diploid(2);
+        let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
+        let log_scale = float::ln(4.0);
+
+        let complete = [observation(1, 0, 2, -14.0)];
+        let partial_only = [partial(&[(0, 3)], b"ACC", 3, -21.0)];
+        let calibration = calibrated(4.0);
+
+        let from_complete = contaminated_row(
+            &GenericSampleEvidence::new(&complete, 0.0, &[]),
+            &alleles,
+            &table,
+            &calibration,
+            ContaminationMixture::uncontaminated(),
+        );
+        let from_partial = contaminated_row(
+            &GenericSampleEvidence::new(&[], 0.0, &partial_only),
+            &alleles,
+            &table,
+            &calibration,
+            ContaminationMixture::uncontaminated(),
+        );
+
+        assert!((from_complete[hom_ref] - 2.0 * (-7.0)).abs() < 1e-12);
+        assert!((from_partial[hom_ref] - 3.0 * (-7.0 + log_scale)).abs() < 1e-12);
     }
 
     /// A read flush to the locus's **right** border constrains the allele's suffix, and the same
@@ -4135,7 +4225,7 @@ mod tests {
                 &evidence,
                 &view,
                 read_groups,
-                ErrorSpreadTable::over(&spreads, &view),
+                WrongReadChargeTable::over(&spreads, &view),
                 &scratch,
                 &mut out,
             );
@@ -4291,7 +4381,7 @@ mod tests {
                 &alleles,
                 &view,
                 ReadGroupParameters::uncontaminated(&uncalibrated()),
-                ErrorSpreadTable::over(&spread_values, &view),
+                WrongReadChargeTable::over(&spread_values, &view),
                 &mut scratch,
                 &mut out,
             );

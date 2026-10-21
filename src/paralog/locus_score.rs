@@ -492,10 +492,8 @@ fn h2_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
         let c = obs.relative_copy_number;
         let k = f64::from(obs.alt_reads);
         let nk = f64::from(obs.total_reads - obs.alt_reads);
-        noncarrier_base.push(
-            ln_normal(c, 1.0, sigma0)
-                + precompute.allele_noncarrier.log_likelihood(k, nk),
-        );
+        noncarrier_base
+            .push(ln_normal(c, 1.0, sigma0) + precompute.allele_noncarrier.log_likelihood(k, nk));
         for (j, config) in configs.iter().enumerate() {
             let cov = ln_normal(
                 c,
@@ -830,7 +828,10 @@ mod tests {
         let means: Vec<f64> = configs.iter().map(|c| c.coverage_mean).collect();
         assert_eq!(means, vec![1.5, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]);
         // VAF = exp(log_vaf); check the balanced m≈T/2 configs are ½.
-        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.allele.log_vaf)).collect();
+        let vafs: Vec<f64> = configs
+            .iter()
+            .map(|c| float::exp(c.allele.log_vaf))
+            .collect();
         assert!((vafs[1] - 0.25).abs() < 1e-12); // (4,1)
         assert!((vafs[2] - 0.5).abs() < 1e-12); // (4,2)
         assert!((vafs[6] - 0.5).abs() < 1e-12); // (8,4)
@@ -1034,7 +1035,10 @@ mod tests {
             ..Default::default()
         };
         let configs = enumerate_carrier_configs(&params);
-        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.allele.log_vaf)).collect();
+        let vafs: Vec<f64> = configs
+            .iter()
+            .map(|c| float::exp(c.allele.log_vaf))
+            .collect();
         assert_eq!(configs.len(), 4);
         assert!((vafs[0] - 1.0 / 5.0).abs() < 1e-12);
         assert!((vafs[1] - 2.0 / 5.0).abs() < 1e-12);
@@ -1072,7 +1076,9 @@ mod tests {
             let s = (1.0 - dispersion) / dispersion;
             let (a, b) = (vaf * s, (1.0 - vaf) * s);
             let rising = |start: f64, count: f64| -> f64 {
-                (0..count as u32).map(|i| float::ln(start + f64::from(i))).sum()
+                (0..count as u32)
+                    .map(|i| float::ln(start + f64::from(i)))
+                    .sum()
             };
             let expected = rising(a, alt) + rising(b, reference) - rising(s, alt + reference);
             let got = factor.log_likelihood(alt, reference);

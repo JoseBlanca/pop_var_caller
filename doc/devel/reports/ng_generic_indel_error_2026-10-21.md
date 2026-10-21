@@ -11,6 +11,17 @@ built rule gives calls byte-identical to its `nomult` arm on all 15 GIAB configu
 tomato, so every `nomult` figure below is the shipped behaviour's. The `table`, `max` and `floor`
 arms existed only in commit 18dd5712.
 
+**One difference from §7's proposed text: partial reads keep the scale** (spec §5.3). Deciding that
+a fragment is one indel from an allele would need an alignment the partial rule deliberately avoids,
+and the prototype — which never touched partials — already restored every lost indel. The built
+rule also states that it holds at any scale, below one as well as above.
+
+**One follow-up from the code review, not done here.** At a locus holding only the reference and
+one indel, with no partial reads, the scale now enters no genotype's likelihood, yet the call's
+reported warrant (`weakest_warrant_at_the_locus`, `summarise_condition.rs`) still folds in the
+calibration's provenance, so it can name a weaker warrant than the call rests on. It is a label, not
+a number; whether to narrow the fold is a small decision for later.
+
 The colleague measured two defects on the SNP/indel path (the *generic path*: every locus that is
 not a catalogued repeat tract):
 

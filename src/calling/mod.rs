@@ -75,9 +75,9 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
 pub use likelihood::generic::{
-    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, ReferenceBesideLocus, WrongReadCharge,
-    allele_is_compatible_with_partial, fill_error_spreads, genotype_log_likelihood_row,
-    partial_row_fits_allele,
+    ERROR_SPREAD_BASES, NO_ERROR_SPREAD, ReferenceBesideLocus, WrongReadCharge,
+    WrongReadChargeTable, allele_is_compatible_with_partial, fill_wrong_read_charges,
+    genotype_log_likelihood_row, partial_row_fits_allele,
 };
 pub use likelihood::{
     ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
@@ -1500,14 +1500,13 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// real answer — an allele no read reached — which is why nothing downstream may treat
     /// it as *unwritten*.
     pooled_allele_reads: Vec<u64>,
-    /// `genotypes × alleles`, genotype-major: how far each allele's own error mass is spread
-    /// across the locus's others under each genotype — the SNP/indel row's
-    /// `fill_error_spreads` table.
+    /// `genotypes × alleles`, genotype-major: how a wrong read is charged under each genotype —
+    /// the divisor its error mass is spread by and whether the calibration scale applies — the
+    /// SNP/indel row's `fill_wrong_read_charges` table.
     ///
-    /// **Filled once per locus rather than once per sample**: how many alleles a wrong read
-    /// could have shown is a property of the candidate sequences and of the genotype being
-    /// scored, and of nothing a sample showed.
-    error_spreads: Vec<WrongReadCharge>,
+    /// **Filled once per locus rather than once per sample**: both are properties of the
+    /// candidate sequences and of the genotype being scored, and of nothing a sample showed.
+    wrong_read_charges: Vec<WrongReadCharge>,
     /// One entry per **scratch row**: which sample of the run that row holds.
     ///
     /// **The scratch is sized for the samples the locus is called on, not for the run**, so
@@ -1754,14 +1753,14 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         let spread_len = genotype_count.checked_mul(allele_count).unwrap_or_else(|| {
             panic!(
                 "a locus of {genotype_count} genotypes over {allele_count} alleles needs an \
-                 error-spread table longer than a usize can index"
+                 wrong-read charge table longer than a usize can index"
             )
         });
         // **No sentinel here, unlike the `f64` buffers**: an enum has no `NaN`. A cell the fill
         // skipped reads as `OtherwiseDifferent` — main's conservative charge — and the fill
         // refuses a table it would not cover entirely, so none is skipped.
         resize_and_fill(
-            &mut self.error_spreads,
+            &mut self.wrong_read_charges,
             spread_len,
             WrongReadCharge::OtherwiseDifferent,
         );
@@ -2069,22 +2068,22 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     pub(crate) fn generic_row_buffers_mut(&mut self, row: usize) -> GenericRowBuffers<'_> {
         let range = self.genotype_row_range(row);
         GenericRowBuffers {
-            error_spreads: &self.error_spreads,
+            wrong_read_charges: &self.wrong_read_charges,
             contaminant_allele_frequencies: &self.contaminant_allele_frequencies,
             row_scratch: &mut self.generic_rows[row],
             genotype_likelihoods: &mut self.genotype_likelihoods[range],
         }
     }
 
-    /// The SNP/indel row's per-allele error-spread table, to fill once per locus.
+    /// The SNP/indel row's per-allele wrong-read charge table, to fill once per locus.
     ///
     /// # Panics
     ///
     /// On an unprepared scratch.
     #[inline]
-    pub(crate) fn error_spreads_mut(&mut self) -> &mut [WrongReadCharge] {
+    pub(crate) fn wrong_read_charges_mut(&mut self) -> &mut [WrongReadCharge] {
         self.assert_prepared();
-        &mut self.error_spreads
+        &mut self.wrong_read_charges
     }
 
     /// Claim a scratch row for one run sample, with its inbreeding coefficient.
@@ -2246,7 +2245,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
             of(&self.allele_count_distribution_next),
             of(&self.log_allele_count_distribution),
             of(&self.pooled_allele_reads),
-            of(&self.error_spreads),
+            of(&self.wrong_read_charges),
             of(&self.run_sample_of_each_row),
             of(&self.inbreeding_coefficient_by_row),
             of(&self.batch_allele_copies),
@@ -2769,8 +2768,8 @@ pub(crate) struct SampleScoringBuffers<'a> {
 /// every sample and filled once per locus; the other two are this row's.
 #[derive(Debug)]
 pub(crate) struct GenericRowBuffers<'a> {
-    /// The locus's per-allele error-spread table, filled once before the first row.
-    pub(crate) error_spreads: &'a [WrongReadCharge],
+    /// The locus's per-allele wrong-read charge table, filled once before the first row.
+    pub(crate) wrong_read_charges: &'a [WrongReadCharge],
     /// The contaminant allele frequencies **this row** is scored against, batch-major — empty
     /// on a run the fit found no contamination in, where the mixture is absent and the row
     /// computes the plain formula.

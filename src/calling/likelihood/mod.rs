@@ -502,23 +502,12 @@ impl ReadGroupCalibration {
     #[must_use]
     pub fn charged_error(&self, q_sum: f64, num_reads: u32) -> f64 {
         assert!(
-            num_reads > 0,
-            "an observation with no reads behind it has no average error; the merge builds \
-             no such row"
-        );
-        assert!(
-            q_sum.is_finite() && q_sum <= 0.0,
-            "an observation's summed log error is {q_sum}, and a sum of logarithms of \
-             probabilities is a finite number at or below zero"
-        );
-        assert!(
             self.scale.is_finite() && self.scale > 0.0,
             "this read group's calibration scale is {}, and a scale is a finite positive \
              multiplier",
             self.scale
         );
-        let mean_log_error = q_sum / f64::from(num_reads);
-        (self.scale * float::exp(mean_log_error)).max(MIN_BASE_ERROR)
+        (self.scale * geometric_mean_error(q_sum, num_reads)).max(MIN_BASE_ERROR)
     }
 
     /// **The observation's minted error without this read group's scale** — what spec §3.5's
@@ -533,18 +522,31 @@ impl ReadGroupCalibration {
     /// summed log error that is not a finite number at or below zero.
     #[must_use]
     pub fn minted_error(&self, q_sum: f64, num_reads: u32) -> f64 {
-        assert!(
-            num_reads > 0,
-            "an observation with no reads behind it has no average error; the merge builds \
-             no such row"
-        );
-        assert!(
-            q_sum.is_finite() && q_sum <= 0.0,
-            "an observation's summed log error is {q_sum}, and a sum of logarithms of \
-             probabilities is a finite number at or below zero"
-        );
-        float::exp(q_sum / f64::from(num_reads)).max(MIN_BASE_ERROR)
+        geometric_mean_error(q_sum, num_reads).max(MIN_BASE_ERROR)
     }
+}
+
+/// **The geometric mean of an observation's reads' minted error**, `exp(q_sum / n)` — the one
+/// average `q_sum` recovers (spec §1.4), before any scale or floor. Shared by
+/// [`ReadGroupCalibration::charged_error`] and [`ReadGroupCalibration::minted_error`] so that the
+/// two cannot drift apart, which is what keeps them bit-identical at a scale of one.
+///
+/// # Panics
+///
+/// On an observation with no reads, or a summed log error that is not a finite number at or
+/// below zero.
+fn geometric_mean_error(q_sum: f64, num_reads: u32) -> f64 {
+    assert!(
+        num_reads > 0,
+        "an observation with no reads behind it has no average error; the merge builds \
+         no such row"
+    );
+    assert!(
+        q_sum.is_finite() && q_sum <= 0.0,
+        "an observation's summed log error is {q_sum}, and a sum of logarithms of \
+         probabilities is a finite number at or below zero"
+    );
+    float::exp(q_sum / f64::from(num_reads))
 }
 
 /// §3.6's mixture inputs for one read group, frozen before the caller's loop starts.

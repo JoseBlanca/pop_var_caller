@@ -259,25 +259,30 @@ pub fn genotype_log_likelihood_row(
     genotypes: &GenotypeTableView<'_>,          // flat views from the loop's table
     calibration: &[ReadGroupCalibration],       // indexed by ReadGroupId
     contamination: &[ContaminationView],        // indexed by ReadGroupId; empty = §3.3 exactly
-    error_spreads: ErrorSpreadTable<'_>,        // m(a, g), per (allele, genotype)
+    wrong_read_charges: WrongReadChargeTable<'_>, // m(a, g) and whether the scale applies
     out: &mut [LogProb],
 );   // no contamination and no scratch yet — see the note below
 
-/// m(a, g): 3.0 where the observation differs from every allele the genotype carries by
-/// a substitution at exactly one position, 1.0 otherwise. A property of the allele pair,
-/// computed once per locus over the projected sequences (spec §3.5).
-pub fn fill_error_spreads(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>, out: &mut [f64]);
+/// How a wrong read is charged, per (genotype, allele): OneSubstitutionAway (scaled, m = 3)
+/// where the observation differs from every carried allele by a substitution at exactly one
+/// position; OneIndelAway (unscaled, m = 1) where it differs from every carried allele by
+/// exactly one insertion or deletion (spec §3.5, amended 2026-10-21); OtherwiseDifferent
+/// (scaled, m = 1) otherwise. A property of the allele pair, computed once per locus over the
+/// projected sequences.
+pub enum WrongReadCharge { OneSubstitutionAway, OneIndelAway, OtherwiseDifferent }
+pub fn fill_wrong_read_charges(alleles: &CandidateAlleles, genotypes: &GenotypeTableView<'_>,
+                               out: &mut [WrongReadCharge]);
 
 /// The filled buffer, carrying the stride it was filled at. A bare `(values, allele_count)`
 /// pair cannot check that the count is the stride the buffer really has, and reading a
 /// three-allele table at a stride of two returns a real divisor from the wrong row on half
 /// the lookups — measured, six of twelve, with nothing to panic about (B1, 2026-08-24).
-pub struct ErrorSpreadTable<'a> { /* values, allele_count */ }
-impl<'a> ErrorSpreadTable<'a> {
-    pub fn over(values: &'a [f64], genotypes: &GenotypeTableView<'_>) -> Self;
-    pub fn row_of(&self, genotype: GenotypeIdx) -> Option<&'a [f64]>;
-    pub fn column_of(&self, allele: AlleleId) -> impl Iterator<Item = f64>;  // what the row walks
-    pub fn at(&self, genotype: GenotypeIdx, allele: AlleleId) -> f64;
+pub struct WrongReadChargeTable<'a> { /* values, allele_count */ }
+impl<'a> WrongReadChargeTable<'a> {
+    pub fn over(values: &'a [WrongReadCharge], genotypes: &GenotypeTableView<'_>) -> Self;
+    pub fn charges_for(&self, genotype: GenotypeIdx) -> Option<&'a [WrongReadCharge]>;
+    pub fn charges_of(&self, allele: AlleleId) -> impl Iterator<Item = WrongReadCharge>; // the row walks this
+    pub fn at(&self, genotype: GenotypeIdx, allele: AlleleId) -> WrongReadCharge;
 }
 ```
 
@@ -309,7 +314,13 @@ divided by.
 So the filler is `fill_error_spreads`, the reader is `ErrorSpreadTable`, and **divisor is the
 right word again**: the row divides, by 3 or by 1.
 
-**The row's signature as built.** It takes `error_spreads: ErrorSpreadTable<'_>` rather than a
+**Renamed 2026-10-21, when the cells grew a second answer.** Spec §3.5's amendment drops the
+calibration scale for an error only an indel could have made, so each cell now says how a wrong
+read is charged — the divisor and whether the scale applies — as one `WrongReadCharge`, filled by
+`fill_wrong_read_charges` and read through `WrongReadChargeTable`. One value per cell rather than a
+second table, so the two answers cannot come from different loci or strides.
+
+**The row's signature as built.** It takes `wrong_read_charges: WrongReadChargeTable<'_>` rather than a
 bare slice, for the reason that type exists; `read_groups: ReadGroupParameters<'_>` pairing the
 calibration with the contamination mixture, which are dense over the same axis and had to agree
 about how long it is; `alleles: &CandidateAlleles`, which the partial rule needs; and
