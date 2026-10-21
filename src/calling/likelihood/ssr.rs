@@ -1650,6 +1650,75 @@ mod tests {
         );
     }
 
+    /// **A whole-tract partial read with no recorded side takes, in each half, that side's own
+    /// rule** (`str_edge_deletion_alleles.md` §5.6). At the chr20:53879889 site (HG002, GRCh38):
+    /// against the allele deleting five right-flank bases, the half read from the left is compared
+    /// with the allele's tract followed by the flank it leaves, and the half read from the right
+    /// with the tract alone, since the allele deletes nothing on the left. The row's cell is half
+    /// of each, to the bit; the left half is the larger by more than a hundredfold.
+    #[test]
+    fn a_whole_tract_read_with_no_side_takes_each_sides_own_flank_rule() {
+        const LEFT_FLANK: &[u8] = b"GAGTAGGGGGGTGGG";
+        const RIGHT_FLANK: &[u8] = b"CAGACAGACAGACAG";
+        let fixture = Fixture::of(b"GA", &[8, 6]);
+        let mut candidates = fixture.candidates();
+        for candidate in &mut candidates {
+            candidate.reference_flanks = (LEFT_FLANK, RIGHT_FLANK);
+        }
+        candidates[1].bases = b"GAGAGAGAGAGAG";
+        candidates[1].flank_deletion = crate::locus_generation::FlankDeletion { left: 0, right: 5 };
+        let contexts = fixture.contexts(&candidates);
+
+        let tract_len = LocusLen::from_positions(16);
+        let mut whole_tract = spanning(&a_tract(b"GA", 8), 1);
+        whole_tract.read_witness =
+            ReadWitness::from_left(16, tract_len).expect("a whole-tract partial witness");
+        whole_tract.held_flank = None;
+        let observations = [whole_tract];
+        let detail = a_detail(b"GA");
+        let evidence = SsrSampleEvidence::new(&observations, &detail, tract_len);
+        let mut lengths = Vec::new();
+        fill_reachable_lengths(&candidates, &fixture.motif, &mut lengths);
+        let table = GenotypeTable::build(Ploidy::try_new(2).expect("a valid ploidy"), 2);
+        let view = table.view();
+        let mut out = vec![LogProb(f64::NAN); view.genotype_count()];
+        let mut scratch = SsrRowScratch::default();
+        genotype_log_likelihood_row(
+            &StutterSubstitutionEmission,
+            &evidence,
+            SsrLocusParameters {
+                candidates: &candidates,
+                contexts: SsrScoringContextTable::new(&contexts, candidates.len()),
+                outlier_weight: DEFAULT_OUTLIER_WEIGHT,
+                reachable_lengths: &lengths,
+                contamination: None,
+            },
+            &view,
+            &mut out,
+            &mut scratch,
+        );
+
+        let mut model_scratch = StutterSubstitutionScratch::default();
+        let mut from = |side| {
+            StutterSubstitutionEmission.censored_emission(
+                &observations[0].bases,
+                side,
+                &candidates[1],
+                &contexts[1],
+                &mut model_scratch,
+            )
+        };
+        let (left, right) = (from(HeldFlank::Left), from(HeldFlank::Right));
+        let expected = 0.5 * left + 0.5 * right;
+        assert_eq!(
+            scratch.emission_at(0, 1).to_bits(),
+            expected.to_bits(),
+            "the row's cell {} against half of {left} and half of {right}",
+            scratch.emission_at(0, 1)
+        );
+        assert!(left > 100.0 * right, "left {left}, right {right}");
+    }
+
     /// **Spec §12's seventh test, first half: a biallelic diploid reproduced by hand.**
     ///
     /// The other ploidy test pins *orderings* — which genotype beats which — and every one of
