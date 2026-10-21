@@ -107,4 +107,6 @@ def steps(ctx):
                                        call_sample="HG002", truth_sample="HG002"))
         out.extend(readfloor.floor_steps(ctx, f"giab_chr20/{depth}", arms.GRCH38,
                                          {"HG002": aligned("HG002", depth)}, calling, base))
+        out.extend(readfloor.startup_steps(ctx, f"giab_chr20/{depth}", arms.GRCH38, catalog,
+                                           {"HG002": aligned("HG002", depth)}, calling, base))
     return out

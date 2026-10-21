@@ -82,4 +82,6 @@ def steps(ctx, sizes=None):
             out.append(step)
         out.extend(readfloor.floor_steps(ctx, f"speed/tomato_{size}", REFERENCE, chosen, regions,
                                          base))
+        out.extend(readfloor.startup_steps(ctx, f"speed/tomato_{size}", REFERENCE, catalog,
+                                           chosen, regions, base))
     return out

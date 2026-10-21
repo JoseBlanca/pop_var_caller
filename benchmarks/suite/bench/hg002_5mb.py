@@ -47,4 +47,6 @@ def steps(ctx):
                                        call_sample="HG002", truth_sample="HG002"))
         out.extend(readfloor.floor_steps(ctx, f"hg002_5mb/{depth}", arms.GRCH38,
                                          {"HG002": alignment("HG002", depth)}, regions, base))
+        out.extend(readfloor.startup_steps(ctx, f"hg002_5mb/{depth}", arms.GRCH38, catalog,
+                                           {"HG002": alignment("HG002", depth)}, regions, base))
     return out

@@ -98,3 +98,53 @@ def _records(d):
             with open(os.path.join(d, f)) as fh:
                 total += int(fh.read().strip() or 0)
     return total
+
+
+def startup_steps(ctx, prefix, reference, catalog, alignments_by_sample, regions, base):
+    """pvc's fixed start-up cost, for each step the read floor is set against.
+
+    The same command as the configuration's — same reference, catalogue and alignment files, so
+    opening every file is counted — over one base: the first of the configuration's regions. What
+    remains is the cost a run pays whatever its size (checking the reference against its index,
+    loading the repeat catalogue, opening the files). The summary shows it beside pvc's time and
+    takes it out of a second ratio. It reruns for every pvc commit, as pvc's own steps do.
+    """
+    from . import callers
+
+    files = {s: (v if isinstance(v, list) else [v]) for s, v in alignments_by_sample.items()}
+    flat = [f for v in files.values() for f in v]
+
+    def one_base(d):
+        with open(regions) as fh:
+            chrom, start = next(l.split()[:2] for l in fh if l.strip() and not l.startswith("#"))
+        path = os.path.join(d, "one_base.bed")
+        with open(path, "w") as fh:
+            fh.write(f"{chrom}\t{start}\t{int(start) + 1}\n")
+        return path
+
+    def call(d):
+        warm(flat + [reference])
+        bed = one_base(d)
+        m = run_commands([callers.pvc_call_from_alignments(
+            ctx, reference, catalog, flat, bed, os.path.join(d, "calls.vcf.gz"),
+            os.path.join(d, "pvc.log"))], os.path.join(d, "logs"))
+        return {"measurement": m,
+                "rows": time_rows(dict(base, caller="pvc (defaults)",
+                                       caller_version=ctx.version("pvc")),
+                                  m, "start-up of call-from-alignments")}
+
+    def generate(d):
+        warm(flat + [reference])
+        bed = one_base(d)
+        m = run_commands(callers.pvc_generate_psps(ctx, reference, catalog, files, bed,
+                                                   os.path.join(d, "psps"), os.path.join(d, "logs")),
+                         os.path.join(d, "logs"), max_concurrent=ctx.threads)
+        return {"measurement": m,
+                "rows": time_rows(dict(base, caller="pvc (fitted)",
+                                       caller_version=ctx.version("pvc")),
+                                  m, "start-up of generate-psps")}
+
+    fp = lambda: {"files": [file_identity(f) for f in flat], "regions": file_identity(regions)}
+    attrs = {"caller": "pvc", "depth": base.get("depth")}
+    return [Step(f"{prefix}/startup_call_from_alignments", "pvc", call, fp, attrs=attrs),
+            Step(f"{prefix}/startup_generate_psps", "pvc", generate, fp, attrs=attrs)]

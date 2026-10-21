@@ -26,6 +26,9 @@ READ_FLOOR_PAIRS = [
     ("read floor, one process per sample", "pvc (fitted)", "generate-psps"),
     ("read floor, every file at the run's threads", "pvc (defaults)", "call-from-alignments"),
 ]
+# A configuration whose read floor takes less than this is too small for the ratio to mean much:
+# pvc's fixed start-up would dominate it.
+MIN_FLOOR_SECONDS = 60.0
 TIME_METRICS = ("seconds", "_mb_largest_process", "_mb_all_processes")
 
 
@@ -149,12 +152,19 @@ def _read_floor_ratios(rows):
             pvc = walls.get(key[:4] + (pvc_caller, pvc_stage))
             if pvc is None or not float(floor["value"]):
                 continue
-            ratio = dict(pvc)
-            ratio.update(stage=f"{pvc_stage} ÷ {floor_stage}", metric="wall_ratio",
-                         value=round(float(pvc["value"]) / float(floor["value"]), 2),
-                         host_load_start="", host_load_end="", other_cpu_cores="",
-                         source=f"{pvc['source']} ÷ {floor['source']}")
-            out.append(ratio)
+            startup = walls.get(key[:4] + (pvc_caller, f"start-up of {pvc_stage}"))
+            for metric, numerator in (
+                    ("wall_ratio", float(pvc["value"])),
+                    ("wall_ratio_after_startup",
+                     float(pvc["value"]) - float(startup["value"]) if startup else None)):
+                if numerator is None:
+                    continue
+                ratio = dict(pvc)
+                ratio.update(stage=f"{pvc_stage} ÷ {floor_stage}", metric=metric,
+                             value=round(numerator / float(floor["value"]), 2),
+                             host_load_start="", host_load_end="", other_cpu_cores="",
+                             source=f"{pvc['source']} ÷ {floor['source']}")
+                out.append(ratio)
     return out
 
 
@@ -171,11 +181,18 @@ def _read_floor_section(rows):
             pvc = walls.get(key[:4] + (pvc_caller, pvc_stage))
             if pvc is None:
                 continue
-            ratio = float(pvc["value"]) / float(floor["value"]) if float(floor["value"]) else 0
-            quiet = "no ⚠" if busy(pvc) or busy(floor) else "yes"
+            startup = walls.get(key[:4] + (pvc_caller, f"start-up of {pvc_stage}"))
+            pvc_s, floor_s = float(pvc["value"]), float(floor["value"])
+            start_s = float(startup["value"]) if startup else None
+            if floor_s < MIN_FLOOR_SECONDS:
+                ratio = after = "too small"
+            else:
+                ratio = f"{pvc_s / floor_s:.2f}"
+                after = f"{(pvc_s - start_s) / floor_s:.2f}" if start_s is not None else "."
+            quiet = "no ⚠" if busy(pvc) or busy(floor) or (startup and busy(startup)) else "yes"
             lines.append(f"| {key[0]} | {key[1]} | {key[2]} | {key[3]} | {pvc_caller} {pvc_stage} | "
-                         f"{float(pvc['value']):,.1f} | {float(floor['value']):,.1f} | {ratio:.2f} | "
-                         f"{quiet} |")
+                         f"{pvc_s:,.1f} | {'.' if start_s is None else f'{start_s:,.1f}'} | "
+                         f"{floor_s:,.1f} | {ratio} | {after} | {quiet} |")
     if not lines:
         return []
     return ["## Read floor — pvc's time against the cost of only reading its input", "",
@@ -188,10 +205,14 @@ def _read_floor_section(rows):
             "run's thread count. Every file was read once before each timed step, so every tool",
             "read from memory. A CRAM floor decodes exactly the fields pvc decodes",
             "(`required_fields=0x17ff`: all but the auxiliary tags other than the read group).",
+            "Start-up: the same pvc command over one base of the same files, the time a run pays",
+            "whatever its size; the last ratio takes it out of pvc's time. A configuration whose",
+            f"floor is under {MIN_FLOOR_SECONDS:g} s is marked too small: start-up would dominate it.",
             "Quiet: whether processes other than the suite used under one core on average during",
-            "both runs.", "",
-            "| benchmark | data | samples | depth | pvc step | pvc wall s | floor wall s | ratio | quiet |",
-            "|---|---|---:|---|---|---:|---:|---:|---|"] + lines + [""]
+            "the runs.", "",
+            "| benchmark | data | samples | depth | pvc step | pvc wall s | start-up s | floor wall s "
+            "| ratio | ratio without start-up | quiet |",
+            "|---|---|---:|---|---|---:|---:|---:|---:|---:|---|"] + lines + [""]
 
 
 def _num(value):
