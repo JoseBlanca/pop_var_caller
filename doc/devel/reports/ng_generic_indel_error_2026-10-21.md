@@ -470,6 +470,60 @@ Errors (missed + false + wrong genotype) for indels; SNP counts beside where any
 - The scope is a candidate on chr20: 103 tracts carry a flank-deletion candidate at 60×, against
   about 6,400 STR records.
 
+### Shipped (branch `str-partial-flank`, 2026-10-21)
+
+**The `deletion` scope is built as the only behaviour, with no switch, and gives the prototype's
+numbers without its one regression.** The build (`str_edge_deletion_alleles.md` §5.6, amended
+2026-10-21) differs from the prototype in three ways the spec asks for: a slip is placed as for any
+partial read — a whole-unit slip in each run of an interrupted tract with equal weight, rather than
+at the tract's end — before the flank is appended; a stretching shorter than the read is admitted
+when the flank covers the rest; and nothing is allocated per read. All calls with
+`--hidden-dup-fdr 0`, from the same psps and fitted files as the table above.
+
+| data | main | shipped |
+|---|---|---|
+| chr20 60×, wrong-genotype indels, defaults / fitted | 37 / 35 | 34 / 32 |
+| chr20 30×, wrong-genotype indels, defaults / fitted | 84 / 67 | 83 / 65 |
+| HG002 tandem repeats, indel errors 5× / 10× / 30× | 8,605 / 6,518 / 5,003 | 8,597 / 6,510 / 4,999 |
+| HG002 tandem repeats, SNP errors 5× / 10× / 30× | 17,695 / 15,247 / 13,633 | the same |
+| GIAB 3-sample panel, 5× to 300×, defaults and fitted | — | no genotype changes |
+| 5 Mb HG002, 10× to 300×, defaults and fitted | — | no genotype changes |
+| tomato identity oracle, 4 accessions at about 3× | — | no genotype changes |
+
+- **chr20:34924682, 53879901 and 58447656 are written `1/1`** at 60×, defaults and fitted.
+- **No SNP error count moves on any data set, but two SNP records change**, both on the tandem-repeat
+  benchmark at 30×, and the prototype makes the same two. In each, the repeat-tract record beside the
+  SNP now carries a homozygous edge deletion over the SNP's base, and the reconciliation step (§6 of
+  the edge-deletion spec) drops the generic record:
+  - chr11:44023063 `C>T,*` was a false SNP; the truth is `TC>T`, homozygous, and the tract's record
+    is now that `1/1`. Right.
+  - chr11:26874157 `G>A` was a true SNP (`0/1`); the truth there is a compound heterozygote, one copy
+    deleting `AAAG` and the other carrying the `G>A`, beside a flank that is itself `AAAG` × 7. Main
+    called no tract record and missed the deletion; the shipped build calls the deletion `1/1` on 1
+    supporting read of 24, and the SNP is lost. Wrong. Why the deletion wins as homozygous is not
+    traced.
+
+  The SNP totals still match main's because one truth SNP is now found that main missed:
+  chr16:12512381 `T>G`, which pvc writes inside a tract record's allele (`ATATATATATAGAT`, at
+  12512370). That record is now written one base wider, with the same genotype, and vcfeval matches
+  it to the truth's haplotype where it did not before.
+- **HG003 chr17:28427006 (fitted, 30×) keeps main's call.** The prototype's one regression there came
+  from its placement: the tract `AAAAAAAAAAAACAAAAAAACAAAAAAAAAAAAA` has three runs of `A`, and
+  stretching it at its end put every slip in the last run. Placed in each run, the one-`A`
+  contraction wins again, as on main. The spec's "one known cost" does not occur in the shipped
+  build.
+- **Where "no genotype changes" is not "byte-identical"**: on the panel, the 5 Mb set and the tomato
+  slice, a few repeat-tract records whose candidates delete flank bases move in QUAL, allele
+  frequency or a sample's GQ — 1 to 8 records a call set on the GIAB data; 11 of 7,509 (defaults) and
+  8 of 6,705 (fitted) on the tomato oracle, QUAL by at most 44 at one `1/1` record. The prototype
+  moved the same records; the brief's "byte-identical" for it held for genotypes, not for these
+  digits. Every other record is identical to main's.
+- **Interrupted tracts are about one candidate in ten** of those the rule reaches: 8 of 85 distinct
+  candidates on chr20 at 30×, 8 of 78 at 60×, 27 of 247 on the tandem-repeat benchmark at 30×
+  (counted with a temporary instrumented build). Against the prototype, the shipped build changes
+  no genotype on chr20, the tandem repeats or the 5 Mb set; it differs only in QUAL and GQ digits at
+  4 to 7 records a chr20 call set, and in the chr17 call above.
+
 ## 6. What would confirm this on chr22
 
 The colleague's own files settle both claims at her scale, without a new walk:

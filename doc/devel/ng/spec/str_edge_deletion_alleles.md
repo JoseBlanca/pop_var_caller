@@ -322,6 +322,16 @@ never reach the `C` used to count against the flank-deletion allele and now coun
 complete reads do not separate the two. It is the only call the rule moved on the per-sample GIAB
 panel (three samples at 5×, 10×, 30× and 300×).
 
+*Measured on the build (2026-10-21, branch `str-partial-flank`).* That cost was the prototype's, and
+came from its placing every slip at the tract's end. The tract there,
+`AAAAAAAAAAAACAAAAAAACAAAAAAAAAAAAA`, has three runs of `A`; with each slip placed in each run, as
+above, the one-`A` contraction wins again and the panel keeps every genotype of main. The cost the
+build does carry is on HG002's tandem-repeat benchmark at 30×: at chr11:26874157 the truth is a
+compound heterozygote, one copy deleting `AAAG` from a tract followed by `AAAG` × 7, the other
+carrying `G>A` in the flank; the deletion is now called `1/1` and the generic `G>A` record, which it
+covers, is dropped (§6). At chr11:44023063 the same mechanism removes a false SNP beside a true
+homozygous flank deletion. Report: `../../reports/ng_generic_indel_error_2026-10-21.md` §5.2.
+
 **At the ends of the range.** The rule is per read and estimates nothing, so it behaves the same at
 one sample and at a thousand. It matters in proportion to how many partial reads a tract has, which
 grows with depth: at 3× a tract has few, and on the tomato oracle (four accessions at about 3×) the
@@ -331,7 +341,9 @@ rule moved no call; at 60× a dozen partial reads were enough to flip a site.
 
 - Output is byte-identical to the build before this amendment wherever no candidate deletes flank
   bases: on the tomato oracle's slice, on HG002's 5 Mb set at 10×, 30× and 300×, and on the GIAB
-  panel except chr17:28427006.
+  panel except chr17:28427006. *(Measured on the build: no genotype moves on any of the three,
+  chr17:28427006 included; records whose candidates delete flank bases move in QUAL, allele
+  frequency or GQ — 0 to 8 a call set there, 11 and 8 on the tomato oracle.)*
 - chr20:34924682, 53879901 and 58447656 are written `1/1` at 60×.
 - On HG002's tandem-repeat benchmark (`benchmarks/ssr_hg002/`, `--defaults`), indel errors (missed
   + false + wrong genotype) fall from 8,605, 6,518 and 5,003 to 8,597, 6,510 and 4,999 at 5×, 10× and
