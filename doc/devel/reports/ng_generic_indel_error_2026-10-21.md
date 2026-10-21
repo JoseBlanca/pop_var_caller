@@ -370,6 +370,58 @@ partial without widening the record — its own spec.
 **The second-copy sites are the hidden-duplication filter's ground**, which a parallel session is
 working on, and are not addressed here.
 
+## 5.1 Whole chromosome 20: deletions, and whether these reads cause the calls (added later, 2026-10-21)
+
+**Data.** HG002 chromosome 20, NIST's 60× novoalign alignment (the same aligner and library family
+as every other HG002 set in this report), with 30× drawn from it (seed 42); GIAB v4.2.1 truth inside
+its confident regions, 56.9 Mb holding 85,951 truth variants. Called with main 0b675c29, which carries
+§7's amendment, `--defaults` and fitted, the hidden-duplication filter off.
+
+**Deletions are the worse case right at the read end.** At the 4,081 truth `1/1` indels with at
+least 10 crossing reads (2,011 deletions, 2,070 insertions), reference reads per 100, by how far a
+read runs past the indel's slide (reads in brackets):
+
+| indel | 1–2 bases past | 3–4 | 5–9 | 10–14 | 15–24 | 25 or more |
+|---|---:|---:|---:|---:|---:|---:|
+| deletion, 1 base | 31.7 (357) | 6.4 (861) | 2.1 | 1.1 | 1.3 | 1.1 |
+| deletion, 2–3 | 53.7 (54) | 21.8 (239) | 4.3 | 1.7 | 1.3 | 1.0 |
+| deletion, 4–6 | 70.9 (55) | 36.2 (47) | 5.9 | 2.0 | 1.2 | 0.7 |
+| deletion, 7 or more | 70.4 (27) | 84.2 (19) | 33.8 (65) | 4.6 | 0.4 | 0.3 |
+| insertion, 1 base | 10.6 (633) | 6.7 (866) | 3.2 | 1.8 | 1.6 | 1.2 |
+| insertion, 2–3 | 5.8 (172) | 4.8 (229) | 5.2 | 1.9 | 1.0 | 0.7 |
+| insertion, 4–6 | 2.5 (81) | 2.9 (170) | 9.3 | 3.9 | 1.7 | 0.7 |
+| insertion, 7 or more | 4.9 (61) | 6.0 (84) | 15.4 (434) | 6.6 | 2.7 | 1.1 |
+
+A read ending a few bases past a deletion can be aligned straight over the deleted bases, with a
+mismatch or two at its tail, and then shows the reference; a read ending inside or just past an
+insertion is more often clipped, which takes it out of the count rather than making it a reference
+read. Deletions are back at the floor by about 15 bases past the slide whatever their length; long
+insertions take about 25. The 5 Mb set's long tail for deletions (§5) was a few sites and does not
+hold here.
+
+**But these reads cause almost none of pvc's genotype errors at homozygous indels.** At 60×, 18
+truth `1/1` indels are written with the wrong genotype. Recounting each from the reads with and
+without the reads that end near the indel, and asking which of `0/1` and `1/1` the reads favour at
+the default charge of 5 in 10,000 a reference read, the verdict changes at **1 of the 18**
+(chr20:61208962, 4 reference reads to 3). At 30×, 3 of 35 change, two towards `1/1` and one away.
+What the 18 are instead, from pvc's own read counts (`--explain-loci`):
+
+- **12 are repeat tracts called by the STR path**, several with almost every read on one allele —
+  chr20:34924682 (`TTTG>T`): 40 reads of the deletion and 1 of the reference, written `0/1`;
+  chr20:53879901: 36 reads, all one allele, written `0/1`; chr20:58447656: 42 against 5, `0/1`.
+  That is the STR path's model, not the reads.
+- **Some carry a second allele the reads do show** — chr20:5619812 `A>AG`: 30 reads of the
+  insertion and 14 of it with a neighbouring substitution, written `1/2`.
+- **The rest keep reference reads among reads that run well past the indel** (14 to 90 in 100 among
+  reads the clearance rule would keep) — a second copy, a long homopolymer, or a truth-set question,
+  as in the colleague's group 3.
+
+**So the clearance rule of §5 is withdrawn as the next step.** The artefact it targets is real and
+measured, but on a whole chromosome at 60× and 30× it accounts for one or two genotype errors, where
+the STR path's `0/1` calls at tracts whose reads are nearly all one allele account for most of them.
+The caveat is the one aligner: the colleague's chr22 alignments may have been made differently, and
+a BWA alignment of the same reads would answer that.
+
 ## 6. What would confirm this on chr22
 
 The colleague's own files settle both claims at her scale, without a new walk:
