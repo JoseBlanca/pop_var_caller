@@ -68,8 +68,12 @@ if [[ -z "$data_root" ]]; then
 fi
 [[ -d "$data_root/benchmarks" ]] || { echo "no benchmarks/ under --data-root $data_root" >&2; exit 1; }
 
-commit="$(git -C "$PROJECT_DIR" rev-parse --short=8 HEAD)"
-if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no)" ]]; then
+# pvc's results are labelled by the last commit that changed pvc's own code (the crate, its
+# vendored libraries and the examples the simulated benchmark runs), not by the branch's head, so
+# a change to the suite's scripts alone does not make pvc look new and rerun.
+pvc_paths=(src Cargo.toml Cargo.lock vendor examples build.rs)
+commit="$(git -C "$PROJECT_DIR" log -1 --format=%h --abbrev=8 -- "${pvc_paths[@]}")"
+if [[ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=no -- "${pvc_paths[@]}")" ]]; then
     if [[ $allow_dirty == 0 ]]; then
         echo "the checkout has uncommitted changes; commit them, or pass --allow-dirty" >&2
         exit 1
