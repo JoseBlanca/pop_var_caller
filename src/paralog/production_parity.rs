@@ -385,8 +385,13 @@ fn score_with_ng(handed: &HandedToTheScorer) -> ng::ParalogScore {
             })
         })
         .collect();
+    // **Production's binomial, not ng's default.** Production's allele term is a strict binomial;
+    // ng's default scores the split as a beta-binomial (`DEFAULT_ALLELE_DISPERSION`). At zero
+    // dispersion ng's factor is computed from production's own logarithms, so this differential
+    // still pins every other part of the score bit for bit.
     let params = ng::ParalogModelParams {
         carrier_copy_numbers: carrier_copy_numbers.clone(),
+        allele_dispersion: 0.0,
         ..ng::ParalogModelParams::default()
     };
 

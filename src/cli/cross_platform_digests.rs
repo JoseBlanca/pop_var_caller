@@ -399,7 +399,12 @@ mod tests {
     /// the one STR record (`chrV:201`) moves in QUAL and in its heterozygous sample's GQ — more
     /// confident at the lower floor — with every genotype unchanged. Recorded on the macOS host
     /// (arm64); it was `d90fefc996dca55d37c45c43cd392170`.
-    const CALLS_MD5: &str = "0999e9cf0affd975c1ef46d6d829f923";
+    /// **Re-recorded 2026-10-21** when the hidden-duplication filter's allele term became a
+    /// beta-binomial (`DEFAULT_ALLELE_DISPERSION`, `doc/devel/reports/ng_dup_filter_allele_balance_2026-10-21.md`):
+    /// only the two records' `PARALOG_LR` (chrV:121 −21.66 → −21.62, chrV:201 −19.13 → −18.19) moved; every record still passes, and `PARALOG_POST`, the header and every
+    /// other column are unchanged. Setting the dispersion to zero reproduces `0999e9cf0affd975c1ef46d6d829f923` exactly.
+    /// Recorded on the macOS host (arm64).
+    const CALLS_MD5: &str = "cea47374a0885f91c92940f2d89e103e";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -619,7 +624,12 @@ mod tests {
     /// the one STR record (`chrV:201`) moves in QUAL and in its heterozygous sample's GQ — more
     /// confident at the lower floor — with every genotype unchanged. Recorded on the macOS host
     /// (arm64); it was `38ee2760d8b096add2b6019fa58765b5`.
-    const WITH_ERRORS_CALLS_MD5: &str = "a7215a1ca6142fa3ebe3e846ef96bd24";
+    /// **Re-recorded 2026-10-21** when the hidden-duplication filter's allele term became a
+    /// beta-binomial (`DEFAULT_ALLELE_DISPERSION`, `doc/devel/reports/ng_dup_filter_allele_balance_2026-10-21.md`):
+    /// only the two records' `PARALOG_LR` (chrV:121 −21.66 → −21.62, chrV:201 −19.13 → −18.19) moved; every record still passes, and `PARALOG_POST`, the header and every
+    /// other column are unchanged. Setting the dispersion to zero reproduces `a7215a1ca6142fa3ebe3e846ef96bd24` exactly.
+    /// Recorded on the macOS host (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "103a0436a5b1630ce94a6a8ee111f274";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -844,7 +854,12 @@ mod tests {
     /// the one STR record (`chrV:201`) moves in QUAL and in its heterozygous sample's GQ — more
     /// confident at the lower floor — with every genotype unchanged. Recorded on the macOS host
     /// (arm64); it was `2883bcaad4b3f7552c384bf5fcf36335`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "65c158aec014804780d5560220169f13";
+    /// **Re-recorded 2026-10-21** when the hidden-duplication filter's allele term became a
+    /// beta-binomial (`DEFAULT_ALLELE_DISPERSION`, `doc/devel/reports/ng_dup_filter_allele_balance_2026-10-21.md`):
+    /// only all fifteen records' `PARALOG_LR`, each by 0.03 to 2.4 toward zero (chrV:201 −18.78 → −16.73 the most) moved; every record still passes, and `PARALOG_POST`, the header and every
+    /// other column are unchanged. Setting the dispersion to zero reproduces `65c158aec014804780d5560220169f13` exactly.
+    /// Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "39efa7a9f70a5a07eea563e2f67df0c4";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

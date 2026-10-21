@@ -7,7 +7,8 @@
 //!   marginalised under the folded site-frequency-spectrum prior
 //!   `∝ 1/(p(1−p))` on `[1/2N, 1−1/2N]`; per sample the genotype prior is the
 //!   Wright inbreeding-adjusted HWE with the sample's `F`, the allele factor
-//!   is binomial over `vaf ∈ {ε, ½, 1−ε}`, and coverage is `~ Normal(1, σ₀)`
+//!   is a beta-binomial over `vaf ∈ {ε, ½, 1−ε}` (see [`AlleleFactor`]), and coverage is
+//!   `~ Normal(1, σ₀)`
 //!   *independent of genotype*.
 //! - **H2 — a hidden (reference-collapsed) paralog.** Per carrier
 //!   configuration `(T, m)` (total copies `T ∈ {3,4,6,8}`, keeping only the
@@ -54,6 +55,14 @@
 //! and the measurements are its step A2 and A3 reports. The differential's widest gap over its 800
 //! randomised loci went from exactly zero to 3.6e-12 nats, and it is pinned at 1e-10.
 //!
+//! **The third departure (2026-10-21) changes the statistic, and the owner ruled it**: every
+//! allele factor, under both stories, is a beta-binomial with dispersion
+//! [`DEFAULT_ALLELE_DISPERSION`](super::DEFAULT_ALLELE_DISPERSION) where production's was a strict
+//! binomial, because the binomial let one site's split count for more evidence the deeper the site
+//! was read, without limit (`doc/devel/reports/ng_dup_filter_allele_balance_2026-10-21.md`). At zero
+//! dispersion the factor is production's binomial from production's own logarithms, and the
+//! differential below runs there.
+//!
 //! **What proves the copy computes what it was copied from is not this file's tests.**
 //! They are production's, transcribed, so they pass on both trees whatever either does.
 //! `production_parity.rs` feeds ng's copy the randomised inputs production was run on, and
@@ -69,7 +78,7 @@
 use super::ParalogModelParams;
 use crate::float;
 use crate::genetics::{
-    PROBABILITY_FLOOR, linear_grid_point, sfs_grid_point, wright_genotype_log_priors,
+    PROBABILITY_FLOOR, lgamma, linear_grid_point, sfs_grid_point, wright_genotype_log_priors,
 };
 
 /// One sample's evidence at a locus — built for *every* locus scored, not
@@ -148,13 +157,73 @@ struct UsableSample {
 }
 
 /// One H2 carrier configuration `(T, m)`: the coverage mean `T/2`, its σ
-/// scale `√(T/2)`, and the log allele factors for `vaf = m/T`.
+/// scale `√(T/2)`, and the allele factor for `vaf = m/T`.
 #[derive(Debug, Clone, Copy)]
 struct CarrierConfig {
     coverage_mean: f64,
     coverage_sigma_factor: f64,
+    allele: AlleleFactor,
+}
+
+/// **How one story scores a sample's read split at one allele share**, with everything that does
+/// not depend on the read counts computed once per pass.
+///
+/// A beta-binomial with mean `vaf` and read-to-read correlation `ρ`
+/// ([`ParalogModelParams::allele_dispersion`]): `ln B(k + a, n − k + b) − ln B(a, b)` with
+/// `a = vaf·s`, `b = (1 − vaf)·s`, `s = (1 − ρ)/ρ`. At `ρ = 0` it is production's strict binomial,
+/// computed from production's own logarithms, so a zero dispersion reproduces production's score
+/// bit for bit. Both forms leave out the binomial coefficient, which is the same under every story
+/// and cancels in the ratio.
+#[derive(Debug, Clone, Copy)]
+struct AlleleFactor {
     log_vaf: f64,
     log1m_vaf: f64,
+    /// `None` is the strict binomial.
+    beta: Option<BetaShape>,
+}
+
+/// The beta-binomial's shape for one allele share, and the `ln B(a, b)` it subtracts.
+#[derive(Debug, Clone, Copy)]
+struct BetaShape {
+    alt: f64,
+    reference: f64,
+    total: f64,
+    log_beta: f64,
+}
+
+impl AlleleFactor {
+    /// `log_vaf` and `log1m_vaf` are passed rather than derived from `vaf`, because
+    /// `ln(1 − (1 − ε))` is not `ln ε` in floating point and production used the latter.
+    fn new(vaf: f64, log_vaf: f64, log1m_vaf: f64, dispersion: f64) -> Self {
+        let beta = (dispersion > 0.0).then(|| {
+            let total = (1.0 - dispersion) / dispersion;
+            let alt = vaf * total;
+            let reference = (1.0 - vaf) * total;
+            BetaShape {
+                alt,
+                reference,
+                total,
+                log_beta: lgamma(alt) + lgamma(reference) - lgamma(total),
+            }
+        });
+        Self {
+            log_vaf,
+            log1m_vaf,
+            beta,
+        }
+    }
+
+    /// The log-likelihood of `alt_reads` ALT and `ref_reads` REF reads at this share.
+    fn log_likelihood(&self, alt_reads: f64, ref_reads: f64) -> f64 {
+        match self.beta {
+            None => alt_reads * self.log_vaf + ref_reads * self.log1m_vaf,
+            Some(shape) => {
+                lgamma(alt_reads + shape.alt) + lgamma(ref_reads + shape.reference)
+                    - lgamma(alt_reads + ref_reads + shape.total)
+                    - shape.log_beta
+            }
+        }
+    }
 }
 
 /// Per-pass, locus-**invariant** scoring inputs, built once and reused for every
@@ -195,10 +264,9 @@ pub struct ParalogScorePrecompute {
     /// Wright genotype log-priors `(hom-ref, het, hom-alt)`, row-major
     /// `[sfs_point * cohort_size + cohort_sample]`.
     wright: Vec<[f64; 3]>,
-    /// H1 genotype VAF log-factors `[hom-ref ε, het ½, hom-alt 1−ε]` and their
-    /// complements — depend only on `ε`.
-    log_vaf_h1: [f64; 3],
-    log1m_vaf_h1: [f64; 3],
+    /// H1 genotype allele factors `[hom-ref ε, het ½, hom-alt 1−ε]` — depend only on `ε` and
+    /// the dispersion.
+    allele_h1: [AlleleFactor; 3],
     // --- H2 (hidden paralog) ---
     /// The kept carrier configurations `(T, m)`.
     configs: Vec<CarrierConfig>,
@@ -208,9 +276,8 @@ pub struct ParalogScorePrecompute {
     /// P(carrier))`, row-major `[carrier_freq_point * cohort_size +
     /// cohort_sample]`.
     carrier_probs: Vec<(f64, f64)>,
-    /// H2 non-carrier VAF log-factors (`ε`, `1−ε`).
-    log_eps: f64,
-    log1m_eps: f64,
+    /// H2 non-carrier allele factor (VAF `ε`).
+    allele_noncarrier: AlleleFactor,
 }
 
 impl ParalogScorePrecompute {
@@ -222,6 +289,8 @@ impl ParalogScorePrecompute {
     pub fn new(params: &ParalogModelParams, inbreeding: &[f64]) -> Self {
         let cohort_size = inbreeding.len();
         let eps = params.pseudocount_vaf;
+        let dispersion = params.allele_dispersion;
+        let (ln_eps, ln_1m_eps, ln_half) = (float::ln(eps), float::ln(1.0 - eps), float::ln(0.5));
 
         // H1 SFS grid + Wright table.
         let sfs_points = params.allele_freq_prior.n_points;
@@ -264,13 +333,15 @@ impl ParalogScorePrecompute {
             sfs_points,
             sfs_log_weight,
             wright,
-            log_vaf_h1: [float::ln(eps), float::ln(0.5), float::ln(1.0 - eps)],
-            log1m_vaf_h1: [float::ln(1.0 - eps), float::ln(0.5), float::ln(eps)],
+            allele_h1: [
+                AlleleFactor::new(eps, ln_eps, ln_1m_eps, dispersion),
+                AlleleFactor::new(0.5, ln_half, ln_half, dispersion),
+                AlleleFactor::new(1.0 - eps, ln_1m_eps, ln_eps, dispersion),
+            ],
             configs,
             carrier_freq_points,
             carrier_probs,
-            log_eps: float::ln(eps),
-            log1m_eps: float::ln(1.0 - eps),
+            allele_noncarrier: AlleleFactor::new(eps, ln_eps, ln_1m_eps, dispersion),
         }
     }
 }
@@ -359,8 +430,7 @@ pub fn score_locus_for_paralogy(
 /// over `p` under the folded-SFS prior. The Wright genotype log-priors and the
 /// SFS log-weights are read from `precompute` (locus-invariant), not recomputed.
 fn h1_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecompute) -> f64 {
-    let log_vaf = precompute.log_vaf_h1;
-    let log1m_vaf = precompute.log1m_vaf_h1;
+    let allele_h1 = &precompute.allele_h1;
 
     // Per-sample allele factor per genotype, and the genotype-independent
     // coverage term summed once.
@@ -373,9 +443,9 @@ fn h1_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
             let k = f64::from(obs.alt_reads);
             let nk = f64::from(obs.total_reads - obs.alt_reads);
             [
-                k * log_vaf[0] + nk * log1m_vaf[0],
-                k * log_vaf[1] + nk * log1m_vaf[1],
-                k * log_vaf[2] + nk * log1m_vaf[2],
+                allele_h1[0].log_likelihood(k, nk),
+                allele_h1[1].log_likelihood(k, nk),
+                allele_h1[2].log_likelihood(k, nk),
             ]
         })
         .collect();
@@ -409,7 +479,6 @@ fn h1_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
 /// per sample) are read from `precompute` (locus-invariant), not recomputed.
 fn h2_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecompute) -> f64 {
     let configs = &precompute.configs;
-    let (log_eps, log1m_eps) = (precompute.log_eps, precompute.log1m_eps);
     let n_configs = configs.len();
 
     // Per-sample non-carrier base term (coverage 1, VAF ε) and the carrier
@@ -423,14 +492,17 @@ fn h2_log_likelihood(usable: &[UsableSample], precompute: &ParalogScorePrecomput
         let c = obs.relative_copy_number;
         let k = f64::from(obs.alt_reads);
         let nk = f64::from(obs.total_reads - obs.alt_reads);
-        noncarrier_base.push(ln_normal(c, 1.0, sigma0) + k * log_eps + nk * log1m_eps);
+        noncarrier_base.push(
+            ln_normal(c, 1.0, sigma0)
+                + precompute.allele_noncarrier.log_likelihood(k, nk),
+        );
         for (j, config) in configs.iter().enumerate() {
             let cov = ln_normal(
                 c,
                 config.coverage_mean,
                 sigma0 * config.coverage_sigma_factor,
             );
-            let allele = k * config.log_vaf + nk * config.log1m_vaf;
+            let allele = config.allele.log_likelihood(k, nk);
             carrier_branch[s * n_configs + j] = cov + allele;
         }
     }
@@ -483,8 +555,12 @@ fn enumerate_carrier_configs(params: &ParalogModelParams) -> Vec<CarrierConfig> 
             out.push(CarrierConfig {
                 coverage_mean,
                 coverage_sigma_factor,
-                log_vaf: float::ln(vaf),
-                log1m_vaf: float::ln(1.0 - vaf),
+                allele: AlleleFactor::new(
+                    vaf,
+                    float::ln(vaf),
+                    float::ln(1.0 - vaf),
+                    params.allele_dispersion,
+                ),
             });
         }
     }
@@ -594,6 +670,7 @@ impl LogSumExp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paralog::DEFAULT_ALLELE_DISPERSION;
 
     const SIGMA0: f64 = 0.26;
 
@@ -753,7 +830,7 @@ mod tests {
         let means: Vec<f64> = configs.iter().map(|c| c.coverage_mean).collect();
         assert_eq!(means, vec![1.5, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0]);
         // VAF = exp(log_vaf); check the balanced m≈T/2 configs are ½.
-        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.log_vaf)).collect();
+        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.allele.log_vaf)).collect();
         assert!((vafs[1] - 0.25).abs() < 1e-12); // (4,1)
         assert!((vafs[2] - 0.5).abs() < 1e-12); // (4,2)
         assert!((vafs[6] - 0.5).abs() < 1e-12); // (8,4)
@@ -917,6 +994,8 @@ mod tests {
                 n_points: 1,
             },
             carrier_copy_numbers: vec![4],
+            // The hand derivation below is production's binomial.
+            allele_dispersion: 0.0,
             ..Default::default()
         };
         // One sample: rel 1.0, 5 alt of 10, F = 0, σ₀ = 0.26.
@@ -955,11 +1034,86 @@ mod tests {
             ..Default::default()
         };
         let configs = enumerate_carrier_configs(&params);
-        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.log_vaf)).collect();
+        let vafs: Vec<f64> = configs.iter().map(|c| float::exp(c.allele.log_vaf)).collect();
         assert_eq!(configs.len(), 4);
         assert!((vafs[0] - 1.0 / 5.0).abs() < 1e-12);
         assert!((vafs[1] - 2.0 / 5.0).abs() < 1e-12);
         assert!((vafs[2] - 1.0 / 7.0).abs() < 1e-12);
         assert!((vafs[3] - 3.0 / 7.0).abs() < 1e-12);
+    }
+
+    /// One sample's ratio at the given dispersion, σ₀ 0.092 (a 300x GIAB sample's), `F = 0`.
+    fn one_sample_ratio(dispersion: f64, alt: u32, total: u32, rel: f64) -> f64 {
+        let params = ParalogModelParams {
+            allele_dispersion: dispersion,
+            ..Default::default()
+        };
+        let samples = [obs(rel, alt, total, 0.0)];
+        score_locus_for_paralogy(
+            &LocusObservations { samples: &samples },
+            &[0.092],
+            &ParalogScorePrecompute::new(&params, &[0.0]),
+        )
+        .paralog_log_likelihood_ratio
+    }
+
+    /// **The beta-binomial factor is the product it abbreviates.** Checked against the
+    /// rising-factorial form `Σ ln(a+i) + Σ ln(b+j) − Σ ln(s+l)`, which uses no `ln Γ`, so a wrong
+    /// shape (swapped `a` and `b`, `s` off by one) cannot pass by sharing the code's mistake.
+    #[test]
+    fn the_beta_binomial_factor_matches_its_rising_factorial_form() {
+        for &(vaf, dispersion, alt, reference) in &[
+            (0.5, 0.0015, 59.0, 186.0),
+            (1.0 / 3.0, 0.0015, 3.0, 4.0),
+            (0.01, 0.02, 2.0, 30.0),
+            (0.99, 0.0015, 0.0, 0.0),
+        ] {
+            let factor = AlleleFactor::new(vaf, float::ln(vaf), float::ln(1.0 - vaf), dispersion);
+            let s = (1.0 - dispersion) / dispersion;
+            let (a, b) = (vaf * s, (1.0 - vaf) * s);
+            let rising = |start: f64, count: f64| -> f64 {
+                (0..count as u32).map(|i| float::ln(start + f64::from(i))).sum()
+            };
+            let expected = rising(a, alt) + rising(b, reference) - rising(s, alt + reference);
+            let got = factor.log_likelihood(alt, reference);
+            assert!(
+                (got - expected).abs() < 1e-8,
+                "vaf {vaf} ρ {dispersion} {alt}/{reference}: {got} vs {expected}"
+            );
+        }
+    }
+
+    /// **At zero dispersion the factor is production's binomial, bit for bit.**
+    #[test]
+    fn at_zero_dispersion_the_factor_is_the_binomial() {
+        let (log_vaf, log1m_vaf) = (float::ln(0.25), float::ln(0.75));
+        let factor = AlleleFactor::new(0.25, log_vaf, log1m_vaf, 0.0);
+        assert_eq!(
+            factor.log_likelihood(7.0, 30.0).to_bits(),
+            (7.0 * log_vaf + 30.0 * log1m_vaf).to_bits()
+        );
+    }
+
+    /// **The split's evidence stops growing with depth, and nothing else moves.**
+    ///
+    /// The defect the dispersion fixes (report `ng_dup_filter_allele_balance_2026-10-21.md` §2.3):
+    /// with a strict binomial, a one-copy sample's REF-heavy split scored in proportion to its read
+    /// count, so at 1,000 reads a 0.2 share scored 154 with no excess depth at all. With the default
+    /// dispersion it scores about 52. At 3 reads and for a site at one and a half copies (detection
+    /// by depth) the two agree within a tenth.
+    #[test]
+    fn the_default_dispersion_caps_the_split_and_leaves_low_depth_and_depth_detection_alone() {
+        let binomial = one_sample_ratio(0.0, 200, 1_000, 1.0);
+        let default = one_sample_ratio(DEFAULT_ALLELE_DISPERSION, 200, 1_000, 1.0);
+        assert!(binomial > 150.0, "binomial {binomial}");
+        assert!((40.0..60.0).contains(&default), "default {default}");
+
+        for &(alt, total, rel) in &[(1, 3, 1.0), (15, 30, 1.5)] {
+            let (b, d) = (
+                one_sample_ratio(0.0, alt, total, rel),
+                one_sample_ratio(DEFAULT_ALLELE_DISPERSION, alt, total, rel),
+            );
+            assert!((b - d).abs() < 0.1, "{alt}/{total} at {rel}: {b} vs {d}");
+        }
     }
 }
