@@ -285,11 +285,19 @@ slice: 20 regions, 4 alignments
 # 7259848b's fitted calls over the same psps and fit: 6,680 -> 6,705 records, 34 generic-path indel records new and 9 gone,
 # 40 sample genotypes changed at generic-path indels, and 1,679 generic-path indel records with only QUAL or FILTER moved;
 # 2 SNP records move in QUAL or FILTER only, and no SNP genotype or repeat-tract record moves. It was 035ddd59.
+# The three VCFs re-recorded 2026-10-21 (Linux container, arm64) when a partial read is compared with an edge-deletion
+# allele followed by the flank it leaves (str_edge_deletion_alleles.md §5.6, amended 2026-10-21; branch str-partial-flank).
+# The base build, b0162d47, reproduced all seven old values in the same container first. Both parameters files and the
+# window lines do not move. No record appears or vanishes and no genotype changes; only repeat-tract records whose
+# candidates delete flank bases move. Defaults route (8d463ab8 -> a152730b): 11 of 7,509 records, QUAL by at most 43.7
+# (SL4.0ch01:80962669, 222.2 -> 265.9, a 1/1), AF by at most 0.024, 7 sample GQs by at most 6. Fitted route
+# (ddf5089f -> f83ff2f5): 8 of 6,705 records, QUAL by at most 44.3 (the same record), AF by at most 0.0012, 7 sample GQs
+# by at most 6. They were 8d463ab8 / ddf5089f.
 # records: 7509
-8d463ab8f32db06d0f0a93b96629f335  from_alignments.comparable
-8d463ab8f32db06d0f0a93b96629f335  from_psps.comparable
+a152730bb3f80443bfa2eff2550c6771  from_alignments.comparable
+a152730bb3f80443bfa2eff2550c6771  from_psps.comparable
 786618495184d417504467f521198153  from_alignments.parameters.toml
 0f3ea11d5faeef7306661280774f67cc  from_alignments.windows.sorted
 cf7eec58f50e1abae9bebf6d4d1c0b10  from_alignments.windows.histograms
 f525345faa6c8efa838be925b2dbd805  fitted.parameters.toml
-ddf5089f35e07656275852321a9131f3  from_fit.comparable
+f83ff2f52c38871871a80a0bc73eb458  from_fit.comparable
