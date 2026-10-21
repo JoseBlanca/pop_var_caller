@@ -96,6 +96,8 @@ pub fn a_written_genotype_carries_an_alternative(locus: &LocusInference) -> bool
 pub struct ReferenceBesideScratch {
     before: Vec<u8>,
     after: Vec<u8>,
+    context_before: Vec<u8>,
+    context_after: Vec<u8>,
 }
 
 /// **The reference either side of an ordinary locus, as much as its partial reads need** — what
@@ -194,9 +196,36 @@ where
             Err(other) => return Err(other),
         }
     }
+    // EXPERIMENT (generic-indel-error): a fixed context window either side, read only to find
+    // the repeat an indel sits in, and only when the experiment is on.
+    scratch.context_before.clear();
+    scratch.context_after.clear();
+    if crate::calling::likelihood::generic::indel_error_mode()
+        != crate::calling::likelihood::generic::IndelErrorMode::Off
+    {
+        const CONTEXT: u64 = 80;
+        let first = region.start.get();
+        let start = first.saturating_sub(CONTEXT).max(FIRST_POSITION_OF_A_CONTIG.get());
+        if start < first {
+            reference.fetch_into(region.contig, start, first - start, &mut scratch.context_before)?;
+        }
+        let start = region.end.get() + 1;
+        match reference.fetch_into(region.contig, start, CONTEXT, &mut scratch.context_after) {
+            Ok(()) => {}
+            Err(RefSeqError::OutOfBounds { contig_length, .. }) => {
+                let available = (contig_length + 1).saturating_sub(start);
+                if available > 0 {
+                    reference.fetch_into(region.contig, start, available, &mut scratch.context_after)?;
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
     Ok(ReferenceBesideLocus {
         before: &scratch.before,
         after: &scratch.after,
+        context_before: &scratch.context_before,
+        context_after: &scratch.context_after,
     })
 }
 

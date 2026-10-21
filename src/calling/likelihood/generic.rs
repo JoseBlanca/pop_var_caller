@@ -483,6 +483,11 @@ pub struct ReferenceBesideLocus<'a> {
     pub before: &'a [u8],
     /// The reference starting just after the locus's last position.
     pub after: &'a [u8],
+    /// EXPERIMENT (generic-indel-error): a fixed window of reference before the locus, read
+    /// only to find the repeat an indel sits in. Never used to compare partial reads.
+    pub context_before: &'a [u8],
+    /// EXPERIMENT (generic-indel-error): the same window after the locus.
+    pub context_after: &'a [u8],
 }
 
 impl ReferenceBesideLocus<'_> {
@@ -491,7 +496,192 @@ impl ReferenceBesideLocus<'_> {
     pub const NONE: ReferenceBesideLocus<'static> = ReferenceBesideLocus {
         before: &[],
         after: &[],
+        context_before: &[],
+        context_after: &[],
     };
+}
+
+// ---------------------------------------------------------------------------------------------
+// EXPERIMENT (branch generic-indel-error): an indel error rate on the generic path.
+//
+// Switched by the environment variable PVC_EXP_INDEL; unset or "off" leaves every number as on
+// main. The other values say how a read the genotype can explain only by an indel error is
+// charged:
+//
+// - "nomult": the read's own minted error, without the read group's calibration multiplier;
+// - "table":  a fixed rate by the repeat the indel sits in (INDEL_ERROR_PER_10K, measured on
+//             HG002 at 300x over invariant GIAB ground), and nothing else;
+// - "max":    the larger of the two above;
+// - "floor":  the larger of the calibrated charge (main's) and the table.
+//
+// The mark: an indel pair's entry in the error-spread table is written as `-(rate + 1)`, which
+// no real spread (1 or 3) can be. `rate` is 0 for "nomult". The assembly decodes it.
+// ---------------------------------------------------------------------------------------------
+
+/// How an indel the genotype cannot explain is charged — the experiment's switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndelErrorMode {
+    /// Main's charge.
+    Off,
+    /// The minted error without the calibration multiplier.
+    NoMultiplier,
+    /// The context table alone.
+    Table,
+    /// The larger of the uncalibrated minted error and the table.
+    Max,
+    /// The larger of the calibrated minted error and the table.
+    Floor,
+}
+
+/// The experiment's mode, read once from `PVC_EXP_INDEL`.
+pub fn indel_error_mode() -> IndelErrorMode {
+    static MODE: std::sync::OnceLock<IndelErrorMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PVC_EXP_INDEL").as_deref() {
+        Err(_) | Ok("") | Ok("off") => IndelErrorMode::Off,
+        Ok("nomult") => IndelErrorMode::NoMultiplier,
+        Ok("table") => IndelErrorMode::Table,
+        Ok("max") => IndelErrorMode::Max,
+        Ok("floor") => IndelErrorMode::Floor,
+        Ok(other) => panic!("PVC_EXP_INDEL={other} is not off, nomult, table, max or floor"),
+    })
+}
+
+/// Reads in 10,000 crossing a stretch that show an indel there although the sample carries the
+/// reference, by the stretch's repeat unit length (row) and copy count (column; a homopolymer's
+/// copy count is its length). Measured on HG002 at 300x over 1,000 GIAB confident regions
+/// (`benchmarks/giab/src/indel_error_by_repeat.py`); column 1 is "no repeat"; the last column holds for every larger
+/// count.
+const INDEL_ERROR_PER_10K: [[f64; 13]; 6] = [
+    [0.4, 0.4, 0.7, 1.1, 1.6, 3.2, 5.2, 8.3, 22.0, 50.0, 130.0, 194.0, 292.0],
+    [0.4, 0.4, 0.9, 1.2, 3.2, 12.8, 23.0, 53.0, 138.0, 138.0, 138.0, 138.0, 138.0],
+    [0.4, 0.4, 1.3, 2.8, 6.9, 8.0, 8.0, 18.0, 18.0, 18.0, 18.0, 18.0, 18.0],
+    [0.4, 0.4, 2.1, 5.1, 14.0, 16.0, 16.0, 16.0, 29.0, 29.0, 29.0, 29.0, 29.0],
+    [0.4, 0.4, 2.5, 13.9, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0],
+    [0.4, 0.4, 4.1, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0, 16.0],
+];
+
+/// The smallest period of `seq`.
+fn minimal_period(seq: &[u8]) -> usize {
+    (1..=seq.len())
+        .find(|&p| seq.len().is_multiple_of(p) && seq.chunks(p).all(|c| c == &seq[..p]))
+        .unwrap_or(seq.len())
+}
+
+/// The table's rate for a read from `carried` that shows `observed`, when the two differ by
+/// one pure insertion or deletion; `None` when they do not.
+fn indel_error_rate(carried: &[u8], observed: &[u8], beside: ReferenceBesideLocus<'_>) -> Option<f64> {
+    if carried.len() == observed.len() {
+        return None;
+    }
+    let shorter = carried.len().min(observed.len());
+    let prefix = carried.iter().zip(observed).take_while(|(a, b)| a == b).count().min(shorter);
+    let suffix = carried
+        .iter()
+        .rev()
+        .zip(observed.iter().rev())
+        .take(shorter - prefix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    if prefix + suffix != shorter {
+        return None;
+    }
+    let (longer, is_deletion) = if carried.len() > observed.len() {
+        (carried, true)
+    } else {
+        (observed, false)
+    };
+    let difference = &longer[prefix..longer.len() - suffix];
+    let period = minimal_period(difference);
+    let unit = &difference[..period];
+    // The carried allele with its reference context, and where the difference ends in it.
+    let mut full = Vec::with_capacity(beside.context_before.len() + carried.len() + beside.context_after.len());
+    full.extend_from_slice(beside.context_before);
+    full.extend_from_slice(carried);
+    full.extend_from_slice(beside.context_after);
+    let end = beside.context_before.len() + prefix + if is_deletion { difference.len() } else { 0 };
+    // Whole copies of the unit ending at `end`, then any starting there.
+    let mut copies = 0usize;
+    let mut at = end;
+    while at >= period && &full[at - period..at] == unit {
+        copies += 1;
+        at -= period;
+    }
+    let mut at = end;
+    while at + period <= full.len() && &full[at..at + period] == unit {
+        copies += 1;
+        at += period;
+    }
+    if period > 6 {
+        return Some(INDEL_ERROR_PER_10K[0][1] / 1e4);
+    }
+    Some(INDEL_ERROR_PER_10K[period - 1][copies.clamp(1, 12)] / 1e4)
+}
+
+/// Overwrite the error-spread table's entries for genotypes that can explain an observed allele
+/// only by an indel error, with the experiment's mark. A no-op when the mode is `Off`.
+pub fn mark_indel_error_rates(
+    alleles: &CandidateAlleles,
+    genotypes: &GenotypeTableView<'_>,
+    beside: ReferenceBesideLocus<'_>,
+    out: &mut [f64],
+) {
+    let mode = indel_error_mode();
+    if mode == IndelErrorMode::Off {
+        return;
+    }
+    let allele_count = alleles.len();
+    let bases: Vec<&[u8]> = alleles.iter().collect();
+    let counts = genotypes.genotype_allele_counts();
+    for genotype in 0..genotypes.genotype_count() {
+        let carried = &counts[genotype * allele_count..(genotype + 1) * allele_count];
+        for observed in 0..allele_count {
+            if carried[observed] > 0 {
+                continue;
+            }
+            let mut weighted = 0.0;
+            let mut copies_total = 0.0;
+            let mut every_carried_is_an_indel_away = true;
+            for (allele, &copies) in carried.iter().enumerate() {
+                if copies == 0 {
+                    continue;
+                }
+                match indel_error_rate(bases[allele], bases[observed], beside) {
+                    Some(rate) => {
+                        weighted += f64::from(copies) * rate;
+                        copies_total += f64::from(copies);
+                    }
+                    None => every_carried_is_an_indel_away = false,
+                }
+            }
+            if !every_carried_is_an_indel_away || copies_total == 0.0 {
+                continue;
+            }
+            let rate = if mode == IndelErrorMode::NoMultiplier {
+                0.0
+            } else {
+                weighted / copies_total
+            };
+            out[genotype * allele_count + observed] = -(rate + 1.0);
+        }
+    }
+}
+
+/// Decode the experiment's mark: the error charged a wrong read given its calibrated charge, the
+/// read group's log multiplier and the spread entry. Unmarked entries are main's arithmetic.
+#[inline]
+fn wrong_read_charge(calibrated: f64, log_scale: f64, spread: f64) -> f64 {
+    if spread > 0.0 {
+        return calibrated / spread;
+    }
+    let rate = -spread - 1.0;
+    let uncalibrated = calibrated / float::exp(log_scale);
+    match indel_error_mode() {
+        IndelErrorMode::Off => unreachable!("an indel mark was written with the experiment off"),
+        IndelErrorMode::NoMultiplier => uncalibrated,
+        IndelErrorMode::Table => rate,
+        IndelErrorMode::Max => uncalibrated.max(rate),
+        IndelErrorMode::Floor => calibrated.max(rate),
+    }
 }
 
 /// Whether a carrier of `allele` shows `bases` from the locus's left border onwards: the allele,
@@ -888,6 +1078,10 @@ pub fn assemble_genotype_log_likelihood_row(
         // Hoisted out of the genotype loop: every one of these is a property of the observation
         // and of the read group it came from, not of the genotype being scored.
         let reads = f64::from(observation.num_reads);
+        let log_scale = read_groups
+            .calibrations()
+            .of(observation.read_group)
+            .log_scale();
         let contamination_fraction = contamination.fraction_of(observation.read_group);
         let from_this_individual = 1.0 - contamination_fraction;
         // The whole of the mixture's second half for this observation: `c · q(o)` does not
@@ -936,7 +1130,7 @@ pub fn assemble_genotype_log_likelihood_row(
                     // The one thing that depends on the genotype: how many things this wrong
                     // read could have shown, given what this genotype carries.
                     float::ln(
-                        this_individuals_charged_error / spread
+                        wrong_read_charge(this_individuals_charged_error, log_scale, spread)
                             + from_somebody_else_carrying_this_allele,
                     )
                 };
@@ -3725,6 +3919,8 @@ mod tests {
         ReferenceBesideLocus {
             before: &[],
             after: GIAB_DELETION_AFTER,
+            context_before: &[],
+            context_after: &[],
         }
     }
 
@@ -3814,6 +4010,8 @@ mod tests {
         let beside = ReferenceBesideLocus {
             before: b"GGAAGT",
             after: &[],
+            context_before: &[],
+            context_after: &[],
         };
 
         assert!(allele_is_compatible_with_partial(
@@ -3848,6 +4046,8 @@ mod tests {
         let beside = ReferenceBesideLocus {
             before: &[],
             after: b"TTA",
+            context_before: &[],
+            context_after: &[],
         };
 
         assert!(!allele_is_compatible_with_partial(
