@@ -234,10 +234,116 @@ zero. A deletion taking a flank base can respell to the same length as a plain a
 then `G`, against `GTT` ×11 then the flank's `A` — and such a pair differs by one base, which the
 substitution rate prices, not by a deletion. The measured build is the one that prices it.
 
-**Reads that end inside the segment are scored as today.** They see one flank only; the delimiter
-anchored them there, so they record no extent and are compared with the allele's spelling as now.
-Scoring them against the allele's extent on the side they anchored is a possible refinement, left
-out so that its effect is not mixed into this one.
+**Reads that end inside the segment: compared with the allele and the flank it leaves.**
+*(AMENDED 2026-10-21, owner. This paragraph said such reads are "scored as today", compared with
+the allele's spelling alone, and named the change below as a refinement left out of the first build.
+Measured since: [`../../reports/ng_generic_indel_error_2026-10-21.md`](../../reports/ng_generic_indel_error_2026-10-21.md)
+§5.2.)*
+
+A read that ends inside the segment — a *partial read* — held one flank and ran towards the other
+until it stopped. It records no flank deletion of its own: it never reached the far flank. **When the
+allele it is compared with deletes flank bases on the side the read runs towards, the read is
+compared with the allele's spelling followed by the flank that allele leaves on that side.** Every
+other partial read is compared with the allele's spelling as before.
+
+**Why: without the flank, a homozygous edge deletion is called heterozygous.** An allele that deletes
+flank bases has a spelling shorter than the reference tract, so a partial read that stops near where
+the reference tract ends has, under that allele, already run past the allele's tract and into the
+flank beyond the deletion. Compared with the spelling alone, those extra bases can only be explained
+as a longer tract — slippage — and are priced as such. Measured on HG002 chromosome 20 at 60×:
+
+- at chr20:53879889 (truth `GAGACAGAC>G` at 53879901, `1/1`; tract `GAGA…GA`, 16 bases; flank
+  `CAGACAGAC…`) the allele is `GAGAGAGAGAGAG` with 5 right-flank bases deleted. Seven partial reads
+  held left and spelled `GAGAGAGAGAGAGAGA`. Under the allele that is its 13 bases followed by `AGA`,
+  the start of the flank it leaves — the allele and the reference read the same there, so the reads
+  cannot tell them apart. Compared with the spelling alone they scored 0.003 each under the allele
+  against about 1 under the reference; reads a base or two longer scored under one in a million;
+- those dozen partial reads outweighed 36 complete reads, each 0.87 likely under the allele and
+  3 × 10⁻¹¹ under the reference, and the site was written `0/1`. chr20:34924682 (`TTTG>T`) and
+  58447656 (`GTGTGTGCA>G`) fail the same way.
+
+**The rule, precisely.** For a partial observation that held the left flank and a candidate `a` whose
+flank deletion takes `R > 0` bases on the right, let `F` be the reference right flank without its
+first `R` bases. Then
+
+```text
+Lr(partial of ℓ bases | a)  =  Σ   P_stutter(Δ | a) · subst( the ℓ bases | first ℓ bases of ( a stretched by Δ, then F ) )
+                               Δ : (L + Δ) + |F| ≥ ℓ
+```
+
+summed over every length change `Δ` the stutter distribution reaches, where `L` is the length of
+`a`'s spelling. Two things differ from [`read_likelihoods.md`](read_likelihoods.md) §5.2's form:
+
+- **the condition is on the stretched spelling plus `F`, not on the stretched spelling alone.** A
+  stretching shorter than the read is now admissible — the flank supplies the rest — and it is the
+  stretching that explains these reads (`Δ = 0`, the allele unchanged). A stretching whose spelling
+  plus `F` is still shorter than the read contributes nothing; with `F` the tract's stored flank (15
+  bases in the chromosome 20 psps) and a read needing only 5 aligned flank bases to be complete
+  (`MIN_ALIGNED_FLANK_BASES`, `src/locus_generation/ssr.rs:1371`), that does not arise from a read
+  the generator classes as partial;
+- **there is no factorised shortcut.** §5.2 takes the letters out of the sum on a pure tract because
+  every stretching agrees on its first `ℓ` bases; with `F` appended they do not — a stretching by one
+  unit puts a repeat base where `Δ = 0` puts a flank base — so the sum is always taken in full.
+
+A slip is placed as §5.2 places it: on a pure tract at the end away from the held flank, on an
+interrupted tract in each run with equal weight, a part-repeat change resized at that end. `F` is
+appended after the stretched spelling. A read that held the **right** flank is the mirror image:
+the candidate's flank deletion on the **left** (`L_del > 0`), `F` the reference left flank without
+its last `L_del` bases, and the read, the spelling, the motif and `F` all written back to front, as
+§5.2 already does for a right-held read. A whole-tract witness with no recorded side is scored from
+both sides, each half under its own side's rule.
+
+**This is what the STR-bundle path already does.** A bundle compares a partial read with the allele
+followed by `flank_beyond_the_hull` — the reference flank on the side the read ran towards, less the
+allele's own deletion (`src/calling/likelihood/ssr_emission.rs:2165`). A segment's partial reads
+now see the same flank under the same definition.
+
+**Unchanged:**
+
+- complete reads (the paragraphs above);
+- a candidate with no flank deletion on the side the read runs towards — the reference, every plain
+  repeat allele, and a flank-deletion allele whose deletion is on the side the read held;
+- STR bundles.
+
+**Not adopted: the flank for every candidate.** Comparing every partial read with every allele
+followed by its flank — the reference included, which a read that runs a base or two past the
+reference tract also currently scores as slippage — was measured beside the rule above. It gains
+more: on chromosome 20 at 30×, 71 indels with the wrong genotype against 83 for the rule above and
+84 before; on HG002's tandem-repeat benchmark at 10×, 6,500 indel errors against 6,510 and 6,518.
+But it adds 7 SNP errors on that benchmark at 30× (13,640 against 13,633), all on repeat ground, and
+changes 35 STR genotypes on the tomato oracle's four accessions at about 3× with no truth to score
+them. It changes how every partial read is scored at every tract, which is
+[`read_likelihoods.md`](read_likelihoods.md) §5.2's rule rather than this design's, and needs its
+own study (§9, deferred).
+
+**One known cost.** HG003 chr17:28427006, truth `CA>C` (`0/1`) inside an `A` run, fitted at 30×: an
+allele deleting the flank `C` before the run now beats the one-`A` contraction. Partial reads that
+never reach the `C` used to count against the flank-deletion allele and now count for both, and the
+complete reads do not separate the two. It is the only call the rule moved on the per-sample GIAB
+panel (three samples at 5×, 10×, 30× and 300×).
+
+**At the ends of the range.** The rule is per read and estimates nothing, so it behaves the same at
+one sample and at a thousand. It matters in proportion to how many partial reads a tract has, which
+grows with depth: at 3× a tract has few, and on the tomato oracle (four accessions at about 3×) the
+rule moved no call; at 60× a dozen partial reads were enough to flip a site.
+
+**How we know it works.**
+
+- Output is byte-identical to the build before this amendment wherever no candidate deletes flank
+  bases: on the tomato oracle's slice, on HG002's 5 Mb set at 10×, 30× and 300×, and on the GIAB
+  panel except chr17:28427006.
+- chr20:34924682, 53879901 and 58447656 are written `1/1` at 60×.
+- On HG002's tandem-repeat benchmark (`benchmarks/ssr_hg002/`, `--defaults`), indel errors (missed
+  + false + wrong genotype) fall from 8,605, 6,518 and 5,003 to 8,597, 6,510 and 4,999 at 5×, 10× and
+  30×, and no SNP count moves.
+- On chromosome 20, indels with the wrong genotype fall from 37 to 34 at 60× and 84 to 83 at 30×
+  (`--defaults`), from 35 to 32 and 67 to 65 fitted; no SNP count moves.
+- Unit tests: a left-held partial read reading into the flank an allele leaves scores within a few
+  per cent of the reference at a site where the two read the same (the 53879889 fixture), and well
+  above the slippage-only score; the right-held mirror with a left flank deletion; a candidate
+  without a flank deletion on the read's far side scores bit-identically to before; an interrupted
+  tract places its slips per run before `F` is appended; a stretching whose spelling plus `F` is
+  shorter than the read contributes zero.
 
 ### 5.7 The prior
 
@@ -356,3 +462,13 @@ The measurement, as for the 2026-10-10 changes:
   period class, the per-tract verdict flips, and the allele-exact false positives, which should
   fall where the two-record spelling becomes one record.
 - The edge-deletion pairs at one sample should approach GATK's 26–27 of 27 at 15× and above.
+
+## 9. Deferred, with a recommended home
+
+- **Comparing every partial read with every allele followed by its flank** — the reference and every
+  plain allele, not only alleles that delete flank bases (§5.6, "Not adopted"). Measured: more
+  indels right (chromosome 20 at 30×, 71 wrong genotypes against 83), 7 more SNP errors on HG002's
+  tandem-repeat benchmark at 30×, 35 tomato genotypes moved with no truth. **Home:**
+  [`read_likelihoods.md`](read_likelihoods.md) §5.2, whose rule it changes for every tract; it wants
+  the stuttering benchmark's 16 runs and the per-period breakdown of the SNP cost before a decision.
+  The prototype is commit 707d725f on branch `generic-indel-error` (`PVC_EXP_PARTIAL_FLANK=all`).

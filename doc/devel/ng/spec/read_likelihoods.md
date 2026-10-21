@@ -1696,6 +1696,13 @@ Lr(partial of length ℓ | a)  =  Σ            P_stutter(Δ | a) · subst( the 
 **In words: sum the stutter distribution over every length change that would still leave the tract at
 least as long as what the read saw, weighting each by how well the letters matched.**
 
+> **Amended (2026-10-21): an allele that deletes flank bases on the side the read runs towards** is
+> compared as its stretched spelling **followed by the flank it leaves there**, the condition becomes
+> `(L + Δ) + |flank left| ≥ ℓ`, and the sum is always taken in full
+> ([`str_edge_deletion_alleles.md`](str_edge_deletion_alleles.md) §5.6). Without it a partial read
+> that ran into that flank was priced as slippage, and homozygous edge deletions were called
+> heterozygous. Every other candidate keeps the formula above.
+
 > **Changed (2026-10-12): "the first ℓ bases" holds for a read that held the left flank only.** A
 > read that held the right flank shows the **end** of its carrier's tract, and is compared with the
 > last `ℓ` bases of `a` stretched by `Δ`. Everything above is applied to the mirror image: the
