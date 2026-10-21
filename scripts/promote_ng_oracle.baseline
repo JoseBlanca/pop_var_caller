@@ -279,6 +279,12 @@ slice: 20 regions, 4 alignments
 # SL4.0ch01:37011736 T>C, now kept at 5.74 against a cut of 5.85. Fitted route (a872e3b6 -> 035ddd59): 6,680 records either
 # way, SL4.0ch01:67912984 A>G now removed and SL4.0ch01:37087746 T>C now kept at 4.97 against 5.15. They were 9fc4a28f /
 # a872e3b6.
+# The fitted route's VCF re-recorded 2026-10-21 (read_likelihoods.md §3.5, amended: an indel error is charged without the
+# calibration scale; report ng_generic_indel_error_2026-10-21.md). Only that line moves: the defaults route, both
+# parameters files and the windows are unchanged, as the amendment cannot reach a run whose scale is one. Against main
+# 7259848b's fitted calls over the same psps and fit: 6,680 -> 6,705 records, 34 generic-path indel records new and 9 gone,
+# 40 sample genotypes changed at generic-path indels, and 1,679 generic-path indel records with only QUAL or FILTER moved;
+# 2 SNP records move in QUAL or FILTER only, and no SNP genotype or repeat-tract record moves. It was 035ddd59.
 # records: 7509
 8d463ab8f32db06d0f0a93b96629f335  from_alignments.comparable
 8d463ab8f32db06d0f0a93b96629f335  from_psps.comparable
@@ -286,4 +292,4 @@ slice: 20 regions, 4 alignments
 0f3ea11d5faeef7306661280774f67cc  from_alignments.windows.sorted
 cf7eec58f50e1abae9bebf6d4d1c0b10  from_alignments.windows.histograms
 f525345faa6c8efa838be925b2dbd805  fitted.parameters.toml
-035ddd599e7f3fcf525fcac8bafd9305  from_fit.comparable
+ddf5089f35e07656275852321a9131f3  from_fit.comparable

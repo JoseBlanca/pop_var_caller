@@ -2,8 +2,14 @@
 
 **Date:** 2026-10-21. Branch `generic-indel-error`, from main bbcc9f46. Prompted by a colleague's
 GIAB chr22 report on pvc bbcc9f46 (`tmp/inform_to_pop_var/README.md` in the main checkout,
-sections 2, 3, 8 and 9). Research only: nothing here changes a default, and the prototype is off
-unless an environment variable turns it on.
+sections 2, 3, 8 and 9).
+
+**Status (2026-10-21, later the same day): the owner ruled for §7's amendment.** It is in
+`read_likelihoods.md` §3.5 and built (commit f800df67): an indel error is charged without the
+calibration scale. The prototype switch this report describes, `PVC_EXP_INDEL`, is gone; the
+built rule gives calls byte-identical to its `nomult` arm on all 15 GIAB configurations and on
+tomato, so every `nomult` figure below is the shipped behaviour's. The `table`, `max` and `floor`
+arms existed only in commit 18dd5712.
 
 The colleague measured two defects on the SNP/indel path (the *generic path*: every locus that is
 not a catalogued repeat tract):
@@ -52,8 +58,8 @@ the highest rate measured on generic ground. The reads come from two other place
 The first has a direct fix — require a read to extend further past an indel before it counts as
 reference evidence, a sibling of 7a1e2417 — which this branch measures but does not build.
 
-**One decision is needed** (§7): whether to amend the read likelihood so that the calibration
-multiplier applies to substitution errors only.
+**One decision was needed** (§7): whether to amend the read likelihood so that the calibration
+multiplier applies to substitution errors only. The owner ruled yes.
 
 ---
 
@@ -217,7 +223,7 @@ colleague's chr22 numbers show the same shape (10×: 1,872 fewer false, 1,342 mo
 
 ## 4. Fixing Defect A: the options, the prototype, and the ends of the range
 
-**The prototype** (this branch, `PVC_EXP_INDEL`; unset, every output is byte-identical to main —
+**The prototype** (commit 18dd5712, `PVC_EXP_INDEL`; unset, every output is byte-identical to main —
 checked on HG002 30×, defaults and fitted). For a genotype that can explain an observed allele only
 by an insertion or deletion — every allele it carries differs from the observed one by one pure
 indel — the wrong read is charged by one of:
@@ -360,7 +366,7 @@ The colleague's own files settle both claims at her scale, without a new walk:
 - **Defect A.** Her fitted parameters files, one per sample and depth: read
   `error_probability_multiplier` (expected about 6–9 at 10–30×, 13–20 at 300×). Then, over her
   fitted-run psps, call twice more with the same file: once with the multiplier edited to 1.0, once
-  with this branch's binary and `PVC_EXP_INDEL=nomult`. Expected: generic-path indel errors back to
+  with this branch's binary (f800df67 or later). Expected: generic-path indel errors back to
   the defaults' level (her section 8: homopolymer 67 → 36, other tandem repeat 96 → 55, extreme GC
   21 → 6, rest 62 → 25 at 30×), SNP errors at the fitted level.
 - **Defect B.** Her 300× CRAMs and psps at the five generic group-2 sites
@@ -417,8 +423,9 @@ flat term for no repeat; home: `parameter_prepass_generic.md` and the census; pr
 
 All scratch lives under the worktree's `tmp/` (not committed); the scripts there are the ones used.
 
-- Prototype: build this branch, then `PVC_EXP_INDEL=nomult` (or `table`, `max`, `floor`) on
-  `call-from-psps`. Unset, output equals main.
+- The rule as built: this branch from f800df67. The four prototype arms: commit 18dd5712 with
+  `PVC_EXP_INDEL=nomult` (or `table`, `max`, `floor`) on `call-from-psps`; unset, output equals
+  main.
 - Error-rate curve: `uv run --with pysam --with numpy python -I
   benchmarks/giab/src/indel_error_by_repeat.py SAMPLE ALIGNMENT BED TRUTH_VCF REFERENCE OUT.tsv`
   (also writes `OUT.tsv.hom_alt.tsv`, the per-site table §5 reads).
