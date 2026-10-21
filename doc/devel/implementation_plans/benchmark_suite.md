@@ -344,6 +344,27 @@ All are regenerated.
 **Estimate.** About 2½ hours for tomato at 1, 8 and 63 samples. freebayes at 63 samples is most of
 it. Under 10 GB.
 
+### 4.6a The read floor: what only reading the alignments costs
+
+*Added 2026-10-21 at the owner's request.* `samtools view -c -M -L <regions> -@ <threads>` over the
+alignment files of `speed` and `hg002_5mb`, set beside pvc's step that reads the alignments, with
+their ratio. It is the floor no caller can beat; the ratio is how much of pvc's time is its own work.
+
+- **Two floors, one per pvc step.** Against `generate-psps`, one samtools process per sample, as
+  many at once as the run's cores, each with the threads `generate-psps` uses for one file: one for
+  a BAM, two for a CRAM, because pvc decodes CRAM containers ahead on a second thread. Against
+  `call-from-alignments`, the files one after another at the run's thread count, summed. samtools'
+  `-@` counts threads beyond the first, so `-@ 5` for 6 threads.
+- **CRAM fields.** samtools 1.16 decodes every field of a CRAM record even for a count (HG002 5 Mb
+  CRAM, quiet machine: 15.4 s by default, 15.4 s forcing every field, 1.3 s for flags only). pvc
+  decodes every field except the auxiliary tags other than the read group, so a CRAM floor asks for
+  exactly those (`required_fields=0x17ff`). On the same CRAM that is within 5 in 100 of a full
+  decode. BAM has no such shortcut.
+- **Cache and quiet.** Every timed step, pvc's and the competitors' included, first reads its input
+  files once, so every tool reads from memory. The host's load and the cores other processes use are
+  recorded every 5 s, and a figure taken with other processes above one core is marked.
+- **Stored like a competitor**, rerun only when samtools' version or the input changes.
+
 ### 4.7 Agreement with GATK on the tomato cohort
 
 There is no truth set, so this benchmark counts agreement, not accuracy. It uses the 63-sample calls

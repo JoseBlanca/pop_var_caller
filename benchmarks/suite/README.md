@@ -73,6 +73,7 @@ summary marks those with ⚠).
 | `hg002_tr` | GIAB HG002 tandem-repeat benchmark, 50,000 regions, 5× to 300×; STR genotypes per tract | pvc (defaults, fitted), GATK, HipSTR |
 | `stutter_sim` | simulated 4 Mb genome with 3,000 STR segments and 500 bundles, PCR and PCR-free, 1 and 50 samples, 5× to 60× | pvc (defaults, fitted, true stutter), GATK, freebayes, HipSTR (twice) |
 | `speed` | tomato cohort, 1, 8 and 63 accessions over 8 Mb: wall time, CPU time, peak memory of each whole pipeline | pvc (both ways), GATK, freebayes |
+| read floor (in `speed` and `hg002_5mb`) | `samtools view -c -M -L` over the same files: the cost of only reading and decoding them, set beside pvc's `generate-psps` and `call-from-alignments` with their ratio | samtools, run once like a competitor |
 | `tomato_agreement` | pvc's 63-accession genotypes against GATK's (no truth set) | pvc against GATK |
 | `external_chr22` | the colleague's chr22 benchmark; not in a full run, needs `--external-config` (see `bench/external_chr22.py`) | pvc (defaults, fitted), GATK, freebayes |
 
@@ -84,6 +85,11 @@ How each is scored:
   kept at QUAL ≥ 20 as its documentation advises.
 - **STRs:** `benchmarks/lib/tract_qual_experiment.py` on HG002 and `scripts/ng_str_stutter_score.py`
   on the simulation, which compare the rebuilt DNA over each repeat.
+- **Speed and the machine's state:** every timed step first reads its input files once, untimed,
+  so every tool reads from memory. The host records its load every 5 s; each time figure carries
+  the load average at its step's start and end and the cores used meanwhile by processes other than
+  the suite (`other_cpu_cores`). A figure whose step ran with other processes above one core is
+  marked ⚠ in the summary.
 - **Parallelism:** each caller as its documentation tells a user — one process per sample for the
   one-sample stages (pvc `generate-psps`, GATK HaplotypeCaller GVCFs), one threaded process for the
   cohort stages, freebayes as one process per block of regions. GATK's cohort route is CombineGVCFs

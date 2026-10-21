@@ -85,7 +85,8 @@ def _split(value):
 
 def _first_line(cmd):
     try:
-        out = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+        out = subprocess.run(cmd, shell=True, capture_output=True, text=True, errors="replace",
+                             timeout=120)
     except subprocess.TimeoutExpired:
         return "unknown"
     text = (out.stdout + out.stderr).strip().splitlines()

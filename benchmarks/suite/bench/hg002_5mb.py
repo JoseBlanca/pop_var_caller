@@ -7,7 +7,7 @@ figures.
 
 import os
 
-from lib import arms, inputs
+from lib import arms, inputs, readfloor
 
 TITLE = "HG002 over 5 Mb — one human sample, accuracy, speed and memory"
 DESCRIPTION = """
@@ -45,4 +45,6 @@ def steps(ctx):
             out.append(step)
             out.append(arms.score_step(ctx, callset, base, truth, regions, sdf,
                                        call_sample="HG002", truth_sample="HG002"))
+        out.extend(readfloor.floor_steps(ctx, f"hg002_5mb/{depth}", arms.GRCH38,
+                                         {"HG002": alignment("HG002", depth)}, regions, base))
     return out

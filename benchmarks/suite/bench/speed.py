@@ -12,7 +12,7 @@ process for the cohort stages, freebayes as 6 processes over blocks of the regio
 import os
 import subprocess
 
-from lib import arms
+from lib import arms, readfloor
 from lib.steps import Step, file_identity
 
 TITLE = "Speed and peak memory — tomato cohort"
@@ -80,4 +80,6 @@ def steps(ctx, sizes=None):
             step, _ = arms.arm_steps(ctx, arm, f"speed/tomato_{size}", REFERENCE, catalog, chosen,
                                      regions, base, joint=True)
             out.append(step)
+        out.extend(readfloor.floor_steps(ctx, f"speed/tomato_{size}", REFERENCE, chosen, regions,
+                                         base))
     return out

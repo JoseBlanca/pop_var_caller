@@ -20,7 +20,7 @@ import shlex
 import shutil
 
 from lib import arms, callers
-from lib.measure import run_commands
+from lib.measure import run_commands, warm
 from lib.results import row, time_rows
 from lib.steps import Step, file_identity
 
@@ -229,6 +229,7 @@ def _hipstr_step(ctx, name, sim_dir, reference, bams, base, fixed):
     row_base = dict(base, caller=LABELS[arm], caller_version=ctx.version("hipstr"))
 
     def action(d):
+        warm(list(bams.values()) + [reference])
         regions = os.path.join(d, "hipstr_regions.bed")
         segments = os.path.join(sim_dir, "segments.bed")
         names = ",".join(bams)

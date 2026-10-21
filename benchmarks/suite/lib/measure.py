@@ -173,3 +173,22 @@ def merge(*measurements):
         "max_single_rss_bytes": max((m["max_single_rss_bytes"] for m in measurements), default=0),
         "peak_summed_rss_bytes": max((m["peak_summed_rss_bytes"] for m in measurements), default=0),
     }
+
+
+def warm(paths):
+    """Read each file once, untimed, so that the timed step after it reads from memory.
+
+    Every timed step that reads alignment files warms them first (with their indexes and the
+    reference), so every tool starts from the same cache state: the files already in memory.
+    """
+    import glob
+
+    files = []
+    for p in paths:
+        for f in [p] + glob.glob(p + ".*i") + glob.glob(p + ".fai"):
+            if os.path.isfile(f) and f not in files:
+                files.append(f)
+    for f in files:
+        with open(f, "rb") as fh:
+            while fh.read(1 << 24):
+                pass

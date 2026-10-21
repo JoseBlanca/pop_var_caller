@@ -83,13 +83,23 @@ machine="$model, $cores cores ($fast fast, $slow slower), ${ram_gb} GB; Linux VM
 # vcfeval, pinned; not in the dev image.
 "$PROJECT_DIR/benchmarks/suite/fetch_tools.sh"
 
-# The host's load, every 30 s, for as long as the suite runs. The virtual machine cannot see it.
+# The host's load every 5 s, for as long as the suite runs; the virtual machine cannot see it. Two
+# figures a line: the one-minute load average, and the cores' worth of CPU used by every process
+# except the suite's own virtual machine ("other CPU"). The load average counts the suite too, so
+# it is the other CPU that says whether the machine was quiet. The suite's virtual machine is any
+# `com.apple.Virtualization.VirtualMachine` process that did not exist before the suite started;
+# a container another session starts during the run would be counted as the suite's.
+vm_name='com.apple.Virtualization.VirtualMachine'
+before_vms=" $( (pgrep -f "$vm_name" || true) | tr "\n" " ") "
 (
     while true; do
         load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
         [[ -z "$load" ]] && load="$(awk '{print $1}' /proc/loadavg)"
-        echo "$(date +%s) $load" >> "$RESULTS/host_load.tsv"
-        sleep 30
+        other="$(ps -A -o pid=,%cpu=,comm= | awk -v before="$before_vms" -v vm="$vm_name" -v me=$$ '
+            { if (index($3, vm) && index(before, " " $1 " ") == 0) next; t += $2 }
+            END { printf "%.2f", t / 100 }')"
+        echo "$(date +%s) $load $other" >> "$RESULTS/host_load.tsv"
+        sleep 5
     done
 ) &
 sampler=$!
