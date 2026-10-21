@@ -625,6 +625,8 @@ log Lg(g)  =   Σ         n_o · log( k_{a(o)} / P )                     ← the
 - `a(o)` is the allele the observation's bases match, `r(o)` its read group.
 - `q_sum_o` is the observation's summed log error, straight off the evidence.
 - `scale` is §3.2's per-read-group calibration; in log space it is one addition per observation.
+  **It is left out when the genotype could have produced the observation only through one
+  insertion or deletion** — §3.5's closing amendment says why (2026-10-21).
 - `m(a, g)` is how many things a wrong read could have shown, which §3.5 settles.
 - `q_sum_other` is the pool of reads matching no allele in the table. It is the same for every
   genotype so it cancels in genotyping, and it is **kept** because the data likelihood also feeds
@@ -776,6 +778,42 @@ favouring the reference, which is the direction a caller should err in when its 
 `(allele, genotype)` and costs nothing per read. The classification uses the projected sequences the
 merge already unified, which is why unification by exact byte match is sound only because indels were
 left-aligned upstream ([`cohort_merge.md`](cohort_merge.md) §4.2).
+
+**AMENDED 2026-10-21 (owner): §3.2's scale applies to substitution errors, not to indel errors**
+([`../../reports/ng_generic_indel_error_2026-10-21.md`](../../reports/ng_generic_indel_error_2026-10-21.md)).
+
+**Why.** The scale is the pre-pass's fitted error rate divided by the reads' mean minted error
+(§3.2), and the fitted rate is learned from reads that disagree with the reference at generic sites
+— nearly all of them by a substitution. Indel errors are far rarer. Measured on HG002 at 300× over
+invariant GIAB ground, a read shows an indel the sample does not carry 0.4 times in 10,000 where
+there is no repeat, 1.6 at a 4-base homopolymer, 8.3 at a 7-base one and 12.8 at a 5-copy
+dinucleotide. The minted error already charges such a read about 5 in 10,000. A fitted scale — 6.2
+to 6.4 on HG002 at 10× and 30×, 14 at 300× — multiplies that to 30 to 95 in 10,000, so a fitted
+run explains a real indel's reads away as errors. On three GIAB samples it missed 61 generic indels
+at 5× where `--defaults` missed 50, 26 against 18 at 10×, 10 against 7 at 30×, and nothing in the
+fitted file but the scale moved them.
+
+**Decision.** When **every** allele a genotype carries differs from the observed allele by exactly
+one insertion or deletion — one contiguous run of bases present in one sequence and absent from the
+other, everything either side identical — the wrong read is charged its minted error **without the
+scale**: `q_sum_o + n_o · (− log m)`, with `m = 1` as before. Every other wrong read keeps the
+scaled charge: a substitution, several substitutions, and a genotype whose carried alleles differ
+from the observed one in mixed ways (one by an indel, another by a substitution), where neither
+reading is clearly right and the scaled charge is the one already validated. The classification is a
+property of the allele pair, computed beside `m` once per `(allele, genotype)`.
+
+**Ends of the range.** Nothing is estimated, so the rule behaves the same at one sample and at a
+thousand, at 3 reads a position and at 300. A `--defaults` run, whose scale is 1, is byte-identical
+to the formula before this amendment. On the three GIAB samples it restored the defaults' generic
+indel counts at every depth from 5× to 300× and left every SNP count at the fitted run's; on tomato
+at about 3× it moved 46 generic indel records and 43 genotypes among 6,888, with no truth set to
+score them against.
+
+**What it is not.** The minted error is a base quality, which is not an indel rate: it overstates
+indel error outside repeats about tenfold and understates it at 7-base homopolymers and 5-copy
+dinucleotides by up to twofold. That is the `--defaults` behaviour, and what replaces it is a fitted
+indel-error curve per read group (§10). Partial reads that no allele fits keep the scaled charge
+(§5.3).
 
 ### 3.6 Contamination
 
@@ -1895,6 +1933,12 @@ term(o | g)  =  Σ  ( k_a / P )   over the alleles a in g that are compatible wi
 and if no allele in `g` is compatible, the observation is charged as an error exactly as in §3.3,
 with `m = 1`, because a multi-position difference has no finite set of wrong outcomes to divide by.
 
+**That charge keeps §3.2's scale even where §3.5's 2026-10-21 amendment drops it for a complete
+read.** Deciding that a fragment differs from a carried allele by one indel and nothing else would
+mean aligning the fragment against the allele, and the partial rule deliberately compares bytes at
+witnessed positions instead. The measured cost of leaving it is none: with complete reads alone
+exempted, every generic indel the scale had cost on three GIAB samples came back (§3.5).
+
 **This is exactly aggregable**, which is why it is the rule chosen: the witnessed positions are
 already part of an observation's identity
 ([`locus_generation/mod.rs`](../../../../src/ng/locus_generation/mod.rs) — `read_witness` carries
@@ -2251,6 +2295,16 @@ anything.
   on per-read discrimination is the cheap approximation of the same idea and could be adopted first.
   **Home:** here, once someone measures how much mapping quality varies within an observation; the
   evidence already carries `mapq_sum_sq`, so the spread is free to report today.
+- **A fitted indel-error rate on the SNP/indel path**, by repeat unit and copy count, per read group
+  — what §3.5's 2026-10-21 amendment stands in for by charging an indel the read's unscaled minted
+  error. The STR path's slippage curve is its upper half and already fits it without a truth set: on
+  one HG002 sample at 10× it gives 19, 50, 121, 203 and 274 slipped reads in 10,000 at homopolymers
+  of 8 to 12, against 22, 50, 130, 194 and 292 measured on invariant ground. Below the routing floor
+  it needs the census to count indel reads at generic sites by repeat context, and a flat term where
+  there is no repeat. **The prize, measured with a fixed table in its place**: 8 fewer missed generic
+  indels at 10× over HG002's 5 Mb for 3 more false ones, 2 fewer for 1 more at 30×, none at 300×
+  ([`../../reports/ng_generic_indel_error_2026-10-21.md`](../../reports/ng_generic_indel_error_2026-10-21.md)
+  §4). **Home:** [`parameter_prepass_generic.md`](parameter_prepass_generic.md) and the census.
 - **A general overdispersion device** — freebayes' read-dependence factor or samtools' dependency
   coefficient (§3.8). **Home:** here, but only once the site filter of §3.7 exists, because
   the two repair the same symptom and one of them names its mechanism.
@@ -2554,3 +2608,12 @@ production already tests and ng's port should carry across
     pseudo-counts for the shape and 20 slipped reads for the level are inherited values nobody here
     has measured. **What would settle it:** adaptation is adopted if it beats the frozen values at
     some depth and does not lose to them at any, with the shrinkage that achieves both named.
+
+20. **The scale reaches substitution errors and not indel errors** (§3.5, amended 2026-10-21). At
+    one locus with a reference, an insertion and a SNP, under a scale of 4: a read showing the
+    insertion is charged its unscaled error under the reference homozygote; a read showing the SNP
+    is charged the scaled error divided by three; a read showing the reference under a genotype
+    carrying the insertion and the SNP — one an indel away, one a substitution away — keeps the
+    scaled charge. At a scale of 1 every row equals the formula before the amendment. And end to
+    end: GIAB single-sample calls, fitted, keep the fitted run's SNP counts and the `--defaults`
+    run's generic-indel counts at 5×, 10×, 30× and 300×.

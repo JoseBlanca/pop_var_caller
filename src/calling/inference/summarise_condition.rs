@@ -1785,13 +1785,6 @@ fn fill_generic_locus_emissions<SsrEmissionScratch>(
     // spread across the locus's others depends on the candidate sequences and on nothing a
     // sample showed.
     fill_error_spreads(candidates, genotypes, scratch.error_spreads_mut());
-    // EXPERIMENT (generic-indel-error): a no-op unless PVC_EXP_INDEL is set.
-    crate::calling::likelihood::generic::mark_indel_error_rates(
-        candidates,
-        genotypes,
-        reference_beside,
-        scratch.error_spreads_mut(),
-    );
 
     scratch.charge_emission_build();
     let calibration = ReadGroupCalibrations::over(parameters.calibration_by_read_group());

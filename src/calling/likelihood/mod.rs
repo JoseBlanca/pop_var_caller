@@ -520,6 +520,31 @@ impl ReadGroupCalibration {
         let mean_log_error = q_sum / f64::from(num_reads);
         (self.scale * float::exp(mean_log_error)).max(MIN_BASE_ERROR)
     }
+
+    /// **The observation's minted error without this read group's scale** — what spec §3.5's
+    /// 2026-10-21 amendment charges a read the genotype could have produced only through one
+    /// insertion or deletion. The same geometric mean and the same floor as
+    /// [`charged_error`](Self::charged_error), so at a scale of one the two are the same number
+    /// to the last bit.
+    ///
+    /// # Panics
+    ///
+    /// As [`charged_error`](Self::charged_error), on an observation with no reads or a
+    /// summed log error that is not a finite number at or below zero.
+    #[must_use]
+    pub fn minted_error(&self, q_sum: f64, num_reads: u32) -> f64 {
+        assert!(
+            num_reads > 0,
+            "an observation with no reads behind it has no average error; the merge builds \
+             no such row"
+        );
+        assert!(
+            q_sum.is_finite() && q_sum <= 0.0,
+            "an observation's summed log error is {q_sum}, and a sum of logarithms of \
+             probabilities is a finite number at or below zero"
+        );
+        float::exp(q_sum / f64::from(num_reads)).max(MIN_BASE_ERROR)
+    }
 }
 
 /// §3.6's mixture inputs for one read group, frozen before the caller's loop starts.
@@ -2019,6 +2044,10 @@ pub struct GenericRowScratch {
     /// a different spread: an unexplained complete observation is charged `ε̄/m` and an
     /// unexplained partial `ε̄/1`, and both numbers are the same `ε̄` scaled.
     charged_error: Vec<f64>,
+    /// One entry per **complete** observation, in the evidence's order: its minted error
+    /// without the scale — the charge for an indel error (spec §3.5, amended 2026-10-21).
+    /// Partials have none: theirs keeps the scale (spec §5.3).
+    minted_error: Vec<f64>,
     supported: usize,
     alleles: usize,
 }
@@ -2043,6 +2072,8 @@ impl GenericRowScratch {
         self.compatible.resize(partials * alleles, false);
         self.charged_error.clear();
         self.charged_error.resize(supported + partials, f64::NAN);
+        self.minted_error.clear();
+        self.minted_error.resize(supported, f64::NAN);
     }
 
     /// One complete observation's charged error `ε̄`, by its position in
@@ -2072,6 +2103,33 @@ impl GenericRowScratch {
             self.supported
         );
         self.charged_error[observation] = charged_error;
+    }
+
+    /// One complete observation's minted error without the scale, by its position in
+    /// [`GenericSampleEvidence::supported`].
+    ///
+    /// # Panics
+    ///
+    /// As [`charged_error_of_supported`](Self::charged_error_of_supported).
+    #[must_use]
+    pub fn minted_error_of_supported(&self, observation: usize) -> f64 {
+        assert!(
+            observation < self.supported,
+            "complete observation {observation} is past the {} this cache was prepared for",
+            self.supported
+        );
+        self.minted_error[observation]
+    }
+
+    /// Write one complete observation's minted error. See
+    /// [`minted_error_of_supported`](Self::minted_error_of_supported) for the index.
+    pub fn set_supported_minted_error(&mut self, observation: usize, minted_error: f64) {
+        assert!(
+            observation < self.supported,
+            "complete observation {observation} is past the {} this cache was prepared for",
+            self.supported
+        );
+        self.minted_error[observation] = minted_error;
     }
 
     /// One partial read's charged error, **already divided by its spread of one**, by its

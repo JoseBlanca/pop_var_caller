@@ -75,7 +75,7 @@ pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
 pub use likelihood::generic::{
-    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, ReferenceBesideLocus,
+    ERROR_SPREAD_BASES, ErrorSpreadTable, NO_ERROR_SPREAD, ReferenceBesideLocus, WrongReadCharge,
     allele_is_compatible_with_partial, fill_error_spreads, genotype_log_likelihood_row,
     partial_row_fits_allele,
 };
@@ -1507,7 +1507,7 @@ pub struct CallingScratch<SsrEmissionScratch> {
     /// **Filled once per locus rather than once per sample**: how many alleles a wrong read
     /// could have shown is a property of the candidate sequences and of the genotype being
     /// scored, and of nothing a sample showed.
-    error_spreads: Vec<f64>,
+    error_spreads: Vec<WrongReadCharge>,
     /// One entry per **scratch row**: which sample of the run that row holds.
     ///
     /// **The scratch is sized for the samples the locus is called on, not for the run**, so
@@ -1757,7 +1757,14 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
                  error-spread table longer than a usize can index"
             )
         });
-        resize_and_fill(&mut self.error_spreads, spread_len, UNWRITTEN_SCRATCH_VALUE);
+        // **No sentinel here, unlike the `f64` buffers**: an enum has no `NaN`. A cell the fill
+        // skipped reads as `OtherwiseDifferent` — main's conservative charge — and the fill
+        // refuses a table it would not cover entirely, so none is skipped.
+        resize_and_fill(
+            &mut self.error_spreads,
+            spread_len,
+            WrongReadCharge::OtherwiseDifferent,
+        );
         // **The two per-row maps are cleared, not resized.** Their length is what says how
         // many rows the caller has claimed so far, and it claims them one at a time after this
         // call — so a resize here would be a length nothing yet means.
@@ -2075,7 +2082,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     ///
     /// On an unprepared scratch.
     #[inline]
-    pub(crate) fn error_spreads_mut(&mut self) -> &mut [f64] {
+    pub(crate) fn error_spreads_mut(&mut self) -> &mut [WrongReadCharge] {
         self.assert_prepared();
         &mut self.error_spreads
     }
@@ -2763,7 +2770,7 @@ pub(crate) struct SampleScoringBuffers<'a> {
 #[derive(Debug)]
 pub(crate) struct GenericRowBuffers<'a> {
     /// The locus's per-allele error-spread table, filled once before the first row.
-    pub(crate) error_spreads: &'a [f64],
+    pub(crate) error_spreads: &'a [WrongReadCharge],
     /// The contaminant allele frequencies **this row** is scored against, batch-major — empty
     /// on a run the fit found no contamination in, where the mixture is absent and the row
     /// computes the plain formula.
