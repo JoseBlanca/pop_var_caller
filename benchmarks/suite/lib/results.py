@@ -18,7 +18,7 @@ COLUMNS = ["benchmark", "dataset", "samples", "depth", "region_bp", "variant_cla
 
 # A time figure whose step ran while processes other than the suite used more than this many cores
 # on average was not measured on a quiet machine, and is marked.
-BUSY_OTHER_CPU = 1.0
+BUSY_OTHER_CPU = 2.0
 
 # The read floor (lib/readfloor.py) set against the pvc step that reads the alignments:
 # (floor stage, pvc caller, pvc stage).
@@ -210,7 +210,7 @@ def _read_floor_section(rows):
             "Start-up: the same pvc command over one base of the same files, the time a run pays",
             "whatever its size; the last ratio takes it out of pvc's time. A configuration where",
             f"start-up is more than {MAX_STARTUP_SHARE:.0%} of pvc's time is marked too small.",
-            "Quiet: whether processes other than the suite used under one core on average during",
+            "Quiet: whether processes other than the suite used under two cores on average during",
             "the runs.", "",
             "| benchmark | data | samples | depth | pvc step | pvc wall s | start-up s | floor wall s "
             "| ratio | ratio without start-up | quiet |",

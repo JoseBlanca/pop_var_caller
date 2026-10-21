@@ -47,10 +47,12 @@ benchmarks/suite/run_suite.sh --redo-busy         # re-time the steps that ran o
 ```
 
 - **It waits for a quiet machine.** Before every caller step whose time is recorded, the suite
-  checks that processes other than itself used under one core in every 5-s sample of the last
+  checks that processes other than itself used under two cores in every 5-s sample of the last
   2 minutes, and otherwise waits, checking every 30 s (`--quiet-cores`, `--quiet-minutes` change
   the test; `--no-wait` starts regardless, for accuracy-only sessions — such times are marked ⚠).
-  Inputs and scoring do not wait.
+  Inputs and scoring do not wait. Two cores, not one: an idle Mac's background services (the
+  window server, the editor, a PDF preview service) use about one core between them, on its slower
+  cores, without touching the six fast ones the suite runs on.
 - **It keeps the Mac awake** while it runs (`caffeinate`).
 - **It stops when told or when the time comes**: `--stop`, or `--stop-at HH:MM` (local time; the
   next time the clock reads it), both between steps; Ctrl-C at once.
@@ -108,7 +110,7 @@ How each is scored:
 - **Speed and the machine's state:** every timed step first reads its input files once, untimed,
   so every tool reads from memory. The host records its load every 5 s; each time figure carries
   the load average at its step's start and end and the cores used meanwhile by processes other than
-  the suite (`other_cpu_cores`). A figure whose step ran with other processes above one core is
+  the suite (`other_cpu_cores`). A figure whose step ran with other processes above two cores is
   marked ⚠ in the summary.
 - **Parallelism:** each caller as its documentation tells a user — one process per sample for the
   one-sample stages (pvc `generate-psps`, GATK HaplotypeCaller GVCFs), one threaded process for the

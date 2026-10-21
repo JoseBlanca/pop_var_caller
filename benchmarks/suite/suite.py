@@ -32,7 +32,7 @@ def parse_args():
     p.add_argument("--external-config", help="configuration file of an external benchmark")
     p.add_argument("--no-wait", action="store_true",
                    help="start timed steps even when the machine is busy (their times are marked)")
-    p.add_argument("--quiet-cores", type=float, default=1.0)
+    p.add_argument("--quiet-cores", type=float, default=2.0)
     p.add_argument("--quiet-minutes", type=float, default=2.0)
     p.add_argument("--stop-at-epoch", type=float, default=None, help="set by run_suite.sh --stop-at")
     p.add_argument("--redo-busy", action="store_true",
