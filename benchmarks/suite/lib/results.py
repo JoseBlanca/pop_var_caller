@@ -26,9 +26,11 @@ READ_FLOOR_PAIRS = [
     ("read floor, one process per sample", "pvc (fitted)", "generate-psps"),
     ("read floor, every file at the run's threads", "pvc (defaults)", "call-from-alignments"),
 ]
-# A configuration whose read floor takes less than this is too small for the ratio to mean much:
-# pvc's fixed start-up would dominate it.
-MIN_FLOOR_SECONDS = 60.0
+# A configuration where pvc's start-up is more than this share of pvc's time is too small for the
+# ratio to mean much: the start-up, not the reading or the calling, would dominate it. (A floor of
+# a minute was the first rule, but reading is fast — all of chromosome 20 at 60x is 10 s on one
+# thread — so no input here reaches it, while pvc's own time on such inputs is minutes.)
+MAX_STARTUP_SHARE = 0.10
 TIME_METRICS = ("seconds", "_mb_largest_process", "_mb_all_processes")
 
 
@@ -184,7 +186,7 @@ def _read_floor_section(rows):
             startup = walls.get(key[:4] + (pvc_caller, f"start-up of {pvc_stage}"))
             pvc_s, floor_s = float(pvc["value"]), float(floor["value"])
             start_s = float(startup["value"]) if startup else None
-            if floor_s < MIN_FLOOR_SECONDS:
+            if start_s is None or start_s > MAX_STARTUP_SHARE * pvc_s:
                 ratio = after = "too small"
             else:
                 ratio = f"{pvc_s / floor_s:.2f}"
@@ -206,8 +208,8 @@ def _read_floor_section(rows):
             "read from memory. A CRAM floor decodes exactly the fields pvc decodes",
             "(`required_fields=0x17ff`: all but the auxiliary tags other than the read group).",
             "Start-up: the same pvc command over one base of the same files, the time a run pays",
-            "whatever its size; the last ratio takes it out of pvc's time. A configuration whose",
-            f"floor is under {MIN_FLOOR_SECONDS:g} s is marked too small: start-up would dominate it.",
+            "whatever its size; the last ratio takes it out of pvc's time. A configuration where",
+            f"start-up is more than {MAX_STARTUP_SHARE:.0%} of pvc's time is marked too small.",
             "Quiet: whether processes other than the suite used under one core on average during",
             "the runs.", "",
             "| benchmark | data | samples | depth | pvc step | pvc wall s | start-up s | floor wall s "
