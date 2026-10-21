@@ -53,6 +53,22 @@ pub const DEFAULT_HOMALT_VAF_THRESHOLD: f64 = 0.9;
 /// not "confident". Prototype `nn >= 5`.
 pub const DEFAULT_HOMALT_MIN_DEPTH: u32 = 5;
 
+/// **How much more a site's read split scatters than a binomial**, as the correlation `ρ` between
+/// two reads at one site: the ALT count has variance `n·v(1−v)·(1 + (n−1)ρ)`.
+///
+/// Every allele factor, under both stories, is a beta-binomial with this dispersion. A real
+/// heterozygote's reads do not split like independent coin tosses at exactly ½ — amplification,
+/// mapping and the local sequence make some sites lean — and with a strict binomial the evidence
+/// from one site's split grew in proportion to its read count: at one copy's depth the highest
+/// score a split alone could reach was 43 at 300 reads and 209 at 1,000. Measured on 1,096 GIAB
+/// heterozygotes on clean ground at 300x (0.0012 to 0.0017 in three samples); it caps those at 23
+/// and 53, and below 30 reads it widens the binomial by under 5%. **Not larger on purpose**: a
+/// dispersion that stops the split deciding at normal depth also stops the filter removing the
+/// false calls it catches that way at high depth. Report
+/// `doc/devel/reports/ng_dup_filter_allele_balance_2026-10-21.md`; spec
+/// `doc/devel/ng/spec/hidden_paralog_filter.md` §3.2.
+pub const DEFAULT_ALLELE_DISPERSION: f64 = 0.0015;
+
 /// The folded site-frequency-spectrum prior on the allele frequency `p`,
 /// under which H1 marginalises `p`. The shape is fixed — proportional to
 /// `1/(p(1−p))` over `p ∈ [1/2N, 1−1/2N]`, where `N` is the number of
@@ -156,6 +172,10 @@ pub struct ParalogModelParams {
     /// Depth threshold for the hom-alt veto. See
     /// [`DEFAULT_HOMALT_MIN_DEPTH`].
     pub homalt_min_depth: u32,
+    /// How much more a site's read split scatters than a binomial, as the correlation `ρ`
+    /// between two reads at one site. See [`DEFAULT_ALLELE_DISPERSION`]; `0.0` is production's
+    /// strict binomial.
+    pub allele_dispersion: f64,
 }
 
 impl Default for ParalogModelParams {
@@ -168,6 +188,7 @@ impl Default for ParalogModelParams {
             carrier_freq_grid: GridSpec::DEFAULT_CARRIER_FREQ,
             homalt_vaf_threshold: DEFAULT_HOMALT_VAF_THRESHOLD,
             homalt_min_depth: DEFAULT_HOMALT_MIN_DEPTH,
+            allele_dispersion: DEFAULT_ALLELE_DISPERSION,
         }
     }
 }
@@ -198,6 +219,7 @@ mod tests {
         );
         assert_eq!(p.homalt_vaf_threshold, 0.9);
         assert_eq!(p.homalt_min_depth, 5);
+        assert_eq!(p.allele_dispersion, 0.0015);
     }
 
     /// The two grid specs default independently to their documented shapes.

@@ -52,9 +52,12 @@ instead of two (§2). In exchange it runs identically in both modes.
 
 ### 1.2 Non-goals, and what this does not do
 
-- **No new statistics.** The likelihood ratio, the prior's estimation, the FDR curve are
-  copied from `src/paralog/`, and every record goes through them as production's biallelic SNPs
-  do; nothing new is derived.
+- **No new statistics, with one exception.** The likelihood ratio, the prior's estimation, the
+  FDR curve are copied from `src/paralog/`, and every record goes through them as production's
+  biallelic SNPs do. The exception is the allele term's dispersion (§3.2, adopted 2026-10-21).
+  Production's binomial was tuned on tomato2 at about six reads a sample; at 300x it was checked
+  only for overall accuracy on the 100-region GIAB panel, which holds too few duplicated sites to
+  show what the split does there.
 - **No mapping-quality term in the score.** `MQDIFF` is already an INFO field
   ([`vcf_output.md`](vcf_output.md) §6) and stays a downstream signal, for production's reason:
   it is shared with introgression.
@@ -216,6 +219,35 @@ copy number, the ALT reads, the total reads, and the sample's inbreeding coeffic
   (step D4). A tract's observation depth runs below its read depth
   ([`window_coverage.md`](window_coverage.md) §3.1); a deletion depresses depth across its own span
   in the samples that carry it, by construction.
+
+- **How the split is scored.** Under both stories, a sample's split is scored as a
+  beta-binomial with the story's share as its mean and a fixed dispersion ρ = 0.0015: the
+  correlation between two reads at one site. A real heterozygote's reads do not split like
+  independent coin tosses at exactly ½; library amplification, mapping and the local sequence
+  make some sites lean one way. On clean GIAB ground at 300x the lean widens the binomial's
+  variance by 1.5 (ρ 0.0012 to 0.0017 in three samples), and no heterozygote of 1,096 fell
+  below an ALT share of 0.35. The same ρ applies to the homozygotes' error share ε and to every
+  collapsed configuration's `m/T`, because read sampling does not depend on which copy a read
+  came from. ρ is fixed: below 30 reads it widens the binomial by under 5% and cannot be
+  measured, and the three samples agree. It becomes fitted, per sample from records at ALT
+  shares 0.25 to 0.75 with 50 reads or more, if a second high-depth dataset with a different
+  library preparation scatters more than twice as widely.
+
+  **What the split may say on its own.** At high depth a split that a single copy cannot
+  produce is evidence of another copy's reads even at normal window depth, and the filter
+  removes such records: on GIAB at 300x every false SNP it removed sat at 0.70 to 1.28 copies.
+  The dispersion bounds that evidence to about 1/ρ reads' worth (670) and no more. It is not set
+  larger to make depth the gate again, for the reason production's §7 kept the depth likelihood
+  Normal: the tail is the signal. Introgressions stay safe because they are single copy, so
+  their reads split like any heterozygote's, which is what the one-copy story now describes.
+
+  **What it costs, stated.** A real heterozygote whose short reads include another copy's
+  reads (a sample-specific duplication, a long tandem repeat) looks like a false call to one
+  sample's depth and split, and may be removed. GIAB's own short-read callers are filtered at
+  such sites. At one sample nothing in this score separates the two.
+
+  *Adopted by the owner 2026-10-21 (§11); until then the split was a strict binomial, as in
+  production.*
 
 - **A record with no alternative allele is not scored.** A refused tract written `ALT .` with
   every sample no-called ([`vcf_output.md`](vcf_output.md) §8) establishes nothing to flag.
@@ -429,14 +461,20 @@ pub struct ParalogVerdicts {
   the scoring is deferred until that number exists (§7).
 - **Three reads a position.** σ₀ is large, the score self-gates, and the filter removes little;
   the tomato slice at this depth is the plan's first real run. A heterozygote's allele balance
-  from three reads is weak evidence and the model already weighs it as such.
+  from three reads is weak evidence and the model already weighs it as such. The allele term's
+  dispersion (§3.2) barely acts here (the variance factor is 1.003 at three reads); over a cohort
+  the small per-sample changes add up: on 59 tomato accessions at about five reads a sample it
+  un-flags 37 of 2,914 records, all within 0.75 of the cut.
 - **Three hundred reads a position.** The histogram's depth axis scales with the sample
   ([`window_coverage.md`](window_coverage.md) §3.4), so the fit is not rejected for range as
   production's was on a 100× human sample. HG002 is the plan's check that the fit accepts and the
   verdicts are sane (step D3). **Until 2026-10-17 that scale came from the run's first 10,000
   windows**, and a GIAB run over chromosome 22 alone at 201–223 reads a position had every
   sample's fit refused for range; the scale is fitted from every window since
-  ([report](../../reports/ng_coverage_depth_scale_2026-10-17.md)).
+  ([report](../../reports/ng_coverage_depth_scale_2026-10-17.md)). **At this depth the split
+  alone can decide a record at normal window depth, and that is intended** (§3.2): it is how the
+  filter removes false calls on duplicated ground whose extra reads did not raise the window's
+  depth. The dispersion caps how far.
 
 ## 5. Cross-cutting concerns
 
@@ -573,3 +611,20 @@ should mostly agree — and reports the difference rather than chasing it.
 - **The ends of the range run**: one tomato accession; six over the two 100 kb intervals
   ([`scripts/ng_fit_stage_end_to_end.sh`](../../../../scripts/ng_fit_stage_end_to_end.sh)'s
   ground); HG002. Each reports records dropped, samples rejected, and π.
+
+## 11. The allele term's dispersion — adopted 2026-10-21
+
+*The owner adopted ρ = 0.0015 on 2026-10-21. Evidence:
+[`ng_dup_filter_allele_balance_2026-10-21.md`](../../reports/ng_dup_filter_allele_balance_2026-10-21.md).
+The text now lives in §1.2, §3.2 and §4.*
+
+**What prompted it.** At 300x the filter removed real heterozygotes at a window depth of about one
+copy, on their read split alone (report §2.2). Production's spec §7 says "a lone heterozygote at
+*normal* coverage is kept", and the single-sample architecture §3 says the score self-gates because
+"the reads are few". Neither holds at high depth, and neither sentence describes ng's filter. With a
+strict binomial the highest score a split alone could reach at one copy's depth was 0.7 at 30 reads,
+43 at 300 and 209 at 1,000; with the dispersion it is 0.7, 23 and 53.
+
+**What was not changed.** No mapping-quality term (§1.2 stands). No change to the depth
+likelihood, the configurations, the prior, or the cut. A larger dispersion that would make depth the
+gate again was measured and declined (report §5.2).

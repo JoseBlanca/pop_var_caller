@@ -271,11 +271,19 @@ slice: 20 regions, 4 alignments
 # 19 in the SNP/indel tables (33 numbers), the largest move 2.9e-8 of its value; 100 in the repeat-tract tables fitted
 # afterwards from them (1,276 numbers), the largest 5.3e-5 of its value. from_fit.comparable (7aeeff78 -> a872e3b6): only
 # `##pvcParameters`, carrying the fitted file's new md5; no record, QUAL or genotype moves. They were 266836a0 / 7aeeff78.
-# records: 7508
-9fc4a28ffcaa3eaa6b220095b3182557  from_alignments.comparable
-9fc4a28ffcaa3eaa6b220095b3182557  from_psps.comparable
+# Re-recorded 2026-10-21 (macOS host, arm64) when the hidden-duplication filter's allele term became a beta-binomial
+# (src/paralog/model_params.rs DEFAULT_ALLELE_DISPERSION = 0.0015; doc/devel/reports/ng_dup_filter_allele_balance_2026-10-21.md).
+# main bbcc9f46 reproduced every old value on the same host first. Only the three VCFs move; both parameters files, the
+# window rows and the histograms do not. In every record only PARALOG_LR / PARALOG_POST move, and the header's pi in its
+# fourth decimal; both cuts are unchanged. Defaults route (9fc4a28f -> 8d463ab8): 7,508 -> 7,509 records, the one more being
+# SL4.0ch01:37011736 T>C, now kept at 5.74 against a cut of 5.85. Fitted route (a872e3b6 -> 035ddd59): 6,680 records either
+# way, SL4.0ch01:67912984 A>G now removed and SL4.0ch01:37087746 T>C now kept at 4.97 against 5.15. They were 9fc4a28f /
+# a872e3b6.
+# records: 7509
+8d463ab8f32db06d0f0a93b96629f335  from_alignments.comparable
+8d463ab8f32db06d0f0a93b96629f335  from_psps.comparable
 786618495184d417504467f521198153  from_alignments.parameters.toml
 0f3ea11d5faeef7306661280774f67cc  from_alignments.windows.sorted
 cf7eec58f50e1abae9bebf6d4d1c0b10  from_alignments.windows.histograms
 f525345faa6c8efa838be925b2dbd805  fitted.parameters.toml
-a872e3b6fb301a5b477b669bf64efc7f  from_fit.comparable
+035ddd599e7f3fcf525fcac8bafd9305  from_fit.comparable
