@@ -524,6 +524,28 @@ when the flank covers the rest; and nothing is allocated per read. All calls wit
   no genotype on chr20, the tandem repeats or the 5 Mb set; it differs only in QUAL and GQ digits at
   4 to 7 records a chr20 call set, and in the chr17 call above.
 
+**The stuttering benchmark** (simulated STR segments of known genotype; `str_stutter_benchmark.md`)
+is where edge deletions are commonest: in a one-sample run, 27 segments carry one. Its 16 runs were
+regenerated at the 2026-10-10 settings (`bundles=0`; PCR and PCR-free libraries, 1 and 50 samples,
+5×, 15×, 30× and 60×) and called from one set of psps per run by b0162d47 and by this build, with
+the simulator's true stutter. One unit is one sample at one segment; hexanucleotide `AAAAAx`
+segments are left out, as in the earlier reports.
+
+| run | variant pairs right, main → shipped | of them, carriers of a deletion across the edge |
+|---|---|---|
+| 50 samples, PCR, 5× / 15× / 30× / 60× | 41,391 → 41,409 / 54,028 → 54,032 / 56,075 (same) / 56,491 → 56,494 | 811 → 829 / 1,009 → 1,013 / 1,021 (same) / 1,020 → 1,023, of 1,085 |
+| 50 samples, PCR-free, same depths | 43,075 → 43,091 / 55,170 → 55,169 / 56,451 → 56,453 / 56,563 → 56,564 | 823 → 839 / 1,002 → 1,001 / 1,017 → 1,019 / 1,028 → 1,029, of 1,085 |
+| 1 sample, either library, any depth | unchanged | unchanged (12 to 26 of 27) |
+
+- **Every pair whose outcome changed carries a deletion across the edge**: 47 became right, 4 stopped
+  being right, and 2 moved between two wrong outcomes. Net, 43 more right across the 16 runs, most
+  of them at 5× with 50 samples (34 of the 43).
+- **False calls do not move** in any run: the same count of reference pairs given a false call, run
+  by run.
+- With the shipped defaults instead of the true stutter, the same picture: 47 gained, 7 lost, 1
+  wrong to wrong, false calls unchanged.
+- The pairs beside a SNP (`snp_beside`, 69 a sample) do not move.
+
 ## 6. What would confirm this on chr22
 
 The colleague's own files settle both claims at her scale, without a new walk:
