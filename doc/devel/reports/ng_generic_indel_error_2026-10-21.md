@@ -422,6 +422,54 @@ the STR path's `0/1` calls at tracts whose reads are nearly all one allele accou
 The caveat is the one aligner: the colleague's chr22 alignments may have been made differently, and
 a BWA alignment of the same reads would answer that.
 
+## 5.2 The STR path's `0/1` at tracts whose reads are one allele (added later, 2026-10-21)
+
+**Three of chr20's 60× errors have one cause: an edge-deletion allele is scored against partial
+reads without the flank it leaves.** At chr20:34924682 (`TTTG>T`), 53879901 (`GAGACAGAC>G`) and
+58447656 (`GTGTGTGCA>G`) the truth deletion runs from the tract into its right flank, pvc writes the
+right allele as a widened STR record (`str_edge_deletion_alleles.md`), and still calls `0/1`.
+
+- **Complete reads are scored right**: a read of the deletion allele is 0.87 likely under it and
+  between 3 × 10⁻¹¹ and 2 × 10⁻⁵ under the reference (instrumented build).
+- **Partial reads are not.** A read anchored on the left that stops near the end of the reference
+  tract spells, for example, `GAGAGAGAGAGAGAGA` at 53879889. Under the deletion allele that is its
+  13 tract bases followed by the first bases of the flank left after the deletion — the allele and
+  the reference read the same there, so the read cannot tell them apart. The STR path's partial-read
+  score for a repeat tract (`censored_from_the_tract_start`) compares the read with the allele's
+  tract alone, so the extra bases can only be slippage: 0.003 for those 7 reads, under 10⁻⁶ for reads
+  a base or two longer, against about 1 under the reference. At 60× a dozen such reads outweigh
+  36 complete reads. `str_edge_deletion_alleles.md` §5.6 left this out on purpose ("a possible
+  refinement, left out so that its effect is not mixed into this one"); the STR-bundle path already
+  scores a partial read against the allele followed by its remaining flank (`flank_beyond_the_hull`).
+
+**The prototype** (commit on this branch, `PVC_EXP_PARTIAL_FLANK`, off by default and byte-identical
+to main when off) scores a partial read against the candidate's tract, stretched by every reachable
+slip, followed by the flank the candidate leaves on the side the read runs towards. Two scopes:
+`deletion`, only candidates that delete flank bases on that side; `all`, every candidate.
+
+Errors (missed + false + wrong genotype) for indels; SNP counts beside where any moved:
+
+| data | off | `deletion` | `all` |
+|---|---|---|---|
+| chr20 60×, wrong-genotype indels, defaults / fitted | 37 / 35 | 34 / 32 | 33 / 28 |
+| chr20 30×, wrong-genotype indels, defaults / fitted | 84 / 67 | 83 / 65 | 71 / 60 |
+| HG002 tandem repeats, indel errors 5× / 10× / 30× | 8,605 / 6,518 / 5,003 | 8,597 / 6,510 / 4,999 | 8,591 / 6,500 / 4,996 |
+| HG002 tandem repeats, SNP errors 30× | 13,633 | 13,633 | 13,640 |
+| GIAB 3-sample panel, 5× to 300× | — | no change, except one site (below) | single calls both ways |
+| 5 Mb HG002, 10× to 300× | — | no change | single calls both ways |
+| tomato2, 4 accessions at about 3× | — | nothing moves | 35 STR genotypes (defaults), 8 (fitted) |
+
+- **`deletion` changes no SNP anywhere** and fixes all three chr20 sites. Its one regression is
+  HG003 chr17:28427006 (truth `CA>C`, heterozygous, fitted at 30×): an allele deleting the flank `C`
+  before an A run now beats the one-`A` contraction, because partial reads that never reach the `C`
+  stopped counting against it.
+- **`all` gains more** (13 fewer wrong genotypes at chr20 30×, 18 fewer indel errors on the tandem
+  repeats at 10×) **but costs 7 SNP errors on the tandem repeats at 30×**, all on repeat ground, and
+  moves 35 tomato genotypes with no truth to score them. It changes how every partial read is scored
+  at every tract, which is a change to `read_likelihoods.md` §5.2 and wants its own study.
+- The scope is a candidate on chr20: 103 tracts carry a flank-deletion candidate at 60×, against
+  about 6,400 STR records.
+
 ## 6. What would confirm this on chr22
 
 The colleague's own files settle both claims at her scale, without a new walk:

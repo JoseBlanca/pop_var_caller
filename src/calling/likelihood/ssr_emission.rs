@@ -787,6 +787,15 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
             );
         }
         let motif = context.motif.as_bytes();
+        // EXPERIMENT (branch generic-indel-error, PVC_EXP_PARTIAL_FLANK): compare a partial read
+        // with the candidate's tract followed by the flank the candidate leaves on the side the
+        // read runs towards, as the bundle path does. "deletion": only candidates that delete
+        // flank bases on that side; "all": every candidate.
+        if let Some(scored) =
+            censored_with_the_flank_beyond(witnessed, held, candidate, motif, context, scratch)
+        {
+            return scored;
+        }
         match held {
             HeldFlank::Left => censored_from_the_tract_start(
                 witnessed,
@@ -821,6 +830,92 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
             }
         }
     }
+}
+
+/// EXPERIMENT scope of [`censored_with_the_flank_beyond`], read once from `PVC_EXP_PARTIAL_FLANK`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PartialFlankScope {
+    Off,
+    FlankDeletionsOnly,
+    Every,
+}
+
+fn partial_flank_scope() -> PartialFlankScope {
+    static SCOPE: std::sync::OnceLock<PartialFlankScope> = std::sync::OnceLock::new();
+    *SCOPE.get_or_init(|| match std::env::var("PVC_EXP_PARTIAL_FLANK").as_deref() {
+        Err(_) | Ok("") | Ok("off") => PartialFlankScope::Off,
+        Ok("deletion") => PartialFlankScope::FlankDeletionsOnly,
+        Ok("all") => PartialFlankScope::Every,
+        Ok(other) => panic!("PVC_EXP_PARTIAL_FLANK={other} is not off, deletion or all"),
+    })
+}
+
+/// EXPERIMENT: a partial read scored against the candidate's tract, stretched by every reachable
+/// length change at the end away from the held flank, followed by the flank the candidate leaves
+/// on that side. `None` when the experiment does not reach this candidate, which then takes the
+/// shipped scoring. Stretching at the end in motif phase is exact for a pure tract and an
+/// approximation for an interrupted one (the shipped exact sum places slips per run).
+fn censored_with_the_flank_beyond(
+    witnessed: &[u8],
+    held: HeldFlank,
+    candidate: &SsrCandidate<'_>,
+    motif: &[u8],
+    context: &SsrScoringContext<'_>,
+    scratch: &mut StutterSubstitutionScratch,
+) -> Option<f64> {
+    let deleted_on_the_far_side = match held {
+        HeldFlank::Left => candidate.flank_deletion.right,
+        HeldFlank::Right => candidate.flank_deletion.left,
+    };
+    match partial_flank_scope() {
+        PartialFlankScope::Off => return None,
+        PartialFlankScope::FlankDeletionsOnly if deleted_on_the_far_side == 0 => return None,
+        _ => {}
+    }
+    let beyond = flank_beyond_the_hull(candidate, held);
+    if beyond.is_empty() {
+        return None;
+    }
+    // Everything is laid out from the held flank: forward from the left, mirrored from the right.
+    let (read, tract, phase_motif, flank): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = match held {
+        HeldFlank::Left => (
+            witnessed.to_vec(),
+            candidate.bases.to_vec(),
+            motif.to_vec(),
+            beyond.to_vec(),
+        ),
+        HeldFlank::Right => {
+            let mut mirrored_motif = Vec::new();
+            motif_phased_to_the_end_reversed(candidate.bases, motif, &mut mirrored_motif);
+            (
+                witnessed.iter().rev().copied().collect(),
+                candidate.bases.iter().rev().copied().collect(),
+                mirrored_motif,
+                beyond.iter().rev().copied().collect(),
+            )
+        }
+    };
+    let period = period_of(context.motif);
+    let mut total = 0.0;
+    let mut sequence = Vec::new();
+    for (bp_diff, length_probability) in context
+        .stutter
+        .reachable_length_changes(period, candidate.repeat_count)
+    {
+        if length_probability <= 0.0 {
+            continue;
+        }
+        resize_at_the_end(&tract, &phase_motif, bp_diff, &mut scratch.resized);
+        sequence.clear();
+        sequence.extend_from_slice(&scratch.resized);
+        sequence.extend_from_slice(&flank);
+        if sequence.len() < read.len() {
+            continue;
+        }
+        total +=
+            length_probability * substitution_probability(&read, &sequence[..read.len()], context);
+    }
+    Some(total)
 }
 
 /// **The motif a mirrored candidate is written in**: the copy the candidate ends on, written
