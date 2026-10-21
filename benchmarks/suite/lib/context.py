@@ -25,6 +25,11 @@ class Context:
         self.depths = _split(args.depth)
         self.callers = _split(args.caller)
         self.external_config = getattr(args, "external_config", None)
+        self.wait_for_quiet = not args.no_wait
+        self.quiet_cores = args.quiet_cores
+        self.quiet_minutes = args.quiet_minutes
+        self.stop_at = args.stop_at_epoch
+        self.redo_busy = args.redo_busy
         self.pvc_bin = os.path.join(PROJECT_DIR, "target-container", "release", "pvc")
         self.gatk = os.environ.get("GATK_BIN", "/opt/gatk/gatk")
         self.rtg_jar = os.path.join(PROJECT_DIR, "tmp", "tools", "rtg-tools-3.13", "RTG.jar")

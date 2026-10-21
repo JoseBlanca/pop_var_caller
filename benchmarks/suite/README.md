@@ -38,6 +38,26 @@ uncommitted changes unless given `--allow-dirty`, which records the commit as `<
 From a worktree, the data are read from the main checkout (found automatically, or
 `--data-root DIR`), which is mounted read-only; results are written in the worktree.
 
+### Running it over several sessions on a machine used during the day
+
+```
+benchmarks/suite/run_suite.sh --stop-at 08:00     # start in the evening; nothing new starts after 08:00
+benchmarks/suite/run_suite.sh --stop              # from another terminal: finish this step, then stop
+benchmarks/suite/run_suite.sh --redo-busy         # re-time the steps that ran on a busy machine
+```
+
+- **It waits for a quiet machine.** Before every caller step whose time is recorded, the suite
+  checks that processes other than itself used under one core in every 5-s sample of the last
+  2 minutes, and otherwise waits, checking every 30 s (`--quiet-cores`, `--quiet-minutes` change
+  the test; `--no-wait` starts regardless, for accuracy-only sessions — such times are marked ⚠).
+  Inputs and scoring do not wait.
+- **It keeps the Mac awake** while it runs (`caffeinate`).
+- **It stops when told or when the time comes**: `--stop`, or `--stop-at HH:MM` (local time; the
+  next time the clock reads it), both between steps; Ctrl-C at once.
+- **Nothing finished is lost.** Rerun the same command next session; it starts where it stopped.
+  A step a machine got busy in the middle of is kept for its results and marked; `--redo-busy`
+  re-times it later.
+
 ### Stopping and resuming
 
 A run is a list of small steps — one caller's one stage on one configuration, or one scoring pass.

@@ -30,6 +30,13 @@ def parse_args():
     p.add_argument("--rescore", action="store_true", help="redo every scoring step")
     p.add_argument("--redo-step", action="append", help="redo this step (its name), any kind")
     p.add_argument("--external-config", help="configuration file of an external benchmark")
+    p.add_argument("--no-wait", action="store_true",
+                   help="start timed steps even when the machine is busy (their times are marked)")
+    p.add_argument("--quiet-cores", type=float, default=1.0)
+    p.add_argument("--quiet-minutes", type=float, default=2.0)
+    p.add_argument("--stop-at-epoch", type=float, default=None, help="set by run_suite.sh --stop-at")
+    p.add_argument("--redo-busy", action="store_true",
+                   help="rerun pvc and competitor steps whose times were taken on a busy machine")
     p.add_argument("--summary-only", action="store_true")
     p.add_argument("--status", action="store_true")
     p.add_argument("--no-build", action="store_true")
@@ -105,8 +112,8 @@ def main():
                 for step in _steps(ctx, name):
                     if ctx.selected(step):
                         runner.run(step)
-        except StopRequested:
-            ctx.log("stopped as asked (benchmark_results/STOP); run the same command to resume")
+        except StopRequested as why:
+            ctx.log(f"{why}; run the same command to resume")
             code = 3
         except (SuiteError, CommandFailed) as err:
             ctx.log(f"error: {err}")

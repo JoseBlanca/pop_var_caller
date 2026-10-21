@@ -39,6 +39,11 @@ while [[ $# -gt 0 ]]; do
         --threads) threads="$2"; pass+=(--threads "$2"); shift ;;
         --data-root) data_root="$2"; shift ;;
         --slice) slice=1; pass+=(--slice) ;;
+        --stop-at)
+            # The next time the clock reads HH:MM, local time (the virtual machine runs on UTC).
+            at="$(date -j -f "%H:%M:%S" "$2:00" +%s 2>/dev/null)" || { echo "--stop-at takes HH:MM" >&2; exit 1; }
+            [[ "$at" -le "$(date +%s)" ]] && at=$(( at + 86400 ))
+            pass+=(--stop-at-epoch "$at"); echo "no step will start after $(date -r "$at")"; shift ;;
         *) pass+=("$1") ;;
     esac
     shift
@@ -109,7 +114,8 @@ extra=()
 [[ "$data_root" != "$PROJECT_DIR" ]] && extra=(DEV_EXTRA_MOUNT="$data_root")
 
 status=0
-env DEV_CPUS="$threads" DEV_MEM="$mem" ${extra[@]+"${extra[@]}"} \
+# caffeinate keeps the Mac from sleeping while the suite runs.
+caffeinate -is env DEV_CPUS="$threads" DEV_MEM="$mem" ${extra[@]+"${extra[@]}"} \
     "$PROJECT_DIR/scripts/dev.sh" python3 "$PROJECT_DIR/benchmarks/suite/suite.py" \
     --data-root "$data_root" --pvc-commit "$commit" --machine "$machine" \
     ${pass[@]+"${pass[@]}"} || status=$?

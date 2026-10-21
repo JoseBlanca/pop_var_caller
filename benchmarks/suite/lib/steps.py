@@ -38,7 +38,7 @@ class SuiteError(Exception):
 
 
 class StopRequested(Exception):
-    pass
+    """The run ends cleanly between steps: `--stop` was asked for, or `--stop-at` has passed."""
 
 
 def file_identity(path):
@@ -100,10 +100,11 @@ class Runner:
         fingerprint = _canonical(step.fingerprint() if callable(step.fingerprint) else step.fingerprint)
         record = self.load_done(step)
         if record is not None:
-            if record.get("fingerprint") == fingerprint and not self._forced(step):
+            if (record.get("fingerprint") == fingerprint and not self._forced(step)
+                    and not self._retime(step, record)):
                 self.skipped_count += 1
                 return record
-            if not self._forced(step):
+            if not self._forced(step) and not self._retime(step, record):
                 if step.kind == "input" or step.kind == "competitor":
                     changed = _difference(record.get("fingerprint"), fingerprint)
                     hint = ("rerun with --rerun-competitors to remake it"
@@ -111,8 +112,9 @@ class Runner:
                     raise SuiteError(
                         f"{step.name}: its stored output was made from different inputs "
                         f"({changed}); {hint}: {directory}")
-        if os.path.exists(os.path.join(self.ctx.results_root, "STOP")):
-            raise StopRequested()
+        self._check_stop()
+        if step.kind in ("pvc", "competitor") and self.ctx.wait_for_quiet:
+            self._wait_for_quiet()
         if os.path.exists(directory):
             shutil.rmtree(directory)
         os.makedirs(directory)
@@ -146,6 +148,59 @@ class Runner:
             m = result["measurement"]
             self.ctx.log(f"    {m['wall_s']:.1f} s, peak {m['peak_summed_rss_bytes'] / 2**20:.0f} MB")
         return record
+
+    def _check_stop(self):
+        if os.path.exists(os.path.join(self.ctx.results_root, "STOP")):
+            raise StopRequested("stopped as asked (run_suite.sh --stop)")
+        if self.ctx.stop_at and time.time() >= self.ctx.stop_at:
+            raise StopRequested("stopped: the --stop-at time has passed")
+
+    def _wait_for_quiet(self):
+        """Hold a timed step until the machine is quiet.
+
+        Quiet: for the last `quiet_minutes`, processes other than the suite used under
+        `quiet_cores` on average in every 5-s sample run_suite.sh recorded. Checked every 30 s;
+        `--stop` and `--stop-at` still end the run while it waits. Without the host's samples (the
+        suite started some other way) it does not wait.
+        """
+        from .results import HostLoad
+
+        path = os.path.join(self.ctx.results_root, "host_load.tsv")
+        logged = 0.0
+        while True:
+            load = HostLoad(path)
+            now = time.time()
+            if not load.times or now - load.times[-1] > 60:
+                return
+            window = [o for t, o in zip(load.times, load.other)
+                      if t >= now - 60 * self.ctx.quiet_minutes and o is not None]
+            enough = len(window) >= max(3, int(self.ctx.quiet_minutes * 60 / 5 * 0.8))
+            if enough and max(window) < self.ctx.quiet_cores:
+                if logged:
+                    self.ctx.log(f"    quiet now; waited {(now - logged) / 60:.0f} min")
+                return
+            if not logged or now - logged > 600:
+                if not enough:
+                    why = "the load has not been sampled for long enough yet"
+                else:
+                    why = f"other processes are using {window[-1]:.1f} cores"
+                self.ctx.log(f"[{time.strftime('%H:%M:%S')}] waiting for a quiet machine ({why}; "
+                             f"need under {self.ctx.quiet_cores:g} for {self.ctx.quiet_minutes:g} min)")
+                logged = logged or now
+            time.sleep(30)
+            self._check_stop()
+
+    def _retime(self, step, record):
+        """With --redo-busy, a pvc or competitor step whose time was taken on a busy machine."""
+        if not self.ctx.redo_busy or step.kind not in ("pvc", "competitor"):
+            return False
+        if not record.get("measurement"):
+            return False
+        from .results import BUSY_OTHER_CPU, HostLoad
+
+        load = HostLoad(os.path.join(self.ctx.results_root, "host_load.tsv"))
+        other = load.other_mean(record["started"], record["ended"])
+        return other != "" and other > BUSY_OTHER_CPU
 
     def _forced(self, step):
         if step.name in self.ctx.redo_steps:
