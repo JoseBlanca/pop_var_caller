@@ -121,7 +121,7 @@ class Runner:
         started = time.time()
         self.ctx.log(f"[{time.strftime('%H:%M:%S')}] {step.kind:10s} {step.name}")
         try:
-            result = step.action(directory) or {}
+            result = _run_in_child(step.action, directory)
         except BaseException:
             self.ctx.log(f"    failed or stopped; {directory} will be redone next time")
             raise
@@ -210,6 +210,48 @@ class Runner:
         if step.kind == "score" and self.ctx.rescore:
             return True
         return False
+
+
+def _run_in_child(action, directory):
+    """Run a step's action in a forked child process and return its result.
+
+    The suite's own process stays small: a step that reads a large VCF into memory grows the child,
+    which exits with it. That matters because a command started from a large process can be charged
+    for that process's memory, and the next step's figures would carry it.
+    """
+    import multiprocessing as mp
+
+    context = mp.get_context("fork")
+    receive, send = context.Pipe(duplex=False)
+
+    def target():
+        try:
+            send.send(("ok", action(directory) or {}))
+        except BaseException as err:  # noqa: BLE001 — every failure goes back to the parent
+            try:
+                send.send(("err", err))
+            except Exception:
+                send.send(("err", SuiteError(repr(err))))
+
+    child = context.Process(target=target)
+    child.start()
+    send.close()
+    try:
+        while True:
+            if receive.poll(1):
+                status, value = receive.recv()
+                break
+            if not child.is_alive():
+                raise SuiteError(f"the step's process ended without a result (exit {child.exitcode})")
+    except BaseException:
+        if child.is_alive():
+            child.terminate()
+        child.join()
+        raise
+    child.join()
+    if status == "err":
+        raise value
+    return value
 
 
 def _canonical(value):

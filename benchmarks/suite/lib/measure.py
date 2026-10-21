@@ -2,9 +2,12 @@
 
 The dev image has no GNU `time`, so this does the measuring itself, from two sources:
 
-- **When a process ends**, the operating system reports its CPU time and its peak resident memory
-  exactly (`os.wait4`). On Linux the report covers the process and every descendant it waited for,
-  so a shell pipeline is measured whole. Its peak memory is the largest single process's.
+- **When a process ends**, the operating system reports its CPU time exactly (`os.wait4`), for the
+  process and every descendant it waited for, so a shell pipeline is measured whole.
+- **The largest single process's peak memory** is each process's own high-water mark (`VmHWM` in
+  `/proc/<pid>/status`), sampled while it runs. Not `wait4`'s peak, which on Linux also counts the
+  memory of the process that started it, as it was when it started it: with the suite's Python at
+  817 MB, every command, a samtools count included, reported at least 817 MB.
 - **While processes run**, a sampler adds up the resident memory of every live process the step
   started, five times a second. That sum is what a stage of several processes at once really
   costs; no single process's peak shows it.
@@ -28,6 +31,18 @@ class CommandFailed(Exception):
     pass
 
 
+def _high_water(pid):
+    """A process's peak resident memory so far, in bytes (Linux `VmHWM`), or None."""
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
 class _MemorySampler(threading.Thread):
     """Adds up the resident memory of the live processes and all their descendants."""
 
@@ -36,6 +51,7 @@ class _MemorySampler(threading.Thread):
         self.pids = set()
         self.lock = threading.Lock()
         self.peak_summed_bytes = 0
+        self.high_water = {}
         self.stopping = threading.Event()
 
     def add(self, pid):
@@ -62,6 +78,9 @@ class _MemorySampler(threading.Thread):
                         total += proc.memory_info().rss
                     except psutil.Error:
                         pass
+                    hwm = _high_water(proc.pid)
+                    if hwm is not None and hwm > self.high_water.get(proc.pid, 0):
+                        self.high_water[proc.pid] = hwm
             self.peak_summed_bytes = max(self.peak_summed_bytes, total)
             self.stopping.wait(SAMPLE_INTERVAL_S)
 
@@ -134,10 +153,11 @@ def run_commands(commands, log_dir, max_concurrent=1, cwd=None, env=None):
         "wall_s": round(time.time() - start, 3),
         "user_s": round(sum(f["user_s"] for f in finished), 3),
         "sys_s": round(sum(f["sys_s"] for f in finished), 3),
-        "max_single_rss_bytes": max((f["max_rss_bytes"] for f in finished), default=0),
-        # The sampler can miss a short-lived peak; the exact single-process peak is a floor.
+        # A process shorter than one sampling interval (0.2 s) has no high-water sample; its peak
+        # is then too small to matter for any figure quoted.
+        "max_single_rss_bytes": max(sampler.high_water.values(), default=0),
         "peak_summed_rss_bytes": max(sampler.peak_summed_bytes,
-                                     max((f["max_rss_bytes"] for f in finished), default=0)),
+                                     max(sampler.high_water.values(), default=0)),
         "processes": len(finished),
         "max_concurrent": max_concurrent,
         "commands": finished,
