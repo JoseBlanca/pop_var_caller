@@ -74,8 +74,10 @@ pub struct SsrCandidate<'a> {
     pub repeat_count: NonZeroU32,
     /// **The flank bases this allele's deletion takes beside the tract** — none but for an
     /// allele that is a deletion running from the repeat into a flank (`str_edge_deletion_alleles.md`
-    /// §5.6). A read whose own flank deletion differs is not this allele with stutter: the
-    /// emission is zero, and the read is left to the outlier term.
+    /// §5.6). A complete read whose own flank deletion differs is compared with it over the wider
+    /// of the two extents (`fill_emissions` in `likelihood/ssr.rs`); a partial read running
+    /// towards a side this deletion takes bases from is compared with the tract followed by the
+    /// flank left there ([`censored_into_the_remaining_flank`]).
     pub flank_deletion: crate::locus_generation::FlankDeletion,
     /// The locus's reference flanks, left and right — what a read and an allele whose flank
     /// extents differ are compared over (`str_edge_deletion_alleles.md` §5.6). Empty where the
@@ -525,9 +527,10 @@ pub struct StutterSubstitutionScratch {
     resized: Vec<u8>,
     /// What an STR bundle candidate's scoring reuses ([`bundle_emission`]).
     bundle: BundleScoringScratch,
-    /// A right-held partial read and its candidate, each reversed, and the motif in their phase —
-    /// what [`censored_from_the_tract_start`] is handed for a read compared with the candidate's
-    /// end.
+    /// A right-held partial read and its candidate, each reversed, the motif in their phase, and
+    /// the left flank the candidate leaves, reversed — what [`censored_from_the_tract_start`] and
+    /// [`censored_from_the_tract_start_into_the_flank`] are handed for a read compared with the
+    /// candidate's end.
     mirrored: MirroredCensoredRead,
 }
 
@@ -711,7 +714,9 @@ struct CensoredSlip {
 
 /// **A read that held the right flank, turned into one that held the left**: the read's bases,
 /// the candidate's tract and the motif, each written back to front — the motif in the phase
-/// the candidate ends on ([`motif_phased_to_the_end_reversed`]).
+/// the candidate ends on ([`motif_phased_to_the_end_reversed`]) — and, for a candidate whose
+/// deletion took left-flank bases, the left flank it leaves, written back to front too
+/// ([`censored_into_the_remaining_flank`]).
 ///
 /// Comparing a read's bases with the end of a tract is comparing them reversed with the start
 /// of the reversed tract, and a reversed pure tract is a pure tract of the reversed motif
@@ -724,6 +729,7 @@ struct MirroredCensoredRead {
     read: Vec<u8>,
     candidate: Vec<u8>,
     motif: Vec<u8>,
+    flank: Vec<u8>,
 }
 
 impl SsrEmissionModel for StutterSubstitutionEmission {
@@ -757,6 +763,7 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
             candidate.bases,
             motif,
             bp_diff,
+            &[],
             context,
             scratch,
         ) else {
@@ -787,14 +794,14 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
             );
         }
         let motif = context.motif.as_bytes();
-        // EXPERIMENT (branch generic-indel-error, PVC_EXP_PARTIAL_FLANK): compare a partial read
-        // with the candidate's tract followed by the flank the candidate leaves on the side the
-        // read runs towards, as the bundle path does. "deletion": only candidates that delete
-        // flank bases on that side; "all": every candidate.
-        if let Some(scored) =
-            censored_with_the_flank_beyond(witnessed, held, candidate, motif, context, scratch)
-        {
-            return scored;
+        // **A candidate that deletes flank bases on the side the read runs towards is compared
+        // with the flank it leaves there, after its tract** (`str_edge_deletion_alleles.md` §5.6,
+        // amended 2026-10-21). Every other candidate — the reference, every plain repeat allele,
+        // one whose deletion is on the side the read held — is compared with its tract alone.
+        if let Some(flank) = remaining_flank_ahead(candidate, held) {
+            return censored_into_the_remaining_flank(
+                witnessed, held, candidate, flank, context, scratch,
+            );
         }
         match held {
             HeldFlank::Left => censored_from_the_tract_start(
@@ -832,90 +839,152 @@ impl SsrEmissionModel for StutterSubstitutionEmission {
     }
 }
 
-/// EXPERIMENT scope of [`censored_with_the_flank_beyond`], read once from `PVC_EXP_PARTIAL_FLANK`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum PartialFlankScope {
-    Off,
-    FlankDeletionsOnly,
-    Every,
-}
-
-fn partial_flank_scope() -> PartialFlankScope {
-    static SCOPE: std::sync::OnceLock<PartialFlankScope> = std::sync::OnceLock::new();
-    *SCOPE.get_or_init(|| match std::env::var("PVC_EXP_PARTIAL_FLANK").as_deref() {
-        Err(_) | Ok("") | Ok("off") => PartialFlankScope::Off,
-        Ok("deletion") => PartialFlankScope::FlankDeletionsOnly,
-        Ok("all") => PartialFlankScope::Every,
-        Ok(other) => panic!("PVC_EXP_PARTIAL_FLANK={other} is not off, deletion or all"),
-    })
-}
-
-/// EXPERIMENT: a partial read scored against the candidate's tract, stretched by every reachable
-/// length change at the end away from the held flank, followed by the flank the candidate leaves
-/// on that side. `None` when the experiment does not reach this candidate, which then takes the
-/// shipped scoring. Stretching at the end in motif phase is exact for a pure tract and an
-/// approximation for an interrupted one (the shipped exact sum places slips per run).
-fn censored_with_the_flank_beyond(
-    witnessed: &[u8],
-    held: HeldFlank,
-    candidate: &SsrCandidate<'_>,
-    motif: &[u8],
-    context: &SsrScoringContext<'_>,
-    scratch: &mut StutterSubstitutionScratch,
-) -> Option<f64> {
-    let deleted_on_the_far_side = match held {
+/// **The flank a segment candidate leaves on the side a partial read ran towards, when its own
+/// deletion took flank bases there** — the reference flank on that side less the deleted bases
+/// ([`flank_beyond_the_hull`], the definition an STR bundle's partial reads already use).
+///
+/// `None` for every candidate whose flank deletion on that side is zero — the reference, every
+/// plain repeat allele, and an edge deletion on the side the read held — and where nothing of the
+/// stored flank is left past the deletion. In both cases the read is compared with the tract
+/// alone, as before `str_edge_deletion_alleles.md` §5.6's amendment of 2026-10-21; with nothing
+/// left the two comparisons are the same sum, and the shipped one is kept.
+fn remaining_flank_ahead<'a>(candidate: &SsrCandidate<'a>, held: HeldFlank) -> Option<&'a [u8]> {
+    let deleted_ahead = match held {
         HeldFlank::Left => candidate.flank_deletion.right,
         HeldFlank::Right => candidate.flank_deletion.left,
     };
-    match partial_flank_scope() {
-        PartialFlankScope::Off => return None,
-        PartialFlankScope::FlankDeletionsOnly if deleted_on_the_far_side == 0 => return None,
-        _ => {}
-    }
-    let beyond = flank_beyond_the_hull(candidate, held);
-    if beyond.is_empty() {
-        return None;
-    }
-    // Everything is laid out from the held flank: forward from the left, mirrored from the right.
-    let (read, tract, phase_motif, flank): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = match held {
-        HeldFlank::Left => (
-            witnessed.to_vec(),
-            candidate.bases.to_vec(),
-            motif.to_vec(),
-            beyond.to_vec(),
+    let flank = flank_beyond_the_hull(candidate, held);
+    (deleted_ahead > 0 && !flank.is_empty()).then_some(flank)
+}
+
+/// **A partial read compared with a segment candidate whose deletion took flank bases on the side
+/// the read ran towards: with the candidate's tract followed by the flank it leaves there**
+/// (`str_edge_deletion_alleles.md` §5.6, amended 2026-10-21).
+///
+/// # Why
+///
+/// Such a candidate's tract is shorter than the reference's, so a read that stops near where the
+/// reference tract ends has, under the candidate, already run past the candidate's tract and into
+/// the flank beyond the deletion. Compared with the tract alone those bases could only be a longer
+/// tract — slippage — and were priced as such: at chr20:53879889 (HG002, 60×) seven reads spelling
+/// `GA` × 8 scored 0.003 each under the homozygous allele `GA` × 6 + `G` and about 1 under the
+/// reference, and the site was written `0/1`. Followed by its flank, `AGACAGAC…`, the allele reads
+/// the same as the reference for the read's whole length.
+///
+/// # The sum
+///
+/// ```text
+/// Lr(partial of ℓ bases | a) = Σ   P_stutter(Δ | a) · letters( the ℓ bases | first ℓ of (a stretched by Δ, then F) )
+///                             Δ : |a| + Δ + |F| ≥ ℓ
+/// ```
+///
+/// over every length change the candidate's stutter reaches, `F` being the flank. Two things
+/// differ from [`censored_from_the_tract_start`]:
+///
+/// - **a stretching shorter than the read is admissible**, because the flank supplies the rest —
+///   and `Δ = 0`, the candidate unchanged, is the one that explains these reads. A stretching
+///   whose bases and the flank's together are fewer than the read's contributes nothing;
+/// - **there is no factorised shortcut on a pure tract.** That shortcut rests on every stretching
+///   agreeing on the read's first `ℓ` bases; with the flank appended they do not — one more unit
+///   puts a repeat base where `Δ = 0` puts a flank base — so the sum is always taken in full.
+///
+/// A slip is placed as for any partial read ([`letters_over`]): a whole-unit slip in each run
+/// with equal weight, a part-unit change resized at the tract's end away from the held flank; the
+/// flank follows each rendering. A read that held the right flank is compared with everything
+/// written back to front — read, tract, flank, and the motif in the phase the tract ends on
+/// ([`MirroredCensoredRead`]).
+///
+/// # Cost
+///
+/// One letter comparison of the read's length per placement per reachable change — the exact
+/// sum's cost — paid only for candidates that delete flank bases, and only for the reads running
+/// towards that deletion.
+fn censored_into_the_remaining_flank(
+    witnessed: &[u8],
+    held: HeldFlank,
+    candidate: &SsrCandidate<'_>,
+    flank: &[u8],
+    context: &SsrScoringContext<'_>,
+    scratch: &mut StutterSubstitutionScratch,
+) -> f64 {
+    let motif = context.motif.as_bytes();
+    match held {
+        HeldFlank::Left => censored_from_the_tract_start_into_the_flank(
+            witnessed,
+            candidate.bases,
+            candidate.repeat_count,
+            motif,
+            flank,
+            context,
+            scratch,
         ),
         HeldFlank::Right => {
-            let mut mirrored_motif = Vec::new();
-            motif_phased_to_the_end_reversed(candidate.bases, motif, &mut mirrored_motif);
-            (
-                witnessed.iter().rev().copied().collect(),
-                candidate.bases.iter().rev().copied().collect(),
-                mirrored_motif,
-                beyond.iter().rev().copied().collect(),
-            )
+            // Taken out of the scratch for the call, as for a right-held read compared with the
+            // tract alone, and put back after so its buffers are reused.
+            let mut mirrored = std::mem::take(&mut scratch.mirrored);
+            for (reversed, forward) in [
+                (&mut mirrored.read, witnessed),
+                (&mut mirrored.candidate, candidate.bases),
+                (&mut mirrored.flank, flank),
+            ] {
+                reversed.clear();
+                reversed.extend(forward.iter().rev());
+            }
+            motif_phased_to_the_end_reversed(candidate.bases, motif, &mut mirrored.motif);
+            let scored = censored_from_the_tract_start_into_the_flank(
+                &mirrored.read,
+                &mirrored.candidate,
+                candidate.repeat_count,
+                &mirrored.motif,
+                &mirrored.flank,
+                context,
+                scratch,
+            );
+            scratch.mirrored = mirrored;
+            scored
         }
-    };
+    }
+}
+
+/// [`censored_into_the_remaining_flank`] for a read whose bases start where the tract starts — one that
+/// held the left flank, or a right-held one already reversed with its tract, motif and `flank`.
+fn censored_from_the_tract_start_into_the_flank(
+    witnessed_prefix: &[u8],
+    candidate_bases: &[u8],
+    repeat_count: NonZeroU32,
+    motif: &[u8],
+    flank: &[u8],
+    context: &SsrScoringContext<'_>,
+    scratch: &mut StutterSubstitutionScratch,
+) -> f64 {
     let period = period_of(context.motif);
+    // The shortest length change that, with the flank after it, still covers what the read showed.
+    let smallest_bp_diff =
+        witnessed_prefix.len() as i64 - candidate_bases.len() as i64 - flank.len() as i64;
+    segment_tract_into(candidate_bases, motif, &mut scratch.segments);
     let mut total = 0.0;
-    let mut sequence = Vec::new();
     for (bp_diff, length_probability) in context
         .stutter
-        .reachable_length_changes(period, candidate.repeat_count)
+        .reachable_length_changes(period, repeat_count)
     {
-        if length_probability <= 0.0 {
+        if bp_diff < smallest_bp_diff || length_probability <= 0.0 {
             continue;
         }
-        resize_at_the_end(&tract, &phase_motif, bp_diff, &mut scratch.resized);
-        sequence.clear();
-        sequence.extend_from_slice(&scratch.resized);
-        sequence.extend_from_slice(&flank);
-        if sequence.len() < read.len() {
+        let Some(letters) = letters_over(
+            witnessed_prefix,
+            candidate_bases,
+            motif,
+            bp_diff,
+            flank,
+            context,
+            scratch,
+        ) else {
+            // A contraction no single run can absorb, as in the shipped exact sum.
             continue;
-        }
-        total +=
-            length_probability * substitution_probability(&read, &sequence[..read.len()], context);
+        };
+        total += length_probability * letters;
     }
-    Some(total)
+    total
 }
 
 /// **The motif a mirrored candidate is written in**: the copy the candidate ends on, written
@@ -1025,6 +1094,7 @@ fn censored_from_the_tract_start(
             candidate_bases,
             motif,
             bp_diff,
+            &[],
             context,
             scratch,
         ) else {
@@ -1066,11 +1136,19 @@ fn censored_from_the_tract_start(
 /// A whole-repeat change enumerates one placement per run it could have landed in and averages
 /// them with equal weight; a part-repeat change is resized at the tract's end in a single
 /// placement (spec §4.2).
+///
+/// # What follows the stretching
+///
+/// `then` is what a carrier shows after the stretched tract, and the read is compared with the
+/// stretching followed by it. It is empty everywhere but for a partial read running towards the
+/// flank a candidate's own deletion leaves ([`censored_into_the_remaining_flank`]); empty, the
+/// comparison is the stretching's first bases alone, bit for bit what it was before `then`.
 fn letters_over(
     observed: &[u8],
     candidate: &[u8],
     motif: &[u8],
     bp_diff: i64,
+    then: &[u8],
     context: &SsrScoringContext<'_>,
     scratch: &mut StutterSubstitutionScratch,
 ) -> Option<f64> {
@@ -1078,10 +1156,8 @@ fn letters_over(
 
     if bp_diff == 0 {
         // The one placement is the candidate itself, so there is nothing to render.
-        return Some(substitution_probability(
-            observed,
-            prefix_of_stretching(candidate, observed.len())?,
-            context,
+        return Some(letters_of_stretching_then(
+            observed, candidate, then, context,
         ));
     }
 
@@ -1104,43 +1180,59 @@ fn letters_over(
             scratch
                 .placements
                 .iter()
-                .map(
-                    |placement| match prefix_of_stretching(placement, observed.len()) {
-                        Some(prefix) => each * substitution_probability(observed, prefix, context),
-                        None => 0.0,
-                    },
-                )
+                .map(|placement| {
+                    each * letters_of_stretching_then(observed, placement, then, context)
+                })
                 .sum(),
         )
     } else {
         // A part-repeat change: one placement, resized at the tract's end.
         resize_at_the_end(candidate, motif, bp_diff, &mut scratch.resized);
-        Some(
-            match prefix_of_stretching(&scratch.resized, observed.len()) {
-                Some(prefix) => substitution_probability(observed, prefix, context),
-                None => 0.0,
-            },
-        )
+        Some(letters_of_stretching_then(
+            observed,
+            &scratch.resized,
+            then,
+            context,
+        ))
     }
 }
 
-/// The first `length` bases of a stretching, or `None` if the stretching is shorter than that.
+/// **How probable `observed`'s letters are against the first bases of `stretching` followed by
+/// `then`**, as many of them as `observed` has — and zero if the two together are shorter.
 ///
-/// **It cannot be `None` at either call site, and it is fallible anyway.** The guarantee spans
-/// three statements and two functions — `censored_emission`'s floor filter admits only
-/// stretchings at least as long as what the read showed, and a complete read is exactly as
+/// **Bit for bit [`substitution_probability`] of the stretching's prefix where `then` is not
+/// reached**: the same per-base scores, added in the same order from the same start. That is what
+/// keeps every read that is not running into a remaining flank scored exactly as before.
+///
+/// **Too short cannot happen at any call site, and it is guarded anyway.** The guarantee spans
+/// three statements and two functions — each censored sum's floor admits only stretchings that,
+/// with `then`, are at least as long as what the read showed, and a complete read is exactly as
 /// long as its own stretching — which is more derivation than a bare index should rest on in a
-/// path that runs once per observation per candidate. Indexing would abort a calling run;
-/// this scores nothing, which is what [`substitution_probability`] already does when handed
-/// two lengths that disagree, so the two branches of the sum now fail the same way.
+/// path that runs once per observation per candidate. Indexing would abort a calling run; this
+/// scores nothing, which is what [`substitution_probability`] already does when handed two
+/// lengths that disagree.
 #[inline]
-fn prefix_of_stretching(stretching: &[u8], length: usize) -> Option<&[u8]> {
-    let prefix = stretching.get(..length);
+fn letters_of_stretching_then(
+    observed: &[u8],
+    stretching: &[u8],
+    then: &[u8],
+    context: &SsrScoringContext<'_>,
+) -> f64 {
+    let long_enough = stretching.len() + then.len() >= observed.len();
     debug_assert!(
-        prefix.is_some(),
+        long_enough,
         "the floor filter admits only stretchings at least as long as what the read showed"
     );
-    prefix
+    if !long_enough {
+        return 0.0;
+    }
+    let scores = substitution_scores(context);
+    let total_ln: f64 = observed
+        .iter()
+        .zip(stretching.iter().chain(then))
+        .map(|(&read_base, &candidate_base)| scores.pick(read_base, candidate_base))
+        .sum();
+    float::exp(total_ln)
 }
 
 /// Whether this candidate's tract is whole copies of the motif and nothing else.
@@ -6055,5 +6147,412 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Partial reads running into the flank an edge deletion leaves (str_edge_deletion_alleles.md
+    //    §5.6, amended 2026-10-21) ──
+
+    /// **chr20:53879889 on GRCh38, the site that showed the defect** (HG002, 60×): fifteen bases
+    /// of left flank, the reference tract `GA` × 8, fifteen bases of right flank. The truth there
+    /// is `GAGACAGAC>G`, homozygous, which deletes the tract's last three bases and the right
+    /// flank's first five.
+    const CHR20_LEFT_FLANK: &[u8] = b"GAGTAGGGGGGTGGG";
+    const CHR20_TRACT: &[u8] = b"GAGAGAGAGAGAGAGA";
+    const CHR20_RIGHT_FLANK: &[u8] = b"CAGACAGACAGACAG";
+    /// The truth allele as the STR path writes it: thirteen bases of tract, five right-flank bases
+    /// deleted.
+    const CHR20_ALLELE: &[u8] = b"GAGAGAGAGAGAG";
+    const CHR20_ALLELE_DELETION: crate::locus_generation::FlankDeletion =
+        crate::locus_generation::FlankDeletion { left: 0, right: 5 };
+
+    /// A partial read held on `held`, scored against a segment candidate at a locus with flanks.
+    #[allow(clippy::too_many_arguments)]
+    fn score_partial_at_a_flanked_locus(
+        held: HeldFlank,
+        read: &[u8],
+        candidate_bases: &[u8],
+        repeat_count: u32,
+        flank_deletion: crate::locus_generation::FlankDeletion,
+        reference_flanks: (&[u8], &[u8]),
+        motif: &[u8],
+        model: &StutterModel,
+    ) -> f64 {
+        let motif = a_motif(motif);
+        let candidate = SsrCandidate {
+            bundle: None,
+            reference_flanks,
+            flank_deletion,
+            bases: candidate_bases,
+            repeat_count: repeats(repeat_count),
+        };
+        let context = SsrScoringContext::new(
+            &motif,
+            model,
+            &candidate,
+            ErrorRate::try_new(1e-3).expect("a valid rate"),
+            [Provenance::FittedHere],
+        );
+        let mut scratch = StutterSubstitutionScratch::default();
+        StutterSubstitutionEmission.censored_emission(
+            read,
+            held,
+            &candidate,
+            &context,
+            &mut scratch,
+        )
+    }
+
+    /// **The sum a left-held partial read running into a remaining flank is owed, written out by
+    /// hand**: for every reachable length change, its probability times the mean, over the
+    /// renderings `renderings_of` gives for that change, of the read's letters against the
+    /// rendering followed by `flank` — and nothing for a rendering that, with the flank, is
+    /// shorter than the read.
+    fn partial_into_the_flank_by_hand(
+        read: &[u8],
+        repeat_count: u32,
+        motif: &[u8],
+        flank: &[u8],
+        model: &StutterModel,
+        renderings_of: impl Fn(i64) -> Vec<Vec<u8>>,
+    ) -> f64 {
+        let period = NonZeroU8::new(motif.len() as u8).expect("a test motif has a base");
+        model
+            .reachable_length_changes(period, repeats(repeat_count))
+            .map(|(bp_diff, length_probability)| {
+                let renderings = renderings_of(bp_diff);
+                if renderings.is_empty() {
+                    return 0.0;
+                }
+                let letters: f64 = renderings
+                    .iter()
+                    .map(|rendering| {
+                        let mut shown = rendering.clone();
+                        shown.extend_from_slice(flank);
+                        if shown.len() < read.len() {
+                            0.0
+                        } else {
+                            letters_by_hand(read, &shown[..read.len()], 1e-3)
+                        }
+                    })
+                    .sum();
+                length_probability * letters / renderings.len() as f64
+            })
+            .sum()
+    }
+
+    /// `tract` resized by `bp_diff` at its end, written out by hand: lengthened by continuing the
+    /// motif's tiling from where the tract ends, shortened by dropping its last bases.
+    fn resized_at_the_end_by_hand(tract: &[u8], motif: &[u8], bp_diff: i64) -> Vec<u8> {
+        if bp_diff < 0 {
+            return tract[..tract.len() - bp_diff.unsigned_abs() as usize].to_vec();
+        }
+        let mut resized = tract.to_vec();
+        for step in 0..bp_diff as usize {
+            resized.push(motif[(tract.len() + step) % motif.len()]);
+        }
+        resized
+    }
+
+    /// **A left-held partial read that runs into the flank an edge deletion leaves scores, under
+    /// that allele, within a few per cent of the reference — where the two read the same — and
+    /// far above what the allele's tract alone gives it.** The chr20:53879889 fixture: a read of
+    /// `GA` × 8 is, under the allele, its thirteen bases followed by `AGA`, the start of the flank
+    /// it leaves, and under the reference the reference tract.
+    ///
+    /// Measured: 0.96686 under the allele, 0.96697 under the reference, 1.2 × 10⁻³ against the
+    /// allele's tract alone — the score that wrote the homozygous site `0/1`. The allele's score is
+    /// the full
+    /// sum, written out by hand: the unchanged allele and a one-unit expansion both read as the
+    /// reference does, and no factorised shortcut stands in for the sum.
+    #[test]
+    fn a_partial_read_into_the_flank_an_edge_deletion_leaves_scores_as_the_reference_does() {
+        let model = a_model();
+        let flanks = (CHR20_LEFT_FLANK, CHR20_RIGHT_FLANK);
+        let read = CHR20_TRACT;
+
+        let under_the_allele = score_partial_at_a_flanked_locus(
+            HeldFlank::Left,
+            read,
+            CHR20_ALLELE,
+            6,
+            CHR20_ALLELE_DELETION,
+            flanks,
+            b"GA",
+            &model,
+        );
+        let under_the_reference = score_partial_at_a_flanked_locus(
+            HeldFlank::Left,
+            read,
+            CHR20_TRACT,
+            8,
+            crate::locus_generation::FlankDeletion::NONE,
+            flanks,
+            b"GA",
+            &model,
+        );
+        let against_the_tract_alone = score_partial_at_a_flanked_locus(
+            HeldFlank::Left,
+            read,
+            CHR20_ALLELE,
+            6,
+            crate::locus_generation::FlankDeletion::NONE,
+            flanks,
+            b"GA",
+            &model,
+        );
+
+        let by_hand = partial_into_the_flank_by_hand(
+            read,
+            6,
+            b"GA",
+            &CHR20_RIGHT_FLANK[5..],
+            &model,
+            |bp_diff| {
+                if bp_diff % 2 == 0 {
+                    // `GA` × 6 then `G`: one run, then the odd base.
+                    let copies = 6 + bp_diff / 2;
+                    if copies < 1 {
+                        return Vec::new();
+                    }
+                    let mut rendering = b"GA".repeat(copies as usize);
+                    rendering.push(b'G');
+                    vec![rendering]
+                } else {
+                    vec![resized_at_the_end_by_hand(CHR20_ALLELE, b"GA", bp_diff)]
+                }
+            },
+        );
+        assert!(
+            (under_the_allele - by_hand).abs() <= 1e-12 * by_hand,
+            "scored {under_the_allele}, by hand {by_hand}"
+        );
+        assert!(
+            (under_the_allele / under_the_reference - 1.0).abs() < 0.05,
+            "under the allele {under_the_allele}, under the reference {under_the_reference}"
+        );
+        assert!(
+            under_the_allele > 100.0 * against_the_tract_alone,
+            "under the allele {under_the_allele}, against its tract alone {against_the_tract_alone}"
+        );
+    }
+
+    /// **The right-held mirror: a candidate that deletes left-flank bases, and a read that held
+    /// the right flank and ran left into what the deletion leaves.** The chr20:53879889 fixture
+    /// written back to front — flanks swapped and reversed, tract and allele reversed under `AG`,
+    /// the read reversed — scores bit for bit what the fixture's left-held read does: the read,
+    /// the tract, the motif in its phase and the remaining flank are all reversed, so the two
+    /// sums are the same sum.
+    #[test]
+    fn a_right_held_read_into_a_left_flank_deletion_mirrors_the_left_held_score() {
+        let model = a_model();
+        let reversed = |bases: &[u8]| bases.iter().rev().copied().collect::<Vec<u8>>();
+        let (left_flank, right_flank) = (reversed(CHR20_RIGHT_FLANK), reversed(CHR20_LEFT_FLANK));
+        let (tract, allele) = (reversed(CHR20_TRACT), reversed(CHR20_ALLELE));
+        let read = reversed(CHR20_TRACT);
+
+        let from_the_right = score_partial_at_a_flanked_locus(
+            HeldFlank::Right,
+            &read,
+            &allele,
+            6,
+            crate::locus_generation::FlankDeletion { left: 5, right: 0 },
+            (&left_flank, &right_flank),
+            b"AG",
+            &model,
+        );
+        let from_the_left = score_partial_at_a_flanked_locus(
+            HeldFlank::Left,
+            CHR20_TRACT,
+            CHR20_ALLELE,
+            6,
+            CHR20_ALLELE_DELETION,
+            (CHR20_LEFT_FLANK, CHR20_RIGHT_FLANK),
+            b"GA",
+            &model,
+        );
+        assert!(from_the_right > 0.5, "the mirror scored {from_the_right}");
+        assert_eq!(
+            from_the_right.to_bits(),
+            from_the_left.to_bits(),
+            "right-held {from_the_right}, left-held {from_the_left}"
+        );
+
+        // And the reference, read from the right, is compared with its tract alone as before.
+        let reference_from_the_right = score_partial_at_a_flanked_locus(
+            HeldFlank::Right,
+            &read,
+            &tract,
+            8,
+            crate::locus_generation::FlankDeletion::NONE,
+            (&left_flank, &right_flank),
+            b"AG",
+            &model,
+        );
+        assert!(
+            (from_the_right / reference_from_the_right - 1.0).abs() < 0.05,
+            "allele {from_the_right}, reference {reference_from_the_right}"
+        );
+    }
+
+    /// **A candidate with no flank deletion on the side the read runs towards scores bit for bit
+    /// as before the rule**: the reference and a plain repeat allele, whatever flanks the locus
+    /// holds, and an edge deletion on the side the read held. "Before" is the same candidate
+    /// with no flank deletion and no flanks, which the rule cannot reach.
+    #[test]
+    fn a_candidate_without_a_flank_deletion_ahead_of_the_read_scores_as_before() {
+        let model = a_model();
+        let flanks = (CHR20_LEFT_FLANK, CHR20_RIGHT_FLANK);
+        let none = crate::locus_generation::FlankDeletion::NONE;
+        let left_only = crate::locus_generation::FlankDeletion { left: 3, right: 0 };
+        let right_only = CHR20_ALLELE_DELETION;
+        for read_repeats in 3..=10 {
+            let read = b"GA".repeat(read_repeats);
+            let right_held_read = b"GA".repeat(read_repeats);
+            for (held, read, candidate, count, deletion) in [
+                (HeldFlank::Left, &read, CHR20_TRACT, 8, none),
+                (HeldFlank::Right, &right_held_read, CHR20_TRACT, 8, none),
+                (HeldFlank::Left, &read, &CHR20_TRACT[..12], 6, none),
+                // The deletion is on the side the read held, not the side it runs towards.
+                (HeldFlank::Left, &read, CHR20_ALLELE, 6, left_only),
+                (
+                    HeldFlank::Right,
+                    &right_held_read,
+                    CHR20_ALLELE,
+                    6,
+                    right_only,
+                ),
+            ] {
+                let with_the_rule_in_reach = score_partial_at_a_flanked_locus(
+                    held, read, candidate, count, deletion, flanks, b"GA", &model,
+                );
+                let before = score_partial_at_a_flanked_locus(
+                    held,
+                    read,
+                    candidate,
+                    count,
+                    none,
+                    (&[], &[]),
+                    b"GA",
+                    &model,
+                );
+                assert_eq!(
+                    with_the_rule_in_reach.to_bits(),
+                    before.to_bits(),
+                    "{held:?}, read of {read_repeats} repeats, candidate {}, deletion {deletion:?}: \
+                     {with_the_rule_in_reach} against {before}",
+                    String::from_utf8_lossy(candidate)
+                );
+            }
+        }
+    }
+
+    /// **On an interrupted tract a whole-unit slip is placed in each run with equal weight, and
+    /// the remaining flank follows each placement** — not the tract stretched at its end. `CAG` ×
+    /// 2, `TT`, `CAG` × 2, with two right-flank bases deleted; the read carries a third `CAG` in
+    /// the second run and then the flank, which only the placement in that run explains.
+    ///
+    /// Stretching the tract at its end in the motif's phase, as the prototype did, writes the
+    /// added unit out of phase here (`…CAGCAG` then `GCA`, since the tract is fourteen bases long).
+    /// Measured: 1.1 × 10⁻³ placed per run — one of the two placements matches the read, so about
+    /// half the one-unit expansion's probability — against 8 × 10⁻¹⁴ stretched at the end.
+    #[test]
+    fn an_interrupted_tract_places_its_slips_per_run_before_the_flank_is_appended() {
+        let model = a_model();
+        let tract = b"CAGCAGTTCAGCAG";
+        let left_flank = b"TTGACCTAGG";
+        let right_flank = b"GTACCATGACTT";
+        let deletion = crate::locus_generation::FlankDeletion { left: 0, right: 2 };
+        let flank = &right_flank[2..];
+        let mut read = b"CAGCAGTTCAGCAGCAG".to_vec();
+        read.extend_from_slice(&flank[..4]);
+
+        let scored = score_partial_at_a_flanked_locus(
+            HeldFlank::Left,
+            &read,
+            tract,
+            4,
+            deletion,
+            (left_flank, right_flank),
+            b"CAG",
+            &model,
+        );
+        let render = |first_run: i64, second_run: i64| {
+            let mut rendering = b"CAG".repeat(first_run as usize);
+            rendering.extend_from_slice(b"TT");
+            rendering.extend_from_slice(&b"CAG".repeat(second_run as usize));
+            rendering
+        };
+        let per_run = partial_into_the_flank_by_hand(&read, 4, b"CAG", flank, &model, |bp_diff| {
+            if bp_diff % 3 != 0 {
+                return vec![resized_at_the_end_by_hand(tract, b"CAG", bp_diff)];
+            }
+            let units = bp_diff / 3;
+            let mut renderings: Vec<Vec<u8>> = [(2 + units, 2), (2, 2 + units)]
+                .into_iter()
+                .filter(|&(first, second)| first >= 0 && second >= 0 && first + second >= 1)
+                .map(|(first, second)| render(first, second))
+                .collect();
+            renderings.dedup();
+            renderings
+        });
+        let at_the_end =
+            partial_into_the_flank_by_hand(&read, 4, b"CAG", flank, &model, |bp_diff| {
+                vec![resized_at_the_end_by_hand(tract, b"CAG", bp_diff)]
+            });
+
+        assert!(
+            (scored - per_run).abs() <= 1e-12 * per_run,
+            "scored {scored}, placed per run by hand {per_run}"
+        );
+        assert!(
+            scored > 10.0 * at_the_end,
+            "placed per run {scored}, stretched at the end {at_the_end}"
+        );
+    }
+
+    /// **A stretching whose bases and the remaining flank's together are fewer than the read's
+    /// contributes nothing.** `CA` × 3 with four of six right-flank bases deleted leaves two flank
+    /// bases: a read as long as the widest expansion plus those two scores exactly the one term
+    /// that reaches it, and a read one unit longer scores zero and is left to the outlier term.
+    #[test]
+    fn a_stretching_shorter_than_the_read_with_its_flank_contributes_nothing() {
+        let model = a_model();
+        let tract = b"CACACA";
+        let right_flank = b"TTGCAC";
+        let deletion = crate::locus_generation::FlankDeletion { left: 0, right: 4 };
+        let flank = &right_flank[4..];
+        let widest = 3 + MAX_WHOLE_REPEAT_SLIP as usize;
+        let score_of = |read: &[u8]| {
+            score_partial_at_a_flanked_locus(
+                HeldFlank::Left,
+                read,
+                tract,
+                3,
+                deletion,
+                (b"GGTTA", right_flank),
+                b"CA",
+                &model,
+            )
+        };
+
+        let mut reaching = b"CA".repeat(widest);
+        reaching.extend_from_slice(flank);
+        let only_the_widest = model.probability(
+            2 * i64::from(MAX_WHOLE_REPEAT_SLIP),
+            NonZeroU8::MIN.saturating_add(1),
+        ) * letters_by_hand(&reaching, &reaching, 1e-3);
+        let scored = score_of(&reaching);
+        assert!(
+            scored > 0.0,
+            "the read the widest stretching reaches scored nothing"
+        );
+        assert!(
+            (scored - only_the_widest).abs() <= 1e-12 * only_the_widest,
+            "scored {scored}, the widest stretching's term alone {only_the_widest}"
+        );
+
+        let mut past_every_stretching = b"CA".repeat(widest + 1);
+        past_every_stretching.extend_from_slice(flank);
+        assert_eq!(score_of(&past_every_stretching), 0.0);
     }
 }
