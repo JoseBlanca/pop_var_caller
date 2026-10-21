@@ -30,7 +30,7 @@ input are unchanged.
 import os
 import shlex
 
-from .measure import run_commands, warm
+from .measure import check_alignments, run_commands, warm
 from .results import row, time_rows
 from .steps import Step, file_identity
 
@@ -61,6 +61,7 @@ def floor_steps(ctx, prefix, reference, alignments_by_sample, regions, base):
                         "cram_fields": PVC_CRAM_FIELDS}
 
     def per_sample(d):
+        check_alignments([f for _, f in files] + [reference])
         warm([f for _, f in files] + [reference])
         cmds = [(f"floor.{s}.{i}",
                  _command(f, reference, regions, 1 if f.endswith(".cram") else 0,
@@ -73,6 +74,7 @@ def floor_steps(ctx, prefix, reference, alignments_by_sample, regions, base):
                        metric="records_read", value=_records(d))]}
 
     def at_threads(d):
+        check_alignments([f for _, f in files] + [reference])
         warm([f for _, f in files] + [reference])
         cmds = [(f"floor.{s}.{i}",
                  _command(f, reference, regions, max(0, ctx.threads - 1),
@@ -123,6 +125,7 @@ def startup_steps(ctx, prefix, reference, catalog, alignments_by_sample, regions
         return path
 
     def call(d):
+        check_alignments(flat + [reference])
         warm(flat + [reference])
         bed = one_base(d)
         m = run_commands([callers.pvc_call_from_alignments(
@@ -134,6 +137,7 @@ def startup_steps(ctx, prefix, reference, catalog, alignments_by_sample, regions
                                   m, "start-up of call-from-alignments")}
 
     def generate(d):
+        check_alignments(flat + [reference])
         warm(flat + [reference])
         bed = one_base(d)
         m = run_commands(callers.pvc_generate_psps(ctx, reference, catalog, files, bed,

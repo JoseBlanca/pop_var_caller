@@ -106,12 +106,32 @@ def main():
         if not args.no_build:
             build_pvc(ctx)
         runner = Runner(ctx)
+        failures = []
         try:
+            # A failed step is logged and the run goes on, so one broken step does not cost the
+            # rest of a night's quiet hours; steps that need its output fail in turn and are
+            # listed too. Everything finished is kept, and the failed steps rerun next time.
             for name in names:
                 ctx.log(f"== {name}")
-                for step in _steps(ctx, name):
-                    if ctx.selected(step):
+                try:
+                    steps = _steps(ctx, name)
+                except SuiteError as err:
+                    ctx.log(f"error: {err}")
+                    failures.append((name, str(err)))
+                    continue
+                for step in steps:
+                    if not ctx.selected(step):
+                        continue
+                    try:
                         runner.run(step)
+                    except (SuiteError, CommandFailed, FileNotFoundError) as err:
+                        ctx.log(f"error: {step.name}: {err}")
+                        failures.append((step.name, str(err)))
+            if failures:
+                ctx.log(f"{len(failures)} step(s) failed; they rerun next time:")
+                for name, why in failures:
+                    ctx.log(f"    {name}: {why[:300]}")
+                code = 2
         except StopRequested as why:
             ctx.log(f"{why}; run the same command to resume")
             code = 3

@@ -16,7 +16,7 @@ import os
 import shlex
 
 from lib import arms, inputs, vcfeval
-from lib.measure import run_commands, warm
+from lib.measure import check_alignments, run_commands, warm
 from lib.results import row, time_rows
 from lib.steps import Step, file_identity
 
@@ -122,6 +122,7 @@ def _hipstr_step(ctx, depth, bam, hipstr_regions, base):
     row_base = dict(base, caller="HipSTR", caller_version=ctx.version("hipstr"))
 
     def action(d):
+        check_alignments([bam, arms.GRCH38])
         warm([bam, arms.GRCH38])
         raw = os.path.join(d, "hipstr.vcf.gz")
         cmd = (f"HipSTR --bams {q(bam)} --bam-samps HG002 --bam-libs HG002 "

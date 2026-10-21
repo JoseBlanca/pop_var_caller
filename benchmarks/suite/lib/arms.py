@@ -17,7 +17,7 @@ import os
 import shutil
 
 from . import callers, vcfeval
-from .measure import merge, run_commands, warm
+from .measure import check_alignments, merge, run_commands, warm
 from .results import row, time_rows
 from .steps import Step, file_identity
 
@@ -126,6 +126,7 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
 
     if arm == "pvc_defaults":
         def action(d):
+            check_alignments(flat + [reference])
             warm(flat + [reference])  # every tool reads from memory (measure.warm)
             log = os.path.join(d, "pvc.log")
             m = run_commands([callers.pvc_call_from_alignments(
@@ -134,6 +135,7 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
 
     elif arm == "pvc_fitted":
         def action(d):
+            check_alignments(flat + [reference])
             warm(flat + [reference])  # every tool reads from memory (measure.warm)
             psp_dir = os.path.join(d, "psps")
             logs = os.path.join(d, "logs")
@@ -156,6 +158,7 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
 
     elif arm == "gatk":
         def action(d):
+            check_alignments(flat + [reference])
             warm(flat + [reference])  # every tool reads from memory (measure.warm)
             logs = os.path.join(d, "logs")
             os.makedirs(os.path.join(ctx.results_root, "java_tmp"), exist_ok=True)
@@ -184,6 +187,7 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
 
     elif arm == "freebayes":
         def action(d):
+            check_alignments(flat + [reference])
             warm(flat + [reference])  # every tool reads from memory (measure.warm)
             logs = os.path.join(d, "logs")
             blocks = callers.split_regions(regions, os.path.join(d, "blocks"), ctx.threads * 4)

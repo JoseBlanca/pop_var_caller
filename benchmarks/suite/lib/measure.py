@@ -175,6 +175,24 @@ def merge(*measurements):
     }
 
 
+def check_alignments(paths):
+    """Refuse a damaged alignment file before any tool reads it.
+
+    `samtools quickcheck` reads each file's header and checks that it ends with its end-of-file
+    marker. Some tools read a truncated CRAM silently up to the break (pvc and GATK did, with a
+    tomato CRAM missing its last third), others abort (freebayes), so a damaged input would give
+    each caller different data without anyone being told.
+    """
+    files = [p for p in paths if p.endswith((".bam", ".cram"))]
+    if not files:
+        return
+    out = subprocess.run(["samtools", "quickcheck", "-v", *files], capture_output=True, text=True)
+    if out.returncode != 0:
+        bad = sorted(set(l.strip() for l in out.stdout.splitlines() if l.strip()))
+        raise CommandFailed("damaged alignment file(s), refused before reading: " + ", ".join(bad)
+                            + (f" ({out.stderr.strip()})" if out.stderr.strip() else ""))
+
+
 def warm(paths):
     """Read each file once, untimed, so that the timed step after it reads from memory.
 
