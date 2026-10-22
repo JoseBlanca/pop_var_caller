@@ -404,7 +404,11 @@ mod tests {
     /// only the two records' `PARALOG_LR` (chrV:121 −21.66 → −21.62, chrV:201 −19.13 → −18.19) moved; every record still passes, and `PARALOG_POST`, the header and every
     /// other column are unchanged. Setting the dispersion to zero reproduces `0999e9cf0affd975c1ef46d6d829f923` exactly.
     /// Recorded on the macOS host (arm64).
-    const CALLS_MD5: &str = "cea47374a0885f91c92940f2d89e103e";
+    /// **Re-recorded 2026-10-22** when the repeat-tract periodicity check was removed
+    /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7): only the header's
+    /// `##FILTER=<ID=notPeriodic,…>` line went; putting it back reproduces the old checksum,
+    /// `cea47374a0885f91c92940f2d89e103e`, exactly. Recorded in the Linux container (amd64).
+    const CALLS_MD5: &str = "da2024ac5ff5582c96a0f86ce9a8254d";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -629,7 +633,11 @@ mod tests {
     /// only the two records' `PARALOG_LR` (chrV:121 −21.66 → −21.62, chrV:201 −19.13 → −18.19) moved; every record still passes, and `PARALOG_POST`, the header and every
     /// other column are unchanged. Setting the dispersion to zero reproduces `a7215a1ca6142fa3ebe3e846ef96bd24` exactly.
     /// Recorded on the macOS host (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "103a0436a5b1630ce94a6a8ee111f274";
+    /// **Re-recorded 2026-10-22** when the repeat-tract periodicity check was removed
+    /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7): only the header's
+    /// `##FILTER=<ID=notPeriodic,…>` line went; putting it back reproduces the old checksum,
+    /// `103a0436a5b1630ce94a6a8ee111f274`, exactly. Recorded in the Linux container (amd64).
+    const WITH_ERRORS_CALLS_MD5: &str = "7083dc4bede34f2e7f197c194ff8df41";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -859,7 +867,11 @@ mod tests {
     /// only all fifteen records' `PARALOG_LR`, each by 0.03 to 2.4 toward zero (chrV:201 −18.78 → −16.73 the most) moved; every record still passes, and `PARALOG_POST`, the header and every
     /// other column are unchanged. Setting the dispersion to zero reproduces `65c158aec014804780d5560220169f13` exactly.
     /// Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "39efa7a9f70a5a07eea563e2f67df0c4";
+    /// **Re-recorded 2026-10-22** when the repeat-tract periodicity check was removed
+    /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7): only the header's
+    /// `##FILTER=<ID=notPeriodic,…>` line went; putting it back reproduces the old checksum,
+    /// `39efa7a9f70a5a07eea563e2f67df0c4`, exactly. Recorded in the Linux container (amd64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "2c68478585fa63e9b890cc30b3f33f9c";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
