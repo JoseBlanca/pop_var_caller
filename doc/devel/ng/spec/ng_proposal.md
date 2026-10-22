@@ -417,7 +417,9 @@ genotypes to estimate parameters).
   + **flank de-Bruijn assembly** alleles, discovered iteratively.
 - **ours — SNP:** overlap-bundled positions, byte-dedup, ≤6 alleles + `<OTHER>`.
   **STR:** length-keyed **rung ladder** + same-length interruption alleles behind a
-  3-filter gate; admission gates (LowDepth / NotPeriodic / TooManyAlleles).
+  3-filter gate; admission gates (LowDepth / NotPeriodic / TooManyAlleles). *(ng keeps only
+  TooManyAlleles, as truncation: NotPeriodic was removed on 2026-10-22, owner —
+  [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7.)*
 
 ### 7. Read likelihoods `P(read | allele)` — incl. stutter & contamination
 *Axis:* the emission model, whether PCR stutter is modelled, and how contamination enters.

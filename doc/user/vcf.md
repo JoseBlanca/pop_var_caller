@@ -81,9 +81,9 @@ many alleles (`--max-generic-alleles`).
 | `tooManyAlleles` | STR record with more candidate alleles than the limit of 32, reference included; only the best-supported were considered |
 | `hiddenDup` | written only with `--hidden-dup-tag`: the site looks like a hidden duplication, explained below |
 
-The header also declares `notPeriodic` and `lowDepth`, but pvc never writes them. A repeat whose
-allele lengths do not step by its repeat unit is called over the reference allele alone, so it is
-not written; the log counts these repeats.
+The header also declares `lowDepth`, but pvc never writes it. A repeat is always genotyped, even
+where some reads differ from the reference by part of a repeat unit; those reads are scored by the
+stutter model like any others.
 
 **Hidden duplications.** Where the genome holds two copies of a sequence but the reference holds
 only one, both copies' reads align to one place. In the samples that carry both copies, a

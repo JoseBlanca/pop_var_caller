@@ -209,7 +209,8 @@ today it keys on the spelling alone. The reference is `(reference tract, (0, 0))
   quarter there) and a heterozygous carrier's (about a half), not a fitted number.
 - **The periodicity check never counts a read with a flank deletion as off the grid** — it is the
   read that check's edge-deletion exception was written for, now known exactly instead of guessed
-  from the spelling (`candidate_alleles_ssr.md` §7).
+  from the spelling (`candidate_alleles_ssr.md` §7). *(The check itself was removed on 2026-10-22,
+  owner, so nothing is counted off the grid any more.)*
 
 ### 5.6 Read likelihood
 

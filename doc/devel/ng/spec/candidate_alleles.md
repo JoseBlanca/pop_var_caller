@@ -643,8 +643,9 @@ document settles. `TooManyAlleles` named a refusal and §4.1 chose truncation. *
 re-ask the merge's keep rule with a different denominator**, and production's version of it is a
 sum over the cohort — measured refusing 98.6% of repeat tracts at one sample sequenced to 5× and
 0.2% at 300× ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §6). Depth is asked once,
-upstream, per sample. `NotPeriodic` survives and belongs only to repeat tracts
-([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7).
+upstream, per sample. `NotPeriodic` survived here at first, for repeat tracts only, and was
+removed on 2026-10-22 (owner): it refused tracts carrying true variants
+([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7). The verdict has the two cases above.
 
 **A locus can select down to the reference alone, and that is a first-class outcome.** The merge
 builds a locus when some sample's non-reference reads *pooled* reach its rule; two reads split one

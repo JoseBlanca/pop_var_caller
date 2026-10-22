@@ -428,6 +428,8 @@ check refused 31 of HG002's 149 missed bundles, among them a 9-base insertion in
 run and a one-base insertion in fixed sequence, and refused nothing on the simulator. Selection
 at a bundle now goes straight to the rungs; `notPeriodic` is never a bundle's verdict, and
 `tooManyAlleles` still is. Segments keep the check unchanged. What it moved is in §10, step 4b.*
+*(Segments lost it too on 2026-10-22, owner: it refused real variants there as well —
+[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7.)*
 
 ### 7.3 Read likelihood: stutter in every run
 

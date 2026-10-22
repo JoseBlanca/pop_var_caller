@@ -113,8 +113,9 @@ by exact bytes** — the grouping is for nomination and for the prior, never a m
 ([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs) against
 [`rung_ladder.rs:301`](../../../../src/ssr/cohort/rung_ladder.rs)), so a 13-base read at a
 dinucleotide is judged out of frame by the gate and then pooled onto rung 6 with the 12-base
-reads, where it counts toward that rung's totals. ng measures both in units. Recorded as a fact
-about the code, not as a criticism of a caller that works.
+reads, where it counts toward that rung's totals. ng measured both in units while it had the
+gate, and has had none since 2026-10-22 (§7). Recorded as a fact about the code, not as a
+criticism of a caller that works.
 
 ---
 
@@ -316,87 +317,41 @@ refuses loci for being polymorphic rather than for being bad.
 
 ---
 
-## 7. The periodicity verdict
+## 7. The periodicity verdict — removed (owner, 2026-10-22)
 
-> **⚠ 2026-09-02 — the grid is anchored on the reference tract's length, not on the ladder's
-> mode.** Owner's decision, taken at step D2 of
-> [`../impl_plan/candidate_alleles_ssr.md`](../impl_plan/candidate_alleles_ssr.md). Read
-> literally, "a whole number of motif units from the ladder's mode" anchors the grid at **zero**
-> — the mode is a repeat count, so its length in bases is a whole number of units and cancels out
-> of the subtraction — and a zero-anchored grid refuses a real class of tract. The catalog trims
-> every tract back to whole motif copies **at both ends**, but a length-changing interruption
-> inside puts the two ends out of phase, so the tract's own reference length is then not a
-> multiple of the period; such a tract is admitted whenever the break is late enough to clear the
-> purity floor of 0.8. Measured through the catalog's own `minimal_trim` and `recompute_purity`:
-> 49 bases of an `AT` repeat with one extra base 40 bases in trims to 49 bases at **purity
-> 0.816**, and 49 is odd — so every read at that tract's reference length is off a zero-anchored
-> grid and the locus is refused. Production avoids this by anchoring on the commonest observed
-> length in bases; the reference tract's length is preferred to that because it is a property of
-> the locus rather than of the reads, so it cannot move with depth, and because it is the
-> quantity the genotype prior was re-indexed onto on 2026-08-27.
+**A repeat tract is always genotyped.** Selection has no verdict of its own beyond the two it
+inherits ([`candidate_alleles.md`](candidate_alleles.md) §6.2), and a read whose length is not a
+whole number of motif units from the reference tract's is a read like any other: nomination counts
+it on the rung its length floors to (§3), and the read likelihood scores it with the stutter
+model's part-repeat regime or, failing that, the junk term
+([`read_likelihoods.md`](read_likelihoods.md) §4.2, §4.5) — as it already did at every tract the
+check let through.
 
-**`NotPeriodic` survives, and it is the one verdict this path adds.** A stretch the catalog called
-a repeat tract whose reads do not actually vary in whole motif units is not a tract this caller's
-model describes: the stutter distribution is written on whole-repeat and part-repeat regimes
-([`read_likelihoods.md`](read_likelihoods.md) §4.2) and the prior's ladder is written on repeat
-counts. Genotyping it against that model would produce a confident answer from a model that does
-not apply.
+**What the check was.** Until 2026-10-22 a periodicity check ran before everything in §4 and §5.
+A read was *off the grid* when its tract length differed from the reference tract's by something
+other than a whole number of motif units. A sample was non-periodic when more than a tenth of its
+spanning reads were off the grid, and at least two of them; a read showing a deletion across the
+tract's edge never counted. When no sample was periodic the tract was refused as `NotPeriodic`:
+it was called over the reference tract alone, so it wrote no record, and the run report listed it.
+The tenth was production's `max_out_of_frame_frac`, inherited and never measured (§12, Q1).
 
-**The measure is production's, with its denominator corrected to be per sample.** Production asks
-what fraction of the **cohort's** reads sit at a length that is not a whole number of motif units
-from the modal length, and rejects above `max_out_of_frame_frac = 0.10`
-([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs), constant at
-[`:85`](../../../../src/ssr/cohort/candidate_set.rs)). **The 10% is inherited and unmeasured**;
-what changes is that the fraction is taken of each sample's own spanning reads and the locus is
-`NotPeriodic` only when **no** sample is periodic by it — the same "one sample suffices" shape as
-everything else here, for the same reason.
+**Why it was removed.** Measured on GIAB chr22 at 30×, HG002, HG003 and HG004 called together and
+scored with hap.py against the GIAB v4.2.1 truth: switching the check off gained 33 true indels and
+4 true SNPs, for 4 more false calls in total. In HG002 every one of the 12 tracts it refused
+carried a true variant that DeepVariant calls correctly, and 3 of them were homozygous. A typical
+one is chr22:19052415, a `CA` repeat of 13 units: 13 reads at the reference length and 12 one unit
+shorter, a clean heterozygous deletion, refused for 3 reads carrying a 5-base insertion that the
+aligner had placed at the read's very end (CIGARs `127M5I16M` and `129M5I14M`).
 
-**And at least two reads must be off the grid** (owner, 2026-10-10;
-`MIN_OFF_GRID_READS_TO_REFUSE`). With the share alone, one read refuses a tract at low depth — one
-in eight is 12.5% — and at one sample a refused tract is a lost genotype. On the stuttering
-benchmark at one sample and 15×, that refused a 4-base repeat whose sample carried a 14-copy allele
-on 7 of its 8 reads, the eighth spelled by the mapper with one flank base inside; two more tracts
-like it fell on the PCR-free library. A single off-grid read is what one sequencing or mapping
-error makes anywhere; a tract the model does not describe shows the pattern again and again. At 20
-spanning reads or more the share already needs three, so the floor changes nothing at depth.
-
-**A read spelling the reference tract with a block missing from one end is never off the grid**
-(owner, 2026-10-10). That is what a deletion across the tract's edge leaves inside the tract, and its
-length there need not be whole units — five bases of an `AAG` repeat, say — which says nothing
-about whether the tract stutters in whole units. At one sample, every read of a heterozygous edge
-deletion counted against the tract, the tract was refused, and the sample's other allele went with
-it. Such reads are spelled by their own alignment ([`locus_generation_ssr.md`](locus_generation_ssr.md)
-§3).
-
-**A `NotPeriodic` locus still yields a candidate table**: the reference tract alone, verdict
-`NotPeriodic`. What the run does with it is emission's.
-
-**The run report names every refused tract by position** (the first five in genome order, then a
-count of the rest), under the count it always printed. A refused tract writes no record, so in the
-VCF it looks exactly like a tract where nobody varied, and a count alone gave a reader nothing to
-look at (2026-10-03).
-
-**A known way the check refuses a real tract, recorded rather than fixed.** On GIAB HG002 at 300×,
-`chr1:206,838,725` is a 75-base `CCTTC` tract whose truth is a 1/2 of one and two units shorter. It
-was refused with 8 of its 55 spanning reads off the grid, against the 10% allowance. Five of the
-eight are reads ending 1 to 7 bases past the tract, where the reference goes on `CTCTCTCCTTCCCTTC`.
-Their mappers spelled them six bases *longer* (`…130M6I12M`), while the realigner measured all five
-at the truth's ten bases shorter. A complete read is spelled by its input alignment wherever the
-CIGAR has an indel ([`locus_generation_ssr.md`](locus_generation_ssr.md); tract-accuracy program,
-L4), so the mapper's spelling won. Four repairs were measured on the HG002 tandem-repeat benchmark
-(36,497 truth records, 30× and 50×), and each wins this one tract and loses more elsewhere:
-
-| rule | right genotypes, summed over 30× and 50×, homopolymer and period 2+ |
-|---|---|
-| use the input spelling only with at least 8 bases of overhang past the tract | −12 |
-| … only with the whole 15-base flank of overhang | −48 |
-| count a read with less than 8 bases of overhang as partial, not spanning | −142 (and 62 homopolymer tracts no longer called at 30×) |
-| use the realigner's spelling where the input spelling is off the grid and the realigner's on it | +14, with about 25 more wrong calls at each depth: tracts whose truth is a sequence change the check had been refusing |
-
-**The owner accepted this miss on 2026-10-03**: the spelling rules stay as they are, and the run report's list of refused tracts is how a later run will show how often it happens.
-
-The details and the numbers per cell are in
+**The refusal recorded here on 2026-10-03 is no longer made.** HG002's `chr1:206,838,725`, a
+75-base `CCTTC` tract whose truth is a 1/2 of one and two units shorter, was refused for 8 of its
+55 spanning reads off the grid, five of them reads the mapper spelled six bases longer near the
+read's end. Whether it is now genotyped right has not been measured. The details are in
 `doc/devel/ng/research/giab_unexplained_fn_2026-10-03.md` §2.
+
+**An STR bundle lost the same check earlier**, on 2026-10-12
+([`str_bundle_loci.md`](str_bundle_loci.md) §7.2), for the same kind of reason: real alleles whose
+length change is not whole units.
 
 ---
 
@@ -593,7 +548,7 @@ likely to come true, and §12's Q2 here records it as the same open question see
 | per-sample nomination and top-`ploidy` selection | [`assemble_candidates`, `candidate_set.rs:194`](../../../../src/ssr/cohort/candidate_set.rs) | **shape ported, predicate replaced** (§4.1) |
 | the `±1` neighbour rescue and its `occupied` test | [`candidate_set.rs:239-258`](../../../../src/ssr/cohort/candidate_set.rs), [`:221`](../../../../src/ssr/cohort/candidate_set.rs) | **ported unchanged** |
 | the union across samples, deduplicated by exact bytes | [`candidate_set.rs:223-227`](../../../../src/ssr/cohort/candidate_set.rs) | ported; the linear `contains` scan is replaced by a set, since the cap is now checked after a bar rather than after an unbounded union |
-| the periodicity measure | [`is_periodic`, `candidate_set.rs:114`](../../../../src/ssr/cohort/candidate_set.rs) | shape ported, denominator moved per sample (§7); the 10% is inherited and unmeasured |
+| the periodicity measure | [`is_periodic`, `candidate_set.rs:114`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported**: ported per sample at first, then removed (owner, 2026-10-22; §7) |
 | the reference tract seeded as allele 0 before any gate | [`candidate_set.rs:200-202`](../../../../src/ssr/cohort/candidate_set.rs) | ported; it is the inherited invariant ([`candidate_alleles.md`](candidate_alleles.md) §6.1) |
 | the depth gate, the three sibling constants, the cap of 24 | [`candidate_set.rs:80-90`](../../../../src/ssr/cohort/candidate_set.rs) | **not ported** (§6) |
 
@@ -636,15 +591,14 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
    heterozygous tracts (§5).
 4. **The share is 5%, one number for both paths** (§5).
 5. **The depth gate, the three sibling constants and the cap of 24 are dropped** (§6).
-6. **`NotPeriodic` survives, per sample** (§7).
+6. **There is no periodicity verdict.** It was ported per sample and removed on 2026-10-22, when
+   it was measured refusing real variants (§7).
 
 **Open.**
 
-- **Q1 — the periodicity threshold of 10% is inherited from production and has never been
-  measured**, here or there. It decides how many catalog tracts are refused as not really
-  periodic, and §4.1's measurements were all taken with the gate switched off, so nothing here
-  constrains it. **Leaning: ship 10% and mark it soft.** *What would settle it:* on HG002, sweep
-  it and count tracts refused against true heterozygous tracts lost, using the same rig as §5.
+- **Q1 — the periodicity threshold of 10%. SETTLED 2026-10-22 by removing the check** (owner;
+  §7). It was inherited from production and never measured; when it was, on GIAB chr22 at 30×,
+  every tract it refused in HG002 carried a true variant.
 - **Q2 — how many alleles may a repeat tract be called over? SETTLED at 32** (owner's decision,
   2026-08-24), against the sibling document's six. A tract carries more real alleles than a SNP
   does and the ladder widens with the cohort, so this is where
@@ -724,8 +678,8 @@ and report what moved, against the numbers in §4.1 and §5. That has a failing 
   cohort denominator creeps back in.
 - **Unit, one sample:** every rule above produces the same answer with a cohort of one that it
   produces for that sample inside a cohort of sixty-three.
-- **Unit, `NotPeriodic`:** a locus whose reads are all a non-unit offset from the mode yields the
-  reference tract alone with that verdict, and one sample being periodic is enough to avoid it.
+- **Unit, reads off the grid:** a tract carrying reads a part of a unit away from the reference
+  length is still selected over, and the alleles its other reads support are admitted (§7).
 - **Differential, the oracle:** §10's two runs — reproduce production exactly with the old rules
   switched in, then report the move.
 - **Regression, the definition of done:** HG002 at 30× through the whole caller with real

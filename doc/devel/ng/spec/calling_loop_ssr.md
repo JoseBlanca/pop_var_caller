@@ -125,7 +125,7 @@ run and reachable the moment an `Ssr`-shaped [`LocusEvidence`,
 The one missing piece of statistics, and its design is done:
 [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) settles the ladder, which rungs a
 sample nominates, the two-spellings rule, the gates deliberately not ported, and the
-periodicity verdict; its implementation plan
+periodicity verdict (removed 2026-10-22, owner; that document's §7); its implementation plan
 ([`impl_plan/candidate_alleles_ssr.md`](../impl_plan/candidate_alleles_ssr.md)) orders the
 build, with the merge's kind field as Milestone A — now owned by
 [`run_ssr_observations.md`](run_ssr_observations.md) §4.
@@ -142,7 +142,9 @@ What the rest of the chain contracts from it, all three already typed at the con
   bases, because an interrupted tract holds fewer whole repeats than its length says;
 - the tract FILTER verdicts that are selection's to mint — `NotPeriodic`,
   `TooManyAlleles`, `LowDepth` — for which the record's vocabulary already exists and is
-  already declared in every run's VCF header.
+  already declared in every run's VCF header. *(`NotPeriodic` removed 2026-10-22, owner: a tract
+  is always genotyped, and the value is no longer declared —
+  [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7.)*
 
 ### 3.2 The driver branch, and the record's two unwired inputs
 
@@ -288,8 +290,9 @@ than the candidate set, and nothing in the owner's ruling touched it — deferre
 
 ## 4. One sample and a thousand, three reads and three hundred
 
-- **One sample.** Selection's bar and the periodicity verdict are cohort-denominated but
-  defined at N = 1 ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §9); the seed is
+- **One sample.** Selection's bar is cohort-denominated but
+  defined at N = 1 (the periodicity verdict, which was too, is removed —
+  [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7) ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §9); the seed is
   the fitted spectrum, which at `--defaults` is a stated constant — so a single-sample tract
   call leans hardest on the emission, and says so through its warrants. No-calls are the
   honest common case at low depth, and the tract `LowDepth` FILTER exists for the locus-level

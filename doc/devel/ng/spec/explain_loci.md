@@ -68,7 +68,7 @@ meaning does.
 | `step` | one row per | `value` | `detail` |
 |---|---|---|---|
 | `locus` | locus | `generic`, `repeat_tract` or `repeat_bundle` | `alleles`, `covering_samples` |
-| `allele` | allele the merge assembled | `kept` (as candidate *k*), `below_support`, `cut_by_allele_cap`, or `refused_not_periodic` | `cohort_reads`, `best_sample`, `best_sample_reads`, `best_sample_share` |
+| `allele` | allele the merge assembled | `kept` (as candidate *k*), `below_support`, `cut_by_allele_cap`, or `not_selected` at a repeat tract (`refused_not_periodic` until 2026-10-22, when the periodicity check was removed; `candidate_alleles_ssr.md` §7) | `cohort_reads`, `best_sample`, `best_sample_reads`, `best_sample_share` |
 | `reads` | sample × allele with reads | complete reads showing it | `read_groups` |
 | `partial` | sample × partial observation | reads | `witnessed`, `compatible_with` (candidate alleles it fits) |
 | `callable` | sample | `callable` or `set_aside` | why, when set aside |

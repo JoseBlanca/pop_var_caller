@@ -383,14 +383,15 @@ and retaining them is a real memory decision; deferred, §13).
 ```
 ##FILTER=<ID=PASS,Description="All filters passed">
 ##FILTER=<ID=EMNoConv,Description="The calling loop did not converge within its pass cap">
-##FILTER=<ID=notPeriodic,Description="Tract allele-length distribution inconsistent with the motif period">
 ##FILTER=<ID=tooManyAlleles,Description="More candidate alleles segregate than the caller admits">
 ##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">
 ```
 
-Five ids: production's four (one generic, three tract — the tract three are
-[`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7's verdicts) in one namespace, plus
-`PASS`. A record carries exactly one value; there is no `.` FILTER.
+Four ids: three of production's four (one generic, two tract) in one namespace, plus `PASS`. A
+record carries exactly one value; there is no `.` FILTER. *(Production's third tract value,
+`notPeriodic`, was declared here until 2026-10-22, when the periodicity check that minted it was
+removed (owner; [`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §7). Its header line went
+with it.)*
 
 **The format's rule: a locus-level refusal that is written at all is written on its FILTER, with
 every sample no-called, `ALT .` where no alternative was established, and `QUAL 0`.** That is the
@@ -422,9 +423,8 @@ by the step that creates them.
 ## 10. One sample and three thousand, three reads and three hundred
 
 **One sample.** Nothing branches. `AN = 2` (or `0` with the sample no-called — a legal, honest
-record if a filtered tract locus is written there). The tract FILTERs still fire — their depth and
-periodicity tests are cohort-denominated but defined at `N = 1`
-([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §9).
+record if a filtered tract locus is written there). The tract FILTERs still fire — their tests
+are defined at `N = 1` ([`candidate_alleles_ssr.md`](candidate_alleles_ssr.md) §9).
 
 **Three thousand samples.** A record's line is dominated by its sample columns — order of 20
 bytes a sample, so ~60 KB a record, linear in `N` and bgzf-compressed on disk (§11). Nothing in
