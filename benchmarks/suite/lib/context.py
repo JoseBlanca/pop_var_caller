@@ -30,6 +30,8 @@ class Context:
         self.quiet_minutes = args.quiet_minutes
         self.stop_at = args.stop_at_epoch
         self.redo_busy = args.redo_busy
+        # The fastest calibration among finished steps, the yardstick of --redo-busy.
+        self.fastest_calibration = _fastest_calibration(self.results_root)
         self.pvc_bin = os.path.join(PROJECT_DIR, "target-container", "release", "pvc")
         self.gatk = os.environ.get("GATK_BIN", "/opt/gatk/gatk")
         self.rtg_jar = os.path.join(PROJECT_DIR, "tmp", "tools", "rtg-tools-3.13", "RTG.jar")
@@ -80,6 +82,22 @@ class Context:
         print(message, flush=True)
         self._log.write(message + "\n")
         self._log.flush()
+
+
+def _fastest_calibration(root):
+    import glob
+    import json
+
+    best = None
+    for path in glob.glob(os.path.join(root, "**", ".done"), recursive=True):
+        try:
+            with open(path) as fh:
+                cal = json.load(fh).get("calibration_s")
+        except (OSError, ValueError):
+            continue
+        if cal and (best is None or cal < best):
+            best = cal
+    return best
 
 
 def _split(value):

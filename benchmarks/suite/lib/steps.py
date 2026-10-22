@@ -113,8 +113,11 @@ class Runner:
                         f"{step.name}: its stored output was made from different inputs "
                         f"({changed}); {hint}: {directory}")
         self._check_stop()
-        if step.kind in ("pvc", "competitor") and self.ctx.wait_for_quiet:
-            self._wait_for_quiet()
+        calibration = None
+        if step.kind in ("pvc", "competitor"):
+            if self.ctx.wait_for_quiet:
+                self._wait_for_quiet()
+            calibration = calibrate(self.ctx.threads)
         if os.path.exists(directory):
             shutil.rmtree(directory)
         os.makedirs(directory)
@@ -136,6 +139,7 @@ class Runner:
             "date": time.strftime("%Y-%m-%d", time.localtime(started)),
             "machine": self.ctx.machine,
             "measurement": result.get("measurement"),
+            "calibration_s": calibration,
             "rows": result.get("rows", []),
             "meta": result.get("meta", {}),
         }
@@ -196,11 +200,15 @@ class Runner:
             return False
         if not record.get("measurement"):
             return False
-        from .results import BUSY_OTHER_CPU, HostLoad
+        from .results import BUSY_OTHER_CPU, SLOW_CALIBRATION, HostLoad
 
         load = HostLoad(os.path.join(self.ctx.results_root, "host_load.tsv"))
         other = load.other_mean(record["started"], record["ended"])
-        return other != "" and other > BUSY_OTHER_CPU
+        if other != "" and other > BUSY_OTHER_CPU:
+            return True
+        cal = record.get("calibration_s")
+        return bool(cal and self.ctx.fastest_calibration
+                    and cal > SLOW_CALIBRATION * self.ctx.fastest_calibration)
 
     def _forced(self, step):
         if step.name in self.ctx.redo_steps:
@@ -210,6 +218,24 @@ class Runner:
         if step.kind == "score" and self.ctx.rescore:
             return True
         return False
+
+
+def calibrate(threads):
+    """How fast the cores the suite has right now are: seconds for `threads` copies of a fixed job.
+
+    Each copy hashes 400 MB of zeros (sha256), about 0.75 s on one of the laptop's fast cores. They
+    run at once, one per core of the virtual machine, and the time is the slowest copy's. If macOS
+    has put any of the virtual machine's cores on a slower core, this time grows by a factor of two
+    or more, so every timed step records it and the summary marks a step whose calibration was slow
+    (results.SLOW_CALIBRATION).
+    """
+    import subprocess
+
+    job = "head -c 400M /dev/zero | sha256sum > /dev/null"
+    script = " ".join(f"({job}) &" for _ in range(threads)) + " wait"
+    started = time.time()
+    subprocess.run(["bash", "-c", script], check=True)
+    return round(time.time() - started, 3)
 
 
 def _run_in_child(action, directory):

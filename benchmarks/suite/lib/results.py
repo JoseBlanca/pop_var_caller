@@ -14,11 +14,15 @@ import time
 
 COLUMNS = ["benchmark", "dataset", "samples", "depth", "region_bp", "variant_class", "caller",
            "caller_version", "pvc_commit", "stage", "metric", "value", "date", "machine",
-           "host_load_start", "host_load_end", "other_cpu_cores", "source"]
+           "host_load_start", "host_load_end", "other_cpu_cores", "calibration_seconds", "source"]
 
 # A time figure whose step ran while processes other than the suite used more than this many cores
 # on average was not measured on a quiet machine, and is marked.
 BUSY_OTHER_CPU = 2.0
+
+# A timed step whose calibration (steps.calibrate) took more than this many times the fastest
+# calibration in the table probably ran partly on the laptop's slower cores, and is marked.
+SLOW_CALIBRATION = 1.3
 
 # The read floor (lib/readfloor.py) set against the pvc step that reads the alignments:
 # (floor stage, pvc caller, pvc stage).
@@ -100,9 +104,20 @@ class HostLoad:
         return round(sum(window) / len(window), 2) if window else ""
 
 
+_FASTEST_CALIBRATION = [None]
+
+
 def busy(row):
-    """Was this time or memory figure measured while other processes used the fast cores?"""
-    return row["other_cpu_cores"] not in ("", None) and float(row["other_cpu_cores"]) > BUSY_OTHER_CPU
+    """Was this time or memory figure measured on a busy machine, or on slower cores?
+
+    Busy: processes other than the suite used more than BUSY_OTHER_CPU cores. Slower cores: the
+    step's calibration took more than SLOW_CALIBRATION times the fastest one in the table.
+    """
+    if row["other_cpu_cores"] not in ("", None) and float(row["other_cpu_cores"]) > BUSY_OTHER_CPU:
+        return True
+    fastest = _FASTEST_CALIBRATION[0]
+    cal = row.get("calibration_seconds")
+    return bool(fastest and cal not in ("", None) and float(cal) > SLOW_CALIBRATION * fastest)
 
 
 def build_table(ctx):
@@ -125,8 +140,11 @@ def build_table(ctx):
                 if r.get("metric", "").endswith(TIME_METRICS):
                     full["host_load_start"], full["host_load_end"] = load_start, load_end
                     full["other_cpu_cores"] = other
+                    full["calibration_seconds"] = record.get("calibration_s") or ""
                 full["source"] = record["name"]
                 rows.append(full)
+    cals = [float(r["calibration_seconds"]) for r in rows if r["calibration_seconds"] not in ("", None)]
+    _FASTEST_CALIBRATION[0] = min(cals) if cals else None
     rows.extend(_read_floor_ratios(rows))
     rows.sort(key=lambda r: (r["benchmark"], r["dataset"], _num(r["samples"]), _num(r["depth"]),
                              r["variant_class"], r["stage"], r["metric"], r["caller"]))
@@ -291,8 +309,10 @@ def write_summary(ctx, rows, benchmarks):
     lines.extend(_read_floor_section(rows))
     if any(busy(r) for r in rows):
         lines.append(f"⚠ marks a time or memory figure measured while processes other than the suite "
-                     f"used more than {BUSY_OTHER_CPU:g} core on average, so the machine was not quiet; "
-                     "rerun that step with `--redo-step <source>` before quoting it.")
+                     f"used more than {BUSY_OTHER_CPU:g} cores on average, or whose step's calibration "
+                     f"(6 copies of a fixed job, run just before it) took over {SLOW_CALIBRATION:g} "
+                     "times the fastest, a sign of the laptop's slower cores; rerun such steps with "
+                     "`--redo-busy` before quoting them.")
         lines.append("")
     path = os.path.join(ctx.pvc_root(), "summary.md")
     with open(path, "w") as fh:
