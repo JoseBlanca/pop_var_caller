@@ -1498,7 +1498,12 @@ mod a_sample_with_repeat_tracts_only {
                 multiplier.observations,
                 multiplier.standard_error
             ),
-            (1.0, Warrant::Defaulted, None, None)
+            (
+                crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER,
+                Warrant::Defaulted,
+                None,
+                None
+            )
         );
         let coefficient = |sample: &str| {
             file.inbreeding

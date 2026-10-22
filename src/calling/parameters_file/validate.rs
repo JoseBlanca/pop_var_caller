@@ -648,14 +648,19 @@ impl ParametersFile {
             // `a_run_whose_rates_were_defaulted_writes_a_file_its_own_reader_accepts`: two
             // libraries whose reads averaged an error of 2.5e-4 and 5e-4 write 4.0 and 2.0.
             //
-            // **RULED (owner, 2026-08-31): that is what a run should do, and spec §5's third row
-            // is the sentence to correct.** §5 says such a read group gets *"scale 1.0, warrant
-            // `Defaulted`"* — take its reads at the quality they claim. It should not: a library's
-            // real error rate is never its reported sequencing quality, because the qualities
-            // describe base calling while the reads also carry mismapping, chimeras and damage. So
-            // a read group the fit could not measure is charged a stated rate rather than taken at
-            // its word, and the multiplier is above one on any real library. Recorded in
-            // `PROJECT_STATUS.md`; the spec is untouched.
+            // **RULED (owner, 2026-08-31): that is what a run should do.** A library's real error
+            // rate is never its reported sequencing quality, because the qualities describe base
+            // calling while the reads also carry mismapping, chimeras and damage. So a read group
+            // the fit could not measure is charged a stated rate rather than taken at its word,
+            // and the multiplier is above one on any real library. Recorded in
+            // `PROJECT_STATUS.md`. Spec §5's third row said *"scale 1.0, warrant `Defaulted`"*
+            // until it was corrected on 2026-10-22.
+            //
+            // **The run that fitted nothing has no such multiplier**, because it has no mean
+            // reported error to divide by; it takes
+            // [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER),
+            // 2.0 since 2026-10-22, and that too is `defaulted`. So the value of a `defaulted`
+            // multiplier is not fixed by either rule, and this check stays absent.
         }
         Ok(())
     }

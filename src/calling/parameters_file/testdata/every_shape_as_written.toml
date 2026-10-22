@@ -58,7 +58,7 @@
 # count still beside it. And on every other key a `defaulted` warrant is checked
 # against nothing — including the inbreeding coefficient, whose built-in number
 # is 0.0. The base-quality multiplier is not one of them: a `defaulted`
-# multiplier is **not** fixed at 1.0, and the note beside
+# multiplier is **not** fixed at its built-in 2.0, and the note beside
 # `base_quality_calibration` says what it is instead. A `defaulted` substitution
 # rate is the one to avoid writing by hand, and the reason is worth stating
 # because a note further down looks like it contradicts this: the caller
@@ -156,7 +156,7 @@ terms = [
 # exactly as reported. It is not a multiplier on the Phred score, which moves
 # the other way.
 #
-# **A `defaulted` multiplier is not 1.0 in general**, and the rows below say
+# **A `defaulted` multiplier is not one fixed number**, and the rows below say
 # `not calibrated` where it applies. A read group no error rate could be fitted
 # for is *charged the caller's stated rate of one error in a thousand* rather
 # than taken at the quality it reported — so its multiplier is that stated rate
@@ -164,7 +164,9 @@ terms = [
 # wherever the instrument claimed better than one in a thousand. A library
 # averaging Q36 gets 4.0: every base of it is scored four times likelier to be
 # wrong than the file it came in said. **The exception is a run that fitted
-# nothing at all**, which read nothing to take a mean over and writes 1.0.
+# nothing at all**, which read nothing to take a mean over and writes the
+# caller's default of 2.0: every read twice as likely to be wrong as the file it
+# came in said.
 by_read_group = [
     { read_group = 0, error_probability_multiplier = { value = 1.0324, standard_error = 0.0071, warrant = "fitted_here", observations = { reads = 812344 } } },
     # not calibrated: no usable error rate could be fitted for this read group,

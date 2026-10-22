@@ -4569,7 +4569,7 @@ mod tests {
     }
 
     fn one_read_group() -> Vec<ReadGroupCalibration> {
-        vec![ReadGroupCalibration::defaulted()]
+        vec![ReadGroupCalibration::unscaled()]
     }
 
     fn measured_contamination() -> ContaminationView {

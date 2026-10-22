@@ -207,28 +207,37 @@ pub use crate::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 /// making the sample's whole row `NaN` (spec §8).
 pub const MIN_BASE_ERROR: f64 = 1e-12;
 
-/// **The multiplier a read group's reads are charged where nothing was fitted — one, which
-/// leaves every quality exactly as the instrument reported it.**
+/// **The multiplier a read group's reads are charged where nothing was fitted — two: every read's
+/// reported error probability is doubled, about 3 Phred less confident than the instrument
+/// claimed.**
 ///
-/// **It declines to recalibrate; it does not abstain from a claim.** The scale is a ratio of a
-/// fitted error rate to the geometric mean of the minted error ([`ReadGroupCalibration`]), and a
-/// run with neither has nothing to form a ratio from — so one is the only multiplier that changes
-/// no read's error probability. **That is still an assumption about the library**: that the
-/// instrument's reported qualities are right, which is the assumption
-/// `doc/devel/ng/spec/read_likelihoods.md` §3.2 says the calibration exists to remove, and which
-/// [`ReadGroupCalibration::from_fitted_rate`]'s own callers refute routinely — a multiplier above
-/// one is common and says the instrument was optimistic. What is true is only that it is an
-/// assumption nothing here can put a number on.
+/// **It is a claim about the library, and it is meant as one** (owner's decision, 2026-10-22). It
+/// says that the base qualities an Illumina instrument reports are optimistic by about a factor of
+/// two. Until that date the default was one, chosen as *the value at which the model does
+/// nothing*. That rationale no longer holds: one also asserted something — that the reported
+/// qualities are right — and every fitted multiplier measured in this project refutes it (6 to 8
+/// on GIAB at 5× to 30×, 12 to 17 at 300×; 2.7 to 19.6 on GIAB and tomato together).
+///
+/// **Why two and not the fitted value.** Measured on GIAB chr22, HG002, HG003 and HG004 summed,
+/// against the GIAB v4.2.1 truth: going from one to two removes 1,513 false calls for 486 true ones
+/// lost at 5×, 1,263 for 427 at 10×, 334 for 15 at 30×, and 241 for one gained at 300×. Above two,
+/// each further step at 5× and 10× removes about one false call per true call lost, and a fitted
+/// multiplier of about six at 10× costs 1,695 true SNPs to remove 1,917 false calls. So two is
+/// where the trade stops paying.
+///
+/// **What the measurement does not cover.** It is one human trio, one library each, one
+/// chromosome. The default applies to every `--defaults` run of any species and any library
+/// preparation, and none of those was measured — so a run that can fit its own multiplier should.
 ///
 /// **Where it differs from the project's other two defaults.** They are guesses at quantities
 /// that exist and that a fit could in principle measure —
 /// [`DEFAULT_OUTLIER_WEIGHT`](ssr::DEFAULT_OUTLIER_WEIGHT), and the tract ladder's
 /// [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION).
-/// This one is the value at which the model does nothing, which is why
-/// `doc/devel/ng/spec/parameters_file.md` §8 can say "a tomato PCR library taking a human PCR-free
-/// slip rate is a guess in a way that a scale of one is not".
+/// This one is a ratio a fit measures directly ([`ReadGroupCalibration::from_fitted_rate`]), and
+/// the default stands in for that ratio, chosen for the calls it gives rather than as an estimate
+/// of it: the fitted values above are three to eight times larger.
 ///
-/// **Named rather than written `1.0`**, because the parameters file writes this number out for a
+/// **Named rather than written `2.0`**, because the parameters file writes this number out for a
 /// person to read and change (`doc/devel/ng/spec/parameters_file.md` §8, which asks for a named
 /// `pub const` with its origin beside it), and a value the file states in two spellings is a
 /// value the two spellings can come to disagree about.
@@ -252,13 +261,12 @@ pub const MIN_BASE_ERROR: f64 = 1e-12;
 /// on the project's most characterised library: HG002's mean minted error is 2.9055 × 10⁻⁴
 /// (`read_likelihoods.md` §3.2), so the stated 0.001 gives a multiplier of **3.44** — every read
 /// charged 3.4 times worse than it claimed, 5.4 Phred more conservative, which is the safe
-/// direction. **Spec §5's third row says such a read group gets "scale 1.0" and is the sentence to
-/// correct**; `DEFAULT_ERROR_RATE` itself is a placeholder until it is fitted from GIAB.
+/// direction. `DEFAULT_ERROR_RATE` itself is a placeholder until it is fitted from GIAB.
 ///
-/// **A fitted multiplier of exactly one is a different claim and stays expressible**, which is
+/// **A fitted multiplier of exactly two is a different claim and stays expressible**, which is
 /// why the warrant travels beside the value rather than being inferred from it
 /// (`doc/devel/ng/spec/parameters_file.md` §5, third row).
-pub const DEFAULT_ERROR_PROBABILITY_MULTIPLIER: f64 = 1.0;
+pub const DEFAULT_ERROR_PROBABILITY_MULTIPLIER: f64 = 2.0;
 
 /// §3.2's calibration: one multiplier per read group, so that the average error the model
 /// charges that group's reads is the rate the parameter fit measured.
@@ -342,12 +350,12 @@ pub const DEFAULT_ERROR_PROBABILITY_MULTIPLIER: f64 = 1.0;
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct ReadGroupCalibration {
     /// The multiplier, applied to each read's own error probability.
-    /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`] where nothing was fitted, which leaves the
-    /// qualities exactly as the instrument reported them.
+    /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`] where nothing was fitted, which doubles every
+    /// read's reported error probability.
     pub scale: f64,
     /// Where the scale came from. **`Defaulted` is not an error condition and it is not a
-    /// detail**: a run calibrated against a measurement and a run trusting the instrument
-    /// are otherwise indistinguishable in the output, and spec §3.2 requires them not to be.
+    /// detail**: a run calibrated against a measurement and a run on the stated default are
+    /// otherwise indistinguishable in the output, and spec §3.2 requires them not to be.
     pub provenance: Provenance,
     /// **How far the multiplier would typically move if the reads were drawn again** — the fitted
     /// rate's standard error over the same divisor the multiplier has — or `None` where nothing
@@ -409,8 +417,9 @@ impl ReadGroupCalibration {
         })
     }
 
-    /// A read group the parameter fit emitted no rate for: **the qualities are used as
-    /// reported**, and the provenance says so.
+    /// A read group the parameter fit emitted no rate for: **its reads are charged
+    /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`] times their reported error**, and the provenance
+    /// says so.
     ///
     /// **The case is too little data to fit from, not a sample the fit found difficult.** Two
     /// of five real tomato alignments ask for a noisier class than the pre-pass's model
@@ -419,12 +428,32 @@ impl ReadGroupCalibration {
     /// this side of the line and it is wrong to; the correction is owed there.*
     ///
     /// What must not happen is that a defaulted calibration be invisible: a run calibrated
-    /// against a measurement and a run trusting the instrument are otherwise indistinguishable
-    /// in the output (spec §3.2).
+    /// against a measurement and a run on the stated default are otherwise indistinguishable in
+    /// the output (spec §3.2).
     #[must_use]
     pub fn defaulted() -> Self {
         Self {
             scale: DEFAULT_ERROR_PROBABILITY_MULTIPLIER,
+            provenance: Provenance::Defaulted,
+            scale_standard_error: None,
+        }
+    }
+
+    /// **A calibration of exactly one, which leaves every read's reported error as it is** —
+    /// marked `Defaulted`, as [`defaulted`](Self::defaulted) is.
+    ///
+    /// **No run takes this; it is for fixtures.** Until 2026-10-22 the default multiplier was
+    /// one, and the tests that score reads by hand were written against it: their expected
+    /// numbers are the minted errors themselves. Those tests are about the row's arithmetic, not
+    /// about what a run without a fit is charged, so they take this rather than follow
+    /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`] wherever it moves. A test of what an unfitted
+    /// run is charged takes [`defaulted`](Self::defaulted).
+    ///
+    /// Public rather than test-only because the integration tests under `tests/` use it too.
+    #[must_use]
+    pub fn unscaled() -> Self {
+        Self {
+            scale: 1.0,
             provenance: Provenance::Defaulted,
             scale_standard_error: None,
         }
@@ -3012,20 +3041,32 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no average error")]
     fn an_observation_with_no_reads_is_a_caller_bug() {
-        let _ = ReadGroupCalibration::defaulted().charged_error(-7.0, 0);
+        let _ = ReadGroupCalibration::unscaled().charged_error(-7.0, 0);
     }
 
-    /// Where nothing was fitted the qualities are used as reported — and the run's output has
-    /// to be able to say so, which is what the provenance is for. A defaulted calibration
-    /// that claimed `FittedHere` would make a calibrated run and a trusting one look alike.
+    /// Where nothing was fitted the reads are charged twice their reported error — and the run's
+    /// output has to be able to say so, which is what the provenance is for. A defaulted
+    /// calibration that claimed `FittedHere` would make a calibrated run and one on the stated
+    /// default look alike.
     #[test]
-    fn a_defaulted_calibration_charges_the_reads_exactly_what_they_were_minted_with() {
+    fn a_defaulted_calibration_charges_the_reads_twice_what_they_were_minted_with() {
         let (q_sum, num_reads) = minted_reads_at_phred(&[30, 30]);
         let defaulted = ReadGroupCalibration::defaulted();
 
-        assert_eq!(defaulted.scale, 1.0);
+        assert_eq!(defaulted.scale, 2.0);
         assert_eq!(defaulted.provenance, Provenance::Defaulted);
-        assert!((defaulted.charged_error(q_sum, num_reads) - 0.001).abs() < 1e-15);
+        assert!((defaulted.charged_error(q_sum, num_reads) - 0.002).abs() < 1e-15);
+    }
+
+    /// The fixtures' calibration changes nothing: a scale of one, charged at the minted error.
+    #[test]
+    fn an_unscaled_calibration_charges_the_reads_exactly_what_they_were_minted_with() {
+        let (q_sum, num_reads) = minted_reads_at_phred(&[30, 30]);
+        let unscaled = ReadGroupCalibration::unscaled();
+
+        assert_eq!(unscaled.scale, 1.0);
+        assert_eq!(unscaled.provenance, Provenance::Defaulted);
+        assert!((unscaled.charged_error(q_sum, num_reads) - 0.001).abs() < 1e-15);
     }
 
     /// A charge that could reach zero would reach negative infinity through the logarithm and
@@ -4382,7 +4423,7 @@ mod tests {
     /// is left of them**, so that reintroducing a cap fails here rather than moving genotypes.
     #[test]
     fn what_the_row_charges_a_poor_read_is_not_capped() {
-        let calibration = ReadGroupCalibration::defaulted();
+        let calibration = ReadGroupCalibration::unscaled();
         let minted_at_phred_1 = -1.0 / 10.0 * std::f64::consts::LN_10;
 
         let charged = calibration.charged_error(minted_at_phred_1, 1);
@@ -4445,7 +4486,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no average error")]
     fn a_charge_for_an_observation_with_no_reads_is_a_caller_bug() {
-        let _ = ReadGroupCalibration::defaulted().charged_error(-7.0, 0);
+        let _ = ReadGroupCalibration::unscaled().charged_error(-7.0, 0);
     }
 
     /// **`f64::max` returns the other operand when one is `NaN`**, so without the check a
@@ -4458,7 +4499,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "at or below zero")]
     fn a_summed_log_error_that_is_not_a_number_is_a_caller_bug() {
-        let _ = ReadGroupCalibration::defaulted().charged_error(f64::NAN, 3);
+        let _ = ReadGroupCalibration::unscaled().charged_error(f64::NAN, 3);
     }
 
     /// A `q_sum` above zero is not a sum of logarithms of probabilities, and it yields a
@@ -4467,7 +4508,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "at or below zero")]
     fn a_positive_summed_log_error_is_a_caller_bug() {
-        let _ = ReadGroupCalibration::defaulted().charged_error(3.0, 3);
+        let _ = ReadGroupCalibration::unscaled().charged_error(3.0, 3);
     }
 
     /// `scale` is a public field, so `from_fitted_rate`'s own guard is bypassable by building

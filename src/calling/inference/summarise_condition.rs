@@ -2972,7 +2972,7 @@ mod tests {
     /// so this says nothing about the tract and everything about whether the warrant fold has
     /// wandered onto the wrong list.
     fn tract_libraries() -> Vec<ReadGroupCalibration> {
-        vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS]
+        vec![ReadGroupCalibration::unscaled(); TRACT_READ_GROUPS]
     }
 
     /// **A fitted per-base substitution rate for every `(library, stratum)` cell a tract's
@@ -5470,7 +5470,7 @@ mod tests {
         view: &GenotypeTableView<'_>,
         model: &dyn GenotypePriorModel,
     ) -> LocusInference {
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = vec![outbred(); likelihoods.len()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = FrozenParameters::uncontaminated(
@@ -6189,7 +6189,7 @@ mod tests {
         let rows = [observation(0, 0, 2, 1, 1)];
         let per_sample = [called_sample(&rows)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = FrozenParameters::uncontaminated(
@@ -6229,7 +6229,7 @@ mod tests {
         let rows = [observation(0, 0, 2, 1, 1)];
         let per_sample = [called_sample(&rows), called_sample(&rows)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = FrozenParameters::uncontaminated(
@@ -6278,7 +6278,7 @@ mod tests {
             },
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -6342,7 +6342,7 @@ mod tests {
         let rows = [observation(0, 0, 2, 1, 1), observation(1, 0, 6, 5, 2)];
         let per_sample = [called_sample(&rows), called_sample(&rows)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -6716,7 +6716,7 @@ mod tests {
         let reference_sample = [observation(0, 0, 8, 4, 4)];
         let per_sample = [called_sample(&carrier), called_sample(&reference_sample)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -6796,7 +6796,7 @@ mod tests {
             called_sample(&alternative_2),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 3];
+        let calibration = [ReadGroupCalibration::unscaled(); 3];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let batching = one_batch(3, 3);
@@ -6865,7 +6865,7 @@ mod tests {
             called_sample(&alternative),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 3];
+        let calibration = [ReadGroupCalibration::unscaled(); 3];
         let fractions = [contaminated_at(0.05); 3];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7002,7 +7002,7 @@ mod tests {
             called_sample(&third),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 3];
+        let calibration = [ReadGroupCalibration::unscaled(); 3];
         let fractions = [contaminated_at(0.05); 3];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7089,7 +7089,7 @@ mod tests {
             called_sample(&third),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 3];
+        let calibration = [ReadGroupCalibration::unscaled(); 3];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -7136,7 +7136,7 @@ mod tests {
         let second = [observation(0, 1, 4, 2, 2), observation(1, 1, 4, 2, 2)];
         let per_sample = [called_sample(&first), called_sample(&second)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 2];
+        let calibration = [ReadGroupCalibration::unscaled(); 2];
         let fractions = [contaminated_at(0.05); 2];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7230,7 +7230,7 @@ mod tests {
             called_sample(&reference_3),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 4];
+        let calibration = [ReadGroupCalibration::unscaled(); 4];
         let fractions = [contaminated_at(0.05); 4];
         let inbreeding = [outbred(), outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7323,7 +7323,7 @@ mod tests {
             called_sample(&alternative),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 3];
+        let calibration = [ReadGroupCalibration::unscaled(); 3];
         let fractions = [contaminated_at(0.05); 3];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7397,7 +7397,7 @@ mod tests {
         let second = [observation(0, 2, 8, 4, 4)];
         let per_sample = [called_sample(&first), called_sample(&second)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 3];
+        let calibration = [ReadGroupCalibration::unscaled(); 3];
         let fractions = [contaminated_at(0.05); 3];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7477,7 +7477,7 @@ mod tests {
         let rows = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
         let per_sample = [called_sample(&rows)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let fractions = [contaminated_at(0.05)];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7523,7 +7523,7 @@ mod tests {
         let rows = [observation(0, 0, 6, 3, 3), observation(1, 0, 6, 3, 3)];
         let per_sample = [called_sample(&rows)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
 
@@ -7583,8 +7583,8 @@ mod tests {
         let per_sample = [called_sample(&alternative), called_sample(&alternative)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
         let calibration = [
-            ReadGroupCalibration::defaulted(),
-            ReadGroupCalibration::defaulted(),
+            ReadGroupCalibration::unscaled(),
+            ReadGroupCalibration::unscaled(),
         ];
         let fractions = [contaminated_at(0.05), contaminated_at(0.05)];
         let inbreeding = [outbred(), outbred()];
@@ -7650,8 +7650,8 @@ mod tests {
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
         let calibration = [
-            ReadGroupCalibration::defaulted(),
-            ReadGroupCalibration::defaulted(),
+            ReadGroupCalibration::unscaled(),
+            ReadGroupCalibration::unscaled(),
         ];
         let fractions = [contaminated_at(0.05), contaminated_at(0.05)];
         let inbreeding = [outbred(), outbred()];
@@ -7698,7 +7698,7 @@ mod tests {
         let reference = [observation(0, 1, 8, 4, 4)];
         let per_sample = [called_sample(&carrier), called_sample(&reference)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); 2];
+        let calibration = [ReadGroupCalibration::unscaled(); 2];
         let fractions = [contaminated_at(0.3); 2];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -7772,7 +7772,7 @@ mod tests {
             },
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -7834,7 +7834,7 @@ mod tests {
         };
         let per_sample = [set_aside, set_aside];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -8161,7 +8161,7 @@ mod tests {
         let carrier = [observation(1, 0, 8, 4, 4)];
         let per_sample = [called_sample(&carrier)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let libraries = [ReadGroupCalibration::defaulted()];
+        let libraries = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let substitution = std::collections::BTreeMap::new();
@@ -8742,7 +8742,7 @@ mod tests {
         let reference_sample = [observation(0, 0, 8, 4, 4)];
         let per_sample = [called_sample(&carrier), called_sample(&reference_sample)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS];
+        let calibration = [ReadGroupCalibration::unscaled(); TRACT_READ_GROUPS];
         let inbreeding = [outbred(), outbred()];
         let strata = tract_strata();
         let substitution = tract_substitution_rates();
@@ -9702,7 +9702,7 @@ mod tests {
             called_sample(&alternative_reads),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -9738,7 +9738,7 @@ mod tests {
 
     /// **A record may not claim its parameters were fitted when they were defaulted.**
     ///
-    /// The fixture's calibration is `ReadGroupCalibration::defaulted()`, whose own provenance
+    /// The fixture's calibration is `ReadGroupCalibration::unscaled()`, whose own provenance
     /// is `Defaulted` — nothing could be fitted and a stated constant was used — and the reads
     /// scored at this locus all came from that read group. So the weakest warrant behind the
     /// call is `Defaulted`, and a consumer that treated it as fitted is the failure
@@ -9749,7 +9749,7 @@ mod tests {
         let het = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
         let per_sample = [called_sample(&het)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         assert_eq!(calibration[0].provenance, Provenance::Defaulted);
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -9784,7 +9784,7 @@ mod tests {
             genotype_must_be_missing: false,
         }];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -9821,7 +9821,7 @@ mod tests {
         let reference_sample = [observation(0, 0, 8, 4, 4)];
         let per_sample = [called_sample(&carrier), called_sample(&reference_sample)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -9856,7 +9856,7 @@ mod tests {
         let balanced = [observation(0, 0, 3, 2, 1), observation(1, 0, 3, 1, 2)];
         let per_sample = [called_sample(&balanced), called_sample(&balanced)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [
             InbreedingF::try_new(0.0).expect("an outbred sample"),
             InbreedingF::try_new(0.9).expect("a highly inbred sample"),
@@ -9907,7 +9907,7 @@ mod tests {
         let thick = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
         let per_sample = [called_sample(&thin), called_sample(&thick)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -9961,7 +9961,7 @@ mod tests {
             genotype_must_be_missing: false,
         }];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -10014,7 +10014,7 @@ mod tests {
             called_sample(&mixed),
         ];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred(), outbred(), outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -10064,7 +10064,7 @@ mod tests {
         let het = [observation(0, 0, 4, 2, 2), observation(1, 0, 4, 2, 2)];
         let per_sample = [called_sample(&het)];
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -10199,7 +10199,7 @@ mod tests {
         let per_sample: Vec<GenericLocusSample<'_>> =
             rows.iter().map(|row| called_sample(row)).collect();
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = vec![outbred(); 3];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -10271,7 +10271,7 @@ mod tests {
         let per_sample: Vec<GenericLocusSample<'_>> =
             rows.iter().map(|row| called_sample(row)).collect();
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = vec![outbred(); 3];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(
@@ -10328,7 +10328,7 @@ mod tests {
         let per_sample: Vec<GenericLocusSample<'_>> =
             rows.iter().map(|row| called_sample(row)).collect();
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let fractions = [contaminated_at(0.05)];
         let inbreeding = vec![outbred(); 3];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
@@ -10391,7 +10391,7 @@ mod tests {
         let per_sample: Vec<GenericLocusSample<'_>> =
             rows.iter().map(|row| called_sample(row)).collect();
         let evidence = LocusEvidence::generic(locus_region(), &per_sample);
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding = [outbred()];
         let strata = StratumFits::over(&[], std::collections::BTreeMap::new());
         let parameters = uncontaminated_run(

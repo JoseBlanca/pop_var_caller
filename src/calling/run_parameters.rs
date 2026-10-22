@@ -8,12 +8,14 @@
 //!
 //! # The four rules, and each has a failure attached
 //!
-//! **A read group with no usable rate gets a scale of one and says so.** The calibration is a
+//! **A read group with no usable rate gets the default scale and says so.** The calibration is a
 //! multiplier on each read's own reported error probability, and *no fit* is not the same claim
 //! as *a fitted zero*: a zero scale charges every read of the library the floor, which is
 //! maximal confidence about every base drawn from a number that says the fit found no errors at
 //! all. [`ReadGroupCalibration::from_fitted_rate`] refuses that, and this takes
-//! [`ReadGroupCalibration::defaulted`] — scale one, provenance `Defaulted` — whenever it does.
+//! [`ReadGroupCalibration::defaulted`] —
+//! [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER),
+//! two, with provenance `Defaulted` — whenever it does.
 //!
 //! **Contamination is absent or measured, never a fitted zero.** Where *no* read group
 //! identified a fraction, the run is [`FrozenParameters::uncontaminated`] and the read
@@ -211,7 +213,8 @@ impl RunParameters {
                 // without its accumulator total, or the reverse, so this `zip` never takes its
                 // empty arm. What is left for `from_fitted_rate` to refuse is a **zero** rate,
                 // which would give a zero scale and charge every read of the library the error
-                // floor; that takes the honest `Defaulted`, scale one, marked as such.
+                // floor; that takes the honest `Defaulted`, at the default multiplier, marked as
+                // such.
                 error_rate_by_read_group
                     .get(&group)
                     .zip(minted_by_read_group.get(&group))
@@ -714,6 +717,7 @@ fn checked_read_group_count_of(
 mod tests {
     use super::*;
     use crate::calling::genotype_prior::SeedRegime;
+    use crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER;
     use crate::float;
     use crate::parameter_estimation::Provenance;
     use crate::parameter_estimation::joint::contamination::NotIdentifiedReason;
@@ -1037,13 +1041,14 @@ mod tests {
         );
     }
 
-    /// **A read group with a total and no usable rate gets scale one, and says `Defaulted`.**
+    /// **A read group with a total and no usable rate gets the default scale, and says
+    /// `Defaulted`.**
     ///
     /// *No fit* and *a fitted zero* are different claims and only one is safe to multiply by: a
     /// zero rate would give a zero scale, which charges every read of the library the floor —
     /// maximal confidence about every base, from a number saying the fit found no errors at all.
     #[test]
-    fn a_read_group_the_fit_could_not_measure_gets_scale_one_and_says_so() {
+    fn a_read_group_the_fit_could_not_measure_gets_the_default_scale_and_says_so() {
         let (rates, totals) = one_read_group(
             &[(0, fitted_rate(0.0, Provenance::FittedHere))],
             &[(0, minted(0.004, 500))],
@@ -1061,7 +1066,7 @@ mod tests {
         );
         let view = run.view();
         let calibration = view.calibration_by_read_group();
-        assert_eq!(calibration[0].scale, 1.0);
+        assert_eq!(calibration[0].scale, DEFAULT_ERROR_PROBABILITY_MULTIPLIER);
         assert_eq!(calibration[0].provenance, Provenance::Defaulted);
     }
 
@@ -1411,12 +1416,12 @@ mod tests {
         );
     }
 
-    /// **A read group whose accumulator saw no read gets scale one too**, and for the third of
+    /// **A read group whose accumulator saw no read gets the default scale too**, and for the third of
     /// the three reasons `from_fitted_rate` names: there is no average to divide by. The
     /// module's other fixture covers the zero-rate reason; this one covers the zero-reads one,
     /// which is what a library present in the header and absent from the data looks like.
     #[test]
-    fn a_read_group_whose_accumulator_saw_no_read_gets_scale_one() {
+    fn a_read_group_whose_accumulator_saw_no_read_gets_the_default_scale() {
         let (rates, totals) = one_read_group(
             &[(0, fitted_rate(0.002, Provenance::FittedHere))],
             &[(0, MintedReadErrors::default())],
@@ -1433,7 +1438,10 @@ mod tests {
             diploid(),
         );
         let view = run.view();
-        assert_eq!(view.calibration_by_read_group()[0].scale, 1.0);
+        assert_eq!(
+            view.calibration_by_read_group()[0].scale,
+            DEFAULT_ERROR_PROBABILITY_MULTIPLIER
+        );
         assert_eq!(
             view.calibration_by_read_group()[0].provenance,
             Provenance::Defaulted

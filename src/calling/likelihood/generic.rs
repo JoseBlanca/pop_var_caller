@@ -1725,7 +1725,7 @@ mod tests {
     /// A calibration whose scale is one, so `log scale` is exactly zero and the arithmetic a
     /// test hand-computes has nothing in it but the terms under examination.
     fn uncalibrated() -> Vec<ReadGroupCalibration> {
-        vec![ReadGroupCalibration::defaulted(); 4]
+        vec![ReadGroupCalibration::unscaled(); 4]
     }
 
     /// A calibration with a scale that is not one.
@@ -1985,7 +1985,7 @@ mod tests {
     /// amendment.
     #[test]
     fn at_a_scale_of_one_the_minted_error_is_the_charged_error() {
-        let calibration = ReadGroupCalibration::defaulted();
+        let calibration = ReadGroupCalibration::unscaled();
         for (q_sum, reads) in [(-6.9, 1u32), (-41.3, 7), (-0.0, 3), (-1.0e4, 300)] {
             assert_eq!(
                 calibration.minted_error(q_sum, reads).to_bits(),
@@ -2546,7 +2546,7 @@ mod tests {
                 provenance: Provenance::FittedHere,
                 scale_standard_error: None,
             },
-            ReadGroupCalibration::defaulted(),
+            ReadGroupCalibration::unscaled(),
         ];
 
         let scored = row(&evidence, &alleles, &table, &calibration);
@@ -3681,7 +3681,7 @@ mod tests {
         let supported = [observation(1, 1, 1, -7.0)];
         let fractions = every_read_group_contaminated_at(0.02);
         let frequencies = [0.9, 0.1];
-        let calibration = [ReadGroupCalibration::defaulted(); 10];
+        let calibration = [ReadGroupCalibration::unscaled(); 10];
 
         let _ = contaminated_row(
             &GenericSampleEvidence::new(&supported, 0.0, &[]),

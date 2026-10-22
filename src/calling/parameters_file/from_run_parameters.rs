@@ -1749,17 +1749,20 @@ mod tests {
     ///
     /// Read group 1's rate fitted to zero and was refused, so its multiplier is the honest
     /// defaulted one. The refused rate still has 4,242 reads on it; writing that count here
-    /// would say a multiplier of one rests on 4,242 reads, and it rests on nothing.
+    /// would say the default multiplier rests on 4,242 reads, and it rests on nothing.
     #[test]
     fn a_defaulted_number_carries_no_evidence_count() {
         let file = the_projected_file();
         let defaulted = &file.base_quality_calibration.by_read_group[1];
 
-        assert_eq!(defaulted.error_probability_multiplier.value, 1.0);
+        assert_eq!(
+            defaulted.error_probability_multiplier.value,
+            crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER
+        );
         assert_eq!(
             defaulted.error_probability_multiplier.warrant,
             Warrant::Defaulted,
-            "a multiplier of exactly one is a legitimate fitted answer as well as the default, \
+            "a multiplier of exactly two is a legitimate fitted answer as well as the default, \
              which is why the warrant travels beside it rather than being read off the value"
         );
         assert_eq!(
@@ -2534,8 +2537,7 @@ mod tests {
     /// 2.9055 × 10⁻⁴ (`read_likelihoods.md` §3.2), and get multipliers of 4.0 and 2.0 — every read
     /// charged four times and twice worse than it claimed. **An earlier fixture reported 0.008,
     /// which is Q21 and unlike any library in this project**, and so showed the multiplier below
-    /// one and the reads made *more* confident. Spec §5's third row says such a read group gets
-    /// "scale 1.0" and is the sentence to correct.
+    /// one and the reads made *more* confident. Spec §5's third row says this since 2026-10-22.
     ///
     /// **What this guards.** Step E1 added a rung to `validate` reading *a `defaulted` multiplier
     /// is [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER)

@@ -1600,7 +1600,7 @@ mod tests {
     }
 
     fn calibrations() -> Vec<ReadGroupCalibration> {
-        vec![ReadGroupCalibration::defaulted(); READ_GROUPS]
+        vec![ReadGroupCalibration::unscaled(); READ_GROUPS]
     }
 
     fn outbred(samples: usize) -> Vec<InbreedingF> {
@@ -2772,7 +2772,7 @@ mod tests {
         let bases = candidate_bases();
         let alleles = candidates(&bases);
         let rates = all_substitution_rates();
-        let calibration = vec![ReadGroupCalibration::defaulted()];
+        let calibration = vec![ReadGroupCalibration::unscaled()];
         let inbreeding = outbred(1);
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
         let prior = tract_prior(reference_repeats(), &parameters);
@@ -2870,7 +2870,7 @@ mod tests {
             one_group_each(1),
         );
         let rates = all_substitution_rates();
-        let calibration = vec![ReadGroupCalibration::defaulted()];
+        let calibration = vec![ReadGroupCalibration::unscaled()];
         let inbreeding = outbred(1);
         let parameters = run(&calibration, &inbreeding, &fits, &rates);
 

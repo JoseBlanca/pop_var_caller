@@ -120,7 +120,7 @@ fn the_loop_allocates_the_same_at_two_passes_and_at_four() {
     };
     let evidence = LocusEvidence::generic(region, &per_sample);
 
-    let calibration = [ReadGroupCalibration::defaulted()];
+    let calibration = [ReadGroupCalibration::unscaled()];
     let outbred = InbreedingF::try_new(0.0).expect("an outbred sample");
     let inbreeding = vec![outbred; 3];
     let strata = StratumFits::over(&[], std::collections::BTreeMap::new());

@@ -19,7 +19,7 @@
 //!
 //! | what a run needs | what it takes with no fit | what that is |
 //! |---|---|---|
-//! | the base-quality multiplier, per read group | [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER), one | the value at which the model does nothing |
+//! | the base-quality multiplier, per read group | [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER), two | a stated constant, chosen against calls on one human trio; it says the reported qualities are optimistic by about twofold |
 //! | the repeat-tract outlier weight, one per run | [`DEFAULT_OUTLIER_WEIGHT`](crate::calling::likelihood::ssr::DEFAULT_OUTLIER_WEIGHT), 0.07 | a stated constant, swept against genotype accuracy and not a measurement of the share it is named for |
 //! | the tract ladder's fallback concentration | [`STATED_FLAT_CONCENTRATION`](crate::parameter_estimation::joint::stratum_fits::STATED_FLAT_CONCENTRATION), ten — written in the file as the between-locus share 1/11 | a stated prior, measured on one human trio |
 //! | contamination, per read group | **absence** — no `[contamination]` section | a model state, not a guess |
@@ -35,13 +35,21 @@
 //!
 //! # What each row means for a run
 //!
-//! - **A multiplier of one declines to recalibrate; it does not abstain from a claim.** It leaves
-//!   every read's error probability at what the instrument minted, which asserts the instrument was
-//!   right — the assumption `read_likelihoods.md` §3.2 says the calibration exists to remove, and
-//!   one that fitted multipliers refute routinely (a multiplier above one is common and says the
-//!   instrument was optimistic). What is true is that it is the value at which the model does
-//!   nothing, so it is the one default that cannot push a call in a particular direction. **It is
-//!   also the only per-read-group default**, so a cohort can be half calibrated and half not.
+//! - **The multiplier is two: every read's reported error probability is doubled** (owner's
+//!   decision, 2026-10-22). It was one until then, chosen as the value at which the model does
+//!   nothing. That rationale no longer holds: one asserts that the instrument's qualities are
+//!   right, which every fitted multiplier this project has measured refutes (2.7 to 19.6 on GIAB
+//!   and tomato). Two makes the opposite claim on purpose — that Illumina qualities are optimistic
+//!   by about a factor of two — and it was chosen for the calls it gives. On GIAB chr22, HG002,
+//!   HG003 and HG004 summed against the v4.2.1 truth, two rather than one removes 1,513 false calls
+//!   for 486 true ones at 5× and 241 false calls for one true call *gained* at 300×; above two,
+//!   each further step at 5× and 10× costs about one true call per false call removed.
+//!
+//!   **It was measured on one human trio** — one library each, one chromosome — and it applies to
+//!   every `--defaults` run of any species and any library preparation, none of which was
+//!   measured. It is lower than any fitted value seen, so it pushes calls the conservative way by
+//!   less than a fit would. **It is also the only per-read-group default**, so a cohort can be half
+//!   calibrated and half not.
 //!
 //!   **⚑ And it is the one row of this table whose `defaulted` warrant does not mean the run took
 //!   the number in the middle column.** The other three warranted numbers are *taken* from a
@@ -62,9 +70,9 @@
 //!   carry mismapping, chimeras and damage. So a read group the fit could not measure is charged a
 //!   stated rate rather than taken at its word, and on any real library that pushes the reads the
 //!   *conservative* way — on HG002's mean minted error of 2.9055 × 10⁻⁴ the multiplier is 3.44,
-//!   5.4 Phred less confident than the instrument claimed. Spec §5's third row says such a read
-//!   group gets "scale 1.0" and is the sentence to correct; `DEFAULT_ERROR_RATE` is itself a
-//!   placeholder until it is fitted from GIAB. Recorded in `PROJECT_STATUS.md`.
+//!   5.4 Phred less confident than the instrument claimed. Spec §5's third row says so since
+//!   2026-10-22; `DEFAULT_ERROR_RATE` is itself a placeholder until it is fitted from GIAB.
+//!   Recorded in `PROJECT_STATUS.md`.
 //! - **The outlier weight is a stated constant at 0.07**, chosen against genotype accuracy and not
 //!   fitted (it was the existing caller's 0.01 until 2026-09-03, then 0.20 until 2026-10-18)
 //!   and never measured here (§3.8). It is the share of a repeat tract's reads the model expects to
@@ -178,8 +186,8 @@
 //!
 //! # What "the warrant says `defaulted`" is worth
 //!
-//! **A defaulted value and a fitted one are the same number.** A multiplier of one that nobody
-//! fitted and a multiplier of one a fit arrived at multiply every read's error probability
+//! **A defaulted value and a fitted one are the same number.** A multiplier of two that nobody
+//! fitted and a multiplier of two a fit arrived at multiply every read's error probability
 //! identically, so nothing downstream of the arithmetic can tell them apart — the warrant beside
 //! the value is the whole of the difference, and §5's third row is the requirement that it survive
 //! a write and a read. The tests below hold each of the three constants to its warrant at the point
@@ -203,10 +211,10 @@ use crate::types::{InbreedingF, Ploidy, ReadGroupId};
 /// prior multiplies that branch by `1 − F` (`doc/devel/ng/spec/calling_priors.md` §7), so at zero
 /// the factor is exactly one and every genotype is scored under Hardy–Weinberg.
 ///
-/// **That is a claim and not an abstention**, exactly as a base-quality multiplier of one is:
-/// Hardy–Weinberg asserts random mating, no selfing and no structure, and on a selfing crop it is
-/// large and wrong. What the two defaults share is that they are the value at which the model does
-/// nothing, not that they assume nothing.
+/// **That is a claim and not an abstention**: Hardy–Weinberg asserts random mating, no selfing
+/// and no structure, and on a selfing crop it is large and wrong. Zero is the value at which the
+/// model does nothing, which is not the same as assuming nothing. (The base-quality multiplier was
+/// defended the same way until 2026-10-22, when its default moved from one to two.)
 ///
 /// **⚑ The *fit* may not take this and the *run* may, and what separates them is how far the
 /// error travels.** `parameter_estimation::generic::fallback` refuses to infer a coefficient from
@@ -439,16 +447,15 @@ impl RunParameters {
             })
             .collect();
         Self::of_gathered_values(
-            // **⚑ Every read group takes a multiplier of one, which is the side of the module
-            // header's ⚑ paragraph the owner ruled *against* for a read group the fit could not
-            // measure** — there, a library nothing was fitted for is charged the pre-pass's
-            // stated rate rather than taken at its reported quality. **A defaults run cannot be
-            // charged that way**, and the reason is arithmetic rather than a second decision: the
-            // multiplier is a rate divided by that library's own mean minted error, and the mean
-            // comes from a `MintedReadErrors` accumulator only a pre-pass fills. A defaults run
-            // has read no read, so it has no denominator. Spec §8's first bullet says 1.0, and
-            // that is what this can do; a run that wanted the stated rate applied would need a
-            // mean minted error from somewhere, which is a change to what a defaults run reads.
+            // **⚑ Every read group takes the default multiplier, two, and not the module
+            // header's stated rate** — there, a library nothing was fitted for is charged the
+            // pre-pass's stated rate over its own mean reported error. **A defaults run cannot
+            // be charged that way**, and the reason is arithmetic rather than a second decision:
+            // the mean comes from a `MintedReadErrors` accumulator only a pre-pass fills, and a
+            // defaults run has read no read, so it has no denominator. Spec §8's first bullet
+            // says 2.0, and that is what this can do; a run that wanted the stated rate applied
+            // would need a mean minted error from somewhere, which is a change to what a
+            // defaults run reads.
             vec![ReadGroupCalibration::defaulted(); read_groups.len()],
             // **Absence, not a row of zeros** (spec §5's first row): a run told nothing about
             // contamination is scored on the read likelihood's plain formula.
@@ -553,18 +560,23 @@ mod tests {
         InbreedingF::try_new(value).expect("a coefficient in [0, 1)")
     }
 
-    /// **The multiplier a read group with no fitted rate is charged under leaves its reads
-    /// exactly as the instrument minted them**, and says it was defaulted.
+    /// **A read group with no fitted rate is charged twice what its reads were minted with**, and
+    /// the calibration says it was defaulted.
     ///
-    /// The second half is what the assertion on the arithmetic is for: `charged_error` is
-    /// `scale · exp(q_sum / n)`, so at a scale of one it is the geometric mean of the reads' own
-    /// error probabilities and nothing else. Compared on `to_bits` as the module's other float
-    /// assertions are — it is the same verdict as `==` on an ordinary finite double, and the
-    /// habit is what step C3 established so that a lost sign on a zero cannot pass.
+    /// The assertion on the arithmetic is what pins *twice*: `charged_error` is
+    /// `scale · exp(q_sum / n)`, so at the default scale of two it is twice the geometric mean of
+    /// the reads' own error probabilities and nothing else. Doubling a double is exact, so the
+    /// comparison is on `to_bits` as the module's other float assertions are — it is the same
+    /// verdict as `==` on an ordinary finite double, and the habit is what step C3 established so
+    /// that a lost sign on a zero cannot pass.
     #[test]
-    fn a_read_group_with_no_fitted_rate_is_charged_what_its_reads_were_minted_with() {
+    fn a_read_group_with_no_fitted_rate_is_charged_twice_what_its_reads_were_minted_with() {
         let defaulted = ReadGroupCalibration::defaulted();
         assert_eq!(defaulted.scale, DEFAULT_ERROR_PROBABILITY_MULTIPLIER);
+        assert_eq!(
+            DEFAULT_ERROR_PROBABILITY_MULTIPLIER, 2.0,
+            "the default multiplier is the owner's 2026-10-22 decision; moving it is a decision too"
+        );
         assert_eq!(defaulted.provenance, Provenance::Defaulted);
 
         // Three reads spanning Phred 40 to Phred 13, as the calibration's own fixture does.
@@ -578,11 +590,11 @@ mod tests {
         );
         assert_eq!(
             defaulted.charged_error(q_sum, reads).to_bits(),
-            geometric_mean.to_bits(),
-            "a defaulted calibration changes no read's error probability"
+            (2.0 * geometric_mean).to_bits(),
+            "a defaulted calibration doubles every read's error probability"
         );
-        // `ln 1 = 0` exactly, so the log-space form adds nothing either.
-        assert_eq!(defaulted.log_scale(), 0.0);
+        // The log-space form adds `ln 2` per observation.
+        assert!((defaulted.log_scale() - core::f64::consts::LN_2).abs() < 1e-15);
     }
 
     /// **The outlier weight a run takes is the stated 0.07 and says it was defaulted** — still

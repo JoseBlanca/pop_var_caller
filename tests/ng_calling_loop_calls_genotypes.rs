@@ -254,7 +254,7 @@ impl Run {
 /// Run the whole path over one cohort locus, under one library whose calibration was never
 /// fitted, and hand back what came out.
 fn call(per_sample: &[SampleLocusObservations]) -> LocusInference {
-    call_with_calibration(per_sample, &[ReadGroupCalibration::defaulted()])
+    call_with_calibration(per_sample, &[ReadGroupCalibration::unscaled()])
 }
 
 /// The same, over a run whose libraries carry the calibrations given.
@@ -980,7 +980,7 @@ fn call_tract(
         &mut views,
     );
 
-    let calibration = vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS];
+    let calibration = vec![ReadGroupCalibration::unscaled(); TRACT_READ_GROUPS];
     let inbreeding =
         vec![InbreedingF::try_new(0.0).expect("an outbred sample"); per_run_sample.len()];
     let parameters = FrozenParameters::uncontaminated(
@@ -1026,7 +1026,7 @@ fn call_contaminated_tract(
         &mut views,
     );
 
-    let calibration = vec![ReadGroupCalibration::defaulted(); TRACT_READ_GROUPS];
+    let calibration = vec![ReadGroupCalibration::unscaled(); TRACT_READ_GROUPS];
     let contamination = vec![
         ContaminationView {
             fraction,

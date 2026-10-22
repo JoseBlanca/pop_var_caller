@@ -246,7 +246,7 @@ impl Locus<'_> {
             .collect();
         let evidence = LocusEvidence::generic(region(), &covering);
 
-        let calibration = [ReadGroupCalibration::defaulted()];
+        let calibration = [ReadGroupCalibration::unscaled()];
         let inbreeding_by_sample: Vec<InbreedingF> = self
             .inbreeding
             .iter()

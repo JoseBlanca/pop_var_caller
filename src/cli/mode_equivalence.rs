@@ -874,11 +874,16 @@ mod tests {
     /// Give each read group its own base-quality multiplier, so that which group a read belongs
     /// to reaches the genotype it is scored into.
     ///
-    /// **Three different numbers and none of them one**, because one is the identity: a file
-    /// that left any group at 1.0 would score that group's reads exactly as the defaults run
-    /// did, and a mis-attribution into it would be invisible again.
+    /// **Three different numbers and none of them the default**: a file that left any group at
+    /// [`DEFAULT_ERROR_PROBABILITY_MULTIPLIER`](crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER)
+    /// would score that group's reads exactly as the defaults run did, and a mis-attribution
+    /// into it would be invisible again.
     fn make_the_read_groups_score_differently(parameters: &Path) {
         let text = std::fs::read_to_string(parameters).expect("the parameters file reads");
+        let the_default = format!(
+            "value = {:?}",
+            crate::calling::likelihood::DEFAULT_ERROR_PROBABILITY_MULTIPLIER
+        );
         let mut rewritten = String::with_capacity(text.len());
         for line in text.lines() {
             let multiplier =
@@ -893,7 +898,7 @@ mod tests {
                     });
             match multiplier {
                 Some(value) => {
-                    rewritten.push_str(&line.replace("value = 1.0", &format!("value = {value}")))
+                    rewritten.push_str(&line.replace(&the_default, &format!("value = {value}")))
                 }
                 None => rewritten.push_str(line),
             }

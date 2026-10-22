@@ -1166,7 +1166,7 @@ mod tests {
 
         let mut alleles = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
         alleles.admit(Box::from(b"T".as_slice()));
-        let calibration = [crate::calling::ReadGroupCalibration::defaulted()];
+        let calibration = [crate::calling::ReadGroupCalibration::unscaled()];
         let inbreeding = [crate::types::InbreedingF::try_new(0.0).expect("legal")];
         let strata = crate::parameter_estimation::joint::stratum_fits::StratumFits::over(
             &[],
