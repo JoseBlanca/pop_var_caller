@@ -137,6 +137,7 @@ fn an_ordinary_request() -> WhatTheOperatorAskedFor {
     WhatTheOperatorAskedFor {
         target_fdr: TargetFdr::try_new(0.01).expect("a target"),
         tag_instead_of_dropping: false,
+        window_bases: 0,
     }
 }
 
@@ -1022,5 +1023,65 @@ fn a_run_where_every_sample_has_a_coverage_model_does_not_warn_about_it() {
         !what_to_tell_the_operator(&run)
             .iter()
             .any(|line| line.contains("have no coverage model")),
+    );
+}
+
+/// **`--hidden-dup-window` reaches the header and the report, and its absence leaves both as they
+/// were.** A research option: a run at a window above zero says so on `##paralogFilter` and in the
+/// report; a run at zero writes neither.
+#[test]
+fn a_window_is_stated_in_the_header_and_the_report_and_zero_states_nothing() {
+    let records = || {
+        vec![
+            a_record(100, 3, ONE_COPY_DEPTH),
+            a_record(200, 3, ONE_COPY_DEPTH * 2.0),
+        ]
+    };
+    let (windowed_spill, windowed_output) =
+        a_spill_and_an_output("a_window_is_stated__windowed", records());
+    let windowed = fit_score_and_write_the_calls(
+        &windowed_spill,
+        (0..3).map(|_| a_fittable_histogram()).collect(),
+        &outbred(3),
+        an_ordinary_request().with_window(50_000),
+        &windowed_output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+    let written = fs::read_to_string(&windowed_output).expect("the calls are on disk");
+    assert!(
+        written.contains("samples_with_coverage_model=3/3;window=50000;shrink="),
+        "{}",
+        written.lines().take(10).collect::<Vec<_>>().join("\n")
+    );
+    let windowed_verdicts = windowed.verdicts.windowed.as_ref().expect("a window ran");
+    assert_eq!(windowed_verdicts.posteriors.len(), 2);
+    assert!(
+        what_to_tell_the_operator(&windowed)
+            .iter()
+            .any(|line| line.contains(
+                "--hidden-dup-window: the duplication rate was estimated per window of 50000 bases"
+            ))
+    );
+
+    let (spill, output) = a_spill_and_an_output("a_window_is_stated__genome_wide", records());
+    let genome_wide = fit_score_and_write_the_calls(
+        &spill,
+        (0..3).map(|_| a_fittable_histogram()).collect(),
+        &outbred(3),
+        an_ordinary_request(),
+        &output,
+        metadata_over(3),
+        diploid(),
+    )
+    .expect("the run finishes");
+    let written = fs::read_to_string(&output).expect("the calls are on disk");
+    assert!(!written.contains("window="));
+    assert!(genome_wide.verdicts.windowed.is_none());
+    assert!(
+        !what_to_tell_the_operator(&genome_wide)
+            .iter()
+            .any(|line| line.contains("--hidden-dup-window"))
     );
 }

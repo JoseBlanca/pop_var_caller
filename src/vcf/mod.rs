@@ -52,7 +52,7 @@ pub use encode::{
 pub use header::{
     FILE_FORMAT, HIDDEN_PARALOG_FILTER_ID, HeaderContig, HeaderMetadataError,
     HiddenParalogProvenance, MAX_CONTIG_LENGTH, PARALOG_POSTERIOR_DECIMALS, PARALOG_RATIO_DECIMALS,
-    VcfHeaderMetadata, header_text,
+    VcfHeaderMetadata, WindowedPriorProvenance, header_text,
 };
 pub use writer::{RecordPlace, VcfWriteError, VcfWriter};
 

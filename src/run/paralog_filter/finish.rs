@@ -19,15 +19,25 @@ use std::time::{Duration, Instant};
 
 use crate::paralog::{CalibrationConfig, CoverageFitConfig, ParalogModelParams};
 use crate::types::{InbreedingF, Ploidy};
-use crate::vcf::{HiddenParalogProvenance, VcfHeaderMetadata, VcfWriteError, VcfWriter};
+use crate::vcf::{
+    HiddenParalogProvenance, VcfHeaderMetadata, VcfWriteError, VcfWriter, WindowedPriorProvenance,
+};
 use crate::window_coverage::SampleHistogram;
 
 use super::{
     CoverageFitConfigRefused, NotATargetFdr, ParalogScoringContext, ParalogVerdicts,
     PassThreeError, PassTwoError, SpillFile, TargetFdr, WhatTheFilterDid, WhatTheFitCameTo,
-    score_the_parked_records_and_resolve_the_cut, write_the_records_the_filter_kept_explaining,
+    score_the_parked_records_and_resolve_the_cut_windowed,
+    write_the_records_the_filter_kept_explaining,
 };
 use crate::run::explain::ParalogExplanations;
+
+/// **`--hidden-dup-window`'s default: `0`, the one genome-wide duplication rate.**
+///
+/// Research option. The default is expected to become `50000` once the windowed rate has been
+/// measured; this constant is the only thing that change touches, since the help text does not
+/// repeat the number.
+pub const DEFAULT_HIDDEN_DUP_WINDOW_BASES: u64 = 0;
 
 /// **The two knobs the operator sets, together** — because they are one decision.
 ///
@@ -43,6 +53,10 @@ pub struct WhatTheOperatorAskedFor {
     /// `--hidden-dup-tag`. **What it is for**: a run that drops can be audited against one
     /// that tags, since the two files differ by exactly the tagged lines.
     pub tag_instead_of_dropping: bool,
+    /// The width in bases of the stretch each record's duplication rate is estimated over —
+    /// `--hidden-dup-window`. `0` is the one genome-wide rate. Research option
+    /// ([`crate::paralog::windowed_prior`]).
+    pub window_bases: u64,
 }
 
 impl WhatTheOperatorAskedFor {
@@ -73,7 +87,18 @@ impl WhatTheOperatorAskedFor {
         Ok(Some(Self {
             target_fdr: TargetFdr::try_new(target_fdr)?,
             tag_instead_of_dropping,
+            window_bases: DEFAULT_HIDDEN_DUP_WINDOW_BASES,
         }))
+    }
+
+    /// The same request, with the duplication rate estimated over windows of `window_bases`
+    /// (`--hidden-dup-window`; `0` is the one genome-wide rate).
+    #[must_use]
+    pub fn with_window(self, window_bases: u64) -> Self {
+        Self {
+            window_bases,
+            ..self
+        }
     }
 }
 
@@ -226,6 +251,7 @@ pub fn fit_score_and_write_the_calls_explaining(
     let WhatTheOperatorAskedFor {
         target_fdr,
         tag_instead_of_dropping,
+        window_bases,
     } = asked_for;
     // **The calling pass is measured from the spill's own birth**, which is the one place both
     // subcommands go through on their way into pass one. Timing it in each subcommand would put
@@ -245,11 +271,12 @@ pub fn fit_score_and_write_the_calls_explaining(
     let fitting = began_fitting.elapsed();
 
     let began_scoring = Instant::now();
-    let verdicts = score_the_parked_records_and_resolve_the_cut(
+    let verdicts = score_the_parked_records_and_resolve_the_cut_windowed(
         spill,
         &scoring,
         target_fdr,
         &CalibrationConfig::default(),
+        crate::exp::windowed_paralog_prior(window_bases).as_ref(),
     )
     .map_err(ParalogFilterError::Scoring)?;
     let scoring_wall = began_scoring.elapsed();
@@ -273,6 +300,15 @@ pub fn fit_score_and_write_the_calls_explaining(
         rate_was_fitted: verdicts.calibration.prior.converged,
         samples_with_a_coverage_model: scoring.how_many_samples_have_a_coverage_model(),
         samples_in_the_run: scoring.sample_count(),
+        windowed: verdicts
+            .windowed
+            .as_ref()
+            .map(|windowed| WindowedPriorProvenance {
+                window_bases: windowed.config.window_bases,
+                shrink_records: windowed.config.shrink_records,
+                cut: windowed.config.cut.name(),
+                posterior_cut: windowed.posterior_cut,
+            }),
     });
 
     let mut writer = VcfWriter::create(output, metadata, ploidy).map_err(|source| {
@@ -436,6 +472,30 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         scoring.how_many_samples_have_a_coverage_model(),
         scoring.sample_count(),
     ));
+
+    // **Say that the verdicts came from a windowed rate** (`--hidden-dup-window`, a research
+    // option), since the rate and cut on the line above then decide nothing on their own.
+    if let Some(windowed) = &verdicts.windowed {
+        let rates = match windowed.local_rates {
+            Some(spread) => format!(
+                "local rates over {} occupied 10-kb bin(s) run from {:.6} to {:.6}, median {:.6}",
+                windowed.occupied_bins, spread.lowest, spread.highest, spread.median,
+            ),
+            None => "no bin held a scored record".to_string(),
+        };
+        lines.push(format!(
+            "  --hidden-dup-window: the duplication rate was estimated per window of {} bases, \
+             pulled towards the run-wide rate by {} record(s), and cut by the {} rule at \
+             probability {}; {rates}",
+            windowed.config.window_bases,
+            windowed.config.shrink_records,
+            windowed.config.cut.name(),
+            match windowed.posterior_cut {
+                Some(cut) => format!("{cut:.6}"),
+                None => "none (nothing flagged)".to_string(),
+            },
+        ));
+    }
 
     // **The warning C3 wrote, printed here** — this is the step that has a report to print it in.
     // It says the half the rate line above cannot: that the records this run removed were

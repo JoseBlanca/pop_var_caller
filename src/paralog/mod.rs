@@ -50,6 +50,7 @@ pub mod coverage_model;
 pub mod locus_score;
 pub mod model_params;
 pub mod prior;
+pub mod windowed_prior;
 
 /// **ng's, not a copy** — the differential that proves the copied scorer computes what
 /// production's did, against production's answers frozen in a fixture: the log-likelihoods

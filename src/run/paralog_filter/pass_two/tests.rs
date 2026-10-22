@@ -1114,3 +1114,58 @@ fn a_ratio_past_the_end_of_the_histogram_is_counted() {
         verdicts.ratios[0]
     );
 }
+
+// ---------------------------------------------------------------- research: the windowed rate
+
+/// **Research only: with a window, every record gets a probability in spill order, and an
+/// unscored one gets none.** Without one, the verdicts carry nothing windowed — the switch unset
+/// is today's run.
+#[test]
+fn a_window_gives_each_scored_record_a_probability_in_spill_order() {
+    use super::score_the_parked_records_and_resolve_the_cut_windowed;
+    use crate::paralog::windowed_prior::{WindowedCut, WindowedPriorConfig};
+
+    let context = a_context_over(6);
+    let spill = a_spill_holding(
+        "a_window_gives_each_scored_record_a_probability_in_spill_order",
+        vec![
+            a_record_shaped_like_a_variant(100, 6),
+            a_record_no_sample_covered(200, 6),
+            a_record_shaped_like_a_duplication(300, 6),
+        ],
+    );
+    let config = WindowedPriorConfig {
+        window_bases: 50_000,
+        shrink_records: 10.0,
+        cut: WindowedCut::TailFdr,
+    };
+
+    let windowed = score_the_parked_records_and_resolve_the_cut_windowed(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+        Some(&config),
+    )
+    .expect("the spill is readable")
+    .windowed
+    .expect("a window was asked for");
+    assert_eq!(windowed.posteriors.len(), 3);
+    assert!(windowed.posteriors[0].is_finite());
+    assert!(
+        windowed.posteriors[1].is_nan(),
+        "the unscored record has no probability"
+    );
+    assert!(windowed.posteriors[2] > windowed.posteriors[0]);
+    assert_eq!(windowed.occupied_bins, 1);
+
+    let today = score_the_parked_records_and_resolve_the_cut_windowed(
+        &spill,
+        &context,
+        target(0.01),
+        &default_config(),
+        None,
+    )
+    .expect("the spill is readable");
+    assert!(today.windowed.is_none());
+}

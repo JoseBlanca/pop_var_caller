@@ -475,6 +475,26 @@ pub struct HiddenParalogProvenance {
     pub samples_with_a_coverage_model: usize,
     /// How many samples the run has.
     pub samples_in_the_run: usize,
+    /// **Research only**: the windowed duplication rate the run used instead of the one run-wide
+    /// rate, where `--hidden-dup-window` asked for it. `None` writes today's line exactly.
+    pub windowed: Option<WindowedPriorProvenance>,
+}
+
+/// **Research only: what the windowed duplication rate ran with** — appended to the
+/// `##paralogFilter=` line as `window=W;shrink=K;cut=fdr|posterior;post_cut=P`.
+///
+/// `post_cut` is the probability the cut resolved to, which is what decides a record under this
+/// rule; the line's `lr_cut` is still the run-wide cut and no longer decides anything on its own.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowedPriorProvenance {
+    /// The window's width in bases.
+    pub window_bases: u64,
+    /// The pull towards the run-wide rate, in records.
+    pub shrink_records: f64,
+    /// The cut's rule: `fdr` or `posterior`.
+    pub cut: &'static str,
+    /// The probability the cut resolved to, or `None` where nothing is flagged.
+    pub posterior_cut: Option<f64>,
 }
 
 impl HiddenParalogProvenance {
@@ -491,15 +511,34 @@ impl HiddenParalogProvenance {
             rate_was_fitted,
             samples_with_a_coverage_model,
             samples_in_the_run,
+            windowed,
         } = self;
         let cut = match lr_cut {
             Some(lr) => format!("{:.*}", PARALOG_RATIO_DECIMALS, lr),
             None => "none".to_string(),
         };
+        let windowed = match windowed {
+            None => String::new(),
+            Some(WindowedPriorProvenance {
+                window_bases,
+                shrink_records,
+                cut,
+                posterior_cut,
+            }) => {
+                let posterior_cut = match posterior_cut {
+                    Some(p) => format!("{:.*}", PARALOG_POSTERIOR_DECIMALS, p),
+                    None => "none".to_string(),
+                };
+                format!(
+                    ";window={window_bases};shrink={shrink_records};cut={cut};\
+post_cut={posterior_cut}"
+                )
+            }
+        };
         format!(
             "target_fdr={:.*};pi={:.*};lr_cut={cut};\
 em_converged={rate_was_fitted};\
-samples_with_coverage_model={samples_with_a_coverage_model}/{samples_in_the_run}",
+samples_with_coverage_model={samples_with_a_coverage_model}/{samples_in_the_run}{windowed}",
             PARALOG_RATIO_DECIMALS, target_fdr, PARALOG_POSTERIOR_DECIMALS, paralog_rate,
         )
     }
@@ -663,6 +702,7 @@ mod header_text_tests {
             rate_was_fitted: true,
             samples_with_a_coverage_model: 61,
             samples_in_the_run: 63,
+            windowed: None,
         }
         .as_header_value();
 
@@ -675,6 +715,32 @@ samples_with_coverage_model=61/63",
         assert_eq!(PARALOG_POSTERIOR_DECIMALS, 6);
     }
 
+    /// **Research only: a windowed run appends its three knobs and the probability it cut at.**
+    #[test]
+    fn a_windowed_run_appends_its_knobs_to_the_calibration_line() {
+        let stated = HiddenParalogProvenance {
+            target_fdr: 0.01,
+            paralog_rate: 0.031_25,
+            lr_cut: Some(4.211_712_3),
+            rate_was_fitted: true,
+            samples_with_a_coverage_model: 1,
+            samples_in_the_run: 1,
+            windowed: Some(WindowedPriorProvenance {
+                window_bases: 50_000,
+                shrink_records: 10.0,
+                cut: "fdr",
+                posterior_cut: Some(0.987_654_321),
+            }),
+        }
+        .as_header_value();
+
+        assert_eq!(
+            stated,
+            "target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;\
+samples_with_coverage_model=1/1;window=50000;shrink=10;cut=fdr;post_cut=0.987654",
+        );
+    }
+
     /// **A run whose target the curve never reaches says so in words, not with a number.**
     #[test]
     fn the_provenance_says_none_where_no_ratio_reached_the_target() {
@@ -685,6 +751,7 @@ samples_with_coverage_model=61/63",
             rate_was_fitted: false,
             samples_with_a_coverage_model: 0,
             samples_in_the_run: 2,
+            windowed: None,
         }
         .as_header_value();
 
@@ -719,6 +786,7 @@ samples_with_coverage_model=61/63",
             rate_was_fitted: true,
             samples_with_a_coverage_model: 1,
             samples_in_the_run: 1,
+            windowed: None,
         });
 
         let text = header_text(&metadata);

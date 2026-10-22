@@ -28,6 +28,7 @@
 //!
 //! Spec: `doc/devel/ng/spec/hidden_paralog_filter.md` §3.3, §6 trap 4.
 
+use crate::paralog::windowed_prior::{WindowedPriorConfig, WindowedVerdicts, windowed_verdicts};
 use crate::paralog::{
     CalibrationConfig, DEFAULT_LR_HISTOGRAM_BINS, DEFAULT_LR_HISTOGRAM_HI, DEFAULT_LR_HISTOGRAM_LO,
     ParalogCalibration, ParalogLrHistogram, calibrate_from_the_ratio_histogram,
@@ -202,6 +203,12 @@ pub struct ParalogVerdicts {
     pub config: CalibrationConfig,
     /// The range and resolution the ratios were binned over.
     pub lr_histogram: LrHistogramShape,
+    /// **Research only**: each record's probability under its own window's duplication rate, and
+    /// the cut on it, where `--hidden-dup-window` asked for one
+    /// ([`crate::paralog::windowed_prior`]). Where it is `Some`, pass three takes the verdict and
+    /// `PARALOG_POST` from here rather than from [`Self::calibration`]; where it is `None`, the run
+    /// is today's.
+    pub windowed: Option<WindowedVerdicts>,
 }
 
 impl ParalogVerdicts {
@@ -261,6 +268,32 @@ pub fn score_the_parked_records_and_resolve_the_cut(
     target_fdr: TargetFdr,
     config: &CalibrationConfig,
 ) -> Result<ParalogVerdicts, PassTwoError> {
+    score_the_parked_records_and_resolve_the_cut_windowed(
+        spill,
+        context,
+        target_fdr,
+        config,
+        None,
+    )
+}
+
+/// [`score_the_parked_records_and_resolve_the_cut`], with a windowed duplication rate where
+/// `--hidden-dup-window` asked for one. `None` is the one run-wide rate.
+///
+/// With a window, each record's contig and position are kept beside its ratio — 12 bytes a
+/// record, flat in the sample count — and handed to
+/// [`windowed_verdicts`] once every record is scored.
+///
+/// # Errors
+///
+/// As [`score_the_parked_records_and_resolve_the_cut`].
+pub fn score_the_parked_records_and_resolve_the_cut_windowed(
+    spill: &SpillFile,
+    context: &ParalogScoringContext,
+    target_fdr: TargetFdr,
+    config: &CalibrationConfig,
+    windowed: Option<&WindowedPriorConfig>,
+) -> Result<ParalogVerdicts, PassTwoError> {
     let entries = spill.read().map_err(PassTwoError::Spill)?;
 
     // **The shape is written down once and the histogram is built from it**, so the range the
@@ -274,6 +307,10 @@ pub fn score_the_parked_records_and_resolve_the_cut(
     // instead, which costs time and never correctness.
     let mut ratios: Vec<f64> =
         Vec::with_capacity(usize::try_from(spill.entries_written()).unwrap_or(0));
+    // **Research only**: where each record sits, in the same order as its ratio, filled only where
+    // the windowed duplication rate needs it — 12 bytes a record.
+    let mut contigs: Vec<u32> = Vec::new();
+    let mut positions: Vec<u64> = Vec::new();
     // **Read serially, score concurrently, fold serially.** The spill is a stream of
     // variable-length entries with no index, so nothing can seek into it — the decode stays on
     // this thread. Scoring is what costs, and it is a pure function of one entry
@@ -307,6 +344,10 @@ pub fn score_the_parked_records_and_resolve_the_cut(
                 |observations, entry| context.score(entry, observations),
             )
             .collect_into_vec(&mut scored);
+        if windowed.is_some() {
+            contigs.extend(batch.iter().map(|entry| entry.contig.0));
+            positions.extend(batch.iter().map(|entry| entry.position.0));
+        }
         // **One binding, pushed to both.** The histogram drops a non-finite ratio and the vector
         // keeps it, which is the whole difference between "did not enter the fit" and "kept,
         // never flagged" — but they are the same number, so no rule can apply to one and not the
@@ -337,8 +378,22 @@ pub fn score_the_parked_records_and_resolve_the_cut(
         })
         .count() as u64;
 
+    let calibration = calibrate_from_the_ratio_histogram(&histogram, target_fdr.get(), config);
+    let windowed = windowed.map(|windowed| {
+        windowed_verdicts(
+            &ratios,
+            &contigs,
+            &positions,
+            calibration.prior.prior_probability,
+            calibration.lr_threshold,
+            target_fdr.get(),
+            windowed,
+        )
+    });
+
     Ok(ParalogVerdicts {
-        calibration: calibrate_from_the_ratio_histogram(&histogram, target_fdr.get(), config),
+        calibration,
+        windowed,
         ratios,
         records_in_the_fit,
         ratios_outside_the_histogram,

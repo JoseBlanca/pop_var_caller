@@ -153,6 +153,20 @@ pub fn write_the_records_the_filter_kept_explaining(
     // **Taken front to back, never indexed.** The pairing is positional and this is what makes
     // it hold: the iterator advances once per record, in step with the read.
     let mut ratios = verdicts.ratios.iter();
+    // Research only: the windowed probabilities, one a record in the same order, where the run
+    // asked for them.
+    if let Some(windowed) = &verdicts.windowed
+        && windowed.posteriors.len() != verdicts.ratios.len()
+    {
+        return Err(PassThreeError::RatiosDoNotMatchTheSpill {
+            records: spill.entries_written(),
+            ratios: windowed.posteriors.len(),
+        });
+    }
+    let mut windowed_posteriors = verdicts
+        .windowed
+        .as_ref()
+        .map(|windowed| windowed.posteriors.iter());
 
     for (read_so_far, entry) in entries.enumerate() {
         let entry =
@@ -164,7 +178,29 @@ pub fn write_the_records_the_filter_kept_explaining(
             .next()
             .expect("the spill and the ratios were counted equal before the walk");
 
-        let flagged = verdicts.calibration.flags(ratio);
+        // **The verdict and the probability**: today's, from the run-wide rate, or the window's
+        // where the research switch asked for one. Either way a record with no finite ratio has
+        // no probability and is not flagged.
+        let (flagged, posterior) = match (&verdicts.windowed, windowed_posteriors.as_mut()) {
+            (Some(windowed), Some(posteriors)) => {
+                // PANIC-FREE: the lengths were compared above and both are walked once a record.
+                let posterior = *posteriors
+                    .next()
+                    .expect("one windowed probability a record, counted before the walk");
+                (
+                    ratio.is_finite() && windowed.flags(posterior),
+                    (ratio.is_finite() && posterior.is_finite()).then_some(posterior),
+                )
+            }
+            _ => (
+                verdicts.calibration.flags(ratio),
+                if ratio.is_finite() {
+                    verdicts.calibration.posterior(ratio)
+                } else {
+                    None
+                },
+            ),
+        };
         if let Some(explained) = explained.as_deref_mut()
             && explained.wants(entry.contig, entry.position.get())
         {
@@ -172,11 +208,7 @@ pub fn write_the_records_the_filter_kept_explaining(
                 contig: entry.contig,
                 written_at: entry.position.get(),
                 ratio,
-                posterior: if ratio.is_finite() {
-                    verdicts.calibration.posterior(ratio)
-                } else {
-                    None
-                },
+                posterior,
                 flagged,
                 dropped: flagged && !tag_instead_of_dropping,
             });
@@ -195,7 +227,7 @@ pub fn write_the_records_the_filter_kept_explaining(
             // fitted duplication rate to be a rate — strictly between none and all — and a run
             // that fitted 0 or 1 has no log-odds to add. The copied calibration answers `None`
             // there rather than a saturated 0 or 1, and the field is then simply absent.
-            if let Some(posterior) = verdicts.calibration.posterior(ratio) {
+            if let Some(posterior) = posterior {
                 info_to_add.push(format!(
                     "PARALOG_POST={:.*}",
                     PARALOG_POSTERIOR_DECIMALS, posterior

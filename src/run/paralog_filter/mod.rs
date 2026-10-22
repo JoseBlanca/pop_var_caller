@@ -49,7 +49,7 @@ pub mod spill;
 pub mod spill_file;
 
 pub use finish::{
-    FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, WhereTheTimeWent,
+    DEFAULT_HIDDEN_DUP_WINDOW_BASES, FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, WhereTheTimeWent,
     fit_score_and_write_the_calls, fit_score_and_write_the_calls_explaining,
     what_to_tell_the_operator,
 };
@@ -63,6 +63,7 @@ pub use pass_three::{
 pub use pass_two::{
     LrHistogramShape, NotATargetFdr, ParalogVerdicts, PassTwoError, TargetFdr,
     score_the_parked_records_and_resolve_the_cut,
+    score_the_parked_records_and_resolve_the_cut_windowed,
 };
 pub use patch::{LinePatchError, rewrite_filter_and_info};
 pub use scoring_context::{
