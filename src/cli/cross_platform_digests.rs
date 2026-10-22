@@ -267,7 +267,11 @@ mod tests {
     /// **Re-recorded 2026-10-18** when the built-in repeat-tract outlier weight went from 0.20 to
     /// 0.07 (parameters file format 6): the file moves by `format_version` and the weight's line,
     /// and by nothing else. Recorded on the macOS host (arm64); it was `ae20f59532f41838b4b63c0b2cf3fb5c`.
-    const FITTED_PARAMETERS_MD5: &str = "467baf41a66b1053543571737bc7b48f";
+    /// **Re-recorded 2026-10-22** when the default base-quality multiplier moved from 1.0 to 2.0:
+    /// no number moved, because every read group here is fitted; only the file's prose about a
+    /// `defaulted` multiplier did. Putting the old prose back reproduces the old checksum,
+    /// `467baf41a66b1053543571737bc7b48f`, exactly. Recorded in the Linux container (amd64).
+    const FITTED_PARAMETERS_MD5: &str = "999e03bef3448832ba0285f0cc77013c";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -408,7 +412,11 @@ mod tests {
     /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7): only the header's
     /// `##FILTER=<ID=notPeriodic,…>` line went; putting it back reproduces the old checksum,
     /// `cea47374a0885f91c92940f2d89e103e`, exactly. Recorded in the Linux container (amd64).
-    const CALLS_MD5: &str = "da2024ac5ff5582c96a0f86ce9a8254d";
+    /// **Re-recorded 2026-10-22** when the default base-quality multiplier moved from 1.0 to 2.0:
+    /// only the `##pvcParameters` line moved, carrying the parameters file's new checksum; with
+    /// the old one put back it reproduces the old checksum, `da2024ac5ff5582c96a0f86ce9a8254d`, exactly. Recorded in the
+    /// Linux container (amd64).
+    const CALLS_MD5: &str = "a98b088ade1653000a043072240ad900";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -518,7 +526,11 @@ mod tests {
     /// **Re-recorded 2026-10-18** when the built-in repeat-tract outlier weight went from 0.20 to
     /// 0.07 (parameters file format 6): the file moves by `format_version` and the weight's line,
     /// and by nothing else. Recorded on the macOS host (arm64); it was `ca1be8e12b7f816755ba43d1e5fcd4c9`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "d80331a16f4cd86bfbdf885c90cc7188";
+    /// **Re-recorded 2026-10-22** when the default base-quality multiplier moved from 1.0 to 2.0:
+    /// no number moved, because every read group here is fitted; only the file's prose about a
+    /// `defaulted` multiplier did. Putting the old prose back reproduces the old checksum,
+    /// `d80331a16f4cd86bfbdf885c90cc7188`, exactly. Recorded in the Linux container (amd64).
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "74601f6755190f65c159a41c95bff1ed";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -637,7 +649,11 @@ mod tests {
     /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7): only the header's
     /// `##FILTER=<ID=notPeriodic,…>` line went; putting it back reproduces the old checksum,
     /// `103a0436a5b1630ce94a6a8ee111f274`, exactly. Recorded in the Linux container (amd64).
-    const WITH_ERRORS_CALLS_MD5: &str = "7083dc4bede34f2e7f197c194ff8df41";
+    /// **Re-recorded 2026-10-22** when the default base-quality multiplier moved from 1.0 to 2.0:
+    /// only the `##pvcParameters` line moved, carrying the parameters file's new checksum; with
+    /// the old one put back it reproduces the old checksum, `7083dc4bede34f2e7f197c194ff8df41`, exactly. Recorded in the
+    /// Linux container (amd64).
+    const WITH_ERRORS_CALLS_MD5: &str = "658380c537ec2cd5964a6774d2deafd7";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -754,7 +770,11 @@ mod tests {
     /// **Re-recorded 2026-10-18** when the built-in repeat-tract outlier weight went from 0.20 to
     /// 0.07 (parameters file format 6): the file moves by `format_version` and the weight's line,
     /// and by nothing else. Recorded on the macOS host (arm64); it was `48480f4ee21a23f1580c059dec5e6bc5`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "ced2576a45b958bd719a0e8720e7b9bb";
+    /// **Re-recorded 2026-10-22** when the default base-quality multiplier moved from 1.0 to 2.0:
+    /// no number moved, because every read group here is fitted; only the file's prose about a
+    /// `defaulted` multiplier did. Putting the old prose back reproduces the old checksum,
+    /// `ced2576a45b958bd719a0e8720e7b9bb`, exactly. Recorded in the Linux container (amd64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "b10618abc9bb00b0e089bfd64ae06858";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -871,7 +891,11 @@ mod tests {
     /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7): only the header's
     /// `##FILTER=<ID=notPeriodic,…>` line went; putting it back reproduces the old checksum,
     /// `39efa7a9f70a5a07eea563e2f67df0c4`, exactly. Recorded in the Linux container (amd64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "2c68478585fa63e9b890cc30b3f33f9c";
+    /// **Re-recorded 2026-10-22** when the default base-quality multiplier moved from 1.0 to 2.0:
+    /// only the `##pvcParameters` line moved, carrying the parameters file's new checksum; with
+    /// the old one put back it reproduces the old checksum, `2c68478585fa63e9b890cc30b3f33f9c`, exactly. Recorded in the
+    /// Linux container (amd64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "bcd2e92c326cef11be6bcfb98798891b";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
