@@ -513,7 +513,6 @@ samples_with_coverage_model={samples_with_a_coverage_model}/{samples_in_the_run}
 const FILTER_DECLARATIONS: &[&str] = &[
     r#"##FILTER=<ID=PASS,Description="All filters passed">"#,
     r#"##FILTER=<ID=EMNoConv,Description="The calling loop did not converge within its pass cap">"#,
-    r#"##FILTER=<ID=notPeriodic,Description="Tract allele-length distribution inconsistent with the motif period">"#,
     r#"##FILTER=<ID=tooManyAlleles,Description="More candidate alleles segregate than the caller admits">"#,
     r#"##FILTER=<ID=lowDepth,Description="Insufficient cohort depth to call the tract">"#,
 ];
@@ -849,13 +848,7 @@ samples_with_coverage_model=61/63",
         for id in ["GT", "GQ", "DP", "AD", "REPCN"] {
             assert!(text.contains(&format!("##FORMAT=<ID={id},")), "FORMAT {id}");
         }
-        for id in [
-            "PASS",
-            "EMNoConv",
-            "notPeriodic",
-            "tooManyAlleles",
-            "lowDepth",
-        ] {
+        for id in ["PASS", "EMNoConv", "tooManyAlleles", "lowDepth"] {
             assert!(text.contains(&format!("##FILTER=<ID={id},")), "FILTER {id}");
         }
     }
@@ -870,7 +863,6 @@ samples_with_coverage_model=61/63",
         for verdict in [
             FilterVerdict::Pass,
             FilterVerdict::EmDidNotConverge,
-            FilterVerdict::NotPeriodic,
             FilterVerdict::TooManyAlleles,
             FilterVerdict::LowDepth,
         ] {

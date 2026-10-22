@@ -667,9 +667,10 @@ impl MapqPool {
 
 /// **The one `FILTER` value a record carries.**
 ///
-/// Five values in one namespace: production's four — one from its SNP/indel writer, three from
-/// its repeat-tract writer — plus `PASS`. There is no missing filter; a record always says
-/// which of these it is.
+/// Four values in one namespace: three of production's four — one from its SNP/indel writer, two
+/// from its repeat-tract writer — plus `PASS`. There is no missing filter; a record always says
+/// which of these it is. Production's third repeat-tract value, `notPeriodic`, went with the
+/// periodicity check that minted it (owner, 2026-10-22; `candidate_alleles_ssr.md` §7).
 ///
 /// **A loop that ran out of passes reaches the file as [`Self::EmDidNotConverge`] rather than
 /// as a separate flag.** The plan's step A1 lists `converged` among the record's contents; it is
@@ -692,8 +693,6 @@ pub enum FilterVerdict {
     /// a loop that did not settle is a weaker claim than one from a loop that did — which
     /// nothing downstream could otherwise tell (`calling_em_loop.md` §6).
     EmDidNotConverge,
-    /// The tract's allele-length distribution is inconsistent with its motif period.
-    NotPeriodic,
     /// More candidate alleles segregate at the tract than the caller admits.
     TooManyAlleles,
     /// Too little cohort depth to call the tract.
@@ -708,7 +707,6 @@ impl FilterVerdict {
         match self {
             Self::Pass => "PASS",
             Self::EmDidNotConverge => "EMNoConv",
-            Self::NotPeriodic => "notPeriodic",
             Self::TooManyAlleles => "tooManyAlleles",
             Self::LowDepth => "lowDepth",
         }

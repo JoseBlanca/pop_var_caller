@@ -16,9 +16,9 @@
 //! **Built in the order `doc/devel/ng/impl_plan/candidate_alleles_ssr.md` set.**
 //! This file holds the ladder (its step B1), the path's configuration and the per-sample length
 //! histogram (B2), nomination — each sample's own repeat counts, the `±1` rescue and the cohort's
-//! union (C1, C2) — the admission of the sequences on a promoted rung (D1), the periodicity verdict
-//! with the entry point [`select_ssr`] it gates (D2), and the repeat counts that entry point hands
-//! the genotype prior (D3). **`select_ssr` is complete** and the run driver dispatches to it
+//! union (C1, C2) — the admission of the sequences on a promoted rung (D1), the entry point
+//! [`select_ssr`] (D2, whose periodicity verdict was removed on 2026-10-22, spec §7), and the
+//! repeat counts that entry point hands the genotype prior (D3). **`select_ssr` is complete** and the run driver dispatches to it
 //! (`src/run/callers.rs`). The STR loop plan's Milestone E added one more pass to it: the
 //! **discovery pre-pass** ([`nominate_discovered_sequences`]), off by default, which admits the
 //! tract sequences one sample showed too often for the model to book as slippage — wired here
@@ -42,8 +42,8 @@ use crate::calling::CandidateAlleles;
 use crate::calling::likelihood::ssr_emission::respelled_over;
 use crate::locus_generation::{FlankDeletion, LocusKind, SsrBundleDetail, SsrDetail};
 use crate::region_typing::run_parse::{RunParse, parse_into_runs};
+use crate::run::cohort_merge::MinAltReads;
 use crate::run::cohort_merge::build::{CohortObservation, SampleSupport};
-use crate::run::cohort_merge::{MinAltReadShare, MinAltReads};
 use crate::types::{AlleleId, GenomeRegion, Motif, Ploidy};
 
 /// **One locus's observed tract sequences, grouped by how many repeats they carry.**
@@ -231,8 +231,9 @@ impl RepeatLadder {
     /// length the reference does not, the reference's own rung can hold a handful of reads and
     /// the mode is elsewhere — which is the case this quantity exists for.
     ///
-    /// **What reads it, and what no longer does.** The periodicity test measures each read's
-    /// offset from this (spec §7). The genotype prior does *not*: its seed was re-indexed on
+    /// **What no longer reads it.** The periodicity test measured each read's offset from this
+    /// until 2026-09-02, then from the reference tract's length, and was removed on 2026-10-22
+    /// (spec §7). The genotype prior does not either: its seed was re-indexed on
     /// 2026-08-27 by offset from the **reference** tract length, which every locus already knows
     /// (`doc/devel/ng/spec/population_diversity.md` §4.2), and handing it the mode instead moves
     /// 0.595 of its mass off the reference length onto 0.091 on its own fixture.
@@ -281,8 +282,7 @@ impl RepeatLadder {
 ///
 /// **The key is floor division and nothing else.** A sequence whose length is not a whole number
 /// of motif units lands on the rung below and is counted there once — it is not dropped and not
-/// counted twice. Whether such a sample is periodic at all is a separate question asked later and
-/// per sample (spec §7); the ladder's job is to place every observed sequence somewhere.
+/// counted twice. The ladder's job is to place every observed sequence somewhere.
 ///
 /// **The mode is the most-supported rung and ties break toward the shorter**, which is the tie
 /// rule production uses and is kept for determinism rather than for a measured reason: the output
@@ -423,74 +423,6 @@ pub(super) fn build_ladder_keyed(
     ladder.modal_repeat_count = modal.repeat_count;
 }
 
-/// **The share of one sample's spanning reads that may sit off the motif's grid before that
-/// sample is judged non-periodic** (spec §7).
-///
-/// A validated fraction of one rather than the bare `f64` arch §2.2 sketches, for the reason
-/// [`MinAltReadShare`] gives about its own range and for one this module has already been bitten
-/// by: a mistyped share here does not crash, it deletes the gate. **Above one, no sample is ever
-/// non-periodic and the verdict can never be reached; below zero, every sample is, and every
-/// repeat tract in the run comes back as the reference alone.** Both are runs whose output looks
-/// entirely ordinary.
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
-pub struct MaxOffGridShare(f64);
-
-impl MaxOffGridShare {
-    /// The default share, [`DEFAULT_MAX_OFF_GRID_SHARE`].
-    pub const DEFAULT: Self = DEFAULT_MAX_OFF_GRID_SHARE;
-
-    /// The share, or `None` if it is not a fraction of one — negative, above one, or not a
-    /// number. Refusing rather than clamping, for the reason on the type.
-    pub fn new(share: f64) -> Option<Self> {
-        MinAltReadShare::new(share).map(|share| Self(share.get()))
-    }
-
-    /// The same share, for a `const` that has to name one — and it **panics** where
-    /// [`new`](Self::new) returns `None`, exactly as [`MinAltReadShare::new_or_panic`] does and
-    /// with the same caveat: called at runtime it aborts, so a share an operator typed or a file
-    /// carried goes through [`new`](Self::new).
-    pub const fn new_or_panic(share: f64) -> Self {
-        Self(MinAltReadShare::new_or_panic(share).get())
-    }
-
-    /// The share, as a fraction of 1.
-    #[inline]
-    pub const fn get(self) -> f64 {
-        self.0
-    }
-}
-
-impl Default for MaxOffGridShare {
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-/// **One read in ten off the motif grid** — production's `max_out_of_frame_frac`
-/// ([`candidate_set.rs:85`](../../../../src/ssr/cohort/candidate_set.rs)), **inherited and never
-/// measured, by them or by us** (spec §12, Q1).
-///
-/// **Soft in the strongest sense available**: every number spec §4.1 and §5 report was taken with
-/// this gate switched off entirely, so nothing measured constrains it, and nothing in the shape of
-/// the code depends on the value.
-pub const DEFAULT_MAX_OFF_GRID_SHARE: MaxOffGridShare = MaxOffGridShare(0.10);
-
-/// **The fewest off-grid reads that can make a sample non-periodic, whatever their share** —
-/// owner's decision of 2026-10-10 (spec §7).
-///
-/// [`DEFAULT_MAX_OFF_GRID_SHARE`] alone lets **one read** refuse a tract at low depth: one off-grid
-/// read in eight spanning reads is 12.5%, over the tenth, and at one sample a refused tract is a
-/// lost genotype. On the stuttering benchmark (one sample, 15×) that was a 4-base repeat whose
-/// sample carried a 14-copy allele on 7 reads, refused for an eighth read that the mapper had
-/// spelled with one flank base inside, and two more tracts like it on the PCR-free library. A
-/// single read off the grid is what a sequencing or mapping error produces at any tract; a tract
-/// the model does not describe shows the pattern again and again. So a sample is non-periodic only
-/// when **both** hold: more than the share, and at least this many reads.
-///
-/// **At high depth it changes nothing**: at 20 spanning reads or more the share already needs
-/// three.
-pub const MIN_OFF_GRID_READS_TO_REFUSE: u32 = 2;
-
 /// **32 tract sequences including the reference, where the ordinary path allows six**
 /// ([`DEFAULT_MAX_CANDIDATE_ALLELES`](super::DEFAULT_MAX_CANDIDATE_ALLELES)) — the owner's
 /// decision of 2026-08-24 on spec §12's Q2.
@@ -507,8 +439,8 @@ pub const MIN_OFF_GRID_READS_TO_REFUSE: u32 = 2;
 pub const DEFAULT_MAX_CANDIDATE_ALLELES_SSR: MaxCandidateAlleles =
     MaxCandidateAlleles::new_or_panic(32);
 
-/// **The repeat-tract path's settings** — the shared support rule and cap, the periodicity gate's
-/// share, and the copy number a sample is nominated at (arch §2.2).
+/// **The repeat-tract path's settings** — the shared support rule and cap, and the copy number a
+/// sample is nominated at (arch §2.2).
 ///
 /// **No `Default`, and that is the design.** [`ploidy`](Self::ploidy) is the run's, from
 /// `FrozenParameters`, and a constant here would be a diploid assumption written where a polyploid
@@ -523,10 +455,6 @@ pub struct SsrSelectionConfig {
     /// rule is the ordinary path's, unchanged — see [`at_ploidy`](Self::at_ploidy) for the one
     /// place that departs from what the spec's text says.
     pub shared: CandidateSelectionConfig,
-    /// How much of one sample's spanning reads may sit off the motif grid before that sample is
-    /// judged non-periodic (spec §7). Default [`DEFAULT_MAX_OFF_GRID_SHARE`]. Read at STR segments
-    /// only: an STR bundle has no periodicity check (`str_bundle_loci.md` §7.2, since 2026-10-12).
-    pub max_off_grid_share: MaxOffGridShare,
     /// Copies per genome — **how many rungs a sample promotes** (arch §3.1). From the run's
     /// parameters, never a constant in this module: production hard-asserts diploid at its own
     /// genotyping step and ng does not, and a polyploid run changes only this number.
@@ -583,9 +511,6 @@ impl SsrSelectionConfig {
                 max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES_SSR,
                 ..CandidateSelectionConfig::DEFAULT
             },
-            max_off_grid_share: crate::exp::off_grid_share()
-                .map(|v| MaxOffGridShare::new(v).expect("PVC_EXP_OFF_GRID_SHARE in [0, 1]"))
-                .unwrap_or(MaxOffGridShare::DEFAULT),
             ploidy,
             // Off. The driver switches it on from the run's `DiscoveryConfig`
             // (`NG_TRACT_DISCOVERY=1` today), and off must stay byte-identical to the
@@ -1423,7 +1348,8 @@ pub(crate) fn repeat_count_of_bases(bases: &[u8], motif: &Motif) -> u32 {
 /// **reference** tract length, which every locus already knows, so the cohort's commonest length
 /// stopped being an input to it — *"nothing consumes it now"*. **This step's own D2 removed the
 /// last remaining consumer inside this module**, by anchoring the periodicity grid on the
-/// reference length too. Returning it would be a field with no reader, and the architecture's own
+/// reference length too (the grid itself went on 2026-10-22, spec §7). Returning it would be a
+/// field with no reader, and the architecture's own
 /// open question — whether selection should carry the mode at all — is left where it is rather
 /// than answered by shipping one. The ladder still computes it, so restoring it is one line.
 #[derive(Clone, PartialEq, Debug)]
@@ -1434,120 +1360,6 @@ pub struct SsrLocusSelection {
     /// **Parallel to `selection.alleles()`**, the reference at index 0: each surviving
     /// candidate's repeat count.
     pub repeat_counts: Vec<u32>,
-}
-
-/// **Whether this tract's reads actually vary in whole motif units** — the one verdict this path
-/// adds, and the gate in front of everything above (spec §7; arch §3.3).
-///
-/// A stretch the catalog called a repeat tract whose reads sit at lengths the motif cannot
-/// explain is not a tract this caller's model describes: the stutter distribution is written on
-/// whole-repeat and part-repeat regimes and the prior's ladder is written on repeat counts.
-/// Genotyping it against that model would produce a confident answer from a model that does not
-/// apply.
-///
-/// # The grid is anchored on the reference tract's own length
-///
-/// A read is **off the grid** when the difference between its tract length and the reference
-/// tract's is not a whole number of motif units. A sample is non-periodic when more than
-/// `max_off_grid_share` of its spanning reads are off the grid **and** at least
-/// [`MIN_OFF_GRID_READS_TO_REFUSE`] of them are — a read spelling the reference tract with a block
-/// missing from one end, which is a deletion across the tract's edge, never counting as off the
-/// grid ([`is_an_edge_deletion_of`]) — and **the locus is judged
-/// non-periodic only when no sample is periodic** — the same "one sample suffices" shape as
-/// everything else on this path.
-///
-/// **The anchor is a decision, taken by the owner on 2026-09-02, and it is not what the design
-/// documents say.** Arch §3.3 and spec §7 anchor the grid on the ladder's mode, and spec §3 adds
-/// that ng measures it in units where production measures it in bases. Taken literally those two
-/// give a grid anchored at **zero** — the mode is a repeat count, so its length in bases is a whole
-/// number of units and cancels out of the subtraction — and a zero-anchored grid refuses a real
-/// class of tract:
-///
-/// - the catalog trims every tract back to whole motif copies **at both ends**, but a
-///   length-changing interruption inside puts the two ends out of phase with each other, so the
-///   tract's own reference length is then **not** a multiple of the period;
-/// - such a tract is admitted whenever the interruption is late enough to clear the catalog's
-///   purity floor of 0.8. Measured through the catalog's own `minimal_trim` and `recompute_purity`
-///   on 2026-09-02: 49 bases of an `AT` repeat with one extra base 40 bases in trims to 49 bases at
-///   **purity 0.816**, and 49 is odd;
-/// - at that tract every read at the reference length is off a zero-anchored grid, so every sample
-///   is non-periodic and **the locus is refused and never called**.
-///
-/// Production avoids that by anchoring on the commonest observed length in bases
-/// ([`candidate_set.rs:114-145`](../../../../src/ssr/cohort/candidate_set.rs)) — its own comment
-/// says so: *"the grid is anchored to the modal length, not to zero, so an interrupted repeat
-/// sitting at an odd reference length stays periodic"*. **The reference tract's length is the
-/// third anchor and the one taken here**, because it keeps those tracts *and* is a property of the
-/// locus rather than of the reads: the commonest observed length moves with depth, so a shallow
-/// sample could shift which lengths count as on-grid. It is also the quantity the genotype prior
-/// was re-indexed onto on 2026-08-27 — offset from the reference tract length
-/// (`doc/devel/ng/spec/population_diversity.md` §4.2) — so the periodicity grid and the prior's
-/// index are now the same number.
-///
-/// # What the counting includes
-///
-/// **Spanning reads only.** A read that ran out inside the tract names no length, so it is on no
-/// grid and in no denominator (spec §8) — it is not in the merge's support rows at all.
-///
-/// **A sample with no spanning reads is not asked**, rather than counted as periodic. Counting it
-/// as periodic would make one silent sample enough to save every locus, and a silent sample is
-/// exactly what a tract too long for a read to span produces. A locus where **no** sample has a
-/// spanning read is periodic by default: there is nothing to judge it on, and refusing it would be
-/// a verdict about coverage rather than about the tract.
-///
-/// **A homopolymer can never be off the grid**, since every difference is a whole number of
-/// one-base units. That falls out of the arithmetic rather than needing production's explicit
-/// short-circuit.
-///
-/// # Panics
-///
-/// On an empty allele table, and on a sample's rows out of ascending allele order.
-pub(super) fn locus_is_periodic(
-    observation: &CohortObservation,
-    motif: &Motif,
-    max_off_grid_share: MaxOffGridShare,
-) -> bool {
-    let grid_step = motif.period();
-    assert!(
-        !observation.alleles.is_empty(),
-        "a cohort locus always holds at least its reference allele, and the repeat tract at {} \
-         holds none",
-        observation.region
-    );
-    let reference_len = observation.alleles[0].len();
-    let on_the_grid = |length_change: usize| length_change.is_multiple_of(grid_step);
-    let mut any_sample_judged = false;
-
-    for sample in &observation.per_sample {
-        let spanning_reads = super::compared_reads_of(sample);
-        if spanning_reads == 0 {
-            continue;
-        }
-        any_sample_judged = true;
-        let mut off_grid_reads = 0_u32;
-        for rows in super::one_run_per_allele(sample, observation.region) {
-            let bases = &observation.alleles[rows[0].allele];
-            // A read with a flank deletion is an edge deletion known exactly, never off the grid
-            // (`str_edge_deletion_alleles.md` §5.5); the spelling test below is the guess the
-            // exception was first written with, for reads that record none.
-            if !on_the_grid(bases.len().abs_diff(reference_len))
-                && observation.flank_deletion_of(rows[0].allele).is_none()
-                && !is_an_edge_deletion_of(bases, &observation.alleles[0])
-            {
-                let pooled_reads = rows.iter().fold(0_u32, |total, row| {
-                    total.saturating_add(row.support.num_reads)
-                });
-                off_grid_reads = off_grid_reads.saturating_add(pooled_reads);
-            }
-        }
-        if off_grid_reads < MIN_OFF_GRID_READS_TO_REFUSE
-            || f64::from(off_grid_reads) <= max_off_grid_share.get() * f64::from(spanning_reads)
-        {
-            return true;
-        }
-    }
-    // Nobody had a spanning read to judge, so there is no evidence the tract is not a tract.
-    !any_sample_judged
 }
 
 /// **The largest share of a sample's reads, over a misread allele and the allele it is one base
@@ -1605,21 +1417,6 @@ fn one_base_apart(
             == 1
 }
 
-/// **Is `bases` the reference tract with a block missing from one end?** — what a deletion running
-/// from the tract into a flank leaves inside the tract, whatever its length (owner, 2026-10-10).
-///
-/// [`locus_is_periodic`] does not count such a spelling as off the grid. It is off the grid only
-/// because the deletion's part inside the tract need not be whole motif units — five bases of an
-/// `AAG` repeat, say — and that says nothing about whether the tract stutters in whole units. At
-/// one sample, every read of a heterozygous edge deletion was otherwise enough to refuse the
-/// tract, and with it the sample's other allele. Reads are spelled this way by their own alignment
-/// when a deletion crosses the tract's edge (`locus_generation_ssr.md` §3).
-fn is_an_edge_deletion_of(bases: &[u8], reference: &[u8]) -> bool {
-    !bases.is_empty()
-        && bases.len() < reference.len()
-        && (reference.ends_with(bases) || reference.starts_with(bases))
-}
-
 /// **Narrow one repeat tract's allele table to the tract sequences worth calling over**
 /// (spec §4, §5, §7) — the entry point, and the repeat-tract sibling of
 /// [`select_generic`](super::generic::select_generic).
@@ -1642,12 +1439,6 @@ fn is_an_edge_deletion_of(bases: &[u8], reference: &[u8]) -> bool {
 /// function of the observations and the candidate table alone, so a second look after these
 /// admissions finds nothing. Off — [`SsrSelectionConfig::discovery`] `None`, the shipped
 /// default — nothing of it executes.
-///
-/// **The periodicity verdict runs first of all**, and a tract that fails it returns the reference
-/// tract alone with [`SelectionVerdict::NotPeriodic`] — a usable table rather than a refusal, so
-/// what the run does with such a locus stays emission's decision (spec §7). Its leftover is one
-/// zeroed entry per covering sample: nothing was cut by the cap, so no sample is uncallable for
-/// that reason, and the tract likelihood does not read the pool at all (spec §8).
 ///
 /// # Panics
 ///
@@ -1673,20 +1464,7 @@ pub fn select_ssr(
         );
     };
 
-    if !locus_is_periodic(observation, &detail.motif, config.max_off_grid_share) {
-        // The reference tract alone, so `repeat_counts` is one entry — and it comes from the same
-        // derivation the periodic path uses, not from a second floor division written out here.
-        return SsrLocusSelection {
-            selection: reference_tract_alone(observation, detail, SelectionVerdict::NotPeriodic),
-            repeat_counts: vec![repeat_count_of_bases(
-                &observation.alleles[0],
-                &detail.motif,
-            )],
-        };
-    }
-
-    // Partial reads that single out one sequence count toward the bar (spec §8.1) — after the
-    // periodicity check, so that they change nothing about which STR segments are refused.
+    // Partial reads that single out one sequence count toward the bar (spec §8.1).
     let merge_rows = &observation.per_sample;
     let counted = super::deciding_partial_reads::count_deciding_partial_reads(
         observation,
@@ -1824,35 +1602,6 @@ pub fn select_ssr_bundle(
         .map(|bases| parse_into_runs(bases, hull, &detail.runs))
         .collect();
     SsrBundleSelection { selection, parses }
-}
-
-/// A table holding the reference tract and nothing else, under `verdict` — what a tract this path
-/// declines to narrow still yields.
-fn reference_tract_alone(
-    observation: &CohortObservation,
-    detail: &SsrDetail,
-    verdict: SelectionVerdict,
-) -> LocusSelection {
-    reference_alone(observation, LocusKind::Ssr(detail.clone()), verdict)
-}
-
-/// A table holding the reference allele and nothing else, stamped `kind`, under `verdict`.
-fn reference_alone(
-    observation: &CohortObservation,
-    kind: LocusKind,
-    verdict: SelectionVerdict,
-) -> LocusSelection {
-    let alleles = CandidateAlleles::new(observation.alleles[0].clone(), kind);
-    let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
-    remap.admit(0, AlleleId::REFERENCE);
-    let covering_samples = observation.per_sample.len();
-    LocusSelection::new(
-        alleles,
-        verdict,
-        vec![super::UnmatchedSupport::default(); covering_samples],
-        remap,
-        covering_samples,
-    )
 }
 
 #[cfg(test)]
@@ -1993,8 +1742,8 @@ mod tests {
     /// is not the reference's.**
     ///
     /// The reference tract is five repeats and two reads; the panel's own length is four repeats
-    /// and thirty. A mode keyed on the reference would centre the periodicity test a whole unit
-    /// away from where the cohort's reads actually sit.
+    /// and thirty. A mode keyed on the reference would sit a whole unit away from where the
+    /// cohort's reads actually are.
     #[test]
     fn the_mode_is_the_rung_with_the_most_reads_and_not_the_reference_s() {
         let observation = locus_of(
@@ -2287,30 +2036,6 @@ mod tests {
         let triploid = Ploidy::try_new(3).expect("three copies");
         assert_eq!(SsrSelectionConfig::at_ploidy(triploid).ploidy, triploid);
         assert_eq!(SsrSelectionConfig::at_ploidy(diploid()).ploidy, diploid());
-    }
-
-    /// The off-grid share refuses everything that is not a fraction of one, because neither
-    /// failure crashes: above one the periodicity verdict can never be reached, below zero every
-    /// tract returns the reference alone.
-    #[test]
-    fn the_off_grid_share_refuses_anything_that_is_not_a_fraction_of_one() {
-        assert_eq!(
-            MaxOffGridShare::new(0.0).map(MaxOffGridShare::get),
-            Some(0.0)
-        );
-        assert_eq!(
-            MaxOffGridShare::new(1.0).map(MaxOffGridShare::get),
-            Some(1.0)
-        );
-        assert!(MaxOffGridShare::new(-0.001).is_none());
-        assert!(MaxOffGridShare::new(1.001).is_none());
-        assert!(MaxOffGridShare::new(f64::NAN).is_none());
-        assert!(MaxOffGridShare::new(f64::INFINITY).is_none());
-        assert_eq!(
-            DEFAULT_MAX_OFF_GRID_SHARE.get(),
-            0.10,
-            "production's max_out_of_frame_frac, inherited and never measured"
-        );
     }
 
     /// **A sample's reads land on the rungs its sequences sit on**, and a rung it showed nothing
@@ -3291,7 +3016,7 @@ mod tests {
         );
     }
 
-    // ---- D2: the periodicity verdict, and the entry point ----
+    // ---- D2: the entry point ----
 
     /// A tract locus of `alleles` covered by `per_sample`, carrying `motif`.
     fn tract_of(
@@ -3333,123 +3058,31 @@ mod tests {
         select_ssr(observation, &config, &mut SelectionScratch::new())
     }
 
-    /// **A tract whose reads are all a whole number of units from the reference is periodic,
-    /// whatever their lengths in bases.**
-    ///
-    /// The reference here is 49 bases — an `AT` repeat with one extra base in it, which is what a
-    /// length-changing interruption leaves behind and what the catalog admits at purity 0.816.
-    /// Every read sits at 49, 51 or 47 bases, all an even number of bases from the reference and
-    /// none of them an even number of bases from zero. **Anchored on zero this locus is entirely
-    /// off the grid and refused**; anchored on the reference it is periodic, which is the whole of
-    /// the owner's decision of 2026-09-02.
+    /// **A tract is genotyped however many of its reads sit off the motif grid** (owner,
+    /// 2026-10-22; spec §7). GIAB HG002's `chr22:19052415` in miniature: a `CA` repeat of 13
+    /// units, 13 reads at the reference length, 12 one unit shorter, and 3 a part of a unit longer
+    /// — the 5-base insertion the aligner placed at the reads' end. The periodicity check refused
+    /// this tract and called it over the reference alone; now the heterozygous deletion is a
+    /// candidate beside the reference, and the three reads are left to the stutter model.
     #[test]
-    fn a_tract_at_an_odd_reference_length_is_periodic_about_its_own_reference() {
-        let reference = [b"AT".repeat(20), b"G".to_vec(), b"AT".repeat(4)].concat();
-        let shorter = [b"AT".repeat(19), b"G".to_vec(), b"AT".repeat(4)].concat();
-        let longer = [b"AT".repeat(21), b"G".to_vec(), b"AT".repeat(4)].concat();
-        assert_eq!(reference.len(), 49, "the measured tract, 49 bases");
+    fn a_tract_with_reads_off_the_motif_grid_is_still_genotyped() {
+        let reference = b"CA".repeat(13);
+        let one_unit_shorter = b"CA".repeat(12);
+        let five_bases_longer = [b"CA".repeat(13), b"CACAC".to_vec()].concat();
         let observation = tract_of(
-            &[&reference, &shorter, &longer],
-            b"AT",
+            &[&reference, &one_unit_shorter, &five_bases_longer],
+            b"CA",
             vec![sample_showing(
                 0,
-                vec![row(0, 20, -20.0), row(1, 20, -20.0), row(2, 20, -20.0)],
-            )],
-        );
-        assert!(locus_is_periodic(
-            &observation,
-            &Motif::new(b"AT").expect("a two-base motif"),
-            MaxOffGridShare::DEFAULT
-        ));
-        assert_ne!(
-            selected(&observation, 2).verdict(),
-            SelectionVerdict::NotPeriodic
-        );
-    }
-
-    /// A tract whose reads mostly sit at lengths the motif cannot explain is refused, and the
-    /// refusal still yields a table: the reference tract alone.
-    #[test]
-    fn a_tract_whose_reads_are_off_the_motif_grid_is_refused_but_still_yields_the_reference() {
-        let observation = tract_of(
-            &[b"ATATATATAT", b"ATATATATATA", b"ATATATATATAAA"],
-            b"AT",
-            vec![sample_showing(
-                0,
-                vec![row(0, 1, -1.0), row(1, 20, -20.0), row(2, 20, -20.0)],
+                vec![row(0, 13, -13.0), row(1, 12, -12.0), row(2, 3, -3.0)],
             )],
         );
         let selection = selected(&observation, 2);
-        assert_eq!(selection.verdict(), SelectionVerdict::NotPeriodic);
-        assert_eq!(admitted_bases(&selection), vec![b"ATATATATAT".to_vec()]);
+        assert_eq!(selection.verdict(), SelectionVerdict::Selected);
         assert_eq!(
-            selection.unmatched().len(),
-            1,
-            "one zeroed leftover per covering sample"
+            admitted_bases(&selection),
+            vec![reference, one_unit_shorter]
         );
-        assert!(!selection.unmatched()[0].genotype_must_be_missing());
-    }
-
-    /// **One periodic sample saves a locus every other sample fails.**
-    ///
-    /// Two samples of forty reads each: the first is entirely off the grid, the second entirely
-    /// on it. The verdict is the cohort's, and it takes one sample to carry it — the same shape as
-    /// the support bar, and for the same reason.
-    #[test]
-    fn one_periodic_sample_saves_a_locus_every_other_sample_fails() {
-        let alleles: [&[u8]; 3] = [b"ATATATATAT", b"ATATATATATA", b"ATATATATATAT"];
-        let all_off = tract_of(
-            &alleles,
-            b"AT",
-            vec![sample_showing(0, vec![row(1, 40, -40.0)])],
-        );
-        assert_eq!(
-            selected(&all_off, 2).verdict(),
-            SelectionVerdict::NotPeriodic
-        );
-
-        let one_on = tract_of(
-            &alleles,
-            b"AT",
-            vec![
-                sample_showing(0, vec![row(1, 40, -40.0)]),
-                sample_showing(1, vec![row(2, 40, -40.0)]),
-            ],
-        );
-        assert_ne!(
-            selected(&one_on, 2).verdict(),
-            SelectionVerdict::NotPeriodic,
-            "the second sample is wholly on the grid, and that is enough"
-        );
-    }
-
-    /// **One read in ten off the grid is allowed; more is not** — the share, at the boundary.
-    ///
-    /// Forty reads a sample: four off the grid is exactly a tenth and passes, five does not.
-    #[test]
-    fn the_off_grid_share_decides_at_one_read_in_ten() {
-        let alleles: [&[u8]; 2] = [b"ATATATATAT", b"ATATATATATA"];
-        let at_the_share = tract_of(
-            &alleles,
-            b"AT",
-            vec![sample_showing(0, vec![row(0, 36, -36.0), row(1, 4, -4.0)])],
-        );
-        assert!(locus_is_periodic(
-            &at_the_share,
-            &Motif::new(b"AT").expect("a two-base motif"),
-            MaxOffGridShare::DEFAULT
-        ));
-
-        let above_it = tract_of(
-            &alleles,
-            b"AT",
-            vec![sample_showing(0, vec![row(0, 35, -35.0), row(1, 5, -5.0)])],
-        );
-        assert!(!locus_is_periodic(
-            &above_it,
-            &Motif::new(b"AT").expect("a two-base motif"),
-            MaxOffGridShare::DEFAULT
-        ));
     }
 
     /// **A length the reads earned, split across spellings by sequencing errors, keeps its purest
@@ -3542,132 +3175,6 @@ mod tests {
         );
     }
 
-    /// **Reads showing a deletion across the tract's edge never refuse it** (owner, 2026-10-10).
-    /// An `AAG` tract of 42 bases where eight reads show it five bases short from the left —
-    /// a 6-base deletion taking one flank base and five tract bases, the stuttering benchmark's
-    /// case — and eight show the reference: half the reads off the grid, and periodic. The same
-    /// count of reads five bases short from the *middle* of the tract is still refused.
-    #[test]
-    fn reads_showing_a_deletion_across_the_edge_do_not_refuse_a_tract() {
-        let reference = b"AAG".repeat(14);
-        let edge_deleted = reference[5..].to_vec();
-        let middle_deleted = [&reference[..20], &reference[25..]].concat();
-        let motif = Motif::new(b"AAG").expect("a three-base motif");
-        let edge = tract_of(
-            &[&reference, &edge_deleted],
-            b"AAG",
-            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 8, -8.0)])],
-        );
-        assert!(locus_is_periodic(&edge, &motif, MaxOffGridShare::DEFAULT));
-        let middle = tract_of(
-            &[&reference, &middle_deleted],
-            b"AAG",
-            vec![sample_showing(0, vec![row(0, 8, -8.0), row(1, 8, -8.0)])],
-        );
-        assert!(!locus_is_periodic(
-            &middle,
-            &motif,
-            MaxOffGridShare::DEFAULT
-        ));
-    }
-
-    /// **One read off the grid never refuses a tract, whatever its share; two can** (owner,
-    /// 2026-10-10). The case from the stuttering benchmark: eight spanning reads, seven of them a
-    /// whole number of units from the reference and one a base longer — an eighth of the reads,
-    /// over the tenth, and still periodic. A second off-grid read in nine is over the tenth and
-    /// refused, as before.
-    #[test]
-    fn one_off_grid_read_never_refuses_a_tract_at_low_depth() {
-        let alleles: [&[u8]; 3] = [b"ATATATATAT", b"ATATATAT", b"GATATATAT"];
-        let motif = Motif::new(b"AT").expect("a two-base motif");
-        let one_off = tract_of(
-            &alleles,
-            b"AT",
-            vec![sample_showing(0, vec![row(1, 7, -7.0), row(2, 1, -1.0)])],
-        );
-        assert!(locus_is_periodic(
-            &one_off,
-            &motif,
-            MaxOffGridShare::DEFAULT
-        ));
-        assert_ne!(
-            selected(&one_off, 2).verdict(),
-            SelectionVerdict::NotPeriodic
-        );
-
-        let two_off = tract_of(
-            &alleles,
-            b"AT",
-            vec![sample_showing(0, vec![row(1, 7, -7.0), row(2, 2, -2.0)])],
-        );
-        assert!(!locus_is_periodic(
-            &two_off,
-            &motif,
-            MaxOffGridShare::DEFAULT
-        ));
-    }
-
-    /// **A homopolymer can never be off the grid**, because every difference is a whole number of
-    /// one-base units. Production short-circuits period 1 explicitly; here it falls out of the
-    /// arithmetic, so this test is what says the arithmetic really does it.
-    #[test]
-    fn a_homopolymer_is_always_periodic() {
-        let observation = tract_of(
-            &[b"AAAAA", b"AAAAAA", b"AAA"],
-            b"A",
-            vec![sample_showing(
-                0,
-                vec![row(0, 1, -1.0), row(1, 20, -20.0), row(2, 20, -20.0)],
-            )],
-        );
-        assert!(locus_is_periodic(
-            &observation,
-            &Motif::new(b"A").expect("a one-base motif"),
-            MaxOffGridShare::DEFAULT
-        ));
-    }
-
-    /// **A sample with no spanning reads is not asked**, rather than counted as periodic.
-    ///
-    /// A tract too long for a read to span produces exactly such a sample, and counting it as
-    /// periodic would make one of them enough to save every locus in the run — the verdict would
-    /// become unreachable wherever coverage is thin, which is where it is most needed.
-    #[test]
-    fn a_sample_with_no_spanning_reads_does_not_vote() {
-        let observation = tract_of(
-            &[b"ATATATATAT", b"ATATATATATA"],
-            b"AT",
-            vec![
-                sample_with_only_partials(0, 40),
-                sample_showing(1, vec![row(1, 40, -40.0)]),
-            ],
-        );
-        assert!(
-            !locus_is_periodic(
-                &observation,
-                &Motif::new(b"AT").expect("a two-base motif"),
-                MaxOffGridShare::DEFAULT
-            ),
-            "the silent sample does not carry the locus for the one that is off the grid"
-        );
-    }
-
-    /// A locus **no** sample spanned is periodic by default: there is nothing to judge it on, and
-    /// refusing it would be a verdict about coverage rather than about the tract.
-    #[test]
-    fn a_locus_no_sample_spanned_is_periodic_by_default() {
-        let observation = tract_of(
-            &[b"ATATATATAT"],
-            b"AT",
-            vec![sample_with_only_partials(0, 40)],
-        );
-        assert!(locus_is_periodic(
-            &observation,
-            &Motif::new(b"AT").expect("a two-base motif"),
-            MaxOffGridShare::DEFAULT
-        ));
-    }
-
     /// The entry point refuses a locus of the wrong kind rather than scoring a SNP against a
     /// stutter model.
     #[test]
@@ -3745,12 +3252,8 @@ mod tests {
 
     /// A repeat count is the floor of the length over the period, so a sequence carrying a part
     /// copy takes the count of the rung it sits on — the same integer the ladder keyed it by, from
-    /// the same derivation.
-    ///
-    /// **This tract is the one D2's anchor exists for**: its reference is 7 bases, an odd number
-    /// for a two-base motif, and the alternative at 9 bases is two bases — one whole copy — away
-    /// from it. Anchored on the reference both are on the grid; anchored on zero neither is, and
-    /// the locus would come back refused with a single count instead of two.
+    /// the same derivation. Here the reference is 7 bases, an odd number for a two-base motif,
+    /// and the alternative at 9 bases is one whole copy longer.
     #[test]
     fn a_part_copy_carries_the_floored_count_the_ladder_keyed_it_by() {
         let observation = tract_of(
@@ -3762,30 +3265,11 @@ mod tests {
             )],
         );
         let narrowed = selected_with_counts(&observation, 2);
-        assert_ne!(
-            narrowed.selection.verdict(),
-            SelectionVerdict::NotPeriodic,
-            "seven and nine bases are one whole copy apart"
-        );
         assert_eq!(
             narrowed.repeat_counts,
             vec![3, 4],
             "seven bases floor to three copies of a two-base motif and nine to four"
         );
-    }
-
-    /// **A refused tract still returns a repeat count**, one entry for the reference alone — the
-    /// prior is indexed for it like any other locus.
-    #[test]
-    fn a_refused_tract_returns_one_repeat_count_for_the_reference() {
-        let observation = tract_of(
-            &[b"ATATATATAT", b"ATATATATATA"],
-            b"AT",
-            vec![sample_showing(0, vec![row(0, 1, -1.0), row(1, 40, -40.0)])],
-        );
-        let narrowed = selected_with_counts(&observation, 2);
-        assert_eq!(narrowed.selection.verdict(), SelectionVerdict::NotPeriodic);
-        assert_eq!(narrowed.repeat_counts, vec![5]);
     }
 
     /// A homopolymer's counts are its lengths, which is the case where a wrong period would be
@@ -4076,9 +3560,7 @@ mod tests {
     /// locus one step later. Its reads clear the bar comfortably; the refusal is the missing
     /// rung, not the evidence.
     ///
-    /// The sequence is a whole-tract deletion at a homopolymer — the shape that reaches this
-    /// check, because a part-copy of a longer unit sits off the motif grid and the
-    /// periodicity gate has already judged it (`locus_is_periodic`).
+    /// The sequence is a whole-tract deletion at a homopolymer.
     #[test]
     fn discovery_does_not_admit_a_sequence_below_one_whole_repeat() {
         let observation = tract_of(

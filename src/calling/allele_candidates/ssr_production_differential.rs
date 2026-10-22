@@ -16,6 +16,11 @@
 //! a digest of the whole tract as the test builds it, so a tract built differently finds no answer
 //! and fails. The re-implemented rules below still run; only the yardstick is a file.
 //!
+//! **Production's periodicity check is re-implemented here too**, because production's answers
+//! include its refusals. ng ported that check per sample and removed it on 2026-10-22
+//! (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7), so it is a fourth rule the shipped selector
+//! does not have.
+//!
 //! **The rules are re-implemented here and not made a field of [`SsrSelectionConfig`]**: the
 //! shipping binary carries one rule, and a configuration nobody should ever set does not belong
 //! in it.

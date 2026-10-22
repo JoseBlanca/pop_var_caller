@@ -495,7 +495,7 @@ mod encoded_lines {
                     vec![allele(b"ATAT"), allele(b"AT")],
                     vec![called(&[1, 1], vec![3, 3])],
                     None,
-                    FilterVerdict::NotPeriodic,
+                    FilterVerdict::TooManyAlleles,
                     Some(TractAnnotation::new(Motif::new(b"AT").expect("a motif"))),
                     None,
                 ),

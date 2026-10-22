@@ -221,8 +221,13 @@ pub const DEFAULT_MAX_CANDIDATE_ALLELES: MaxCandidateAlleles = MaxCandidateAllel
 /// 98.6% of repeat tracts at one sample sequenced to 5× against 0.2% at 300×. **Depth is
 /// asked once, upstream, per sample.**
 ///
-/// `#[non_exhaustive]` because the repeat-tract path adds the third variant and a fourth
-/// is not ruled out; a match on this in another crate must keep a wildcard arm.
+/// **There is no periodicity variant either.** The repeat-tract path had a third,
+/// `NotPeriodic`, for a tract whose reads did not vary in whole motif units; it was removed on
+/// 2026-10-22 (owner), when every tract it refused in GIAB HG002 at 30× on chr22 was found to
+/// carry a true variant (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7).
+///
+/// `#[non_exhaustive]` because a third variant is not ruled out; a match on this in another
+/// crate must keep a wildcard arm.
 #[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SelectionVerdict {
@@ -254,11 +259,6 @@ pub enum SelectionVerdict {
         /// guarantee rather than a measured case.
         dropped: u32,
     },
-    /// **Repeat tracts only, and never minted by the ordinary path.** A tract whose reads
-    /// do not agree on a repeat unit is not called as a tract
-    /// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §7); `generic.rs` has no way to reach
-    /// this and no reason to.
-    NotPeriodic,
 }
 
 /// **One sample's reads whose sequence selection dropped, and the error mass they carry** —

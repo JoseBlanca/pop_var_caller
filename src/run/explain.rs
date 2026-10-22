@@ -206,8 +206,7 @@ fn spelled(bases: &[u8]) -> String {
 /// split is recomputed from the reads with selection's own bar
 /// (`MinAltReads::reached_by`), because
 /// selection keeps it in a scratch buffer. A repeat tract's selection nominates lengths by a
-/// different route, so a tract's dropped allele is `not_selected`, or
-/// `refused_not_periodic` when the whole tract was.
+/// different route, so a tract's dropped allele is `not_selected`.
 pub(crate) fn selection_rows(
     rows: &mut Vec<ExplainRow>,
     observation: &CohortObservation,
@@ -268,9 +267,6 @@ pub(crate) fn selection_rows(
         }
         let value = match selection.remap().candidate_for(allele) {
             Some(candidate) => format!("kept_as_candidate_{}", candidate.0),
-            None if matches!(selection.verdict(), SelectionVerdict::NotPeriodic) => {
-                "refused_not_periodic".to_owned()
-            }
             None if !matches!(observation.kind, LocusKind::Generic) => "not_selected".to_owned(),
             None if cleared_the_bar => "cut_by_allele_cap".to_owned(),
             None => "below_support".to_owned(),
@@ -377,7 +373,6 @@ fn verdict_word(verdict: SelectionVerdict) -> String {
     match verdict {
         SelectionVerdict::Selected => "selected".to_owned(),
         SelectionVerdict::Truncated { dropped } => format!("truncated_by_cap_dropping_{dropped}"),
-        SelectionVerdict::NotPeriodic => "not_periodic".to_owned(),
     }
 }
 

@@ -1002,8 +1002,8 @@ fn a_tract_record_carries_its_motif_and_an_ordinary_one_carries_none() {
     );
 }
 
-/// **Selection's two tract verdicts reach the `FILTER` column, and a loop that did not settle
-/// outranks both.**
+/// **Selection's tract verdicts reach the `FILTER` column, and a loop that did not settle
+/// outranks them.**
 ///
 /// The precedence is not a preference: `assemble_record` asserts that the filter is `EMNoConv`
 /// exactly when the loop failed to converge, so the two cannot be carried together.
@@ -1023,10 +1023,6 @@ fn a_tracts_filter_comes_from_selection_unless_the_loop_did_not_settle() {
     assert_eq!(
         filter_of(&settled, SelectionVerdict::Selected),
         FilterVerdict::Pass,
-    );
-    assert_eq!(
-        filter_of(&settled, SelectionVerdict::NotPeriodic),
-        FilterVerdict::NotPeriodic,
     );
     assert_eq!(
         filter_of(&settled, SelectionVerdict::Truncated { dropped: 3 }),

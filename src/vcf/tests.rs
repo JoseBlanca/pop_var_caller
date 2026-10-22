@@ -176,10 +176,9 @@ fn a_refused_tract_locus_is_expressible() {
 
 #[test]
 fn every_filter_value_has_its_written_spelling() {
-    // Five values in one namespace, spelled as the two production writers spell them.
+    // Four values in one namespace, spelled as the two production writers spell them.
     assert_eq!(FilterVerdict::Pass.as_str(), "PASS");
     assert_eq!(FilterVerdict::EmDidNotConverge.as_str(), "EMNoConv");
-    assert_eq!(FilterVerdict::NotPeriodic.as_str(), "notPeriodic");
     assert_eq!(FilterVerdict::TooManyAlleles.as_str(), "tooManyAlleles");
     assert_eq!(FilterVerdict::LowDepth.as_str(), "lowDepth");
 }

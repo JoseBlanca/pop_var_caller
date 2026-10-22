@@ -459,8 +459,6 @@ struct TractTally {
     /// Loci the cap cut, and how many alternatives it removed in total.
     truncated: usize,
     truncated_alternatives: u64,
-    /// Loci refused as not varying in whole motif units.
-    not_periodic: usize,
     /// Loci that narrowed to the reference tract alone — a first-class outcome, not an error.
     reference_only: usize,
     /// Samples that carry a sequence the cap cut, summed over loci: each one is a genotype the
@@ -492,7 +490,6 @@ impl TractTally {
                 self.truncated += 1;
                 self.truncated_alternatives += u64::from(dropped);
             }
-            SelectionVerdict::NotPeriodic => self.not_periodic += 1,
             _ => {}
         }
         if selection.alternative_allele_count() == 0 {
@@ -528,11 +525,6 @@ impl TractTally {
             self.truncated,
             100.0 * self.truncated as f64 / loci,
             self.truncated_alternatives
-        );
-        println!(
-            "not_periodic\t{}\t{:.1}%",
-            self.not_periodic,
-            100.0 * self.not_periodic as f64 / loci
         );
         println!(
             "reference_only\t{}\t{:.1}%",
@@ -716,11 +708,10 @@ fn run_tracts(
             MinAltReadShare::new(raw.parse().expect("a number")).expect("a fraction of one");
     }
     println!(
-        "# tract selection: ploidy {}, bar {:?}, cap {}, off-grid share {}",
+        "# tract selection: ploidy {}, bar {:?}, cap {}",
         config.ploidy,
         config.shared.min_allele_support,
         config.shared.max_candidate_alleles.get(),
-        config.max_off_grid_share.get()
     );
 
     let mut cohort: Vec<Vec<SampleLocusObservations>> = Vec::with_capacity(cram_paths.len());

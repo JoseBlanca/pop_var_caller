@@ -329,10 +329,6 @@ impl<'a> RunReport<'a> {
     /// the cohort — and then called, filtered, or not scored at all. A run that printed only
     /// the base lines would say a refused tract's ground was *called*, which it was not.
     fn what_the_loci_came_to(&self, lines: &mut Vec<String>) {
-        // **The two refusals are here because the file cannot say them.** A tract refused as not
-        // periodic is called over the reference tract alone, so every sample is homozygous
-        // reference and no record is written; in the file it is indistinguishable from a tract
-        // nobody varied at (`doc/devel/ng/spec/vcf_output.md` §9).
         let tracts = &self.calling.tracts;
         if tracts.built() > 0 {
             lines.push(format!(
@@ -340,30 +336,6 @@ impl<'a> RunReport<'a> {
                 tracts.built(),
                 tracts.called,
             ));
-            if !tracts.not_periodic.is_empty() {
-                lines.push(format!(
-                    "  not called — the reads do not vary in whole motif units (notPeriodic): {}",
-                    tracts.not_periodic.len(),
-                ));
-                // **Sorted here, not where they are gathered**: the round driver's workers add
-                // theirs as they finish, so only a sort makes the lines the same at any thread
-                // count.
-                let mut refused = tracts.not_periodic.clone();
-                refused.sort_unstable_by_key(|tract| (tract.contig, tract.start, tract.end));
-                for tract in refused.iter().take(SPANS_A_REPORT_SHOWS) {
-                    lines.push(format!(
-                        "    {} ({} bases)",
-                        self.named(*tract),
-                        tract.len()
-                    ));
-                }
-                if refused.len() > SPANS_A_REPORT_SHOWS {
-                    lines.push(format!(
-                        "    … and {} more",
-                        refused.len() - SPANS_A_REPORT_SHOWS
-                    ));
-                }
-            }
             if tracts.too_many_alleles > 0 {
                 lines.push(format!(
                     "  called over fewer sequences than segregate there (tooManyAlleles): {}",

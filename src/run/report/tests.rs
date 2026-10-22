@@ -783,19 +783,8 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     );
 
     let mut some_built = a_run(3, 0, Vec::new(), Vec::new(), ground.clone());
-    // Seven refused tracts, **out of genome order** as the round driver's workers can hand
-    // them in, so that the listing below is checked for its sort as well as its cap.
-    let refused_at = |start: u64| GenomeRegion {
-        contig: ContigId(0),
-        start: Position(start),
-        end: Position(start + 19),
-    };
     some_built.calling.tracts = TractOutcomes {
         called: 40,
-        not_periodic: [700, 100, 600, 200, 500, 300, 400]
-            .into_iter()
-            .map(refused_at)
-            .collect(),
         too_many_alleles: 3,
         without_whole_repeats: 1,
         bundles: 7,
@@ -805,14 +794,10 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     // **The headline is the sum and the share of it that was called**, so a reader who stops
     // after one line still knows how much of the tract ground the run spoke for.
     assert!(
-        text.contains("repeat tracts: 51 built, of which 40 called"),
-        "the five outcomes sum to the tracts built: {text}",
+        text.contains("repeat tracts: 44 built, of which 40 called"),
+        "the three outcomes sum to the tracts built: {text}",
     );
     for (line, what) in [
-        (
-            "(notPeriodic): 7",
-            "the reads do not vary in whole motif units",
-        ),
         (
             "(tooManyAlleles): 3",
             "more sequences segregate than the cap admits",
@@ -831,31 +816,13 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
             "the report says {what} and how many, and got: {text}",
         );
     }
-    // **The refused tracts are named, sorted, and capped** like the too-wide loci: the count
-    // alone gave a reader nothing to look at.
-    let listed: Vec<&str> = text
-        .lines()
-        .filter(|line| line.starts_with("    chr1:"))
-        .collect();
-    assert_eq!(
-        listed,
-        [
-            "    chr1:100-119 (20 bases)",
-            "    chr1:200-219 (20 bases)",
-            "    chr1:300-319 (20 bases)",
-            "    chr1:400-419 (20 bases)",
-            "    chr1:500-519 (20 bases)",
-        ],
-        "the first five refused tracts in genome order: {text}",
-    );
-    assert!(text.contains("    … and 2 more"), "{text}");
     assert!(
         text.contains("called: 950 bases (95.0%)"),
         "the tract's bases are called ground — which is exactly why the lines above have to \
          exist: {text}",
     );
 
-    // **Each refusal's line appears only when it happened.** Four lines of zeros under a
+    // **Each refusal's line appears only when it happened.** Three lines of zeros under a
     // headline is a report a reader stops reading.
     let mut only_called = a_run(3, 0, Vec::new(), Vec::new(), ground);
     only_called.calling.tracts = TractOutcomes {
@@ -865,7 +832,6 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     let text = rendered(&only_called, &read_groups, &parameters, 1_000);
     assert!(text.contains("repeat tracts: 40 built, of which 40 called"));
     for absent in [
-        "notPeriodic",
         "tooManyAlleles",
         "shorter than one copy",
         "clean flanks, which",
@@ -877,24 +843,18 @@ fn tract_loci_the_run_could_not_score_are_a_line_of_their_own_and_only_when_ther
     }
 }
 
-/// **The five outcomes are a partition** — every tract-kind locus the merge built is in exactly
-/// one of them, which is what makes the headline's sum a fact rather than an addition.
+/// **The three outcomes are a partition** — every tract-kind locus the merge built is in exactly
+/// one of them, which is what makes the headline's sum a fact rather than an addition. The bundle
+/// count is a subset of them, not a fourth part.
 #[test]
 fn the_tract_outcomes_sum_to_the_tracts_built() {
-    let a_tract = |start: u64| GenomeRegion {
-        contig: ContigId(0),
-        start: Position(start),
-        end: Position(start + 9),
-    };
     let outcomes = TractOutcomes {
         called: 40,
-        not_periodic: (1..=5).map(|i| a_tract(100 * i)).collect(),
         too_many_alleles: 3,
         without_whole_repeats: 1,
         bundles: 7,
     };
-    assert_eq!(outcomes.built(), 49);
-    assert_eq!(outcomes.refused_by_a_filter(), 8);
+    assert_eq!(outcomes.built(), 44);
     assert_eq!(TractOutcomes::default().built(), 0);
 }
 

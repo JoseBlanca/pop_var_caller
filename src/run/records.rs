@@ -631,10 +631,10 @@ pub fn evidence_for_output(
 /// truncated *and* did not converge says `EMNoConv`, and the truncation is visible in the record
 /// anyway — the alternatives it kept are the alternatives it kept.
 ///
-/// # The tract verdicts are a tract's, and one of them ng never mints
+/// # The tract verdict is a tract's, and one more ng never mints
 ///
-/// `notPeriodic` and `tooManyAlleles` come from repeat-tract selection
-/// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §6, §7). **`lowDepth` is declared and never
+/// `tooManyAlleles` comes from repeat-tract selection
+/// (`doc/devel/ng/spec/candidate_alleles_ssr.md` §6). **`lowDepth` is declared and never
 /// written**: production refuses a tract whose *cohort-summed* depth is under ten, and ng does
 /// not port that gate — depth is asked once, upstream, per sample, by the merge's keep rule,
 /// and there is no depth verdict on this path (§6). The vocabulary stays in the header because
@@ -651,10 +651,9 @@ fn filter_for(locus: &LocusInference, selection: SelectionVerdict) -> FilterVerd
     }
     match locus.alleles().kind() {
         LocusKind::Generic => FilterVerdict::Pass,
-        // An STR bundle's selection gives the segment's two verdicts (`str_bundle_loci.md` §7.2),
+        // An STR bundle's selection gives the segment's verdicts (`str_bundle_loci.md` §7.2),
         // and they reach the column the same way.
         LocusKind::Ssr(_) | LocusKind::SsrBundle(_) => match selection {
-            SelectionVerdict::NotPeriodic => FilterVerdict::NotPeriodic,
             SelectionVerdict::Truncated { .. } => FilterVerdict::TooManyAlleles,
             _ => FilterVerdict::Pass,
         },
