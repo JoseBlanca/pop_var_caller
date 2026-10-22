@@ -583,7 +583,9 @@ impl SsrSelectionConfig {
                 max_candidate_alleles: DEFAULT_MAX_CANDIDATE_ALLELES_SSR,
                 ..CandidateSelectionConfig::DEFAULT
             },
-            max_off_grid_share: MaxOffGridShare::DEFAULT,
+            max_off_grid_share: crate::exp::off_grid_share()
+                .map(|v| MaxOffGridShare::new(v).expect("PVC_EXP_OFF_GRID_SHARE in [0, 1]"))
+                .unwrap_or(MaxOffGridShare::DEFAULT),
             ploidy,
             // Off. The driver switches it on from the run's `DiscoveryConfig`
             // (`NG_TRACT_DISCOVERY=1` today), and off must stay byte-identical to the
