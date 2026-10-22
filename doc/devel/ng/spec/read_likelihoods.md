@@ -595,8 +595,9 @@ what biases the estimate, and stops being true of **the caller**. The edit is no
 **At the ends of the range.** The fitted rate is pooled over hundreds of millions of base
 observations, so it is equally well determined at 3 reads a position and at 300, and it exists at
 one sample as readily as at a thousand — it is a property of a read group, and one sample has read
-groups. **Where the pre-pass emits no rate** — too little data — the scale is 1 and the qualities
-are used as reported. **That must be visible in the run's output**, because a run calibrated against
+groups. **Where the pre-pass emits no rate** — too little data — the scale is the stated default,
+2.0 since 2026-10-22 (owner's decision; [`parameters_file.md`](parameters_file.md) §8 gives the
+measurement), so every read's reported error is doubled. **That must be visible in the run's output**, because a run calibrated against
 a measurement and a run trusting the instrument are otherwise indistinguishable.
 
 **A sample whose noise is off the end of the ladder is not that case, and this paragraph used to
@@ -810,8 +811,10 @@ property of the allele pair, computed beside `m` once per `(allele, genotype)`.
 thousand, at 3 reads a position and at 300. **It holds at any scale, below one as well as above**:
 the argument is that the fitted rate carries no information about indels in either direction, so a
 read group whose substitutions come out better than its qualities claim does not make its indel
-errors rarer either. (Every fit seen so far is above one: 2.7 to 19.6 on GIAB and tomato.) A `--defaults` run, whose scale is 1, is byte-identical
-to the formula before this amendment. On the three GIAB samples it restored the defaults' generic
+errors rarer either. (Every fit seen so far is above one: 2.7 to 19.6 on GIAB and tomato.) A `--defaults` run had a scale of 1 when this amendment
+was made, so for it the amendment changed nothing; since 2026-10-22 its scale is 2, and the
+amendment keeps its indel errors at the minted error while its substitutions are doubled. On the
+three GIAB samples the amendment restored the defaults' generic
 indel counts at every depth from 5× to 300× and left every SNP count at the fitted run's; on tomato
 at about 3× it moved 46 generic indel records and 43 genotypes among 6,888, with no truth set to
 score them against.

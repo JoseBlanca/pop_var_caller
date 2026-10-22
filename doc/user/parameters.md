@@ -30,7 +30,7 @@ marked `defaulted`. A class with no estimate at all gets an even spread at 1/11,
 
 | Quantity | Built-in value |
 |---|---|
-| base-quality calibration | none: the sequencer's qualities are taken as they are |
+| base-quality calibration | every base's reported error probability is doubled (about 3 Phred lower), on the assumption that the sequencer's qualities are optimistic. The factor of 2 was chosen on three human Illumina genomes; a fitted file measures it for your own libraries |
 | contamination | none |
 | inbreeding F | 0, for every sample: outbred, Hardy–Weinberg proportions |
 | stutter | 1 read in 20 a unit short and 1 in 20 a unit long, for every repeat |

@@ -166,13 +166,14 @@ supplied file cannot be paired with a run at a different ploidy without saying s
 **One multiplier on each read's own reported error probability**, per read group, with its warrant
 and the number of observations behind it.
 
-**A read group with no usable rate gets a scale of one, marked `Defaulted` — never a fitted zero.**
+**A read group with no usable rate gets the default scale of §8, 2.0, marked `Defaulted` — never a
+fitted zero.**
 A zero scale charges every read of that library the error floor, which is maximal confidence about
 every base, drawn from a fit that found no errors at all. `ReadGroupCalibration::from_fitted_rate`
 refuses it and the assembly takes `ReadGroupCalibration::defaulted` instead
 ([`run_parameters.rs`](../../../../src/ng/calling/run_parameters.rs), module documentation). The
 file must be able to express that state, which is why the warrant travels with the value rather
-than being inferred from it: a scale of exactly 1.0 is a legitimate fitted answer as well as the
+than being inferred from it: a scale of exactly 2.0 is a legitimate fitted answer as well as the
 default.
 
 ### 3.4 Per read group — contamination, and the batching it was drawn against
@@ -409,7 +410,7 @@ likely to cost a day. In one place:
 |---|---|---|
 | no read group identified any contamination | the contamination table is absent | write zeros for every read group |
 | a read group was measured and is clean | fraction 0, evidence counts non-zero | read it as unmeasured |
-| a read group's error rate could not be fitted | scale 1.0, warrant `Defaulted` | read the 1.0 as a fitted answer |
+| a read group's error rate could not be fitted | a stated scale, warrant `Defaulted`: §8's 2.0 in a run that fitted nothing, and the pre-pass's stated error rate over the library's own mean reported error in a run that fitted other read groups | read the stated scale as a fitted answer |
 | a stratum was furnished from its period's curves | no length spectrum entry | fall back silently to the flat rung without saying so |
 | a read group has no reads in a stratum | no row for that (stratum × slippage group) | write a zero slip rate |
 | the file does not say what its run counted as a repeat | `[repeat_routing]` is absent (§3.9) | read it as the defaults |
@@ -510,19 +511,33 @@ user has to find first.
 
 **Not every parameter has an honest default, and the file must not hide which.** Three cases:
 
-- **has one**: the base-quality calibration scale (1.0 — no calibration), the repeat-tract outlier
-  weight (0.07, a swept constant, §3.8), the flat concentration (1.0). All marked `Defaulted`.
+- **has one**: the base-quality calibration scale (2.0, a stated constant — below), the
+  repeat-tract outlier weight (0.07, a swept constant, §3.8), the flat concentration (1.0). All
+  marked `Defaulted`.
 - **absence is the default**: contamination. A run told nothing about contamination is
   uncontaminated, which is a real model state and not a guess (§3.4).
 - **has one, and it has to be measured before it exists** — decided 2026-08-28: the
   per-(stratum × slippage group) slippage numbers. **The defaults are fitted from the GIAB HG002
   alignments** and compiled in like the others.
 
-**That last default is the softest number in the file, and it should be read that way.** It is one
-individual, one library preparation, one genome, standing in for every chemistry a run might use —
-where the others are either "no calibration" (a scale of one) or a real model state (no
-contamination). A tomato PCR library taking a human PCR-free slip rate is a guess in a way that a
-scale of one is not. Two consequences:
+**The base-quality scale is 2.0 — owner's decision, 2026-10-22.** Every read's reported error
+probability is doubled, which claims that Illumina base qualities are optimistic by about a factor
+of two. It was 1.0 until then, chosen as the value at which the model does nothing; that rationale
+no longer holds, because 1.0 also makes a claim — that the qualities are right — and every fitted
+scale measured here refutes it (6 to 8 on GIAB at 5× to 30×, 12 to 17 at 300×). **The measurement
+behind 2.0:** on GIAB chr22, HG002, HG003 and HG004 summed against the v4.2.1 truth, 2.0 rather
+than 1.0 removes 1,513 false calls for 486 true ones lost at 5×, 1,263 for 427 at 10×, 334 for 15
+at 30×, and 241 for one true call gained at 300×; above 2.0, each further step at 5× and 10× removes
+about one false call per true call lost, so 2.0 is where the trade stops paying. **It is one human
+trio, one library each, one chromosome**, and it applies to every `--defaults` run of any species,
+none of which was measured.
+
+**The slippage default is the softest number in the file, and it should be read that way.** It is
+one individual, one library preparation, one genome, standing in for every chemistry a run might use
+— where the base-quality scale is one factor on numbers every library reports for itself, and
+contamination's default is a real model state. A tomato PCR library taking a human PCR-free slip
+rate is a guess in a way that a scale of two on its own reported qualities is not. Two
+consequences:
 
 - the default is marked `Defaulted` like the rest, and its origin — which alignments, at what
   depth, on which date — is written into the file as a comment beside it, so a user can see what
@@ -655,7 +670,7 @@ memory and in direct mode from the file that fit wrote, must give the same VCF.
    ([`run_streaming.md`](run_streaming.md) §12).
 3. **Each of §5's five rows is a test.** A file with an absent contamination table gives an
    uncontaminated run; one with a zero fraction and non-zero counts gives a measured-and-clean read
-   group; a `Defaulted` scale of 1.0 does not read back as fitted. These are the states a reader
+   group; a `Defaulted` scale does not read back as fitted, even at a value a fit could give. These are the states a reader
    collapses, so each needs a fixture where collapsing them changes an answer — not merely a
    fixture where they differ.
 4. **Each of §6's three refusals fires, and names the field.** A file against another reference,
