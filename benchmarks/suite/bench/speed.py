@@ -1,7 +1,7 @@
 """Speed and peak memory of each caller's whole pipeline on the tomato cohort (plan §4.6).
 
-63 tomato accessions at about 3 reads a position over 80 regions of 100 kb (8 Mb of SL4.0), called
-at 1, 8 and 63 samples so the table shows how each caller grows with the cohort. The one-human-sample
+62 tomato accessions at about 3 reads a position over 80 regions of 100 kb (8 Mb of SL4.0), called
+at 1, 8 and 62 samples so the table shows how each caller grows with the cohort. The one-human-sample
 figures come from the HG002 5 Mb benchmark (`hg002_5mb`), whose arms are timed the same way.
 
 Each caller runs as its documentation tells a user to (plan §3.4), at 6 threads: one process per
@@ -17,8 +17,9 @@ from lib.steps import Step, file_identity
 
 TITLE = "Speed and peak memory — tomato cohort"
 DESCRIPTION = """
-Tomato (S. lycopersicum, SL4.0). 63 accessions at about 3 reads a position, over 80 regions of
-100 kb (8 Mb); the first 1, 8 and all 63 accessions in name order. Each caller's whole pipeline at
+Tomato (S. lycopersicum, SL4.0). 62 accessions at about 3 reads a position, over 80 regions of
+100 kb (8 Mb); the first 1, 8 and all 62 accessions in name order. (The data directory holds 63
+files; SRR7279543 is left out because its CRAM is truncated.) Each caller's whole pipeline at
 6 threads, inside a Linux virtual machine given 6 cores and 32 GB on the machine named below:
 wall_seconds is elapsed time, cpu_seconds user plus system time summed over every process,
 peak_rss_mb_all_processes the largest total resident memory of the processes running at once (the
@@ -28,7 +29,14 @@ generate-psps, estimate-parameters and call-from-psps ("whole pipeline" is their
 catalogue (repeat-catalog), built once per reference, is timed separately under "repeat_catalog".
 """
 
-SIZES = [1, 8, 63]
+SIZES = [1, 8, 62]
+
+# Files of the tomato data directory left out of every tomato benchmark, and why.
+EXCLUDED = {
+    "SRR7279543.p1.bench.cram": "truncated: no end-of-file block, and its reads stop at "
+                                "SL4.0ch08:54,312,875, so it has none in the regions on chromosomes "
+                                "9 to 12 (found 2026-10-22; the owner chose to drop it)",
+}
 ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
 REFERENCE = os.path.expanduser("~/genomes/s_lycopersicum/4.00/S_lycopersicum_chromosomes.4.00.fa")
 
@@ -38,7 +46,7 @@ def cohort(ctx):
     crams = ctx.data("benchmarks", "tomato1", "crams")
     out = {}
     for f in sorted(os.listdir(crams)):
-        if not f.endswith(".cram"):
+        if not f.endswith(".cram") or f in EXCLUDED:
             continue
         path = os.path.join(crams, f)
         header = subprocess.run(["samtools", "view", "-H", path], capture_output=True, text=True,

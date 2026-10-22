@@ -1,7 +1,7 @@
 """Agreement with GATK on the tomato cohort, which has no truth set (plan §4.7).
 
-Uses the 63-sample calls the speed benchmark makes (pvc both ways, and GATK's joint calls), so it
-runs no caller of its own; it needs `speed` to have run at 63 samples (2 in the slice).
+Uses the whole-cohort calls the speed benchmark makes (pvc both ways, and GATK's joint calls), so it
+runs no caller of its own; it needs `speed` to have run at all 62 accessions (2 in the slice).
 """
 
 import os
@@ -13,7 +13,7 @@ from . import speed
 
 TITLE = "Agreement with GATK — tomato cohort (no truth set)"
 DESCRIPTION = """
-Tomato (S. lycopersicum, SL4.0), all 63 accessions over 80 regions of 100 kb, about 3 reads a
+Tomato (S. lycopersicum, SL4.0), all 62 accessions over 80 regions of 100 kb, about 3 reads a
 position. There is no truth set, so this is agreement, not accuracy. Both callers' VCFs are
 left-aligned, split and decomposed the same way (bcftools norm -m -any -a); the unit is one sample's
 genotype at one variant where at least one caller gives that sample the allele. same_genotype: both
@@ -24,7 +24,7 @@ it the allele and the other leaves the sample uncalled.
 
 
 def steps(ctx):
-    size = 2 if ctx.slice else 63
+    size = 2 if ctx.slice else speed.SIZES[-1]
     _, regions = speed.regions_step(ctx)
     samples = list(speed.cohort(ctx))[:size]
     gatk = os.path.join(ctx.results_root, "competitors", f"speed/tomato_{size}", "gatk",

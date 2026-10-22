@@ -94,9 +94,9 @@ summary marks those with ⚠).
 | `hg002_5mb` | HG002 over 1,000 confident intervals (5.08 Mb), 30× and full depth; also the one-human-sample speed figures | the same |
 | `hg002_tr` | GIAB HG002 tandem-repeat benchmark, 50,000 regions, 5× to 300×; STR genotypes per tract | pvc (defaults, fitted), GATK, HipSTR |
 | `stutter_sim` | simulated 4 Mb genome with 3,000 STR segments and 500 bundles, PCR and PCR-free, 1 and 50 samples, 5× to 60× | pvc (defaults, fitted, true stutter), GATK, freebayes, HipSTR (twice) |
-| `speed` | tomato cohort, 1, 8 and 63 accessions over 8 Mb: wall time, CPU time, peak memory of each whole pipeline | pvc (both ways), GATK, freebayes |
+| `speed` | tomato cohort, 1, 8 and 62 accessions over 8 Mb (a 63rd, SRR7279543, has a truncated CRAM and is left out): wall time, CPU time, peak memory of each whole pipeline | pvc (both ways), GATK, freebayes |
 | read floor (in `speed` and `hg002_5mb`) | `samtools view -c -M -L` over the same files: the cost of only reading and decoding them, set beside pvc's `generate-psps` and `call-from-alignments` with their ratio | samtools, run once like a competitor |
-| `tomato_agreement` | pvc's 63-accession genotypes against GATK's (no truth set) | pvc against GATK |
+| `tomato_agreement` | pvc's 62-accession genotypes against GATK's (no truth set) | pvc against GATK |
 | `external_chr22` | the colleague's chr22 benchmark; not in a full run, needs `--external-config` (see `bench/external_chr22.py`) | pvc (defaults, fitted), GATK, freebayes |
 
 How each is scored:
