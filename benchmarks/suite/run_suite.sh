@@ -66,6 +66,7 @@ pass+=(--threads "$threads")
 [[ -n "${BENCH_TOMATO_CRAMS:-}" ]] && pass+=(--tomato-crams "$BENCH_TOMATO_CRAMS")
 [[ -n "${BENCH_TOMATO_REFERENCE:-}" ]] && pass+=(--tomato-reference "$BENCH_TOMATO_REFERENCE")
 [[ -n "${BENCH_TOMATO_SIZES:-}" ]] && pass+=(--tomato-sizes "$BENCH_TOMATO_SIZES")
+[[ -n "${BENCH_TOMATO_REGIONS:-}" ]] && pass+=(--tomato-regions "$PROJECT_DIR/$BENCH_TOMATO_REGIONS")
 [[ $slice == 1 ]] && RESULTS="$RESULTS/slice"
 mkdir -p "$RESULTS"
 

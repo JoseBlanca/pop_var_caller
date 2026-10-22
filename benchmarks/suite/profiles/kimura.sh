@@ -8,3 +8,9 @@ BENCH_TOMATO_CRAMS=/home/joxi/tomato25/snp_calling/crams
 BENCH_TOMATO_REFERENCE=/home/joxi/tomato25/genome/S_lycopersicum_chromosomes.4.00.fa
 # Both are under this directory, mounted read-only into the dev container and the DeepVariant jobs.
 BENCH_EXTRA_MOUNT=/home/joxi/tomato25
+# Speed is measured over all of chromosome 1 (90.9 Mb), not tomato1's 8 Mb: whole-genome CRAMs
+# make larger ground possible, and 8 Mb is too little for start-up to stay small. Relative to the
+# checkout.
+BENCH_TOMATO_REGIONS=benchmarks/suite/data/tomato/SL4.0ch01.bed
+# Sample counts for the speed curve: all real accessions on kimura, no copies.
+BENCH_TOMATO_SIZES=1,2,5,10,20,50,100

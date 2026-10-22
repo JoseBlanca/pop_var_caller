@@ -86,13 +86,14 @@ def style_axes(ax, xlabel, ylabel, title):
     ax.set_title(title, color=TEXT, fontsize=11, loc="left")
 
 
-def draw_lines(ax, series, point_labels_for="pvc (defaults)"):
-    """`series`: caller -> list of (x, y, point label) in order."""
-    for caller in CALLERS:
+def draw_lines(ax, series, point_labels_for="pvc (defaults)", styles=None, order=None):
+    """`series`: line -> list of (x, y, point label) in order."""
+    styles = styles or STYLE
+    for caller in order or CALLERS:
         pts = series.get(caller)
         if not pts:
             continue
-        st = STYLE[caller]
+        st = styles[caller]
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         ax.plot(xs, ys, color=st["color"], linestyle=st["linestyle"], linewidth=2,
                 marker=st["marker"], markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.5,
@@ -173,34 +174,46 @@ def accuracy_figure(rows, benchmark, title, subtitle, out, name, aggregate=False
     return save(fig, out, name)
 
 
-PERF_STAGE = {  # the figure for each caller's whole run
-    "pvc (defaults)": "call-from-alignments",
-    "pvc (fitted)": "whole pipeline",
-    "GATK": ("whole pipeline", "HaplotypeCaller"),
-    "freebayes": "freebayes",
-    "DeepVariant": ("DeepVariant", "DeepVariant + GLnexus"),
-}
+# The performance figures' lines: (line, caller in the table, its stages in order of preference).
+# pvc is three lines, its three ways of spending time: in one step from the reads, building the
+# psps from the reads, and calling from the psps. Its parameter fit is optional, made once for a
+# cohort, and is in no line (the summary reports it on its own).
+PERF_LINES = [
+    ("pvc, one step", "pvc (defaults)", ("call-from-alignments",)),
+    ("pvc, building psps", "pvc (fitted)", ("generate-psps",)),
+    ("pvc, calling from psps", "pvc (fitted)", ("call-from-psps",)),
+    ("GATK", "GATK", ("whole pipeline", "HaplotypeCaller")),
+    ("freebayes", "freebayes", ("freebayes",)),
+    ("DeepVariant", "DeepVariant", ("DeepVariant + GLnexus", "DeepVariant")),
+]
+PERF_STYLE = dict(STYLE)
+PERF_STYLE["pvc, one step"] = dict(STYLE["pvc (defaults)"])
+PERF_STYLE["pvc, building psps"] = dict(color="#2a78d6", linestyle="--", marker="s",
+                                        label="pvc, building psps")
+PERF_STYLE["pvc, calling from psps"] = dict(color="#2a78d6", linestyle=":", marker="v",
+                                            label="pvc, calling from psps")
 
 
 def performance_series(rows, benchmark, label_of):
     vals = collections.defaultdict(dict)
-    for r in rows:
-        if r["benchmark"] != benchmark or r["caller"] not in STYLE:
-            continue
-        want = PERF_STAGE[r["caller"]]
-        if r["stage"] not in (want if isinstance(want, tuple) else (want,)):
-            continue
-        if r["metric"] in ("wall_seconds", "peak_rss_mb_all_processes"):
-            key = (r["caller"], r["samples"], r["depth"])
-            # GATK's whole pipeline wins over its HaplotypeCaller row where both exist.
-            if r["metric"] in vals[key] and r["stage"] == "HaplotypeCaller":
+    for line, caller, stages in PERF_LINES:
+        for r in rows:
+            if r["benchmark"] != benchmark or r["caller"] != caller or r["stage"] not in stages:
+                continue
+            if r["metric"] not in ("wall_seconds", "peak_rss_mb_all_processes"):
+                continue
+            key = (line, r["samples"], r["depth"])
+            rank = stages.index(r["stage"])
+            prior = vals[key].get(("rank", r["metric"]))
+            if prior is not None and prior < rank:
                 continue
             vals[key][r["metric"]] = float(r["value"])
+            vals[key][("rank", r["metric"])] = rank
     series = collections.defaultdict(list)
-    for (caller, samples, depth), m in vals.items():
+    for (line, samples, depth), m in vals.items():
         if "wall_seconds" in m and "peak_rss_mb_all_processes" in m:
-            series[caller].append((label_of(samples, depth), m["wall_seconds"],
-                                   m["peak_rss_mb_all_processes"] / 1024))
+            series[line].append((label_of(samples, depth), m["wall_seconds"],
+                                 m["peak_rss_mb_all_processes"] / 1024))
     return series
 
 
@@ -212,7 +225,8 @@ def performance_figure(rows, benchmark, order_key, label_of, title, subtitle, ou
     fig, ax = plt.subplots(figsize=(7.5, 5), facecolor=SURFACE)
     style_axes(ax, "wall time (seconds)", "peak memory (GB)", "")
     ax.margins(x=0.08, y=0.12)
-    draw_lines(ax, series)
+    draw_lines(ax, series, point_labels_for="pvc, one step", styles=PERF_STYLE,
+               order=[line for line, _, _ in PERF_LINES])
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     ax.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: f"{v:g}" if f"{v:.0e}"[0] in "25" else ""))
     fig.suptitle(title, x=0.01, ha="left", color=TEXT, fontsize=13, y=1.02)
@@ -240,12 +254,14 @@ def main():
             rows, "giab_chr20", depth_key, lambda s, d: d,
             # depth_key orders the raw depths; their labels are made readable below.
             "Speed and memory — HG002, chromosome 20, one sample",
-            "6 threads; points from 5× to ~60×; lower left is faster and smaller", out,
+            "6 threads; points from 5× to ~60×; pvc's optional parameter fit is in no line",
+            out,
             "performance_giab_chr20"),
         performance_figure(
             rows, "speed", lambda s: int(s), lambda s, d: s,
             "Speed and memory — tomato cohort, 8 Mb at ~3 reads a position",
-            "6 threads; points are 1, 8 and 62 accessions", out, "performance_tomato"),
+            "6 threads; points are 1, 8 and 62 accessions; pvc's optional parameter fit is in no "
+            "line", out, "performance_tomato"),
     ]
     for m in made:
         print(m)

@@ -123,7 +123,10 @@ def _server_cohort(ctx):
 
 
 def regions_step(ctx):
-    src = ctx.data("benchmarks", "tomato1", "regions.bed")
+    # tomato1's 80 regions of 100 kb (8 Mb), the only ground its sliced CRAMs cover; a machine with
+    # whole-genome CRAMs can set larger regions in its profile (BENCH_TOMATO_REGIONS; kimura: all
+    # of chromosome 1).
+    src = ctx.tomato_regions or ctx.data("benchmarks", "tomato1", "regions.bed")
     path = os.path.join(ctx.results_root, "inputs", "tomato", "regions", "regions.bed")
 
     def action(d):

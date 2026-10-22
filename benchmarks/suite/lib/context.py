@@ -27,6 +27,7 @@ class Context:
         self.external_config = getattr(args, "external_config", None)
         self.tomato_crams = getattr(args, "tomato_crams", None)
         self.tomato_reference = getattr(args, "tomato_reference", None)
+        self.tomato_regions = getattr(args, "tomato_regions", None)
         sizes = getattr(args, "tomato_sizes", None)
         self.tomato_sizes = [int(x) for x in sizes.split(",")] if sizes else None
         self.wait_for_quiet = not args.no_wait

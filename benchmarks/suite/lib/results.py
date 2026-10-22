@@ -235,6 +235,48 @@ def _read_floor_section(rows):
             "|---|---|---:|---|---|---:|---:|---:|---:|---:|---|"] + lines + [""]
 
 
+def _add_sample_section(rows, threads):
+    """pvc's psp route against GATK's GVCF route: the cost of adding one sample to a cohort.
+
+    The per-sample file's time is derived from the cohort run, where `threads` samples ran at once:
+    one sample's time is the stage's wall time times the number running at once, over the number of
+    samples. The joint steps are timed as they are.
+    """
+    walls = {(r["benchmark"], r["dataset"], str(r["samples"]), str(r["depth"]), r["caller"],
+              r["stage"]): float(r["value"]) for r in rows if r["metric"] == "wall_seconds"}
+    configs = sorted({k[:4] for k in walls if k[5] == "generate-psps" and k[0] == "speed"},
+                     key=lambda k: (k[0], k[1], _num(k[2])))
+    lines = []
+    for key in configs:
+        n = int(key[2])
+        g = lambda caller, stage: walls.get(key + (caller, stage))
+        per = lambda v: None if v is None else v * min(threads, n) / n
+        psp, call = per(g("pvc (fitted)", "generate-psps")), g("pvc (fitted)", "call-from-psps")
+        gvcf = per(g("GATK", "HaplotypeCaller GVCFs"))
+        comb, geno = g("GATK", "CombineGVCFs"), g("GATK", "GenotypeGVCFs")
+        fit = g("pvc (fitted)", "estimate-parameters")
+        direct = g("pvc (defaults)", "call-from-alignments")
+        fmt = lambda v: "." if v is None else f"{v:,.1f}"
+        pvc_add = psp + call if psp is not None and call is not None else None
+        gatk_add = gvcf + comb + geno if None not in (gvcf, comb, geno) else None
+        lines.append(f"| {key[2]} | {fmt(direct)} | {fmt(psp)} | {fmt(call)} | {fmt(pvc_add)} | "
+                     f"{fmt(fit)} | {fmt(gvcf)} | {fmt(comb)} | {fmt(geno)} | {fmt(gatk_add)} |")
+    if not lines:
+        return []
+    return ["## Adding a sample to a cohort — pvc's psp route against GATK's GVCF route", "",
+            "Both callers can keep a per-sample file (pvc: a psp; GATK: a GVCF) and redo only the",
+            "joint step when a sample is added: one per-sample file plus the joint step over the",
+            f"cohort. The per-sample time is derived from the cohort run, where {threads} samples ran",
+            "at once: the stage's wall time × the number running at once ÷ the number of samples.",
+            "pvc's parameter fit is optional, made once for a cohort, and is shown on its own, in",
+            "no sum. pvc in one step reads every sample's reads again. Tomato cohort; wall seconds.",
+            "",
+            "| samples | pvc one step | pvc: one psp | pvc: call from psps | pvc: add a sample | "
+            "pvc: fit (optional) | GATK: one GVCF | GATK: CombineGVCFs | GATK: GenotypeGVCFs | "
+            "GATK: add a sample |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"] + lines + [""]
+
+
 def _num(value):
     try:
         return float(str(value).rstrip("x"))
@@ -306,6 +348,7 @@ def write_summary(ctx, rows, benchmarks):
                 lines.append("| " + " | ".join(str(x) for x in k) + " | "
                              + " | ".join(cells[k].get(c, "") for c in callers) + " |")
             lines.append("")
+    lines.extend(_add_sample_section(rows, ctx.threads))
     lines.extend(_read_floor_section(rows))
     if any(busy(r) for r in rows):
         lines.append(f"⚠ marks a time or memory figure measured while processes other than the suite "
