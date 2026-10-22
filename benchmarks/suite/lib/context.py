@@ -135,6 +135,9 @@ def _read_version(ctx, tool):
         return _first_line("samtools --version")
     if tool == "minimap2":
         return "minimap2 " + _first_line("minimap2 --version")
+    if tool == "deepvariant":
+        from .hostjobs import DEEPVARIANT_VERSION
+        return f"DeepVariant {DEEPVARIANT_VERSION}"
     if tool == "vcfeval":
         return "RTG Tools " + _first_line(f"java -jar {ctx.rtg_jar} version 2>&1 | grep -i 'product'").split()[-1]
     sys.exit(f"no version reader for {tool}")

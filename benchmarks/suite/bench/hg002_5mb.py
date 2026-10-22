@@ -20,7 +20,7 @@ pair-HMM threads, freebayes as 6 processes over blocks of the intervals.
 """
 
 DEPTHS = ["30x", "full"]
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
 
 
 def steps(ctx):

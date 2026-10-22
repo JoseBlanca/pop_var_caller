@@ -14,6 +14,9 @@ The dev image has no GNU `time`, so this does the measuring itself, from two sou
 
 Several commands can run at once (`max_concurrent`), which is how the one-sample stages are run:
 one process per sample, as many at a time as the suite has cores.
+
+Only the standard library and Linux's `/proc` are used, so the same measuring runs inside other
+tools' images too (DeepVariant's, through lib/measure_cli.py).
 """
 
 import os
@@ -22,9 +25,8 @@ import subprocess
 import threading
 import time
 
-import psutil
-
 SAMPLE_INTERVAL_S = 0.2
+PAGE_BYTES = os.sysconf("SC_PAGE_SIZE")
 
 
 class CommandFailed(Exception):
@@ -41,6 +43,40 @@ def _high_water(pid):
     except OSError:
         return None
     return None
+
+
+def _rss(pid):
+    """A process's resident memory now, in bytes, or None."""
+    try:
+        with open(f"/proc/{pid}/statm") as fh:
+            return int(fh.read().split()[1]) * PAGE_BYTES
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _descendants(roots):
+    """The given processes and every process descended from them, from /proc."""
+    children = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as fh:
+                stat = fh.read()
+        except OSError:
+            continue
+        # The fourth field, after the parenthesised command name (which may hold spaces).
+        try:
+            ppid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    out, stack = [], list(roots)
+    while stack:
+        pid = stack.pop()
+        out.append(pid)
+        stack.extend(children.get(pid, []))
+    return out
 
 
 class _MemorySampler(threading.Thread):
@@ -67,20 +103,14 @@ class _MemorySampler(threading.Thread):
             with self.lock:
                 pids = list(self.pids)
             total = 0
-            for pid in pids:
-                try:
-                    root = psutil.Process(pid)
-                    procs = [root] + root.children(recursive=True)
-                except psutil.Error:
+            for pid in _descendants(pids) if pids else []:
+                rss = _rss(pid)
+                if rss is None:
                     continue
-                for proc in procs:
-                    try:
-                        total += proc.memory_info().rss
-                    except psutil.Error:
-                        pass
-                    hwm = _high_water(proc.pid)
-                    if hwm is not None and hwm > self.high_water.get(proc.pid, 0):
-                        self.high_water[proc.pid] = hwm
+                total += rss
+                hwm = _high_water(pid)
+                if hwm is not None and hwm > self.high_water.get(pid, 0):
+                    self.high_water[pid] = hwm
             self.peak_summed_bytes = max(self.peak_summed_bytes, total)
             self.stopping.wait(SAMPLE_INTERVAL_S)
 

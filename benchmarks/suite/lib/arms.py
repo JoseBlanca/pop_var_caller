@@ -16,7 +16,7 @@ rerun for every commit; GATK's and freebayes' live under `competitors/` and run 
 import os
 import shutil
 
-from . import callers, vcfeval
+from . import callers, hostjobs, vcfeval
 from .measure import check_alignments, merge, run_commands, warm
 from .results import row, time_rows
 from .steps import Step, file_identity
@@ -25,13 +25,13 @@ GRCH38 = os.path.expanduser(
     "~/genomes/h_sapiens/gca_grch38/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna")
 
 ARM_LABELS = {"pvc_defaults": "pvc (defaults)", "pvc_fitted": "pvc (fitted)", "gatk": "GATK",
-              "freebayes": "freebayes", "hipstr": "HipSTR"}
+              "freebayes": "freebayes", "hipstr": "HipSTR", "deepvariant": "DeepVariant"}
 ARM_CALLER = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebayes": "freebayes",
-              "hipstr": "hipstr"}
+              "hipstr": "hipstr", "deepvariant": "deepvariant"}
 ARM_KIND = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "competitor",
-            "freebayes": "competitor", "hipstr": "competitor"}
+            "freebayes": "competitor", "hipstr": "competitor", "deepvariant": "competitor"}
 ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebayes": "freebayes",
-            "hipstr": "hipstr"}
+            "hipstr": "hipstr", "deepvariant": "deepvariant"}
 # freebayes writes every candidate it considers; its documentation asks for a quality filter.
 MIN_QUAL = {"freebayes": 20}
 
@@ -185,6 +185,42 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
                     + time_rows(row_base, total, "whole pipeline"))
             return {"measurement": total, "rows": rows}
 
+    elif arm == "deepvariant":
+        def action(d):
+            # DeepVariant runs in Google's own image through the host job runner (hostjobs.py),
+            # one sample at a time with its own parallelism (`--num_shards`, one per core). A
+            # cohort is called the way DeepVariant documents: a GVCF per sample, joined by GLnexus.
+            hostjobs.require(ctx)
+            check_alignments(flat + [reference])
+            warm(flat + [reference])
+            measurements, rows = [], []
+            for s in samples:
+                tmp = os.path.join(d, f"intermediate_{s}")
+                out = calls if not joint else os.path.join(d, f"{s}.vcf.gz")
+                gvcf = f" --output_gvcf={os.path.join(d, f'{s}.g.vcf.gz')}" if joint else ""
+                cmd = (f"/opt/deepvariant/bin/run_deepvariant --model_type=WGS --ref={reference} "
+                       f"--reads={files[s][0]} --regions={regions} --output_vcf={out}{gvcf} "
+                       f"--num_shards={ctx.threads} --intermediate_results_dir={tmp} "
+                       f"--vcf_stats_report=false")
+                m = hostjobs.run(ctx, "deepvariant", cmd, d, f"deepvariant.{s}")
+                measurements.append(m)
+                shutil.rmtree(tmp, ignore_errors=True)
+            if joint:
+                gvcfs = " ".join(os.path.join(d, f"{s}.g.vcf.gz") for s in samples)
+                m = hostjobs.run(ctx, "glnexus",
+                                 f"glnexus_cli --config DeepVariantWGS --bed {regions} "
+                                 f"--threads {ctx.threads} {gvcfs} > {os.path.join(d, 'joint.bcf')}",
+                                 d, "glnexus")
+                measurements.append(m)
+                run_commands([("bcf_to_vcf", f"bcftools view --no-version {os.path.join(d, 'joint.bcf')} "
+                                             f"-Oz -o {calls}")], os.path.join(d, "logs"))
+                shutil.rmtree(os.path.join(d, "GLnexus.DB"), ignore_errors=True)
+            run_commands([("index", f"bcftools index -t -f {calls}")], os.path.join(d, "logs"))
+            measured = [m for m in measurements if m]
+            total = merge(*measured) if len(measured) == len(measurements) else None
+            stage = "DeepVariant + GLnexus" if joint else "DeepVariant"
+            return {"measurement": total, "rows": time_rows(row_base, total, stage) if total else []}
+
     elif arm == "freebayes":
         def action(d):
             check_alignments(flat + [reference])
@@ -221,6 +257,7 @@ def score_step(ctx, callset, base, truth, bed, sdf, call_sample=None, truth_samp
                 "min_qual": MIN_QUAL.get(callset.arm), "samples": [call_sample, truth_sample]}
 
     def action(d):
+        hostjobs.skip_with(ctx, callset)
         m, rows = vcfeval.score(ctx, d, row_base, truth, callset.path, bed, sdf,
                                 min_qual=MIN_QUAL.get(callset.arm), call_sample=call_sample,
                                 truth_sample=truth_sample)

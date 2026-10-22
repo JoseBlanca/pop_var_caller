@@ -9,7 +9,7 @@ over the regions), and keeps them under `inputs/`.
 
 import os
 
-from lib import arms, inputs, mendelian
+from lib import arms, hostjobs, inputs, mendelian
 from lib.measure import run_commands
 from lib.steps import Step, file_identity
 
@@ -26,7 +26,7 @@ inherit; the "GIAB truth" rows are the same count on the three truth sets merged
 MEMBERS = {"mother": "HG004", "father": "HG003", "child": "HG002"}
 SAMPLES = ["HG002", "HG003", "HG004"]
 DEPTHS = ["5x", "10x", "30x", "300x"]
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
 
 
 def steps(ctx):
@@ -66,6 +66,7 @@ def _mendelian_step(ctx, callset, base, regions):
                     caller_version=ctx.version(arms.ARM_TOOL[callset.arm]))
 
     def action(step_dir):
+        hostjobs.skip_with(ctx, callset)
         counts = mendelian.count(callset.path, regions, MEMBERS["mother"], MEMBERS["father"],
                                  MEMBERS["child"], min_qual=arms.MIN_QUAL.get(callset.arm))
         return {"rows": mendelian.rows(row_base, counts)}

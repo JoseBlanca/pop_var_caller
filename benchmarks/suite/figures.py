@@ -41,6 +41,10 @@ STYLE = {
     "pvc (fitted)": dict(color="#2a78d6", linestyle="--", marker="s", label="pvc, fitted"),
     "GATK": dict(color="#eb6834", linestyle="-", marker="^", label="GATK"),
     "freebayes": dict(color="#1baf7a", linestyle="-", marker="D", label="freebayes"),
+    # No fourth hue separates from these three for every reader (the palette validator fails every
+    # candidate on all pairs), so DeepVariant, the accuracy reference, is drawn in neutral ink with
+    # its own marker; against the three hues it passes both separation checks.
+    "DeepVariant": dict(color="#3a3936", linestyle="-", marker="P", label="DeepVariant"),
 }
 CALLERS = list(STYLE)
 DEPTH_ORDER = ["5x", "10x", "15x", "20x", "30x", "50x", "full", "300x"]
@@ -164,7 +168,7 @@ def accuracy_figure(rows, benchmark, title, subtitle, out, name, aggregate=False
     fig.suptitle(title, x=0.01, ha="left", color=TEXT, fontsize=13, y=1.04)
     fig.text(0.01, 0.97, subtitle, ha="left", color=TEXT_2, fontsize=9)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False, fontsize=9,
+    fig.legend(handles, labels, loc="lower center", ncol=5, frameon=False, fontsize=9,
                bbox_to_anchor=(0.5, -0.06), labelcolor=TEXT)
     return save(fig, out, name)
 
@@ -174,6 +178,7 @@ PERF_STAGE = {  # the figure for each caller's whole run
     "pvc (fitted)": "whole pipeline",
     "GATK": ("whole pipeline", "HaplotypeCaller"),
     "freebayes": "freebayes",
+    "DeepVariant": ("DeepVariant", "DeepVariant + GLnexus"),
 }
 
 

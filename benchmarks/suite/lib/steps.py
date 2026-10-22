@@ -37,6 +37,11 @@ class SuiteError(Exception):
     pass
 
 
+class SkipStep(Exception):
+    """This machine cannot run the step (DeepVariant on arm64, say): it is listed, not failed,
+    and runs on a machine that can."""
+
+
 class StopRequested(Exception):
     """The run ends cleanly between steps: `--stop` was asked for, or `--stop-at` has passed."""
 
@@ -44,6 +49,9 @@ class StopRequested(Exception):
 def file_identity(path):
     """What a fingerprint records about one input file: a checksum if small, else size and time."""
     path = os.path.realpath(path)
+    if not os.path.exists(path):
+        # Not made yet, or not makeable on this machine; the step decides what that means.
+        return {"path": path, "missing": True}
     if os.path.isdir(path):
         return {"path": path, "dir": sorted(os.listdir(path))}
     st = os.stat(path)
@@ -125,6 +133,9 @@ class Runner:
         self.ctx.log(f"[{time.strftime('%H:%M:%S')}] {step.kind:10s} {step.name}")
         try:
             result = _run_in_child(step.action, directory)
+        except SkipStep:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
         except BaseException:
             self.ctx.log(f"    failed or stopped; {directory} will be redone next time")
             raise

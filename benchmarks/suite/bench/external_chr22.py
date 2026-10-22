@@ -34,7 +34,7 @@ confident regions, at the depths the configuration names. Truth: GIAB v4.2.1 sma
 scored by RTG vcfeval, as for the per-sample panel.
 """
 IN_FULL_RUN = False
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
 
 
 def steps(ctx):

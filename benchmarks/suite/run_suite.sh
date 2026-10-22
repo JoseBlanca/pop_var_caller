@@ -114,6 +114,14 @@ before_vms=" $( (pgrep -f "$vm_name" || true) | tr "\n" " ") "
 sampler=$!
 trap 'kill $sampler 2>/dev/null || true' EXIT
 
+# DeepVariant and GLnexus run in their own official images, started on this host by the job runner
+# (host_jobs.sh), since the dev container cannot start containers; where the machine cannot run
+# them it says so and the suite skips those steps.
+"$PROJECT_DIR/benchmarks/suite/host_jobs.sh" "$RESULTS" "$PROJECT_DIR" "$data_root" \
+    "${DEV_GENOMES_DIR:-$HOME/genomes}" &
+host_jobs=$!
+trap 'kill $sampler $host_jobs 2>/dev/null || true' EXIT
+
 extra=()
 [[ "$data_root" != "$PROJECT_DIR" ]] && extra=(DEV_EXTRA_MOUNT="$data_root")
 

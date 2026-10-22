@@ -29,7 +29,7 @@ FULL_DEPTH = {
     "HG003": "HG003_bench_azar_merged_100.sorted.m5.bam",
     "HG004": "HG004_bench_azar_merged_100.sorted.m5.bam",
 }
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
 
 
 def alignment(ctx, sample, depth):

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bench import BENCHMARKS  # noqa: E402
 from lib.context import Context  # noqa: E402
 from lib.results import build_table, write_summary  # noqa: E402
-from lib.steps import Runner, StopRequested, SuiteError  # noqa: E402
+from lib.steps import Runner, SkipStep, StopRequested, SuiteError  # noqa: E402
 from lib.measure import CommandFailed  # noqa: E402
 
 
@@ -107,6 +107,7 @@ def main():
             build_pvc(ctx)
         runner = Runner(ctx)
         failures = []
+        skipped = []
         try:
             # A failed step is logged and the run goes on, so one broken step does not cost the
             # rest of a night's quiet hours; steps that need its output fail in turn and are
@@ -124,9 +125,16 @@ def main():
                         continue
                     try:
                         runner.run(step)
+                    except SkipStep as why:
+                        ctx.log(f"skipped: {step.name}: {why}")
+                        skipped.append((step.name, str(why)))
                     except (SuiteError, CommandFailed, FileNotFoundError) as err:
                         ctx.log(f"error: {step.name}: {err}")
                         failures.append((step.name, str(err)))
+            if skipped:
+                reasons = sorted({why for _, why in skipped})
+                ctx.log(f"{len(skipped)} step(s) skipped, this machine cannot run them: "
+                        + "; ".join(reasons))
             if failures:
                 ctx.log(f"{len(failures)} step(s) failed; they rerun next time:")
                 for name, why in failures:

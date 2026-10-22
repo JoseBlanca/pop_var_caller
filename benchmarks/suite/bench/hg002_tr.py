@@ -15,7 +15,7 @@ tracts. A later change to pvc's typing does not move the tract list; delete
 import os
 import shlex
 
-from lib import arms, inputs, vcfeval
+from lib import arms, hostjobs, inputs, vcfeval
 from lib.measure import check_alignments, run_commands, warm
 from lib.results import row, time_rows
 from lib.steps import Step, file_identity
@@ -33,7 +33,7 @@ with 6 pair-HMM threads. freebayes is not run here.
 """
 
 DEPTHS = ["5x", "10x", "15x", "20x", "30x", "50x", "300x"]
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "hipstr"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "hipstr", "deepvariant"]
 GENOTYPE_METRICS = ["tracts_truth_calls", "tracts_both_call", "genotype_right", "no_call",
                     "genotype_accuracy", "right_as_lengths", "length_accuracy",
                     "called_hom_truth_het", "called_het_truth_hom", "wrong_some_other_way"]
@@ -151,6 +151,7 @@ def _str_score_step(ctx, callset, base, truth, regions, tracts, depth):
     kind = arms.ARM_KIND[callset.arm]
 
     def action(d):
+        hostjobs.skip_with(ctx, callset)
         genotype = os.path.join(d, "genotype.tsv")
         cmd = (f"python3 {q(scorer)} --reference {q(arms.GRCH38)} --truth {q(truth)} "
                f"--query {q(callset.path)} --confident-bed {q(regions)} --tract-bed {q(tracts)} "

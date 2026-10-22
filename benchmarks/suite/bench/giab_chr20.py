@@ -33,7 +33,7 @@ URL = ("https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data/Ashkenazim
 CONTIG = "chr20"
 SLICE = ("chr20", 10_000_000, 10_500_000)
 DEPTHS = ["5x", "10x", "30x", "full"]
-ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes"]
+ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
 READ_GROUP = r"@RG\tID:HG002\tSM:HG002\tLB:HG002\tPL:ILLUMINA"
 q = shlex.quote
 
