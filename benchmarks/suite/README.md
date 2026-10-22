@@ -118,6 +118,30 @@ How each is scored:
   then GenotypeGVCFs: GenomicsDBImport's native library is built only for x86-64, and the container
   is arm64.
 
+## DeepVariant, and running on an x86-64 Linux server
+
+DeepVariant (1.10.0) and GLnexus (1.4.1), its joint genotyper for the trio, run in their official
+images. The dev container cannot start containers, so `run_suite.sh` starts a job runner on the
+host (`host_jobs.sh`) that runs only those two images, through the host's podman or Docker, with the
+project mounted and the data read-only, measured by the suite's own code inside them.
+
+- **On this Mac** (arm64) the runner says it cannot, and every DeepVariant step, with the scoring of
+  its calls, is listed as skipped at the end of the run.
+- **On an x86-64 Linux server with podman**, the same command runs everything, DeepVariant
+  included. First time there:
+
+  ```
+  podman pull docker.io/google/deepvariant:1.10.0 ghcr.io/dnanexus-rnd/glnexus:v1.4.1
+  benchmarks/suite/run_suite.sh --slice --data-root <checkout with the data> --threads <cores>
+  ```
+
+  The slice run is the first test of the DeepVariant steps: they were built on the Mac, where they
+  cannot run. The data the suite reads (about 60 GB: `benchmarks/giab`, `human_genome_bottle`,
+  `ssr_hg002`, `tomato1`, and the references under `~/genomes`) must be copied there; the
+  chromosome 20 alignments are fetched again by the suite.
+- Figures from the server are the server's: every caller, the competitors included, is rerun there,
+  so no figure mixes two machines.
+
 ## How long, and how much disk
 
 Estimated for the laptop at 6 cores; the plan's §8 says how each figure was reached.
