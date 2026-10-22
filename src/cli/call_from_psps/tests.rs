@@ -227,6 +227,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
         hidden_dup_tag: false,
+        hidden_dup_window: 0,
         locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,
@@ -560,6 +561,20 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
         !args.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
+}
+
+/// **`--hidden-dup-window` defaults to the one genome-wide rate, and takes a width in bases.**
+///
+/// A research option whose default is expected to change once it is measured; this pins what
+/// the default is today, so the change is a deliberate edit and not an accident.
+#[test]
+fn the_hidden_dup_window_defaults_to_one_genome_wide_rate() {
+    let args = args_of(&a_defaults_run());
+    assert_eq!(args.hidden_dup_window, 0);
+
+    let mut windowed = a_defaults_run();
+    windowed.extend(["--hidden-dup-window", "50000"]);
+    assert_eq!(args_of(&windowed).hidden_dup_window, 50_000);
 }
 
 /// **A target that is not a false-discovery rate is refused, whatever shape it takes.**

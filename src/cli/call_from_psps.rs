@@ -215,6 +215,19 @@ pub struct CallFromPspsArgs {
     #[arg(long, help_heading = "Advanced")]
     pub hidden_dup_tag: bool,
 
+    /// The width, in bases, of the stretch of genome over which the hidden-dup filter estimates
+    /// how common hidden duplications are. 0 uses one genome-wide rate.
+    ///
+    /// Each call's rate comes from the calls within half the window on either side, pulled toward
+    /// the genome-wide rate where few calls are near. A research option: its default may change.
+    #[arg(
+        long,
+        value_name = "BASES",
+        default_value_t = paralog_filter::DEFAULT_HIDDEN_DUP_WINDOW_BASES,
+        help_heading = "Advanced"
+    )]
+    pub hidden_dup_window: u64,
+
     /// The most reads of one read group kept at one position. Defaults to `--max-depth`.
     ///
     /// A psp holding more is thinned to this as it is read: each allele keeps its share of the
@@ -437,7 +450,8 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         args.hidden_dup_fdr,
         args.hidden_dup_tag,
     )
-    .map_err(|source| CallFromPspsCliError::ParalogTargetIsNotAFraction { source })?;
+    .map_err(|source| CallFromPspsCliError::ParalogTargetIsNotAFraction { source })?
+    .map(|asked| asked.with_window(args.hidden_dup_window));
 
     let asked_ploidy = calling_run::ploidy_asked_for(args.ploidy)?;
     let candidate_selection = calling_run::candidate_selection_for(args.max_generic_alleles)?;

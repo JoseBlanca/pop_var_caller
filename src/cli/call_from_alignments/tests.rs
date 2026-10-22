@@ -317,6 +317,7 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
         hidden_dup_tag: false,
+        hidden_dup_window: 0,
         locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -400,6 +401,7 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
         hidden_dup_tag: false,
+        hidden_dup_window: 0,
         locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -621,6 +623,7 @@ fn a_cohort_on_disk() -> (
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
         hidden_dup_tag: false,
+        hidden_dup_window: 0,
         locus_builder_regions_len: None,
         threads: 0,
         min_copies: MinCopies::default(),
@@ -1284,6 +1287,20 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
         !args.hidden_dup_tag,
         "and it removes them rather than tagging them"
     );
+}
+
+/// **`--hidden-dup-window` defaults to the one genome-wide rate, and takes a width in bases.**
+///
+/// A research option whose default is expected to change once it is measured; this pins what
+/// the default is today, so the change is a deliberate edit and not an accident.
+#[test]
+fn the_hidden_dup_window_defaults_to_one_genome_wide_rate() {
+    let args = args_of(&a_defaults_run());
+    assert_eq!(args.hidden_dup_window, 0);
+
+    let mut windowed = a_defaults_run();
+    windowed.extend(["--hidden-dup-window", "50000"]);
+    assert_eq!(args_of(&windowed).hidden_dup_window, 50_000);
 }
 
 /// **Direct mode refuses a target that is not a false-discovery rate, and this is what says so.**

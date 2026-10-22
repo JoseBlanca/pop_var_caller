@@ -954,6 +954,7 @@ mod tests {
             // variant sites include low-quality ones; the threshold is pinned elsewhere.
             min_site_quality: 0.0,
             hidden_dup_tag: false,
+            hidden_dup_window: 0,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,
