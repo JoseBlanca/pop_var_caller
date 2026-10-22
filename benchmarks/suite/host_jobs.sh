@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The host job runner: runs DeepVariant and GLnexus in their own official images for the suite.
 #
-#   benchmarks/suite/host_jobs.sh <results-dir> <project-dir> <data-root> <genomes-dir>
+#   benchmarks/suite/host_jobs.sh <results-dir> <project-dir> <data-root> <genomes-dir> [<extra-dir>]
 #
 # run_suite.sh starts it in the background and stops it on exit. The suite itself runs inside the
 # dev container, which cannot start other containers; for a DeepVariant or GLnexus step it writes a
@@ -22,6 +22,8 @@ results=$1
 project=$2
 data_root=$3
 genomes=$4
+extra_dir=${5:-}
+memory="${BENCH_MEM:-32g}"
 jobs="$results/host_jobs"
 mkdir -p "$jobs"
 
@@ -90,11 +92,12 @@ while true; do
         [[ "$runtime" == docker ]] && user=(--user "$(id -u):$(id -g)")
         mounts=(-v "$project:$project" -v "$data_root:$data_root:ro")
         [[ -d "$genomes" && "$genomes" != "$data_root" ]] && mounts+=(-v "$genomes:$genomes:ro")
+        [[ -n "$extra_dir" && -d "$extra_dir" ]] && mounts+=(-v "$extra_dir:$extra_dir:ro")
         running="pvcsuite-$id"
         # Measured by the suite's own code where the image has Python; otherwise run as it is, and
         # the step records no measurement (GLnexus's image may lack Python).
         mkdir -p "$workdir/logs"
-        "$runtime" run --rm --name "$running" --cpus "$threads" ${user[@]+"${user[@]}"} \
+        "$runtime" run --rm --name "$running" --cpus "$threads" --memory "$memory" ${user[@]+"${user[@]}"} \
             "${mounts[@]}" -w "$workdir" \
             -e MCLI="$project/benchmarks/suite/lib/measure_cli.py" -e RESULT="$result" \
             -e LOGDIR="$workdir/logs" -e LABEL="$label" -e CMD="$command" \

@@ -126,6 +126,10 @@ TTY_FLAGS=(-i)
 RESOURCE_FLAGS=()
 if [[ "$RUNTIME" == container ]]; then
     RESOURCE_FLAGS+=(--memory "${DEV_MEM:-16g}" --cpus "${DEV_CPUS:-8}")
+elif [[ -n "${DEV_LIMIT_PODMAN:-}" ]]; then
+    # Opt-in for podman, which otherwise uses the whole host: the benchmark suite sets it so a run
+    # on a shared server stays within the cores and memory its profile allows.
+    RESOURCE_FLAGS+=(--memory "${DEV_MEM:-16g}" --cpus "${DEV_CPUS:-8}")
 fi
 
 # **Build-affecting environment is forwarded, because otherwise it is silently

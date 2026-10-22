@@ -25,6 +25,10 @@ class Context:
         self.depths = _split(args.depth)
         self.callers = _split(args.caller)
         self.external_config = getattr(args, "external_config", None)
+        self.tomato_crams = getattr(args, "tomato_crams", None)
+        self.tomato_reference = getattr(args, "tomato_reference", None)
+        sizes = getattr(args, "tomato_sizes", None)
+        self.tomato_sizes = [int(x) for x in sizes.split(",")] if sizes else None
         self.wait_for_quiet = not args.no_wait
         self.quiet_cores = args.quiet_cores
         self.quiet_minutes = args.quiet_minutes

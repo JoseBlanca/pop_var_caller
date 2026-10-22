@@ -136,9 +136,19 @@ project mounted and the data read-only, measured by the suite's own code inside 
   ```
 
   The slice run is the first test of the DeepVariant steps: they were built on the Mac, where they
-  cannot run. The data the suite reads (about 60 GB: `benchmarks/giab`, `human_genome_bottle`,
-  `ssr_hg002`, `tomato1`, and the references under `~/genomes`) must be copied there; the
-  chromosome 20 alignments are fetched again by the suite.
+  cannot run.
+- **No data needs copying.** Where the data checkout lacks a human benchmark's files, the suite
+  fetches them from GIAB and NCBI as input steps (`lib/giab_sources.py`); the project's region lists
+  and downsampling fractions travel in `benchmarks/suite/data/`. The tomato CRAMs and reference come
+  from the machine's profile.
+- **Machine profiles** (`profiles/<hostname>.sh`, or `--profile NAME`) set what differs per machine:
+  `profiles/kimura.sh` gives the suite 32 cores and 80 GB, the tomato collection under
+  `/home/joxi/tomato25`, and mounts it. On kimura the tomato cohort is tomato1's 62 accessions found
+  by sample name in the collection, then further accessions for larger sample counts
+  (`BENCH_TOMATO_SIZES` or `--tomato-sizes 1,2,5,10,20,50,100`).
+- **On Linux** the quiet check counts every process except this user's podman containers' (the
+  dev container and the DeepVariant jobs), and the profile's core and memory limits are applied to
+  podman.
 - Figures from the server are the server's: every caller, the competitors included, is rerun there,
   so no figure mixes two machines.
 

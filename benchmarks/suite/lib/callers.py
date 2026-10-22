@@ -83,14 +83,19 @@ def gatk_haplotypecaller(ctx, reference, alignment, intervals, out, threads):
 
 
 def gatk_gvcfs(ctx, reference, alignment_by_sample, intervals, out_dir):
-    """One single-threaded HaplotypeCaller process per sample, each writing `<sample>.g.vcf.gz`."""
+    """One single-threaded HaplotypeCaller process per sample, each writing `<sample>.g.vcf.gz`.
+
+    A sample's value is one alignment file or a list of them (several runs of one sample).
+    """
     cmds = []
     heap = "2g"
     for sample, alignment in alignment_by_sample.items():
         out = os.path.join(out_dir, f"{sample}.g.vcf.gz")
+        files = alignment if isinstance(alignment, list) else [alignment]
+        inputs = " ".join(f"-I {q(f)}" for f in files)
         cmds.append((f"haplotypecaller.{sample}",
                      _gatk(ctx, "HaplotypeCaller",
-                           f"-R {q(reference)} -I {q(alignment)} -L {q(intervals)} -O {q(out)} "
+                           f"-R {q(reference)} {inputs} -L {q(intervals)} -O {q(out)} "
                            f"-ERC GVCF --native-pair-hmm-threads 1", heap=heap)))
     return cmds
 

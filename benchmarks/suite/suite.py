@@ -30,6 +30,9 @@ def parse_args():
     p.add_argument("--rescore", action="store_true", help="redo every scoring step")
     p.add_argument("--redo-step", action="append", help="redo this step (its name), any kind")
     p.add_argument("--external-config", help="configuration file of an external benchmark")
+    p.add_argument("--tomato-crams", help="directory of tomato CRAMs (a machine profile sets it)")
+    p.add_argument("--tomato-reference", help="SL4.0 FASTA (a machine profile sets it)")
+    p.add_argument("--tomato-sizes", help="comma-separated sample counts for the speed benchmark")
     p.add_argument("--no-wait", action="store_true",
                    help="start timed steps even when the machine is busy (their times are marked)")
     p.add_argument("--quiet-cores", type=float, default=2.0)

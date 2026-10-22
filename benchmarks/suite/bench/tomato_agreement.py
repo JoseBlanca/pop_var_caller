@@ -24,7 +24,7 @@ it the allele and the other leaves the sample uncalled.
 
 
 def steps(ctx):
-    size = 2 if ctx.slice else speed.SIZES[-1]
+    size = speed.sizes(ctx)[-1] if ctx.slice else min(speed.sizes(ctx)[-1], len(speed.cohort(ctx)))
     _, regions = speed.regions_step(ctx)
     samples = list(speed.cohort(ctx))[:size]
     gatk = os.path.join(ctx.results_root, "competitors", f"speed/tomato_{size}", "gatk",
@@ -41,7 +41,7 @@ def steps(ctx):
             for path in (calls, gatk):
                 if not os.path.exists(path):
                     raise FileNotFoundError(f"{path} is missing: run --only speed first")
-            counts = agreement.compare(calls, gatk, speed.REFERENCE, regions, samples)
+            counts = agreement.compare(calls, gatk, speed.reference(ctx), regions, samples)
             return {"rows": agreement.rows(base, counts, "pvc", "GATK")}
 
         out.append(Step(f"tomato_agreement/{arm}", "score", action,

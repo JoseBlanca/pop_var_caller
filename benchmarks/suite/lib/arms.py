@@ -170,7 +170,7 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             gvcf_dir = os.path.join(d, "gvcfs")
             os.makedirs(gvcf_dir)
             m_hc = run_commands(callers.gatk_gvcfs(
-                ctx, reference, {s: files[s][0] for s in samples}, regions, gvcf_dir), logs,
+                ctx, reference, {s: files[s] for s in samples}, regions, gvcf_dir), logs,
                 max_concurrent=ctx.threads)
             combined = os.path.join(d, "combined.g.vcf.gz")
             comb, gen = callers.gatk_joint(
