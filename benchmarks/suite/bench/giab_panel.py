@@ -7,7 +7,7 @@ in their `.coverage.json`); the suite uses them as they are.
 
 import os
 
-from lib import arms
+from lib import arms, giab_sources
 from lib.steps import Step, file_identity
 
 TITLE = "GIAB per-sample panel — SNPs and indels, one sample at a time"
@@ -32,7 +32,7 @@ FULL_DEPTH = {
 ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "freebayes", "deepvariant"]
 
 
-def alignment(ctx, sample, depth):
+def local_alignment(ctx, sample, depth):
     root = ctx.data("benchmarks", "giab", "per_sample", "bam", depth)
     if depth == "300x":
         return os.path.join(root, FULL_DEPTH[sample])
@@ -42,7 +42,16 @@ def alignment(ctx, sample, depth):
 def steps(ctx):
     panel = ctx.data("benchmarks", "giab", "per_sample")
     samples, depths = (["HG002"], ["10x"]) if ctx.slice else (SAMPLES, DEPTHS)
-    out, catalog, sdf = arms.reference_steps(ctx, "GRCh38", arms.GRCH38)
+    ref_steps, reference = giab_sources.grch38(ctx)
+    out = list(ref_steps)
+    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", reference)
+    out.extend(more)
+
+    def bed_of(s):
+        # The data checkout's copy where it has one (the laptop), else the suite's identical copy.
+        local = os.path.join(panel, "bed", f"{s}_bench_azar_merged_100.bed")
+        return local if os.path.exists(local) else giab_sources.data_file(
+            f"giab_panel/{s}_bench_azar_merged_100.bed")
 
     # The regions each sample is called and scored over: its whole bed, or its first five regions
     # for the slice. The scored regions are GIAB's confident regions, so they double as the region list.
@@ -50,8 +59,7 @@ def steps(ctx):
 
     def make_regions(step_dir):
         for s in samples:
-            src = os.path.join(panel, "bed", f"{s}_bench_azar_merged_100.bed")
-            with open(src) as fh:
+            with open(bed_of(s)) as fh:
                 lines = [l for l in fh if l.strip()]
             if ctx.slice:
                 lines = lines[:5]
@@ -60,19 +68,46 @@ def steps(ctx):
         return {}
 
     out.append(Step("giab_panel/regions", "input", make_regions,
-                    {"beds": [file_identity(os.path.join(panel, "bed", f"{s}_bench_azar_merged_100.bed"))
-                              for s in samples], "slice_regions": 5 if ctx.slice else "all"}))
+                    {"beds": [file_identity(bed_of(s)) for s in samples],
+                     "slice_regions": 5 if ctx.slice else "all"}))
+
+    # Alignments and truth: the data checkout's files, or fetched from GIAB (lib/giab_sources.py).
+    fractions = giab_sources.panel_fractions()
+    aligned, truths = {}, {}
+    for s in samples:
+        if os.path.exists(local_alignment(ctx, s, depths[0])):
+            for depth in depths:
+                aligned[(s, depth)] = local_alignment(ctx, s, depth)
+        else:
+            step, full = giab_sources.fetched(ctx, "giab_panel", s, bed_of(s), reference)
+            out.append(step)
+            for depth in depths:
+                if depth == "300x":
+                    aligned[(s, depth)] = full
+                    continue
+                step, path = giab_sources.downsampled(ctx, "giab_panel", s, full, reference, depth,
+                                                      fractions[(s, depth)])
+                out.append(step)
+                aligned[(s, depth)] = path
+        local_truth = os.path.join(panel, "vcf", f"{s}_GRCh38_1_22_v4.2.1_benchmark.selected_100.vcf.gz")
+        if os.path.exists(local_truth):
+            truths[s] = local_truth
+        else:
+            more, whole, _ = giab_sources.whole_truth(ctx, s)
+            out.extend(more)
+            step, truths[s] = giab_sources.cut_truth(ctx, f"giab_panel_{s}", whole, bed_of(s))
+            out.append(step)
 
     for s in samples:
         regions = os.path.join(regions_dir, f"{s}.bed")
-        truth = os.path.join(panel, "vcf", f"{s}_GRCh38_1_22_v4.2.1_benchmark.selected_100.vcf.gz")
+        truth = truths[s]
         for depth in depths:
             # The region length is read when the row is written, after the regions step ran.
             base = dict(benchmark="giab_panel", dataset=f"GIAB {s}, own 100 confident regions",
                         samples=1, depth=depth, region_bp=arms.BedLength(regions))
             for arm in ARMS:
-                step, callset = arms.arm_steps(ctx, arm, f"giab_panel/{s}/{depth}", arms.GRCH38,
-                                               catalog, {s: alignment(ctx, s, depth)}, regions,
+                step, callset = arms.arm_steps(ctx, arm, f"giab_panel/{s}/{depth}", reference,
+                                               catalog, {s: aligned[(s, depth)]}, regions,
                                                base)
                 out.append(step)
                 out.append(arms.score_step(ctx, callset, base, truth, regions, sdf,

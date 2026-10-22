@@ -9,7 +9,7 @@ over the regions), and keeps them under `inputs/`.
 
 import os
 
-from lib import arms, hostjobs, inputs, mendelian
+from lib import arms, giab_sources, hostjobs, inputs, mendelian
 from lib.measure import run_commands
 from lib.steps import Step, file_identity
 
@@ -35,12 +35,29 @@ def steps(ctx):
     truth = {s: os.path.join(trio, "vcf", f"{s}_GRCh38_1_22_v4.2.1_benchmark.trio_common_random_100.vcf.gz")
              for s in SAMPLES}
     src_bed = os.path.join(trio, "bed", "trio_common_evaluable.random_100.seed42.bed")
+    if not os.path.exists(src_bed):
+        src_bed = giab_sources.data_file("giab_trio/trio_common_evaluable.random_100.seed42.bed")
     depths = ["10x"] if ctx.slice else DEPTHS
-    out, catalog, sdf = arms.reference_steps(ctx, "GRCh38", arms.GRCH38)
+    ref_steps, reference = giab_sources.grch38(ctx)
+    out = list(ref_steps)
+    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", reference)
+    out.extend(more)
+
+    # The data checkout's alignments and truth where it has them, else fetched from GIAB over the
+    # trio's regions (lib/giab_sources.py).
+    for s in SAMPLES:
+        if not os.path.exists(full[s]):
+            step, full[s] = giab_sources.fetched(ctx, "giab_trio", s, src_bed, reference)
+            out.append(step)
+        if not os.path.exists(truth[s]):
+            more, whole, _ = giab_sources.whole_truth(ctx, s)
+            out.extend(more)
+            step, truth[s] = giab_sources.cut_truth(ctx, f"giab_trio_{s}", whole, src_bed)
+            out.append(step)
 
     step, regions = inputs.regions_step(ctx, "giab_trio", src_bed, 5)
     out.append(step)
-    ladder, alignment = inputs.depth_ladder(ctx, "giab_trio", arms.GRCH38, full, regions, depths)
+    ladder, alignment = inputs.depth_ladder(ctx, "giab_trio", reference, full, regions, depths)
     out.extend(ladder)
 
     for depth in depths:
@@ -48,7 +65,7 @@ def steps(ctx):
                     samples=3, depth=depth, region_bp=arms.BedLength(regions))
         bams = {s: alignment(s, depth) for s in SAMPLES}
         for arm in ARMS:
-            step, callset = arms.arm_steps(ctx, arm, f"giab_trio/{depth}", arms.GRCH38, catalog,
+            step, callset = arms.arm_steps(ctx, arm, f"giab_trio/{depth}", reference, catalog,
                                            bams, regions, base, joint=True)
             out.append(step)
             for s in SAMPLES:

@@ -15,7 +15,7 @@ tracts. A later change to pvc's typing does not move the tract list; delete
 import os
 import shlex
 
-from lib import arms, hostjobs, inputs, vcfeval
+from lib import arms, giab_sources, hostjobs, inputs, vcfeval
 from lib.measure import check_alignments, run_commands, warm
 from lib.results import row, time_rows
 from lib.steps import Step, file_identity
@@ -47,16 +47,24 @@ def steps(ctx):
     data = ctx.data("benchmarks", "ssr_hg002")
     truth = os.path.join(data, "truth", "HG002_GRCh38_TandemRepeats_v1.0.1_50000.vcf.gz")
     tier = os.path.join(data, "regions", "HG002_GRCh38_TandemRepeats_v1.0.1_Tier_50000.bed")
+    if not os.path.exists(tier):
+        tier = giab_sources.data_file("hg002_tr/HG002_GRCh38_TandemRepeats_v1.0.1_Tier_50000.bed.gz")
     depths = ["10x"] if ctx.slice else DEPTHS
-    out, catalog, sdf = arms.reference_steps(ctx, "GRCh38", arms.GRCH38)
+    ref_steps, GRCH38 = giab_sources.grch38(ctx)
+    out = list(ref_steps)
+    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", GRCH38)
+    out.extend(more)
 
     # The tier BED is unsorted; sort it, then take the slice's first 200 regions.
     inputs_dir = os.path.join(ctx.results_root, "inputs", "hg002_tr")
     regions = os.path.join(inputs_dir, "regions", "regions.bed")
+    whole_tier = os.path.join(inputs_dir, "regions", "tier_sorted.bed")
 
     def make_regions(step_dir):
         keep = "| awk 'NR<=200' " if ctx.slice else ""
-        run_commands([("sort", f"sort -k1,1V -k2,2n {q(tier)} | cut -f1-3 {keep}> {q(regions)}")],
+        cat = "gzip -dc" if tier.endswith(".gz") else "cat"
+        run_commands([("sort", f"{cat} {q(tier)} | sort -k1,1V -k2,2n | cut -f1-3 > {q(whole_tier)} "
+                               f"&& cat {q(whole_tier)} {keep}> {q(regions)}")],
                      os.path.join(step_dir, "logs"))
         return {}
 
@@ -73,8 +81,8 @@ def steps(ctx):
         view = os.path.join(step_dir, "reference")
         os.makedirs(view)
         ref = os.path.join(view, "GRCh38.fna")
-        os.symlink(arms.GRCH38, ref)
-        os.symlink(arms.GRCH38 + ".fai", ref + ".fai")
+        os.symlink(GRCH38, ref)
+        os.symlink(GRCH38 + ".fai", ref + ".fai")
         os.symlink(catalog, ref + ".repeats.parquet")
         typed = os.path.join(step_dir, "typed_regions.tsv")
         m = run_commands([("type_regions",
@@ -98,15 +106,59 @@ def steps(ctx):
     out.append(Step("hg002_tr/tracts", "input", make_tracts,
                     lambda: {"regions": file_identity(regions)}))
 
+    # Alignments and truth: the data checkout's where it has them, else fetched from GIAB and the
+    # ladder remade as benchmarks/ssr_hg002/src/subsample_coverages.sh made it: the source's mean
+    # depth over the tier measured, each fraction depth / mean to six decimals, seed 42.
+    local_bam = lambda depth: os.path.join(data, "bam", depth, f"HG002_TR_v1.0.1_Tier_{depth}.bam")
+    bams = {}
+    if os.path.exists(local_bam(depths[0])):
+        bams = {depth: local_bam(depth) for depth in depths}
+    else:
+        step, full = giab_sources.fetched(ctx, "hg002_tr", "HG002", whole_tier, GRCH38)
+        out.append(step)
+        mean_file = os.path.join(inputs_dir, "mean_depth", "mean_depth.txt")
+
+        def measure(d):
+            run_commands([("depth", f"samtools depth -a -b {q(whole_tier)} {q(full)} "
+                                    "| awk '{t+=$3; n++} END {printf \"%.6f\", t/n}' "
+                                    f"> {q(mean_file)}")], os.path.join(d, "logs"))
+            return {}
+
+        out.append(Step("hg002_tr/mean_depth", "input", measure,
+                        lambda: {"alignment": file_identity(full)}))
+        for depth in depths:
+            if depth == "300x":
+                bams[depth] = full
+                continue
+
+            def ladder(d, depth=depth):
+                with open(mean_file) as fh:
+                    mean = float(fh.read())
+                fraction = round(min(0.999999, float(depth.rstrip("x")) / mean), 6)
+                return giab_sources.downsampled(ctx, "hg002_tr", "HG002", full, GRCH38, depth,
+                                                fraction)[0].action(d)
+
+            path = os.path.join(ctx.results_root, "inputs", "giab", "alignments", "hg002_tr",
+                                "HG002", f"HG002.{depth}.seed42.bam")
+            out.append(Step(f"giab/alignments/hg002_tr/HG002/{depth}", "input", ladder,
+                            lambda: {"source": file_identity(full),
+                                     "mean_depth": file_identity(mean_file)}))
+            bams[depth] = path
+    if not os.path.exists(truth):
+        more, whole = giab_sources.tr_truth(ctx)
+        out.extend(more)
+        step, truth = giab_sources.cut_truth(ctx, "hg002_tr", whole, whole_tier)
+        out.append(step)
+
     for depth in depths:
-        bam = os.path.join(data, "bam", depth, f"HG002_TR_v1.0.1_Tier_{depth}.bam")
+        bam = bams[depth]
         base = dict(benchmark="hg002_tr", dataset="GIAB HG002 tandem-repeat benchmark v1.0.1",
                     samples=1, depth=depth, region_bp=arms.BedLength(regions))
         for arm in ARMS:
             if arm == "hipstr":
                 step, callset = _hipstr_step(ctx, depth, bam, hipstr_regions, base)
             else:
-                step, callset = arms.arm_steps(ctx, arm, f"hg002_tr/{depth}", arms.GRCH38,
+                step, callset = arms.arm_steps(ctx, arm, f"hg002_tr/{depth}", GRCH38,
                                                catalog, {"HG002": bam}, regions, base)
             out.append(step)
             out.append(_str_score_step(ctx, callset, base, truth, regions, tracts, depth))
@@ -122,11 +174,11 @@ def _hipstr_step(ctx, depth, bam, hipstr_regions, base):
     row_base = dict(base, caller="HipSTR", caller_version=ctx.version("hipstr"))
 
     def action(d):
-        check_alignments([bam, arms.GRCH38])
-        warm([bam, arms.GRCH38])
+        check_alignments([bam, giab_sources.grch38(ctx)[1]])
+        warm([bam, giab_sources.grch38(ctx)[1]])
         raw = os.path.join(d, "hipstr.vcf.gz")
         cmd = (f"HipSTR --bams {q(bam)} --bam-samps HG002 --bam-libs HG002 "
-               f"--fasta {q(arms.GRCH38)} --regions {q(hipstr_regions)} --str-vcf {q(raw)} "
+               f"--fasta {q(giab_sources.grch38(ctx)[1])} --regions {q(hipstr_regions)} --str-vcf {q(raw)} "
                f"--log {q(os.path.join(d, 'hipstr.log'))} {HIPSTR_ARGS}")
         m = run_commands([("hipstr", cmd)], os.path.join(d, "logs"))
         # HipSTR leaves QUAL empty; both scorers need it (lib/hipstr_qual.py). Not timed.
@@ -153,7 +205,7 @@ def _str_score_step(ctx, callset, base, truth, regions, tracts, depth):
     def action(d):
         hostjobs.skip_with(ctx, callset)
         genotype = os.path.join(d, "genotype.tsv")
-        cmd = (f"python3 {q(scorer)} --reference {q(arms.GRCH38)} --truth {q(truth)} "
+        cmd = (f"python3 {q(scorer)} --reference {q(giab_sources.grch38(ctx)[1])} --truth {q(truth)} "
                f"--query {q(callset.path)} --confident-bed {q(regions)} --tract-bed {q(tracts)} "
                f"--arm {callset.arm} --ground hg002_tr --depth {depth} --sample HG002 "
                f"--calibration-out {q(os.path.join(d, 'calibration.tsv'))} "

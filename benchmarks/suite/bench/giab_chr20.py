@@ -14,7 +14,7 @@ file's own depth, about 60×.
 import os
 import shlex
 
-from lib import arms, inputs, readfloor
+from lib import arms, giab_sources, inputs, readfloor
 from lib.measure import run_commands
 from lib.steps import Step, file_identity
 
@@ -39,14 +39,15 @@ q = shlex.quote
 
 
 def steps(ctx):
-    giab = ctx.data("benchmarks", "giab", "all_bench_regions")
-    whole_truth = os.path.join(giab, "vcfs", "HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz")
-    whole_bed = os.path.join(giab, "bed", "HG002_GRCh38_1_22_v4.2.1_benchmark_noinconsistent.bed")
+    truth_steps, whole_truth, whole_bed = giab_sources.whole_truth(ctx, "HG002")
     region = f"{SLICE[0]}:{SLICE[1] + 1}-{SLICE[2]}" if ctx.slice else CONTIG
     start, end = (SLICE[1], SLICE[2]) if ctx.slice else (0, None)
     depths = ["10x"] if ctx.slice else DEPTHS
     inputs_dir = os.path.join(ctx.results_root, "inputs", "giab_chr20")
-    out, catalog, sdf = arms.reference_steps(ctx, "GRCh38", arms.GRCH38)
+    ref_steps, GRCH38 = giab_sources.grch38(ctx)
+    out = list(ref_steps) + list(truth_steps)
+    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", GRCH38)
+    out.extend(more)
 
     # ---- the alignment: chromosome 20 fetched through the index, with a read group added -------
     # GIAB's header says SO:unsorted (as its other HG002 downloads do, benchmarks/ssr_hg002/README),
@@ -69,7 +70,7 @@ def steps(ctx):
     truth = os.path.join(inputs_dir, "truth", "truth.vcf.gz")
 
     def cut_truth(d):
-        fai = arms.GRCH38 + ".fai"
+        fai = GRCH38 + ".fai"
         contig_len = next(int(l.split()[1]) for l in open(fai) if l.split()[0] == CONTIG)
         stop = end if end is not None else contig_len
         with open(calling, "w") as fh:
@@ -91,7 +92,7 @@ def steps(ctx):
                     {"truth": file_identity(whole_truth), "bed": file_identity(whole_bed),
                      "region": region}))
 
-    ladder, aligned = inputs.depth_ladder(ctx, "giab_chr20", arms.GRCH38, {"HG002": alignment},
+    ladder, aligned = inputs.depth_ladder(ctx, "giab_chr20", GRCH38, {"HG002": alignment},
                                           calling, depths)
     out.extend(ladder)
 
@@ -100,13 +101,13 @@ def steps(ctx):
                     dataset="GIAB HG002, chromosome 20" + (" (slice, 500 kb)" if ctx.slice else ""),
                     samples=1, depth=depth, region_bp=arms.BedLength(calling))
         for arm in ARMS:
-            step, callset = arms.arm_steps(ctx, arm, f"giab_chr20/{depth}", arms.GRCH38, catalog,
+            step, callset = arms.arm_steps(ctx, arm, f"giab_chr20/{depth}", GRCH38, catalog,
                                            {"HG002": aligned("HG002", depth)}, calling, base)
             out.append(step)
             out.append(arms.score_step(ctx, callset, base, truth, confident, sdf,
                                        call_sample="HG002", truth_sample="HG002"))
-        out.extend(readfloor.floor_steps(ctx, f"giab_chr20/{depth}", arms.GRCH38,
+        out.extend(readfloor.floor_steps(ctx, f"giab_chr20/{depth}", GRCH38,
                                          {"HG002": aligned("HG002", depth)}, calling, base))
-        out.extend(readfloor.startup_steps(ctx, f"giab_chr20/{depth}", arms.GRCH38, catalog,
+        out.extend(readfloor.startup_steps(ctx, f"giab_chr20/{depth}", GRCH38, catalog,
                                            {"HG002": aligned("HG002", depth)}, calling, base))
     return out
