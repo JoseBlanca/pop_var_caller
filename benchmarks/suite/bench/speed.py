@@ -30,6 +30,9 @@ catalogue (repeat-catalog), built once per reference, is timed separately under 
 """
 
 SIZES = [1, 8, 62]
+# The slice's tomato ground: the first region, cut to this many bases (tomato1's regions are
+# 100 kb, so there it is the whole first region).
+SLICE_REGION_BP = 100_000
 
 # Files of the tomato data directory left out of every tomato benchmark, and why.
 EXCLUDED = {
@@ -132,12 +135,19 @@ def regions_step(ctx):
     def action(d):
         with open(src) as fh:
             lines = [l for l in fh if l.strip() and not l.startswith(("#", "track"))]
+        if ctx.slice:
+            # The slice is the first region, cut to SLICE_REGION_BP: a profile's regions can be one
+            # whole chromosome (kimura's and rick's are SL4.0ch01, 90.9 Mb), and a slice of that is
+            # no slice.
+            contig, start, end = lines[0].split("\t")[:3]
+            start, end = int(start), int(end)
+            lines = [f"{contig}\t{start}\t{min(end, start + SLICE_REGION_BP)}\n"]
         with open(path, "w") as fh:
-            fh.writelines(lines[:1] if ctx.slice else lines)
+            fh.writelines(lines)
         return {}
 
     return Step("tomato/regions", "input", action,
-                {"bed": file_identity(src), "slice_regions": 1 if ctx.slice else "all"}), path
+                {"bed": file_identity(src), "slice_regions": f"1:{SLICE_REGION_BP}" if ctx.slice else "all"}), path
 
 
 def steps(ctx):
