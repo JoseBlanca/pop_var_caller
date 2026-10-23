@@ -90,7 +90,11 @@ while true; do
         fi
         user=()
         [[ "$runtime" == docker ]] && user=(--user "$(id -u):$(id -g)")
-        mounts=(-v "$project:$project" -v "$data_root:$data_root:ro")
+        # Run from the main checkout, the data root is the project itself: podman refuses the same
+        # destination twice, so it is mounted once (read-write, as the project).
+        mounts=(-v "$project:$project")
+        [[ "$(cd "$data_root" && pwd -P)" != "$(cd "$project" && pwd -P)" ]] \
+            && mounts+=(-v "$data_root:$data_root:ro")
         [[ -d "$genomes" && "$genomes" != "$data_root" ]] && mounts+=(-v "$genomes:$genomes:ro")
         [[ -n "$extra_dir" && -d "$extra_dir" ]] && mounts+=(-v "$extra_dir:$extra_dir:ro")
         running="pvcsuite-$id"
