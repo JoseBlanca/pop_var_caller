@@ -1,21 +1,21 @@
 //! **A duplication rate for each stretch of the genome, instead of one for the whole run.**
-//! Research only (branch `research/giab-alpha`); switched on by `--hidden-dup-window`, with two
-//! knobs in environment switches ([`crate::exp::windowed_paralog_prior`]). At a window of `0`,
-//! nothing here runs.
+//! The hidden-duplication filter's default since 2026-10-23, at a window of 50,000 bases
+//! (`--hidden-dup-window`; spec `doc/devel/ng/spec/hidden_paralog_filter.md` §3.3). At a window of
+//! `0`, nothing here runs and the filter uses the one run-wide rate.
 //!
 //! **What it is for.** The filter turns each record's likelihood ratio into a probability by
 //! adding the log-odds of one run-wide rate, π, the share of records that are hidden
 //! duplications ([`super::prior`]). Duplications cluster, so one rate is wrong almost everywhere:
-//! on GIAB HG002 chr22 the same estimate gives about 0.15 over all records, about 0.0005 inside
-//! GIAB's trusted regions and about 0.4 outside them. In easy ground the run-wide rate inflates
+//! on GIAB HG002 chr22 the same estimate gives about 0.15 over all records, 0.0003 to 0.005 inside
+//! GIAB's trusted regions and 0.33 to 0.43 outside them. In easy ground the run-wide rate inflates
 //! every probability, and the filter removes real variants there.
 //!
 //! **What this does instead.** The contig is cut into bins of 10,000 bases. For each bin that holds
 //! a scored record, the rate is re-estimated from the records within half a window of the bin's
 //! centre, by the same iteration as the run-wide rate, but pulled towards the run-wide rate as if
-//! `K` extra records sat in the window at that rate. A window with few records therefore keeps
-//! about the run-wide rate; a window with many keeps its own. In symbols, the bin's rate `π_b` is
-//! the fixed point of
+//! `K` extra records sat in the window at that rate ([`LOCAL_PRIOR_SHRINK_RECORDS`]). A window
+//! with few records therefore keeps about the run-wide rate; a window with many keeps its own. In
+//! symbols, the bin's rate `π_b` is the fixed point of
 //!
 //! ```text
 //! π_b = ( Σ_i σ(LR_i + logit π_b) + K·π ) / (n + K)
@@ -25,11 +25,12 @@
 //! logistic function, `π` the run-wide rate and `K` the pull towards it, counted in records. Each
 //! record's probability of being a duplication is then `σ(LR + logit π_b)` with its own bin's rate.
 //!
-//! **The cut** is one of two rules ([`WindowedCut`]): the run's tail false-discovery rule applied
-//! to these local probabilities, or a fixed probability taken from today's cut.
+//! **The cut** is the run's tail false-discovery rule applied to these local probabilities
+//! ([`tail_fdr_posterior_cut`]): rank the records by probability, highest first, and flag the
+//! longest run from the top whose mean chance of being a real variant is at or below the target.
 //!
-//! **Records with no finite ratio** — unscored ones — stay as they are today: they are not counted
-//! in any window, carry no probability, and are never flagged.
+//! **Records with no finite ratio** — unscored ones — are not counted in any window, carry no
+//! probability, and are never flagged, as under the run-wide rate.
 //!
 //! **Cost.** Pass two keeps a contig and a position (12 bytes) beside each record's ratio, and the
 //! calibration briefly holds an index (8 bytes) a record to sort them, then one probability (8
@@ -50,39 +51,36 @@ pub const LOCAL_PRIOR_MAX_ITERATIONS: usize = 50;
 /// The local rate is held inside `[floor, 1 − floor]`, so its log-odds stay finite.
 pub const LOCAL_PRIOR_FLOOR: f64 = 1e-9;
 
-/// **How the windowed probabilities become a verdict.**
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowedCut {
-    /// Rank the records by local probability, highest first, and flag the longest run from the
-    /// top whose mean `1 − probability` is at or below the target false-discovery rate. With
-    /// one rate everywhere this is today's tail-FDR cut, without the histogram's binning.
-    TailFdr,
-    /// Flag a record whose local probability exceeds the probability today's cut stands for:
-    /// `σ(lr_cut + logit π)`, with today's cut and the run-wide rate.
-    Posterior,
-}
+/// **How hard each window's rate is pulled towards the run-wide rate**, counted in records: the
+/// iteration behaves as if this many extra records sat in every window at the run-wide rate.
+///
+/// A window holding far fewer scored records than this keeps about the run-wide rate, and one
+/// holding far more keeps its own. **Not tuned**: 10 is the value the measurements in spec §3.3
+/// were taken at, and nothing beyond them was tried. It is written on the `##paralogFilter` line
+/// as `shrink=`.
+pub const LOCAL_PRIOR_SHRINK_RECORDS: f64 = 10.0;
 
-impl WindowedCut {
-    /// The name the header and the switch use: `fdr` or `posterior`.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::TailFdr => "fdr",
-            Self::Posterior => "posterior",
-        }
-    }
-}
-
-/// **The three research knobs, together.**
+/// **What the windowed rate runs with.**
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowedPriorConfig {
     /// The window's width in bases: the records within half of it of a bin's centre set that
     /// bin's rate.
     pub window_bases: u64,
-    /// How hard the local rate is pulled towards the run-wide one, in records.
+    /// How hard the local rate is pulled towards the run-wide one, in records
+    /// ([`LOCAL_PRIOR_SHRINK_RECORDS`] in a run).
     pub shrink_records: f64,
-    /// Which rule turns the local probabilities into verdicts.
-    pub cut: WindowedCut,
+}
+
+impl WindowedPriorConfig {
+    /// **The settings a run uses for a window of `window_bases`**, or `None` where the window is
+    /// `0` — the one run-wide rate.
+    #[must_use]
+    pub fn for_window(window_bases: u64) -> Option<Self> {
+        (window_bases > 0).then_some(Self {
+            window_bases,
+            shrink_records: LOCAL_PRIOR_SHRINK_RECORDS,
+        })
+    }
 }
 
 /// The lowest, median and highest local rate over the occupied bins.
@@ -116,16 +114,11 @@ impl WindowedVerdicts {
     /// Whether a record with this local probability is flagged. A `NaN` — an unscored record —
     /// never is.
     ///
-    /// The two rules differ at the boundary on purpose. The tail-FDR rule takes whole groups of
-    /// tied probabilities and its cut is the lowest probability it took, so the cut itself is
-    /// flagged; the probability rule flags what *exceeds* the cut.
+    /// The tail false-discovery rule takes whole groups of tied probabilities and its cut is the
+    /// lowest probability it took, so a record at the cut itself is flagged.
     #[must_use]
     pub fn flags(&self, posterior: f64) -> bool {
-        match (self.posterior_cut, self.config.cut) {
-            (None, _) => false,
-            (Some(cut), WindowedCut::TailFdr) => posterior >= cut,
-            (Some(cut), WindowedCut::Posterior) => posterior > cut,
-        }
+        self.posterior_cut.is_some_and(|cut| posterior >= cut)
     }
 }
 
@@ -168,6 +161,10 @@ pub fn posterior_at(ratio: f64, rate: f64) -> f64 {
 /// from the highest probability down, whose mean `1 − probability` is at or below `target_fdr`.
 /// `None` where not even the highest group meets it.
 ///
+/// With one rate everywhere this flags what the run-wide histogram cut flags, without the
+/// histogram's binning. It was chosen over the other rule measured, which flagged a probability
+/// above the one the run-wide cut stands for; nothing beyond those two was tried.
+///
 /// Tied probabilities are taken or left as one group, because a cut cannot separate them. Sorted
 /// highest first, each added `1 − probability` is at least the mean before it, so the mean never
 /// falls; the first group that lifts it past the target ends the run. Non-finite values are
@@ -203,8 +200,7 @@ pub fn tail_fdr_posterior_cut(posteriors: &[f64], target_fdr: f64) -> Option<f64
 /// **Every record's local probability, and the cut.**
 ///
 /// `ratios`, `contigs` and `positions` are parallel, in spill order. `global_rate` is the run's
-/// fitted rate (or its fallback), `global_lr_cut` the ratio today's cut resolved to, and
-/// `target_fdr` the operator's target.
+/// fitted rate (or its fallback), and `target_fdr` the operator's target.
 ///
 /// # Panics
 ///
@@ -215,7 +211,6 @@ pub fn windowed_verdicts(
     contigs: &[u32],
     positions: &[u64],
     global_rate: f64,
-    global_lr_cut: Option<f64>,
     target_fdr: f64,
     config: &WindowedPriorConfig,
 ) -> WindowedVerdicts {
@@ -283,10 +278,7 @@ pub fn windowed_verdicts(
         contig_start = contig_end;
     }
 
-    let posterior_cut = match config.cut {
-        WindowedCut::TailFdr => tail_fdr_posterior_cut(&posteriors, target_fdr),
-        WindowedCut::Posterior => global_lr_cut.map(|lr| posterior_at(lr, global_rate)),
-    };
+    let posterior_cut = tail_fdr_posterior_cut(&posteriors, target_fdr);
 
     let occupied_bins = all_rates.len();
     all_rates.sort_unstable_by(f64::total_cmp);
@@ -370,11 +362,11 @@ mod tests {
         assert!((local_rate(&[], 0.1, 0.0) - 0.1).abs() < 1e-12);
     }
 
-    /// **With one rate everywhere, the tail-FDR rule on probabilities flags what today's
+    /// **With one rate everywhere, the tail-FDR rule on probabilities flags what the run-wide
     /// histogram cut flags**, apart from records whose ratio lies within a bin or so of the cut
     /// — the histogram decides by bin, this by record.
     #[test]
-    fn the_tail_fdr_cut_on_one_rate_is_todays_cut() {
+    fn the_tail_fdr_cut_on_one_rate_is_the_run_wide_cut() {
         // 9,000 records spread over a real-variant range and 1,000 over a duplication range, with
         // a stretch between so the cut falls among records.
         let mut ratios: Vec<f64> = Vec::new();
@@ -389,23 +381,23 @@ mod tests {
             histogram.push(r);
         }
         for target in [0.01, 0.05, 0.2] {
-            let today = calibrate_from_the_ratio_histogram(
+            let run_wide = calibrate_from_the_ratio_histogram(
                 &histogram,
                 target,
                 &CalibrationConfig::default(),
             );
-            let rate = today.prior.prior_probability;
-            let lr_cut = today.lr_threshold.expect("the target is reachable");
+            let rate = run_wide.prior.prior_probability;
+            let lr_cut = run_wide.lr_threshold.expect("the target is reachable");
             let posteriors: Vec<f64> = ratios.iter().map(|&r| posterior_at(r, rate)).collect();
             let cut = tail_fdr_posterior_cut(&posteriors, target).expect("reachable here too");
 
             let mut disagree = 0;
             for (&r, &p) in ratios.iter().zip(&posteriors) {
-                if today.flags(r) != (p >= cut) {
+                if run_wide.flags(r) != (p >= cut) {
                     disagree += 1;
                     assert!(
                         (r - lr_cut).abs() < 0.2,
-                        "target {target}: ratio {r} is far from today's cut {lr_cut} and the two \
+                        "target {target}: ratio {r} is far from the run-wide cut {lr_cut} and the two \
                          rules disagree on it"
                     );
                 }
@@ -455,23 +447,11 @@ mod tests {
         for &r in &ratios {
             histogram.push(r);
         }
-        let today =
+        let run_wide =
             calibrate_from_the_ratio_histogram(&histogram, 0.01, &CalibrationConfig::default());
-        let rate = today.prior.prior_probability;
-        let config = WindowedPriorConfig {
-            window_bases: 50_000,
-            shrink_records: 10.0,
-            cut: WindowedCut::TailFdr,
-        };
-        let windowed = windowed_verdicts(
-            &ratios,
-            &contigs,
-            &positions,
-            rate,
-            today.lr_threshold,
-            0.01,
-            &config,
-        );
+        let rate = run_wide.prior.prior_probability;
+        let config = WindowedPriorConfig::for_window(50_000).expect("a window above zero");
+        let windowed = windowed_verdicts(&ratios, &contigs, &positions, rate, 0.01, &config);
         let dense = windowed.posteriors[10_000];
         let isolated = windowed.posteriors[10_020];
         assert!(
@@ -489,46 +469,33 @@ mod tests {
         let config = WindowedPriorConfig {
             window_bases: 50_000,
             shrink_records: 0.0,
-            cut: WindowedCut::TailFdr,
         };
         let with = windowed_verdicts(
             &[f64::NAN, 10.0, -10.0],
             &[0, 0, 0],
             &[10, 20, 30],
             0.1,
-            None,
             0.5,
             &config,
         );
-        let without =
-            windowed_verdicts(&[10.0, -10.0], &[0, 0], &[20, 30], 0.1, None, 0.5, &config);
+        let without = windowed_verdicts(&[10.0, -10.0], &[0, 0], &[20, 30], 0.1, 0.5, &config);
         assert!(with.posteriors[0].is_nan());
         assert!(!with.flags(with.posteriors[0]));
         assert_eq!(with.posteriors[1], without.posteriors[0]);
         assert_eq!(with.posteriors[2], without.posteriors[1]);
     }
 
-    /// The probability rule flags what exceeds the probability today's cut stands for, and with
-    /// no cut flags nothing.
+    /// A window of zero is the one run-wide rate and asks for no windowed settings; any other
+    /// width gets the shipped pull.
     #[test]
-    fn the_posterior_rule_uses_todays_cut_at_the_run_wide_rate() {
-        let config = WindowedPriorConfig {
-            window_bases: 50_000,
-            shrink_records: 10.0,
-            cut: WindowedCut::Posterior,
-        };
-        let windowed = windowed_verdicts(
-            &[3.0, -3.0],
-            &[0, 1],
-            &[5, 5],
-            0.2,
-            Some(1.5),
-            0.01,
-            &config,
+    fn a_window_of_zero_is_the_run_wide_rate() {
+        assert_eq!(WindowedPriorConfig::for_window(0), None);
+        assert_eq!(
+            WindowedPriorConfig::for_window(50_000),
+            Some(WindowedPriorConfig {
+                window_bases: 50_000,
+                shrink_records: LOCAL_PRIOR_SHRINK_RECORDS,
+            })
         );
-        assert_eq!(windowed.posterior_cut, Some(posterior_at(1.5, 0.2)));
-        let none = windowed_verdicts(&[3.0], &[0], &[5], 0.2, None, 0.01, &config);
-        assert_eq!(none.posterior_cut, None);
-        assert!(!none.flags(1.0));
     }
 }

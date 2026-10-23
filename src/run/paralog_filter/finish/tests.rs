@@ -1027,7 +1027,7 @@ fn a_run_where_every_sample_has_a_coverage_model_does_not_warn_about_it() {
 }
 
 /// **`--hidden-dup-window` reaches the header and the report, and its absence leaves both as they
-/// were.** A research option: a run at a window above zero says so on `##paralogFilter` and in the
+/// were.** A run at a window above zero says so on `##paralogFilter` and in the
 /// report; a run at zero writes neither.
 #[test]
 fn a_window_is_stated_in_the_header_and_the_report_and_zero_states_nothing() {

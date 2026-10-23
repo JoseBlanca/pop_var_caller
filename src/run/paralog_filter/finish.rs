@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::paralog::windowed_prior::WindowedPriorConfig;
 use crate::paralog::{CalibrationConfig, CoverageFitConfig, ParalogModelParams};
 use crate::types::{InbreedingF, Ploidy};
 use crate::vcf::{
@@ -34,7 +35,7 @@ use crate::run::explain::ParalogExplanations;
 
 /// **`--hidden-dup-window`'s default: `50000` bases, a duplication rate per window.**
 ///
-/// Research option; `0` keeps the one genome-wide duplication rate. Owner, 2026-10-23. The help
+/// `0` keeps the one genome-wide duplication rate. Owner, 2026-10-23. The help
 /// text does not repeat the number, so this constant is the only place it lives.
 pub const DEFAULT_HIDDEN_DUP_WINDOW_BASES: u64 = 50_000;
 
@@ -53,7 +54,7 @@ pub struct WhatTheOperatorAskedFor {
     /// that tags, since the two files differ by exactly the tagged lines.
     pub tag_instead_of_dropping: bool,
     /// The width in bases of the stretch each record's duplication rate is estimated over —
-    /// `--hidden-dup-window`. `0` is the one genome-wide rate. Research option
+    /// `--hidden-dup-window`. `0` is the one genome-wide rate
     /// ([`crate::paralog::windowed_prior`]).
     pub window_bases: u64,
 }
@@ -275,7 +276,7 @@ pub fn fit_score_and_write_the_calls_explaining(
         &scoring,
         target_fdr,
         &CalibrationConfig::default(),
-        crate::exp::windowed_paralog_prior(window_bases).as_ref(),
+        WindowedPriorConfig::for_window(window_bases).as_ref(),
     )
     .map_err(ParalogFilterError::Scoring)?;
     let scoring_wall = began_scoring.elapsed();
@@ -305,7 +306,6 @@ pub fn fit_score_and_write_the_calls_explaining(
             .map(|windowed| WindowedPriorProvenance {
                 window_bases: windowed.config.window_bases,
                 shrink_records: windowed.config.shrink_records,
-                cut: windowed.config.cut.name(),
                 posterior_cut: windowed.posterior_cut,
             }),
     });
@@ -484,11 +484,10 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         };
         lines.push(format!(
             "  --hidden-dup-window: the duplication rate was estimated per window of {} bases, \
-             pulled towards the run-wide rate by {} record(s), and cut by the {} rule at \
-             probability {}; {rates}",
+             pulled towards the run-wide rate by {} record(s), and cut by the tail \
+             false-discovery rule at probability {}; {rates}",
             windowed.config.window_bases,
             windowed.config.shrink_records,
-            windowed.config.cut.name(),
             match windowed.posterior_cut {
                 Some(cut) => format!("{cut:.6}"),
                 None => "none (nothing flagged)".to_string(),

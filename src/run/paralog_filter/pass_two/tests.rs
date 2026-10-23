@@ -1115,15 +1115,14 @@ fn a_ratio_past_the_end_of_the_histogram_is_counted() {
     );
 }
 
-// ---------------------------------------------------------------- research: the windowed rate
+// ---------------------------------------------------------------- the windowed rate
 
-/// **Research only: with a window, every record gets a probability in spill order, and an
-/// unscored one gets none.** Without one, the verdicts carry nothing windowed — the switch unset
-/// is today's run.
+/// **With a window, every record gets a probability in spill order, and an unscored one gets
+/// none.** Without one, the verdicts carry nothing windowed — the run-wide rate decides.
 #[test]
 fn a_window_gives_each_scored_record_a_probability_in_spill_order() {
     use super::score_the_parked_records_and_resolve_the_cut_windowed;
-    use crate::paralog::windowed_prior::{WindowedCut, WindowedPriorConfig};
+    use crate::paralog::windowed_prior::WindowedPriorConfig;
 
     let context = a_context_over(6);
     let spill = a_spill_holding(
@@ -1134,11 +1133,7 @@ fn a_window_gives_each_scored_record_a_probability_in_spill_order() {
             a_record_shaped_like_a_duplication(300, 6),
         ],
     );
-    let config = WindowedPriorConfig {
-        window_bases: 50_000,
-        shrink_records: 10.0,
-        cut: WindowedCut::TailFdr,
-    };
+    let config = WindowedPriorConfig::for_window(50_000).expect("a window above zero");
 
     let windowed = score_the_parked_records_and_resolve_the_cut_windowed(
         &spill,
@@ -1159,7 +1154,7 @@ fn a_window_gives_each_scored_record_a_probability_in_spill_order() {
     assert!(windowed.posteriors[2] > windowed.posteriors[0]);
     assert_eq!(windowed.occupied_bins, 1);
 
-    let today = score_the_parked_records_and_resolve_the_cut_windowed(
+    let run_wide = score_the_parked_records_and_resolve_the_cut_windowed(
         &spill,
         &context,
         target(0.01),
@@ -1167,5 +1162,5 @@ fn a_window_gives_each_scored_record_a_probability_in_spill_order() {
         None,
     )
     .expect("the spill is readable");
-    assert!(today.windowed.is_none());
+    assert!(run_wide.windowed.is_none());
 }

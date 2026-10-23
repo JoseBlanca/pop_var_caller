@@ -219,7 +219,7 @@ pub struct CallFromPspsArgs {
     /// how common hidden duplications are. 0 uses one genome-wide rate.
     ///
     /// Each call's rate comes from the calls within half the window on either side, pulled toward
-    /// the genome-wide rate where few calls are near. A research option: its default may change.
+    /// the genome-wide rate where few calls are near.
     #[arg(
         long,
         value_name = "BASES",

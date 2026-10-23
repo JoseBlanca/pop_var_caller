@@ -203,11 +203,10 @@ pub struct ParalogVerdicts {
     pub config: CalibrationConfig,
     /// The range and resolution the ratios were binned over.
     pub lr_histogram: LrHistogramShape,
-    /// **Research only**: each record's probability under its own window's duplication rate, and
-    /// the cut on it, where `--hidden-dup-window` asked for one
-    /// ([`crate::paralog::windowed_prior`]). Where it is `Some`, pass three takes the verdict and
-    /// `PARALOG_POST` from here rather than from [`Self::calibration`]; where it is `None`, the run
-    /// is today's.
+    /// Each record's probability under its own window's duplication rate, and the cut on it,
+    /// where `--hidden-dup-window` is above 0 — the default ([`crate::paralog::windowed_prior`]).
+    /// Where it is `Some`, pass three takes the verdict and `PARALOG_POST` from here rather than
+    /// from [`Self::calibration`]; where it is `None`, the one run-wide rate decides.
     pub windowed: Option<WindowedVerdicts>,
 }
 
@@ -307,8 +306,8 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
     // instead, which costs time and never correctness.
     let mut ratios: Vec<f64> =
         Vec::with_capacity(usize::try_from(spill.entries_written()).unwrap_or(0));
-    // **Research only**: where each record sits, in the same order as its ratio, filled only where
-    // the windowed duplication rate needs it — 12 bytes a record.
+    // Where each record sits, in the same order as its ratio, filled only where the windowed
+    // duplication rate needs it — 12 bytes a record.
     let mut contigs: Vec<u32> = Vec::new();
     let mut positions: Vec<u64> = Vec::new();
     // **Read serially, score concurrently, fold serially.** The spill is a stream of
@@ -385,7 +384,6 @@ pub fn score_the_parked_records_and_resolve_the_cut_windowed(
             &contigs,
             &positions,
             calibration.prior.prior_probability,
-            calibration.lr_threshold,
             target_fdr.get(),
             windowed,
         )
