@@ -114,12 +114,14 @@ def steps(ctx):
     if os.path.exists(local_bam(depths[0])):
         bams = {depth: local_bam(depth) for depth in depths}
     else:
-        step, full = giab_sources.fetched(ctx, "hg002_tr", "HG002", whole_tier, GRCH38)
+        # A slice reads only its own 200 regions: the whole tier is 50,000.
+        fetch_bed = regions if ctx.slice else whole_tier
+        step, full = giab_sources.fetched(ctx, "hg002_tr", "HG002", fetch_bed, GRCH38)
         out.append(step)
         mean_file = os.path.join(inputs_dir, "mean_depth", "mean_depth.txt")
 
         def measure(d):
-            run_commands([("depth", f"samtools depth -a -b {q(whole_tier)} {q(full)} "
+            run_commands([("depth", f"samtools depth -a -b {q(fetch_bed)} {q(full)} "
                                     "| awk '{t+=$3; n++} END {printf \"%.6f\", t/n}' "
                                     f"> {q(mean_file)}")], os.path.join(d, "logs"))
             return {}

@@ -67,6 +67,7 @@ pass+=(--threads "$threads")
 [[ -n "${BENCH_TOMATO_REFERENCE:-}" ]] && pass+=(--tomato-reference "$BENCH_TOMATO_REFERENCE")
 [[ -n "${BENCH_TOMATO_SIZES:-}" ]] && pass+=(--tomato-sizes "$BENCH_TOMATO_SIZES")
 [[ -n "${BENCH_TOMATO_REGIONS:-}" ]] && pass+=(--tomato-regions "$PROJECT_DIR/$BENCH_TOMATO_REGIONS")
+[[ -n "${BENCH_GIAB_ALIGNMENTS:-}" ]] && pass+=(--giab-alignments "$BENCH_GIAB_ALIGNMENTS")
 [[ $slice == 1 ]] && RESULTS="$RESULTS/slice"
 mkdir -p "$RESULTS"
 
@@ -175,13 +176,11 @@ BENCH_MEM="$mem" "$PROJECT_DIR/benchmarks/suite/host_jobs.sh" "$RESULTS" "$PROJE
 host_jobs=$!
 trap 'kill $sampler $host_jobs 2>/dev/null || true' EXIT
 
+# The extra read-only mounts: the data root (from a worktree) and the profile's own, colon-separated.
+mounts_list="${BENCH_EXTRA_MOUNT:-}"
+[[ "$data_root" != "$PROJECT_DIR" ]] && mounts_list="$data_root${mounts_list:+:$mounts_list}"
 extra=()
-if [[ "$data_root" != "$PROJECT_DIR" ]]; then
-    extra=(DEV_EXTRA_MOUNT="$data_root")
-    [[ -n "${BENCH_EXTRA_MOUNT:-}" ]] && { echo "dev.sh mounts one extra directory: the data root and the profile's BENCH_EXTRA_MOUNT cannot both be mounted" >&2; exit 1; }
-elif [[ -n "${BENCH_EXTRA_MOUNT:-}" ]]; then
-    extra=(DEV_EXTRA_MOUNT="$BENCH_EXTRA_MOUNT")
-fi
+[[ -n "$mounts_list" ]] && extra=(DEV_EXTRA_MOUNT="$mounts_list")
 # The memory and core limits are applied to podman too (DEV_LIMIT_PODMAN), not only to Apple's VM.
 extra+=(DEV_LIMIT_PODMAN=1)
 keep_awake=()
