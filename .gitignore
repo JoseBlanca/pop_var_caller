@@ -93,3 +93,6 @@ benchmarks/ssr_tomato1/catalog/
 # Registry bookkeeping that comes with an extracted crate and means nothing here.
 /vendor/noodles-cram/.cargo-ok
 /vendor/noodles-cram/.cargo_vcs_info.json
+
+# Benchmark suite results (benchmarks/suite/)
+/benchmark_results/

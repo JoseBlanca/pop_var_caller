@@ -66,10 +66,10 @@ also overridable from the environment (`REFERENCE=… THREADS=8 …`).
   the same reference: `run_ng.sh` builds one at `NG_CATALOG` if it is missing,
   which takes about 100 s on GRCh38. Where the reference sits on a read-only
   mount, the benchmark config points `NG_CATALOG` somewhere writable.
-- **Two limits to hold against ng's numbers.** It does not call inside tandem
-  repeats — every tract in the BED is counted as ground it cannot speak for and
-  named in the run report, in pvc's log beside the VCF (`<name>.pvc.log`) — and nothing is
-  fitted, because no command writes a fitted parameters file yet, so every run
-  is `--defaults`. Both cost recall, not precision.
+- `run_ng.sh` calls with `--defaults` unless `NG_PARAMETERS` names a parameters file written by
+  `pvc estimate-parameters`. pvc calls inside tandem repeats on its STR path.
+- **The figures quoted about pvc come from `benchmarks/suite/`** (`run_suite.sh`), which reruns
+  pvc, scores every caller with vcfeval or the STR scorers, and keeps the competitors' calls; the
+  runners here are kept for the older analyses.
 - `compare_to_truth.sh` scores **allele** concordance (POS+REF+ALT), not
   genotype concordance; for GT-level eval use rtg vcfeval or hap.py.
