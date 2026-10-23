@@ -158,7 +158,7 @@ def fetched(ctx, name, sample, regions, reference):
         source = f"-T {q(reference)} {q(local)}" if local else q(bam_url(sample))
         m = run_commands([("fetch",
                            f"samtools view -u -h -M -L {q(regions)} {source} "
-                           f"| samtools addreplacerg -m overwrite_all -r {q(rg)} -O bam -u - "
+                           f"| samtools addreplacerg -m overwrite_all -w -r {q(rg)} -O bam -u - "
                            f"| samtools sort -@ 4 -m 1G -T {q(os.path.join(d, 'sort'))} -o {q(path)} - "
                            f"&& samtools index {q(path)}")],
                          os.path.join(d, "logs"), cwd=d)
