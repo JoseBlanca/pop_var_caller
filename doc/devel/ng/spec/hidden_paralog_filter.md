@@ -260,9 +260,9 @@ the pseudocount — are production's ([`paralog/mod.rs`](../../../../src/paralog
 *kept, never flagged*: its ratio is `NaN`, which the histogram refuses to fold and the verdict
 never flags ([`ParalogCalibration::flags`, `calibrate.rs:97`](../../../../src/var_calling/paralog_filter/calibrate.rs)).
 
-### 3.3 From scores to a cut — production's prior and FDR, copied
+### 3.3 From scores to a cut — production's prior and FDR, then a rate per window
 
-Pass two folds every finite ratio into a fixed-size histogram of ratios
+**The run-wide rate.** Pass two folds every finite ratio into a fixed-size histogram of ratios
 ([`ParalogLrHistogram`, `prior.rs:108`](../../../../src/paralog/prior.rs)), estimates π from it by
 EM ([`ParalogPrior::estimate`, `prior.rs:181`](../../../../src/paralog/prior.rs)), builds the
 tail-FDR curve over the same bins ([`ParalogFdrCurve`, `prior.rs:230`](../../../../src/paralog/prior.rs)),
@@ -276,6 +276,53 @@ the run warns, and the header says so.
 so pass three applies the cut to the value the histogram was built from rather than re-scoring.
 That is production's own argument for storing the ratio: the cut then matches the histogram *by
 construction*. Forty megabytes at five million records, flat in the sample count.
+
+**A rate per window — the default since 2026-10-23.** Hidden duplications cluster: long stretches
+of a genome hold almost none and a few hold many. One run-wide π is therefore too high in the
+clean stretches, where it lifts real variants over the cut, and too low in the dense ones. So pass
+two re-estimates the rate locally
+([`windowed_prior.rs`](../../../../src/paralog/windowed_prior.rs)):
+
+1. **Each contig is cut into bins of 10,000 bases**, and every record in a bin shares one rate.
+2. **A bin's rate is estimated from the records within half a window of the bin's centre** —
+   25,000 bases either side at the default window of 50,000 (`--hidden-dup-window`, §3.6) — by
+   the same EM that gives π.
+3. **The estimate is pulled toward the run-wide π**, as if 10 extra records sat in every window at
+   that rate. A window holding few records keeps about π; one holding hundreds keeps its own.
+4. **Each record's posterior is σ(LR + logit π_b)**, with π_b its own bin's rate. That is the
+   `PARALOG_POST` written (§3.5).
+5. **The cut** ranks the records by posterior, highest first, and flags the longest run from the
+   top whose mean chance of being a real variant, `1 − posterior`, is at or below the target;
+   records with equal posteriors are taken or left together. With one rate everywhere this flags
+   what the histogram cut above flags, apart from records within about one histogram bin of it.
+
+Pass two keeps each record's contig and position for this (12 bytes a record), then one posterior
+(8 bytes a record) until pass three — flat in the sample count. The time grows with the window,
+not the cohort: each occupied bin's EM runs over the records in its window. The `##paralogFilter`
+line (§3.5) gains `window=`, `shrink=` (the pull, in records) and `post_cut=` (the posterior the
+cut resolved to, `none` where nothing is flagged); in a windowed run `post_cut` decides, and `pi`
+and `lr_cut` are the run-wide values the windows were pulled toward.
+
+**Why (the owner's decision, 2026-10-23).** On GIAB HG002 chromosome 22, called as one sample, the
+run-wide π is 0.13 to 0.16, while the same EM gives 0.0003 to 0.005 inside GIAB's trusted regions
+and 0.33 to 0.43 outside them; inside the trusted regions 31 to 80 of every 100 records the
+run-wide filter removed were real variants, against a target of 1 in 100. With 50,000-base windows,
+HG002, HG003 and HG004 summed (hap.py, with pvc_eval agreeing) gained 192, 100, 48 and 17 true calls
+at 5x, 10x, 30x and 300x, while false calls fell by 6 and 7 at 5x and 10x and rose by 10 and 7 at 30x
+and 300x. On a simulated genome with hidden duplications absent from the reference, introgressions
+and uneven coverage, one sample caught more duplication artifacts at every depth (502 → 764 of
+1,401 at 3x, 2,057 → 2,418 of 2,604 at 30x) and removed fewer real variants at 100x (59 → 38); a
+cohort of 20 at 3x removed fewer real variant genotypes (4,129 → 3,083), at the cost of 13 more at
+10x (55 against 42 of 195,796).
+
+**What was not tuned.** The pull of 10 records (`LOCAL_PRIOR_SHRINK_RECORDS`) and the cut rule
+(`tail_fdr_posterior_cut`) are the values those measurements were taken at. The one other cut
+measured — flag a posterior above the one the run-wide cut stands for — was dropped. Windows of
+20,000 to 100,000 bases behaved alike; nothing outside that range was tried.
+
+**A window of 0 is the filter as it was before 2026-10-23**: every record's posterior uses the
+run-wide π, the histogram cut decides, and the header line carries no windowed fields. It is there
+to reproduce a run made before that date, or to compare the two on one's own data.
 
 ### 3.4 The spill — a framed binary file of finished lines
 
