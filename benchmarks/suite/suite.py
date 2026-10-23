@@ -34,6 +34,9 @@ def parse_args():
     p.add_argument("--tomato-reference", help="SL4.0 FASTA (a machine profile sets it)")
     p.add_argument("--tomato-sizes", help="comma-separated sample counts for the speed benchmark")
     p.add_argument("--tomato-regions", help="BED of the tomato regions (a machine profile sets it)")
+    p.add_argument("--giab-alignments",
+                   help="local copies of GIAB's 300x alignments, a path with {sample} in it, read "
+                        "instead of fetching from GIAB (a machine profile sets it)")
     p.add_argument("--no-wait", action="store_true",
                    help="start timed steps even when the machine is busy (their times are marked)")
     p.add_argument("--quiet-cores", type=float, default=2.0)

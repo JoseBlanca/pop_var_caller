@@ -96,7 +96,10 @@ while true; do
         [[ "$(cd "$data_root" && pwd -P)" != "$(cd "$project" && pwd -P)" ]] \
             && mounts+=(-v "$data_root:$data_root:ro")
         [[ -d "$genomes" && "$genomes" != "$data_root" ]] && mounts+=(-v "$genomes:$genomes:ro")
-        [[ -n "$extra_dir" && -d "$extra_dir" ]] && mounts+=(-v "$extra_dir:$extra_dir:ro")
+        IFS=: read -r -a extra_dirs <<< "$extra_dir"
+        for d in ${extra_dirs[@]+"${extra_dirs[@]}"}; do
+            [[ -n "$d" && -d "$d" ]] && mounts+=(-v "$d:$d:ro")
+        done
         running="pvcsuite-$id"
         # Measured by the suite's own code where the image has Python; otherwise run as it is, and
         # the step records no measurement (GLnexus's image may lack Python).

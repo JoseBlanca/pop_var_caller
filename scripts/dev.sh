@@ -100,18 +100,23 @@ add_ro_mount() {
 DEV_GENOMES_DIR="${DEV_GENOMES_DIR:-$HOME/genomes}"
 [[ -d "$DEV_GENOMES_DIR" ]] && add_ro_mount "$DEV_GENOMES_DIR"
 
-# Opt-in additional mount for data living somewhere else again. Single
-# path only; rerun with a different value if you need a different mount.
+# Opt-in additional mounts for data living somewhere else again: one
+# directory, or several separated by colons (the benchmark suite on a
+# server needs its tomato collection and its GIAB alignments both).
 if [[ -n "${DEV_EXTRA_MOUNT:-}" ]]; then
-    if [[ ! -d "$DEV_EXTRA_MOUNT" ]]; then
-        echo "Error: DEV_EXTRA_MOUNT='$DEV_EXTRA_MOUNT' is not a directory." >&2
-        exit 1
-    fi
-    # Skip if it duplicates the genomes mount — bind-mounting the same
-    # path twice is an error on Apple container.
-    if [[ "$DEV_EXTRA_MOUNT" != "$DEV_GENOMES_DIR" ]]; then
-        add_ro_mount "$DEV_EXTRA_MOUNT"
-    fi
+    IFS=: read -r -a extra_dirs <<< "$DEV_EXTRA_MOUNT"
+    for extra_dir in "${extra_dirs[@]}"; do
+        [[ -z "$extra_dir" ]] && continue
+        if [[ ! -d "$extra_dir" ]]; then
+            echo "Error: DEV_EXTRA_MOUNT names '$extra_dir', which is not a directory." >&2
+            exit 1
+        fi
+        # Skip one that duplicates the genomes mount — bind-mounting the
+        # same path twice is an error on Apple container and on podman.
+        if [[ "$extra_dir" != "$DEV_GENOMES_DIR" ]]; then
+            add_ro_mount "$extra_dir"
+        fi
+    done
 fi
 
 # Only request a TTY when stdin actually is one; -t fails when invoked

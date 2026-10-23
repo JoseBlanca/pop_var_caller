@@ -143,22 +143,32 @@ def tr_truth(ctx):
 # ---- alignments ---------------------------------------------------------------------------------
 
 def fetched(ctx, name, sample, regions, reference):
-    """(step, path): a sample's 300× GIAB alignment over `regions`, with a read group, sorted."""
+    """(step, path): a sample's 300× GIAB alignment over `regions`, with a read group, sorted.
+
+    Read from GIAB's server, or, where the machine's profile names local copies of the same
+    alignments (`--giab-alignments`, a path with `{sample}`; rick's are GIAB's novoalign 300× BAMs
+    as CRAMs of chromosomes 1 to 22), from those: the same reads, at disk speed instead of hours of
+    HTTP range requests.
+    """
     path = _inputs(ctx, "alignments", name, sample, f"{sample}.300x.bam")
     rg = f"@RG\\tID:{sample}\\tSM:{sample}\\tLB:{sample}\\tPL:ILLUMINA"
+    local = ctx.giab_alignments.format(sample=sample) if ctx.giab_alignments else None
 
     def action(d):
-        url = bam_url(sample)
+        source = f"-T {q(reference)} {q(local)}" if local else q(bam_url(sample))
         m = run_commands([("fetch",
-                           f"samtools view -u -h -M -L {q(regions)} {q(url)} "
+                           f"samtools view -u -h -M -L {q(regions)} {source} "
                            f"| samtools addreplacerg -m overwrite_all -r {q(rg)} -O bam -u - "
                            f"| samtools sort -@ 4 -m 1G -T {q(os.path.join(d, 'sort'))} -o {q(path)} - "
                            f"&& samtools index {q(path)}")],
                          os.path.join(d, "logs"), cwd=d)
         return {"measurement": m}
 
-    return Step(f"giab/alignments/{name}/{sample}", "input", action,
-                lambda: {"url": bam_url(sample), "regions": file_identity(regions)}), path
+    def fingerprint():
+        source = {"local": file_identity(local)} if local else {"url": bam_url(sample)}
+        return {**source, "regions": file_identity(regions)}
+
+    return Step(f"giab/alignments/{name}/{sample}", "input", action, fingerprint), path
 
 
 def downsampled(ctx, name, sample, source, reference, depth, fraction):
