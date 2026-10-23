@@ -1289,18 +1289,19 @@ fn a_run_that_says_nothing_about_the_filter_takes_the_specs_target() {
     );
 }
 
-/// **`--hidden-dup-window` defaults to the one genome-wide rate, and takes a width in bases.**
+/// **`--hidden-dup-window` defaults to windows of 50,000 bases, and `0` asks for the one
+/// genome-wide rate.**
 ///
-/// A research option whose default is expected to change once it is measured; this pins what
-/// the default is today, so the change is a deliberate edit and not an accident.
+/// A research option; this pins what the default is today, so a change is a deliberate edit and
+/// not an accident.
 #[test]
-fn the_hidden_dup_window_defaults_to_one_genome_wide_rate() {
+fn the_hidden_dup_window_defaults_to_fifty_thousand_bases() {
     let args = args_of(&a_defaults_run());
-    assert_eq!(args.hidden_dup_window, 0);
+    assert_eq!(args.hidden_dup_window, 50_000);
 
-    let mut windowed = a_defaults_run();
-    windowed.extend(["--hidden-dup-window", "50000"]);
-    assert_eq!(args_of(&windowed).hidden_dup_window, 50_000);
+    let mut genome_wide = a_defaults_run();
+    genome_wide.extend(["--hidden-dup-window", "0"]);
+    assert_eq!(args_of(&genome_wide).hidden_dup_window, 0);
 }
 
 /// **Direct mode refuses a target that is not a false-discovery rate, and this is what says so.**

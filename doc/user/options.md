@@ -21,7 +21,7 @@ says otherwise.
 | `--min-site-quality` | 1 | you want every site, including weak ones: `0`. Or you want a stricter set: raise it. The default removes sites whose penalties for looking like sequencing artifacts outweigh their evidence. |
 | `--hidden-dup-fdr` | 0.01 | you want no hidden-duplication filtering: `0`. The value is the share of removed calls you accept as true variants removed by mistake. |
 | `--hidden-dup-tag` | off | you want to see what the hidden-duplication filter removes: the calls are kept and marked `hiddenDup` in FILTER. |
-| `--hidden-dup-window` | 0 | **Research option; its default may change.** Hidden duplications cluster in some parts of the genome, so one genome-wide rate overstates them in easy ground and removes true variants there. With a width in bases, for example `50000`, the filter estimates the rate from the calls within half the window on either side of each call, pulled toward the genome-wide rate where few calls are near. `0` uses the one genome-wide rate. |
+| `--hidden-dup-window` | 50000 | **Research option; its default may change.** Hidden duplications cluster in some parts of the genome, so one genome-wide rate overstates them in easy ground and removes true variants there. With a width in bases, the filter estimates the rate from the calls within half the window on either side of each call, pulled toward the genome-wide rate where few calls are near. `0` uses the one genome-wide rate. |
 
 ## Depth and locus size
 

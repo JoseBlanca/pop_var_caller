@@ -32,12 +32,11 @@ use super::{
 };
 use crate::run::explain::ParalogExplanations;
 
-/// **`--hidden-dup-window`'s default: `0`, the one genome-wide duplication rate.**
+/// **`--hidden-dup-window`'s default: `50000` bases, a duplication rate per window.**
 ///
-/// Research option. The default is expected to become `50000` once the windowed rate has been
-/// measured; this constant is the only thing that change touches, since the help text does not
-/// repeat the number.
-pub const DEFAULT_HIDDEN_DUP_WINDOW_BASES: u64 = 0;
+/// Research option; `0` keeps the one genome-wide duplication rate. Owner, 2026-10-23. The help
+/// text does not repeat the number, so this constant is the only place it lives.
+pub const DEFAULT_HIDDEN_DUP_WINDOW_BASES: u64 = 50_000;
 
 /// **The two knobs the operator sets, together** — because they are one decision.
 ///

@@ -383,7 +383,7 @@ model was rejected, each with its reason; π, the cut, and whether the EM conver
 |---|---|---|
 | `--paralog-fdr <f>` | `0.01` | the target false-discovery rate among the records removed; `0` turns the filter off |
 | `--paralog-filter-tag` | off | keep flagged records, on the `hiddenParalog` filter, instead of dropping them |
-| `--hidden-dup-window <BASES>` | `0` | research option, branch `research/giab-alpha` (2026-10-22): estimate π per window of this width rather than once for the genome; `0` is the one genome-wide π. See `src/paralog/windowed_prior.rs` |
+| `--hidden-dup-window <BASES>` | `50000` | research option, branch `research/giab-alpha` (2026-10-22), default raised from `0` (owner, 2026-10-23): estimate π per window of this width rather than once for the genome; `0` is the one genome-wide π. See `src/paralog/windowed_prior.rs` |
 
 Both on `call-from-psps` and `call-from-alignments`
 ([`CallFromPspsArgs`, `call_from_psps.rs:75`](../../../../src/pop_var_caller_exp/call_from_psps.rs)),
