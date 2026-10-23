@@ -433,7 +433,7 @@ const INFO_DECLARATIONS: &[&str] = &[
 /// a reader cannot tell "nothing was flagged" from "the filter did not run".
 const HIDDEN_PARALOG_DECLARATIONS: &[&str] = &[
     r#"##INFO=<ID=PARALOG_LR,Number=1,Type=Float,Description="Log likelihood ratio of a hidden paralog over a real variant, from coverage and allele balance across samples">"#,
-    r#"##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the run's fitted paralog rate">"#,
+    r#"##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the paralog rate fitted around it (over the whole run where --hidden-dup-window is 0)">"#,
     r#"##FILTER=<ID=hiddenDup,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">"#,
 ];
 

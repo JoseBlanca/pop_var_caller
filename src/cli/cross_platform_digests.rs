@@ -416,7 +416,11 @@ mod tests {
     /// only the `##pvcParameters` line moved, carrying the parameters file's new checksum; with
     /// the old one put back it reproduces the old checksum, `da2024ac5ff5582c96a0f86ce9a8254d`, exactly. Recorded in the
     /// Linux container (amd64).
-    const CALLS_MD5: &str = "a98b088ade1653000a043072240ad900";
+    /// **Re-recorded 2026-10-23** when `PARALOG_POST`'s header description became "under the paralog
+    /// rate fitted around it" for the windowed duplication rate: only that `##INFO` line moved; putting
+    /// the old description back reproduces the old checksum, `a98b088ade1653000a043072240ad900`, exactly. Recorded
+    /// in the Linux container (amd64).
+    const CALLS_MD5: &str = "97c0120bca8f944d9d26e07695bf87c2";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -653,7 +657,11 @@ mod tests {
     /// only the `##pvcParameters` line moved, carrying the parameters file's new checksum; with
     /// the old one put back it reproduces the old checksum, `7083dc4bede34f2e7f197c194ff8df41`, exactly. Recorded in the
     /// Linux container (amd64).
-    const WITH_ERRORS_CALLS_MD5: &str = "658380c537ec2cd5964a6774d2deafd7";
+    /// **Re-recorded 2026-10-23** when `PARALOG_POST`'s header description became "under the paralog
+    /// rate fitted around it" for the windowed duplication rate: only that `##INFO` line moved; putting
+    /// the old description back reproduces the old checksum, `658380c537ec2cd5964a6774d2deafd7`, exactly. Recorded
+    /// in the Linux container (amd64).
+    const WITH_ERRORS_CALLS_MD5: &str = "d717848f594200eb3b7c4e39ddeeb3ae";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -895,7 +903,11 @@ mod tests {
     /// only the `##pvcParameters` line moved, carrying the parameters file's new checksum; with
     /// the old one put back it reproduces the old checksum, `2c68478585fa63e9b890cc30b3f33f9c`, exactly. Recorded in the
     /// Linux container (amd64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "bcd2e92c326cef11be6bcfb98798891b";
+    /// **Re-recorded 2026-10-23** when `PARALOG_POST`'s header description became "under the paralog
+    /// rate fitted around it" for the windowed duplication rate: only that `##INFO` line moved; putting
+    /// the old description back reproduces the old checksum, `bcd2e92c326cef11be6bcfb98798891b`, exactly. Recorded
+    /// in the Linux container (amd64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "513fb4a876d6f1d82b36a77171a4d825";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

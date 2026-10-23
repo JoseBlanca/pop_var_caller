@@ -400,14 +400,13 @@ Per entry, in spill order, with its ratio from pass two:
 
 ```text
 ##INFO=<ID=PARALOG_LR,Number=1,Type=Float,Description="Log likelihood ratio of a hidden paralog over a real variant, from coverage and allele balance across samples">
-##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the run's fitted paralog rate">
+##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the paralog rate fitted around it (over the whole run where --hidden-dup-window is 0)">
 ##FILTER=<ID=hiddenParalog,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">
 ```
 
 `PARALOG_POST` is the id [`vcf_output.md`](vcf_output.md) §6 reserved for this document. In a
-windowed run (the default, §3.3) it is the posterior under the rate of the record's own window;
-the header's description, written before the window existed, still says "the run's fitted paralog
-rate". The
+windowed run (the default, §3.3) it is the posterior under the rate of the record's own window.
+The
 ratio is written so that a run that drops can be audited against one that tags.
 
 **The header carries the run's calibration**, production's line with one addition:
