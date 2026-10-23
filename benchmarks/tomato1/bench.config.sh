@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Benchmark config: tomato1 — 26-sample S. lycopersicum cohort, CRAMs
-# pre-sliced to the regions in regions.bed (~2 Mb of SL4.0).
+# Benchmark config: tomato1 — 63 S. lycopersicum accessions, CRAMs
+# pre-sliced to the regions in regions.bed (80 regions of 100 kb, 8 Mb of SL4.0).
+# The figures quoted about pvc on this cohort come from benchmarks/suite/
+# (`run_suite.sh --only speed,tomato_agreement`), not from this config.
 #
 # Sourced by benchmarks/lib/run_<caller>.sh and the helper scripts.
 # Every value is env-overridable. BENCH_DIR, CRAM_DIR, and OUT_ROOT are
