@@ -153,8 +153,7 @@ pub fn write_the_records_the_filter_kept_explaining(
     // **Taken front to back, never indexed.** The pairing is positional and this is what makes
     // it hold: the iterator advances once per record, in step with the read.
     let mut ratios = verdicts.ratios.iter();
-    // Research only: the windowed probabilities, one a record in the same order, where the run
-    // asked for them.
+    // The windowed probabilities, one a record in the same order, where the run used a window.
     if let Some(windowed) = &verdicts.windowed
         && windowed.posteriors.len() != verdicts.ratios.len()
     {
@@ -178,8 +177,8 @@ pub fn write_the_records_the_filter_kept_explaining(
             .next()
             .expect("the spill and the ratios were counted equal before the walk");
 
-        // **The verdict and the probability**: today's, from the run-wide rate, or the window's
-        // where the research switch asked for one. Either way a record with no finite ratio has
+        // **The verdict and the probability**: the window's where the run used one, or the
+        // run-wide rate's at a window of 0. Either way a record with no finite ratio has
         // no probability and is not flagged.
         let (flagged, posterior) = match (&verdicts.windowed, windowed_posteriors.as_mut()) {
             (Some(windowed), Some(posteriors)) => {

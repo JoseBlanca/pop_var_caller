@@ -83,7 +83,6 @@ pub mod bam;
 pub mod calling;
 pub mod cli;
 pub mod error_render;
-pub mod exp;
 pub mod fasta;
 pub mod float;
 pub mod genetics;

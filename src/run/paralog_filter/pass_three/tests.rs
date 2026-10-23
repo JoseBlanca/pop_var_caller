@@ -596,9 +596,9 @@ fn records_on_a_second_contig_are_written_in_the_spill_s_order() {
     assert_eq!(positions, vec!["chr0", "chr1", "chr1"]);
 }
 
-// ---------------------------------------------------------------- research: the windowed rate
+// ---------------------------------------------------------------- the windowed rate
 
-/// **Research only: with a windowed rate, the verdict and `PARALOG_POST` are the window's.**
+/// **With a windowed rate, the verdict and `PARALOG_POST` are the window's.**
 ///
 /// Three records with the same ratio and a run-wide calibration that removes nothing. The
 /// windowed probabilities are set by hand: the first is above the windowed cut and is tagged, the
@@ -606,7 +606,7 @@ fn records_on_a_second_contig_are_written_in_the_spill_s_order() {
 /// `PARALOG_POST` is its own windowed probability, not the run-wide one.
 #[test]
 fn a_windowed_rate_decides_the_verdict_and_the_probability_written() {
-    use crate::paralog::windowed_prior::{WindowedCut, WindowedPriorConfig, WindowedVerdicts};
+    use crate::paralog::windowed_prior::{WindowedPriorConfig, WindowedVerdicts};
     let (spill, output) = a_spill_and_an_output(
         "a_windowed_rate_decides_the_verdict_and_the_probability_written",
         vec![
@@ -620,7 +620,6 @@ fn a_windowed_rate_decides_the_verdict_and_the_probability_written() {
         config: WindowedPriorConfig {
             window_bases: 50_000,
             shrink_records: 10.0,
-            cut: WindowedCut::TailFdr,
         },
         posteriors: vec![0.995, 0.25, f64::NAN],
         posterior_cut: Some(0.99),

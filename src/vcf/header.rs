@@ -475,24 +475,24 @@ pub struct HiddenParalogProvenance {
     pub samples_with_a_coverage_model: usize,
     /// How many samples the run has.
     pub samples_in_the_run: usize,
-    /// **Research only**: the windowed duplication rate the run used instead of the one run-wide
-    /// rate, where `--hidden-dup-window` asked for it. `None` writes today's line exactly.
+    /// The windowed duplication rate the run used instead of the one run-wide rate, where
+    /// `--hidden-dup-window` is above 0 — the default. `None`, at a window of 0, writes the line
+    /// without the windowed fields.
     pub windowed: Option<WindowedPriorProvenance>,
 }
 
-/// **Research only: what the windowed duplication rate ran with** — appended to the
-/// `##paralogFilter=` line as `window=W;shrink=K;cut=fdr|posterior;post_cut=P`.
+/// **What the windowed duplication rate ran with** — appended to the `##paralogFilter=` line as
+/// `window=W;shrink=K;post_cut=P`.
 ///
-/// `post_cut` is the probability the cut resolved to, which is what decides a record under this
-/// rule; the line's `lr_cut` is still the run-wide cut and no longer decides anything on its own.
+/// `post_cut` is the probability the tail false-discovery rule resolved to, which is what decides
+/// a record in a windowed run; the line's `pi` and `lr_cut` are still the run-wide rate and cut,
+/// and no longer decide anything on their own.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WindowedPriorProvenance {
     /// The window's width in bases.
     pub window_bases: u64,
     /// The pull towards the run-wide rate, in records.
     pub shrink_records: f64,
-    /// The cut's rule: `fdr` or `posterior`.
-    pub cut: &'static str,
     /// The probability the cut resolved to, or `None` where nothing is flagged.
     pub posterior_cut: Option<f64>,
 }
@@ -522,17 +522,13 @@ impl HiddenParalogProvenance {
             Some(WindowedPriorProvenance {
                 window_bases,
                 shrink_records,
-                cut,
                 posterior_cut,
             }) => {
                 let posterior_cut = match posterior_cut {
                     Some(p) => format!("{:.*}", PARALOG_POSTERIOR_DECIMALS, p),
                     None => "none".to_string(),
                 };
-                format!(
-                    ";window={window_bases};shrink={shrink_records};cut={cut};\
-post_cut={posterior_cut}"
-                )
+                format!(";window={window_bases};shrink={shrink_records};post_cut={posterior_cut}")
             }
         };
         format!(
@@ -715,7 +711,7 @@ samples_with_coverage_model=61/63",
         assert_eq!(PARALOG_POSTERIOR_DECIMALS, 6);
     }
 
-    /// **Research only: a windowed run appends its three knobs and the probability it cut at.**
+    /// **A windowed run appends its window, its pull and the probability it cut at.**
     #[test]
     fn a_windowed_run_appends_its_knobs_to_the_calibration_line() {
         let stated = HiddenParalogProvenance {
@@ -728,7 +724,6 @@ samples_with_coverage_model=61/63",
             windowed: Some(WindowedPriorProvenance {
                 window_bases: 50_000,
                 shrink_records: 10.0,
-                cut: "fdr",
                 posterior_cut: Some(0.987_654_321),
             }),
         }
@@ -737,7 +732,7 @@ samples_with_coverage_model=61/63",
         assert_eq!(
             stated,
             "target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;\
-samples_with_coverage_model=1/1;window=50000;shrink=10;cut=fdr;post_cut=0.987654",
+samples_with_coverage_model=1/1;window=50000;shrink=10;post_cut=0.987654",
         );
     }
 
