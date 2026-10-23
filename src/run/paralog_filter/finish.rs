@@ -35,7 +35,7 @@ use crate::run::explain::ParalogExplanations;
 
 /// **`--hidden-dup-window`'s default: `50000` bases, a duplication rate per window.**
 ///
-/// Research option; `0` keeps the one genome-wide duplication rate. Owner, 2026-10-23. The help
+/// `0` keeps the one genome-wide duplication rate. Owner, 2026-10-23. The help
 /// text does not repeat the number, so this constant is the only place it lives.
 pub const DEFAULT_HIDDEN_DUP_WINDOW_BASES: u64 = 50_000;
 
@@ -54,7 +54,7 @@ pub struct WhatTheOperatorAskedFor {
     /// that tags, since the two files differ by exactly the tagged lines.
     pub tag_instead_of_dropping: bool,
     /// The width in bases of the stretch each record's duplication rate is estimated over —
-    /// `--hidden-dup-window`. `0` is the one genome-wide rate. Research option
+    /// `--hidden-dup-window`. `0` is the one genome-wide rate
     /// ([`crate::paralog::windowed_prior`]).
     pub window_bases: u64,
 }
