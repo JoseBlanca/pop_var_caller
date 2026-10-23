@@ -101,7 +101,10 @@ while true; do
         # Measured by the suite's own code where the image has Python; otherwise run as it is, and
         # the step records no measurement (GLnexus's image may lack Python).
         mkdir -p "$workdir/logs"
-        "$runtime" run --rm --name "$running" --cpus "$threads" --memory "$memory" ${user[@]+"${user[@]}"} \
+        # No cap on processes and threads: rootless podman's default of 2,048 per container stops
+        # DeepVariant's make_examples at 30 shards ("can't start new thread").
+        "$runtime" run --rm --name "$running" --cpus "$threads" --memory "$memory" --pids-limit=-1 \
+            ${user[@]+"${user[@]}"} \
             "${mounts[@]}" -w "$workdir" \
             -e MCLI="$project/benchmarks/suite/lib/measure_cli.py" -e RESULT="$result" \
             -e LOGDIR="$workdir/logs" -e LABEL="$label" -e CMD="$command" \
