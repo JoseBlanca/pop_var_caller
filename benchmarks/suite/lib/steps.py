@@ -105,7 +105,8 @@ class Runner:
     def run(self, step):
         """Run `step` unless it is already done with a matching fingerprint; return its record."""
         directory = self.step_dir(step)
-        fingerprint = _canonical(step.fingerprint() if callable(step.fingerprint) else step.fingerprint)
+        fingerprint = _canonical(_refresh_missing(
+            step.fingerprint() if callable(step.fingerprint) else step.fingerprint))
         record = self.load_done(step)
         if record is not None:
             if (record.get("fingerprint") == fingerprint and not self._forced(step)
@@ -288,6 +289,24 @@ def _run_in_child(action, directory):
     child.join()
     if status == "err":
         raise value
+    return value
+
+
+def _refresh_missing(value):
+    """The fingerprint with every file recorded as missing looked at again, now.
+
+    Most steps take their fingerprint when the run is planned, and an input made by an earlier
+    step of the same run (the reference a server downloads, say) does not exist yet then. Taken
+    at that moment it reads `missing`, and the next session, which finds the file, would call the
+    input changed. Looked at again here, just before the step is compared and run, it reads what
+    the step actually ran on.
+    """
+    if isinstance(value, dict):
+        if value.get("missing") is True and "path" in value:
+            return file_identity(value["path"])
+        return {k: _refresh_missing(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_refresh_missing(v) for v in value]
     return value
 
 
