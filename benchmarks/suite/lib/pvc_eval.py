@@ -31,6 +31,7 @@ run_suite.sh found and mounted.
 
 import csv
 import os
+import re
 import shlex
 import subprocess
 
@@ -57,10 +58,30 @@ def available(ctx):
     return bool(ctx.pvc_eval_dir)
 
 
+def _metadata_dir(ctx):
+    """A directory holding the package metadata of the checkout, for PYTHONPATH.
+
+    pvc_eval reads its own version from its installed package's metadata (`str-regions` writes it
+    in its BED's header), and a checkout run from PYTHONPATH has none, so the call fails
+    ("No package metadata was found for pvc-eval"). Installing it would need the network at every
+    run, to fetch its build backend; a minimal `.dist-info` with its name and the version in its
+    pyproject.toml is all the lookup reads. Written once per pvc_eval commit, under the results."""
+    with open(os.path.join(ctx.pvc_eval_dir, "pyproject.toml")) as fh:
+        found = re.search(r'^version\s*=\s*"([^"]+)"', fh.read(), re.MULTILINE)
+    version = found.group(1) if found else "0"
+    path = os.path.join(ctx.results_root, "inputs", "pvc_eval_metadata", ctx.pvc_eval_commit)
+    info = os.path.join(path, f"pvc_eval-{version}.dist-info")
+    if not os.path.exists(os.path.join(info, "METADATA")):
+        os.makedirs(info, exist_ok=True)
+        with open(os.path.join(info, "METADATA"), "w") as fh:
+            fh.write(f"Metadata-Version: 2.1\nName: pvc-eval\nVersion: {version}\n")
+    return path
+
+
 def _command(ctx, args):
     """A pvc_eval command line, run from the mounted checkout on the image's Python 3.15t."""
-    src = os.path.join(ctx.pvc_eval_dir, "src")
-    return (f"PYTHONPATH={q(src)} PYTHONDONTWRITEBYTECODE=1 {q(ctx.pvc_eval_python)} -c "
+    path = f"{os.path.join(ctx.pvc_eval_dir, 'src')}:{_metadata_dir(ctx)}"
+    return (f"PYTHONPATH={q(path)} PYTHONDONTWRITEBYTECODE=1 {q(ctx.pvc_eval_python)} -c "
             f"{q('import sys; from pvc_eval.cli import main; main(sys.argv[1:])')} {args}")
 
 
