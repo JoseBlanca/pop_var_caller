@@ -79,18 +79,33 @@ def _first_sample(path):
     return names[0]
 
 
+def in_reference_order(reference, vcf, out):
+    """A shell command writing `vcf` to `out` in the reference's contig order, which pvc_eval
+    requires and vcfeval does not: HipSTR writes its contigs by name (chr19 before chr2), and two
+    of GIAB's panel truth files have chr7 before chr6. The header's contigs are replaced by the
+    `.fai`'s, then the records sorted by them; a file already in order comes out the same."""
+    reheaded = out + ".reheaded.vcf.gz"
+    return (f"bcftools reheader --fai {q(reference + '.fai')} -o {q(reheaded)} {q(vcf)} && "
+            f"bcftools sort -Oz -o {q(out)} {q(reheaded)} && rm {q(reheaded)} && "
+            f"bcftools index -t {q(out)}")
+
+
 def score(ctx, step_dir, base, truth, calls, bed, reference, str_regions, min_qual=None,
           call_sample=None, truth_sample=None):
     """Compare one call set with the truth; return (measurement, rows)."""
     out = os.path.join(step_dir, "pvc_eval")
     os.makedirs(out, exist_ok=True)
+    filtered = os.path.join(out, "calls.filtered.vcf.gz")
     kept = os.path.join(out, "calls.kept.vcf.gz")
+    sorted_truth = os.path.join(out, "truth.sorted.vcf.gz")
     sample_arg = f"-s {q(call_sample)}" if call_sample else ""
     qual = f"-i 'QUAL>={min_qual}'" if min_qual is not None else ""
     prepare = ("pvc_eval_prepare",
-               f"bcftools view --no-version {sample_arg} -f PASS,. {qual} -Oz -o {q(kept)} "
-               f"{q(calls)} && bcftools index -t {q(kept)}")
+               f"bcftools view --no-version {sample_arg} -f PASS,. {qual} -Oz -o {q(filtered)} "
+               f"{q(calls)} && {in_reference_order(reference, filtered, kept)} && "
+               f"rm {q(filtered)} && {in_reference_order(reference, truth, sorted_truth)}")
     run_commands([prepare], os.path.join(step_dir, "logs"))
+    truth = sorted_truth
     sample_map = os.path.join(out, "samples.tsv")
     with open(sample_map, "w") as fh:
         fh.write(f"{truth_sample or _first_sample(truth)}\t{call_sample or _first_sample(kept)}\n")

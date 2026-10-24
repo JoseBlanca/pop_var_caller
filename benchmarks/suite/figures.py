@@ -180,19 +180,24 @@ ERROR_SUBTITLE = ("wrong GT (truth ref): a variant called where the truth is ref
                   "no call (./.): genotype left missing")
 
 
-def error_counts(rows, benchmark, kind, aggregate_datasets=False):
-    """{(depth, caller): {error type: count}} from pvc_eval's rows, for one class of variant."""
+def error_counts(rows, benchmark, kind, aggregate_datasets=False, exclude=()):
+    """{(depth, caller): {error type: count}} from pvc_eval's rows, for one class of variant.
+
+    The loci scored right are counted too, under "right", so that a class with no locus at all
+    (no STR in the trio's regions) can be told from one with no error, and left out."""
     acc = collections.defaultdict(lambda: collections.defaultdict(float))
-    wanted = {metric for metric, _, _ in ERROR_MARKS}
+    wanted = {metric for metric, _, _ in ERROR_MARKS} | {"right"}
     datasets = {r["dataset"] for r in rows if r["benchmark"] == benchmark}
     if len(datasets) > 1 and not aggregate_datasets:
         raise ValueError(f"{benchmark} has {len(datasets)} datasets; sum them or pick one")
     for r in rows:
         if (r["benchmark"] == benchmark and r["stage"] == "error type"
                 and r["variant_class"] == kind and r["caller"] in STYLE
-                and r["metric"] in wanted):
+                and r["caller"] not in exclude and r["metric"] in wanted):
             acc[(r["depth"], r["caller"])][r["metric"]] += float(r["value"])
-    return {k: dict(v) for k, v in acc.items()}
+    if not any(v for counts in acc.values() for v in counts.values()):
+        return {}
+    return {k: {m: v for m, v in c.items() if m != "right"} for k, c in acc.items()}
 
 
 def row_layout(panels):
@@ -292,8 +297,9 @@ def error_figure(panels, title, subtitle, out, name):
 KIND_PANELS = [("SNPs", "SNP"), ("indels", "indel"), ("STRs", "STR"), ("complex", "complex")]
 
 
-def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggregate=False):
-    panels = [(title_, error_counts(rows, benchmark, kind, aggregate))
+def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggregate=False,
+                             exclude=()):
+    panels = [(title_, error_counts(rows, benchmark, kind, aggregate, exclude))
               for title_, kind in KIND_PANELS]
     return error_figure(panels, title, subtitle, out, name)
 
@@ -427,8 +433,10 @@ def main():
                                  "errors_hg002_5mb"),
         vcfeval_benchmark_figure(rows, "hg002_tr", "Errors — HG002, GIAB tandem-repeat regions",
                                  "GIAB TR benchmark v1.0.1, 50,000 regions (6.1 Mb); scored by "
-                                 "pvc_eval; HipSTR calls repeat lengths only", out,
-                                 "errors_hg002_tr"),
+                                 "pvc_eval; HipSTR left out: it calls repeat lengths only, and "
+                                 "its long records make pvc_eval class its loci as indels and "
+                                 "complex, not STRs", out, "errors_hg002_tr",
+                                 exclude=("HipSTR",)),
         *stutter_figures(rows, out),
         performance_figure(
             rows, "giab_chr20", depth_key, lambda s, d: d,
