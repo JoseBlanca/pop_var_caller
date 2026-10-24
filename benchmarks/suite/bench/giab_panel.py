@@ -44,7 +44,7 @@ def steps(ctx):
     samples, depths = (["HG002"], ["10x"]) if ctx.slice else (SAMPLES, DEPTHS)
     ref_steps, reference = giab_sources.grch38(ctx)
     out = list(ref_steps)
-    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", reference)
+    more, catalog, scoring = arms.reference_steps(ctx, "GRCh38", reference)
     out.extend(more)
 
     def bed_of(s):
@@ -110,6 +110,6 @@ def steps(ctx):
                                                catalog, {s: aligned[(s, depth)]}, regions,
                                                base)
                 out.append(step)
-                out.append(arms.score_step(ctx, callset, base, truth, regions, sdf,
+                out.append(arms.score_step(ctx, callset, base, truth, regions, scoring,
                                            call_sample=s, truth_sample=s))
     return out

@@ -46,7 +46,7 @@ def steps(ctx):
     inputs_dir = os.path.join(ctx.results_root, "inputs", "giab_chr20")
     ref_steps, GRCH38 = giab_sources.grch38(ctx)
     out = list(ref_steps) + list(truth_steps)
-    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", GRCH38)
+    more, catalog, scoring = arms.reference_steps(ctx, "GRCh38", GRCH38)
     out.extend(more)
 
     # ---- the alignment: chromosome 20 fetched through the index, with a read group added -------
@@ -104,7 +104,7 @@ def steps(ctx):
             step, callset = arms.arm_steps(ctx, arm, f"giab_chr20/{depth}", GRCH38, catalog,
                                            {"HG002": aligned("HG002", depth)}, calling, base)
             out.append(step)
-            out.append(arms.score_step(ctx, callset, base, truth, confident, sdf,
+            out.append(arms.score_step(ctx, callset, base, truth, confident, scoring,
                                        call_sample="HG002", truth_sample="HG002"))
         out.extend(readfloor.floor_steps(ctx, f"giab_chr20/{depth}", GRCH38,
                                          {"HG002": aligned("HG002", depth)}, calling, base))

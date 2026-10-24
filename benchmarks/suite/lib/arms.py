@@ -15,8 +15,9 @@ rerun for every commit; GATK's and freebayes' live under `competitors/` and run 
 
 import os
 import shutil
+from collections import namedtuple
 
-from . import callers, hostjobs, vcfeval
+from . import callers, hostjobs, pvc_eval, vcfeval
 from .measure import check_alignments, merge, run_commands, warm
 from .results import row, time_rows
 from .steps import Step, file_identity
@@ -36,8 +37,15 @@ ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebay
 MIN_QUAL = {"freebayes": 20}
 
 
+# What the scorers need of a reference: the FASTA, vcfeval's copy of it, and pvc_eval's STR regions
+# over it (None without pvc_eval).
+ScoringReference = namedtuple("ScoringReference", "fasta sdf str_regions")
+
+
 def reference_steps(ctx, name, reference):
-    """The pvc repeat catalogue (per pvc commit) and vcfeval's copy of the reference (once)."""
+    """The pvc repeat catalogue (per pvc commit), and what the scorers need of the reference (once).
+
+    Returns (steps, catalogue path, ScoringReference)."""
     catalog_path = os.path.join(ctx.pvc_root(), "catalogs", name, f"{name}.repeats.parquet")
 
     def catalog(step_dir):
@@ -62,7 +70,22 @@ def reference_steps(ctx, name, reference):
              attrs={"caller": "pvc"}),
         Step(f"refs/{name}.sdf", "input", sdf, {"reference": file_identity(fai)}),
     ]
-    return steps, catalog_path, sdf_path
+    str_regions = None
+    if pvc_eval.available(ctx):
+        # pvc_eval's STR finder over the whole reference, once: a scan at every scoring step would
+        # cost about 40 s a chromosome each time. Remade when pvc_eval changes, since its finder
+        # may have.
+        str_regions = os.path.join(ctx.results_root, "inputs", "refs", f"{name}.pvc_eval_str",
+                                   "str_regions.bed")
+
+        def find_strs(step_dir):
+            m = run_commands([pvc_eval.str_regions_command(ctx, reference, str_regions)],
+                             os.path.join(step_dir, "logs"))
+            return {"measurement": m}
+
+        steps.append(Step(f"refs/{name}.pvc_eval_str", "input", find_strs,
+                          {"reference": file_identity(fai), "pvc_eval": ctx.version("pvc_eval")}))
+    return steps, catalog_path, ScoringReference(reference, sdf_path, str_regions)
 
 
 def bed_length(path):
@@ -244,23 +267,31 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
     return step, CallSet(arm, name, calls)
 
 
-def score_step(ctx, callset, base, truth, bed, sdf, call_sample=None, truth_sample=None):
-    """vcfeval of one call set against the truth; lives beside the calls it scores."""
+def score_step(ctx, callset, base, truth, bed, scoring, call_sample=None, truth_sample=None):
+    """One call set scored against the truth by vcfeval and, where there is a checkout, by
+    pvc_eval (lib/pvc_eval.py); lives beside the calls it scores."""
     kind = ARM_KIND[callset.arm]
     name = f"{callset.step_name}/score" + (f"_{call_sample}" if call_sample else "")
     row_base = dict(base, caller=ARM_LABELS[callset.arm],
                     caller_version=ctx.version(ARM_TOOL[callset.arm]))
+    with_pvc_eval = scoring.str_regions is not None
 
     def fingerprint():
         return {"calls": file_identity(callset.path), "truth": file_identity(truth),
                 "bed": file_identity(bed), "scorer": ctx.version("vcfeval"),
+                "second_scorer": ctx.version("pvc_eval") if with_pvc_eval else None,
                 "min_qual": MIN_QUAL.get(callset.arm), "samples": [call_sample, truth_sample]}
 
     def action(d):
         hostjobs.skip_with(ctx, callset)
-        m, rows = vcfeval.score(ctx, d, row_base, truth, callset.path, bed, sdf,
+        m, rows = vcfeval.score(ctx, d, row_base, truth, callset.path, bed, scoring.sdf,
                                 min_qual=MIN_QUAL.get(callset.arm), call_sample=call_sample,
                                 truth_sample=truth_sample)
+        if with_pvc_eval:
+            _, more = pvc_eval.score(ctx, d, row_base, truth, callset.path, bed, scoring.fasta,
+                                     scoring.str_regions, min_qual=MIN_QUAL.get(callset.arm),
+                                     call_sample=call_sample, truth_sample=truth_sample)
+            rows += more
         return {"rows": rows}
 
     return Step(name, "score", action, fingerprint,

@@ -88,6 +88,29 @@ if [[ -z "$data_root" ]]; then
 fi
 [[ -d "$data_root/benchmarks" ]] || { echo "no benchmarks/ under --data-root $data_root" >&2; exit 1; }
 
+# pvc_eval, the second scorer of every call set vcfeval scores (lib/pvc_eval.py): a checkout of
+# github.com/JoseBlanca/pvc_eval, named by a profile's BENCH_PVC_EVAL, or else found in the data
+# checkout's tmp/pvc_eval (as on rick) or beside it (../pvc_eval, as on the laptop). Its commit is
+# recorded like pvc's, "-dirty" when its code has uncommitted changes, and a new one rescores. With
+# no checkout the suite scores with vcfeval alone and says so.
+pvc_eval_dir="${BENCH_PVC_EVAL:-}"
+if [[ -z "$pvc_eval_dir" ]]; then
+    for candidate in "$data_root/tmp/pvc_eval" "$(dirname "$data_root")/pvc_eval"; do
+        [[ -d "$candidate/src/pvc_eval" ]] && { pvc_eval_dir="$candidate"; break; }
+    done
+fi
+if [[ -n "$pvc_eval_dir" ]]; then
+    [[ -d "$pvc_eval_dir/src/pvc_eval" ]] || { echo "no pvc_eval checkout at $pvc_eval_dir" >&2; exit 1; }
+    pvc_eval_dir="$(cd "$pvc_eval_dir" && pwd)"
+    pvc_eval_commit="$(git -C "$pvc_eval_dir" log -1 --format=%h --abbrev=8)"
+    [[ -n "$(git -C "$pvc_eval_dir" status --porcelain --untracked-files=no -- src)" ]] \
+        && pvc_eval_commit="$pvc_eval_commit-dirty"
+    pass+=(--pvc-eval "$pvc_eval_dir" --pvc-eval-commit "$pvc_eval_commit")
+    echo "pvc_eval: $pvc_eval_dir at $pvc_eval_commit"
+else
+    echo "pvc_eval: no checkout found (set BENCH_PVC_EVAL); scoring with vcfeval only"
+fi
+
 # pvc's results are labelled by the last commit that changed pvc's own code (the crate, its
 # vendored libraries and the examples the simulated benchmark runs), not by the branch's head, so
 # a change to the suite's scripts alone does not make pvc look new and rerun.
@@ -179,6 +202,14 @@ trap 'kill $sampler $host_jobs 2>/dev/null || true' EXIT
 # The extra read-only mounts: the data root (from a worktree) and the profile's own, colon-separated.
 mounts_list="${BENCH_EXTRA_MOUNT:-}"
 [[ "$data_root" != "$PROJECT_DIR" ]] && mounts_list="$data_root${mounts_list:+:$mounts_list}"
+# The pvc_eval checkout, unless one of those or the project already holds it.
+if [[ -n "${pvc_eval_dir:-}" ]]; then
+    inside=0
+    for m in "$PROJECT_DIR" ${mounts_list//:/ }; do
+        [[ "$pvc_eval_dir" == "$m" || "$pvc_eval_dir" == "$m"/* ]] && inside=1
+    done
+    [[ $inside == 0 ]] && mounts_list="$pvc_eval_dir${mounts_list:+:$mounts_list}"
+fi
 extra=()
 [[ -n "$mounts_list" ]] && extra=(DEV_EXTRA_MOUNT="$mounts_list")
 # The memory and core limits are applied to podman too (DEV_LIMIT_PODMAN), not only to Apple's VM.

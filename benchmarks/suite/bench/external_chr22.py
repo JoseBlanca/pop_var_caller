@@ -54,7 +54,7 @@ def steps(ctx):
     if missing:
         raise SuiteError("external_chr22: these files are not visible in the container: "
                          + ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else ""))
-    out, catalog, sdf = arms.reference_steps(ctx, "chr22_reference", reference)
+    out, catalog, scoring = arms.reference_steps(ctx, "chr22_reference", reference)
     for s, c in config["samples"].items():
         for depth, alignment in c["alignments"].items():
             base = dict(benchmark="external_chr22", dataset=f"GIAB {s}, chromosome 22 confident",
@@ -63,6 +63,6 @@ def steps(ctx):
                 step, callset = arms.arm_steps(ctx, arm, f"external_chr22/{s}/{depth}", reference,
                                                catalog, {s: alignment}, c["confident"], base)
                 out.append(step)
-                out.append(arms.score_step(ctx, callset, base, c["truth"], c["confident"], sdf,
+                out.append(arms.score_step(ctx, callset, base, c["truth"], c["confident"], scoring,
                                            call_sample=s, truth_sample=s))
     return out

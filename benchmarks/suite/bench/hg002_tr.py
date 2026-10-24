@@ -52,7 +52,7 @@ def steps(ctx):
     depths = ["10x"] if ctx.slice else DEPTHS
     ref_steps, GRCH38 = giab_sources.grch38(ctx)
     out = list(ref_steps)
-    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", GRCH38)
+    more, catalog, scoring = arms.reference_steps(ctx, "GRCh38", GRCH38)
     out.extend(more)
 
     # The tier BED is unsorted; sort it, then take the slice's first 200 regions.
@@ -164,7 +164,7 @@ def steps(ctx):
                                                catalog, {"HG002": bam}, regions, base)
             out.append(step)
             out.append(_str_score_step(ctx, callset, base, truth, regions, tracts, depth))
-            out.append(arms.score_step(ctx, callset, base, truth, regions, sdf,
+            out.append(arms.score_step(ctx, callset, base, truth, regions, scoring,
                                        call_sample="HG002", truth_sample="HG002"))
     return out
 

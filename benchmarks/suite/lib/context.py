@@ -41,6 +41,11 @@ class Context:
         self.pvc_bin = os.path.join(PROJECT_DIR, "target-container", "release", "pvc")
         self.gatk = os.environ.get("GATK_BIN", "/opt/gatk/gatk")
         self.rtg_jar = os.path.join(PROJECT_DIR, "tmp", "tools", "rtg-tools-3.13", "RTG.jar")
+        # pvc_eval: its checkout and commit (None when run_suite.sh found none), and the image's
+        # free-threaded Python that runs it (Containerfile).
+        self.pvc_eval_dir = getattr(args, "pvc_eval", None)
+        self.pvc_eval_commit = getattr(args, "pvc_eval_commit", None)
+        self.pvc_eval_python = os.environ.get("PVC_EVAL_PYTHON", "/opt/pvc-eval-env/bin/python")
         self.java_heap = "4g"
         os.makedirs(self.results_root, exist_ok=True)
         self._log = open(os.path.join(self.results_root, "suite.log"), "a")
@@ -144,6 +149,8 @@ def _read_version(ctx, tool):
     if tool == "deepvariant":
         from .hostjobs import DEEPVARIANT_VERSION
         return f"DeepVariant {DEEPVARIANT_VERSION}"
+    if tool == "pvc_eval":
+        return f"pvc_eval {ctx.pvc_eval_commit}" if ctx.pvc_eval_commit else "pvc_eval none"
     if tool == "vcfeval":
         return "RTG Tools " + _first_line(f"java -jar {ctx.rtg_jar} version 2>&1 | grep -i 'product'").split()[-1]
     sys.exit(f"no version reader for {tool}")

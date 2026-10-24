@@ -105,6 +105,13 @@ How each is scored:
   genotype must match, or only the alleles — split into SNPs and indels, plus each caller's best F1
   over a sweep of its QUAL threshold. Records count as each caller writes them, except freebayes,
   kept at QUAL ≥ 20 as its documentation advises.
+- **The three error types:** every call set vcfeval scores is scored again by pvc_eval
+  (github.com/JoseBlanca/pvc_eval, `lib/pvc_eval.py`), which sorts each error into *wrong GT (truth
+  ref)*, *wrong GT (truth var)* or *no call (./.)*, per SNP, indel, STR and complex locus. vcfeval
+  cannot count genotypes left missing; vcfeval stays as the check. pvc_eval runs from a checkout:
+  a profile's `BENCH_PVC_EVAL`, or else `tmp/pvc_eval` in the data checkout or `../pvc_eval` beside
+  it; its commit is recorded, and its interpreter (free-threaded Python 3.15 with numpy) is in the
+  dev image. With no checkout the suite scores with vcfeval alone.
 - **STRs:** `benchmarks/lib/tract_qual_experiment.py` on HG002 and `scripts/ng_str_stutter_score.py`
   on the simulation, which compare the rebuilt DNA over each repeat.
 - **Speed and the machine's state:** every timed step first reads its input files once, untimed,
