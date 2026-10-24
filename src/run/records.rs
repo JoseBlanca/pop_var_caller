@@ -439,14 +439,62 @@ where
     let base = scratch[0];
     // **Release what the run has walked past**, so the accessor's window does not grow into a
     // resident contig over a genome. Correctness does not depend on it: an evicted position is
-    // simply read again, and the loci this is driven over arrive in genome order, so nothing
-    // asks for a base behind the one just fetched.
+    // simply read again. The loci this is driven over arrive in genome order, so only a later
+    // repeat tract's [`base_before_left_flank`], which lies a flank's length left of its span,
+    // can ask for a base behind the one just fetched, and it is then re-read.
     reference.evict_before(position);
     Ok(Some(if at_contig_start {
         PaddingBase::Right(base)
     } else {
         PaddingBase::Left(base)
     }))
+}
+
+/// **The reference base just before a repeat-tract locus's left flank**, or `None` at a SNP or
+/// indel locus, and where the flank starts at the contig's first base.
+///
+/// A record widened over its alleles' reach into the flanks (`str_edge_deletion_alleles.md`
+/// §5.8) is padded, when an allele comes out empty, with the base before the widened span. The
+/// flank the locus holds supplies that base unless the reach spends the whole flank; then the
+/// base lies one past what the locus holds, and only the reference has it. Without it the record
+/// would be padded on the right in the middle of a contig, which VCF does not allow and
+/// [`VcfRecord::new`](crate::vcf::VcfRecord::new) refuses — that stopped the 2,174-sample tomato
+/// run on 2026-10-24 at a record starting at 5,661,839.
+///
+/// Read before [`padding_base_beside`], which evicts behind the base it reads, and this one lies
+/// further left. It is read for every repeat-tract locus with an empty candidate allele, whether
+/// or not its widening turns out to need it: which reach the alleles have is only settled at
+/// assembly, where the reference is no longer open. A locus with no empty allele never needs it
+/// — widening only adds flank bases to an allele, so it cannot empty one.
+///
+/// # Errors
+///
+/// Whatever the reference fetch refuses; see [`padding_base_beside`].
+pub fn base_before_left_flank<R>(
+    reference: &R,
+    region: GenomeRegion,
+    alleles: &CandidateAlleles,
+    scratch: &mut Vec<u8>,
+) -> Result<Option<u8>, RefSeqError>
+where
+    R: RefSeq,
+{
+    let flank = match alleles.kind() {
+        LocusKind::Ssr(detail) => detail.left_flank.len(),
+        LocusKind::SsrBundle(detail) => detail.left_flank.len(),
+        LocusKind::Generic => return Ok(None),
+    } as u64;
+    if !alleles.iter().any(<[u8]>::is_empty) {
+        return Ok(None);
+    }
+    // The flank is clamped at the contig's start, so it ends right before the span and starts
+    // `flank` bases earlier, at position 1 at the earliest.
+    let flank_start = region.start.get().saturating_sub(flank);
+    if flank_start <= FIRST_POSITION_OF_A_CONTIG.get() {
+        return Ok(None);
+    }
+    reference.fetch_into(region.contig, flank_start - 1, 1, scratch)?;
+    Ok(Some(scratch[0]))
 }
 
 /// **Everything a record needs that the called locus does not already carry**, gathered while
@@ -464,7 +512,8 @@ where
 ///   `LocusInference`'s own quality field is the **uncorrected** baseline and nothing between
 ///   the worker and this correction may read it as a site quality
 ///   (`doc/devel/ng/spec/calling_quality.md` §3.5);
-/// - **the padding base**, already resolved by [`padding_base_beside`].
+/// - **the padding base**, already resolved by [`padding_base_beside`], and the base before a
+///   repeat tract's left flank, by [`base_before_left_flank`], for a record widened over it.
 ///
 /// # Panics
 ///
@@ -484,6 +533,7 @@ pub fn evidence_for_output(
     unmatched: &[UnmatchedSupport],
     selection: SelectionVerdict,
     padding_base: Option<PaddingBase>,
+    base_before_left_flank: Option<u8>,
 ) -> LocusEvidenceForOutput {
     let written_alleles = locus.alleles().len();
     let run_sample_count = locus.per_sample.len();
@@ -599,6 +649,7 @@ pub fn evidence_for_output(
         samples,
         allele_mapq,
         padding_base,
+        base_before_left_flank,
         corrected_site_quality,
         artifact_penalties,
         // **Read off the called locus's own candidate table**, which is where selection

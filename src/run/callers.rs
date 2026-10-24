@@ -79,7 +79,8 @@ use super::explain::{
 };
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
-    evidence_for_output, padding_base_beside, reference_beside_locus, reread_spellings_cut_short,
+    base_before_left_flank, evidence_for_output, padding_base_beside, reference_beside_locus,
+    reread_spellings_cut_short,
 };
 use super::segments::Segmentation;
 use super::walker::{AlignmentFilesWalker, RunSegments, WalkReference, generic_path_generators};
@@ -1092,6 +1093,18 @@ where
                         return Ok(CalledLocus::NoAlternative);
                     }
                     let alleles = inference.alleles();
+                    // Read first: it lies left of the padding base, and that read evicts
+                    // behind itself.
+                    let before_left_flank = base_before_left_flank(
+                        &padding_reference,
+                        inference.region,
+                        alleles,
+                        &mut padding_scratch,
+                    )
+                    .map_err(|source| RunError::PaddingBaseUnreadable {
+                        locus: inference.region,
+                        source,
+                    })?;
                     let padding = padding_base_beside(
                         &padding_reference,
                         inference.region,
@@ -1109,6 +1122,7 @@ where
                         unmatched,
                         verdict,
                         padding,
+                        before_left_flank,
                     );
                     // **The gate reads the quality the record would carry**, after the artifact
                     // correction, and before the windows are taken: a locus below it is not
@@ -7416,6 +7430,18 @@ where
                         return Ok(CalledLocus::NoAlternative);
                     }
                     let alleles = inference.alleles();
+                    // Read first: it lies left of the padding base, and that read evicts
+                    // behind itself.
+                    let before_left_flank = base_before_left_flank(
+                        padding_reference,
+                        inference.region,
+                        alleles,
+                        padding_scratch,
+                    )
+                    .map_err(|source| RunError::PaddingBaseUnreadable {
+                        locus: inference.region,
+                        source,
+                    })?;
                     let padding = padding_base_beside(
                         padding_reference,
                         inference.region,
@@ -7433,6 +7459,7 @@ where
                         unmatched,
                         verdict,
                         padding,
+                        before_left_flank,
                     );
                     // **The gate reads the quality the record would carry**, after the artifact
                     // correction, and before the windows are taken: a locus below it is not

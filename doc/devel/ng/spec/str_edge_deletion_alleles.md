@@ -385,6 +385,14 @@ on each side, and every allele is respelled over the widened reference: the refe
 bases, less the allele's own flank deletion, around its spelling. The repeat count written per
 sample (`REPCN`) is still that of the spelling, not of the widened sequence.
 
+An allele that comes out empty is padded by [`vcf_output.md`](vcf_output.md) §5's anchor rule,
+over the widened record: with the reference base **left** of the widened span. While the reach
+leaves some of the left flank, that base is the flank's own; where it spends the whole flank, the
+base lies just before the flank the locus holds and is read from the reference. Only where the
+widened span starts at the contig's first base is it the base to the **right**. Taking the base to
+the right whenever the flank was spent wrote a right-padded record in the middle of a contig,
+which the writer refuses; that stopped the 2,174-sample tomato run on 2026-10-24.
+
 ## 6. Gathering: reconciling the generic records
 
 **This runs on the finished records, in genome order, before the filters and the VCF writer** —
