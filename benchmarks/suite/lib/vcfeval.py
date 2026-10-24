@@ -10,6 +10,15 @@ twice:
 The gap between the two is the genotype errors. Counts are split into SNPs and everything else
 ("indel") from vcfeval's own per-class tables, which also give each caller's best F1 over a sweep
 of its QUAL threshold.
+
+**A missed variant is split into "called with the wrong genotype" and "not called".** The two
+counts are not the difference of the two scorings' `missed`: the two match variants differently,
+and allele scoring can miss a variant genotype scoring found (pvc's indels on chromosome 20 at full
+depth: 210 against 177). Instead each truth record genotype scoring missed is looked up among the
+truth records allele scoring found: found there, its allele was called and its genotype was wrong;
+not found, it was not called. "Not called" is taken as `missed` less the wrong genotypes, so the
+two always add up to vcfeval's own count; the class of a record is judged here by its alleles'
+lengths, which can differ from vcfeval's on a rare record.
 """
 
 import gzip
@@ -97,6 +106,42 @@ def class_metrics(roc_path):
     return out, best_out
 
 
+def _truth_records(path):
+    """class -> the truth records in one of vcfeval's per-record files, by position and alleles."""
+    out = {"SNP": set(), "indel": set()}
+    if not os.path.exists(path):
+        return out
+    with gzip.open(path, "rt") as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            chrom, pos, _, ref, alt = line.split("\t", 5)[:5]
+            snp = len(ref) == 1 and all(len(a) == 1 for a in alt.split(","))
+            out["SNP" if snp else "indel"].add((chrom, pos, ref, alt))
+    return out
+
+
+def wrong_genotypes(step_dir):
+    """class -> truth records genotype scoring missed whose allele allele scoring found."""
+    missed = _truth_records(os.path.join(step_dir, "vcfeval_genotype", "fn.vcf.gz"))
+    found = _truth_records(os.path.join(step_dir, "vcfeval_allele", "tp-baseline.vcf.gz"))
+    return {cls: len(missed[cls] & found[cls]) for cls in missed}
+
+
+def miss_split_rows(step_dir, base, missed_by_class):
+    """The `missed` of genotype scoring split into wrong genotype and not called (module doc)."""
+    rows = []
+    for cls, wrong in wrong_genotypes(step_dir).items():
+        if cls not in missed_by_class:
+            continue
+        wrong = min(wrong, missed_by_class[cls])
+        rows.append(row(base, variant_class=cls, stage="genotype match",
+                        metric="missed_wrong_genotype", value=wrong))
+        rows.append(row(base, variant_class=cls, stage="genotype match",
+                        metric="missed_not_called", value=missed_by_class[cls] - wrong))
+    return rows
+
+
 def score(ctx, step_dir, base, truth, calls, bed, sdf, min_qual=None, call_sample=None,
           truth_sample=None):
     """Score one call set both ways; return (measurement, rows)."""
@@ -111,12 +156,16 @@ def score(ctx, step_dir, base, truth, calls, bed, sdf, min_qual=None, call_sampl
             truth_sample=truth_sample, call_sample=call_sample)))
     m2 = run_commands([r[2] for r in runs], os.path.join(step_dir, "logs"), max_concurrent=1)
     rows = []
+    genotype_missed = {}
     for out, stage, _ in runs:
         for cls, roc in (("SNP", "snp_roc.tsv.gz"), ("indel", "non_snp_roc.tsv.gz")):
             metrics, best = class_metrics(os.path.join(out, roc))
+            if stage == "genotype match":
+                genotype_missed[cls] = metrics["missed"]
             for k, v in metrics.items():
                 rows.append(row(base, variant_class=cls, stage=stage, metric=k, value=v))
             if best:
                 for k, v in best.items():
                     rows.append(row(base, variant_class=cls, stage=stage, metric=k, value=v))
+    rows.extend(miss_split_rows(step_dir, base, genotype_missed))
     return m2, rows
