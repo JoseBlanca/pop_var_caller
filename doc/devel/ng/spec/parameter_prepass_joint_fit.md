@@ -1164,7 +1164,8 @@ step, which needs the information every cycle.
 
 **When the climb stops** is [`fit_precision.md`](fit_precision.md) §2, amended the same day (owner):
 a start stops when the log-likelihood the remaining bounded Newton step is worth — the Newton
-decrement — falls below `DECREMENT_THRESHOLD` = 0.001 units.
+decrement — falls below `DECREMENT_THRESHOLD` = 0.01 units (0.001 until 2026-10-25,
+[`fit_precision.md`](fit_precision.md) §2).
 
 #### 3.3.2 The starts explore on a thinned census; the winner finishes on all of it — added 2026-10-25
 

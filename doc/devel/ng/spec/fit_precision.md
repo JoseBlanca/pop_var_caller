@@ -220,7 +220,8 @@ cohorts and two of the three 4-sample ones with the duplicated class). On the or
 claims to. Part B's climb (§4.3) keeps its projection of the log-likelihood gain.
 
 **Amended 2026-10-16 (owner): for the SNP/indel fit, a start stops when the remaining Newton step is
-worth less than `DECREMENT_THRESHOLD` = 0.001 log-likelihood units.** Proposed by the lead after the
+worth less than `DECREMENT_THRESHOLD` = 0.01 log-likelihood units** (0.001 until 2026-10-25; see
+below). Proposed by the lead after the
 owner asked what the fit should do on a plateau, measured in
 [`../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md`](../../reports/implementations/snp_fit_stopping_rule_2026-10-16.md),
 and decided by the owner the same day at the threshold that measurement supports. It replaces the
@@ -295,7 +296,25 @@ step B1 stays — the judging pass, its information and scores, the bounded step
   and reaches `maximise` as `JointFitConfig::decrement_threshold`, defaulted to it, so a test can run
   a fit to `10⁻⁴` the way the measurement's references were.
 
-**`DECREMENT_THRESHOLD` = 0.001 — decided 2026-10-16 (owner), measured.** Where each threshold
+**`DECREMENT_THRESHOLD` = 0.01 since 2026-10-25 (owner), re-measured after the starts were thinned.**
+Since `parameter_prepass_joint_fit.md` §3.3.2 the starts explore on a seventh of the census and the
+winner finishes on all of it, from close to the answer. Measured on the returned fit, against the
+same fit run to 10⁻⁴, the largest distance of any number the parameters file gives an error, in
+that error, and the fit's instructions retired against 0.001:
+
+| input | 0.001 | **0.01** | 0.1 | instructions, 0.01 against 0.001 |
+|---|---|---|---|---|
+| 1 tomato sample | 0.035 | **0.012** | — | −11% |
+| 8 tomato samples | 0.011 | **0.055** | 0.72 (the duplicated share above 1%) | −30% |
+| 62 tomato samples | 0.003 | **0.049** | 0.13 (the second frequency shape) | −24% |
+
+Calling from the 0.01 fits changed 4 of 495,712 genotypes at 8 samples and 11 of 10,491,082 at 62.
+**0.01 now meets the tenth of an error that 0.001 was chosen for**; the measurement below, made on
+the first start's own path before the starts were thinned, is why 0.01 was rejected then. Inputs are
+still tomato only, at about 3 reads a position.
+
+*The 2026-10-16 decision, kept for its measurement:* **`DECREMENT_THRESHOLD` = 0.001 — decided
+2026-10-16 (owner), measured.** Where each threshold
 would have stopped the first start, against a run to 10⁻⁴, largest distance in errors over the
 determined quantities (the mismapped share, except at 1 on 59 samples read one chunk in four: the
 mean alternative frequency) and the log-likelihood short:
@@ -991,7 +1010,7 @@ a write and a read.
    *Amended at plan step B1 (2026-09-29): `SETTLED_FRACTION` was kept at 0.1 at checkpoint A;
    `MAX_CONTRACTION` and `ERROR_REFRESH_CYCLES` belonged to the projection §2's amendment replaced and
    are no longer used.*
-   *Decided 2026-10-16 (owner):* `DECREMENT_THRESHOLD` (§2) = 0.001, measured rather than a
+   *Decided 2026-10-16 (owner), changed to 0.01 on 2026-10-25 (§2):* `DECREMENT_THRESHOLD` (§2) = 0.001, measured rather than a
    starting value: the only threshold measured that leaves every determined quantity within
    `SETTLED_FRACTION` of its error on every input tried (1, 4 and 59 tomato samples). It replaces
    `SETTLED_FRACTION` as what stops the SNP/indel fit; `SETTLED_FRACTION` keeps only its reporting

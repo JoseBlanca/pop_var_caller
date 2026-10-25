@@ -19,7 +19,7 @@
 //! ([`has_converged`]), and stops at once at the parameters that pass judged; the final pass follows
 //! there. One number bounds every parameter that has a standard error and every quantity computed
 //! from those alone: the step moves any of them by at most `√(2λ)` of its own standard error; at
-//! 0.001 that is 0.045 errors. The parameters with none — not identified, or with an error wider
+//! 0.01 that is 0.14 errors. The parameters with none — not identified, or with an error wider
 //! than their range — are profiled out of the decrement (plan step B4,
 //! [`newton_step`](super::standard_errors::newton_step)), and the number bounds nothing about them.
 //! On every cohort measured (1, 4 and 59 tomato samples) every determined quantity stopped within a
@@ -57,10 +57,12 @@ use super::standard_errors::StandardError;
 pub(in crate::parameter_estimation::joint) const SETTLED_FRACTION: f64 = 0.1;
 
 /// **The log-likelihood the remaining Newton step must be worth less than for a start to have
-/// converged** — the Newton decrement's threshold, decided by the owner on 2026-10-16 from the
-/// measurement in `fit_precision.md` §2: on every input measured (1, 4 and 59 tomato samples) it
-/// stopped each determined quantity within a tenth of its standard error of a fit run to 10⁻⁴.
-pub(in crate::parameter_estimation::joint) const DECREMENT_THRESHOLD: f64 = 0.001;
+/// converged** — the Newton decrement's threshold: 0.001 from 2026-10-16, 0.01 since 2026-10-25
+/// (owner), from the measurements in `fit_precision.md` §2. Since the starts explore on a thinned
+/// census and the winner finishes on all of it, 0.01 stops every number the file gives an error
+/// within 0.055 of that error of a fit run to 10⁻⁴ (1, 8 and 62 tomato samples), for 24 to 30% less
+/// of the fit's arithmetic than 0.001.
+pub(in crate::parameter_estimation::joint) const DECREMENT_THRESHOLD: f64 = 0.01;
 
 /// **Whether a start whose remaining Newton step is worth `decrement` has converged**, at
 /// `threshold`: when the decrement is at least zero and below the threshold. A decrement that is not
@@ -277,7 +279,7 @@ mod tests {
             DECREMENT_THRESHOLD
         ));
         assert!(!has_converged(DECREMENT_THRESHOLD, DECREMENT_THRESHOLD));
-        assert_eq!(DECREMENT_THRESHOLD, 0.001);
+        assert_eq!(DECREMENT_THRESHOLD, 0.01);
     }
 
     #[test]
