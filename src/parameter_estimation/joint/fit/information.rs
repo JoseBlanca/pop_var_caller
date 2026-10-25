@@ -3844,7 +3844,8 @@ mod tests {
         let which = super::super::WhichStart {
             number,
             of: config.starting_points.len(),
-            point: &config.starting_points[number - 1],
+            stride: 1,
+            finishing: false,
             earlier,
             sample_names: &sample_names,
             stage: &stage,
@@ -3853,10 +3854,16 @@ mod tests {
             lent,
             depth_cap,
             config,
-            &groups,
             group_index,
             coverage,
             &which,
+            super::super::Parameters::at_start(
+                &config.starting_points[number - 1],
+                groups.len(),
+                lent.len(),
+                config,
+            ),
+            1,
         )
     }
 

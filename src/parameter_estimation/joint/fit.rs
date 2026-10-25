@@ -775,6 +775,12 @@ pub struct JointFitConfig {
     /// on a drawn cohort at thirty reads a position it returns heterozygosity 4 to 7% above
     /// what the cohort was drawn with, where the range returns it within 2%.
     pub depth_as_a_range: bool,
+    /// **How many positions the starts explore on**, when the census holds at least twice as many:
+    /// every start runs on every `k`-th position, `k` the census over this, and only the winner then
+    /// continues on every position until it converges there. The answer is the full census's
+    /// maximum either way; what changes is how many of the passes read every position. Zero, or a
+    /// census smaller than twice this, explores on every position.
+    pub explore_on: usize,
 }
 
 impl Default for JointFitConfig {
@@ -800,6 +806,11 @@ impl Default for JointFitConfig {
             genotype_posteriors: false,
             pass_trace: false,
             depth_as_a_range: true,
+            // PROTOTYPE: `PVC_EXPLORE_ON` overrides it, so one binary can time both ways.
+            explore_on: std::env::var("PVC_EXPLORE_ON")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(250_000),
         }
     }
 }
@@ -975,6 +986,9 @@ struct EvidenceCursor<'a> {
     at: Vec<Vec<usize>>,
     positions: usize,
     next: usize,
+    /// How far each step moves: one visits every position, `k` only those whose index is a
+    /// multiple of `k` ([`Self::every`]).
+    stride: usize,
 }
 
 impl<'a> EvidenceCursor<'a> {
@@ -1113,7 +1127,17 @@ impl<'a> EvidenceCursor<'a> {
             at,
             positions: end,
             next: first,
+            stride: 1,
         }
+    }
+
+    /// The same cursor visiting only the positions whose index is a multiple of `stride` — the
+    /// thinned census the starts explore on ([`JointFitConfig::explore_on`]). A position's index
+    /// does not depend on where the chunks are cut, so every pool width visits the same ones.
+    fn every(mut self, stride: usize) -> Self {
+        self.stride = stride.max(1);
+        self.next = self.next.next_multiple_of(self.stride);
+        self
     }
 
     fn next_position(&mut self, into: &mut PositionEvidence) -> bool {
@@ -1121,7 +1145,7 @@ impl<'a> EvidenceCursor<'a> {
             return false;
         }
         let index = self.next;
-        self.next += 1;
+        self.next += self.stride;
         into.observed_alternatives.clear();
         let mut seen = [false; 5];
         for (s, sections) in self.samples.iter().enumerate() {
@@ -1522,6 +1546,33 @@ struct Parameters {
 }
 
 impl Parameters {
+    /// Where a start begins: every read group at the start's two rates, no sample's homozygote
+    /// excess, and the duplicated class where the run fits one.
+    fn at_start(
+        start: &StartingPoint,
+        groups: usize,
+        samples: usize,
+        config: &JointFitConfig,
+    ) -> Self {
+        Self {
+            clean: vec![start.clean; groups],
+            noisy: vec![start.noisy; groups],
+            noisy_share: start.noisy_share,
+            density: FrequencyDensity {
+                p_invariant: start.p_invariant,
+                p_fixed_alt: start.p_fixed_alt,
+                a: start.a,
+                b: start.b,
+            },
+            hom_excess: vec![0.0; samples],
+            duplicated: config.duplicated_positions.then_some(DuplicatedPositions {
+                share: start.duplicated_share,
+                carrier_a: start.carrier_a,
+                carrier_b: start.carrier_b,
+            }),
+        }
+    }
+
     /// **Every fitted number's name as the run's log gives it**, in the order
     /// [`coordinates`](Self::coordinates) lists them: the cohort's in the words the standard-error
     /// line uses, a sample's by its name, a library's rates by its sample and, where the sample has
@@ -1995,15 +2046,48 @@ pub fn fit_jointly(
         let mut starts: Vec<StartRecord> = Vec::with_capacity(config.starting_points.len());
         // The best-scoring converged start so far.
         let mut earlier: Option<EarlierAnswer> = None;
-        for (index, start) in config.starting_points.iter().enumerate() {
-            // Counted from one. `which` borrows `earlier`, which this start may replace below, so
-            // what follows reads the number from here and not from `which`.
-            let number = index + 1;
+        // **The starts explore on a thinned census** when the census is large enough to thin
+        // ([`JointFitConfig::explore_on`]); the winner then finishes on every position, below.
+        let census = EvidenceCursor::position_count(lent);
+        let stride = census
+            .checked_div(config.explore_on)
+            .map_or(1, |stride| stride.max(1));
+        // The runs: each start on the thinned census, then, when it was thinned, the winner's
+        // finish on every position — `None` as its point, as it continues from where it stood.
+        let mut runs: Vec<(usize, Option<&StartingPoint>)> = config
+            .starting_points
+            .iter()
+            .enumerate()
+            .map(|(index, start)| (index + 1, Some(start)))
+            .collect();
+        if stride > 1 {
+            runs.push((0, None));
+        }
+        for (number, start) in runs {
+            let finishing = start.is_none();
+            let (number, initial, which_earlier, run_stride) = match start {
+                Some(start) => (
+                    number,
+                    Parameters::at_start(start, groups.len(), lent.len(), config),
+                    earlier.as_ref(),
+                    stride,
+                ),
+                None => {
+                    // PANIC-FREE: the first start has no earlier answer to agree with, so it
+                    // always competes.
+                    let (winner, outcome) = best.take().expect("the first start always competes");
+                    // The finish replaces the winner: its answer is the full census's, and the
+                    // thinned census's statistics are not comparable with it.
+                    earlier = None;
+                    (winner, outcome.parameters, None, 1)
+                }
+            };
             let which = WhichStart {
                 number,
                 of: config.starting_points.len(),
-                point: start,
-                earlier: earlier.as_ref(),
+                stride: run_stride,
+                finishing,
+                earlier: which_earlier,
                 sample_names: &names,
                 stage: &stage,
             };
@@ -2012,10 +2096,11 @@ pub fn fit_jointly(
                 lent,
                 depth_cap,
                 config,
-                &groups,
                 &group_index,
                 &coverage,
                 &which,
+                initial,
+                run_stride,
             );
             let score = outcome.statistics.log_likelihood;
             stage.always(|into| {
@@ -2050,19 +2135,27 @@ pub fn fit_jointly(
                     config.settled_fraction,
                 );
                 format!(
-                    "SNP/indel fit, start {} of {}: {how} after {} pass(es), log-likelihood \
+                    "SNP/indel fit, {}: {how} after {} pass(es), log-likelihood \
                          {score:.6e}{short_of_settled}; {last_pass}; {into}",
-                    which.number, which.of, outcome.passes,
+                    which.label(),
+                    outcome.passes,
                 )
             });
-            starts.push(StartRecord {
+            let record = StartRecord {
                 number,
                 ended: outcome.ended,
                 passes: outcome.passes,
                 judging_passes: outcome.judging_passes,
                 log_likelihood: score,
                 furthest_from_settled: outcome.furthest_from_settled.clone(),
-            });
+            };
+            // The finish is the winning start continued, so it takes that start's place in the
+            // record rather than adding one.
+            if finishing {
+                starts[number - 1] = record;
+            } else {
+                starts.push(record);
+            }
             if is_the_new_yardstick(
                 outcome.ended,
                 score,
@@ -2354,14 +2447,35 @@ struct WhichStart<'a> {
     /// Counted from one, as the progress line prints it.
     number: usize,
     of: usize,
-    /// The point the run starts from.
-    point: &'a StartingPoint,
+    /// Every how many positions this run reads, and whether it is the winner's finish on every
+    /// position after the starts explored on a thinned census.
+    stride: usize,
+    finishing: bool,
     /// The best-scoring earlier start that converged, which this one stops on heading towards
     /// ([`agrees`]); `None` for the first start, and for any start before one has converged.
     earlier: Option<&'a EarlierAnswer>,
     /// The cohort's sample names, in the fit's order, which the log names parameters by.
     sample_names: &'a [String],
     stage: &'a StageProgress,
+}
+
+impl WhichStart<'_> {
+    /// What the log calls this run: `start 2 of 3`, with the thinned census or the finish named.
+    fn label(&self) -> String {
+        if self.finishing {
+            format!(
+                "start {} of {}, finished on every position",
+                self.number, self.of
+            )
+        } else if self.stride > 1 {
+            format!(
+                "start {} of {}, on every {}th position",
+                self.number, self.of, self.stride
+            )
+        } else {
+            format!("start {} of {}", self.number, self.of)
+        }
+    }
 }
 
 /// One run of the alternation, from one starting point, **accelerated by SQUAREM**.
@@ -2419,33 +2533,21 @@ struct WhichStart<'a> {
 /// before. Expectation–maximisation crawls along the ridge where the invariant share and the
 /// density's first shape trade against each other; the Newton step crosses it. Every pass before a
 /// start's first judging pass is the same as without the step.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lent evidence and what it means, the start, where it begins and the stride"
+)]
 fn maximise(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
     config: &JointFitConfig,
-    groups: &[ReadGroupId],
     group_index: &[Vec<usize>],
     coverage: &[f64],
     which: &WhichStart<'_>,
+    initial: Parameters,
+    stride: usize,
 ) -> StartOutcome {
-    let start = which.point;
-    let mut parameters = Parameters {
-        clean: vec![start.clean; groups.len()],
-        noisy: vec![start.noisy; groups.len()],
-        noisy_share: start.noisy_share,
-        density: FrequencyDensity {
-            p_invariant: start.p_invariant,
-            p_fixed_alt: start.p_fixed_alt,
-            a: start.a,
-            b: start.b,
-        },
-        hom_excess: vec![0.0; samples.len()],
-        duplicated: config.duplicated_positions.then_some(DuplicatedPositions {
-            share: start.duplicated_share,
-            carrier_a: start.carrier_a,
-            carrier_b: start.carrier_b,
-        }),
-    };
+    let mut parameters = initial;
     let mut alternation = Alternation {
         samples,
         depth_cap,
@@ -2453,6 +2555,7 @@ fn maximise(
         group_index,
         coverage,
         which,
+        stride,
         passes: 0,
         judging_passes: 0,
         judging_took: std::time::Duration::ZERO,
@@ -2690,7 +2793,7 @@ fn maximise(
     // it returns — and no use for the posteriors, since it does not compete to be the answer.
     let last_pass_began = std::time::Instant::now();
     let mut statistics = agreed_at.unwrap_or_else(|| {
-        expectation_pass(
+        expectation_pass_every(
             samples,
             depth_cap,
             config,
@@ -2701,6 +2804,7 @@ fn maximise(
                 per_position_posteriors: true,
                 information: true,
             },
+            stride,
         )
     });
     let last_pass_took = last_pass_began.elapsed();
@@ -2891,10 +2995,9 @@ fn print_the_cycle(
 ) {
     which.stage.now_and_then(|into| {
         format!(
-            "SNP/indel fit, start {} of {}, pass {passes} of at most {}: log-likelihood {}{}; {}; \
+            "SNP/indel fit, {}, pass {passes} of at most {}: log-likelihood {}{}; {}; \
              {} a cycle, {into}",
-            which.number,
-            which.of,
+            which.label(),
             config.max_passes,
             how_the_log_likelihood_moved(gain),
             way.map_or_else(String::new, |way| format!("; {way}")),
@@ -3088,6 +3191,8 @@ struct Alternation<'a, 'b> {
     group_index: &'a [Vec<usize>],
     coverage: &'a [f64],
     which: &'a WhichStart<'a>,
+    /// Every how many positions a pass reads: one, or the thinned census's stride.
+    stride: usize,
     /// Passes over the data so far — what `max_passes` bounds.
     passes: u32,
     /// How many of those also summed the information for the stop rule, and how long they took: left
@@ -3110,7 +3215,7 @@ impl Alternation<'_, '_> {
         self.passes += 1;
         let pass = self.passes;
         let began = std::time::Instant::now();
-        let statistics = expectation_pass(
+        let statistics = expectation_pass_every(
             self.samples,
             self.depth_cap,
             self.config,
@@ -3121,6 +3226,7 @@ impl Alternation<'_, '_> {
                 per_position_posteriors: false,
                 information: keeps_information,
             },
+            self.stride,
         );
         if keeps_information {
             self.judging_passes += 1;
@@ -3584,6 +3690,7 @@ impl PassKeeps {
 ///
 /// Every pass joins its chunks' totals in an order fixed by the number of positions, so the
 /// totals do not depend on the pool's width.
+#[cfg(test)]
 fn expectation_pass(
     samples: &[SampleGenericSections<'_>],
     depth_cap: DepthCap,
@@ -3592,6 +3699,34 @@ fn expectation_pass(
     coverage: &[f64],
     parameters: &Parameters,
     keeps: PassKeeps,
+) -> Statistics {
+    expectation_pass_every(
+        samples,
+        depth_cap,
+        config,
+        group_index,
+        coverage,
+        parameters,
+        keeps,
+        1,
+    )
+}
+
+/// The same pass over only every `stride`-th position ([`EvidenceCursor::every`]); one is every
+/// position.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "expectation_pass's arguments and the stride"
+)]
+fn expectation_pass_every(
+    samples: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    coverage: &[f64],
+    parameters: &Parameters,
+    keeps: PassKeeps,
+    stride: usize,
 ) -> Statistics {
     let collect_noisy_posterior = keeps.per_position_posteriors;
     let model = PassModel::new(parameters, config, group_index);
@@ -3648,7 +3783,8 @@ fn expectation_pass(
             config.depth_as_a_range,
             first,
             end,
-        );
+        )
+        .every(stride);
         let mut scratch = Scratch::new(
             samples.len(),
             parameters.clean.len(),
@@ -3669,7 +3805,7 @@ fn expectation_pass(
                 PositionScores::new(group_index, parameters.clean.len()),
             )
         });
-        let mut index = first;
+        let mut index = first.next_multiple_of(stride);
         while cursor.next_position(&mut scratch.evidence) {
             for (slot, sample) in odds.iter_mut().enumerate() {
                 *sample = float::exp(f64::from(
@@ -3688,7 +3824,7 @@ fn expectation_pass(
                     .expect("a pass that scores its positions keeps their sums")
                     .add_position(scores);
             }
-            index += 1;
+            index += stride;
         }
         statistics
     };
