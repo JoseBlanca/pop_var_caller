@@ -2052,26 +2052,34 @@ pub fn fit_jointly(
             .checked_div(config.explore_on)
             .map_or(1, |stride| stride.max(1));
         // The runs: each start on the thinned census, then, when it was thinned, the winner's
-        // finish on every position — `None` as its point, as it continues from where it stood.
-        let mut runs: Vec<(usize, Option<&StartingPoint>)> = config
+        // finish on every position, which continues from where that start stood.
+        let mut runs: std::collections::VecDeque<StartRun> = config
             .starting_points
             .iter()
             .enumerate()
-            .map(|(index, start)| (index + 1, Some(start)))
+            .map(|(index, _)| StartRun::Start {
+                number: index + 1,
+                stride,
+            })
             .collect();
         if stride > 1 {
-            runs.push((0, None));
+            runs.push_back(StartRun::Finish);
         }
-        for (number, start) in runs {
-            let finishing = start.is_none();
-            let (number, initial, which_earlier, run_stride) = match start {
-                Some(start) => (
+        while let Some(run) = runs.pop_front() {
+            let finishing = run == StartRun::Finish;
+            let (number, initial, which_earlier, run_stride) = match run {
+                StartRun::Start { number, stride } => (
                     number,
-                    Parameters::at_start(start, groups.len(), lent.len(), config),
+                    Parameters::at_start(
+                        &config.starting_points[number - 1],
+                        groups.len(),
+                        lent.len(),
+                        config,
+                    ),
                     earlier.as_ref(),
                     stride,
                 ),
-                None => {
+                StartRun::Finish => {
                     // PANIC-FREE: the first start has no earlier answer to agree with, so it
                     // always competes.
                     let (winner, outcome) = best.take().expect("the first start always competes");
@@ -2148,12 +2156,23 @@ pub fn fit_jointly(
                 log_likelihood: score,
                 furthest_from_settled: outcome.furthest_from_settled.clone(),
             };
-            // The finish is the winning start continued, so it takes that start's place in the
-            // record rather than adding one.
-            if finishing {
+            // The finish is the winning start continued, and a start run again on every position is
+            // that start, so each takes its start's place in the record rather than adding one.
+            if number <= starts.len() {
                 starts[number - 1] = record;
             } else {
                 starts.push(record);
+            }
+            // **A finish that does not converge leaves no answer to have agreed with**, so the
+            // other starts run again on every position, as every start did before the census was
+            // thinned when none converged: each to its own end, or until it heads where a later
+            // one of them converged.
+            if finishing {
+                runs.extend(runs_after_the_finish(
+                    outcome.ended,
+                    number,
+                    config.starting_points.len(),
+                ));
             }
             if is_the_new_yardstick(
                 outcome.ended,
@@ -2438,6 +2457,31 @@ pub fn fit_jointly(
         log_likelihood: score,
         standard_errors,
     })
+}
+
+/// One run of [`maximise`] in [`fit_jointly`]: a start from its starting point on every `stride`-th
+/// position, or the finish — the winning start continued on every position.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum StartRun {
+    Start { number: usize, stride: usize },
+    Finish,
+}
+
+/// **What runs after the finish** of start `winner`, of `starts`, that ended so: nothing when it
+/// converged; otherwise every other start again, on every position, in order — a start that agreed
+/// on the thinned census agreed with an answer the full census did not reach, and the parameters
+/// file holds no start as agreeing with one that did not converge.
+fn runs_after_the_finish(ended: StartEnding, winner: usize, starts: usize) -> Vec<StartRun> {
+    if ended == StartEnding::Converged {
+        return Vec::new();
+    }
+    (1..=starts)
+        .filter(|&other| other != winner)
+        .map(|other| StartRun::Start {
+            number: other,
+            stride: 1,
+        })
+        .collect()
 }
 
 /// Which of the fit's starting points a run of the alternation is, the earlier answer it is judged
@@ -6920,6 +6964,84 @@ mod whole_fit_tests {
                 gap < 0.1 * error,
                 "{sample}: excesses {gap:e} apart, error {error:e}"
             );
+        }
+    }
+
+    /// After a finish that converged nothing runs; after one that did not, every other start runs
+    /// again on every position, in order, so none is left agreeing with the unconverged winner.
+    #[test]
+    fn a_finish_that_did_not_converge_runs_the_other_starts_again_on_every_position() {
+        assert!(runs_after_the_finish(StartEnding::Converged, 1, 3).is_empty());
+        assert_eq!(
+            runs_after_the_finish(StartEnding::AtTheLimit, 2, 3),
+            vec![
+                StartRun::Start {
+                    number: 1,
+                    stride: 1
+                },
+                StartRun::Start {
+                    number: 3,
+                    stride: 1
+                },
+            ]
+        );
+        assert!(runs_after_the_finish(StartEnding::AtTheLimit, 1, 1).is_empty());
+    }
+
+    /// **Every start recorded as agreeing names one recorded as converged** — the rule the
+    /// parameters file holds a fit to — across pass limits and thresholds that leave the thinned
+    /// starts and the finish converged or not in every combination this cohort reaches. (The
+    /// combination the rerun exists for, thinned starts agreeing and the finish out of passes, is
+    /// not among them on this cohort; `runs_after_the_finish` is tested on its own above.)
+    #[test]
+    fn a_finish_out_of_passes_leaves_no_agreement_with_an_unconverged_start() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let cohort = draw_cohort(
+            10,
+            3_000,
+            8.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0x9E37_79B9_7F4A_7C15,
+        );
+        for (max_passes, decrement_threshold) in [20, 30, 40, 60]
+            .into_iter()
+            .flat_map(|passes| [1e-5, 1e-7, 1e-9].map(|threshold| (passes, threshold)))
+        {
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                duplicated_positions: false,
+                explore_on: 300,
+                max_passes,
+                decrement_threshold,
+                ..JointFitConfig::default()
+            };
+            let fit =
+                fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
+            let numbers: Vec<usize> = fit.starts.iter().map(|start| start.number).collect();
+            assert_eq!(
+                numbers,
+                vec![1, 2, 3],
+                "one record a start, at {max_passes} passes"
+            );
+            for start in &fit.starts {
+                if let StartEnding::Agreed { with_start } = start.ended {
+                    assert_eq!(
+                        fit.starts[with_start - 1].ended,
+                        StartEnding::Converged,
+                        "at {max_passes} passes start {} agreed with start {with_start}, which \
+                         did not converge: {:?}",
+                        start.number,
+                        fit.starts
+                    );
+                }
+            }
         }
     }
 

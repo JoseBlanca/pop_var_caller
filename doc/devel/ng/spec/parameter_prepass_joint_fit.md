@@ -1175,6 +1175,13 @@ it converges by the rule below. Later starts stop on agreement with an earlier o
 judged on the thinned census. A smaller census is not thinned, so a run over a few hundred thousand
 positions fits exactly as it did.
 
+**A finish that does not converge** — it runs out of `max_passes` — leaves the starts that agreed on
+the thinned census agreeing with an answer the full census did not reach. Then every other start runs
+again on every position, in order, as every start did before this rule when none converged: each to
+its own end, or until it heads where one of these reruns converged. Its record replaces its thinned
+one. That costs passes only in the case it guards, and a parameters file never names an unconverged
+start as one another agreed with.
+
 **Why.** Each pass reads every sample at every census position, so a pass costs samples × positions
 and the fit's time grows in step with the cohort: 220 CPU-seconds a sample from 8 samples to 62 on
 the benchmark suite's tomato region. Before this rule more than half the passes only confirmed the
