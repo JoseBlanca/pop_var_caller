@@ -780,6 +780,9 @@ pub struct JointFitConfig {
     /// continues on every position until it converges there. The answer is the full census's
     /// maximum either way; what changes is how many of the passes read every position. Zero, or a
     /// census smaller than twice this, explores on every position.
+    ///
+    /// Spec: `parameter_prepass_joint_fit.md` §3.3.2. At 62 tomato samples it halved the fit
+    /// (2,223 s to 1,069 s) and moved no fitted number by more than 0.015 of its standard error.
     pub explore_on: usize,
 }
 
@@ -806,11 +809,7 @@ impl Default for JointFitConfig {
             genotype_posteriors: false,
             pass_trace: false,
             depth_as_a_range: true,
-            // PROTOTYPE: `PVC_EXPLORE_ON` overrides it, so one binary can time both ways.
-            explore_on: std::env::var("PVC_EXPLORE_ON")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(250_000),
+            explore_on: 250_000,
         }
     }
 }
@@ -6852,6 +6851,76 @@ mod whole_fit_tests {
             cohort.noisy_share
         );
         assert!(fit.converged, "the alternation ran out of passes");
+    }
+
+    /// **Exploring on a thinned census returns the full census's answer** (spec §3.3.2): the same
+    /// drawn cohort fitted with every start on every position, and with the starts on every 10th
+    /// and the winner finished on all, comes back at the same maximum — the same log-likelihood to
+    /// a hundredth of a unit, and every library's rate and every sample's excess within a tenth of
+    /// its own standard error. The thinned run's winner records the finish's passes in its own
+    /// place, so the starts are still numbered one to three.
+    #[test]
+    fn starts_explored_on_a_thinned_census_finish_at_the_full_censuss_answer() {
+        let density = FrequencyDensity {
+            p_invariant: 0.90,
+            p_fixed_alt: 0.01,
+            a: 0.7,
+            b: 2.5,
+        };
+        let cohort = draw_cohort(
+            10,
+            3_000,
+            8.0,
+            (0.002, 0.06, 0.02),
+            density,
+            0.2,
+            0x9E37_79B9_7F4A_7C15,
+        );
+        let fit_with = |explore_on| {
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                duplicated_positions: false,
+                explore_on,
+                ..JointFitConfig::default()
+            };
+            fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools")
+        };
+        let full = fit_with(0);
+        let thinned = fit_with(300);
+        assert!(full.converged && thinned.converged, "both fits converge");
+        assert_eq!(
+            thinned
+                .starts
+                .iter()
+                .map(|start| start.number)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the finish takes its start's place in the record"
+        );
+        assert!(
+            (full.log_likelihood - thinned.log_likelihood).abs() < 0.01,
+            "log-likelihood {} on every position against {} thinned",
+            full.log_likelihood,
+            thinned.log_likelihood
+        );
+        for (group, error) in &full.clean_rate_standard_error {
+            let error = error.expect("every library has reads");
+            let gap = (full.noise[group].value.clean - thinned.noise[group].value.clean).abs();
+            assert!(
+                gap < 0.1 * error,
+                "library {group:?}: rates {gap:e} apart, error {error:e}"
+            );
+        }
+        for (sample, excess) in &full.hom_excess {
+            let error = excess
+                .standard_error
+                .expect("ten samples give every excess an error");
+            let gap = (excess.value.get() - thinned.hom_excess[sample].value.get()).abs();
+            assert!(
+                gap < 0.1 * error,
+                "{sample}: excesses {gap:e} apart, error {error:e}"
+            );
+        }
     }
 
     /// **A stretch some samples carry twice must not be read as heterozygosity.**
