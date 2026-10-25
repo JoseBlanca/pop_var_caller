@@ -94,6 +94,11 @@ pub struct LocusEvidenceForOutput {
     /// `Some` exactly when some allele of the locus is empty (spec §5). [`assemble_record`] drops
     /// it again when the only empty allele is an alternative no sample calls.
     pub padding_base: Option<PaddingBase>,
+    /// The reference base just before a repeat tract's left flank — `None` at a SNP or indel,
+    /// and where the flank starts at the contig's first base. A record widened over the whole
+    /// left flank is padded with it when an allele comes out empty (§5.8 of
+    /// `str_edge_deletion_alleles.md`), as no base the locus holds lies before the widened span.
+    pub base_before_left_flank: Option<u8>,
     /// The site quality **after** the artifact correction, and the two penalties it subtracted.
     ///
     /// **Not read off the locus**, whose own quality field is the uncorrected baseline and which
@@ -207,7 +212,12 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         LocusKind::Generic => None,
     };
     if let Some(flanks) = flanks
-        && let Some(widened) = WidenedTract::over(&alleles, &flank_deletions, flanks)
+        && let Some(widened) = WidenedTract::over(
+            &alleles,
+            &flank_deletions,
+            flanks,
+            evidence.base_before_left_flank,
+        )
     {
         region = GenomeRegion {
             contig: region.contig,
@@ -259,7 +269,8 @@ struct WidenedTract {
     flank_bases_per_allele: Vec<u8>,
     /// Each allele's reach into the left and the right flank, as the generic path places it.
     reach_per_allele: Vec<(u8, u8)>,
-    /// The base before the widened record, for when an allele comes out empty.
+    /// The base before the widened record, for when an allele comes out empty — or the one
+    /// after it, where the widened record starts at the contig's first base.
     padding_base: Option<PaddingBase>,
 }
 
@@ -279,6 +290,7 @@ impl WidenedTract {
         alleles: &[Box<[u8]>],
         flank_deletions: &[FlankDeletion],
         (left_flank, right_flank): (&[u8], &[u8]),
+        base_before_left_flank: Option<u8>,
     ) -> Option<Self> {
         let flank = left_flank.len();
         let reference = &alleles[0];
@@ -354,10 +366,16 @@ impl WidenedTract {
             );
             widened.push(allele.into_boxed_slice());
         }
-        // An allele that comes out empty is padded with the base before the widened record,
-        // or the one after it where the flank is spent.
+        // An allele that comes out empty is padded with the base before the widened record:
+        // the flank's own while it lasts, and the reference's beyond it where the reach spends
+        // the whole flank. Only where nothing lies before — the flank starts at the contig's
+        // first base — is it the base after the record (`vcf_output.md` §5). Taking the base
+        // after it whenever the flank was spent wrote a right-padded record in the middle of a
+        // contig, which `VcfRecord::new` refuses.
         let padding_base = if left < flank {
             Some(PaddingBase::Left(left_flank[flank - left - 1]))
+        } else if let Some(base) = base_before_left_flank {
+            Some(PaddingBase::Left(base))
         } else if right < right_flank.len() {
             Some(PaddingBase::Right(right_flank[right]))
         } else {

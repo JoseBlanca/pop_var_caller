@@ -3844,7 +3844,8 @@ mod tests {
         let which = super::super::WhichStart {
             number,
             of: config.starting_points.len(),
-            point: &config.starting_points[number - 1],
+            stride: 1,
+            finishing: false,
             earlier,
             sample_names: &sample_names,
             stage: &stage,
@@ -3853,10 +3854,16 @@ mod tests {
             lent,
             depth_cap,
             config,
-            &groups,
             group_index,
             coverage,
             &which,
+            super::super::Parameters::at_start(
+                &config.starting_points[number - 1],
+                groups.len(),
+                lent.len(),
+                config,
+            ),
+            1,
         )
     }
 
@@ -4044,6 +4051,10 @@ mod tests {
             quadrature_nodes: 8,
             estimate_contamination: false,
             pass_trace: true,
+            // **The 2026-10-16 threshold, pinned**: these fixtures were drawn so that a start
+            // reaches the mechanism under test before it stops, at 0.001; the default (0.01) stops
+            // them sooner. What is tested is the mechanism, not where the default stops.
+            decrement_threshold: 0.001,
             ..JointFitConfig::default()
         };
         (cohort, config)
@@ -4304,6 +4315,10 @@ mod tests {
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
+            // **The 2026-10-16 threshold, pinned**: these fixtures were drawn so that a start
+            // reaches the mechanism under test before it stops, at 0.001; the default (0.01) stops
+            // them sooner. What is tested is the mechanism, not where the default stops.
+            decrement_threshold: 0.001,
             ..JointFitConfig::default()
         };
         let cohort = a_cohort_of(20, 4_000, 3.0, 0x5E77_1ED0_B200_0000 + 1001);
@@ -4351,6 +4366,10 @@ mod tests {
         let config = JointFitConfig {
             estimate_contamination: false,
             duplicated_positions: false,
+            // **The 2026-10-16 threshold, pinned**: these fixtures were drawn so that a start
+            // reaches the mechanism under test before it stops, at 0.001; the default (0.01) stops
+            // them sooner. What is tested is the mechanism, not where the default stops.
+            decrement_threshold: 0.001,
             ..JointFitConfig::default()
         };
         let consistent = |record: &crate::parameter_estimation::joint::fit::StartRecord| {

@@ -302,6 +302,7 @@ fn a_covering_samples_window_lands_on_the_run_sample_it_names() {
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     );
 
     assert_eq!(evidence.samples[0].window_coverage, first);
@@ -462,6 +463,7 @@ fn ad_is_keyed_by_the_records_allele_table_and_not_the_merges() {
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     );
 
     assert_eq!(
@@ -502,6 +504,7 @@ fn the_pooled_mapping_qualities_count_the_same_reads_as_ad() {
         &remap,
         &unmatched,
         SelectionVerdict::Selected,
+        None,
         None,
     );
 
@@ -556,6 +559,7 @@ fn a_covering_samples_reads_land_on_the_run_sample_it_names() {
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![9, 2]);
@@ -596,6 +600,7 @@ fn a_read_that_stopped_inside_the_locus_is_in_dp_and_in_no_ad_slot() {
         &remap,
         &unmatched,
         SelectionVerdict::Selected,
+        None,
         None,
     );
 
@@ -651,6 +656,7 @@ fn the_records_site_quality_is_the_corrected_one_and_the_penalties_are_beside_it
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     );
 
     let (expected, penalties) = correct_site_quality(locus.uncorrected_site_quality(), &counts);
@@ -684,6 +690,7 @@ fn a_locus_the_artifact_tests_did_not_run_on_carries_no_penalties() {
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     );
 
     assert_eq!(evidence.artifact_penalties, None);
@@ -715,6 +722,7 @@ fn a_locus_whose_loop_did_not_settle_carries_the_filter_that_says_so() {
             &unmatched,
             SelectionVerdict::Selected,
             None,
+            None,
         )
         .filter,
         FilterVerdict::Pass,
@@ -726,6 +734,7 @@ fn a_locus_whose_loop_did_not_settle_carries_the_filter_that_says_so() {
             &remap,
             &unmatched,
             SelectionVerdict::Selected,
+            None,
             None,
         )
         .filter,
@@ -765,6 +774,7 @@ fn a_samples_reads_for_one_allele_are_summed_over_its_read_groups() {
         &remap,
         &unmatched,
         SelectionVerdict::Selected,
+        None,
         None,
     );
 
@@ -819,6 +829,7 @@ fn a_samples_leftover_is_read_off_the_merges_covering_list_and_not_the_runs_orde
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     );
 
     assert_eq!(
@@ -851,6 +862,7 @@ fn a_read_removed_as_evidence_is_in_dp_and_in_no_ad_slot() {
         &remap,
         &unmatched,
         SelectionVerdict::Selected,
+        None,
         None,
     );
 
@@ -895,6 +907,7 @@ fn the_three_kinds_of_unexplained_read_are_added_together() {
         &remap,
         &unmatched,
         SelectionVerdict::Selected,
+        None,
         None,
     );
 
@@ -979,6 +992,7 @@ fn a_tract_record_carries_its_motif_and_an_ordinary_one_carries_none() {
         &unmatched,
         SelectionVerdict::Selected,
         None,
+        None,
     )
     .repeat_tract
     .expect("a tract record carries its motif");
@@ -994,6 +1008,7 @@ fn a_tract_record_carries_its_motif_and_an_ordinary_one_carries_none() {
             &remap,
             &unmatched,
             SelectionVerdict::Selected,
+            None,
             None,
         )
         .repeat_tract,
@@ -1016,7 +1031,7 @@ fn a_tracts_filter_comes_from_selection_unless_the_loop_did_not_settle() {
     let (remap, unmatched) = selected(&observation);
     let per_sample = vec![called(&[0, 1], false)];
     let filter_of = |locus: &LocusInference, verdict| {
-        evidence_for_output(locus, &observation, &remap, &unmatched, verdict, None).filter
+        evidence_for_output(locus, &observation, &remap, &unmatched, verdict, None, None).filter
     };
 
     let settled = tract_called_over(&[b"ATAT", b"ATATAT"], per_sample.clone(), true);
@@ -1219,4 +1234,66 @@ fn a_spelling_with_a_longer_insertion_is_left_alone() {
         cut_short_locus(&[b"ACG", b"AGTCG", b"AGTCGTT"], &[(0, 2), (1, 10), (2, 4)]);
     reread(&mut observation);
     assert!(observation.per_sample[0].partials.is_empty());
+}
+
+/// **The base before a repeat tract's left flank is the reference's, one past the flank.**
+///
+/// The tract `ATAT` at bases 9–12 holds the four-base flank `CCCC` at bases 5–8, so the base
+/// before it is the `T` at position 4 — the base a record widened over the whole flank is padded
+/// with. Every letter around it differs, so an answer one base off either way, or the flank's own
+/// first base, is visible.
+#[test]
+fn the_base_before_a_tracts_left_flank_is_read_off_the_reference() {
+    let mut scratch = Vec::new();
+    let mut tract = CandidateAlleles::new(Box::from(&b"ATAT"[..]), LocusKind::Ssr(tract_detail()));
+    // A tract with no empty allele never needs the base: widening cannot empty an allele.
+    let answer = base_before_left_flank(
+        &reference_of(b"ACGTCCCCATATGGGG"),
+        region(9, 12),
+        &tract,
+        &mut scratch,
+    )
+    .expect("a fetch that is never made cannot fail");
+    assert_eq!(answer, None);
+    tract.admit(Box::from(&b""[..]));
+
+    let answer = base_before_left_flank(
+        &reference_of(b"ACGTCCCCATATGGGG"),
+        region(9, 12),
+        &tract,
+        &mut scratch,
+    )
+    .expect("the reference holds a base at position 4");
+    assert_eq!(answer, Some(b'T'));
+
+    // A flank that starts at the contig's first base has nothing before it.
+    let answer = base_before_left_flank(
+        &reference_of(b"CCCCATATGGGG"),
+        region(5, 8),
+        &tract,
+        &mut scratch,
+    )
+    .expect("a fetch that is never made cannot fail");
+    assert_eq!(answer, None);
+
+    // One base further in, the flank starts at position 2 and the contig's first base is before
+    // it: the boundary, which an off-by-one in either direction gets wrong.
+    let answer = base_before_left_flank(
+        &reference_of(b"GCCCCATATGGGG"),
+        region(6, 9),
+        &tract,
+        &mut scratch,
+    )
+    .expect("the reference holds a base at position 1");
+    assert_eq!(answer, Some(b'G'));
+
+    // A SNP or indel locus holds no flank.
+    let answer = base_before_left_flank(
+        &reference_of(b"ACGTCCCCATATGGGG"),
+        region(9, 12),
+        &table_of(&[b"ATAT", b""]),
+        &mut scratch,
+    )
+    .expect("a fetch that is never made cannot fail");
+    assert_eq!(answer, None);
 }

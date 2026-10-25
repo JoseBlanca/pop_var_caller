@@ -92,6 +92,7 @@ fn evidence(
         samples,
         allele_mapq: mapq,
         padding_base: None,
+        base_before_left_flank: None,
         corrected_site_quality: quality(120.0),
         artifact_penalties: None,
         repeat_tract: None,
@@ -329,6 +330,7 @@ fn evidence_over_three(samples: Vec<SampleEvidenceForOutput>) -> LocusEvidenceFo
         samples,
         allele_mapq: mapq,
         padding_base: None,
+        base_before_left_flank: None,
         corrected_site_quality: quality(120.0),
         artifact_penalties: None,
         repeat_tract: None,
@@ -505,6 +507,7 @@ fn a_tract_record_is_widened_over_its_alleles_reach_into_the_flanks() {
         &alleles,
         &deletions,
         (&detail.left_flank, &detail.right_flank),
+        None,
     )
     .expect("a reach");
     assert_eq!((widened.left, widened.right), (1, 1));
@@ -545,8 +548,45 @@ fn a_tract_record_is_widened_over_its_alleles_reach_into_the_flanks() {
         WidenedTract::over(
             &expansion,
             &plain,
-            (&detail.left_flank, &detail.right_flank)
+            (&detail.left_flank, &detail.right_flank),
+            None,
         )
         .is_none()
     );
+}
+
+/// **A deletion that spends the whole left flank is padded with the reference base before it**
+/// (`str_edge_deletion_alleles.md` §5.8, `vcf_output.md` §5).
+///
+/// `AG` ×3 after the two-base flank `CG`: allele 1 deletes the whole tract and both flank bases,
+/// so it comes out empty over a record widened two bases left — the whole flank. No base the locus
+/// holds lies before that record; the reference's `T` does. Taking the base after the record
+/// instead, as the widening did, stopped the 2,174-sample tomato run on 2026-10-24: a right-hand
+/// padding base is only legal at a contig's first base, and `VcfRecord::new` refuses it elsewhere.
+#[test]
+fn a_deletion_spending_the_whole_left_flank_is_padded_with_the_base_before_it() {
+    use crate::locus_generation::FlankDeletion;
+    let (left_flank, right_flank): (&[u8], &[u8]) = (b"CG", b"CCAA");
+    let alleles: Vec<Box<[u8]>> = vec![Box::from(&b"AGAGAG"[..]), Box::from(&b""[..])];
+    let deletions = [FlankDeletion::NONE, FlankDeletion { left: 2, right: 0 }];
+
+    let widened = WidenedTract::over(&alleles, &deletions, (left_flank, right_flank), Some(b'T'))
+        .expect("a reach");
+
+    assert_eq!(
+        (widened.left, widened.right),
+        (2, 0),
+        "the reach spends the flank"
+    );
+    assert_eq!(
+        widened.alleles,
+        vec![Box::from(&b"CGAGAGAG"[..]), Box::from(&b""[..])],
+    );
+    assert_eq!(widened.padding_base, Some(PaddingBase::Left(b'T')));
+
+    // Where the flank starts at the contig's first base nothing lies before it, and the base
+    // after the record is the one VCF asks for.
+    let at_contig_start =
+        WidenedTract::over(&alleles, &deletions, (left_flank, right_flank), None).expect("a reach");
+    assert_eq!(at_contig_start.padding_base, Some(PaddingBase::Right(b'C')));
 }

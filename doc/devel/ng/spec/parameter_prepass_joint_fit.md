@@ -1164,7 +1164,60 @@ step, which needs the information every cycle.
 
 **When the climb stops** is [`fit_precision.md`](fit_precision.md) §2, amended the same day (owner):
 a start stops when the log-likelihood the remaining bounded Newton step is worth — the Newton
-decrement — falls below `DECREMENT_THRESHOLD` = 0.001 units.
+decrement — falls below `DECREMENT_THRESHOLD` = 0.01 units (0.001 until 2026-10-25,
+[`fit_precision.md`](fit_precision.md) §2).
+
+#### 3.3.2 The starts explore on a thinned census; the winner finishes on all of it — added 2026-10-25
+
+**Rule.** When the census holds at least twice `explore_on` = 250,000 positions, every start runs
+on the positions whose index is a multiple of `k = ⌊census / explore_on⌋` — every 7th of tomato's
+1,999,854 — and the start that wins there continues, from where it stopped, on every position until
+it converges by the rule below. Later starts stop on agreement with an earlier one exactly as before,
+judged on the thinned census. A smaller census is not thinned, so a run over a few hundred thousand
+positions fits exactly as it did.
+
+**A finish that does not converge** — it runs out of `max_passes` — leaves the starts that agreed on
+the thinned census agreeing with an answer the full census did not reach. Then every other start runs
+again on every position, in order, as every start did before this rule when none converged: each to
+its own end, or until it heads where one of these reruns converged. Its record replaces its thinned
+one. That costs passes only in the case it guards, and a parameters file never names an unconverged
+start as one another agreed with.
+
+**Why.** Each pass reads every sample at every census position, so a pass costs samples × positions
+and the fit's time grows in step with the cohort: 220 CPU-seconds a sample from 8 samples to 62 on
+the benchmark suite's tomato region. Before this rule more than half the passes only confirmed the
+first start's answer — at 62 samples starts 2 and 3 took 72 of 126 passes. The starts exist to find
+*which* maximum, and a seventh of the census answers that: §4.3 of
+[`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) measured every SNP/indel
+parameter to within 2% at 320,000 positions.
+
+**What it does not change: the answer.** The reported values are the full census's maximum, stopped
+by the same decrement threshold, and their standard errors come from the finish's final pass over
+every position. Measured on tomato (8 Mb region, about 3 reads a position, 6 threads, the same binary
+with the rule off and on):
+
+| samples | fit, off | fit, on | instructions retired | largest move of any fitted number |
+|---:|---:|---:|---:|---:|
+| 8 | 295 s | 199 s | −35% | 0.011 of its standard error |
+| 62 | 2,223 s | 1,069 s | −53% | 0.015 of its standard error |
+
+Some repeat-tract curves' stiffness — read off a flat search — moves (1.2·10⁹ to 10¹⁰), with no
+fitted curve value moving by more than one part in a thousand.
+
+**What still costs.** The finish needs 76 passes at 8 samples and 37 at 62 although it begins within
+a few log-likelihood units of the maximum: its Newton steps are accepted at a quarter or an eighth of
+their length along the trade between the mismapped share and the libraries' mismapped error rates.
+Starting the finish's judging at its first pass, rather than at the stillness trigger, was measured
+and not adopted: 76 → 90 passes at 8 samples, 37 → 37 at 62 with more instructions.
+
+**What the records now mean.** The parameters file's start lines keep their numbers 1 to 3, the
+winner's line holding the finish's passes and log-likelihood — over every position — and the other
+starts' lines their passes over the thinned census, whose log-likelihoods are on fewer positions and
+not comparable with the winner's. The per-pass trace (`PVC_JOINT_FIT_TRACE`) writes the finish under
+the winner's start number with its passes counted from one again, after that start's thinned passes.
+
+**Soft:** `explore_on` = 250,000 was chosen from §4.3's 320,000 without a sweep; the finish makes any
+value safe for the answer, so it trades only time.
 
 ### 3.4 Contamination — a per-sample number this path fits, and only this path can
 
