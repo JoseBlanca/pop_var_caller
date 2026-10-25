@@ -166,6 +166,17 @@ def save(fig, out, name):
 # | small light dot     | no call (./.)        | the genotype left missing, the lesser error      |
 #
 # The line joins all three, zeros included: a short line near 0 is the good result.
+#
+# **pvc is drawn once, as fitted, named plain "pvc"** (owner, 25 October 2026): its run with the
+# defaults is usually a little worse and two pvc rows crowded every depth group. The table keeps
+# both.
+ERROR_FIGURE_CALLERS = [c for c in CALLERS if c != "pvc (defaults)"]
+ERROR_FIGURE_LABEL = {"pvc (fitted)": "pvc"}
+
+
+def error_label(caller):
+    return ERROR_FIGURE_LABEL.get(caller, STYLE[caller]["label"])
+
 
 ERROR_MARKS = [
     ("wrong_gt_truth_ref", "wrong GT (truth ref)",
@@ -192,7 +203,7 @@ def error_counts(rows, benchmark, kind, aggregate_datasets=False, exclude=()):
         raise ValueError(f"{benchmark} has {len(datasets)} datasets; sum them or pick one")
     for r in rows:
         if (r["benchmark"] == benchmark and r["stage"] == "error type"
-                and r["variant_class"] == kind and r["caller"] in STYLE
+                and r["variant_class"] == kind and r["caller"] in ERROR_FIGURE_CALLERS
                 and r["caller"] not in exclude and r["metric"] in wanted):
             acc[(r["depth"], r["caller"])][r["metric"]] += float(r["value"])
     if not any(v for counts in acc.values() for v in counts.values()):
@@ -208,7 +219,7 @@ def row_layout(panels):
     y, place, groups = 0, {}, []
     for depth in depths:
         top = y
-        for caller in CALLERS:
+        for caller in ERROR_FIGURE_CALLERS:
             if (depth, caller) in keys:
                 place[(depth, caller)] = y
                 y += 1
@@ -244,7 +255,7 @@ def dot_panel(ax, counts, layout, show_labels):
     ax.xaxis.set_minor_formatter(NullFormatter())
     ax.set_ylim(bottom + 0.5, -0.7)
     ax.set_yticks(list(place.values()))
-    ax.set_yticklabels([STYLE[caller]["label"] for _, caller in place])
+    ax.set_yticklabels([error_label(caller) for _, caller in place])
     ax.tick_params(axis="y", length=0, labelsize=8.5, labelcolor=TEXT, labelleft=show_labels)
     ax.tick_params(axis="x", colors=TEXT_2, labelsize=9)
     ax.grid(True, axis="x", which="major", color=GRID, linewidth=0.8)
@@ -323,7 +334,7 @@ def stutter_counts(rows, dataset, samples, classes):
     for r in rows:
         if (r["benchmark"] == "stutter_sim" and r["dataset"] == dataset
                 and r["samples"] == samples and r["variant_class"] in classes
-                and r["caller"] in STYLE):
+                and r["caller"] in ERROR_FIGURE_CALLERS):
             acc[(r["depth"], r["caller"])][r["metric"]] += float(r["value"])
     return {key: {error: sum(m.get(o, 0) for o in outcomes)
                   for error, outcomes in STUTTER_ERRORS.items()}
