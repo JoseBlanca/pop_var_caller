@@ -215,6 +215,33 @@ RUN apt-get update \
     && install -m 0755 HipSTR /usr/local/bin/HipSTR \
     && cd / && rm -rf /tmp/hipstr
 
+# pvc_eval's interpreter: the benchmark suite scores every call set a second way with pvc_eval
+# (github.com/JoseBlanca/pvc_eval), which runs on the free-threaded CPython 3.15 ("3.15t") with
+# numpy. Only the interpreter and numpy are in the image: pvc_eval itself is still being written,
+# so the suite runs it from a checkout it mounts and records the commit of, and a new pvc_eval
+# needs no rebuild. uv installs the interpreter; everything lives under /opt/pvc-eval-env, and
+# its Python is /opt/pvc-eval-env/bin/python. Pinned to what pvc_eval's own uv.lock uses
+# (24 October 2026). Its own layer, last.
+ARG UV_VERSION=0.13.1
+ARG PVC_EVAL_PYTHON=3.15.0+freethreaded
+ARG PVC_EVAL_NUMPY=2.5.4
+RUN arch="$(uname -m)" \
+    && case "$arch" in \
+         aarch64) triple=aarch64-unknown-linux-gnu ;; \
+         x86_64)  triple=x86_64-unknown-linux-gnu ;; \
+         *) echo "no uv build for $arch" >&2; exit 1 ;; \
+       esac \
+    && wget -q "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${triple}.tar.gz" \
+         -O /tmp/uv.tgz \
+    && tar -xzf /tmp/uv.tgz -C /tmp \
+    && install -m 0755 "/tmp/uv-${triple}/uv" /usr/local/bin/uv \
+    && rm -rf /tmp/uv.tgz "/tmp/uv-${triple}" \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python uv python install "cpython-${PVC_EVAL_PYTHON}" \
+    && UV_PYTHON_INSTALL_DIR=/opt/uv-python uv venv --python "cpython-${PVC_EVAL_PYTHON}" \
+         /opt/pvc-eval-env \
+    && uv pip install --python /opt/pvc-eval-env/bin/python "numpy==${PVC_EVAL_NUMPY}" \
+    && /opt/pvc-eval-env/bin/python -c "import sys, numpy; assert not sys._is_gil_enabled(); print(sys.version, numpy.__version__)"
+
 WORKDIR /work
 COPY scripts/container-entrypoint.sh /usr/local/bin/container-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/container-entrypoint.sh"]

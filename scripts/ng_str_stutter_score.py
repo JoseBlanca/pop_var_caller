@@ -23,10 +23,16 @@ Each (caller, sample, segment) cell gets one outcome:
 | `right` | the called sequences are the truth's |
 | `length_right` | not the truth's sequences, but the same two lengths (whatever the bases) |
 | `wrong` | a variant in the truth, called with other lengths |
-| `called_reference` | a variant in the truth, every record over the window called homozygous reference |
+| `called_reference` | a variant in the truth, and every record over the window calls the sample homozygous reference, or no record covers the window |
 | `false_call` | no variant in the truth, a variant called |
-| `no_call` | a record over the window leaves the sample uncalled (`./.`), or the truth has a variant and no record covers the window |
+| `no_call` | a record over the window leaves the sample uncalled (`./.`) |
 | `ref_right` | no variant in the truth, none called |
+
+**No record over the window is a reference call, not a missing one** (owner, 24 October 2026). A
+VCF lists only the sites a caller found variant, in some sample; where it wrote nothing, it says
+every sample is the reference there, which at a variant STR is a wrong genotype, not a genotype
+left missing. Until then that case was `no_call`, which mixed the two and made a caller that
+skips a variant look as if it had declined to call it. Only an explicit `./.` is `no_call` now.
 
 A record that reaches outside the window widens the stretch compared, and the truth over the widening
 is the reference: the simulator puts no variant within 150 bases of a segment beyond its window.
@@ -339,7 +345,8 @@ def score_cell(caller, segment, sample, truth_pair, calls, contigs):
     records = calls.overlapping(segment.chrom, segment.window_start, segment.window_end)
     truth_variant = any(index != 0 for index in truth_pair)
     if not records:
-        return ("no_call" if truth_variant else "ref_right"), None
+        # Nothing written over the window: the caller says reference (module doc).
+        return ("called_reference" if truth_variant else "ref_right"), None
     if any(record.calls[sample][0] is None for record in records):
         return "no_call", None
     start = min([segment.window_start] + [record.start for record in records])

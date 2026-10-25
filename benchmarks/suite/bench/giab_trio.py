@@ -40,7 +40,7 @@ def steps(ctx):
     depths = ["10x"] if ctx.slice else DEPTHS
     ref_steps, reference = giab_sources.grch38(ctx)
     out = list(ref_steps)
-    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", reference)
+    more, catalog, scoring = arms.reference_steps(ctx, "GRCh38", reference)
     out.extend(more)
 
     # The data checkout's alignments and truth where it has them, else fetched from GIAB over the
@@ -70,7 +70,7 @@ def steps(ctx):
             out.append(step)
             for s in SAMPLES:
                 member_base = dict(base, dataset=f"GIAB trio, member {s}, 100 common regions")
-                out.append(arms.score_step(ctx, callset, member_base, truth[s], regions, sdf,
+                out.append(arms.score_step(ctx, callset, member_base, truth[s], regions, scoring,
                                            call_sample=s, truth_sample=s))
             out.append(_mendelian_step(ctx, callset, base, regions))
         if depth == depths[0]:

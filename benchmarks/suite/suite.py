@@ -49,6 +49,8 @@ def parse_args():
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--data-root", required=True)
     p.add_argument("--pvc-commit", required=True)
+    p.add_argument("--pvc-eval", help="pvc_eval checkout, the second scorer (set by run_suite.sh)")
+    p.add_argument("--pvc-eval-commit", help="its commit (set by run_suite.sh)")
     p.add_argument("--machine", required=True)
     return p.parse_args()
 

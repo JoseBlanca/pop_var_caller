@@ -31,7 +31,7 @@ def steps(ctx):
     depths = ["30x"] if ctx.slice else DEPTHS
     ref_steps, GRCH38 = giab_sources.grch38(ctx)
     out = list(ref_steps)
-    more, catalog, sdf = arms.reference_steps(ctx, "GRCh38", GRCH38)
+    more, catalog, scoring = arms.reference_steps(ctx, "GRCh38", GRCH38)
     out.extend(more)
     # The data checkout's files where it has them, else fetched from GIAB (lib/giab_sources.py).
     if not os.path.exists(full["HG002"]):
@@ -55,7 +55,7 @@ def steps(ctx):
             step, callset = arms.arm_steps(ctx, arm, f"hg002_5mb/{depth}", GRCH38, catalog,
                                            {"HG002": alignment("HG002", depth)}, regions, base)
             out.append(step)
-            out.append(arms.score_step(ctx, callset, base, truth, regions, sdf,
+            out.append(arms.score_step(ctx, callset, base, truth, regions, scoring,
                                        call_sample="HG002", truth_sample="HG002"))
         out.extend(readfloor.floor_steps(ctx, f"hg002_5mb/{depth}", GRCH38,
                                          {"HG002": alignment("HG002", depth)}, regions, base))
