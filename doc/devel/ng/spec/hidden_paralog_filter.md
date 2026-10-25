@@ -52,9 +52,11 @@ instead of two (§2). In exchange it runs identically in both modes.
 
 ### 1.2 Non-goals, and what this does not do
 
-- **No new statistics, with one exception.** The likelihood ratio, the prior's estimation, the
+- **No new statistics, with two exceptions.** The likelihood ratio, the prior's estimation, the
   FDR curve are copied from `src/paralog/`, and every record goes through them as production's
-  biallelic SNPs do. The exception is the allele term's dispersion (§3.2, adopted 2026-10-21).
+  biallelic SNPs do. The exceptions are the allele term's dispersion (§3.2, adopted 2026-10-21)
+  and the duplication rate estimated per window of the genome rather than once for all of it
+  (§3.3, adopted 2026-10-23).
   Production's binomial was tuned on tomato2 at about six reads a sample; at 300x it was checked
   only for overall accuracy on the 100-region GIAB panel, which holds too few duplicated sites to
   show what the split does there.
@@ -260,9 +262,9 @@ the pseudocount — are production's ([`paralog/mod.rs`](../../../../src/paralog
 *kept, never flagged*: its ratio is `NaN`, which the histogram refuses to fold and the verdict
 never flags ([`ParalogCalibration::flags`, `calibrate.rs:97`](../../../../src/var_calling/paralog_filter/calibrate.rs)).
 
-### 3.3 From scores to a cut — production's prior and FDR, copied
+### 3.3 From scores to a cut — production's prior and FDR, then a rate per window
 
-Pass two folds every finite ratio into a fixed-size histogram of ratios
+**The run-wide rate.** Pass two folds every finite ratio into a fixed-size histogram of ratios
 ([`ParalogLrHistogram`, `prior.rs:108`](../../../../src/paralog/prior.rs)), estimates π from it by
 EM ([`ParalogPrior::estimate`, `prior.rs:181`](../../../../src/paralog/prior.rs)), builds the
 tail-FDR curve over the same bins ([`ParalogFdrCurve`, `prior.rs:230`](../../../../src/paralog/prior.rs)),
@@ -276,6 +278,53 @@ the run warns, and the header says so.
 so pass three applies the cut to the value the histogram was built from rather than re-scoring.
 That is production's own argument for storing the ratio: the cut then matches the histogram *by
 construction*. Forty megabytes at five million records, flat in the sample count.
+
+**A rate per window — the default since 2026-10-23.** Hidden duplications cluster: long stretches
+of a genome hold almost none and a few hold many. One run-wide π is therefore too high in the
+clean stretches, where it lifts real variants over the cut, and too low in the dense ones. So pass
+two re-estimates the rate locally
+([`windowed_prior.rs`](../../../../src/paralog/windowed_prior.rs)):
+
+1. **Each contig is cut into bins of 10,000 bases**, and every record in a bin shares one rate.
+2. **A bin's rate is estimated from the records within half a window of the bin's centre** —
+   25,000 bases either side at the default window of 50,000 (`--hidden-dup-window`, §3.6) — by
+   the same EM that gives π.
+3. **The estimate is pulled toward the run-wide π**, as if 10 extra records sat in every window at
+   that rate. A window holding few records keeps about π; one holding hundreds keeps its own.
+4. **Each record's posterior is σ(LR + logit π_b)**, with π_b its own bin's rate. That is the
+   `PARALOG_POST` written (§3.5).
+5. **The cut** ranks the records by posterior, highest first, and flags the longest run from the
+   top whose mean chance of being a real variant, `1 − posterior`, is at or below the target;
+   records with equal posteriors are taken or left together. With one rate everywhere this flags
+   what the histogram cut above flags, apart from records within about one histogram bin of it.
+
+Pass two keeps each record's contig and position for this (12 bytes a record), then one posterior
+(8 bytes a record) until pass three — flat in the sample count. The time grows with the window,
+not the cohort: each occupied bin's EM runs over the records in its window. The `##paralogFilter`
+line (§3.5) gains `window=`, `shrink=` (the pull, in records) and `post_cut=` (the posterior the
+cut resolved to, `none` where nothing is flagged); in a windowed run `post_cut` decides, and `pi`
+and `lr_cut` are the run-wide values the windows were pulled toward.
+
+**Why (the owner's decision, 2026-10-23).** On GIAB HG002 chromosome 22, called as one sample, the
+run-wide π is 0.13 to 0.16, while the same EM gives 0.0003 to 0.005 inside GIAB's trusted regions
+and 0.33 to 0.43 outside them; inside the trusted regions 31 to 80 of every 100 records the
+run-wide filter removed were real variants, against a target of 1 in 100. With 50,000-base windows,
+HG002, HG003 and HG004 summed (hap.py, with pvc_eval agreeing) gained 192, 100, 48 and 17 true calls
+at 5x, 10x, 30x and 300x, while false calls fell by 6 and 7 at 5x and 10x and rose by 10 and 7 at 30x
+and 300x. On a simulated genome with hidden duplications absent from the reference, introgressions
+and uneven coverage, one sample caught more duplication artifacts at every depth (502 → 764 of
+1,401 at 3x, 2,057 → 2,418 of 2,604 at 30x) and removed fewer real variants at 100x (59 → 38); a
+cohort of 20 at 3x removed fewer real variant genotypes (4,129 → 3,083), at the cost of 13 more at
+10x (55 against 42 of 195,796).
+
+**What was not tuned.** The pull of 10 records (`LOCAL_PRIOR_SHRINK_RECORDS`) and the cut rule
+(`tail_fdr_posterior_cut`) are the values those measurements were taken at. The one other cut
+measured — flag a posterior above the one the run-wide cut stands for — was dropped. Windows of
+20,000 to 100,000 bases behaved alike; nothing outside that range was tried.
+
+**A window of 0 is the filter as it was before 2026-10-23**: every record's posterior uses the
+run-wide π, the histogram cut decides, and the header line carries no windowed fields. It is there
+to reproduce a run made before that date, or to compare the two on one's own data.
 
 ### 3.4 The spill — a framed binary file of finished lines
 
@@ -337,7 +386,8 @@ cohort size times the record count.
 
 Per entry, in spill order, with its ratio from pass two:
 
-- **flagged** ⇔ the ratio is finite and its tail FDR is at or below the target
+- **flagged** ⇔ the ratio is finite and its posterior is at or above the windowed cut (§3.3), or,
+  at a window of 0, its tail FDR is at or below the target
   ([`flags`, `calibrate.rs:97`](../../../../src/var_calling/paralog_filter/calibrate.rs));
 - **dropped** if flagged and `--paralog-filter-tag` is not given: the line is not written and
   the drop is counted;
@@ -350,22 +400,28 @@ Per entry, in spill order, with its ratio from pass two:
 
 ```text
 ##INFO=<ID=PARALOG_LR,Number=1,Type=Float,Description="Log likelihood ratio of a hidden paralog over a real variant, from coverage and allele balance across samples">
-##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the run's fitted paralog rate">
+##INFO=<ID=PARALOG_POST,Number=1,Type=Float,Description="Posterior probability that this locus is a hidden paralog, under the paralog rate fitted around it (over the whole run where --hidden-dup-window is 0)">
 ##FILTER=<ID=hiddenParalog,Description="Better explained by a reference-collapsed duplication than by a variant; tail FDR at or below the run's target">
 ```
 
-`PARALOG_POST` is the id [`vcf_output.md`](vcf_output.md) §6 reserved for this document. The
+`PARALOG_POST` is the id [`vcf_output.md`](vcf_output.md) §6 reserved for this document. In a
+windowed run (the default, §3.3) it is the posterior under the rate of the record's own window.
+The
 ratio is written so that a run that drops can be audited against one that tags.
 
 **The header carries the run's calibration**, production's line with one addition:
 
 ```text
-##paralogFilter=target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;samples_with_coverage_model=61/63
+##paralogFilter=target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;samples_with_coverage_model=61/63;window=50000;shrink=10;post_cut=0.987654
 ```
 
 Production writes the first four ([`paralog_provenance`, `write_pass.rs:120`](../../../../src/var_calling/paralog_filter/write_pass.rs))
 because a dropped record leaves no per-record trace; the fifth says how much of the cohort the
-coverage evidence rested on. ng's header writes its meta lines as `##key=value`
+coverage evidence rested on. The last three are the windowed rate's (§3.3): the window in bases,
+the pull toward π in records, and the posterior the cut resolved to (`none` where nothing is
+flagged). In a windowed run `post_cut` decides, and `pi` and `lr_cut` are the run-wide values the
+windows were pulled toward; a run at a window of 0 writes the first five only. ng's header writes
+its meta lines as `##key=value`
 ([`header_text`, `header.rs:431`](../../../../src/ng/vcf/header.rs)); this is one more.
 
 **The writer gains one entry point**: write a line whose contig, position and tract-ness are
@@ -383,7 +439,7 @@ model was rejected, each with its reason; π, the cut, and whether the EM conver
 |---|---|---|
 | `--paralog-fdr <f>` | `0.01` | the target false-discovery rate among the records removed; `0` turns the filter off |
 | `--paralog-filter-tag` | off | keep flagged records, on the `hiddenParalog` filter, instead of dropping them |
-| `--hidden-dup-window <BASES>` | `50000` | research option, branch `research/giab-alpha` (2026-10-22), default raised from `0` (owner, 2026-10-23): estimate π per window of this width rather than once for the genome; `0` is the one genome-wide π. See `src/paralog/windowed_prior.rs` |
+| `--hidden-dup-window <BASES>` | `50000` | added 2026-10-22, default raised from `0` (owner, 2026-10-23): estimate π per window of this width rather than once for the genome; `0` is the one genome-wide π. See `src/paralog/windowed_prior.rs` |
 
 Both on `call-from-psps` and `call-from-alignments`
 ([`CallFromPspsArgs`, `call_from_psps.rs:75`](../../../../src/pop_var_caller_exp/call_from_psps.rs)),
@@ -454,12 +510,16 @@ pub struct ParalogVerdicts {
   (`[1/2N, 1 − 1/2N]` is `[½, ½]`); **the plan runs one sample explicitly** (step D1) because the
   copied precompute has not been exercised there. Calibration is soft — the ratio distribution is
   less bimodal, so π is noisier and the fallback fires more often — and the header says which
-  happened.
+  happened. The rate per window (§3.3) needs no cohort: every GIAB figure behind it is one sample
+  called alone, and on the simulated genome one sample at 3x caught 764 of 1,401 duplication
+  artifacts with it against 502 without.
 - **Three thousand samples.** Per record: 3,000 spill sample entries (about 20 bytes each) and a
   score over 3,000 samples, on one thread in pass two. The precompute tables are
   `grid points × samples`. Nothing is held across records but the ratios. **Pass two's wall at
   that size is unmeasured**; the plan measures it at 63 and reports (step D2), and parallelising
-  the scoring is deferred until that number exists (§7).
+  the scoring is deferred until that number exists (§7). The rate per window adds 20 bytes a
+  record and a cost that grows with the window, neither with the cohort; the largest cohort it
+  was measured on is 20 simulated samples.
 - **Three reads a position.** σ₀ is large, the score self-gates, and the filter removes little;
   the tomato slice at this depth is the plan's first real run. A heterozygote's allele balance
   from three reads is weak evidence and the model already weighs it as such. The allele term's
@@ -475,12 +535,16 @@ pub struct ParalogVerdicts {
   ([report](../../reports/ng_coverage_depth_scale_2026-10-17.md)). **At this depth the split
   alone can decide a record at normal window depth, and that is intended** (§3.2): it is how the
   filter removes false calls on duplicated ground whose extra reads did not raise the window's
-  depth. The dispersion caps how far.
+  depth. The dispersion caps how far. The rate per window removed fewer real variants here too:
+  at 100x on the simulated genome, 38 instead of 59 for one sample; at 300x on GIAB, 17 more true
+  calls and 7 more false ones over the trio.
 
 ## 5. Cross-cutting concerns
 
 - **Memory** — one spill entry in hand at a time in passes one and three; the ratios (8 bytes a
-  record) and the per-sample context through pass two. The histograms are
+  record) and the per-sample context through pass two, and with the rate per window a contig and
+  position (12 bytes a record) in pass two and a posterior (8 bytes a record) until pass three. The
+  histograms are
   [`window_coverage.md`](window_coverage.md)'s and are dropped once the models are fitted.
 - **Time** — two sequential reads of a VCF-sized file, and one score per record. Unmeasured; the
   plan reports pass shares on the tomato slice.
