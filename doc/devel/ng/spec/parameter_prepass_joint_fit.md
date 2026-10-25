@@ -1202,6 +1202,12 @@ their length along the trade between the mismapped share and the libraries' mism
 Starting the finish's judging at its first pass, rather than at the stillness trigger, was measured
 and not adopted: 76 → 90 passes at 8 samples, 37 → 37 at 62 with more instructions.
 
+**What the records now mean.** The parameters file's start lines keep their numbers 1 to 3, the
+winner's line holding the finish's passes and log-likelihood — over every position — and the other
+starts' lines their passes over the thinned census, whose log-likelihoods are on fewer positions and
+not comparable with the winner's. The per-pass trace (`PVC_JOINT_FIT_TRACE`) writes the finish under
+the winner's start number with its passes counted from one again, after that start's thinned passes.
+
 **Soft:** `explore_on` = 250,000 was chosen from §4.3's 320,000 without a sweep; the finish makes any
 value safe for the answer, so it trades only time.
 
