@@ -782,7 +782,13 @@ mod tests {
     /// no number moved, because every read group here is fitted; only the file's prose about a
     /// `defaulted` multiplier did. Putting the old prose back reproduces the old checksum,
     /// `ced2576a45b958bd719a0e8720e7b9bb`, exactly. Recorded in the Linux container (amd64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "b10618abc9bb00b0e089bfd64ae06858";
+    /// **Re-recorded 2026-10-25** when `DECREMENT_THRESHOLD` went from 0.001 to 0.01
+    /// (`fit_precision.md` §2, measured on 1, 8 and 62 tomato samples first): this fit's only start
+    /// stops at 49 passes instead of 84, and its numbers and standard errors move within their
+    /// errors — the largest, read group 15's multiplier, 0.47 → 0.58 against an error of 0.83.
+    /// Setting the threshold back to 0.001 reproduces the old checksum,
+    /// `b10618abc9bb00b0e089bfd64ae06858`, exactly. Recorded on the macOS host (arm64).
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "aef60ff6d9816096e75a960d9ca5d0e8";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -907,7 +913,12 @@ mod tests {
     /// rate fitted around it" for the windowed duplication rate: only that `##INFO` line moved; putting
     /// the old description back reproduces the old checksum, `bcd2e92c326cef11be6bcfb98798891b`, exactly. Recorded
     /// in the Linux container (amd64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "513fb4a876d6f1d82b36a77171a4d825";
+    /// **Re-recorded 2026-10-25** with [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`]'s last note: every
+    /// record and every genotype is unchanged; the records' `QUAL` (chrV:32 220.1 → 195.7 the most,
+    /// the rest by 1 or 2), `AF` in its fifth decimal, and the `##pvcParameters` line move. Setting
+    /// the threshold back reproduces `513fb4a876d6f1d82b36a77171a4d825` exactly. Recorded on the
+    /// macOS host (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "ae8b4f7101b1a69eb2ec1972e57aa69c";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

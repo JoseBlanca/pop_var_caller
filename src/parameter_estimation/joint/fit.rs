@@ -699,7 +699,7 @@ pub struct JointFitConfig {
     /// §3.5). What stops a start is `decrement_threshold`.
     pub settled_fraction: f64,
     /// **A start converges once the remaining Newton step is worth less than this much
-    /// log-likelihood** — the Newton decrement's threshold, 0.001 units by default ([`settled`]'s
+    /// log-likelihood** — the Newton decrement's threshold, 0.01 units by default ([`settled`]'s
     /// `DECREMENT_THRESHOLD`, `fit_precision.md` §2). A field so a test can run a fit further, to
     /// 10⁻⁴, the way the measurement that chose the default ran its references. **Zero or below,
     /// no start ever converges** — a decrement is never below zero — so none is a yardstick for
