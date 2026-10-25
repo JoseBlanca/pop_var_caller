@@ -121,9 +121,16 @@ How each is scored:
   marked ⚠ in the summary.
 - **Parallelism:** each caller as its documentation tells a user — one process per sample for the
   one-sample stages (pvc `generate-psps`, GATK HaplotypeCaller GVCFs), one threaded process for the
-  cohort stages, freebayes as one process per block of regions. GATK's cohort route is CombineGVCFs
-  then GenotypeGVCFs: GenomicsDBImport's native library is built only for x86-64, and the container
-  is arm64.
+  cohort stages, freebayes as one process per block of regions. GATK's cohort stages are
+  single-threaded, so they run as GATK's joint-calling workflow runs them: one process per shard of
+  the regions, as many at once as the suite has cores. They join the GVCFs with GenomicsDBImport,
+  GATK's recommended route, on x86-64, and with CombineGVCFs on the arm64 laptop, where
+  GenomicsDBImport's native library does not exist; the stage rows name the route.
+- **GVCFs made once:** where a benchmark calls nested cohorts (the speed benchmark's first 1, 2,
+  5, ... accessions), each sample's GATK GVCF is made once, in a run of the largest cohort, and
+  every cohort's GATK step joins its share. That cohort's per-sample stage figures are derived from
+  each sample's own measured time and memory, laid out as many at once as the suite has cores, and
+  are marked † in the summary.
 
 ## DeepVariant, and running on an x86-64 Linux server
 

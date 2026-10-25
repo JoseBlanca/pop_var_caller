@@ -54,8 +54,8 @@ def _rss(pid):
         return None
 
 
-def _descendants(roots):
-    """The given processes and every process descended from them, from /proc."""
+def _children():
+    """Each process's children, from /proc."""
     children = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
@@ -71,6 +71,13 @@ def _descendants(roots):
         except (IndexError, ValueError):
             continue
         children.setdefault(ppid, []).append(int(entry))
+    return children
+
+
+def _descendants(roots, children=None):
+    """The given processes and every process descended from them."""
+    if children is None:
+        children = _children()
     out, stack = [], list(roots)
     while stack:
         pid = stack.pop()
@@ -80,7 +87,13 @@ def _descendants(roots):
 
 
 class _MemorySampler(threading.Thread):
-    """Adds up the resident memory of the live processes and all their descendants."""
+    """Adds up the resident memory of the live processes and all their descendants.
+
+    Also keeps each started command's own peak (`command_peak`, by the pid of the command's
+    shell): the largest sum over that command's processes alone, or its largest single process's
+    high-water mark if that is larger. That is the figure for one command of several run at once,
+    one sample's GATK HaplotypeCaller, say.
+    """
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -88,6 +101,7 @@ class _MemorySampler(threading.Thread):
         self.lock = threading.Lock()
         self.peak_summed_bytes = 0
         self.high_water = {}
+        self.command_peak = {}
         self.stopping = threading.Event()
 
     def add(self, pid):
@@ -103,14 +117,21 @@ class _MemorySampler(threading.Thread):
             with self.lock:
                 pids = list(self.pids)
             total = 0
-            for pid in _descendants(pids) if pids else []:
-                rss = _rss(pid)
-                if rss is None:
-                    continue
-                total += rss
-                hwm = _high_water(pid)
-                if hwm is not None and hwm > self.high_water.get(pid, 0):
-                    self.high_water[pid] = hwm
+            children = _children() if pids else {}
+            for root in pids:
+                own, own_hwm = 0, 0
+                for pid in _descendants([root], children):
+                    rss = _rss(pid)
+                    if rss is None:
+                        continue
+                    own += rss
+                    hwm = _high_water(pid)
+                    if hwm is not None:
+                        own_hwm = max(own_hwm, hwm)
+                        if hwm > self.high_water.get(pid, 0):
+                            self.high_water[pid] = hwm
+                self.command_peak[root] = max(self.command_peak.get(root, 0), own, own_hwm)
+                total += own
             self.peak_summed_bytes = max(self.peak_summed_bytes, total)
             self.stopping.wait(SAMPLE_INTERVAL_S)
 
@@ -165,8 +186,10 @@ def run_commands(commands, log_dir, max_concurrent=1, cwd=None, env=None):
                 "wall_s": time.time() - started,
                 "user_s": usage.ru_utime,
                 "sys_s": usage.ru_stime,
-                # Linux reports ru_maxrss in kilobytes.
+                # Linux reports ru_maxrss in kilobytes. (Inflated by the suite's own memory; see
+                # the module's docstring. peak_rss_bytes is the sampled figure.)
                 "max_rss_bytes": usage.ru_maxrss * 1024,
+                "peak_rss_bytes": sampler.command_peak.get(pid, 0),
             })
             if proc.returncode != 0 and failure is None:
                 failure = f"{label} exited with {proc.returncode}; see {log_dir}/{label}.stderr"

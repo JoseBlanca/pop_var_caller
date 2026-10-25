@@ -7,12 +7,16 @@ documentation (plan §3.4):
 - one-sample tools run one process per sample, as many at a time as the suite has cores: GATK
   HaplotypeCaller making GVCFs, and pvc `generate-psps`;
 - cohort tools are one process using every core: pvc `estimate-parameters`, `call-from-psps`,
-  `call-from-alignments`, and GATK CombineGVCFs and GenotypeGVCFs;
+  `call-from-alignments`;
+- GATK's cohort stages (GenomicsDBImport or CombineGVCFs, then GenotypeGVCFs) are single-threaded,
+  so they run as GATK's joint-calling workflow runs them: one process per shard of the regions,
+  as many at a time as the suite has cores, and the shards' VCFs joined;
 - freebayes has no threads, so it runs one process per block of regions, as `freebayes-parallel`
   does, and the blocks' VCFs are joined.
 """
 
 import os
+import platform
 import shlex
 
 q = shlex.quote
@@ -69,6 +73,11 @@ def pvc_call_from_psps(ctx, reference, catalog, psps, out, log, parameters=None)
 
 # ---- GATK -------------------------------------------------------------------------------------
 
+# The Java heap of each process in a stage that runs one process per core: 30 at once on a
+# 30-thread run stay within 60 GB. HaplotypeCaller making a GVCF, and each shard's join.
+SHARD_HEAP = "2g"
+
+
 def _gatk(ctx, tool, args, heap=None):
     return (f"{q(ctx.gatk)} --java-options {q('-Xmx' + (heap or ctx.java_heap))} {tool} {args} "
             f"--tmp-dir {q(os.path.join(ctx.results_root, 'java_tmp'))}")
@@ -88,7 +97,6 @@ def gatk_gvcfs(ctx, reference, alignment_by_sample, intervals, out_dir):
     A sample's value is one alignment file or a list of them (several runs of one sample).
     """
     cmds = []
-    heap = "2g"
     for sample, alignment in alignment_by_sample.items():
         out = os.path.join(out_dir, f"{sample}.g.vcf.gz")
         files = alignment if isinstance(alignment, list) else [alignment]
@@ -96,26 +104,70 @@ def gatk_gvcfs(ctx, reference, alignment_by_sample, intervals, out_dir):
         cmds.append((f"haplotypecaller.{sample}",
                      _gatk(ctx, "HaplotypeCaller",
                            f"-R {q(reference)} {inputs} -L {q(intervals)} -O {q(out)} "
-                           f"-ERC GVCF --native-pair-hmm-threads 1", heap=heap)))
+                           f"-ERC GVCF --native-pair-hmm-threads 1", heap=SHARD_HEAP)))
     return cmds
 
 
-def gatk_joint(ctx, reference, gvcfs, intervals, combined, out):
-    """CombineGVCFs then GenotypeGVCFs; returns two commands to run one after the other.
+def gatk_joint_route():
+    """How GATK joins the samples' GVCFs on this machine.
 
-    GATK's Best Practices name GenomicsDBImport for cohorts, but its native library exists only
-    for x86-64, and the dev container is arm64 ("can't load AMD 64 .so on a AARCH64 platform").
-    CombineGVCFs is GATK's other supported route and is what the earlier tomato runs used.
+    GATK's Best Practices name GenomicsDBImport for cohorts, but its native library exists only for
+    x86-64 ("can't load AMD 64 .so on a AARCH64 platform" on the arm64 laptop). There the route is
+    CombineGVCFs, GATK's other supported one. The stage rows carry the route's name, so a table
+    says which one each machine ran.
+    """
+    return "GenomicsDBImport" if platform.machine() in ("x86_64", "AMD64") else "CombineGVCFs"
+
+
+def gatk_join_shards(ctx, reference, gvcfs, shard_beds, work_dir, route):
+    """One process per shard of the regions joining every sample's GVCF over that shard.
+
+    GATK's joint-calling workflow scatters the import and the genotyping over intervals this way;
+    each of these commands is single-threaded. Returns (commands, one GenotypeGVCFs input per
+    shard): a GenomicsDB workspace (`gendb://`) or a combined GVCF.
     """
     vs = " ".join(f"-V {q(g)}" for g in gvcfs)
-    comb = ("combinegvcfs",
-            _gatk(ctx, "CombineGVCFs", f"-R {q(reference)} {vs} -L {q(intervals)} -O {q(combined)}",
-                  heap="8g"))
-    gen = ("genotypegvcfs",
-           _gatk(ctx, "GenotypeGVCFs",
-                 f"-R {q(reference)} -V {q(combined)} -L {q(intervals)} -O {q(out)}",
-                 heap="8g"))
-    return comb, gen
+    cmds, sources = [], []
+    for bed in shard_beds:
+        name = os.path.splitext(os.path.basename(bed))[0]
+        if route == "GenomicsDBImport":
+            workspace = os.path.join(work_dir, f"{name}.genomicsdb")
+            # --merge-input-intervals: one partition over the shard instead of one per interval;
+            # there are no GVCF records between the intervals, which HaplotypeCaller kept to.
+            cmds.append((f"genomicsdbimport.{name}",
+                         _gatk(ctx, "GenomicsDBImport",
+                               f"{vs} -L {q(bed)} --merge-input-intervals "
+                               f"--genomicsdb-workspace-path {q(workspace)} --batch-size 50",
+                               heap=SHARD_HEAP)))
+            sources.append(f"gendb://{workspace}")
+        else:
+            combined = os.path.join(work_dir, f"{name}.g.vcf.gz")
+            cmds.append((f"combinegvcfs.{name}",
+                         _gatk(ctx, "CombineGVCFs",
+                               f"-R {q(reference)} {vs} -L {q(bed)} -O {q(combined)}",
+                               heap=SHARD_HEAP)))
+            sources.append(combined)
+    return cmds, sources
+
+
+def gatk_genotype_shards(ctx, reference, sources, shard_beds, out_dir):
+    """GenotypeGVCFs, one process per shard, each writing `<shard>.vcf.gz`."""
+    cmds = []
+    for source, bed in zip(sources, shard_beds):
+        name = os.path.splitext(os.path.basename(bed))[0]
+        out = os.path.join(out_dir, f"{name}.vcf.gz")
+        cmds.append((f"genotypegvcfs.{name}",
+                     _gatk(ctx, "GenotypeGVCFs",
+                           f"-R {q(reference)} -V {q(source)} -L {q(bed)} -O {q(out)}",
+                           heap=SHARD_HEAP)))
+    return cmds
+
+
+def gatk_gather(shard_vcfs, out):
+    """The shards' VCFs, in the regions' order, joined into one indexed VCF (GATK's GatherVcfs)."""
+    inputs = " ".join(q(v) for v in shard_vcfs)
+    return ("gather_shards",
+            f"bcftools concat --no-version -Oz -o {q(out)} {inputs} && bcftools index -t {q(out)}")
 
 
 # ---- freebayes --------------------------------------------------------------------------------
