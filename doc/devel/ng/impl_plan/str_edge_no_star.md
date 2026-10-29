@@ -24,6 +24,18 @@ differently; the change is confined to the pass, the record it builds, and the d
 
 Records the pass drops are not counted by the run today; step 1 adds the count.
 
+**Measured after step 1 (71fba711), whose output is byte-identical to main's:**
+
+| run | sample copies matched to the deletion | copies the STR record overrode | generic records dropped | generic records kept with `*` |
+|---|---|---|---|---|
+| stuttering benchmark, 50 samples, PCR, 15×, true stutter (psps regenerated) | 1,109 | 28 | 63 | 11 |
+| identity oracle, 4 tomato accessions, 20 regions, `--defaults` (both routes) | 29 | 9 | 21 | 2 |
+| identity oracle, called with its fit | 37 | 0 | 21 | 2 |
+
+The oracle's recorded baseline (`scripts/promote_ng_oracle.baseline`, 7,509 records) no longer
+matches main on this machine (7,282, with the catalog rebuilt here), so step 5 compares this
+branch's step-2 output with the step-1 run kept in `tmp/oracle/run`, not with the baseline.
+
 ## Steps — one commit each, touched tests run at each
 
 1. **Count before changing anything.** Write the pass's counts to the run log (`pvc.log`): copies
