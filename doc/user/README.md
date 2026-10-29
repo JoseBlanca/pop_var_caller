@@ -16,6 +16,9 @@ statistical models behind the calls, see [doc/methods/](../methods/) *(in prepar
   and what counts as a repeat, with when to change each.
 - [The VCF](vcf.md): the header, QUAL and GQ, every INFO, FORMAT and FILTER field, and how STRs
   are written.
+- [Overlapping variants](overlapping_variants.md): how variants that overlap, such as a SNP
+  inside a deletion, are written in a VCF, how population-genetics tools can misread them, and
+  what pvc writes.
 - [Limits and refusals](limits.md): what pvc does not call, its hard limits, why a run can refuse
   to start, and what a failed run leaves behind.
 - [Estimating contamination](../help/estimate_contamination.md).
