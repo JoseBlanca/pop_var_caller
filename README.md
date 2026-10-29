@@ -10,35 +10,6 @@ pvc is a variant caller, focused on speed, memory usage and accuracy.
 
 Supported on Linux and macOS.
 
-## What it aims for
-
-- **Fast and small in memory.** pvc is written in Rust and uses a streaming architecture
-  designed for a small memory footprint. For example, it called more than 2,000 whole tomato
-  genomes in a week using less than 30 GB.
-- **From one sample to thousands, and from 3 reads a position to hundreds.**
-- **Accurate calls in model and non-model species alike.** It can take into account
-  contamination between samples, per-sample inbreeding coefficients (F) and different error
-  priors.
-- **STR-aware models.** It uses specialised models for STR and STR-bundle regions.
-
-## How it performs
-
-| what | data | pvc | GATK | freebayes |
-|---|---|---|---|---|
-| STR genotypes right, of 56,621 at variant sites / false calls at 80,279 reference sites | simulated: 50 samples, 30×, 2,738 STRs, PCR stutter [^str] | 55,978 / 76 | 53,290 / 9,445 | 53,456 / 9,864 |
-| SNP recall / precision | human, GIAB HG002 | *to be measured* | *to be measured* | *to be measured* |
-| indel recall / precision | human, GIAB HG002 | *to be measured* | *to be measured* | *to be measured* |
-| run time and peak memory, whole pipeline | 59 tomato accessions, about 5.5 reads a position, 32 Mb | *to be measured* [^speed] | *to be measured* | *to be measured* |
-
-[^str]: Measured 2026-10-11. In this run pvc was given the true stutter rates rather than
-    fitting them. The full grid, one sample and 50, 5× to 60×, PCR and PCR-free, is in
-    [doc/devel/reports/implementations/str_edge_deletion_2026-10-11.md](doc/devel/reports/implementations/str_edge_deletion_2026-10-11.md).
-    To be rerun on the current version.
-
-[^speed]: What exists so far is pvc alone, on one 18-core Apple laptop (2026-10-17): estimating
-    the parameters of the 59 accessions takes 16 minutes with a peak of 410 MB, then calling them
-    takes 33 seconds. The time to read the alignments is not included.
-
 ## What it does
 
 - **Calls** SNPs, indels (up to 100 bp by default), and STRs with repeat units of 1 to 6 bases
@@ -58,6 +29,37 @@ Supported on Linux and macOS.
 
 It does not call structural variants, satellite repeats longer than 100 bp, or deletions longer
 than 100 bp.
+
+## How it performs
+
+| | SNP F1, HG002 30× [^giab] | indel F1, HG002 30× [^giab] | STR genotypes right, HG002 30× [^str] | 100 tomato samples: time / memory [^tomato] | [overlapping variants](doc/user/overlapping_variants.md) |
+|---|---|---|---|---|---|
+| pvc | 0.9941 | 0.9819 | 88% | 1 h 45 min / 11 GB | one record; `*` only where a deletion runs off the edge of an STR |
+| GATK | 0.9928 | 0.9839 | 82% | 9 h 50 min / 75 GB | separate records, with `*` |
+| freebayes | 0.9933 | 0.9602 | not run | stalled, stopped after 17 h | one record, which also merges variants within 3 bases |
+| DeepVariant | *running* | *running* | *running* | not run | *to be checked* |
+| HipSTR | n/a | n/a | 73% | not run | STRs only: one record per repeat |
+
+At larger scale, pvc called more than 2,000 whole tomato genomes in a week using less than 30 GB.
+
+[^giab]: GIAB HG002, the whole of chromosome 20 (64 Mb), reads downsampled to 30×, scored with
+    RTG vcfeval against the GIAB truth set: a call counts only if its genotype matches. pvc ran
+    its full pipeline, with parameters estimated from the data. Measured 2026-10-24 on an Apple
+    M5 Pro laptop (pvc e7964e29); a rerun on a Linux server, which adds DeepVariant, is in
+    progress.
+
+[^str]: GIAB HG002 tandem-repeat benchmark v1.0.1, reads downsampled to 30×: of the 6,995 repeats
+    where the truth carries a variant, the share whose genotype the caller gets right, compared as
+    repeat lengths (HipSTR reports lengths only). Same machine and date as the SNP and indel
+    columns.
+
+[^tomato]: Wall time and peak memory of the whole pipeline: 100 tomato accessions at about 3 reads
+    a position over 91 Mb of chromosome 1, on a Linux server limited to 30 cores and 80 GB
+    (Intel Xeon E5-2667 v4), 2026-10-26/27, pvc c3d1ed69. pvc's figure is its three steps
+    (pileup files, parameter estimation, calling); run as a single step it took 2 h 35 min and
+    21 GB. Memory is the total of the processes running at once. freebayes did not finish: some
+    regions stopped making progress, possibly because they had too many alleles, and the run was
+    stopped after 17 hours.
 
 ## Install
 
