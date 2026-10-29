@@ -572,6 +572,13 @@ consumer that reads lengths sees the same `REPCN` as before the merge, whichever
 - **`AF`**: an STR allele's fitted copies are shared among the alleles built on it in proportion to
   the copies the written genotypes give each. **`AC` and `AN`** are counted from the written
   genotypes, as on every record.
+- **The filters after the gathering judge the merged record as one record** (owner, 2026-10-29).
+  The hidden-duplication filter scores it like any multi-allelic record, so its verdict can differ
+  from the one either record would have had alone. On tomato (62 accessions, about 3×, fitted
+  parameters) that happens at 4 sites in 169,113 records: one STR record that scored 0.9998 alone
+  is written merged, and three generic alleles that were dropped alone are written inside a
+  passing STR record. *Rejected:* dropping a generic record before the merge where the filter
+  would drop it alone — it would make the gathering depend on a filter that runs after it.
 
 ### 6.7 The records the replaced pass dropped
 
