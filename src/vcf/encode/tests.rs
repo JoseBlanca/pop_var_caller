@@ -381,6 +381,27 @@ fn a_contig_the_header_does_not_hold_is_refused() {
     let _ = fixed_columns(&record, &contigs());
 }
 
+/// **pvc never writes `*`.** The gathering pass merges a record overlapping a widened STR record
+/// into it, so a `*` here would mean that pass let one through; refusing it keeps the defect
+/// from reaching a VCF unnoticed.
+#[test]
+#[should_panic(expected = "a `*` allele reached the encoder")]
+fn a_star_allele_is_refused() {
+    let record = VcfRecord::new(
+        region_on(0, 1_000, 1_000),
+        vec![allele(b"A"), allele(b"*")],
+        vec![1.0, 1.0],
+        one_sample(vec![2, 2], 0, &[0, 1]),
+        pools(&[2, 2]),
+        None,
+        quality(1.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+    let _ = fixed_columns(&record, &contigs());
+}
+
 // ---------------------------------------------------------------------------
 // INFO
 // ---------------------------------------------------------------------------

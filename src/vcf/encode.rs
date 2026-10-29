@@ -184,11 +184,12 @@ fn alternatives_column(record: &VcfRecord) -> String {
 /// record rather than to the empty one alone: VCF states a deletion by giving all alleles a
 /// shared flanking base, so padding one and not the others would describe a different variant.
 fn padded(allele: &[u8], padding: Option<PaddingBase>) -> String {
-    // `*` is "deleted by an overlapping record" and is written as it is, never padded
-    // (`str_edge_deletion_alleles.md` §6).
-    if allele == b"*" {
-        return "*".to_string();
-    }
+    // pvc writes no `*` allele: a record overlapping a widened STR record is merged into it
+    // (`str_edge_deletion_alleles.md` §6), so a `*` reaching here is a defect upstream.
+    assert!(
+        allele != b"*",
+        "a `*` allele reached the encoder; pvc merges overlapping records instead"
+    );
     let bases = std::str::from_utf8(allele)
         .expect("allele bases are A/C/G/T/N-validated at the merge boundary");
     match padding {

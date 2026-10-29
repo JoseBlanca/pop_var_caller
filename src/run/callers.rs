@@ -67,6 +67,7 @@ use crate::run::cohort_merge::{
     MinAltReads,
 };
 use crate::run::depth_ceiling::DepthCeiling;
+use crate::run::edge_deletion_gathering::EdgeDeletionGatheringCounts;
 use crate::types::{GenomePosition, GenomeRegion, Phred, ReadGroupId};
 use crate::vcf::VcfRecord;
 use crate::vcf::assemble::assemble_record;
@@ -843,6 +844,8 @@ impl AlignedFilesVariantCaller {
                     source: Box::new(source),
                 })?;
             }
+            let mut outcome = outcome;
+            outcome.calling.after_gathering(gathering.counts());
             outcome
         };
         Ok(WrittenCohort {
@@ -1221,6 +1224,7 @@ where
             loci_with_nobody_to_call,
             tracts,
             explanations,
+            edge_deletion_gathering: Default::default(),
         },
         sources,
         window_coverage_histograms,
@@ -1850,16 +1854,33 @@ pub struct CohortCallingTallies {
     /// **The `--explain-loci` rows of every locus explained**, in the order the loci were met;
     /// empty when the run explained nothing (`doc/devel/ng/spec/explain_loci.md`).
     pub explanations: Vec<ExplainRow>,
+    /// **What the gathering of the calls did to the generic records an STR record widened over a
+    /// flank overlaps** (`str_edge_deletion_alleles.md` §6). The generic records it merged into one are
+    /// called loci that are not in [`Self::records_written`]; [`loci_called`](Self::loci_called)
+    /// counts them.
+    pub edge_deletion_gathering: EdgeDeletionGatheringCounts,
 }
 
 impl CohortCallingTallies {
-    /// How many loci were called — written, plus those that established no variant.
+    /// How many loci were called — written, plus those that established no variant, plus the
+    /// generic records the gathering of the calls merged into an STR record.
     #[inline]
     #[must_use]
     pub fn loci_called(&self) -> u64 {
         self.records_written
             .saturating_add(self.loci_called_but_not_written)
             .saturating_add(self.loci_below_minimum_site_quality)
+            .saturating_add(self.edge_deletion_gathering.generic_records_merged)
+    }
+
+    /// **Settle the counts once the gathering of the calls has released every record.** The
+    /// drivers count a record written when they hand it to the gathering, so the generic records
+    /// it then merged into an STR record are taken back out of [`Self::records_written`].
+    pub(crate) fn after_gathering(&mut self, counts: EdgeDeletionGatheringCounts) {
+        self.records_written = self
+            .records_written
+            .saturating_sub(counts.generic_records_merged);
+        self.edge_deletion_gathering = counts;
     }
 }
 
@@ -7602,6 +7623,7 @@ where
             loci_with_nobody_to_call,
             tracts,
             explanations,
+            edge_deletion_gathering: Default::default(),
         },
         sources,
         window_coverage_histograms,

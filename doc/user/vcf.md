@@ -70,8 +70,14 @@ many alleles (`--max-generic-alleles`).
   to its left, and `POS` moves one base left. At a chromosome's first base, the base to the right
   is added instead.
 - A deletion that runs from the repeat into the sequence beside it widens the STR record over
-  those bases. A SNP or indel record that overlaps it marks the overlapping allele as `*`.
+  those bases. A SNP or indel that overlaps the widened record is merged into it: the record
+  covers both, and its alleles are the whole sequences each copy carries, repeat and SNP or indel
+  together. Such a record can hold more than 32 alleles. pvc never writes a `*` allele;
   [Overlapping variants](overlapping_variants.md) explains why this matters.
+- In a merged record, which SNP or indel allele goes with which repeat allele is decided from each
+  sample's reads where it can be. Where a sample is heterozygous at both and its reads cannot
+  decide, the pairing seen most often in the other samples is used, and `GQ` falls to reflect how
+  sure that pairing is.
 
 ## FILTER
 
