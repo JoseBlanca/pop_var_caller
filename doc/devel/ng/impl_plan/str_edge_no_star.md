@@ -58,14 +58,16 @@ branch's step-2 output with the step-1 run kept in `tmp/oracle/run`, not with th
      generic record's own left base (the only case where the merged span starts before the STR
      record and needs a padding base; a generic record with an empty allele always carries it).
    *Stop: report.*
+   *Done, 2600ece2. On the stuttering run (50 samples, PCR, 15×) it merges 74 generic records and
+   pairs 45 samples from the cohort; 14 STR records change. On the oracle, the 2 `*` records merge.*
 3. **`*` becomes unwritable.** Delete `SPANNING_DELETION`; the encoder's `*` branch
    (`src/vcf/encode.rs:189`) becomes a refusal, so a future path that produced one fails a test
-   instead of writing it.
+   instead of writing it. *Done, 9123e04a; `SPANNING_DELETION` had already gone with step 2.*
 4. **Documents**: `vcf_output.md` §3 (records never claim the same base, now without exception)
    and wherever it names the gathering; `doc/user/vcf.md` "STR records";
    `doc/user/overlapping_variants.md` "What pvc writes" and the README's comparison-table cell for
    pvc. The last two live on branch `docs-overlapping`: rebase onto main once it is merged, or
-   edit them there.
+   edit them there. *Done: main, holding both, was merged into this branch first.*
 5. **Checks before merging** (the brief's list):
    - no `*` in any VCF the oracle and the benchmarks write (`bcftools view -H -i 'ALT="*"'`);
    - the identity oracle (`scripts/promote_ng_oracle.sh`): every changed record lies at a widened STR

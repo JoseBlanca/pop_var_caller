@@ -80,11 +80,11 @@ informative ones, because a site with more alleles tells more individuals apart.
 - **Variants that do not overlap get separate records**, even when they are a base apart. Unlike
   freebayes, pvc does not merge them. This causes none of the problems above: neither event
   covers the other's position, so no `*` is needed.
-- **One exception, at the edge of an STR.** When a deletion runs from an STR into the sequence
-  beside it, pvc widens the STR record over those bases, and a SNP or indel record that overlaps
-  them gets `*` for the copies the deletion removes. Removing this exception is in progress.
+- **At the edge of an STR, the same rule.** When a deletion runs from an STR into the sequence
+  beside it, pvc widens the STR record over those bases, and a SNP or indel that overlaps them is
+  merged into that record, whose alleles then span both.
 
-To see how many records with `*` a pvc VCF holds:
+pvc never writes `*`. To check a VCF from any caller:
 
 ```
 bcftools view -H -i 'ALT="*"' calls.vcf.gz | wc -l

@@ -34,7 +34,7 @@ than 100 bp.
 
 | | SNP F1, HG002 30× [^giab] | indel F1, HG002 30× [^giab] | STR genotypes right, HG002 30× [^str] | 100 tomato samples: time / memory [^tomato] | [overlapping variants](doc/user/overlapping_variants.md) |
 |---|---|---|---|---|---|
-| pvc | 0.9941 | 0.9819 | 88% | 1 h 45 min / 11 GB | one record; `*` only where a deletion runs off the edge of an STR |
+| pvc | 0.9941 | 0.9819 | 88% | 1 h 45 min / 11 GB | one record, never `*` |
 | GATK | 0.9928 | 0.9839 | 82% | 9 h 50 min / 75 GB | separate records, with `*` |
 | freebayes | 0.9933 | 0.9602 | not run | stalled, stopped after 17 h | one record, which also merges variants within 3 bases |
 | DeepVariant | *running* | *running* | *running* | not run | *to be checked* |
