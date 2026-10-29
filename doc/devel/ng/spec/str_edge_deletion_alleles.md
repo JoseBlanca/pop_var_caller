@@ -465,6 +465,14 @@ sample (§6.2), and the record's alleles are the haplotypes the written genotype
 STR allele paired with a generic alternative, ordered by STR allele and then by generic allele. An
 allele no genotype names is dropped, its reads handled as §6.4 says, as assembly does.
 
+**Bases every allele shares at the ends of the union are trimmed, as far back as the STR record's
+own span.** A generic indel record carries a base before its event that both its alleles keep —
+`AA`→`A` at the base before a homopolymer — so the union starts there, and every merged allele
+then begins with that base. Trimmed, the record starts and ends where the STR record did and says
+the same; a base trimmed from the front is the one an allele left empty is padded with. On the
+stuttering benchmark (50 samples, PCR, 15×) the untrimmed merge moved 37 STR records one or two
+bases left for nothing else.
+
 **Not cut by the STR path's cap of 32 alleles.** The cap bounds the cost of calling — a locus of
 `A` alleles is scored against `A(A+1)/2` genotypes per sample — and the merged record is not called
 again. At most the record has its STR alleles times the generic record's alleles; measured, the
@@ -557,6 +565,10 @@ consumer that reads lengths sees the same `REPCN` as before the merge, whichever
   record holds a variant when either did, so the chance that it holds none is at most the smaller
   of the two; the larger `QUAL` says no more than that.
 - **`FILTER`** is the STR record's verdict, unless it is `PASS` and the generic record's is not.
+- **Both count a generic record only where it adds an allele of its own** — where some written
+  haplotype carries one of its alternatives that the STR allele does not spell. A generic record
+  whose every called alternative is the flank half of an STR allele measured the same event as
+  the STR record and adds nothing to the site.
 - **`AF`**: an STR allele's fitted copies are shared among the alleles built on it in proportion to
   the copies the written genotypes give each. **`AC` and `AN`** are counted from the written
   genotypes, as on every record.

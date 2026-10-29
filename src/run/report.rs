@@ -229,13 +229,23 @@ impl<'a> RunReport<'a> {
         let gathering = self.calling.edge_deletion_gathering;
         if gathering != EdgeDeletionGatheringCounts::default() {
             lines.push(format!(
-                "SNP/indel records overlapping an STR record widened over a deletion into its \
-                 flank: {} sample copies matched to the deletion, {} overridden by the STR \
-                 record, {} records left with nothing of their own and so left out",
-                gathering.copies_starred_in_agreement,
-                gathering.copies_rewritten,
-                gathering.generic_records_dropped,
+                "SNP/indel records merged into an STR record widened over a deletion into its \
+                 flank: {} (samples whose deletion the SNP/indel call matched: {}, overridden \
+                 by the STR record: {}; samples paired with the flank variant from the cohort: \
+                 {}; SNP/indel calls lost to an STR no-call: {})",
+                gathering.generic_records_merged,
+                gathering.samples_in_agreement,
+                gathering.samples_overridden,
+                gathering.samples_paired_from_the_cohort,
+                gathering.generic_calls_lost_to_an_str_no_call,
             ));
+            if gathering.generic_records_left_unmerged > 0 {
+                lines.push(format!(
+                    "  SNP/indel records left beside the STR record they overlap, the merged \
+                     record not being buildable: {}",
+                    gathering.generic_records_left_unmerged,
+                ));
+            }
         }
     }
 

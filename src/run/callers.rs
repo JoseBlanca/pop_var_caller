@@ -1855,7 +1855,7 @@ pub struct CohortCallingTallies {
     /// empty when the run explained nothing (`doc/devel/ng/spec/explain_loci.md`).
     pub explanations: Vec<ExplainRow>,
     /// **What the gathering of the calls did to the generic records an STR record widened over a
-    /// flank overlaps** (`str_edge_deletion_alleles.md` §6). The generic records it dropped are
+    /// flank overlaps** (`str_edge_deletion_alleles.md` §6). The generic records it merged into one are
     /// called loci that are not in [`Self::records_written`]; [`loci_called`](Self::loci_called)
     /// counts them.
     pub edge_deletion_gathering: EdgeDeletionGatheringCounts,
@@ -1863,23 +1863,23 @@ pub struct CohortCallingTallies {
 
 impl CohortCallingTallies {
     /// How many loci were called — written, plus those that established no variant, plus the
-    /// generic records the gathering of the calls took into an STR record.
+    /// generic records the gathering of the calls merged into an STR record.
     #[inline]
     #[must_use]
     pub fn loci_called(&self) -> u64 {
         self.records_written
             .saturating_add(self.loci_called_but_not_written)
             .saturating_add(self.loci_below_minimum_site_quality)
-            .saturating_add(self.edge_deletion_gathering.generic_records_dropped)
+            .saturating_add(self.edge_deletion_gathering.generic_records_merged)
     }
 
     /// **Settle the counts once the gathering of the calls has released every record.** The
     /// drivers count a record written when they hand it to the gathering, so the generic records
-    /// it then dropped are taken back out of [`Self::records_written`].
+    /// it then merged into an STR record are taken back out of [`Self::records_written`].
     pub(crate) fn after_gathering(&mut self, counts: EdgeDeletionGatheringCounts) {
         self.records_written = self
             .records_written
-            .saturating_sub(counts.generic_records_dropped);
+            .saturating_sub(counts.generic_records_merged);
         self.edge_deletion_gathering = counts;
     }
 }

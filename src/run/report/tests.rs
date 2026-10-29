@@ -248,9 +248,12 @@ fn the_report_states_what_the_gathering_of_the_calls_did() {
     written
         .calling
         .after_gathering(EdgeDeletionGatheringCounts {
-            copies_starred_in_agreement: 7,
-            copies_rewritten: 2,
-            generic_records_dropped: 3,
+            samples_in_agreement: 7,
+            samples_overridden: 2,
+            generic_records_merged: 3,
+            samples_paired_from_the_cohort: 4,
+            generic_calls_lost_to_an_str_no_call: 1,
+            generic_records_left_unmerged: 0,
         });
 
     let text = rendered(
@@ -264,7 +267,9 @@ fn the_report_states_what_the_gathering_of_the_calls_did() {
     assert_eq!(written.loci_called(), 168);
     assert!(
         text.contains(
-            "7 sample copies matched to the deletion, 2 overridden by the STR record, 3 records"
+            "STR record widened over a deletion into its flank: 3 (samples whose deletion the \
+             SNP/indel call matched: 7, overridden by the STR record: 2; samples paired with the \
+             flank variant from the cohort: 4; SNP/indel calls lost to an STR no-call: 1)"
         ),
         "{text}",
     );
