@@ -5,7 +5,13 @@ pass. A step owns one directory. It is finished when that directory holds a `.do
 last, carrying the step's measurement, its result rows and its fingerprint. So:
 
 - a resumed run skips every step with a `.done`, and reads its result from there;
-- a directory without `.done` is a step that was cut short; it is deleted and the step starts over;
+- a directory without `.done` is a step that was cut short; it is deleted and the step starts over.
+  A step that failed or was stopped leaves `.failed` there, with when it ran and why it ended;
+- `--mark-unfinished NAME` turns a `.failed` into a `.done` that says the step did not finish: the
+  step counts as done, its result is the time it ran before it was stopped, marked as such, and no
+  later run redoes it unless asked to (`--redo-step`). For a tool that cannot finish a
+  configuration in any reasonable time (freebayes on 100 tomato samples sat on single sites for
+  over a day), that is the result;
 - `benchmark_results/STOP`, made by `run_suite.sh --stop`, is checked between steps, and the run
   ends cleanly before starting the next one.
 
@@ -30,6 +36,7 @@ import shutil
 import time
 
 DONE = ".done"
+FAILED = ".failed"
 SMALL_FILE_BYTES = 64 * 1024 * 1024
 
 
@@ -71,9 +78,11 @@ class Step:
     `action(step_dir)` does the work inside `step_dir` and returns a dict with any of
     `measurement` (from measure.run_commands), `rows` (result rows, see results.py) and `meta`.
     `attrs` carries what the selection options filter on: benchmark, depth, caller.
+    `unfinished(wall_s, note)`, if given, returns the rows of a run that did not finish
+    (`Runner.mark_unfinished`).
     """
 
-    def __init__(self, name, kind, action, fingerprint, attrs=None, title=None):
+    def __init__(self, name, kind, action, fingerprint, attrs=None, title=None, unfinished=None):
         assert kind in ("input", "competitor", "pvc", "score")
         self.name = name
         self.kind = kind
@@ -81,6 +90,7 @@ class Step:
         self.fingerprint = fingerprint
         self.attrs = attrs or {}
         self.title = title or name
+        self.unfinished = unfinished
 
 
 class Runner:
@@ -102,11 +112,14 @@ class Runner:
     def is_done(self, step):
         return self.load_done(step) is not None
 
+    def fingerprint(self, step):
+        return _canonical(_refresh_missing(
+            step.fingerprint() if callable(step.fingerprint) else step.fingerprint))
+
     def run(self, step):
         """Run `step` unless it is already done with a matching fingerprint; return its record."""
         directory = self.step_dir(step)
-        fingerprint = _canonical(_refresh_missing(
-            step.fingerprint() if callable(step.fingerprint) else step.fingerprint))
+        fingerprint = self.fingerprint(step)
         record = self.load_done(step)
         if record is not None:
             if (record.get("fingerprint") == fingerprint and not self._forced(step)
@@ -137,8 +150,11 @@ class Runner:
         except SkipStep:
             shutil.rmtree(directory, ignore_errors=True)
             raise
-        except BaseException:
+        except BaseException as err:
             self.ctx.log(f"    failed or stopped; {directory} will be redone next time")
+            with open(os.path.join(directory, FAILED), "w") as fh:
+                json.dump({"name": step.name, "started": started, "ended": time.time(),
+                           "error": str(err) or type(err).__name__}, fh, indent=1)
             raise
         ended = time.time()
         record = {
@@ -163,6 +179,45 @@ class Runner:
         if result.get("measurement"):
             m = result["measurement"]
             self.ctx.log(f"    {m['wall_s']:.1f} s, peak {m['peak_summed_rss_bytes'] / 2**20:.0f} MB")
+        return record
+
+    def mark_unfinished(self, step, note):
+        """Record a failed or stopped step as done, with the time it ran before it ended.
+
+        Reads the `.failed` the run left. The record's rows come from the step's `unfinished`;
+        each carries `note` in the table's `outcome` column. A step done since, or never run, is
+        refused.
+        """
+        directory = self.step_dir(step)
+        if self.load_done(step) is not None:
+            raise SuiteError(f"{step.name} is done; nothing to mark")
+        path = os.path.join(directory, FAILED)
+        if not os.path.exists(path):
+            raise SuiteError(f"{step.name} has no record of a failed run ({path})")
+        if step.unfinished is None:
+            raise SuiteError(f"{step.name} has no rows for a run that did not finish")
+        with open(path) as fh:
+            failed = json.load(fh)
+        wall_s = failed["ended"] - failed["started"]
+        record = {
+            "name": step.name,
+            "kind": step.kind,
+            "attrs": step.attrs,
+            "fingerprint": self.fingerprint(step),
+            "started": failed["started"],
+            "ended": failed["ended"],
+            "date": time.strftime("%Y-%m-%d", time.localtime(failed["started"])),
+            "machine": self.ctx.machine,
+            "measurement": {"wall_s": round(wall_s, 3)},
+            "calibration_s": None,
+            "rows": step.unfinished(wall_s, note),
+            "meta": {"outcome": note, "error": failed.get("error", "")},
+        }
+        tmp = os.path.join(directory, DONE + ".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(record, fh, indent=1, default=str)
+        os.replace(tmp, os.path.join(directory, DONE))
+        self.ctx.log(f"{step.name}: marked as not finished after {wall_s:,.0f} s: {note}")
         return record
 
     def _check_stop(self):

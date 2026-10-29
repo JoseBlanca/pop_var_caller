@@ -45,6 +45,10 @@ def parse_args():
     p.add_argument("--redo-busy", action="store_true",
                    help="rerun pvc and competitor steps whose times were taken on a busy machine")
     p.add_argument("--summary-only", action="store_true")
+    p.add_argument("--mark-unfinished", metavar="NAME",
+                   help="record this failed or stopped step as done but not finished, with the "
+                        "time it ran (lib/steps.py); needs --note; then rebuild the summary")
+    p.add_argument("--note", help="why the step did not finish, for --mark-unfinished")
     p.add_argument("--status", action="store_true")
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--data-root", required=True)
@@ -111,7 +115,17 @@ def main():
         status(ctx, names)
         return 0
     code = 0
-    if not args.summary_only:
+    if args.mark_unfinished:
+        if not args.note:
+            sys.exit("--mark-unfinished needs --note: why the step did not finish")
+        found = [s for name in names for s in _steps(ctx, name) if s.name == args.mark_unfinished]
+        if not found:
+            sys.exit(f"no step named {args.mark_unfinished} in {', '.join(names)}")
+        try:
+            Runner(ctx).mark_unfinished(found[0], args.note)
+        except SuiteError as err:
+            sys.exit(f"error: {err}")
+    elif not args.summary_only:
         if not args.no_build:
             build_pvc(ctx)
         runner = Runner(ctx)
