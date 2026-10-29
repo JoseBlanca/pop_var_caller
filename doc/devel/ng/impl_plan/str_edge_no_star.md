@@ -78,6 +78,35 @@ branch's step-2 output with the step-1 run kept in `tmp/oracle/run`, not with th
    - tomato, 62 accessions: records changed, and the 111 flank genotypes §6.2 expects lost.
    Run one job at a time on the laptop's 6 fast cores.
 
+   *Done, 2026-10-29, on 0a2ffbd3 against main's stored VCFs (build 5ffb2444).*
+
+   - **No `*`** in any of the 16 grid VCFs, tomato's or the oracle's; main's hold 0–2 at one
+     sample, 9–36 at 50 samples, and 99 on tomato. The encoder now refuses one, so a VCF that
+     finished has none.
+   - **The grid, true stutter.** At one sample (8 runs: PCR and PCR-free, 5×, 15×, 30×, 60×) and
+     at 50 samples above 5× (6 runs), every outcome count is main's, overall, at the segments with
+     a deletion across the edge, and at those with a SNP beside the segment; only `GQ` moves. At
+     50 samples and 5× the outcomes move, all from no-calls:
+
+     | run | no-call → right | no-call → wrong | no-call → false call | wrong → right |
+     |---|---|---|---|---|
+     | PCR, 50 samples, 5× | 1 | 2 | 1 | 0 |
+     | PCR-free, 50 samples, 5× | 3 | 7 | 1 | 2 |
+
+     Each no-call was main's empty generic record (`./.`, no reads) carrying `*` beside an STR
+     call the scorer would otherwise have read; the STR call is unchanged and its `GQ` low (1–4).
+     The two wrong → right cells are samples whose generic call disagreed with the STR record,
+     now overridden (§6.2 step 1).
+   - **Tomato, 62 accessions, fitted parameters.** 169,211 records become 169,113: 154 generic
+     records merged (3 samples paired from the cohort, 129 generic calls lost to an STR no-call).
+     13 STR records start up to 12 bases earlier, having taken a generic alternative on their left.
+     `PARALOG_POST` moves by at most 0.0042 on 2,915 records (the hidden-duplication fit sees 154
+     fewer records). **The hidden-duplication filter's verdict changes at 4 sites**, because it now
+     judges one merged record where main judged two: at SL4.0ch04:39669978 the STR record alone
+     scored 0.9998 and was dropped, while the merged record scores 0 and is written; at
+     SL4.0ch05:10778163, ch10:5440676 and ch12:18058168 the generic record alone was dropped and its
+     allele is now written inside a passing STR record. Two other merged sites are flagged in both.
+
 ## Decisions taken in the spec that the owner should confirm
 
 These are written into §6 as recommendations; each is reversible inside step 2.
