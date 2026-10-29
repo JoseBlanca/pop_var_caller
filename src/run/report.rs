@@ -230,9 +230,9 @@ impl<'a> RunReport<'a> {
         if gathering != EdgeDeletionGatheringCounts::default() {
             lines.push(format!(
                 "SNP/indel records merged into an STR record widened over a deletion into its \
-                 flank: {} (samples whose deletion the SNP/indel call matched: {}, overridden \
-                 by the STR record: {}; samples paired with the flank variant from the cohort: \
-                 {}; SNP/indel calls lost to an STR no-call: {})",
+                 flank: {} (counted per sample and SNP/indel record: genotypes matching the \
+                 STR record's deletion: {}, overridden by the STR record: {}; paired with an \
+                 STR allele from the cohort: {}; lost to an STR no-call: {})",
                 gathering.generic_records_merged,
                 gathering.samples_in_agreement,
                 gathering.samples_overridden,

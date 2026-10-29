@@ -107,6 +107,13 @@ branch's step-2 output with the step-1 run kept in `tmp/oracle/run`, not with th
      SL4.0ch05:10778163, ch10:5440676 and ch12:18058168 the generic record alone was dropped and its
      allele is now written inside a passing STR record. Two other merged sites are flagged in both.
 
+     *After the code review (same day)*, an STR allele's reads and fitted copies follow every
+     haplotype built on it, not only the first allele it originated: `AD` and `AF` move at 36
+     tomato STR records and 4 in the PCR-free 50-sample 5× run, whose scores are unchanged. Tomato
+     then has 169,115 records: SL4.0ch01:85884002, a merged STR record main dropped with its
+     generic record, now scores 0.28 and is written (5 sites in all), and one SNP at
+     SL4.0ch03:37729277 falls under the filter's cut-off after the refit (0.43).
+
 ## Decisions taken in the spec that the owner should confirm
 
 These are written into §6 as recommendations; each is reversible inside step 2.

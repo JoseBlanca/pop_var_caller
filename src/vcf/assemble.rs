@@ -226,8 +226,8 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         };
         repeat_tract = repeat_tract.map(|tract| {
             tract.widened(TractWidening {
-                left: u16::try_from(widened.left).expect("a flank holds fewer than 256 bases"),
-                right: u16::try_from(widened.right).expect("a flank holds fewer than 256 bases"),
+                left: u16::try_from(widened.left).expect("a flank holds fewer than 65,536 bases"),
+                right: u16::try_from(widened.right).expect("a flank holds fewer than 65,536 bases"),
                 flank_bases_per_allele: widened.flank_bases_per_allele,
                 reach_per_allele: widened.reach_per_allele,
                 base_before: widened.base_before,

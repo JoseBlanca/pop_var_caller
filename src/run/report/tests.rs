@@ -267,9 +267,10 @@ fn the_report_states_what_the_gathering_of_the_calls_did() {
     assert_eq!(written.loci_called(), 168);
     assert!(
         text.contains(
-            "STR record widened over a deletion into its flank: 3 (samples whose deletion the \
-             SNP/indel call matched: 7, overridden by the STR record: 2; samples paired with the \
-             flank variant from the cohort: 4; SNP/indel calls lost to an STR no-call: 1)"
+            "STR record widened over a deletion into its flank: 3 (counted per sample and \
+             SNP/indel record: genotypes matching the STR record's deletion: 7, overridden by the \
+             STR record: 2; paired with an STR allele from the cohort: 4; lost to an STR \
+             no-call: 1)"
         ),
         "{text}",
     );

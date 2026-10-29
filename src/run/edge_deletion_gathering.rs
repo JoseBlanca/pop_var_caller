@@ -44,6 +44,9 @@ use crate::window_coverage::WindowCoverage;
 const HOLD_REACH: u64 = 256;
 
 /// What the pass changed, for the run's report.
+///
+/// **The per-sample counts are per sample and generic record**: a sample at an STR record that
+/// absorbs two generic records is counted at each.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EdgeDeletionGatheringCounts {
     /// Samples whose STR allele reaching a generic record found the generic copy it spells
@@ -73,8 +76,9 @@ struct WidenedTract {
     /// The tract's first and last base, 1-based.
     tract_first: u64,
     tract_last: u64,
-    /// The generic records that overlap it, in the order they arrived.
-    generic: Vec<VcfRecord>,
+    /// The generic records that overlap it, in the order they arrived, each with its windows so
+    /// that it can be written as it came if the merge cannot be built.
+    generic: Vec<(VcfRecord, Vec<WindowCoverage>)>,
 }
 
 impl WidenedTract {
@@ -212,7 +216,7 @@ impl EdgeDeletionGathering {
                 if !self.held[index].0.is_repeat_tract()
                     && tract.overlaps(self.held[index].0.region())
                 {
-                    tract.generic.push(self.held.remove(index).0);
+                    tract.generic.push(self.held.remove(index));
                 } else {
                     index += 1;
                 }
@@ -222,7 +226,7 @@ impl EdgeDeletionGathering {
             .then(|| self.widened.iter_mut().find(|tract| tract.overlaps(region)))
             .flatten()
         {
-            tract.generic.push(record);
+            tract.generic.push((record, windows));
         } else {
             self.held.push((record, windows));
         }
@@ -298,8 +302,11 @@ fn merge(
     if tract.generic.is_empty() {
         return vec![(tract.record, tract.windows)];
     }
-    let mut generic = tract.generic.clone();
-    generic.sort_by_key(|record| record.region().start);
+    let mut tract = tract;
+    let mut arrived = std::mem::take(&mut tract.generic);
+    arrived.sort_by_key(|(record, _)| record.region().start);
+    let (generic, generic_windows): (Vec<VcfRecord>, Vec<Vec<WindowCoverage>>) =
+        arrived.into_iter().unzip();
 
     let mut samples: Vec<SampleHaplotypes> = tract
         .record
@@ -332,7 +339,7 @@ fn merge(
     let Some(merged) = build_merged_record(&tract, &generic, &samples) else {
         counts.generic_records_left_unmerged += generic.len() as u64;
         let mut out = vec![(tract.record, tract.windows)];
-        out.extend(generic.into_iter().map(|record| (record, Vec::new())));
+        out.extend(generic.into_iter().zip(generic_windows));
         return out;
     };
     counts.samples_in_agreement += tallies.samples_in_agreement;
@@ -439,6 +446,9 @@ fn pair_with(
             .windows(2)
             .all(|pair| copies[pair[0]] == copies[pair[1]])
             || open_generic.windows(2).all(|pair| pair[0] == pair[1])
+            // Both records are the same sample's at one place, so they have its one ploidy and
+            // step 1 took one generic copy per copy it settled: the two lists are the same
+            // length. The test keeps a mismatch from reaching step 3's pairings.
             || open_slots.len() != open_generic.len();
         if one_pairing {
             for (index, &slot) in open_slots.iter().enumerate() {
@@ -664,13 +674,22 @@ fn build_merged_record(
     let after = after.filter(|_| end > str_region.end.get());
 
     // Per sample: the genotype, its quality, and the STR record's reads on the new alleles.
-    let built_on = |origin: usize| -> Vec<usize> {
-        (0..alleles.len())
-            .filter(|&index| origins[index] == origin)
-            .collect()
-    };
+    // The alleles built on an STR allele are those its haplotypes spell — not only those whose
+    // `origins` entry names it, since a haplotype on one STR allele can spell the sequence of a
+    // haplotype on another, and the allele keeps the first one's origin.
+    let str_alleles = str_record.alleles().len();
+    let mut built_on: Vec<Vec<usize>> = vec![Vec::new(); str_alleles];
+    for haplotype in &haplotypes {
+        built_on[usize::from(haplotype.str_allele)].push(index_of[haplotype]);
+    }
+    for indices in &mut built_on {
+        indices.sort_unstable();
+        indices.dedup();
+    }
     let mut columns = Vec::with_capacity(samples.len());
-    let mut called_copies = vec![0_u32; alleles.len()];
+    // Per STR allele and merged allele: the copies called, and the reads moved.
+    let mut called_copies = vec![vec![0_u32; alleles.len()]; str_alleles];
+    let mut moved_reads = vec![vec![0_u64; alleles.len()]; str_alleles];
     for (state, column) in samples.iter().zip(str_record.sample_columns()) {
         let call = match state {
             SampleHaplotypes::NoCall => SampleCall::NoCall,
@@ -683,7 +702,7 @@ fn build_merged_record(
                     .iter()
                     .map(|copy| {
                         let index = index_of[copy];
-                        called_copies[index] += 1;
+                        called_copies[usize::from(copy.str_allele)][index] += 1;
                         AlleleId(u16::try_from(index).expect("fewer than 65,536 alleles"))
                     })
                     .collect();
@@ -706,19 +725,22 @@ fn build_merged_record(
         let mut reads = vec![0_u32; alleles.len()];
         let mut unexplained = column.read_counts.unexplained_reads();
         for (origin, &count) in column.read_counts.allele_reads().iter().enumerate() {
-            let candidates = built_on(origin);
+            let candidates = &built_on[origin];
             let target = if candidates.len() == 1 {
                 Some(candidates[0])
             } else {
-                let mut on_genotype: Vec<usize> = candidates
-                    .into_iter()
+                let on_genotype: Vec<usize> = candidates
+                    .iter()
+                    .copied()
                     .filter(|index| named.contains(index))
                     .collect();
-                on_genotype.dedup();
                 (on_genotype.len() == 1).then(|| on_genotype[0])
             };
             match target {
-                Some(index) => reads[index] += count,
+                Some(index) => {
+                    reads[index] += count;
+                    moved_reads[origin][index] += u64::from(count);
+                }
                 None => unexplained += count,
             }
         }
@@ -728,35 +750,33 @@ fn build_merged_record(
         });
     }
 
-    // The cohort-level columns, from the STR allele each new allele is built on.
+    // The cohort-level columns, from the STR alleles each new allele is built on: each STR
+    // allele's fitted copies shared by the copies called, its mapping-quality pool by the reads
+    // moved.
     let mut expected_copies = vec![0.0; alleles.len()];
     let mut allele_mapq = vec![MapqPool::default(); alleles.len()];
-    for origin in 0..str_record.alleles().len() {
-        let candidates = built_on(origin);
-        if candidates.is_empty() {
+    for (origin, candidates) in built_on.iter().enumerate() {
+        let Some(&first) = candidates.first() else {
             continue;
-        }
-        let copies: u32 = candidates.iter().map(|&index| called_copies[index]).sum();
+        };
+        let copies: u32 = candidates
+            .iter()
+            .map(|&index| called_copies[origin][index])
+            .sum();
         let fitted = str_record.expected_copies()[origin];
         let pool = str_record.allele_mapq()[origin];
-        for &index in &candidates {
-            expected_copies[index] = if copies == 0 {
-                if index == candidates[0] { fitted } else { 0.0 }
+        for &index in candidates {
+            expected_copies[index] += if copies == 0 {
+                if index == first { fitted } else { 0.0 }
             } else {
-                fitted * f64::from(called_copies[index]) / f64::from(copies)
+                fitted * f64::from(called_copies[origin][index]) / f64::from(copies)
             };
-            let reads: u64 = columns
-                .iter()
-                .map(|column| u64::from(column.read_counts.allele_reads()[index]))
-                .sum();
-            allele_mapq[index] = MapqPool {
-                reads,
-                mapq_sum: if pool.reads == 0 {
-                    0
-                } else {
-                    (pool.mapq_sum as f64 * reads as f64 / pool.reads as f64).round() as u64
-                },
-            };
+            let reads = moved_reads[origin][index];
+            allele_mapq[index].reads += reads;
+            if pool.reads > 0 {
+                allele_mapq[index].mapq_sum +=
+                    (pool.mapq_sum as f64 * reads as f64 / pool.reads as f64).round() as u64;
+            }
         }
     }
 

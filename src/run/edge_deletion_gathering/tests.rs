@@ -409,6 +409,42 @@ fn reads_of_an_str_allele_split_over_two_alleles_are_unexplained_and_repcn_is_sh
     assert_eq!(tract.repeat_copies_of_allele(1, &merged.alleles()[1]), 3);
 }
 
+/// **A haplotype that spells another STR allele's sequence takes that allele's reads and fitted
+/// copies with it.** STR allele 1 changes the flank's `A` to `G` itself; a sample called 0/0 at
+/// the STR record and `G/G` at the SNP spells the same sequence, so it is written 1/1 — and its
+/// reads, which the STR record put on allele 0, go to allele 1, as does allele 0's `AF` share.
+#[test]
+fn a_haplotype_spelling_another_str_alleles_sequence_takes_its_reads_along() {
+    let tract = record(
+        region(101, 110),
+        &[b"GTTGTTGTTA", b"GTTGTTGTTG"],
+        &[(&[1, 1], 30.0), (&[0, 0], 30.0)],
+        widened(
+            b"GTT",
+            TractWidening {
+                left: 0,
+                right: 1,
+                flank_bases_per_allele: vec![1, 1],
+                reach_per_allele: vec![(0, 0), (0, 1)],
+                base_before: Some(b'C'),
+            },
+        ),
+    );
+    let mut gathering = EdgeDeletionGathering::default();
+    let out = written(
+        &mut gathering,
+        vec![tract, a_snp_at_110(&[(&[1, 1], 40.0), (&[1, 1], 40.0)])],
+    );
+    assert_eq!(out.len(), 1);
+    let merged = &out[0];
+    assert_eq!(alleles(merged), vec![&b"GTTGTTGTTA"[..], b"GTTGTTGTTG"]);
+    assert_eq!(genotypes(merged), vec![Some(vec![1, 1]), Some(vec![1, 1])]);
+    let column = &merged.sample_columns()[1];
+    assert_eq!(column.read_counts.allele_reads(), &[0, 2]);
+    assert_eq!(merged.expected_copies(), &[0.0, 1.0]);
+    assert_eq!(merged.allele_mapq()[1].reads, 4);
+}
+
 /// **A generic record on each flank of one STR record**: both merge, one after the other, the
 /// second paired against the haplotypes the first left.
 #[test]

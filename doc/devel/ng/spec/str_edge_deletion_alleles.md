@@ -575,9 +575,9 @@ consumer that reads lengths sees the same `REPCN` as before the merge, whichever
 - **The filters after the gathering judge the merged record as one record** (owner, 2026-10-29).
   The hidden-duplication filter scores it like any multi-allelic record, so its verdict can differ
   from the one either record would have had alone. On tomato (62 accessions, about 3×, fitted
-  parameters) that happens at 4 sites in 169,113 records: one STR record that scored 0.9998 alone
-  is written merged, and three generic alleles that were dropped alone are written inside a
-  passing STR record. *Rejected:* dropping a generic record before the merge where the filter
+  parameters) that happens at 5 sites in 169,115 records: two STR records dropped alone are
+  written merged (one scored 0.9998 alone, 0 merged), and three generic alleles that were dropped
+  alone are written inside a passing STR record. *Rejected:* dropping a generic record before the merge where the filter
   would drop it alone — it would make the gathering depend on a filter that runs after it.
 
 ### 6.7 The records the replaced pass dropped
@@ -645,6 +645,12 @@ nobody carries; counted as an allele, it counts one deletion once per site it co
   generic record within a flank's reach; the held records are a flank's worth (at most the locus's
   stored flank, tens of bases) of generic records, so memory does not grow with the genome.
 - **`--explain-loci` rows** describe the records before the merge.
+- **Two widened STR records over one stretch of flank are not merged with each other.** Where the
+  right widening of one segment and the left widening of the next would share bases, a generic
+  record overlapping both merges into the first only, and the two STR records are written
+  overlapping. Not seen so far: no two records share a base in any of the 16 stuttering-benchmark
+  VCFs or tomato's (62 accessions), against 97 pairs on main's tomato VCF, all of them `*`
+  records (2026-10-29). Segments that close are usually one STR bundle.
 
 ## 8. Building and measuring it
 
