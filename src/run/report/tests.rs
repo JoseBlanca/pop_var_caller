@@ -102,6 +102,7 @@ fn a_run(
             loci_with_nobody_to_call: nobody,
             tracts: TractOutcomes::default(),
             explanations: Vec::new(),
+            edge_deletion_gathering: Default::default(),
         },
         walk: CohortWalkTallies {
             per_sample,
@@ -230,6 +231,63 @@ fn the_report_states_what_was_called_and_what_of_it_was_written() {
         text.contains("loci called: 165 — 120 written, 45 establishing no variant"),
         "the two parts and their sum, so a reader need not add them: {text}",
     );
+}
+
+/// **What the gathering of the calls did at STR records widened over a flank is stated, and a
+/// generic record it left out is a locus called but not written.**
+#[test]
+fn the_report_states_what_the_gathering_of_the_calls_did() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let mut written = a_run(
+        123,
+        45,
+        Vec::new(),
+        Vec::new(),
+        vec![walked("zeta", ground_mostly_called(), Vec::new())],
+    );
+    written
+        .calling
+        .after_gathering(EdgeDeletionGatheringCounts {
+            copies_starred_in_agreement: 7,
+            copies_rewritten: 2,
+            generic_records_dropped: 3,
+        });
+
+    let text = rendered(
+        &written,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        1_000,
+    );
+
+    assert!(text.contains("records written: 120"), "{text}");
+    assert_eq!(written.loci_called(), 168);
+    assert!(
+        text.contains(
+            "7 sample copies matched to the deletion, 2 overridden by the STR record, 3 records"
+        ),
+        "{text}",
+    );
+}
+
+/// **A run whose gathering changed nothing says nothing about it.**
+#[test]
+fn the_report_is_silent_about_a_gathering_that_changed_nothing() {
+    let (_zeta, _alpha, read_groups) = a_cohorts_read_groups();
+    let written = a_run(
+        120,
+        45,
+        Vec::new(),
+        Vec::new(),
+        vec![walked("zeta", ground_mostly_called(), Vec::new())],
+    );
+    let text = rendered(
+        &written,
+        &read_groups,
+        &a_defaults_runs_parameters(&read_groups),
+        1_000,
+    );
+    assert!(!text.contains("widened over a deletion"), "{text}");
 }
 
 /// **The analysed ground partitions into what was called and the two kinds of what was not**,
@@ -1151,6 +1209,7 @@ fn the_calling_half_of_the_report_does_not_depend_on_the_mode() {
         loci_with_nobody_to_call: Vec::new(),
         tracts: TractOutcomes::default(),
         explanations: Vec::new(),
+        edge_deletion_gathering: Default::default(),
     };
     let walked = a_run(
         calling.records_written,

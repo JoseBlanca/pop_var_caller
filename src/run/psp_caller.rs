@@ -840,6 +840,8 @@ impl PspVariantCaller {
                         source: Box::new(source),
                     })?;
             }
+            let mut outcome = outcome;
+            outcome.calling.after_gathering(gathering.counts());
             outcome
         };
         // **The sources come back so that a mode can turn them into per-sample facts**, and

@@ -40,6 +40,7 @@ use crate::region_typing::GenomeRegions;
 use crate::types::{GenomeRegion, ReadGroupId};
 
 use super::callers::{CohortCallingTallies, CohortWalkTallies, WrittenCohort};
+use super::edge_deletion_gathering::EdgeDeletionGatheringCounts;
 use super::psp_caller::StoredCohortTallies;
 
 /// **The two bounds a run's refusals were measured against**, so the report can name each beside
@@ -223,6 +224,17 @@ impl<'a> RunReport<'a> {
             lines.push(format!(
                 "loci left out for a site quality below --min-site-quality: {}",
                 self.calling.loci_below_minimum_site_quality,
+            ));
+        }
+        let gathering = self.calling.edge_deletion_gathering;
+        if gathering != EdgeDeletionGatheringCounts::default() {
+            lines.push(format!(
+                "SNP/indel records overlapping an STR record widened over a deletion into its \
+                 flank: {} sample copies matched to the deletion, {} overridden by the STR \
+                 record, {} records left with nothing of their own and so left out",
+                gathering.copies_starred_in_agreement,
+                gathering.copies_rewritten,
+                gathering.generic_records_dropped,
             ));
         }
     }
