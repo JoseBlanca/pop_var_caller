@@ -164,10 +164,18 @@ def gatk_genotype_shards(ctx, reference, sources, shard_beds, out_dir):
 
 
 def gatk_gather(shard_vcfs, out):
-    """The shards' VCFs, in the regions' order, joined into one indexed VCF (GATK's GatherVcfs)."""
+    """The shards' VCFs joined into one indexed VCF, in the reference's order (GATK's GatherVcfs).
+
+    A plain concat needs each chromosome in one run of consecutive records, which shards of a BED
+    sorted by name do not give: GATK writes a shard in the reference's order, so one holding chr18
+    and chr2 regions starts with chr2, after the shard before it ended in chr18 (the GIAB trio's
+    regions, 2026-10-29). `--allow-overlaps` merges the shards through their indexes instead, still
+    in the shards' chromosome order, and the sort puts the result in the reference's.
+    """
     inputs = " ".join(q(v) for v in shard_vcfs)
     return ("gather_shards",
-            f"bcftools concat --no-version -Oz -o {q(out)} {inputs} && bcftools index -t {q(out)}")
+            f"bcftools concat --no-version --allow-overlaps -Ou {inputs} "
+            f"| bcftools sort -Oz -o {q(out)} && bcftools index -t {q(out)}")
 
 
 # ---- freebayes --------------------------------------------------------------------------------
