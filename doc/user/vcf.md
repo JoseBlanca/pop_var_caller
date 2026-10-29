@@ -71,6 +71,7 @@ many alleles (`--max-generic-alleles`).
   is added instead.
 - A deletion that runs from the repeat into the sequence beside it widens the STR record over
   those bases. A SNP or indel record that overlaps it marks the overlapping allele as `*`.
+  [Overlapping variants](overlapping_variants.md) explains why this matters.
 
 ## FILTER
 
