@@ -36,6 +36,11 @@ ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebay
             "hipstr": "hipstr", "deepvariant": "deepvariant"}
 # freebayes writes every candidate it considers; its documentation asks for a quality filter.
 MIN_QUAL = {"freebayes": 20}
+# The GIAB samples' benchmarks run pvc with --call-satellites (off by default): repeats longer than
+# the repeat model takes are called with the SNP/indel model instead of left uncalled. Their reads
+# are high quality with little stutter, so the SNPs and short indels inside satellites, which the
+# other callers report, can be called too (the owner's choice, 2026-10-30).
+GIAB_CALL_SATELLITES = True
 
 
 # What the scorers need of a reference: the FASTA, vcfeval's copy of it, and pvc_eval's STR regions
@@ -158,12 +163,14 @@ def _gatk_joint(ctx, reference, gvcfs, regions, calls, d):
 
 
 def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, regions, base,
-              joint=False):
+              joint=False, call_satellites=False):
     """One arm's calling step on one configuration; returns (step, CallSet).
 
     `alignments_by_sample` maps sample name to its alignment file(s); several samples means a
     cohort, called jointly. `regions` is the BED the callers are restricted to. `base` is the row
-    configuration (benchmark, dataset, samples, depth, region_bp).
+    configuration (benchmark, dataset, samples, depth, region_bp). `call_satellites` runs pvc
+    with `--call-satellites`, which is off by default: repeats too long for the repeat model are
+    called with the SNP/indel model instead of left uncalled.
     """
     name = f"{prefix}/{arm}"
     kind = ARM_KIND[arm]
@@ -180,6 +187,8 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
                            regions, reference)
         if arm == "gatk" and joint:
             out["joint_route"] = callers.gatk_joint_route()
+        if kind == "pvc" and call_satellites:
+            out["call_satellites"] = True  # only when on, so earlier runs' records still match
         return out
 
     if arm == "pvc_defaults":
@@ -188,7 +197,8 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             warm(flat + [reference])  # every tool reads from memory (measure.warm)
             log = os.path.join(d, "pvc.log")
             m = run_commands([callers.pvc_call_from_alignments(
-                ctx, reference, catalog, flat, regions, calls, log)], os.path.join(d, "logs"))
+                ctx, reference, catalog, flat, regions, calls, log,
+                call_satellites=call_satellites)], os.path.join(d, "logs"))
             return {"measurement": m, "rows": time_rows(row_base, m, "call-from-alignments")}
 
     elif arm == "pvc_fitted":
@@ -198,8 +208,8 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             psp_dir = os.path.join(d, "psps")
             logs = os.path.join(d, "logs")
             m_gen = run_commands(callers.pvc_generate_psps(
-                ctx, reference, catalog, files, regions, psp_dir, logs), logs,
-                max_concurrent=ctx.threads)
+                ctx, reference, catalog, files, regions, psp_dir, logs,
+                call_satellites=call_satellites), logs, max_concurrent=ctx.threads)
             psps = [os.path.join(psp_dir, f"{s}.psp") for s in samples]
             params = os.path.join(d, "fitted.parameters.toml")
             m_fit = run_commands([callers.pvc_estimate_parameters(

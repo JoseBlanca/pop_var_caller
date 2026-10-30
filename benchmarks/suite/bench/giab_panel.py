@@ -20,6 +20,8 @@ match" needs the alleles and the genotype right; "allele match" only the alleles
 scored as each caller writes them (its own filters), except freebayes, kept at QUAL ≥ 20. The
 best_f1 rows are each caller's best F1 over a sweep of its QUAL threshold. pvc (fitted) fits its
 parameters from that one sample's data with `estimate-parameters`.
+pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
+called with the SNP/indel model instead of left uncalled.
 """
 
 SAMPLES = ["HG002", "HG003", "HG004"]
@@ -108,7 +110,7 @@ def steps(ctx):
             for arm in ARMS:
                 step, callset = arms.arm_steps(ctx, arm, f"giab_panel/{s}/{depth}", reference,
                                                catalog, {s: aligned[(s, depth)]}, regions,
-                                               base)
+                                               base, call_satellites=arms.GIAB_CALL_SATELLITES)
                 out.append(step)
                 out.append(arms.score_step(ctx, callset, base, truth, regions, scoring,
                                            call_sample=s, truth_sample=s))

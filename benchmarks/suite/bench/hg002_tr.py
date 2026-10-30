@@ -30,6 +30,8 @@ genotype is right — compared as the two rebuilt DNA sequences over the tract, 
 lengths. Small-variant rows: RTG vcfeval inside the regions. HipSTR runs as it was run on this
 benchmark before (`--use-unpaired --min-reads 5`) over pvc's typed repeat loci; GATK HaplotypeCaller
 with 6 pair-HMM threads. freebayes is not run here.
+pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
+called with the SNP/indel model instead of left uncalled.
 """
 
 DEPTHS = ["5x", "10x", "15x", "20x", "30x", "50x", "300x"]
@@ -161,7 +163,8 @@ def steps(ctx):
                 step, callset = _hipstr_step(ctx, depth, bam, hipstr_regions, base)
             else:
                 step, callset = arms.arm_steps(ctx, arm, f"hg002_tr/{depth}", GRCH38,
-                                               catalog, {"HG002": bam}, regions, base)
+                                               catalog, {"HG002": bam}, regions, base,
+                                               call_satellites=arms.GIAB_CALL_SATELLITES)
             out.append(step)
             out.append(_str_score_step(ctx, callset, base, truth, regions, tracts, depth))
             out.append(arms.score_step(ctx, callset, base, truth, regions, scoring,

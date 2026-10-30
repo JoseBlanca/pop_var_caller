@@ -31,26 +31,32 @@ def pvc_catalog(ctx, reference, out, log):
 
 
 def pvc_call_from_alignments(ctx, reference, catalog, alignments, regions, out, log,
-                             parameters=None):
+                             parameters=None, call_satellites=False):
     alignment_args = " ".join(f"--alignment {q(a)}" for a in alignments)
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     regions_arg = f"--regions {q(regions)}" if regions else ""
+    satellites = "--call-satellites " if call_satellites else ""
     return ("call_from_alignments",
             f"{q(ctx.pvc_bin)} call-from-alignments --reference {q(reference)} "
-            f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} "
+            f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} {satellites}"
             f"--threads {ctx.threads} --output {q(out)} --log {q(log)} --force")
 
 
-def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, out_dir, log_dir):
-    """One command per sample. `alignments_by_sample` maps sample name to its alignment files."""
+def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, out_dir, log_dir,
+                      call_satellites=False):
+    """One command per sample. `alignments_by_sample` maps sample name to its alignment files.
+
+    `call_satellites` is recorded in each psp, so the commands that read them follow it.
+    """
     cmds = []
     regions_arg = f"--regions {q(regions)}" if regions else ""
+    satellites = " --call-satellites" if call_satellites else ""
     for sample, files in alignments_by_sample.items():
         alignment_args = " ".join(f"--alignment {q(a)}" for a in files)
         cmds.append((f"generate_psps.{sample}",
                      f"{q(ctx.pvc_bin)} generate-psps --reference {q(reference)} "
                      f"--catalog {q(catalog)} {alignment_args} {regions_arg} "
-                     f"--output-dir {q(out_dir)} --force"))
+                     f"--output-dir {q(out_dir)} --force{satellites}"))
     return cmds
 
 
