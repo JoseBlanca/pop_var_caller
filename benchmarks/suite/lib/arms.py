@@ -334,8 +334,20 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
     else:
         raise ValueError(arm)
 
+    # The stage a run that did not finish is reported under (`--mark-unfinished`): the one that
+    # names the arm's whole time.
+    whole = {"pvc_defaults": "call-from-alignments", "pvc_fitted": "whole pipeline",
+             "pvc_segments": "whole pipeline",
+             "gatk": "whole pipeline" if joint else "HaplotypeCaller", "freebayes": "freebayes",
+             "deepvariant": "DeepVariant + GLnexus" if joint else "DeepVariant"}[arm]
+
+    def unfinished(wall_s, note):
+        return [row(row_base, stage=whole, metric="wall_seconds", value=round(wall_s, 3),
+                    outcome=note)]
+
     step = Step(name, kind, action, fingerprint,
-                attrs={"caller": ARM_CALLER[arm], "depth": base.get("depth")})
+                attrs={"caller": ARM_CALLER[arm], "depth": base.get("depth")},
+                unfinished=unfinished)
     return step, CallSet(arm, name, calls)
 
 

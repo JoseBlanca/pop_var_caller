@@ -9,6 +9,9 @@
 #   benchmarks/suite/run_suite.sh --slice --only giab_panel        the small test configuration
 #   benchmarks/suite/run_suite.sh --summary-only      rebuild results.tsv and summary.md
 #
+#   benchmarks/suite/run_suite.sh --only speed --mark-unfinished speed/tomato_100/freebayes \
+#       --note "6 of 114 blocks sat on single sites for over a day"   a stopped step's time, kept
+#
 # Other options: --threads N (default 6, the laptop's fast cores), --rescore, --redo-step NAME,
 # --allow-dirty (run with uncommitted changes; the commit is recorded as <sha>-dirty),
 # --data-root DIR (the checkout holding benchmarks/ and its data; from a worktree, the main

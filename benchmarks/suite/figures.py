@@ -390,6 +390,8 @@ def performance_series(rows, benchmark, label_of):
                 continue
             if r["metric"] not in ("wall_seconds", "peak_rss_mb_all_processes"):
                 continue
+            if r.get("outcome"):  # did not finish: a lower bound, not a point on the curve
+                continue
             key = (line, r["samples"], r["depth"])
             rank = stages.index(r["stage"])
             prior = vals[key].get(("rank", r["metric"]))
