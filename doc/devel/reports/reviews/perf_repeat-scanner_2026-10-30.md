@@ -2,7 +2,7 @@
 **Date:** 2026-10-30
 **Reviewer:** rust-performance-review skill (orchestrator)
 **Scope:** `pvc repeat-catalog` — the tandem-repeat scan, row building and catalog write — and the catalog read path, on branch `str-adjacent-runs` at c237378b
-**Verdict:** Apply the listed wins (applied: H1–H6, L1–L3, L6; open: L5)
+**Verdict:** Apply the listed wins (applied: H1–H6, L1–L3, L6; L5 resolved by redefining the reference digest)
 **Hot-path evidence:** sampling profile (`sample`) of the whole tomato build; per-stage instruction counts; per-change instruction, peak-RSS and wall measurements
 
 ---
@@ -54,7 +54,8 @@ On GRCh38: one thread went from 90.9 s and 7.67 GiB to 52.2 s and 0.97 GiB. Six 
 includes the branch's own scanner change. The new build's catalog is identical at one and six
 threads.
 
-The owner then accepted H6 and L6, which were applied in follow-up commits. L5 is still open.
+The owner then accepted H6 and L6, applied in follow-up commits, and resolved L5 by redefining the
+reference digest.
 With all of it, on the whole tomato genome:
 
 | threads | wall | peak RSS |
@@ -228,13 +229,26 @@ not measured.
 - After H1 it holds about a tenth of that. Re-measured on top of step 5, three interleaved runs:
   wall 1.71–1.72 s for both, instructions 22.42 → 22.54 G. More code for nothing; rejected.
 
-**L5: [reference_info.rs](../../../../src/reference_info.rs) `flush_md5` — the two MD5s run as two passes over every base** — *not applied: owner decision*
+**L5: [reference_info.rs](../../../../src/reference_info.rs) `flush_md5` — the two MD5s run as two passes over every base** — *resolved another way: the reference digest is now built from the contig digests (owner, 2026-10-30)*
 - **Measured (io agent probe):** one interleaved two-lane MD5 takes 0.12 s against 0.22 s for two
   `md-5` passes on chromosome 1. Both digests are checked against `md-5`.
 - **Why it matters:** this pass runs on every command that reads the catalog — once per sample.
 - **Complexity:** a hand-written MD5 of about 60 lines, plus per-lane buffering. It would delete
   the two-thread `split_digests` path.
 - Diff: `io_md5-two-lanes-probe.diff`.
+- **What was done instead:** the second digest no longer reads the bases. The whole-reference
+  MD5 is now the MD5 of the per-contig digests, in file order, so each base is hashed once and
+  the `split_digests` path is gone with no hand-written MD5. The cost is that the stored value
+  changes, so catalogs and psps are rebuilt; the owner accepted that. Its two properties hold:
+  it still catches a reordering, and a re-wrap still leaves it unchanged
+  (`reference_info.md` §3.4).
+- **Measured on chromosome 1:**
+  - the reference check (`dev type-regions`): 5.45 → 2.88 G instructions, 0.16 → 0.13 s wall;
+  - the build: 18.96 → 18.08 G instructions;
+  - typed regions identical.
+- **The pinned checksums:** the three cross-platform checksum tests moved. In each, a diff
+  against the previous commit showed only the reference-digest lines and the VCF's
+  `##pvcParameters` checksum line changed, and they were re-recorded.
 
 **L6: [parquet_file.rs](../../../../src/repeat_catalog/parquet_file.rs) — dictionary encoding on the four coordinate columns** — *applied after the owner's decision (2026-10-30), commit 587a4860*
 - **Measured (io agent), delta encoding instead, on chromosome 1:**
