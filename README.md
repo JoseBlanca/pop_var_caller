@@ -42,6 +42,9 @@ than 100 bp.
 
 At larger scale, pvc called more than 2,000 whole tomato genomes in a week using less than 30 GB.
 
+[Accuracy](doc/benchmarks/accuracy.md) has the full results behind the accuracy columns, at every
+read depth, with the errors split by kind.
+
 [^giab]: GIAB HG002, the whole of chromosome 20 (64 Mb), reads downsampled to 30×, scored with
     RTG vcfeval against the GIAB truth set: a call counts only if its genotype matches. pvc ran
     its full pipeline, with parameters estimated from the data. Measured 2026-10-29 on a Linux
