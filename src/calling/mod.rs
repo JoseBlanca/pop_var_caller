@@ -2608,8 +2608,8 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
     ///
     /// **Handed out mutably and never read back through a shared accessor**, because the
     /// one caller that fills it is the one caller that reads it, in the same call: the
-    /// final pass pools every called sample's reads onto the alleles, picks the primary
-    /// alternative from the totals, and is done with them
+    /// final pass pools every callable sample's reads onto the alleles, calls the samples,
+    /// picks the primary alternative from the totals and the calls, and is done with them
     /// (`doc/devel/ng/spec/calling_quality.md` §6.3). There is nothing for a later stage to
     /// come back for.
     ///

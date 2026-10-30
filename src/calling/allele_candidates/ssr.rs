@@ -1128,8 +1128,8 @@ pub(super) fn admit_promoted_sequences_on(
 
     // Every alternative that sits on a promoted rung *and* some sample's reads earned — or that
     // the discovery pre-pass nominated on its own bar, which is how a length the top-`ploidy`
-    // cut hid still reaches the table — in the merge table's own order, which is the order it
-    // is admitted in, so nothing has to sort it unless the cap reorders it below.
+    // cut hid still reaches the table — in the merge table's own order for now; admission sorts
+    // it by bases.
     ranked_table_indices.clear();
     ranked_table_indices.extend(
         (1..observation.alleles.len())
@@ -1162,7 +1162,6 @@ pub(super) fn admit_promoted_sequences_on(
         observation.region
     );
     let reference_rung = ladder.rung_of_table_index(0);
-    let mut kept_for_an_earned_length = false;
     for rung in (0..rung_earned_by_reads.len()).filter(|&rung| rung_earned_by_reads[rung]) {
         let stood_for = rung == reference_rung
             || ranked_table_indices
@@ -1189,13 +1188,10 @@ pub(super) fn admit_promoted_sequences_on(
             ranked_table_indices.push(
                 u32::try_from(index).expect("a merge table narrower than four billion alleles"),
             );
-            kept_for_an_earned_length = true;
         }
     }
-    if kept_for_an_earned_length {
-        // Back to the merge table's order, which is the order admission and the cap expect.
-        ranked_table_indices.sort_unstable();
-    }
+    // Nothing below reads the buffer's order: the misread fold keeps or drops each entry on its
+    // own, the cap ranks on a total order, and admission sorts by bases.
 
     // **An allele over a flank extent one misread base away from an allele already standing is
     // not a candidate of its own** (2026-10-11; `str_edge_deletion_alleles.md` §5.5). Respelled
@@ -1246,11 +1242,16 @@ pub(super) fn admit_promoted_sequences_on(
         cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
         cap_cut_table_indices.sort_unstable();
         ranked_table_indices.truncate(allowed_alternatives);
-        ranked_table_indices.sort_unstable();
         SelectionVerdict::Truncated {
             dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
         }
     };
+    // **Admitted in the order of their bases, not the merge table's**, for the generic path's
+    // reason (`generic.rs`): the table's order is the order the samples were given, and two
+    // spellings of one length swapped `ALT` places when the cohort was listed the other way.
+    ranked_table_indices.sort_unstable_by(|&left, &right| {
+        observation.alleles[left as usize].cmp(&observation.alleles[right as usize])
+    });
 
     let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), ground.locus_kind());
     let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
@@ -2839,8 +2840,8 @@ mod tests {
             admitted_bases(&selection),
             vec![
                 b"ATATATAT".to_vec(),
-                b"ATATATATAT".to_vec(),
-                b"ATATATATAG".to_vec()
+                b"ATATATATAG".to_vec(),
+                b"ATATATATAT".to_vec()
             ],
             "the reference, and both five-repeat spellings on their own reads"
         );
@@ -2937,10 +2938,10 @@ mod tests {
             admitted_bases(&selection),
             vec![
                 b"ATATATAT".to_vec(),
-                b"ATATATATAT".to_vec(),
-                b"ATATATATAG".to_vec()
+                b"ATATATATAG".to_vec(),
+                b"ATATATATAT".to_vec()
             ],
-            "the ten-read spelling is the one cut, and the survivors keep the merge's order"
+            "the ten-read spelling is the one cut, and the survivors are in the order of their bases"
         );
     }
 
@@ -3205,8 +3206,8 @@ mod tests {
             admitted_bases(&selection),
             vec![
                 b"ATATATAT".to_vec(),
-                b"ATATATATAT".to_vec(),
-                b"ATATATATAG".to_vec()
+                b"ATATATATAG".to_vec(),
+                b"ATATATATAT".to_vec()
             ]
         );
     }
@@ -3234,14 +3235,14 @@ mod tests {
             admitted_bases(&narrowed.selection),
             vec![
                 b"ATATATAT".to_vec(),
-                b"ATATATATATAT".to_vec(),
-                b"ATATATATAT".to_vec()
+                b"ATATATATAT".to_vec(),
+                b"ATATATATATAT".to_vec()
             ],
             "the one-read nine-base sequence is the only one dropped"
         );
         assert_eq!(
             narrowed.repeat_counts,
-            vec![4, 6, 5],
+            vec![4, 5, 6],
             "each surviving candidate's own repeat count, in candidate-id order"
         );
         assert_eq!(
@@ -3451,17 +3452,17 @@ mod tests {
         );
         assert_eq!(
             admitted_bases(&on.selection),
-            vec![at_repeats(8), at_repeats(7), at_repeats(5)],
-            "the discovered length joins the table, in the merge's own order"
+            vec![at_repeats(8), at_repeats(5), at_repeats(7)],
+            "the discovered length joins the table, in the order of the bases"
         );
         assert_eq!(
             on.repeat_counts,
-            vec![8, 7, 5],
+            vec![8, 5, 7],
             "and the loop sees three candidates, each with the repeat count the prior indexes by"
         );
         assert_eq!(
             on.selection.remap().candidate_for(2),
-            Some(AlleleId(2)),
+            Some(AlleleId(1)),
             "the merge's third sequence now has a candidate id"
         );
         assert_eq!(
@@ -3524,7 +3525,7 @@ mod tests {
             admitted_bases(
                 &select_ssr(&clearing_the_share, &config, &mut SelectionScratch::new()).selection
             ),
-            vec![at_repeats(8), at_repeats(7), at_repeats(5)],
+            vec![at_repeats(8), at_repeats(5), at_repeats(7)],
             "six of forty is 15 in 100 and clears it"
         );
     }

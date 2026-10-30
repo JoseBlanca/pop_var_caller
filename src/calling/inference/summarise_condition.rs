@@ -1019,25 +1019,20 @@ impl PooledArtifactCounts {
     }
 }
 
-/// **Which allele the artifact tests treat as *the* alternative**: the non-reference allele
-/// the most reads reached, pooled over the samples the locus is called on — or `None` where
-/// there is no such allele to name.
+/// **Every allele's reads, pooled over the samples the locus is called on** — and whether any
+/// alternative was reached at all, which is whether the artifact tests have anything to weigh.
 ///
-/// `pooled_reads` is the scratch buffer this fills and reads, one entry per allele of the
-/// locus; it arrives holding the previous locus's totals and is zeroed here.
+/// `pooled_reads` is the scratch buffer this fills, one entry per allele of the locus; it
+/// arrives holding the previous locus's totals and is zeroed here. Which alternative the tests
+/// weigh is [`pick_primary_alternative`]'s, once the samples are called.
 ///
-/// **`None` is two different situations and the caller need not tell them apart**: a locus
+/// **`false` is two different situations and the caller need not tell them apart**: a locus
 /// whose candidate table is the reference alone — 27.4% of built loci on the 63-accession
 /// tomato panel and 27.3% on HG002 at 30×
 /// ([`SelectionVerdict::Selected`](crate::calling::allele_candidates::SelectionVerdict))
 /// — and a locus with alternatives that no read reached. Both leave the two tests with
 /// nothing to weigh, and production returns its baseline unchanged in exactly these two
 /// cases ([`qual_refine.rs:79`](../../../../src/vcf/qual_refine.rs)).
-///
-/// **Ties go to the lowest allele id**, because the fold keeps the first *strict* maximum —
-/// the same rule and the same reason as the genotype quality's argmax
-/// ([`score_best_genotype`]): the allele table's order is fixed, so a run must not depend on
-/// which of two equally supported alternatives a comparison happened to keep.
 ///
 /// # Panics
 ///
@@ -1051,10 +1046,7 @@ impl PooledArtifactCounts {
 ///   count.** They are shares of the same reads, and both artifact tests read them as
 ///   fractions: a fraction above one reaches the binomial tail as a probability above one
 ///   and comes back as a penalty rather than as a failure.
-fn pool_reads_and_pick_primary_alternative(
-    per_sample: &[GenericLocusSample<'_>],
-    pooled_reads: &mut [u64],
-) -> Option<AlleleId> {
+fn pool_allele_reads(per_sample: &[GenericLocusSample<'_>], pooled_reads: &mut [u64]) -> bool {
     pooled_reads.fill(0);
     for (sample, locus_sample) in per_sample.iter().enumerate() {
         if !locus_sample.is_callable() {
@@ -1081,23 +1073,62 @@ fn pool_reads_and_pick_primary_alternative(
             pooled_reads[allele] += u64::from(observation.num_reads);
         }
     }
-    // The first strict maximum over the alternatives, so ties go to the lowest id; allele 0
-    // is the reference and is never a candidate for it.
-    //
-    // PANIC-FREE: `best_allele` indexes `pooled_reads`, whose length is the genotype table's
-    // `allele_count`, and `GenotypeTable::build` refuses an `allele_count` above
-    // `MAX_ALLELE_COUNT` — so the index is at most 65,535 and always fits a `u16`.
-    let (best_allele, best_reads) = pooled_reads.iter().enumerate().skip(1).fold(
-        (0_usize, 0_u64),
-        |(best_allele, best_reads), (allele, &reads)| {
-            if reads > best_reads {
-                (allele, reads)
-            } else {
-                (best_allele, best_reads)
+    // Allele 0 is the reference, which the tests weigh the alternative against.
+    pooled_reads.iter().skip(1).any(|&reads| reads > 0)
+}
+
+/// **Which allele the artifact tests treat as *the* alternative**: of the alternatives some
+/// sample was called carrying, the one the most reads reached — and only where no called
+/// alternative was reached by a read, the most-read alternative of all.
+///
+/// **A called allele first, because the tests are about the record.** Both compare the reads
+/// of one alternative against the reference, and the allele-balance test's expectation is the
+/// copies of that alternative in the called genotypes. An alternative no sample carries is
+/// not in the record's `ALT`, expects no reads, and penalises a site for evidence it does not
+/// report: on 8 tomato accessions, SL4.0ch01:3493044 lost 126 of its 163 Phred to the strand
+/// test on reads of an allele no sample was called with.
+///
+/// **Ties go to the alternative whose bases sort first**, never to the lower id. Ids follow
+/// the order the merge first met the alleles in, which is the order the samples were given,
+/// so an id tie-break made a site's quality depend on how the cohort was listed — 2 sites in
+/// 3,200 on that slice, one of them written or not by it. Bases cannot tie.
+///
+/// `None` where no alternative was reached by a read; [`pool_allele_reads`] has already said so,
+/// and this is not asked.
+fn pick_primary_alternative(
+    pooled_reads: &[u64],
+    candidates: &CandidateAlleles,
+    calls: &[SampleGenotypeCall],
+) -> Option<AlleleId> {
+    let carried_by_a_call = |allele: AlleleId| {
+        calls.iter().any(|call| match call {
+            SampleGenotypeCall::Called { genotype, .. } => genotype.alleles().contains(&allele),
+            SampleGenotypeCall::Missing => false,
+        })
+    };
+    let most_read = |eligible: &dyn Fn(AlleleId) -> bool| {
+        let mut best: Option<(AlleleId, u64, &[u8])> = None;
+        for (index, &reads) in pooled_reads.iter().enumerate().skip(1) {
+            // PANIC-FREE: `pooled_reads` is one entry per allele of the genotype table, and
+            // `GenotypeTable::build` refuses an `allele_count` above `MAX_ALLELE_COUNT` — so
+            // the index is at most 65,535 and always fits a `u16`.
+            let allele = AlleleId(u16::try_from(index).expect("an allele id fits a u16"));
+            if reads == 0 || !eligible(allele) {
+                continue;
             }
-        },
-    );
-    (best_reads > 0).then(|| AlleleId(u16::try_from(best_allele).expect("an allele id fits a u16")))
+            let bases = candidates
+                .bases_of(allele)
+                .expect("the pooled reads are one entry per candidate allele");
+            let better = best.is_none_or(|(_, best_reads, best_bases)| {
+                reads > best_reads || (reads == best_reads && bases < best_bases)
+            });
+            if better {
+                best = Some((allele, reads, bases));
+            }
+        }
+        best.map(|(allele, _, _)| allele)
+    };
+    most_read(&carried_by_a_call).or_else(|| most_read(&|_| true))
 }
 
 /// **Score every sample once more, take its best genotype, and mint what leaves the locus** —
@@ -1235,15 +1266,11 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
         } => Some(*per_sample),
         LocusEvidence::Ssr { .. } => None,
     };
-    // **The rows the artifact summary pools from, and the allele it weighs against the
-    // reference — one value, because the second cannot exist without the first.** Held as
-    // two `Option`s and re-paired at the use site, the combination that cannot arise —
-    // an alternative allele with no rows behind it — would pool nothing and say nothing,
-    // which is the silent-wrong-answer shape rather than the loud one.
-    let artifact_pool = generic_samples.and_then(|per_sample| {
-        pool_reads_and_pick_primary_alternative(per_sample, scratch.pooled_allele_reads_mut())
-            .map(|primary_alternative| (per_sample, primary_alternative))
-    });
+    // **The rows the artifact summary pools from**, where some alternative was reached by a
+    // read. Which alternative it weighs is chosen after the samples are called, because the
+    // choice prefers an allele the calls carry.
+    let artifact_rows = generic_samples
+        .filter(|per_sample| pool_allele_reads(per_sample, scratch.pooled_allele_reads_mut()));
 
     // **The genotype table's ploidy, and there is no second source of it.** The table was
     // built for a `(ploidy, allele count)` shape and every genotype's copies come out of it;
@@ -1301,14 +1328,6 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
         let copies_of_each_allele = genotypes
             .allele_counts_of(winner)
             .expect("the winner is an index into the row this table's own width sized");
-        if let Some((locus_samples, primary)) = artifact_pool {
-            pooled.add_called_sample(
-                &locus_samples[run_sample].evidence,
-                primary,
-                copies_of_each_allele[usize::from(primary.get())],
-                ploidy,
-            );
-        }
         calls.push(SampleGenotypeCall::Called {
             genotype: mint_genotype(copies_of_each_allele),
             genotype_quality,
@@ -1331,6 +1350,35 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
         evidence.region(),
         scratch.row_count()
     );
+
+    // **The artifact summary, now that the calls exist to choose its alternative from.** Every
+    // called sample's reads are pooled against that one allele — the samples the candidate
+    // step set aside are `Missing` and contribute nothing, as `pool_allele_reads` left them out.
+    //
+    // **The rows and the allele are one value, because the second cannot exist without the
+    // first.** Held as two `Option`s and re-paired at the use site, the combination that cannot
+    // arise — an alternative allele with no rows behind it — would pool nothing and say
+    // nothing, which is the silent-wrong-answer shape rather than the loud one.
+    let artifact_pool = artifact_rows.and_then(|per_sample| {
+        pick_primary_alternative(scratch.pooled_allele_reads_mut(), &candidates, &calls)
+            .map(|primary| (per_sample, primary))
+    });
+    if let Some((locus_samples, primary)) = artifact_pool {
+        for (locus_sample, call) in locus_samples.iter().zip(&calls) {
+            if let SampleGenotypeCall::Called { genotype, .. } = call {
+                let copies = genotype
+                    .alleles()
+                    .iter()
+                    .filter(|&&allele| allele == primary);
+                pooled.add_called_sample(
+                    &locus_sample.evidence,
+                    primary,
+                    u32::try_from(copies.count()).expect("a genotype's copies fit a u32"),
+                    ploidy,
+                );
+            }
+        }
+    }
 
     // **After the samples, and it could as well have been before them**: the fold reads the
     // genotype likelihood table, which the loop built and this pass only reads
@@ -5624,8 +5672,9 @@ mod tests {
     /// counts are pooled from **two read groups**, which a fixture with one row per allele
     /// would also let a reader-of-the-first-row pass.
     ///
-    /// The two samples' calls do not enter the choice — it is made from the reads alone,
-    /// before any sample is scored (`spec/calling_quality.md` §6.3).
+    /// Both samples are called homozygous for allele 2, so preferring a called allele and
+    /// preferring the most reads agree here; where they disagree is
+    /// `the_primary_alternative_is_one_a_call_carries_before_one_with_more_reads`.
     #[test]
     fn the_primary_alternative_is_the_allele_the_most_reads_reached_over_two_read_groups() {
         let (alleles, table) = generic_locus(2);
@@ -5684,14 +5733,15 @@ mod tests {
         assert_eq!(counts.genotype_expected_alternative_reads, 17.0);
     }
 
-    /// **Two alternatives the same number of reads reached: the lower id wins**, because the
-    /// fold keeps the first strict maximum.
+    /// **Two alternatives the same number of reads reached: the one whose bases sort first
+    /// wins, whatever its id.**
     ///
-    /// The allele table's order is fixed, so this is the difference between a run that
-    /// reproduces itself and one that does not — the same rule the genotype quality's argmax
-    /// follows, for the same reason.
+    /// Ids follow the order the merge met the alleles, which is the order the samples were
+    /// given, so an id tie-break changed a site's quality with the cohort's order. Here allele
+    /// 1 is `T` and allele 2 is `C`, so the lower id and the earlier bases disagree, and no
+    /// sample carries either, so the choice falls back to all alternatives.
     #[test]
-    fn a_tie_between_two_alternatives_goes_to_the_lower_allele_id() {
+    fn a_tie_between_two_alternatives_goes_to_the_bases_that_sort_first() {
         let (alleles, table) = generic_locus(2);
         let view = table.view();
         let rows = [
@@ -5711,12 +5761,59 @@ mod tests {
             &MarginalizedDirichletPrior,
         );
 
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(0)]
+        );
         let counts = inference
             .artifact_test_counts()
             .expect("both alternatives drew reads");
-        assert_eq!(counts.primary_alternative, AlleleId(1));
-        // And the counts are that allele's, not the other's — 3 forward against 1.
-        assert_eq!(counts.alternative_forward_reads, 3.0);
+        assert_eq!(counts.primary_alternative, AlleleId(2), "C sorts before T");
+        // And the counts are that allele's, not the other's — 1 forward against 3.
+        assert_eq!(counts.alternative_forward_reads, 1.0);
+    }
+
+    /// **An alternative a sample is called carrying is weighed before one with more reads that
+    /// no sample carries.**
+    ///
+    /// The tests are about the record: the allele-balance test expects the called copies of
+    /// the alternative it weighs, and an allele absent from every call expects none and is not
+    /// in the record's `ALT`. On 8 tomato accessions, SL4.0ch01:3493044 lost 126 of 163 Phred
+    /// to the strand test on such an allele. Here allele 1 draws 5 reads and no call; allele 2
+    /// draws 2 and the sample is called `0/2`.
+    #[test]
+    fn the_primary_alternative_is_one_a_call_carries_before_one_with_more_reads() {
+        let (alleles, table) = generic_locus(2);
+        let view = table.view();
+        let rows = [
+            observation(0, 0, 4, 2, 2),
+            observation(1, 0, 5, 5, 0),
+            observation(2, 0, 2, 1, 1),
+        ];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        // Genotypes in table order 0/0, 0/1, 1/1, 0/2, 1/2, 2/2; the reads favour 0/2.
+        let inference = call_locus(
+            &[vec![-6.0, -6.0, -6.0, 0.0, -6.0, -6.0]],
+            &evidence,
+            &[1.0, 0.5, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(2)]
+        );
+        let counts = inference
+            .artifact_test_counts()
+            .expect("both alternatives drew reads");
+        assert_eq!(counts.primary_alternative, AlleleId(2));
+        assert_eq!(counts.alternative_reads, 2.0);
+        // Half of the sample's 11 reads, from the one copy of allele 2 its call carries.
+        assert_eq!(counts.genotype_expected_alternative_reads, 5.5);
     }
 
     /// **A locus whose alternatives no read reached carries no artifact summary**, and the

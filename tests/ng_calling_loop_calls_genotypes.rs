@@ -590,9 +590,10 @@ fn a_locus_the_merge_builds_can_still_be_called_over_the_reference_alone() {
 /// Five samples over a reference `A`. The merge interns sequences in the order it meets them
 /// walking samples in ascending order, so its table is **`[A, T, G, C]`**; `G` is one sample's 3
 /// reads in 100, which clears the merge's 2% bar and fails selection's 10%, so it is dropped and
-/// the candidates are **`[A, T, C]`**. **`C` is therefore merge index 3 and candidate id 2**, and
-/// the assertions below are on the literal ids rather than on a lookup by bases — which is what
-/// makes them able to fail.
+/// the candidates are **`[A, C, T]`** — admitted in the order of their bases, not the merge's.
+/// **`C` is therefore merge index 3 and candidate id 1, and `T` merge index 1 and candidate id
+/// 2**, and the assertions below are on the literal ids rather than on a lookup by bases — which
+/// is what makes them able to fail.
 ///
 /// *(The first version of this test had nothing dropped, so the remapping was the identity and
 /// the ids were resolved by looking each sequence up in the output. Deleting the remapping
@@ -628,21 +629,25 @@ fn a_locus_with_two_alternatives_is_called_over_all_three_and_the_ids_are_select
             .to_vec()
     };
     assert_eq!(bases_of(0), b"A".to_vec(), "the reference is candidate 0");
-    assert_eq!(bases_of(1), b"T".to_vec());
+    assert_eq!(
+        bases_of(1),
+        b"C".to_vec(),
+        "C is merge index 3 and candidate 1 — the remapping closed the gap G left"
+    );
     assert_eq!(
         bases_of(2),
-        b"C".to_vec(),
-        "C is merge index 3 and candidate 2 — the remapping closed the gap G left"
+        b"T".to_vec(),
+        "T is merge index 1 and candidate 2"
     );
 
-    assert_eq!(genotype_of(&inference, 0), vec![1, 1], "20 reads of T");
+    assert_eq!(genotype_of(&inference, 0), vec![2, 2], "20 reads of T");
     assert_eq!(
         genotype_of(&inference, 1),
         vec![0, 0],
         "3 G in 100 is not a candidate"
     );
-    assert_eq!(genotype_of(&inference, 2), vec![2, 2], "20 reads of C");
-    assert_eq!(genotype_of(&inference, 3), vec![0, 1], "10 A and 10 T");
+    assert_eq!(genotype_of(&inference, 2), vec![1, 1], "20 reads of C");
+    assert_eq!(genotype_of(&inference, 3), vec![0, 2], "10 A and 10 T");
     assert_eq!(genotype_of(&inference, 4), vec![0, 0], "20 reads of A");
 }
 
