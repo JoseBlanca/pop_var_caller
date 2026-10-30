@@ -25,6 +25,7 @@ import collections
 import csv
 import math
 import os
+import textwrap
 
 import matplotlib
 
@@ -271,19 +272,25 @@ def dot_panel(ax, counts, layout, show_labels):
                         color=TEXT, fontweight="bold")
 
 
-def error_figure(panels, title, subtitle, out, name):
-    """`panels`: [(panel title, {(depth, caller): {error type: count}})]; empty panels dropped."""
+def error_figure(panels, title, subtitle, out, name, ncols=None):
+    """`panels`: [(panel title, {(depth, caller): {error type: count}})]; empty panels dropped.
+
+    The panels sit in one row unless `ncols` says how many go across."""
     panels = [(t, c) for t, c in panels if c]
     if not panels:
         return None
     layout = row_layout(panels)
-    fig, axes = plt.subplots(1, len(panels), figsize=(4.4 * len(panels) + 1.6,
-                                                      1.4 + 0.27 * len(layout[0])),
+    ncols = min(ncols or len(panels), len(panels))
+    nrows = math.ceil(len(panels) / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.4 * ncols + 1.6,
+                                                    (1.4 + 0.27 * len(layout[0])) * nrows),
                              facecolor=SURFACE, sharey=True, squeeze=False)
-    for i, ((panel, counts), ax) in enumerate(zip(panels, axes[0])):
-        dot_panel(ax, counts, layout, show_labels=(i == 0))
+    for i, ((panel, counts), ax) in enumerate(zip(panels, axes.flat)):
+        dot_panel(ax, counts, layout, show_labels=(i % ncols == 0))
         ax.set_title(panel, loc="left", color=TEXT, fontsize=11)
         ax.set_xlabel("errors (log scale)", color=TEXT_2, fontsize=9)
+    for ax in list(axes.flat)[len(panels):]:
+        ax.set_visible(False)
     fig.tight_layout(rect=(0.04, 0.05, 1, 1))
     handles = [Line2D([], [], linestyle="none", marker=m["marker"], markersize=m["size"],
                       markeredgewidth=m["edge"], alpha=m["alpha"],
@@ -292,10 +299,16 @@ def error_figure(panels, title, subtitle, out, name):
                for _, label, m in ERROR_MARKS]
     fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False, fontsize=9,
                bbox_to_anchor=(0.5, -0.01), labelcolor=TEXT)
+    # The heading's lines, stacked upwards from the top of the panels and wrapped to the figure's
+    # width (a character is about half its font size wide), so a narrow figure is not widened.
     pt = 1 / 72 / fig.get_figheight()
-    fig.text(0.01, 1 + 4 * pt, ERROR_SUBTITLE, ha="left", va="bottom", color=TEXT_2, fontsize=8)
-    fig.text(0.01, 1 + 17 * pt, subtitle, ha="left", va="bottom", color=TEXT_2, fontsize=9)
-    fig.text(0.01, 1 + 32 * pt, title, ha="left", va="bottom", color=TEXT, fontsize=13)
+    y = 4
+    for text, size, colour in ((ERROR_SUBTITLE, 8, TEXT_2), (subtitle, 9, TEXT_2),
+                               (title, 13, TEXT)):
+        wrapped = textwrap.fill(text, int(fig.get_figwidth() * 72 / (0.5 * size)))
+        fig.text(0.01, 1 + y * pt, wrapped, ha="left", va="bottom", color=colour, fontsize=size,
+                 linespacing=1.3)
+        y += (wrapped.count("\n") + 1) * size * 1.3 + 2
     os.makedirs(out, exist_ok=True)
     for ext in ("svg", "png"):
         fig.savefig(os.path.join(out, f"{name}.{ext}"), facecolor=SURFACE, dpi=160,
@@ -304,15 +317,111 @@ def error_figure(panels, title, subtitle, out, name):
     return os.path.join(out, f"{name}.svg")
 
 
-# pvc_eval's classes of variant, one panel each.
-KIND_PANELS = [("SNPs", "SNP"), ("indels", "indel"), ("STRs", "STR"), ("complex", "complex")]
+# pvc_eval's classes of variant, one panel each, in two figures of two panels: each figure is one
+# column, so a panel is as wide as the page it is shown on.
+KIND_FIGURES = [
+    ("snps_indels", "SNPs and indels", [("SNPs", "SNP"), ("indels", "indel")]),
+    ("strs_complex", "STRs and complex variants", [("STRs", "STR"), ("complex", "complex")]),
+]
 
 
 def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggregate=False,
                              exclude=()):
-    panels = [(title_, error_counts(rows, benchmark, kind, aggregate, exclude))
-              for title_, kind in KIND_PANELS]
-    return error_figure(panels, title, subtitle, out, name)
+    """Two figures, `<name>_snps_indels` and `<name>_strs_complex`; returns their paths."""
+    made = []
+    for suffix, kinds_title, kinds in KIND_FIGURES:
+        panels = [(title_, error_counts(rows, benchmark, kind, aggregate, exclude))
+                  for title_, kind in kinds]
+        made.append(error_figure(panels, f"{title}: {kinds_title}", subtitle, out,
+                                 f"{name}_{suffix}", ncols=1))
+    return made
+
+
+# ---- accuracy: false positives against false negatives ---------------------------------------
+#
+# For a benchmark where no caller leaves a genotype missing (one sample called alone: every
+# caller writes a genotype for each record it emits), the dot plot's third mark is always 0 and
+# two numbers are left. A scatter shows them better: false positives across, the variants the
+# truth has and the call does not give down, one line per caller through its depths, so the
+# corner nearest 0, 0 is the good one. Both axes are logarithmic with a short linear stretch from
+# 0 to 1, which holds the zeros.
+
+SCATTER_LABEL = {"pvc (fitted)": "pvc"}
+# Marker sizes for the depths, smallest first: depth is the marker's size, so every caller's points
+# say their depth without a label each.
+SCATTER_SIZES = [5, 8.5, 12, 15.5, 19]
+
+
+def error_scatter_figure(rows, benchmark, title, subtitle, out, name):
+    """Two figures, `<name>_scatter_snps_indels` and `<name>_scatter_strs_complex`."""
+    styles = {c: dict(STYLE[c], label=SCATTER_LABEL.get(c, STYLE[c]["label"]),
+                      linestyle="-") for c in ERROR_FIGURE_CALLERS}
+    made = []
+    for suffix, kinds_title, kinds in KIND_FIGURES:
+        panels = [(t, error_counts(rows, benchmark, kind)) for t, kind in kinds]
+        panels = [(t, c) for t, c in panels if c]
+        if not panels:
+            continue
+        depths = sorted({d for _, c in panels for d, _ in c}, key=depth_key)
+        fig, axes = plt.subplots(len(panels), 1, figsize=(6.4, 5.6 * len(panels)),
+                                 facecolor=SURFACE, squeeze=False)
+        for (panel, counts), ax in zip(panels, axes[:, 0]):
+            series = {}
+            for depth, caller in sorted(counts, key=lambda k: depth_key(k[0])):
+                c = counts[(depth, caller)]
+                series.setdefault(caller, []).append(
+                    (c.get("wrong_gt_truth_ref", 0), c.get("wrong_gt_truth_var", 0),
+                     depth))
+            style_axes(ax, "false positives: a variant called where the truth is reference",
+                       "false negatives: the truth has a variant and the call\n"
+                       "is not its genotype", panel)
+            size = {d: SCATTER_SIZES[i] for i, d in enumerate(depths)}
+            for caller in ERROR_FIGURE_CALLERS:
+                pts = series.get(caller)
+                if not pts:
+                    continue
+                st = styles[caller]
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                ax.plot(xs, ys, color=st["color"], linewidth=1.6, alpha=0.7, zorder=2)
+                # Hollow, so markers that overlap where the callers crowd still show.
+                for x, y, depth in pts:
+                    ax.plot(x, y, linestyle="none", marker=st["marker"],
+                            markersize=size[depth], markerfacecolor="none",
+                            markeredgecolor=st["color"], markeredgewidth=1.8, zorder=3)
+                ax.annotate(st["label"], (xs[-1], ys[-1]), xytext=(10, 0),
+                            textcoords="offset points", fontsize=8.5, color=TEXT, va="center",
+                            zorder=4, gid="caller")
+            points = [p for pts in series.values() for p in pts]
+            for i, (setter, limits) in enumerate(((ax.set_xscale, ax.set_xlim),
+                                                  (ax.set_yscale, ax.set_ylim))):
+                values = [p[i] for p in points]
+                if min(values) == 0:
+                    # The zero stretch only where some caller has a zero.
+                    setter("symlog", linthresh=1, linscale=0.4)
+                    limits(-0.3, max(values) * 1.6)
+                else:
+                    limits(min(values) / 1.6, max(values) * 1.6)
+            fmt = FuncFormatter(lambda v, _: f"{v:,.0f}" if v >= 1 else "0")
+            minor = FuncFormatter(lambda v, _: f"{v:,.0f}" if is_two_or_five(v) else "")
+            for axis in (ax.xaxis, ax.yaxis):
+                axis.set_major_formatter(fmt)
+                axis.set_minor_formatter(minor if axis.get_scale() == "log" else NullFormatter())
+        fig.tight_layout(rect=(0, 0.03, 1, 1))
+        handles = [Line2D([], [], linestyle="none", marker="o", markersize=SCATTER_SIZES[i],
+                          markerfacecolor="none", markeredgecolor=TEXT_2, markeredgewidth=1.8,
+                          label=depth_label(d)) for i, d in enumerate(depths)]
+        fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
+                   fontsize=9, bbox_to_anchor=(0.5, -0.01), labelcolor=TEXT,
+                   title="read depth", title_fontsize=9)
+        pt = 1 / 72 / fig.get_figheight()
+        y = 4
+        for text, size, colour in ((subtitle, 9, TEXT_2), (f"{title}: {kinds_title}", 13, TEXT)):
+            wrapped = textwrap.fill(text, int(fig.get_figwidth() * 72 / (0.5 * size)))
+            fig.text(0.01, 1 + y * pt, wrapped, ha="left", va="bottom", color=colour,
+                     fontsize=size, linespacing=1.3)
+            y += (wrapped.count("\n") + 1) * size * 1.3 + 2
+        made.append(save(fig, out, f"{name}_scatter_{suffix}"))
+    return made
 
 
 # The simulated stuttering benchmark scores with its own scorer (scripts/ng_str_stutter_score.py):
@@ -428,21 +537,25 @@ def main():
     rows = read_rows(os.path.join(args.run, "results.tsv"))
     out = args.out or os.path.join(args.run, "figures")
     made = [
-        vcfeval_benchmark_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20",
+        *vcfeval_benchmark_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20",
                                  "GIAB v4.2.1 confident regions; scored by pvc_eval; depths from "
                                  "5× to ~60×", out, "errors_giab_chr20"),
-        vcfeval_benchmark_figure(rows, "giab_panel", "Errors — GIAB HG002, HG003, HG004 panel",
+        *error_scatter_figure(rows, "giab_chr20", "Errors — HG002, chromosome 20",
+                              "GIAB v4.2.1 confident regions; scored by pvc_eval; one point per "
+                              "depth, larger for more reads; the bottom-left corner is the best",
+                              out, "errors_giab_chr20"),
+        *vcfeval_benchmark_figure(rows, "giab_panel", "Errors — GIAB HG002, HG003, HG004 panel",
                                  "100 confident regions per sample, each sample called alone, "
                                  "summed over the three; scored by pvc_eval", out,
                                  "errors_giab_panel", aggregate=True),
-        vcfeval_benchmark_figure(rows, "giab_trio", "Errors — GIAB trio, called jointly",
+        *vcfeval_benchmark_figure(rows, "giab_trio", "Errors — GIAB trio, called jointly",
                                  "HG002, HG003 and HG004 called together over 100 common regions, "
                                  "summed over the three; scored by pvc_eval", out,
                                  "errors_giab_trio", aggregate=True),
-        vcfeval_benchmark_figure(rows, "hg002_5mb", "Errors — HG002 over 5 Mb",
+        *vcfeval_benchmark_figure(rows, "hg002_5mb", "Errors — HG002 over 5 Mb",
                                  "1,000 confident intervals (5.08 Mb); scored by pvc_eval", out,
                                  "errors_hg002_5mb"),
-        vcfeval_benchmark_figure(rows, "hg002_tr", "Errors — HG002, GIAB tandem-repeat regions",
+        *vcfeval_benchmark_figure(rows, "hg002_tr", "Errors — HG002, GIAB tandem-repeat regions",
                                  "GIAB TR benchmark v1.0.1, 50,000 regions (6.1 Mb); scored by "
                                  "pvc_eval; HipSTR left out: it calls repeat lengths only, and "
                                  "its long records make pvc_eval class its loci as indels and "
