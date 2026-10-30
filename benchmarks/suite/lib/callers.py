@@ -31,14 +31,23 @@ def pvc_catalog(ctx, reference, out, log):
 
 
 def pvc_call_from_alignments(ctx, reference, catalog, alignments, regions, out, log,
-                             parameters=None):
+                             parameters=None, threads=None, label="call_from_alignments"):
     alignment_args = " ".join(f"--alignment {q(a)}" for a in alignments)
     source = f"--parameters {q(parameters)}" if parameters else "--defaults"
     regions_arg = f"--regions {q(regions)}" if regions else ""
-    return ("call_from_alignments",
+    return (label,
             f"{q(ctx.pvc_bin)} call-from-alignments --reference {q(reference)} "
             f"--catalog {q(catalog)} {alignment_args} {regions_arg} {source} "
-            f"--threads {ctx.threads} --output {q(out)} --log {q(log)} --force")
+            f"--threads {threads or ctx.threads} --output {q(out)} --log {q(log)} --force")
+
+
+def pvc_join_segments(segment_vcfs, out):
+    """The segments' VCFs, each indexed first (pvc writes none), joined in the reference's order."""
+    index = " && ".join(f"bcftools index -t {q(v)}" for v in segment_vcfs)
+    inputs = " ".join(q(v) for v in segment_vcfs)
+    return ("join_segments",
+            f"{index} && bcftools concat --no-version --allow-overlaps -Ou {inputs} "
+            f"| bcftools sort -Oz -o {q(out)} && bcftools index -t {q(out)}")
 
 
 def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, out_dir, log_dir):
@@ -212,6 +221,43 @@ def split_regions(regions_bed, out_dir, blocks):
     paths = []
     for i, block in enumerate(files):
         path = os.path.join(out_dir, f"block{i:04d}.bed")
+        with open(path, "w") as fh:
+            for chrom, s, e in block:
+                fh.write(f"{chrom}\t{s}\t{e}\n")
+        paths.append(path)
+    return paths
+
+
+def split_regions_even(regions_bed, out_dir, parts):
+    """Split a BED into `parts` files of equal total length, each a contiguous run of the regions.
+
+    An interval is cut wherever a boundary falls, so one long interval (a whole chromosome) becomes
+    `parts` pieces. Fewer files when the regions hold fewer bases than `parts`.
+    """
+    intervals = []
+    with open(regions_bed) as fh:
+        for line in fh:
+            if not line.strip() or line.startswith(("#", "track", "browser")):
+                continue
+            chrom, start, end = line.split()[:3]
+            intervals.append((chrom, int(start), int(end)))
+    total = sum(e - s for _, s, e in intervals)
+    parts = max(1, min(parts, total))
+    # Part i holds the bases from i * total // parts up to (i + 1) * total // parts of the regions
+    # laid end to end.
+    bounds = [i * total // parts for i in range(parts + 1)]
+    files = [[] for _ in range(parts)]
+    offset = 0
+    for chrom, start, end in intervals:
+        for i in range(parts):
+            lo, hi = max(bounds[i], offset), min(bounds[i + 1], offset + end - start)
+            if lo < hi:
+                files[i].append((chrom, start + lo - offset, start + hi - offset))
+        offset += end - start
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for i, block in enumerate(files):
+        path = os.path.join(out_dir, f"segment{i:02d}.bed")
         with open(path, "w") as fh:
             for chrom, s, e in block:
                 fh.write(f"{chrom}\t{s}\t{e}\n")

@@ -365,6 +365,7 @@ def stutter_figures(rows, out):
 # cohort, and is in no line (the summary reports it on its own).
 PERF_LINES = [
     ("pvc, one step", "pvc (defaults)", ("call-from-alignments",)),
+    ("pvc, one step, 3 segments", "pvc (defaults, 3 segments)", ("whole pipeline",)),
     ("pvc, building psps", "pvc (fitted)", ("generate-psps",)),
     ("pvc, calling from psps", "pvc (fitted)", ("call-from-psps",)),
     ("GATK", "GATK", ("whole pipeline", "HaplotypeCaller")),
@@ -373,6 +374,8 @@ PERF_LINES = [
 ]
 PERF_STYLE = dict(STYLE)
 PERF_STYLE["pvc, one step"] = dict(STYLE["pvc (defaults)"], label="pvc, one step")
+PERF_STYLE["pvc, one step, 3 segments"] = dict(color="#2a78d6", linestyle="-.", marker="*",
+                                               label="pvc, one step, 3 segments")
 PERF_STYLE["pvc, building psps"] = dict(color="#2a78d6", linestyle="--", marker="s",
                                         label="pvc, building psps")
 PERF_STYLE["pvc, calling from psps"] = dict(color="#2a78d6", linestyle=":", marker="v",

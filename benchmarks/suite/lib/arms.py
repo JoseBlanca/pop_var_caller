@@ -6,6 +6,7 @@ An *arm* is one way of calling the same data:
 |-----------------|--------------------|----------------------------------------------------------------|
 | `pvc_defaults`  | pvc (defaults)     | `call-from-alignments --defaults`                              |
 | `pvc_fitted`    | pvc (fitted)       | `generate-psps`, `estimate-parameters`, `call-from-psps`       |
+| `pvc_segments`  | pvc (defaults, 3 segments) | `call-from-alignments --defaults` over 3 segments at once, joined |
 | `gatk`          | GATK               | HaplotypeCaller (one sample), or GVCFs, then a sharded join and GenotypeGVCFs |
 | `freebayes`     | freebayes          | one process per block of regions, all samples together         |
 
@@ -26,14 +27,21 @@ from .steps import Step, file_identity
 GRCH38 = os.path.expanduser(
     "~/genomes/h_sapiens/gca_grch38/GCA_000001405.15_GRCh38_no_alt_plus_hs38d1_analysis_set.fna")
 
-ARM_LABELS = {"pvc_defaults": "pvc (defaults)", "pvc_fitted": "pvc (fitted)", "gatk": "GATK",
+# pvc in one step over this many segments of the regions at once, each with an equal share of the
+# threads. Its memory does not shrink with the ground it covers (about 200 MB a sample on tomato,
+# rick, October 2026), so each segment costs a whole run's: 3 at 100 samples is about 61 GB, within
+# the suite's 80 GB, where 4 would be about 81 GB.
+PVC_SEGMENTS = 3
+
+ARM_LABELS = {"pvc_defaults": "pvc (defaults)", "pvc_fitted": "pvc (fitted)",
+              "pvc_segments": f"pvc (defaults, {PVC_SEGMENTS} segments)", "gatk": "GATK",
               "freebayes": "freebayes", "hipstr": "HipSTR", "deepvariant": "DeepVariant"}
-ARM_CALLER = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebayes": "freebayes",
-              "hipstr": "hipstr", "deepvariant": "deepvariant"}
-ARM_KIND = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "competitor",
+ARM_CALLER = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "pvc_segments": "pvc", "gatk": "gatk",
+              "freebayes": "freebayes", "hipstr": "hipstr", "deepvariant": "deepvariant"}
+ARM_KIND = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "pvc_segments": "pvc", "gatk": "competitor",
             "freebayes": "competitor", "hipstr": "competitor", "deepvariant": "competitor"}
-ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "gatk": "gatk", "freebayes": "freebayes",
-            "hipstr": "hipstr", "deepvariant": "deepvariant"}
+ARM_TOOL = {"pvc_defaults": "pvc", "pvc_fitted": "pvc", "pvc_segments": "pvc", "gatk": "gatk",
+            "freebayes": "freebayes", "hipstr": "hipstr", "deepvariant": "deepvariant"}
 # freebayes writes every candidate it considers; its documentation asks for a quality filter.
 MIN_QUAL = {"freebayes": 20}
 
@@ -180,6 +188,8 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
                            regions, reference)
         if arm == "gatk" and joint:
             out["joint_route"] = callers.gatk_joint_route()
+        if arm == "pvc_segments":
+            out["segments"] = PVC_SEGMENTS
         return out
 
     if arm == "pvc_defaults":
@@ -190,6 +200,32 @@ def arm_steps(ctx, arm, prefix, reference, catalog, alignments_by_sample, region
             m = run_commands([callers.pvc_call_from_alignments(
                 ctx, reference, catalog, flat, regions, calls, log)], os.path.join(d, "logs"))
             return {"measurement": m, "rows": time_rows(row_base, m, "call-from-alignments")}
+
+    elif arm == "pvc_segments":
+        def action(d):
+            check_alignments(flat + [reference])
+            warm(flat + [reference])  # every tool reads from memory (measure.warm)
+            logs = os.path.join(d, "logs")
+            segments = callers.split_regions_even(regions, os.path.join(d, "segments"),
+                                                  PVC_SEGMENTS)
+            threads = max(1, ctx.threads // len(segments))
+            seg_dir = os.path.join(d, "segment_vcfs")
+            os.makedirs(seg_dir)
+            vcfs, cmds = [], []
+            for bed in segments:
+                seg = os.path.splitext(os.path.basename(bed))[0]
+                vcfs.append(os.path.join(seg_dir, f"{seg}.vcf.gz"))
+                cmds.append(callers.pvc_call_from_alignments(
+                    ctx, reference, catalog, flat, bed, vcfs[-1], os.path.join(d, f"{seg}.log"),
+                    threads=threads, label=f"call_from_alignments.{seg}"))
+            m_call = run_commands(cmds, logs, max_concurrent=len(segments))
+            m_join = run_commands([callers.pvc_join_segments(vcfs, calls)], logs)
+            shutil.rmtree(seg_dir)
+            total = merge(m_call, m_join)
+            rows = (time_rows(row_base, m_call, "call-from-alignments")
+                    + time_rows(row_base, m_join, "join segments")
+                    + time_rows(row_base, total, "whole pipeline"))
+            return {"measurement": total, "rows": rows}
 
     elif arm == "pvc_fitted":
         def action(d):

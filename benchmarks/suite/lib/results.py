@@ -258,10 +258,11 @@ def _add_sample_section(rows, threads):
         geno = g("GATK", "GenotypeGVCFs")
         fit = g("pvc (fitted)", "estimate-parameters")
         direct = g("pvc (defaults)", "call-from-alignments")
+        segments = g("pvc (defaults, 3 segments)", "whole pipeline")
         fmt = lambda v: "." if v is None else f"{v:,.1f}"
         pvc_add = psp + call if psp is not None and call is not None else None
         gatk_add = gvcf + comb + geno if None not in (gvcf, comb, geno) else None
-        lines.append(f"| {key[2]} | {fmt(direct)} | {fmt(psp)} | {fmt(call)} | {fmt(pvc_add)} | "
+        lines.append(f"| {key[2]} | {fmt(direct)} | {fmt(segments)} | {fmt(psp)} | {fmt(call)} | {fmt(pvc_add)} | "
                      f"{fmt(fit)} | {fmt(gvcf)} | {fmt(comb)} | {fmt(geno)} | {fmt(gatk_add)} |")
     if not lines:
         return []
@@ -275,10 +276,10 @@ def _add_sample_section(rows, threads):
             "GenomicsDBImport on x86-64 and CombineGVCFs elsewhere (the stage rows name which).",
             "Tomato cohort; wall seconds.",
             "",
-            "| samples | pvc one step | pvc: one psp | pvc: call from psps | pvc: add a sample | "
+            "| samples | pvc one step | pvc one step, 3 segments | pvc: one psp | pvc: call from psps | pvc: add a sample | "
             "pvc: fit (optional) | GATK: one GVCF | GATK: join GVCFs | GATK: GenotypeGVCFs | "
             "GATK: add a sample |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"] + lines + [""]
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"] + lines + [""]
 
 
 def _num(value):
