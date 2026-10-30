@@ -1020,6 +1020,58 @@ mod tests {
         );
     }
 
+    /// **The largest ploidy the caller accepts is scored, not refused.** The fold keeps a
+    /// sample's copy-count weights in a fixed array sized for that ploidy, so this is the case
+    /// that would find it a slot short. Two samples of sixteen copies each: reads that say every
+    /// copy is the alternative earn a confident quality, reads that say every copy is the
+    /// reference earn almost none.
+    #[test]
+    fn the_largest_ploidy_is_scored() {
+        let ploidy = crate::calling::likelihood::MAX_PLOIDY_COPIES;
+        let mut alleles = CandidateAlleles::new(Box::from(b"A".as_slice()), LocusKind::Generic);
+        alleles.admit(Box::from(b"T".as_slice()));
+        let table = GenotypeTable::build(
+            Ploidy::try_new(u8::try_from(ploidy).expect("a small ploidy")).expect("a ploidy"),
+            alleles.len(),
+        );
+        let view = table.view();
+        let quality_where = |favoured_alternative_copies: usize| {
+            let mut scratch = CallingScratch::<()>::default();
+            scratch.prepare_for_locus(2, &alleles, &view);
+            for sample in 0..2 {
+                for (genotype, slot) in scratch
+                    .sample_genotype_likelihoods_mut(sample)
+                    .iter_mut()
+                    .enumerate()
+                {
+                    let reference_copies =
+                        view.genotype_allele_counts()[genotype * view.allele_count()] as usize;
+                    let alternative_copies = ploidy - reference_copies;
+                    let distance = alternative_copies.abs_diff(favoured_alternative_copies);
+                    *slot = LogProb(-10.0 * distance as f64);
+                }
+            }
+            f64::from(
+                score_uncorrected_site_quality(
+                    scratch.site_quality_buffers_mut(),
+                    &view,
+                    human_like_seed(),
+                )
+                .get(),
+            )
+        };
+        let carried = quality_where(ploidy);
+        let absent = quality_where(0);
+        assert!(
+            carried > 20.0,
+            "every copy alternative in two samples: {carried}"
+        );
+        assert!(
+            absent < 1.0,
+            "every copy reference in two samples: {absent}"
+        );
+    }
+
     /// **The property the whole formula was chosen for: adding reference-looking samples
     /// does not pile up evidence for a variant.**
     ///
