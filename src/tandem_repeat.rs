@@ -459,6 +459,156 @@ fn maximal_scoring_subsequences(
     }
 }
 
+/// Split one maximal scoring segment wherever the **motif changes**, emitting each piece as
+/// `(k0, k1, score)` — the same score-index form [`maximal_scoring_subsequences`] emits.
+///
+/// The lag-`p` comparison asks only "is this base the one `p` back?", which is as true inside a
+/// run of `A` as inside a run of `T`. So `A×12 T×12` scores 11 matches, one mismatch, 11 matches
+/// at period 1, and the segment runs across the junction: one tract, motif `A`, half of it `T`.
+/// The consumer's purity floor then rejects it and **both** repeats are lost. The same holds
+/// for `(CA)×10 (GT)×10` at period 2, or `(GA)×12` running into `C×12`.
+///
+/// The test is what tells a motif change from the interruptions §3.4 keeps whole. A
+/// **solid block** is a run of consecutive lag-`p` matches long enough to be a repeat by the
+/// scanner's own floor — at least `min_copies` copies, and never less than two, so its motif is
+/// fully determined. Its motif is compared up to rotation:
+///
+/// - a substitution leaves fewer than `p` matches between its two mismatches (spec §3.3), so it
+///   never makes a solid block, and the blocks either side share the motif;
+/// - an indel shifts phase, so the block after it carries a **rotation** of the motif before —
+///   the same motif;
+/// - a different repeat abutting this one carries a motif that is no rotation of it — a split.
+///
+/// Consecutive solid blocks with the same motif form one piece; the bases between two pieces
+/// (the junction's mismatches) belong to neither.
+///
+/// **A short stretch of another motif inside a repeat is an interruption, not a second
+/// repeat.** `ATATATATACACATATATAT` is an `AT` repeat with two copies changed to `AC`; the
+/// `AC` pair is a solid block, but splitting there leaves pieces too short for a copy floor,
+/// and the repeat is lost — on tomato, 876 STR segments of this shape. So a piece is
+/// **absorbed** into its neighbours when they share a motif and the three together, compared
+/// base by base with that motif tiled in phase, are at least as pure as the scoring holds a
+/// tract to (spec §3.3: a ratio `r` holds tracts to purity `r / (1 + r)`, 7/9 ≈ 0.78 at the
+/// defaults). That example matches `AT` at 18 of 20 bases, 0.9, and stays whole; so does
+/// `(TAC)×2 (TGC)×4 (TAC)×3`, 0.85, whose inner motif differs from the outer by one base.
+/// Base by base, not piece by piece, because that is how the typing measures purity
+/// afterwards. No new knob: the tolerance is the one the scoring already states.
+///
+/// **A piece at either end is never absorbed**, however short: nothing of the first motif
+/// follows it, so it is where one repeat stops and another starts. `G×60 A×15` is `G` over 0.8
+/// of its bases, and still two repeats.
+///
+/// A segment with one motif throughout — every segment that is not a junction — and a segment
+/// whose pieces were all absorbed are emitted unchanged, score and all.
+fn split_at_motif_changes(
+    canonical: &[u8],
+    p: usize,
+    k0: usize,
+    k1: usize,
+    score: i64,
+    params: &ScanParams,
+    emit: &mut impl FnMut(usize, usize, i64),
+) {
+    // No mismatch, no motif change: a segment's score is all rewards exactly when every
+    // comparison in it matched. Nearly every segment is this — at period 1 every pair of
+    // equal neighbouring bases is one, and tomato's scan meets about 197 million segments too
+    // short to keep — and they skip the walk below, which cost the catalog build a quarter
+    // more time without this.
+    if score == i64::from(params.match_reward) * (k1 - k0 + 1) as i64 {
+        emit(k0, k1, score);
+        return;
+    }
+    let is_match = |k: usize| {
+        let h = canonical[k + p];
+        h != 0 && h == canonical[k]
+    };
+    // A block of `len` consecutive matches covers `len + p` bases, so `min_copies` copies need
+    // `(min_copies - 1) · p` matches; at least `p`, so the block holds two whole copies.
+    let solid_len = p * (params.min_copies.max(2) as usize - 1);
+    let same_motif = |a: usize, b: usize| {
+        let (x, y) = (&canonical[a..a + p], &canonical[b..b + p]);
+        (0..p).any(|r| (0..p).all(|i| x[i] == y[(i + r) % p]))
+    };
+
+    // The closed pieces, as `(first score index, last score index, where its motif is read)`.
+    // Empty — and never allocated — for a segment with one motif throughout.
+    let mut pieces: Vec<(usize, usize, usize)> = Vec::new();
+    // The open piece: where it starts, the last solid block's end, and that block's start
+    // (whose first `p` bases are the piece's current motif).
+    let mut piece_start = k0;
+    let mut motif_at: Option<usize> = None;
+    let mut last_solid_end = k0;
+    let mut k = k0;
+    while k <= k1 {
+        if !is_match(k) {
+            k += 1;
+            continue;
+        }
+        let b0 = k;
+        while k <= k1 && is_match(k) {
+            k += 1;
+        }
+        let b1 = k - 1;
+        if b1 + 1 - b0 < solid_len {
+            continue;
+        }
+        match motif_at {
+            Some(m) if !same_motif(m, b0) => {
+                pieces.push((piece_start, last_solid_end, m));
+                piece_start = b0;
+            }
+            _ => {}
+        }
+        motif_at = Some(b0);
+        last_solid_end = b1;
+    }
+    let (Some(last_motif), false) = (motif_at, pieces.is_empty()) else {
+        emit(k0, k1, score);
+        return;
+    };
+    pieces.push((piece_start, k1, last_motif));
+
+    // Absorb each interruption: a piece whose neighbours share a motif, when the three together
+    // are pure enough in the left one's motif. Left to right with a stack, so a joined piece is
+    // tested again against what follows it.
+    let reward = i64::from(params.match_reward);
+    let penalty = i64::from(params.mismatch_penalty);
+    // Of the tract a span of score indices certifies (widened by `p + 1`, as the segment's
+    // is), whether enough bases match the motif read at its first base, tiled in phase:
+    // matches / bases >= penalty / (reward + penalty), in integers.
+    let pure_enough = |first: usize, last: usize| {
+        let tract = &canonical[first..last + p + 1];
+        let matches = tract
+            .iter()
+            .enumerate()
+            .filter(|&(i, &b)| b == tract[i % p])
+            .count();
+        matches as i64 * (reward + penalty) >= penalty * tract.len() as i64
+    };
+    let mut kept: Vec<(usize, usize, usize)> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        kept.push(piece);
+        while let [.., left, _, right] = kept[..] {
+            if !(same_motif(left.2, right.2) && pure_enough(left.0, right.1)) {
+                break;
+            }
+            kept.truncate(kept.len() - 3);
+            kept.push((left.0, right.1, left.2));
+        }
+    }
+    if kept.len() == 1 {
+        emit(k0, k1, score);
+        return;
+    }
+    // Each piece's own score, over its own score indices, as the segment's was.
+    for (a, b, _) in kept {
+        let piece_score = (a..=b)
+            .map(|k| if is_match(k) { reward } else { -penalty })
+            .sum();
+        emit(a, b, piece_score);
+    }
+}
+
 /// Find every tandem-repeat interval in `seq` whose period lies in `periods` (arch §2.1).
 ///
 /// For each period `p` it scores position `j` (`j >= p`) `+match_reward` when `seq[j]`
@@ -506,7 +656,7 @@ pub fn find_tandem_repeats(
             .iter()
             .zip(here.iter())
             .map(|(&b, &h)| if h != 0 && h == b { reward } else { penalty });
-        maximal_scoring_subsequences(scores, |k0, k1, score| {
+        let mut emit = |k0: usize, k1: usize, score: i64| {
             // Segment [k0, k1] → tract [k0, k1 + p + 1): the earliest base involved is
             // `j0 - p = k0`, the latest is `j1 = k1 + p`, so the exclusive end is `k1+p+1`.
             let tract_start = k0 as u64;
@@ -527,6 +677,9 @@ pub fn find_tandem_repeats(
                     score: i32::try_from(score).unwrap_or(i32::MAX),
                 });
             }
+        };
+        maximal_scoring_subsequences(scores, |k0, k1, score| {
+            split_at_motif_changes(&canonical, p, k0, k1, score, params, &mut emit);
         });
     }
 
@@ -1364,6 +1517,97 @@ mod tests {
         );
         assert_eq!(period3[0].start, 0);
         assert_eq!(period3[0].end, seq.len() as u64);
+    }
+
+    /// Two abutting repeats of different motifs come back as **two** intervals, each with its
+    /// own motif — not one interval in the first motif, half of it the second, which the
+    /// purity floor then rejects whole. The four two-repeat shapes a simulator found merged.
+    #[test]
+    fn abutting_repeats_of_different_motifs_are_split() {
+        /// A sequence, and the `(start, end, period)` intervals it must yield.
+        type Case = (Vec<u8>, Vec<(u64, u64, u8)>);
+        let rep = |unit: &[u8], n: usize| unit.repeat(n);
+        let cases: Vec<Case> = vec![
+            (
+                [rep(b"A", 12), rep(b"T", 12)].concat(),
+                vec![(0, 12, 1), (12, 24, 1)],
+            ),
+            (
+                [rep(b"G", 60), rep(b"A", 15)].concat(),
+                vec![(0, 60, 1), (60, 75, 1)],
+            ),
+            (
+                [rep(b"GA", 12), rep(b"C", 12)].concat(),
+                vec![(0, 24, 2), (24, 36, 1)],
+            ),
+            (
+                [rep(b"CA", 10), rep(b"GT", 10)].concat(),
+                vec![(0, 20, 2), (20, 40, 2)],
+            ),
+        ];
+        for (seq, want) in cases {
+            let got = find_tandem_repeats(&seq, p(1, 6), &ScanParams::default());
+            let mut spans: Vec<(u64, u64, u8)> =
+                got.iter().map(|r| (r.start, r.end, r.period)).collect();
+            spans.sort_unstable();
+            for w in &want {
+                assert!(
+                    spans.contains(w),
+                    "{} lacks {w:?}: {spans:?}",
+                    String::from_utf8_lossy(&seq)
+                );
+            }
+            // Nothing spans the junction in the first motif's period.
+            let junction = want[0].1;
+            assert!(
+                !got.iter().any(|r| r.start < junction - 1
+                    && r.end > junction + 1
+                    && r.period == want[0].2),
+                "{} still has a merged interval: {spans:?}",
+                String::from_utf8_lossy(&seq)
+            );
+        }
+    }
+
+    /// Two copies of another motif **inside** a repeat are an interruption, not a second
+    /// repeat: `(AT)×4 A (CA)×2 (TA)×4 T` stays one `AT` interval, as it was before the split
+    /// existed. Its `AT` covers 17 of 20 bases, above the 7/9 the default scoring holds a tract
+    /// to. Found on tomato, where splitting this shape lost 876 STR segments.
+    #[test]
+    fn a_short_run_of_another_motif_inside_a_repeat_is_not_split() {
+        let seq = b"ATATATATACACATATATAT";
+        let got = find_tandem_repeats(seq, p(2, 2), &ScanParams::default());
+        assert_eq!(
+            got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
+            vec![(0, 20)],
+            "{got:?}"
+        );
+    }
+
+    /// The same interruption, too long for the tolerance: `(CA)×10 (GT)×10 (CA)×10` has `CA`
+    /// over two thirds of its bases, under 7/9, so all three repeats come back.
+    #[test]
+    fn a_long_run_of_another_motif_inside_a_repeat_is_split() {
+        let seq = [b"CA".repeat(10), b"GT".repeat(10), b"CA".repeat(10)].concat();
+        let got = find_tandem_repeats(&seq, p(2, 2), &ScanParams::default());
+        assert_eq!(
+            got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
+            vec![(0, 20), (20, 40), (40, 60)],
+            "{got:?}"
+        );
+    }
+
+    /// A homopolymer on its own is untouched by the split.
+    #[test]
+    fn a_lone_homopolymer_is_one_interval() {
+        let seq = b"AAAAAAAAAAAA";
+        let got = find_tandem_repeats(seq, p(1, 6), &ScanParams::default());
+        assert_eq!(
+            got.iter()
+                .map(|r| (r.start, r.end, r.period))
+                .collect::<Vec<_>>(),
+            vec![(0, 12, 1)]
+        );
     }
 
     /// A run of `N` yields nothing — `N == N` is not a match (spec §3.5).

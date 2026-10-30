@@ -847,31 +847,39 @@ fn a_window_over_one_end_of_a_bundle_types_the_whole_chain() {
     );
 }
 
-/// Sequence with no structure of its own, from a fixed seed — the same bases every run.
-fn pseudorandom(len: usize, seed: u64) -> String {
+/// Sequence with no structure of its own, from a fixed seed — the same bases every run. Each
+/// base is drawn uniformly from `alphabet`, so a letter listed three times is drawn three times
+/// as often as one listed once.
+fn pseudorandom_from(alphabet: &[u8], len: usize, seed: u64) -> String {
     let mut state = seed;
     (0..len)
         .map(|_| {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            b"ACGT"[((state >> 33) % 4) as usize] as char
+            alphabet[((state >> 33) % alphabet.len() as u64) as usize] as char
         })
         .collect()
 }
 
-/// [`fixture`] plus 200 kb of sequence with no designed structure.
+/// [`fixture`] plus 2 Mb of AT-rich sequence with no designed structure.
 ///
 /// **The hand-built contigs drive no rejection at all**, which would make the tally
 /// comparison assert four zeroes against four zeroes. Two of admission's gates need a
-/// haystack rather than a planted tract: over 200 kb of random bases the detector emits a few
-/// dozen tracts that lose a copy to the whole-motif cut (the copy floor) and a few dozen with
-/// no whole-motif boundaries to cut back to at all. The other two gates — an impure tract and
-/// a compound motif — a scan does not reach even over 2 Mb, and they are pinned instead by
-/// `segments.rs`'s own tests, which hand admission the rows directly.
+/// haystack rather than a planted tract: tracts that lose a copy to the whole-motif cut (the
+/// copy floor) and tracts with no whole-motif boundaries to cut back to at all.
+///
+/// **AT-rich, 2 Mb, not uniform 200 kb.** Uniform random bases drove both gates only through
+/// a scanner fault: two different short repeats side by side came back as one tract in the
+/// first one's motif, which then failed the cut. With that fixed, 4 Mb of uniform bases
+/// rejects nothing at all; 4 Mb at 70% A+T rejects 103 (55 at the cut, 29 at the copy floor,
+/// 19 at the purity floor).
+/// The purity floor fires here too, but too rarely in the 2 Mb to rely on; it and the
+/// compound-motif gate, which a scan does not reach, are pinned instead by `segments.rs`'s own
+/// tests, which hand admission the rows directly.
 fn tally_fixture() -> Vec<(&'static str, String)> {
     let mut contigs = fixture();
-    contigs.push(("chr_random", pseudorandom(200_000, 5)));
+    contigs.push(("chr_random", pseudorandom_from(b"AAATTTCGAT", 2_000_000, 5)));
     contigs
 }
 

@@ -229,6 +229,54 @@ tract, can produce a burst that outruns the flanking score and splits the segmen
 caller that cares can stitch same-period neighbours (deferred, §8). It is not built in: the
 local-comparison property already covers the cases that occur in practice.
 
+### 3.4a Two abutting repeats are two intervals (added 2026-10-30)
+
+The locality that keeps an interrupted repeat whole has a blind side: the lag-*p* comparison
+asks whether a base equals the one *p* back, and that is as true inside a run of `A` as inside
+a run of `T`. So two **different** repeats side by side score as one repeat with a single
+interruption at the junction. `A×12 T×12` at period 1 is 11 matches, one mismatch and 11
+matches, and came back as one interval whose motif — read at its first base — is `A`. Half its
+bases are `T`, the catalog's purity floor rejected it, and **both** repeats were lost. The same
+held for `(CA)×10 (GT)×10`, for `(GA)×12` running into `C×12`, and for `G×60 A×15`, which a
+simulator's flank re-scan found (owner's report, 2026-10-30).
+
+Each maximal scoring segment is therefore cut where its motif changes, after Ruzzo–Tompa and
+before emission:
+
+1. **Solid blocks.** A run of consecutive lag-*p* matches long enough to hold `min_copies`
+   copies (at least two) fixes a motif. A substitution never makes one — it leaves fewer than
+   *p* matches between its two mismatches (§3.3).
+2. **Motifs compared up to rotation.** An indel shifts phase, so the block after it carries a
+   rotation of the motif before: the same motif. Consecutive solid blocks with the same motif
+   form one piece; a block with a motif that is no rotation of the last one starts a new piece.
+3. **Interruptions are absorbed.** A piece whose neighbours on both sides share a motif is
+   joined to them when the three together, compared base by base with that motif tiled in
+   phase, are at least as pure as the scoring holds a tract to — `r / (1 + r)`, 7/9 at the
+   defaults. `(AT)×4 A (CA)×2 (TA)×4 T` matches `AT` at 18 of 20 bases and stays one interval;
+   `(CA)×10 (GT)×10 (CA)×10` matches `CA` at 40 of 60 and is three. No new knob: the tolerance
+   is the one §3.3 already states.
+4. **A piece at either end is never absorbed**: nothing of the first motif follows it, so it is
+   where one repeat stops and another starts. `G×60 A×15` is `G` at 0.8 of its bases and still
+   two repeats.
+
+A segment with no mismatch (its score is all rewards) cannot hold a motif change and skips the
+walk; that is nearly every segment, and it keeps the cost to about 3% of a tomato catalog build.
+
+**Measured on tomato SL4.00**, default settings, typed regions before and after:
+
+| | before | after |
+|---|---:|---|
+| STR segments | 462,678 | 489,355 |
+| — of which period 2 to 6 | 52,229 | 56,496 |
+| STR bundles | 22,755 | 30,324 |
+| repeat bases typed as no STR | 3,791,370 | 2,399,153 |
+
+461,127 segments are unchanged. Of the 1,551 segments that are gone, 1,313 are now members of a
+bundle with the repeat that abutted them, 218 are inside a satellite (a bundle that passes the
+100-base cap once its abutting repeat joins it), 7 are the same repeat with moved edges, and
+13 have become plain sequence — each a repeat with several different inner motifs, such as
+`(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4`.
+
 ### 3.5 Non-ACGT and case
 
 The scanner **upper-cases** each base before comparing (so soft-masked, i.e. lowercase,

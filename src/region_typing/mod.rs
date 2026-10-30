@@ -2598,6 +2598,57 @@ mod tests {
         );
     }
 
+    /// **Two abutting repeats of different motifs are one bundle carrying both** — the
+    /// scanner reports each in its own motif, so neither fails the purity floor for carrying
+    /// the other. Before, they came back as one tract in the first motif, half of it the
+    /// second, and the purity floor dropped both: the region was `Generic`.
+    #[test]
+    fn abutting_repeats_of_different_motifs_are_one_bundle_of_both() {
+        let rep = |unit: &[u8], n: usize| unit.repeat(n);
+        let cases: Vec<(Vec<u8>, [&[u8]; 2])> = vec![
+            ([rep(b"A", 12), rep(b"T", 12)].concat(), [b"A", b"T"]),
+            ([rep(b"G", 60), rep(b"A", 15)].concat(), [b"G", b"A"]),
+            ([rep(b"GA", 12), rep(b"C", 12)].concat(), [b"GA", b"C"]),
+            ([rep(b"CA", 10), rep(b"GT", 10)].concat(), [b"CA", b"GT"]),
+        ];
+        for (repeats, motifs) in cases {
+            let bases = [filler(80), repeats.clone(), filler(80)].concat();
+            let name = String::from_utf8_lossy(&repeats).into_owned();
+            let regions =
+                partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+            assert_partitions(&regions, ContigId(0), bases.len() as u64, &name);
+            let members: Vec<_> = regions
+                .iter()
+                .filter_map(|r| match &r.kind {
+                    RegionKind::SsrBundle { members } => Some(members),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                members.len(),
+                1,
+                "{name}: one bundle, got {:?}",
+                kinds_of(&regions)
+            );
+            // A member is cut back to whole copies, so its motif may be any rotation.
+            let rotation_of = |a: &[u8], b: &[u8]| {
+                a.len() == b.len()
+                    && (0..a.len())
+                        .any(|r| a[r..] == b[..a.len() - r] && a[..r] == b[a.len() - r..])
+            };
+            for motif in motifs {
+                assert!(
+                    members[0]
+                        .iter()
+                        .any(|m| rotation_of(m.motif().as_bytes(), motif)),
+                    "{name}: no member in {}: {:?}",
+                    String::from_utf8_lossy(motif),
+                    members[0]
+                );
+            }
+        }
+    }
+
     /// The typed regions and tally of a contig with two `(AT)*10` tracts 10 bases apart —
     /// one bundle at the default cap — typed with bundle cap `cap`.
     fn two_close_tracts_capped_at(cap: u64) -> (Vec<TypedRegion>, TypedRegionCounts) {
