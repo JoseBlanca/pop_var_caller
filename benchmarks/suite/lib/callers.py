@@ -164,10 +164,16 @@ def gatk_genotype_shards(ctx, reference, sources, shard_beds, out_dir):
 
 
 def gatk_gather(shard_vcfs, out):
-    """The shards' VCFs, in the regions' order, joined into one indexed VCF (GATK's GatherVcfs)."""
+    """The shards' VCFs joined into one sorted, indexed VCF (GATK's GatherVcfs).
+
+    Sorted, not concatenated in the shards' order: GATK writes each shard in the reference's order,
+    so where the regions put one chromosome in two shards with others between them, a plain
+    concatenation stops ("the chromosome block chr18 is not contiguous") and leaves a partial file.
+    """
     inputs = " ".join(q(v) for v in shard_vcfs)
     return ("gather_shards",
-            f"bcftools concat --no-version -Oz -o {q(out)} {inputs} && bcftools index -t {q(out)}")
+            f"bcftools concat --no-version -a -Ou {inputs} | bcftools sort -Oz -o {q(out)} "
+            f"&& bcftools index -t {q(out)}")
 
 
 # ---- freebayes --------------------------------------------------------------------------------
