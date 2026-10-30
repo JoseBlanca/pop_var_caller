@@ -30,22 +30,23 @@ chrom1  1    ATT  A     1/1   0/0   0/1
 chrom1  2    T    C,*   2/2   1/1   1/2
 ```
 
-Written **as separate records, without `*`**. DeepVariant writes it this way. Each record lists
-only its own event, so a copy that carries the deletion is written as reference, `0`, in the
-SNP's record:
+Written **as separate records, without `*`**. DeepVariant writes it this way. It calls each
+sample on its own, and its cohorts are usually merged with GLnexus. GLnexus writes a copy that
+carries the deletion as missing, `.`, in the SNP's record, and gives the reason in the FORMAT
+field `RNC` as `-`, "unrepresentable overlapping deletion":
 
 ```
 #CHROM  POS  REF  ALT   ind1  ind2  ind3
 chrom1  1    ATT  A     1/1   0/0   0/1
-chrom1  2    T    C     ./.   1/1   0/1
+chrom1  2    T    C     ./.   1/1   ./1
 ```
 
-ind1, with no read covering position 2, gets `./.` or `0/0` depending on how the samples' calls
-are merged.
+A single sample's VCF from DeepVariant, not merged, writes that copy as reference instead: ind3
+would be `0/1` at position 2.
 
-The first two forms say the same thing. The third has already lost information: at position 2,
-ind3 looks like a `T/C` heterozygote, although no copy carries `T`. The difference between the
-first two is what a downstream tool does with the second record.
+The first two forms say the same thing. The third has already lost information, the same way a
+tool loses it when it reads the second form: as if `*` were read as missing in a merged cohort,
+and as if `*` were recoded as reference in a single sample's VCF. The next section describes both.
 
 ## What goes wrong with the separate-records form
 
@@ -63,7 +64,7 @@ missing.
 
 **`*` recoded as the reference allele.** ind1 becomes `T/T` and ind3 `T/C` at position 2. This
 invents an allele, `T`, that no copy in the sample carries, and counts the deletion a second
-time, as a SNP. It is what the form without `*` already holds, so the same applies to it.
+time, as a SNP.
 
 **`*` counted as another allele.**
 

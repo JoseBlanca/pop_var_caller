@@ -37,7 +37,7 @@ than 100 bp.
 | pvc | 0.9941 | 0.9819 | 88% | 1 h 45 min / 11 GB | one record, never `*` |
 | GATK | 0.9928 | 0.9839 | 82% | 9 h 50 min / 75 GB | separate records, with `*` |
 | freebayes | 0.9933 | 0.9606 | not run | stalled, stopped after 17 h | one record, which also merges variants within 3 bases |
-| DeepVariant | 0.9966 | 0.9934 | 87% | not run | separate records, without `*`: a copy the deletion removes is written as reference |
+| DeepVariant | 0.9966 | 0.9934 | 87% | not run | separate records, without `*`: a copy the deletion removes is written as missing in a cohort, as reference in a single sample |
 | HipSTR | n/a | n/a | 73% | not run | STRs only: one record per repeat |
 
 At larger scale, pvc called more than 2,000 whole tomato genomes in a week using less than 30 GB.
