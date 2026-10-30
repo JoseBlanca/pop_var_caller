@@ -281,6 +281,17 @@ where
     fetch_flanks(reference, observation.region, flank, scratch)?;
 
     let reference_len = observation.alleles[0].len();
+    // **The longer alleles are tried best-supported first, ties by bases** — never in the merge
+    // table's order, which is the order the samples were given. A spelling can match more than
+    // one longer allele, on different borders, and the first match wins: on 63 tomato
+    // accessions, SL4.0ch10:57543357's `AAAAAA` was cut short on the right in one sample order
+    // and on the left in the other, and the site's QUAL moved with it.
+    let mut longer_first: Vec<usize> = (0..observation.alleles.len()).collect();
+    longer_first.sort_unstable_by(|&left, &right| {
+        complete_reads[right]
+            .cmp(&complete_reads[left])
+            .then_with(|| observation.alleles[left].cmp(&observation.alleles[right]))
+    });
     let mut cut_short: Vec<Option<LocusBorder>> = vec![None; observation.alleles.len()];
     for (spelling, bases) in observation.alleles.iter().enumerate().skip(1) {
         // **Never a spelling shorter than the reference.** A deletion's own allele is a prefix of
@@ -289,7 +300,8 @@ where
         if complete_reads[spelling] == 0 || bases.len() < reference_len {
             continue;
         }
-        for (longer, allele) in observation.alleles.iter().enumerate() {
+        for &longer in &longer_first {
+            let allele = &observation.alleles[longer];
             if longer == spelling
                 || allele.len() == bases.len()
                 || complete_reads[longer] < complete_reads[spelling]

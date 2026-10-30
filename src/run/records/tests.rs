@@ -1149,6 +1149,35 @@ fn a_spelling_that_is_the_end_of_a_longer_allele_is_reread_at_the_left_border() 
     );
 }
 
+/// **A spelling two longer alleles could have been cut from is re-read against the better-supported
+/// one, whatever order the merge's table lists them in.** `TTG` is the start of `TTGCG` (cut on
+/// the right) and the end of `ACTTG` (cut on the left), and `ACTTG` has more reads. The table's
+/// order is the order the samples were given, and trying its alleles in that order once made the
+/// border follow the cohort's order (SL4.0ch10:57543357, 63 tomato accessions).
+#[test]
+fn a_spelling_two_longer_alleles_explain_takes_the_better_supported_ones_border() {
+    for (alleles, rows) in [
+        (
+            [&b"ACG"[..], b"TTGCG", b"ACTTG", b"TTG"],
+            [(0, 6), (1, 10), (2, 12), (3, 2)],
+        ),
+        (
+            [&b"ACG"[..], b"ACTTG", b"TTGCG", b"TTG"],
+            [(0, 6), (1, 12), (2, 10), (3, 2)],
+        ),
+    ] {
+        let mut observation = cut_short_locus(&alleles, &rows);
+        reread(&mut observation);
+        let partials = &observation.per_sample[0].partials;
+        assert_eq!(partials.len(), 1, "{alleles:?}: {partials:?}");
+        assert_eq!(
+            partials[0].sequence_may_run_on_past,
+            Some(LocusBorder::Left),
+            "{alleles:?}: ACTTG has the more reads, and TTG is its end",
+        );
+    }
+}
+
 /// **A substitution haplotype is not re-read as the longer allele cut short when that allele is
 /// the same haplotype with an insertion.** `ACA` carries `G>A` on the locus's last base; `ACACA`
 /// carries the same substitution after an inserted `CA`. `ACA` is the start of `ACACA`, but its
