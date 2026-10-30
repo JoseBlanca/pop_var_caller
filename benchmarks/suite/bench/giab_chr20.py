@@ -25,6 +25,8 @@ alignments (novoalign, 2×148 bp); 5×, 10× and 30× downsampled by the suite (
 about 60×. Each caller runs over the whole chromosome. Truth: GIAB v4.2.1 small variants, scored by
 RTG vcfeval inside GIAB's confident regions of chromosome 20. The time and memory rows are the
 human speed figures: one sample, a whole chromosome, at 6 threads.
+pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
+called with the SNP/indel model instead of left uncalled.
 """
 
 URL = ("https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/data/AshkenazimTrio/"
@@ -102,7 +104,8 @@ def steps(ctx):
                     samples=1, depth=depth, region_bp=arms.BedLength(calling))
         for arm in ARMS:
             step, callset = arms.arm_steps(ctx, arm, f"giab_chr20/{depth}", GRCH38, catalog,
-                                           {"HG002": aligned("HG002", depth)}, calling, base)
+                                           {"HG002": aligned("HG002", depth)}, calling, base,
+                                           call_satellites=arms.GIAB_CALL_SATELLITES)
             out.append(step)
             out.append(arms.score_step(ctx, callset, base, truth, confident, scoring,
                                        call_sample="HG002", truth_sample="HG002"))

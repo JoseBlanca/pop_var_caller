@@ -21,6 +21,8 @@ suite from the full reads (seed 42); "300x" is the full reads. Each member is sc
 against its own GIAB v4.2.1 truth. The Mendelian rows count sites where all three have a called
 genotype and at least one is not reference, and how many of those the child's genotype cannot
 inherit; the "GIAB truth" rows are the same count on the three truth sets merged, the floor.
+pvc runs with --call-satellites (off by default), so repeats too long for its repeat model are
+called with the SNP/indel model instead of left uncalled.
 """
 
 MEMBERS = {"mother": "HG004", "father": "HG003", "child": "HG002"}
@@ -66,7 +68,8 @@ def steps(ctx):
         bams = {s: alignment(s, depth) for s in SAMPLES}
         for arm in ARMS:
             step, callset = arms.arm_steps(ctx, arm, f"giab_trio/{depth}", reference, catalog,
-                                           bams, regions, base, joint=True)
+                                           bams, regions, base, joint=True,
+                                           call_satellites=arms.GIAB_CALL_SATELLITES)
             out.append(step)
             for s in SAMPLES:
                 member_base = dict(base, dataset=f"GIAB trio, member {s}, 100 common regions")
