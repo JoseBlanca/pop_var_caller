@@ -257,6 +257,20 @@ fn fixture() -> Vec<(&'static str, String)> {
     // calling one of 100, which is what makes the cap a knob this fixture can move.
     let mid_array = format!("{}{}{}", filler(200), "AT".repeat(90), filler(200));
 
+    // Two `AT` repeats each interrupted by a run of `AC`, which the scanner emits twice — joined
+    // and as pieces — for the reader's purity floor to choose between (`choose_readings`).
+    // `(AT)×8 (AC)×3 (AT)×8` is 0.92 pure as one tract: joined at the catalog's 0.8, pieces at
+    // the stricter 0.95. `(AT)×7 (AC)×11 (AT)×7` is 0.78: pieces at both, though the scanner's
+    // own tolerance, 7/9, joins it — the gap a reader's floor has to close.
+    let junctions = format!(
+        "{}{}{}{}{}",
+        filler(200),
+        ["AT".repeat(8), "AC".repeat(3), "AT".repeat(8)].concat(),
+        filler(200),
+        ["AT".repeat(7), "AC".repeat(11), "AT".repeat(7)].concat(),
+        filler(200),
+    );
+
     vec![
         ("chr_clean", clean),
         ("chr_bundled", bundled),
@@ -266,6 +280,7 @@ fn fixture() -> Vec<(&'static str, String)> {
         ("chr_impure", impure),
         ("chr_edges", edges),
         ("chr_near_edge", near_edge),
+        ("chr_junctions", junctions),
     ]
 }
 
@@ -377,13 +392,15 @@ fn bundle_members_carry_the_same_motifs_and_spans_from_the_file_as_from_a_scan()
 
     // Each member carries its own motif, in the detector's phase (the `GATA` run is read from
     // one base earlier, so as `AGAT`) and at its primitive period (`TCTC` is `TC` repeated).
+    // The last three are `chr_junctions`' 0.78-pure tract, which the catalog's 0.8 floor
+    // reads as its pieces: two `AT` runs and the `AC` run between them.
     let motifs: Vec<&str> = seen
         .iter()
         .map(|(_, (_, _, motif))| motif.as_str())
         .collect();
     assert_eq!(
         motifs,
-        ["AGAT", "TC", "CAG", "TC"],
+        ["AGAT", "TC", "CAG", "TC", "AT", "AC", "AT"],
         "each member carries its own motif: {seen:?}"
     );
     // The ragged member: eight `CAG` from 201 to 224, then `CA`. Cut back, it ends at 224.

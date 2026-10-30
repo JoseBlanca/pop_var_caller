@@ -706,6 +706,100 @@ pub fn prefilter(intervals: &[RepeatInterval], params: &SsrSegmentCriteria) -> V
         .collect()
 }
 
+/// Which reading of each **joined tract** to keep: `true` for every interval kept.
+///
+/// When the scanner absorbs a short stretch of another motif into a repeat (`ATATATATACACATATATAT`
+/// read as one `AT` tract), it emits the joined tract **and** the pieces it was joined from,
+/// nested inside it at the same period (`tandem_repeat::split_at_motif_changes`). Nothing else
+/// nests within one period, so the nesting is what marks the two readings. Exactly one survives:
+///
+/// - the joined tract, when `joined_passes` says it clears this policy's purity gate — a clean
+///   whole-motif cut, and the cut tract at least `min_purity` pure — and then its pieces go;
+/// - otherwise the pieces, and the joined tract goes.
+///
+/// **The choice is the reader's, not the scanner's**, because it turns on the purity floor:
+/// the scanner can only absorb at its own tolerance (7/9 at the default weights), which is not
+/// the typing's 0.8, and the catalog is built once and read at any floor (`repeat_catalog`
+/// spec §4.2). A tract between the two used to be absorbed and then rejected whole by the purity
+/// gate — the very loss the split exists to prevent.
+///
+/// `joined_passes` is asked only about intervals that enclose another, by index. The scan asks
+/// the bases ([`joined_passes_on_bases`]); the catalog reads the cut and purity its row stored,
+/// which the builder computed with the same two functions.
+pub fn choose_readings(
+    intervals: &[RepeatInterval],
+    joined_passes: impl Fn(usize) -> bool,
+) -> Vec<bool> {
+    let mut keep = vec![true; intervals.len()];
+    let mut order: Vec<usize> = (0..intervals.len()).collect();
+    order.sort_by_key(|&i| {
+        let iv = &intervals[i];
+        (iv.period, iv.start, std::cmp::Reverse(iv.end))
+    });
+    // The enclosing tract of the current run, and the pieces found inside it.
+    let mut enclosing: Option<usize> = None;
+    let mut inside: Vec<usize> = Vec::new();
+    let mut settle = |enclosing: Option<usize>, inside: &mut Vec<usize>| {
+        if let (Some(joined), false) = (enclosing, inside.is_empty()) {
+            if joined_passes(joined) {
+                inside.iter().for_each(|&i| keep[i] = false);
+            } else {
+                keep[joined] = false;
+            }
+        }
+        inside.clear();
+    };
+    for i in order {
+        let iv = intervals[i];
+        let nested = enclosing.is_some_and(|e| {
+            let outer = intervals[e];
+            outer.period == iv.period && iv.start >= outer.start && iv.end <= outer.end
+        });
+        if nested {
+            inside.push(i);
+        } else {
+            settle(enclosing, &mut inside);
+            enclosing = Some(i);
+        }
+    }
+    settle(enclosing, &mut inside);
+    keep
+}
+
+/// Whether a joined tract clears `params`' purity gate, read from the bases as
+/// [`classify`] will read it: the motif at the tract's first base, a clean whole-motif cut
+/// ([`minimal_trim`]), and the cut tract at least `min_purity` pure.
+///
+/// `bases` is the slice the intervals' offsets index into.
+pub fn joined_passes_on_bases(
+    joined: &RepeatInterval,
+    bases: &[u8],
+    params: &SsrSegmentCriteria,
+) -> bool {
+    let tract = upper(&bases[joined.start as usize..joined.end as usize]);
+    let Some(motif) = tract.get(..joined.period as usize) else {
+        return false;
+    };
+    minimal_trim(&tract, motif)
+        .is_some_and(|(st, en)| recompute_purity(&tract[st..en], motif) >= params.min_purity)
+}
+
+/// [`choose_readings`] over a scan's own intervals, judged on the bases they came from.
+pub fn chosen_readings(
+    intervals: Vec<RepeatInterval>,
+    bases: &[u8],
+    params: &SsrSegmentCriteria,
+) -> Vec<RepeatInterval> {
+    let keep = choose_readings(&intervals, |i| {
+        joined_passes_on_bases(&intervals[i], bases, params)
+    });
+    intervals
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(iv, kept)| kept.then_some(iv))
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // Admission
 // ---------------------------------------------------------------------

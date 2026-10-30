@@ -548,18 +548,24 @@ fn split_at_motif_changes(
             .filter(|&x| canonical[x] == canonical[motif_at + (x % p + p - motif_at % p) % p])
             .count() as i64
     };
-    // The pieces so far, left to right, as `(first score index, last score index, where its
-    // motif is read, bases of its tract matching that motif in phase)`. A piece's tract is its
-    // score indices widened by `p + 1`, as the segment's is. Empty — and never allocated — for a
-    // segment with one motif throughout.
-    let mut pieces: Vec<(usize, usize, usize, i64)> = Vec::new();
+    // Every piece as split, `(first score index, last score index)`: the second reading of a
+    // joined tract. Empty — and never allocated — for a segment with one motif throughout.
+    let mut split: Vec<(usize, usize)> = Vec::new();
+    // The pieces so far after absorption, left to right, as `(first score index, last score
+    // index, where its motif is read, bases of its tract matching that motif in phase, the first
+    // of `split` it holds)`. A piece's tract is its score indices widened by `p + 1`, as the
+    // segment's is.
+    let mut pieces: Vec<(usize, usize, usize, i64, usize)> = Vec::new();
     // Push a piece, then absorb every interruption it closes: the nearest earlier piece of the
     // same motif, with everything between, when the joined tract matches that motif in phase
     // at the scoring's tolerance — matches / bases >= penalty / (reward + penalty), in
     // integers. Only the new bases are compared, so a long run of absorbed interruptions costs
     // one pass, not one per join.
-    let push = |pieces: &mut Vec<(usize, usize, usize, i64)>, (a, b, m): (usize, usize, usize)| {
-        pieces.push((a, b, m, in_phase(m, a, b + p + 1)));
+    let push = |pieces: &mut Vec<(usize, usize, usize, i64, usize)>,
+                split: &mut Vec<(usize, usize)>,
+                (a, b, m): (usize, usize, usize)| {
+        pieces.push((a, b, m, in_phase(m, a, b + p + 1), split.len()));
+        split.push((a, b));
         loop {
             let right = pieces[pieces.len() - 1];
             let Some(j) = (0..pieces.len() - 1)
@@ -575,7 +581,7 @@ fn split_at_motif_changes(
                 return;
             }
             pieces.truncate(j);
-            pieces.push((left.0, right.1, left.2, matches));
+            pieces.push((left.0, right.1, left.2, matches, left.4));
         }
     };
     // The open piece: where it starts, the last solid block's end, and that block's start
@@ -599,7 +605,7 @@ fn split_at_motif_changes(
         }
         match motif_at {
             Some(m) if !same_motif(m, b0) => {
-                push(&mut pieces, (piece_start, last_solid_end, m));
+                push(&mut pieces, &mut split, (piece_start, last_solid_end, m));
                 piece_start = b0;
             }
             _ => {}
@@ -611,17 +617,28 @@ fn split_at_motif_changes(
         emit(k0, k1, score);
         return;
     };
-    push(&mut pieces, (piece_start, k1, last_motif));
-    if pieces.len() == 1 {
-        emit(k0, k1, score);
-        return;
-    }
-    // Each piece's own score, over its own score indices, as the segment's was.
-    for (a, b, _, _) in pieces {
-        let piece_score = (a..=b)
-            .map(|k| if is_match(k) { reward } else { -penalty })
-            .sum();
-        emit(a, b, piece_score);
+    push(&mut pieces, &mut split, (piece_start, k1, last_motif));
+    // Each piece's own score, over its own score indices, as the segment's was — the
+    // segment's own for a piece that is the whole segment.
+    let score_of = |a: usize, b: usize| {
+        if (a, b) == (k0, k1) {
+            score
+        } else {
+            (a..=b)
+                .map(|k| if is_match(k) { reward } else { -penalty })
+                .sum()
+        }
+    };
+    // A joined piece is emitted **with the pieces it was joined from**: both readings, the
+    // consumer's purity floor to choose between them (`segment_criteria::choose_readings`).
+    for (i, &(a, b, _, _, first_split)) in pieces.iter().enumerate() {
+        emit(a, b, score_of(a, b));
+        let end_split = pieces.get(i + 1).map_or(split.len(), |next| next.4);
+        if end_split - first_split > 1 {
+            for &(sa, sb) in &split[first_split..end_split] {
+                emit(sa, sb, score_of(sa, sb));
+            }
+        }
     }
 }
 
@@ -706,7 +723,7 @@ pub fn find_tandem_repeats(
     // sitting inside a period-4 `(GAAA)` covers a sliver and stays (a genuinely different,
     // smaller repeat — the copy floor, downstream, decides if it is significant). No
     // copy-number policy here: purely how much of `iv` the shorter `a` explains.
-    out.sort_by_key(|iv| (iv.period, iv.start));
+    out.sort_by_key(|iv| (iv.period, iv.start, std::cmp::Reverse(iv.end)));
 
     // Survivors grouped by period, which is what turns the redundancy test from a
     // rescan of every survivor into a binary search.
@@ -718,13 +735,14 @@ pub fn find_tandem_repeats(
     // 2. **Those lists are already complete** when `iv` is reached: `out` is sorted by
     //    period first, so every shorter period was processed before it. (The old code
     //    relied on the same ordering, implicitly.)
-    // 3. **Within one period the tracts are start- AND end-sorted.** Ruzzo–Tompa's
+    // 3. **Within one period the searched tracts are start- AND end-sorted.** Ruzzo–Tompa's
     //    segments are disjoint by construction, and each tract extends its segment by
     //    the same `p + 1`, so both endpoints stay monotonic. That is the precondition
-    //    `partition_point` needs.
-    //
-    // Behaviour is unchanged — same predicate, same survivors, same order (flattening
-    // by ascending period reproduces the `(period, start)` sort the old loop kept).
+    //    `partition_point` needs. The one exception is a joined tract's pieces, emitted
+    //    beside it (`split_at_motif_changes`) and nested inside it: they are kept out of
+    //    the searched lists, which loses nothing, since the tract enclosing a piece
+    //    overlaps anything at least as much as the piece does. The sort puts the
+    //    enclosing tract first, so a piece is known by ending no later than the reach so far.
     //
     // Why it was worth doing: the old `kept.iter().any(…)` was O(survivors²) per
     // window, and measured at **28.6% of the walk's total CPU while discarding 707 of
@@ -732,8 +750,12 @@ pub fn find_tandem_repeats(
     // paying a quadratic price, with up to 26,836 intervals in a single window.
     let max_period = out.iter().map(|iv| iv.period).max().unwrap_or(0) as usize;
     let mut by_period: Vec<Vec<RepeatInterval>> = vec![Vec::new(); max_period + 1];
-    let mut kept_len = 0usize;
+    let mut kept: Vec<RepeatInterval> = Vec::with_capacity(out.len());
+    // The furthest end of this period's searched tracts so far, and the period it belongs to.
+    // Only a kept tract moves it: a joined tract dropped here leaves its pieces searchable.
+    let mut reach = (0u8, 0u64);
     for iv in out {
+        let nested = reach.0 == iv.period && iv.end <= reach.1;
         let iv_len = iv.end - iv.start;
         let mut redundant = false;
         for shorter in 1..iv.period {
@@ -764,13 +786,12 @@ pub fn find_tandem_repeats(
             }
         }
         if !redundant {
-            kept_len += 1;
-            by_period[iv.period as usize].push(iv);
+            if !nested {
+                reach = (iv.period, iv.end);
+                by_period[iv.period as usize].push(iv);
+            }
+            kept.push(iv);
         }
-    }
-    let mut kept: Vec<RepeatInterval> = Vec::with_capacity(kept_len);
-    for group in by_period {
-        kept.extend(group);
     }
     kept
 }
@@ -1585,18 +1606,34 @@ mod tests {
         }
     }
 
+    /// The intervals of `got`, as `(start, end)`, after asserting the first is `joined` and
+    /// every other one lies inside it — the shape of a joined tract emitted with its pieces.
+    fn joined_with_pieces(got: &[RepeatInterval], joined: (u64, u64)) -> Vec<(u64, u64)> {
+        let spans: Vec<(u64, u64)> = got.iter().map(|r| (r.start, r.end)).collect();
+        assert_eq!(spans.first(), Some(&joined), "{got:?}");
+        assert!(spans.len() > 1, "the pieces come with it: {got:?}");
+        assert!(
+            spans[1..]
+                .iter()
+                .all(|&(s, e)| s >= joined.0 && e <= joined.1),
+            "every piece lies inside the joined tract: {got:?}"
+        );
+        spans
+    }
+
     /// Two copies of another motif **inside** a repeat are an interruption, not a second
-    /// repeat: `(AT)×4 A (CA)×2 (TA)×4 T` stays one `AT` interval, as it was before the split
-    /// existed. It matches `AT` at 18 of 20 bases, above the 7/9 the default scoring holds a
-    /// tract to. Found on tomato, where splitting this shape lost 876 STR segments.
+    /// repeat: `(AT)×4 A (CA)×2 (TA)×4 T` comes back as one `AT` interval over all of it, as it
+    /// did before the split existed — and with the pieces it was joined from, for the typing to
+    /// fall back on if the joined tract is not pure enough for it (`choose_readings`). It
+    /// matches `AT` at 18 of 20 bases, above the 7/9 the default scoring holds a tract to.
+    /// Found on tomato, where splitting this shape lost 876 STR segments.
     #[test]
     fn a_short_run_of_another_motif_inside_a_repeat_is_not_split() {
         let seq = b"ATATATATACACATATATAT";
         let got = find_tandem_repeats(seq, p(2, 2), &ScanParams::default());
         assert_eq!(
-            got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
-            vec![(0, 20)],
-            "{got:?}"
+            joined_with_pieces(&got, (0, 20)),
+            vec![(0, 20), (0, 9), (8, 13), (12, 20)]
         );
     }
 
@@ -1614,11 +1651,7 @@ mod tests {
         ]
         .concat();
         let got = find_tandem_repeats(&seq, p(3, 3), &ScanParams::default());
-        assert_eq!(
-            got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
-            vec![(0, 39)],
-            "{got:?}"
-        );
+        joined_with_pieces(&got, (0, 39));
     }
 
     /// The same interruption, too long for the tolerance: `(CA)×10 (GT)×10 (CA)×10` has `CA`

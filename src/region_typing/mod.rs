@@ -572,7 +572,12 @@ pub fn partition_resident_in(
         .collect();
 
     // 1. Detect.
-    let raw = find_tandem_repeats(bases, config.criteria.periods, &config.scan);
+    // 1b. One reading of each joined tract — joined or split — by this policy's purity floor.
+    let raw = segment_criteria::chosen_readings(
+        find_tandem_repeats(bases, config.criteria.periods, &config.scan),
+        bases,
+        &config.criteria,
+    );
     // 2. Clean.
     let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
     // 3. Admit — the whole contig, for the reason the doc gives.
@@ -2649,6 +2654,46 @@ mod tests {
         }
     }
 
+    /// **The purity floor chooses between a joined tract and its pieces.** `(AT)×7 (AC)×11
+    /// (AT)×7` is 0.78 pure as one `AT` tract: the scanner's own tolerance, 7/9, joins it, and
+    /// the typing's floor of 0.8 would then have rejected it whole — all three repeats lost to
+    /// generic sequence. With the pieces beside it, the typing keeps the pieces: a bundle of the
+    /// two `AT` runs and the `AC` run. At a floor of 0.75 the joined tract passes, and it is one
+    /// `AT` segment over all of it.
+    #[test]
+    fn the_purity_floor_chooses_between_a_joined_tract_and_its_pieces() {
+        let repeats = ["AT".repeat(7), "AC".repeat(11), "AT".repeat(7)]
+            .concat()
+            .into_bytes();
+        let bases = [filler(80), repeats, filler(80)].concat();
+        let typed_at = |min_purity: f32| {
+            let mut config = TypedRegionConfig::default();
+            config.criteria.min_purity = min_purity;
+            let regions = partition_resident("chr1", ContigId(0), &bases, &config);
+            assert_partitions(&regions, ContigId(0), bases.len() as u64, "junction");
+            regions
+        };
+
+        let strict = typed_at(0.8);
+        assert_eq!(kinds_of(&strict), vec!["generic", "bundle", "generic"]);
+        let RegionKind::SsrBundle { members } = &strict[1].kind else {
+            unreachable!("asserted a bundle above")
+        };
+        assert!(
+            members
+                .iter()
+                .any(|m| matches!(m.motif().as_bytes(), b"AC" | b"CA")),
+            "the AC run is a member: {members:?}"
+        );
+
+        let lenient = typed_at(0.75);
+        assert_eq!(kinds_of(&lenient), vec!["generic", "locus", "generic"]);
+        let RegionKind::SsrSegment(segment) = &lenient[1].kind else {
+            unreachable!("asserted a locus above")
+        };
+        assert_eq!(segment.end() - segment.start() + 1, 50, "{segment:?}");
+    }
+
     /// **A two-copy tail of another motif leaves an STR segment a segment.** The scanner splits
     /// `(AT)×10 (AC)×2` into two intervals, since nothing of `AT` follows the tail; but two
     /// copies are under every period's copy floor, so the tail is dropped before bundles are
@@ -3443,7 +3488,11 @@ mod tests {
         // drops it. So the raw coverage run runs 4 bp longer than the cleaned one.
         bases[5200..5204].copy_from_slice(b"CGCG");
         let config = TypedRegionConfig::default();
-        let raw = find_tandem_repeats(&bases, config.criteria.periods, &config.scan);
+        let raw = segment_criteria::chosen_readings(
+            find_tandem_repeats(&bases, config.criteria.periods, &config.scan),
+            &bases,
+            &config.criteria,
+        );
         let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
 
         let over_cap = |intervals: &[RepeatInterval]| -> Vec<(u64, u64)> {
@@ -3536,7 +3585,11 @@ mod tests {
         // (A `>=` bound was the first version, and it left the subtraction untested:
         // dropping it makes the number bigger, and bigger still satisfies `>=`.)
         let config = TypedRegionConfig::default();
-        let raw = find_tandem_repeats(&bases, config.criteria.periods, &config.scan);
+        let raw = segment_criteria::chosen_readings(
+            find_tandem_repeats(&bases, config.criteria.periods, &config.scan),
+            &bases,
+            &config.criteria,
+        );
         let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
         let coverage_bp: u64 = coverage_runs(&cleaned).iter().map(|r| r.len()).sum();
         let locus_bp = bp_of(|k| matches!(k, RegionKind::SsrSegment(_)));

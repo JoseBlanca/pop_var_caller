@@ -266,26 +266,39 @@ before emission:
 A segment with no mismatch (its score is all rewards) cannot hold a motif change and skips the
 walk; that is nearly every segment, and it keeps the cost to about 3% of a tomato catalog build.
 
-**Known gap: 7/9 here, 0.8 in the typing.** The typing's purity floor (`--min-purity`, 0.8 by
-default) is stricter than this tolerance, so a joined tract between the two passes here and is
-rejected there whole — the failure this section exists to prevent, in a narrow band. On tomato,
-joining only at 0.8 or more would type 240 more STR segments (489,617 against 489,377), about 5
-in 10,000. Closing it means handing the typing's floor to the scanner, a typing setting the
-user can change, into parameters the catalogue and the psp files record; left for a decision.
+**Both readings of a joined tract are emitted; the reader's purity floor chooses.** The
+scanner's tolerance, 7/9 at the default weights, is not the typing's purity floor (`--min-purity`,
+0.8 by default). A tract joined between the two would pass here and be rejected there whole —
+the loss this section exists to prevent. The scanner cannot use the typing's floor instead: the
+catalog is built once per reference and serves a reader at any floor (`repeat_catalog` spec
+§4.2), so what it stores cannot depend on one. So a joined tract is emitted **together with the
+pieces it was joined from**, nested inside it at its period — nothing else nests within one
+period — and the reader keeps one reading (`segment_criteria::choose_readings`): the joined
+tract when it has a clean whole-motif cut and the cut tract clears the floor, its pieces
+otherwise. A scan judges this from the bases; the catalog from the cut and purity its row
+stores, computed by the same two functions. A joined tract within the catalog's 15-base flank
+floor of a contig end has no row while a piece of it may; that is the contig-end difference the
+catalog differential already allows.
+
+`(AT)×7 (AC)×11 (AT)×7` is 0.78 pure joined: at the default 0.8 it is typed as a bundle of its
+three repeats, where it used to be rejected whole; at a floor of 0.75 it is one `AT` segment.
 
 **Measured on tomato SL4.00**, default settings, typed regions before and after:
 
 | | before | after |
 |---|---:|---:|
-| STR segments | 462,678 | 489,377 |
-| — of which period 2 to 6 | 52,229 | 56,520 |
-| STR bundles | 22,755 | 30,282 |
-| repeat bases typed as no STR | 3,791,370 | 2,404,152 |
+| STR segments | 462,678 | 489,434 |
+| — of which period 2 to 6 | 52,229 | 56,379 |
+| STR bundles | 22,755 | 30,529 |
+| repeat bases typed as no STR | 3,791,370 | 2,380,359 |
+| bases rejected at the purity floor | 545,552 | 94,535 |
 
-461,197 segments are unchanged. Of the 1,481 segments that are gone, 1,289 are now members of a
-bundle with the repeat that abutted them, 189 are inside a satellite (a bundle that passes the
+460,845 segments are unchanged. Of the 1,833 segments that are gone, 1,465 are now members of a
+bundle with the repeat that abutted them, 365 are inside a satellite (a bundle that passes the
 100-base cap once its abutting repeat joins it), 1 is the same repeat with moved edges, and 2
-have become plain sequence.
+have become plain sequence. Compound stretches are now typed as one bundle of their repeats:
+`(AT)×15 (TATT)×6 (TA)×9` at SL4.0ch01:8,185,566 is a bundle of all three, where joining inside
+the scanner at 0.8 gave two `AT` segments and left the `TATT` run as plain sequence.
 
 ### 3.5 Non-ACGT and case
 
