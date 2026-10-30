@@ -2,7 +2,7 @@
 **Date:** 2026-10-30
 **Reviewer:** rust-performance-review skill (orchestrator)
 **Scope:** `pvc repeat-catalog` — the tandem-repeat scan, row building and catalog write — and the catalog read path, on branch `str-adjacent-runs` at c237378b
-**Verdict:** Apply the listed wins
+**Verdict:** Apply the listed wins (applied: H1–H6, L1–L3, L6; open: L5)
 **Hot-path evidence:** sampling profile (`sample`) of the whole tomato build; per-stage instruction counts; per-change instruction, peak-RSS and wall measurements
 
 ---
@@ -54,7 +54,16 @@ On GRCh38: one thread went from 90.9 s and 7.67 GiB to 52.2 s and 0.97 GiB. Six 
 includes the branch's own scanner change. The new build's catalog is identical at one and six
 threads.
 
-Three findings are left for the owner (H6, L5, L6).
+The owner then accepted H6 and L6, which were applied in follow-up commits. L5 is still open.
+With all of it, on the whole tomato genome:
+
+| threads | wall | peak RSS |
+|---:|---:|---:|
+| 1 | 11.3–11.7 s | 540 MiB |
+| 2 | 6.0 s | 922 MiB |
+| 4 | 3.7 s | 1,256–1,344 MiB |
+
+GRCh38 at one thread: 41.9 s and 1.36 GiB. At six threads: 11.4 s and 4.68 GiB.
 
 ## 3. Measurement plan
 
@@ -165,7 +174,7 @@ not measured.
 - **Measured:** instructions 22.42 → 19.09 G, wall 1.72 → 1.64 s; the 59 `reference_info` tests pass.
 - **Complexity:** about 45 lines, plus the invariant that `push_bases` matches `push_byte`.
 
-**H6: [builder.rs](../../../../src/repeat_catalog/builder.rs) `flush_pending` — reading and scanning never overlap** — *not applied: owner decision*
+**H6: [builder.rs](../../../../src/repeat_catalog/builder.rs) `flush_pending` — reading and scanning never overlap** — *applied after the owner's decision (2026-10-30)*
 - **Confidence:** High (concurrency agent, with timers around the hand-offs).
 - **Mechanism:** contigs are scanned in batches of `--threads`; the batch waits for its slowest
   contig and its write, and only then does reading resume. At two threads on c237378b, the
@@ -175,9 +184,22 @@ not measured.
   two and 6.65 s at four, against perfect overlap at 6.9 s and 3.4 s.
 - **Complexity:** about 110 lines — long-lived threads, a hand-off channel, a reorder buffer and
   panic propagation. It would also have to hand the bases buffer back to keep L3.
-- **The decision:** with overlap, `--threads 1` uses two cores (a reader and a scanner).
-- Diff: `tmp/perf_review_2026-10-30_repeat-scanner/concurrency_pipelined-workers.diff` (against
-  c237378b).
+- **The decision:** with overlap, `--threads 1` uses two cores, a reader and a scanner. The
+  owner accepted that.
+- **Applied:** rewritten on `crossbeam-channel`, so the scanners share a receiver without a mutex.
+  - Each scanner returns the contig's bases buffer with its rows, so L3's reuse survives.
+  - Results are collected when a contig starts as well as when it ends, so a returned buffer
+    serves the very next contig.
+- **Measured on whole tomato, against the build before it, two rounds each:**
+
+  | threads | wall | peak RSS |
+  |---:|---|---|
+  | 1 | 13.8 → 11.3–11.7 s | 403 → 540 MiB |
+  | 2 | 9.1 → 6.0 s | 677–728 → 922 MiB |
+  | 4 | 6.3 → 3.7 s | 1,209–1,225 → 1,256–1,344 MiB |
+
+  The catalog is byte-identical at every count.
+- **GRCh38:** one thread 52.2 → 41.9 s, six threads 18.5 → 11.4 s.
 
 ### Likely
 
@@ -214,13 +236,21 @@ not measured.
   the two-thread `split_digests` path.
 - Diff: `io_md5-two-lanes-probe.diff`.
 
-**L6: [parquet_file.rs](../../../../src/repeat_catalog/parquet_file.rs) — dictionary encoding on the four coordinate columns** — *not applied: owner decision (format change)*
+**L6: [parquet_file.rs](../../../../src/repeat_catalog/parquet_file.rs) — dictionary encoding on the four coordinate columns** — *applied after the owner's decision (2026-10-30), commit 587a4860*
 - **Measured (io agent), delta encoding instead, on chromosome 1:**
   - write 0.09 → 0.06 s;
   - file 6.73 → 4.25 MB (−37%);
   - whole-catalog read 0.035 → 0.024 s.
 - It changes the catalog's bytes, so it breaks byte-identity with existing catalogs by design.
-- Diff: `io_parquet-delta-coordinates.diff`.
+  The owner accepted that, on condition that the caller's output did not change. Catalogs are
+  rebuilt.
+- **Re-measured on whole tomato:**
+  - file 60.7 → 35.7 MB;
+  - build 162.5 → 155.8 G instructions, about 2% fewer cycles at the same clock;
+  - `dev type-regions` 0.55 → 0.47 s;
+  - typed regions identical.
+- Old catalogs still read, because parquet records each column's encoding.
+- Spec §3 already said the coordinates delta-encode; the writer had not asked for it.
 
 ### Speculative
 

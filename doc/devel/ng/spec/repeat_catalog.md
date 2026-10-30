@@ -146,7 +146,8 @@ as one row.
 **What it costs is set by the largest contig, and it is about 4 to 5 bytes a base** — measured, not
 arithmetic. Since 2026-10-30 a build peaks at **404 MiB on tomato** (largest contig 91 Mb) and
 **0.97 GiB on GRCh38** (248 Mb) at one thread, and 4.36 GiB on GRCh38 at six (macOS, mimalloc;
-`perf_repeat-scanner_2026-10-30.md`); `--threads N` multiplies it by up to N (§2.4). **Those are
+`perf_repeat-scanner_2026-10-30.md`); `--threads N` multiplies it by up to N (§2.4). With reading
+overlapped (§2.4) the reader holds one more contig: 1.36 GiB on GRCh38 at one thread, 4.68 GiB at six. **Those are
 macOS figures, and the Linux ones below them were 1.49 GB and 3.89 GB** — about 16 bytes a base,
 before the scan stopped returning the 97 in 100 tracts no row can come from; the Linux figures
 for the current build are owed.
@@ -175,10 +176,14 @@ contained swap, not a redesign — but it is a worse file, so it is the fallback
 **This file is built once per reference, by a command whose only job is that** (§2.6), so scan
 throughput is not on any path that runs twice. The design spends nothing on it:
 
-- **sequential by default** — each contig is scanned as the stream finishes it, and the pass waits;
-- **`--threads N` scans up to N contigs at once**, each on its own buffer, which is the whole of the
-  parallelism. Rows are written in the reference's contig order regardless, so the file is
-  byte-identical at every thread count (§10.5).
+- **`--threads N` scans up to N contigs at once**, each on its own buffer. Rows are written in the
+  reference's contig order regardless, so the file is byte-identical at every thread count (§10.5).
+- **Reading runs beside the scanning** (owner, 2026-10-30): the pass reads the next contig while the
+  scanners work and hands it to the first one free, so `--threads N` uses N + 1 cores. Before, the
+  pass read N contigs, waited for the slowest scan and its write, and only then read on; at two
+  threads the scanners sat idle 6 of 18 seconds. Whole tomato, overlapped against batched: 1 thread
+  11.5 s against 13.8 s, 2 threads 6.0 against 9.1, 4 threads 3.7 against 6.3; the peak grows by the
+  contig the reader holds meanwhile (`perf_repeat-scanner_2026-10-30.md`, H6).
 
 **Nothing else is pipelined**, and the digest keeps its own shape: it is computed from the same bytes
 as they stream, in order, exactly as it is today. The catalog is a second value taken from that one

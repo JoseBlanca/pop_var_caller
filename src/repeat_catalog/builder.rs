@@ -6,13 +6,18 @@
 //! and a cap on the repeat length it can promise to catch whole. Scanning a contig in one
 //! slice removes all three: a satellite of any size comes out as one row.
 //!
-//! **What it costs is set by the largest contig, at about 4 to 5 bytes a base** — measured at
-//! 404 MiB on tomato (largest contig 91 Mb) and 0.97 GiB on GRCh38 (248 Mb) at one thread, and
-//! 4.36 GiB on GRCh38 at six (macOS, 2026-10-30, `perf_repeat-scanner_2026-10-30.md`). It was
+//! **What it costs is set by the largest contigs, at about 4 to 5 bytes a base each** — those
+//! being scanned plus the one the reader is filling: 540 MiB on tomato (largest contig 91 Mb) and
+//! 1.36 GiB on GRCh38 (248 Mb) at one thread, 4.68 GiB on GRCh38 at six (macOS, 2026-10-30,
+//! `perf_repeat-scanner_2026-10-30.md`). It was
 //! about 16 bytes a base before the scan stopped returning the tracts no row can come from
 //! (`find_tandem_repeats_for_copy_floor`); the bases are now about a quarter of it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
+
+use crossbeam_channel::{Receiver, Sender};
 
 use crate::reference_info::{ContigInfo, ReferenceBasesObserver, ReferenceInfo};
 use crate::repeat_catalog::criteria::StrRepeatCriteria;
@@ -74,10 +79,18 @@ pub struct RepeatCatalogBuilder {
     /// The contig being accumulated: its index and its bases.
     contig: Option<ContigId>,
     bases: Vec<u8>,
-    /// Contigs finished but not yet scanned — at most [`threads`](Self::with_threads) of
-    /// them, which is what bounds the memory a parallel build uses (spec §2.4).
-    pending: Vec<PendingContig>,
+    /// The largest bases buffer a scanner has handed back, for the next contig to fill instead
+    /// of growing one from empty: grown by doubling, a 91 Mb chromosome passes through buffers
+    /// of every power of two below 128 MiB, and the allocator counts them in the peak.
+    spare_bases: Vec<u8>,
+    /// The scanning threads, started at the first finished contig.
+    scanners: Option<Scanners>,
     threads: usize,
+    /// Contigs handed to the scanners so far, and the next one, in reference order, to write.
+    handed_over: usize,
+    next_to_write: usize,
+    /// Contigs scanned ahead of one still being scanned, held until it is written.
+    scanned_early: BTreeMap<usize, ScannedContig>,
 
     tally: BuildTally,
     failure: Option<RepeatCatalogError>,
@@ -108,8 +121,12 @@ impl RepeatCatalogBuilder {
             path: path.to_path_buf(),
             contig: None,
             bases: Vec::new(),
-            pending: Vec::new(),
+            spare_bases: Vec::new(),
+            scanners: None,
             threads: 1,
+            handed_over: 0,
+            next_to_write: 0,
+            scanned_early: BTreeMap::new(),
             tally: BuildTally::default(),
             failure: None,
             contigs_seen: 0,
@@ -128,9 +145,9 @@ impl RepeatCatalogBuilder {
     /// could stamp a catalog with a version that never wrote it, and the reader's refusal
     /// (`check_written_by_this_build`) would then be checking a claim rather than a fact.
     pub fn finish(mut self, reference: &ReferenceInfo) -> Result<BuildTally, RepeatCatalogError> {
-        // Whatever is still held back is scanned and written before the footer, in
+        // Whatever is still being scanned is waited for and written before the footer, in
         // reference order like everything else.
-        self.flush_pending();
+        self.finish_scanning();
         if let Some(failure) = self.failure.take() {
             return Err(failure);
         }
@@ -197,82 +214,148 @@ impl RepeatCatalogBuilder {
     /// **A speed knob and nothing else** (spec §2.4): contigs are written in the
     /// reference's order however many are scanned together, so the file is byte-identical
     /// at every thread count. What it costs is `threads` contigs resident rather than one.
+    ///
+    /// **Reading runs beside the scanning**, so the build uses one core more than `threads`:
+    /// the reader fills the next contig while the scanners work, and hands it to the first
+    /// scanner free. The reader is the light side — 0.2 to 0.4 s a tomato chromosome against
+    /// 1.4 to 2.8 s to scan it — so it never holds the scanners up (owner, 2026-10-30).
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
         self
     }
 
-    /// Scan every contig held back, and write their rows in **reference order**.
-    ///
-    /// Held-back contigs are scanned together when there is more than one thread; the
-    /// results are collected in order before any is written, so completion order cannot
-    /// reach the file.
-    fn flush_pending(&mut self) {
-        if self.pending.is_empty() || self.writer.is_none() {
-            self.pending.clear();
-            return;
-        }
-
+    /// Hand one finished contig to the first scanner free, starting the scanners the first
+    /// time. Blocks until one is free: no contig waits in the hand-off holding its bases.
+    fn hand_over(&mut self, contig: PendingContig) {
+        let threads = self.threads;
         let criteria = &self.criteria;
-        let scan = &self.scan;
-        let scanned: Vec<ScannedContig> = if self.threads == 1 {
-            self.pending
-                .iter()
-                .map(|contig| scan_contig(contig, criteria, scan))
-                .collect()
-        } else {
-            use rayon::prelude::*;
-            self.pending
-                .par_iter()
-                .map(|contig| scan_contig(contig, criteria, scan))
-                .collect()
-        };
-
-        for result in scanned {
-            if let Some(contig) = result.rows.first().map(|row| row.contig.get() as usize) {
-                if self.longest_tract.len() <= contig {
-                    self.longest_tract.resize(contig + 1, 0);
-                }
-                let longest = result
-                    .rows
-                    .iter()
-                    .map(|row| row.detected.len_bp())
-                    .max()
-                    .unwrap_or(0);
-                self.longest_tract[contig] = self.longest_tract[contig].max(longest);
-            }
-            for rejection in result.rejections {
-                self.tally.charge(rejection);
-            }
-            for row in &result.rows {
-                self.tally.rows.count(row.period);
-            }
-            let Some(writer) = self.writer.as_mut() else {
-                break;
-            };
-            if let Err(e) = writer.write_contig(&result.rows) {
-                self.failure = Some(e);
-                self.writer = None;
-                break;
-            }
+        let scan = self.scan;
+        let scanners = self
+            .scanners
+            .get_or_insert_with(|| Scanners::start(threads, criteria, scan));
+        let order = self.handed_over;
+        if scanners.to_scan.send((order, contig)).is_ok() {
+            self.handed_over += 1;
         }
+    }
 
-        // Nothing accumulates across flushes (spec §6) — except one bases buffer, the largest,
-        // which the next contig fills instead of growing a new one from empty. Grown by
-        // doubling, a 91 Mb chromosome passes through buffers of every power of two below
-        // 128 MiB, and the allocator counts them in the peak.
-        let largest = self
-            .pending
-            .drain(..)
-            .map(|contig| contig.bases)
-            .max_by_key(Vec::capacity);
-        if let Some(mut bases) = largest
-            && bases.capacity() > self.bases.capacity()
+    /// Take whatever the scanners have finished, without waiting, and write what is in order.
+    fn take_finished(&mut self) {
+        while let Some(finished) = self
+            .scanners
+            .as_ref()
+            .and_then(|scanners| scanners.scanned.try_recv().ok())
         {
-            bases.clear();
-            self.bases = bases;
+            self.file_away(finished);
         }
-        self.pending.shrink_to_fit();
+    }
+
+    /// Wait for every contig handed over, write the rest, and stop the scanners.
+    fn finish_scanning(&mut self) {
+        let Some(scanners) = self.scanners.take() else {
+            return;
+        };
+        let Scanners {
+            to_scan,
+            scanned,
+            threads,
+        } = scanners;
+        // Closing the hand-off is what ends each scanner's loop.
+        drop(to_scan);
+        while self.next_to_write < self.handed_over {
+            match scanned.recv() {
+                Ok(finished) => self.file_away(finished),
+                // Every scanner has exited with contigs unaccounted for: one panicked, and
+                // joining it below re-raises the panic.
+                Err(_) => break,
+            }
+        }
+        for thread in threads {
+            if let Err(panic) = thread.join() {
+                std::panic::resume_unwind(panic);
+            }
+        }
+    }
+
+    /// Keep one finished contig's bases buffer if it is the largest seen, then write every
+    /// scanned contig whose predecessors are all written — **reference order**, whatever
+    /// order the scanners finished in, so completion order cannot reach the file.
+    fn file_away(&mut self, (order, result, mut bases): (usize, ScannedContig, Vec<u8>)) {
+        if bases.capacity() > self.spare_bases.capacity() {
+            bases.clear();
+            self.spare_bases = bases;
+        }
+        self.scanned_early.insert(order, result);
+        while let Some(result) = self.scanned_early.remove(&self.next_to_write) {
+            self.next_to_write += 1;
+            self.write(result);
+        }
+    }
+
+    /// Tally one contig's rows and rejections and write its row group.
+    fn write(&mut self, result: ScannedContig) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        if let Some(contig) = result.rows.first().map(|row| row.contig.get() as usize) {
+            if self.longest_tract.len() <= contig {
+                self.longest_tract.resize(contig + 1, 0);
+            }
+            let longest = result
+                .rows
+                .iter()
+                .map(|row| row.detected.len_bp())
+                .max()
+                .unwrap_or(0);
+            self.longest_tract[contig] = self.longest_tract[contig].max(longest);
+        }
+        for rejection in result.rejections {
+            self.tally.charge(rejection);
+        }
+        for row in &result.rows {
+            self.tally.rows.count(row.period);
+        }
+        if let Err(e) = writer.write_contig(&result.rows) {
+            self.failure = Some(e);
+            self.writer = None;
+        }
+    }
+}
+
+/// The scanning threads and their two channels. Each thread takes one contig at a time,
+/// scans it, and sends back its rows tagged with the contig's place in reference order, with
+/// the bases buffer for the reader to reuse.
+struct Scanners {
+    /// A rendezvous channel: a contig is handed over only when a scanner is free to take it.
+    to_scan: Sender<(usize, PendingContig)>,
+    scanned: Receiver<(usize, ScannedContig, Vec<u8>)>,
+    threads: Vec<JoinHandle<()>>,
+}
+
+impl Scanners {
+    fn start(count: usize, criteria: &StrRepeatCriteria, scan: ScanParams) -> Self {
+        let (to_scan, contigs) = crossbeam_channel::bounded::<(usize, PendingContig)>(0);
+        let (results, scanned) = crossbeam_channel::unbounded();
+        let threads = (0..count)
+            .map(|_| {
+                let contigs = contigs.clone();
+                let results = results.clone();
+                let criteria = criteria.clone();
+                std::thread::spawn(move || {
+                    for (order, contig) in contigs {
+                        let result = scan_contig(&contig, &criteria, &scan);
+                        if results.send((order, result, contig.bases)).is_err() {
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect();
+        Self {
+            to_scan,
+            scanned,
+            threads,
+        }
     }
 }
 
@@ -336,7 +419,13 @@ fn scan_contig(
 impl ReferenceBasesObserver for RepeatCatalogBuilder {
     fn contig_started(&mut self, _name: &str, index: usize) {
         self.contig = Some(ContigId(index as u32));
-        // Load / use / clear: the buffer is reused across contigs rather than reallocated.
+        // Load / use / clear: the largest buffer a scanner has handed back is filled again
+        // rather than a new one grown from empty. Collecting first is what lets a buffer
+        // returned while the last contig was being read serve this one.
+        self.take_finished();
+        if self.spare_bases.capacity() > self.bases.capacity() {
+            std::mem::swap(&mut self.bases, &mut self.spare_bases);
+        }
         self.bases.clear();
     }
 
@@ -359,16 +448,14 @@ impl ReferenceBasesObserver for RepeatCatalogBuilder {
         let Some(contig) = self.contig else { return };
         self.contigs_seen += 1;
 
-        self.pending.push(PendingContig {
+        let finished = PendingContig {
             contig,
             length: Bp(info.length),
-            // The bases move to the pending contig; the next one starts from an empty
-            // buffer rather than reusing this one, since a worker may still be reading it.
+            // The bases move to the scanner, which hands the buffer back when it is done.
             bases: std::mem::take(&mut self.bases),
-        });
-        if self.pending.len() >= self.threads {
-            self.flush_pending();
-        }
+        };
+        self.hand_over(finished);
+        self.take_finished();
     }
 }
 
