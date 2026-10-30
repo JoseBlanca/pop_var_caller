@@ -234,12 +234,15 @@ pub const DEFAULT_MIN_SITE_QUALITY: f32 = 1.0;
 /// reference before it, is a spelling of `A` cut short rather than evidence of its own. Its
 /// complete rows become partial rows covering the whole locus and marked to run on past that
 /// border ([`PartialObservation::sequence_may_run_on_past`]), so they count for every allele a
-/// carrier of which would have shown the same bases. Three guards: `A` must have at least as many
+/// carrier of which would have shown the same bases. Four guards: `A` must have at least as many
 /// complete reads across the cohort as `S`, so a handful of odd reads cannot re-read a
 /// well-supported allele; `A` and `S` must differ in length by two bases or more, because a
 /// one-base shift inside a homopolymer is invisible and a real SNP just before one spells the
-/// start of a one-base insertion; and the reference is never re-read, since it is the allele every
-/// genotype is measured against and the slide in the walk already covers its ambiguous reads.
+/// start of a one-base insertion; the reference is never re-read, since it is the allele every
+/// genotype is measured against and the slide in the walk already covers its ambiguous reads; and
+/// a substitution spelling whose departure from the reference `A` carries too, and with at least
+/// half as many complete reads as `A`, is `A` without its insertion, a haplotype of its own
+/// ([`is_the_longer_allele_without_its_insertion`]).
 ///
 /// `S`'s entry in the allele table is kept with no complete reads behind it, which candidate
 /// selection's admission rule then declines. A locus where nothing qualifies is left untouched,
@@ -308,11 +311,26 @@ where
             if bases.len() > reference_len && allele.len() < bases.len() {
                 continue;
             }
-            if carrier_sequence_starts_with(allele, &scratch.after, bases) {
+            // **A haplotype of its own**: spelled as `allele` without its insertion, and with
+            // too many reads to be `allele`'s carriers cut short. Either alone is not enough —
+            // see [`is_the_longer_allele_without_its_insertion`].
+            let haplotype_of_its_own = |border| {
+                is_the_longer_allele_without_its_insertion(
+                    bases,
+                    &observation.alleles[0],
+                    allele,
+                    border,
+                ) && complete_reads[spelling].saturating_mul(2) >= complete_reads[longer]
+            };
+            if carrier_sequence_starts_with(allele, &scratch.after, bases)
+                && !haplotype_of_its_own(LocusBorder::Right)
+            {
                 cut_short[spelling] = Some(LocusBorder::Right);
                 break;
             }
-            if carrier_sequence_ends_with(&scratch.before, allele, bases) {
+            if carrier_sequence_ends_with(&scratch.before, allele, bases)
+                && !haplotype_of_its_own(LocusBorder::Left)
+            {
                 cut_short[spelling] = Some(LocusBorder::Left);
                 break;
             }
@@ -364,6 +382,63 @@ where
         }
     }
     Ok(())
+}
+
+/// **Whether a substitution spelling `spelling` is `longer` with its insertion taken out, rather
+/// than `longer` cut short** — the guard that keeps [`reread_spellings_cut_short`] off a real
+/// haplotype.
+///
+/// A read cut short at the right border spells the start of `longer` laid over the reference, so
+/// where it first departs from the reference it shows the inserted copy, and `longer` ends with
+/// the reference there instead. A read of a haplotype carrying `longer`'s substitutions but not
+/// its insertion departs from the reference at those substitutions, and `longer`, which carries
+/// them too after its insertion, ends with exactly that stretch. So: from the first base where
+/// `spelling` departs from `reference` to its end, does `longer` end with it? At the left border
+/// the same from the start, through the last base where it departs.
+///
+/// At GIAB HG002 chr22:37788634 the heterozygous `AACA` insertion and a homozygous `G>A` 12 bases
+/// on fall in one 13-base record, `GAACAAACAAACG`. The 16 reads carrying the substitution alone
+/// spell `GAACAAACAAACA`, exactly the first 13 bases of the 18 carrying both, so they were re-read
+/// as those cut short and the heterozygote was called `1/1`, reads 0 and 18 where DeepVariant saw
+/// 23 and 17. The spelling departs from the reference at its last base, an `A`, and the longer
+/// allele ends with that `A`: a haplotype of its own. At chr22:17595058 (`GTTTTT` beside
+/// `GTTTTTTT`) the same holds; there the re-read was held off only because the substitution's
+/// reads outnumbered the insertion's, 19 to 18.
+///
+/// **The sequences alone cannot settle it, so the caller also asks for the reads.** Where every
+/// carrier has both the insertion and the substitution — a homozygote — its reads cut short spell
+/// exactly what the substitution alone would, and this answers yes for them too. What differs is
+/// how many there are: reads cut short are the carriers whose read happened to stop inside the
+/// insertion's reach, a minority of them (34 against 107 at GIAB HG003 chr15:96140584, the case
+/// the re-read was written for), while two haplotypes of one heterozygote bring about as many
+/// each (16 and 18 here). So [`reread_spellings_cut_short`] keeps the spelling's reads complete
+/// only when this holds **and** they are at least half as many as `longer`'s. Telling the two
+/// apart read by read — a read of the substitution haplotype carries on along the reference past
+/// the border, where a read cut short has stopped — would need the walk to store how far each
+/// read ran past a record, which it does not.
+///
+/// Only substitution spellings, as long as the reference, and only against a longer allele: a
+/// spelling that carries an insertion has no single base where it starts to depart, and a deletion
+/// allele has no insertion to take out; both are left to the rule as it was.
+fn is_the_longer_allele_without_its_insertion(
+    spelling: &[u8],
+    reference: &[u8],
+    longer: &[u8],
+    border: LocusBorder,
+) -> bool {
+    if spelling.len() != reference.len() || longer.len() <= spelling.len() {
+        return false;
+    }
+    let departs = |index: &usize| spelling[*index] != reference[*index];
+    match border {
+        LocusBorder::Right => (0..spelling.len())
+            .find(departs)
+            .is_some_and(|first| longer.ends_with(&spelling[first..])),
+        LocusBorder::Left => (0..spelling.len())
+            .rev()
+            .find(departs)
+            .is_some_and(|last| longer.starts_with(&spelling[..=last])),
+    }
 }
 
 /// The reference `flank` bases either side of `region`, into `scratch`, each stopped at the

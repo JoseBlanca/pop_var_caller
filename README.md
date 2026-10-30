@@ -36,28 +36,30 @@ than 100 bp.
 |---|---|---|---|---|---|
 | pvc | 0.9941 | 0.9819 | 88% | 1 h 45 min / 11 GB | one record, never `*` |
 | GATK | 0.9928 | 0.9839 | 82% | 9 h 50 min / 75 GB | separate records, with `*` |
-| freebayes | 0.9933 | 0.9602 | not run | stalled, stopped after 17 h | one record, which also merges variants within 3 bases |
-| DeepVariant | *running* | *running* | *running* | not run | *to be checked* |
+| freebayes | 0.9933 | 0.9606 | not run | stalled, stopped after 17 h | one record, which also merges variants within 3 bases |
+| DeepVariant | 0.9966 | 0.9934 | 87% | not run | separate records, without `*`: a copy the deletion removes is written as missing in a cohort, as reference in a single sample |
 | HipSTR | n/a | n/a | 73% | not run | STRs only: one record per repeat |
 
 At larger scale, pvc called more than 2,000 whole tomato genomes in a week using less than 30 GB.
 
+[Accuracy](doc/benchmarks/accuracy.md) has the full results behind the accuracy columns, at every
+read depth, with the errors split by kind.
+
 [^giab]: GIAB HG002, the whole of chromosome 20 (64 Mb), reads downsampled to 30×, scored with
     RTG vcfeval against the GIAB truth set: a call counts only if its genotype matches. pvc ran
-    its full pipeline, with parameters estimated from the data. Measured 2026-10-24 on an Apple
-    M5 Pro laptop (pvc e7964e29); a rerun on a Linux server, which adds DeepVariant, is in
-    progress.
+    its full pipeline, with parameters estimated from the data. Measured 2026-10-29 on a Linux
+    server limited to 30 cores and 80 GB (Intel Xeon E5-2667 v4): pvc c3d1ed69, GATK 4.6.0.0,
+    freebayes 1.3.6, DeepVariant 1.10.0.
 
 [^str]: GIAB HG002 tandem-repeat benchmark v1.0.1, reads downsampled to 30×: of the 6,995 repeats
     where the truth carries a variant, the share whose genotype the caller gets right, compared as
-    repeat lengths (HipSTR reports lengths only). Same machine and date as the SNP and indel
-    columns.
+    repeat lengths (HipSTR reports lengths only). Same server as the SNP and indel columns,
+    2026-10-30; HipSTR 0.6.2. freebayes was not run on this benchmark.
 
 [^tomato]: Wall time and peak memory of the whole pipeline: 100 tomato accessions at about 3 reads
-    a position over 91 Mb of chromosome 1, on a Linux server limited to 30 cores and 80 GB
-    (Intel Xeon E5-2667 v4), 2026-10-26/27, pvc c3d1ed69. pvc's figure is its three steps
-    (pileup files, parameter estimation, calling); run as a single step it took 2 h 35 min and
-    21 GB. Memory is the total of the processes running at once. freebayes did not finish: some
+    a position over 91 Mb of chromosome 1, on the same server, 2026-10-26/27, pvc c3d1ed69.
+    pvc's figure is its three steps (pileup files, parameter estimation, calling); run as a
+    single step it took 2 h 35 min and 21 GB. Memory is the total of the processes running at once. freebayes did not finish: some
     regions stopped making progress, possibly because they had too many alleles, and the run was
     stopped after 17 hours.
 

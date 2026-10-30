@@ -1149,6 +1149,61 @@ fn a_spelling_that_is_the_end_of_a_longer_allele_is_reread_at_the_left_border() 
     );
 }
 
+/// **A substitution haplotype is not re-read as the longer allele cut short when that allele is
+/// the same haplotype with an insertion.** `ACA` carries `G>A` on the locus's last base; `ACACA`
+/// carries the same substitution after an inserted `CA`. `ACA` is the start of `ACACA`, but its
+/// departure from the reference, the final `A`, is how `ACACA` ends too, so its reads crossed
+/// the locus showing a haplotype of their own. GIAB HG002 chr22:37788634 in miniature: a
+/// heterozygous insertion beside a homozygous SNP, called `1/1` when the SNP's reads were
+/// re-read.
+#[test]
+fn a_substitution_haplotype_the_longer_allele_carries_too_is_left_alone() {
+    let mut observation = cut_short_locus(&[b"ACG", b"ACACA", b"ACA"], &[(1, 10), (2, 8)]);
+    reread(&mut observation);
+    let sample = &observation.per_sample[0];
+    assert_eq!(
+        sample
+            .supported
+            .iter()
+            .map(|row| row.allele)
+            .collect::<Vec<_>>(),
+        vec![1, 2],
+        "the substitution's reads stay complete",
+    );
+    assert!(sample.partials.is_empty(), "{:?}", sample.partials);
+}
+
+/// **…and at a homozygote it is re-read after all.** The same two spellings, but `ACA` has 3 reads
+/// against `ACACA`'s 20: what a homozygous carrier of both changes leaves when a few of its reads
+/// stop inside the insertion's reach, which spell exactly the substitution alone. Kept complete
+/// they would be an allele no haplotype carries, and the homozygote a `1/2`.
+#[test]
+fn a_substitution_spelling_far_outnumbered_by_the_longer_allele_is_reread() {
+    let mut observation = cut_short_locus(&[b"ACG", b"ACACA", b"ACA"], &[(1, 20), (2, 3)]);
+    reread(&mut observation);
+    let partials = &observation.per_sample[0].partials;
+    assert_eq!(partials.len(), 1, "{partials:?}");
+    assert_eq!(
+        partials[0].sequence_may_run_on_past,
+        Some(LocusBorder::Right)
+    );
+}
+
+/// **The mirror image at the left border.** `TCG` carries `A>T` on the locus's first base and is
+/// the end of `TTTCG`, which carries the same substitution before an inserted `TT`: `TTTCG` starts
+/// with `TCG`'s departure, so `TCG`'s reads are a haplotype of their own, not reads of `TTTCG`
+/// that began inside its insertion.
+#[test]
+fn a_substitution_haplotype_is_left_alone_at_the_left_border() {
+    let mut observation = cut_short_locus(&[b"ACG", b"TTTCG", b"TCG"], &[(1, 10), (2, 8)]);
+    reread(&mut observation);
+    assert!(
+        observation.per_sample[0].partials.is_empty(),
+        "{:?}",
+        observation.per_sample[0].partials
+    );
+}
+
 /// **A spelling better supported than the allele it would be cut from is left alone**: a few odd
 /// reads must not re-read an allele most of the cohort's reads show whole.
 #[test]

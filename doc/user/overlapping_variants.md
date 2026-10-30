@@ -1,8 +1,8 @@
 # Overlapping variants
 
-When two variants overlap, such as a SNP inside a deletion, a VCF can write them in two ways.
-Callers differ in which way they use, and population-genetics tools read the two ways very
-differently. One of them, separate records, can distort the results.
+When two variants overlap, such as a SNP inside a deletion, a VCF can write them in one record
+or in separate records. Callers differ in which way they use, and population-genetics tools read
+them very differently. Separate records can distort the results.
 
 Let's imagine a reference `ATT` at positions 1 to 3 of `chrom1`, and three individuals:
 
@@ -30,7 +30,23 @@ chrom1  1    ATT  A     1/1   0/0   0/1
 chrom1  2    T    C,*   2/2   1/1   1/2
 ```
 
-Both say the same thing. The difference is what a downstream tool does with the second record.
+Written **as separate records, without `*`**. DeepVariant writes it this way. It calls each
+sample on its own, and its cohorts are usually merged with GLnexus. GLnexus writes a copy that
+carries the deletion as missing, `.`, in the SNP's record, and gives the reason in the FORMAT
+field `RNC` as `-`, "unrepresentable overlapping deletion":
+
+```
+#CHROM  POS  REF  ALT   ind1  ind2  ind3
+chrom1  1    ATT  A     1/1   0/0   0/1
+chrom1  2    T    C     ./.   1/1   ./1
+```
+
+A single sample's VCF from DeepVariant, not merged, writes that copy as reference instead: ind3
+would be `0/1` at position 2.
+
+The first two forms say the same thing. The third has already lost information, the same way a
+tool loses it when it reads the second form: as if `*` were read as missing in a merged cohort,
+and as if `*` were recoded as reference in a single sample's VCF. The next section describes both.
 
 ## What goes wrong with the separate-records form
 
