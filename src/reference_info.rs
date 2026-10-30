@@ -90,11 +90,11 @@ pub(crate) fn format_md5_hex(bytes: [u8; 16]) -> String {
 /// What reading a reference yields: the whole-assembly digest and every contig's info.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceInfo {
-    /// The **whole-reference** MD5 — every contig's uppercased bases *concatenated* in
-    /// file order (spec §3.4; the `ssr-catalog` convention, and **not** a SAM field).
-    /// Distinct from the per-contig `@SQ M5` on each [`ContigInfo`]. `None` from a
-    /// `.fai`-only read; being an in-order concatenation, it also pins the contig order
-    /// (spec §5 T1).
+    /// The **whole-reference** MD5 — the MD5 of every contig's `@SQ M5` digest, the 16 bytes
+    /// of each concatenated in file order (spec §3.4; **not** a SAM field). Distinct from the
+    /// per-contig `@SQ M5` on each [`ContigInfo`]. `None` from a `.fai`-only read; being an
+    /// in-order concatenation, it also pins the contig order (spec §5 T1), and re-wrapping
+    /// the FASTA leaves it unchanged.
     pub md5: Option<[u8; 16]>,
     /// Every contig, **in file order** — the order that defines `ContigId` (`ContigId(i)`
     /// is `contigs[i]`, spec §5 T1). One source of truth for name/length/geometry/md5, so
@@ -536,11 +536,30 @@ fn read_fasta_bases(
                 });
             }
         }
-        for &b in &buf[..n] {
-            pass.push_byte(b)?;
-        }
+        pass.push_window(&buf[..n])?;
     }
     pass.finish()
+}
+
+/// Whether `b` is a base under the pass's single predicate (`[0x21, 0x7E]`, spec §3.4/§4).
+#[inline(always)]
+fn is_base_byte(b: u8) -> bool {
+    b.wrapping_sub(0x21) < 0x5e
+}
+
+/// How many leading bytes of `w` are bases. Checked sixteen at a time without an early exit,
+/// so the common case — a whole sequence line — compiles to vector compares.
+#[inline]
+fn leading_bases(w: &[u8]) -> usize {
+    let (chunks, _) = w.as_chunks::<16>();
+    let mut done = 0;
+    for chunk in chunks {
+        if !chunk.iter().fold(true, |all, &b| all & is_base_byte(b)) {
+            break;
+        }
+        done += 16;
+    }
+    done + w[done..].iter().take_while(|&&b| is_base_byte(b)).count()
 }
 
 /// Where the pass is in the file's grammar.
@@ -601,8 +620,8 @@ struct FastaPass<'a> {
     /// True at file start and immediately after a `\n` — the only place a `>` opens a header.
     at_line_start: bool,
 
-    /// The whole-reference digest: every contig's uppercased bases, concatenated in file
-    /// order (spec §3.4).
+    /// The whole-reference digest: the MD5 of every contig's digest, in file order (spec §3.4).
+    /// Fed one contig digest at a time, as each contig finishes.
     reference_md5: Md5,
     contigs: Vec<ContigInfo>,
     seen_names: HashSet<String>,
@@ -625,16 +644,9 @@ struct FastaPass<'a> {
     /// further sequence line after one is a non-uniform-geometry error (spec §3.8, T3).
     short_line_seen: bool,
 
-    /// Uppercased bases batched before feeding the MD5s (one `update` per full window
+    /// Uppercased bases batched before feeding the contig's MD5 (one `update` per full window
     /// instead of per byte). Reused across the whole pass.
     upper: Vec<u8>,
-    /// Whether the two digests are hashed side by side — see [`FastaPass::flush_md5`].
-    ///
-    /// **Read once, not once a window.** The pass flushes about twelve thousand times over a
-    /// tomato reference, and a run whose pool holds one thread pays the fork-join's bookkeeping
-    /// at every one of them for no concurrency: measured on an 8-accession call, splitting made
-    /// `--threads 1` 4.80 s against 5.04 s while making the default 3.57 s against 3.10.
-    split_digests: bool,
 }
 
 impl<'a> FastaPass<'a> {
@@ -659,7 +671,52 @@ impl<'a> FastaPass<'a> {
             cur_line_width: 0,
             short_line_seen: false,
             upper: Vec::with_capacity(FASTA_PASS_BUFFER_SIZE),
-            split_digests: rayon::current_num_threads() > 1,
+        }
+    }
+
+    /// Feed one read window. **A run of bases inside a sequence line is taken whole**; every
+    /// other byte — a line terminator, a header, a `>` at a line start, a `\r` or a space —
+    /// goes through [`push_byte`](Self::push_byte), which is where every geometry check and
+    /// every error lives. The run does exactly what `push_byte` does for each of its bytes
+    /// (counters, `pos`, `at_line_start`, the uppercased batch and its flush points), so the
+    /// digests, the observer's batches and the error offsets are the same.
+    fn push_window(&mut self, mut w: &[u8]) -> Result<(), ReferenceInfoError> {
+        while let Some(&first) = w.first() {
+            let in_sequence = matches!(self.mode, PassMode::Sequence);
+            if in_sequence && !(self.at_line_start && first == b'>') {
+                let run = leading_bases(w);
+                if run > 0 {
+                    self.push_bases(&w[..run]);
+                    w = &w[run..];
+                    continue;
+                }
+            }
+            self.push_byte(first)?;
+            w = &w[1..];
+        }
+        Ok(())
+    }
+
+    /// A run of base bytes inside a sequence line: `push_byte`'s `Sequence` arm, per byte,
+    /// done for the whole run at once.
+    fn push_bases(&mut self, run: &[u8]) {
+        let n = run.len() as u64;
+        self.at_line_start = false;
+        self.cur_line_width += n;
+        self.cur_line_bases += n;
+        self.length += n;
+        self.pos += n;
+        let mut rest = run;
+        while !rest.is_empty() {
+            let room = self.upper.capacity() - self.upper.len();
+            let take = room.min(rest.len());
+            let from = self.upper.len();
+            self.upper.extend_from_slice(&rest[..take]);
+            self.upper[from..].make_ascii_uppercase();
+            rest = &rest[take..];
+            if self.upper.len() == self.upper.capacity() {
+                self.flush_md5();
+            }
         }
     }
 
@@ -754,40 +811,18 @@ impl<'a> FastaPass<'a> {
         }
     }
 
-    /// Feed the window to both digests and to the observer, then empty it.
+    /// Feed the window to the contig's digest and to the observer, then empty it.
     ///
-    /// **The two digests run side by side, because they are two whole MD5s over the same
-    /// bytes.** Every base is hashed twice — once into its contig's digest and once into the
-    /// assembly's — and on a 780-megabase reference that is the pass: `md5` over the tomato
-    /// FASTA costs about 1.0 s on this host and the whole pass costs 2.7, so the two digests
-    /// are roughly three quarters of it and the scan is the rest. They share nothing, so the
-    /// window is hashed into both at once and the pass waits for the slower.
-    ///
-    /// **The window, not the file, is what is split.** A 64 KiB window is about 80 µs of MD5,
-    /// which is far more than a fork-join costs, and splitting per window rather than per
-    /// contig keeps the memory at one window however long a contig is (spec §4).
+    /// **Each base is hashed once.** The whole-reference digest is built from the contig
+    /// digests as each contig finishes ([`finalize_contig`](Self::finalize_contig)), not from
+    /// the bases again. It used to be a second MD5 over every base, which was most of the
+    /// pass's cost and was paid by every command that checks its reference, once per sample
+    /// in a cohort (owner, 2026-10-30, `perf_repeat-scanner_2026-10-30.md`).
     fn flush_md5(&mut self) {
         if !self.upper.is_empty() {
-            // Destructured because the two digests are hashed at the same time and a method
-            // call would borrow the whole pass twice.
-            let Self {
-                contig_md5,
-                reference_md5,
-                upper,
-                split_digests,
-                ..
-            } = self;
-            if *split_digests {
-                rayon::join(
-                    || contig_md5.update(&*upper),
-                    || reference_md5.update(&*upper),
-                );
-            } else {
-                contig_md5.update(&*upper);
-                reference_md5.update(&*upper);
-            }
+            self.contig_md5.update(&self.upper);
             // The one place uppercased bases leave the pass, which is why the observer
-            // seam is here: it sees exactly the bytes the digests do.
+            // seam is here: it sees exactly the bytes the digest does.
             self.observer.bases(&self.upper);
             self.upper.clear();
         }
@@ -850,6 +885,7 @@ impl<'a> FastaPass<'a> {
         let digest: [u8; 16] = std::mem::replace(&mut self.contig_md5, Md5::new())
             .finalize()
             .into();
+        self.reference_md5.update(digest);
         let name = String::from_utf8_lossy(&self.name_bytes).into_owned();
         if !self.seen_names.insert(name.clone()) {
             return Err(ReferenceInfoError::DuplicateContigName {
@@ -1886,16 +1922,20 @@ mod tests {
         }
     }
 
+    /// The whole-reference digest is the MD5 of the contigs' `@SQ M5` digests in file order —
+    /// checked against `samtools dict`'s M5s for the golden FASTA, an oracle outside this code.
+    ///
+    /// It replaced a check against the deleted caller's golden `.cat` header (2026-10-30), whose
+    /// digest was a second MD5 over every base; the two definitions now differ by design.
     #[test]
-    fn fasta_pass_reference_md5_matches_the_golden_cat_header() {
+    fn fasta_pass_reference_md5_is_the_md5_of_the_golden_contig_m5s() {
         let info = read_fasta_none(golden_ref_path()).unwrap();
-        // Read by ng's own reader of the golden file since promotion step C19.
-        let expected = crate::golden_catalog::golden_catalog().reference_md5;
-        let got = format_md5_hex(info.md5.unwrap());
-        assert_eq!(
-            got, expected,
-            "whole-reference digest vs the golden .cat header"
-        );
+        let mut of_m5s = Md5::new();
+        for g in GOLDEN {
+            of_m5s.update(hex_to_md5(g.md5_hex));
+        }
+        let expected: [u8; 16] = of_m5s.finalize().into();
+        assert_eq!(info.md5, Some(expected));
     }
 
     #[test]

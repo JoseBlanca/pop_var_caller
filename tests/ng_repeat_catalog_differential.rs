@@ -257,6 +257,20 @@ fn fixture() -> Vec<(&'static str, String)> {
     // calling one of 100, which is what makes the cap a knob this fixture can move.
     let mid_array = format!("{}{}{}", filler(200), "AT".repeat(90), filler(200));
 
+    // Two `AT` repeats each interrupted by a run of `AC`, which the scanner emits twice — joined
+    // and as pieces — for the reader's purity floor to choose between (`choose_readings`).
+    // `(AT)×8 (AC)×3 (AT)×8` is 0.92 pure as one tract: joined at the catalog's 0.8, pieces at
+    // the stricter 0.95. `(AT)×7 (AC)×11 (AT)×7` is 0.78: pieces at both, though the scanner's
+    // own tolerance, 7/9, joins it — the gap a reader's floor has to close.
+    let junctions = format!(
+        "{}{}{}{}{}",
+        filler(200),
+        ["AT".repeat(8), "AC".repeat(3), "AT".repeat(8)].concat(),
+        filler(200),
+        ["AT".repeat(7), "AC".repeat(11), "AT".repeat(7)].concat(),
+        filler(200),
+    );
+
     vec![
         ("chr_clean", clean),
         ("chr_bundled", bundled),
@@ -266,6 +280,7 @@ fn fixture() -> Vec<(&'static str, String)> {
         ("chr_impure", impure),
         ("chr_edges", edges),
         ("chr_near_edge", near_edge),
+        ("chr_junctions", junctions),
     ]
 }
 
@@ -377,13 +392,15 @@ fn bundle_members_carry_the_same_motifs_and_spans_from_the_file_as_from_a_scan()
 
     // Each member carries its own motif, in the detector's phase (the `GATA` run is read from
     // one base earlier, so as `AGAT`) and at its primitive period (`TCTC` is `TC` repeated).
+    // The last three are `chr_junctions`' 0.78-pure tract, which the catalog's 0.8 floor
+    // reads as its pieces: two `AT` runs and the `AC` run between them.
     let motifs: Vec<&str> = seen
         .iter()
         .map(|(_, (_, _, motif))| motif.as_str())
         .collect();
     assert_eq!(
         motifs,
-        ["AGAT", "TC", "CAG", "TC"],
+        ["AGAT", "TC", "CAG", "TC", "AT", "AC", "AT"],
         "each member carries its own motif: {seen:?}"
     );
     // The ragged member: eight `CAG` from 201 to 224, then `CA`. Cut back, it ends at 224.
@@ -847,31 +864,41 @@ fn a_window_over_one_end_of_a_bundle_types_the_whole_chain() {
     );
 }
 
-/// Sequence with no structure of its own, from a fixed seed — the same bases every run.
-fn pseudorandom(len: usize, seed: u64) -> String {
+/// Sequence with no structure of its own, from a fixed seed — the same bases every run. Each
+/// base is drawn uniformly from `alphabet`, so a letter listed three times is drawn three times
+/// as often as one listed once.
+fn pseudorandom_from(alphabet: &[u8], len: usize, seed: u64) -> String {
     let mut state = seed;
     (0..len)
         .map(|_| {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            b"ACGT"[((state >> 33) % 4) as usize] as char
+            alphabet[((state >> 33) % alphabet.len() as u64) as usize] as char
         })
         .collect()
 }
 
-/// [`fixture`] plus 200 kb of sequence with no designed structure.
+/// [`fixture`] plus 2 Mb of AT-rich sequence with no designed structure.
 ///
 /// **The hand-built contigs drive no rejection at all**, which would make the tally
 /// comparison assert four zeroes against four zeroes. Two of admission's gates need a
-/// haystack rather than a planted tract: over 200 kb of random bases the detector emits a few
-/// dozen tracts that lose a copy to the whole-motif cut (the copy floor) and a few dozen with
-/// no whole-motif boundaries to cut back to at all. The other two gates — an impure tract and
-/// a compound motif — a scan does not reach even over 2 Mb, and they are pinned instead by
-/// `segments.rs`'s own tests, which hand admission the rows directly.
+/// haystack rather than a planted tract: tracts that lose a copy to the whole-motif cut (the
+/// copy floor) and tracts with no whole-motif boundaries to cut back to at all.
+///
+/// **AT-rich, 2 Mb, not uniform 200 kb.** Uniform random bases drove both gates only through
+/// a scanner fault: two different short repeats side by side came back as one tract in the
+/// first one's motif, which then failed the cut. With that fixed, 4 Mb of uniform bases
+/// rejects nothing at all. This contig — 2 Mb, 8 of every 10 bases A or T — rejects 84: 55 at
+/// the cut and 29 at the copy floor. At 1 Mb the copy floor fires on none, which is why it is
+/// 2 Mb; the whole file still runs in half a second.
+///
+/// The other two gates — an impure tract and a compound motif — this scan does not reach, and
+/// they are pinned instead by `segments.rs`'s own tests, which hand admission the rows
+/// directly.
 fn tally_fixture() -> Vec<(&'static str, String)> {
     let mut contigs = fixture();
-    contigs.push(("chr_random", pseudorandom(200_000, 5)));
+    contigs.push(("chr_random", pseudorandom_from(b"AAATTTCGAT", 2_000_000, 5)));
     contigs
 }
 

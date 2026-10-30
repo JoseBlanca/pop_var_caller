@@ -572,7 +572,12 @@ pub fn partition_resident_in(
         .collect();
 
     // 1. Detect.
-    let raw = find_tandem_repeats(bases, config.criteria.periods, &config.scan);
+    // 1b. One reading of each joined tract — joined or split — by this policy's purity floor.
+    let raw = segment_criteria::chosen_readings(
+        find_tandem_repeats(bases, config.criteria.periods, &config.scan),
+        bases,
+        &config.criteria,
+    );
     // 2. Clean.
     let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
     // 3. Admit — the whole contig, for the reason the doc gives.
@@ -2598,6 +2603,115 @@ mod tests {
         );
     }
 
+    /// **Two abutting repeats of different motifs are one bundle carrying both** — the
+    /// scanner reports each in its own motif, so neither fails the purity floor for carrying
+    /// the other. Before, they came back as one tract in the first motif, half of it the
+    /// second, and the purity floor dropped both: the region was `Generic`.
+    #[test]
+    fn abutting_repeats_of_different_motifs_are_one_bundle_of_both() {
+        let rep = |unit: &[u8], n: usize| unit.repeat(n);
+        let cases: Vec<(Vec<u8>, [&[u8]; 2])> = vec![
+            ([rep(b"A", 12), rep(b"T", 12)].concat(), [b"A", b"T"]),
+            ([rep(b"G", 60), rep(b"A", 15)].concat(), [b"G", b"A"]),
+            ([rep(b"GA", 12), rep(b"C", 12)].concat(), [b"GA", b"C"]),
+            ([rep(b"CA", 10), rep(b"GT", 10)].concat(), [b"CA", b"GT"]),
+        ];
+        for (repeats, motifs) in cases {
+            let bases = [filler(80), repeats.clone(), filler(80)].concat();
+            let name = String::from_utf8_lossy(&repeats).into_owned();
+            let regions =
+                partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+            assert_partitions(&regions, ContigId(0), bases.len() as u64, &name);
+            let members: Vec<_> = regions
+                .iter()
+                .filter_map(|r| match &r.kind {
+                    RegionKind::SsrBundle { members } => Some(members),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                members.len(),
+                1,
+                "{name}: one bundle, got {:?}",
+                kinds_of(&regions)
+            );
+            // A member is cut back to whole copies, so its motif may be any rotation.
+            let rotation_of = |a: &[u8], b: &[u8]| {
+                a.len() == b.len()
+                    && (0..a.len())
+                        .any(|r| a[r..] == b[..a.len() - r] && a[..r] == b[a.len() - r..])
+            };
+            for motif in motifs {
+                assert!(
+                    members[0]
+                        .iter()
+                        .any(|m| rotation_of(m.motif().as_bytes(), motif)),
+                    "{name}: no member in {}: {:?}",
+                    String::from_utf8_lossy(motif),
+                    members[0]
+                );
+            }
+        }
+    }
+
+    /// **The purity floor chooses between a joined tract and its pieces.** `(AT)×7 (AC)×11
+    /// (AT)×7` is 0.78 pure as one `AT` tract: the scanner's own tolerance, 7/9, joins it, and
+    /// the typing's floor of 0.8 would then have rejected it whole — all three repeats lost to
+    /// generic sequence. With the pieces beside it, the typing keeps the pieces: a bundle of the
+    /// two `AT` runs and the `AC` run. At a floor of 0.75 the joined tract passes, and it is one
+    /// `AT` segment over all of it.
+    #[test]
+    fn the_purity_floor_chooses_between_a_joined_tract_and_its_pieces() {
+        let repeats = ["AT".repeat(7), "AC".repeat(11), "AT".repeat(7)]
+            .concat()
+            .into_bytes();
+        let bases = [filler(80), repeats, filler(80)].concat();
+        let typed_at = |min_purity: f32| {
+            let mut config = TypedRegionConfig::default();
+            config.criteria.min_purity = min_purity;
+            let regions = partition_resident("chr1", ContigId(0), &bases, &config);
+            assert_partitions(&regions, ContigId(0), bases.len() as u64, "junction");
+            regions
+        };
+
+        let strict = typed_at(0.8);
+        assert_eq!(kinds_of(&strict), vec!["generic", "bundle", "generic"]);
+        let RegionKind::SsrBundle { members } = &strict[1].kind else {
+            unreachable!("asserted a bundle above")
+        };
+        assert!(
+            members
+                .iter()
+                .any(|m| matches!(m.motif().as_bytes(), b"AC" | b"CA")),
+            "the AC run is a member: {members:?}"
+        );
+
+        let lenient = typed_at(0.75);
+        assert_eq!(kinds_of(&lenient), vec!["generic", "locus", "generic"]);
+        let RegionKind::SsrSegment(segment) = &lenient[1].kind else {
+            unreachable!("asserted a locus above")
+        };
+        assert_eq!(segment.end() - segment.start() + 1, 50, "{segment:?}");
+    }
+
+    /// **A two-copy tail of another motif leaves an STR segment a segment.** The scanner splits
+    /// `(AT)×10 (AC)×2` into two intervals, since nothing of `AT` follows the tail; but two
+    /// copies are under every period's copy floor, so the tail is dropped before bundles are
+    /// formed, and the `AT` repeat is typed on its own — as it was when the two came back as one.
+    #[test]
+    fn a_two_copy_tail_of_another_motif_does_not_make_a_bundle() {
+        let repeats = [b"AT".repeat(10), b"AC".repeat(2)].concat();
+        let bases = [filler(80), repeats, filler(80)].concat();
+        let regions =
+            partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+        assert_partitions(&regions, ContigId(0), bases.len() as u64, "AT tail");
+        assert_eq!(
+            kinds_of(&regions),
+            vec!["generic", "locus", "generic"],
+            "{regions:?}"
+        );
+    }
+
     /// The typed regions and tally of a contig with two `(AT)*10` tracts 10 bases apart —
     /// one bundle at the default cap — typed with bundle cap `cap`.
     fn two_close_tracts_capped_at(cap: u64) -> (Vec<TypedRegion>, TypedRegionCounts) {
@@ -3374,7 +3488,11 @@ mod tests {
         // drops it. So the raw coverage run runs 4 bp longer than the cleaned one.
         bases[5200..5204].copy_from_slice(b"CGCG");
         let config = TypedRegionConfig::default();
-        let raw = find_tandem_repeats(&bases, config.criteria.periods, &config.scan);
+        let raw = segment_criteria::chosen_readings(
+            find_tandem_repeats(&bases, config.criteria.periods, &config.scan),
+            &bases,
+            &config.criteria,
+        );
         let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
 
         let over_cap = |intervals: &[RepeatInterval]| -> Vec<(u64, u64)> {
@@ -3467,7 +3585,11 @@ mod tests {
         // (A `>=` bound was the first version, and it left the subtraction untested:
         // dropping it makes the number bigger, and bigger still satisfies `>=`.)
         let config = TypedRegionConfig::default();
-        let raw = find_tandem_repeats(&bases, config.criteria.periods, &config.scan);
+        let raw = segment_criteria::chosen_readings(
+            find_tandem_repeats(&bases, config.criteria.periods, &config.scan),
+            &bases,
+            &config.criteria,
+        );
         let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
         let coverage_bp: u64 = coverage_runs(&cleaned).iter().map(|r| r.len()).sum();
         let locus_bp = bp_of(|k| matches!(k, RegionKind::SsrSegment(_)));
