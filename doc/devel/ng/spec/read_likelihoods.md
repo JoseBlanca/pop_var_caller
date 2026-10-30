@@ -1881,11 +1881,13 @@ alone, or an insertion shorter than the other allele's) whose bases are exactly 
 locus, or exactly its end preceded by the reference before it, has its complete reads turned into
 partial ones covering the whole locus and marked with that border
 (`PartialObservation::sequence_may_run_on_past`; `reread_spellings_cut_short` in `run/records.rs`).
-They are then compared exactly as a read flush to that border is, above. Three guards: the longer
+They are then compared exactly as a read flush to that border is, above. Four guards: the longer
 allele needs at least as many complete reads across the cohort; the two must differ in length by
 two bases or more, because a one-base shift inside a homopolymer is invisible, so a real SNP just
 before one spells the start of a one-base insertion (without this guard, a SNP GATK calls in 52 of
-63 tomato accessions, SL4.0ch12:18047655, was re-read); and the reference is never re-read.
+63 tomato accessions, SL4.0ch12:18047655, was re-read); the reference is never re-read; and a
+substitution spelling that is the longer allele without its insertion, with at least half its
+reads, is a haplotype of its own (added 2026-10-30, below).
 The length rule is not optional: a deletion's allele is a prefix of the reference's whenever it
 removes the locus's last bases, and without it 20 true deletions at 300× were lost. A spelling
 longer than the reference is re-read only against a longer allele: it is a read that began inside
@@ -1904,6 +1906,40 @@ changes 23 of 225,917 records; at those loci, against GATK HaplotypeCaller run o
 (vcfeval per sample, an allele in either zygosity counting as agreement), 87 variant genotypes GATK
 does not call are removed and 62 it does call are lost, some of the latter at sites where neither
 build writes a record within 150 bases, i.e. vcfeval matching a neighbouring haplotype differently.
+
+**A substitution spelling the longer allele also carries is a haplotype, not a read cut short
+(2026-10-30).** A read cut short at the right border spells the start of the longer allele laid
+over the reference, so from the first base where it departs from the reference it shows the
+inserted copy, while the longer allele ends with the reference there. A read of a haplotype that
+carries the longer allele's substitutions but not its insertion departs at those substitutions,
+and the longer allele, carrying them after its insertion, ends with exactly that stretch. At GIAB
+HG002 chr22:37788634 a heterozygous `AACA` insertion and a homozygous `G>A` 12 bases on share one
+13-base record; the 16 reads of the substitution alone spell exactly the first 13 bases of the 18
+carrying both, were re-read as those cut short, and the heterozygote was called `1/1` (DeepVariant:
+23 and 17 reads). At chr22:17595058 (`GTTTTT` beside `GTTTTTTT`) the same re-read was held off only
+by the read-count guard, 19 to 18.
+
+The sequences cannot settle it alone: at a homozygote carrying both changes, reads cut short spell
+exactly what the substitution alone would. The reads' number can. Reads cut short are the carriers
+whose read stopped inside the insertion's reach, a minority (34 against 107 at HG003
+chr15:96140584, the case the rule was written for), while one heterozygote's two haplotypes bring
+about as many each. So a spelling as long as the reference, against an allele longer than it, is
+not re-read when the longer allele ends with the spelling from its first departure from the
+reference on (at the left border: starts with it through its last departure) **and** the spelling
+has at least half as many complete reads (`is_the_longer_allele_without_its_insertion`). Read by
+read the two are distinct — a read of the substitution haplotype carries on along the reference
+past the border, where one cut short has stopped — but the walk does not store how far a read ran
+past a record. Two cases stay unresolved: a substitution haplotype with fewer than half the longer
+allele's reads (sampling at low depth), and one whose substitution lies before the insertion inside
+a run the insertion extends, which is a read cut short base for base.
+
+Measured on HG002 chr22 against v4.2.1 with hap.py, every build calling from the same stored
+evidence (missed / false indels): 30× 170 / 76 → 169 / 73, SNPs unchanged; 5× 1,885 / 505 →
+1,884 / 503, one homozygous SNP lost (chr22:23873331, two reads on each haplotype, where the
+genotype prior picks `0/1` over the `1/2` the reads favour). On 29 tomato accessions at about 3×
+over SL4.0ch01:1–10 Mb it changes 20 of 207,606 records; read by hand against GATK's joint calls,
+about 9 sample genotypes move towards GATK and about 4 away, the losses where a substitution
+extends a homopolymer the insertion also lengthens and single reads pass the half-the-reads test.
 
 **The flank matters only when the read showed more bases than the allele has.** While the read's
 bases fit inside the allele, the extended comparison and the comparison against the allele alone
