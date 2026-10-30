@@ -485,14 +485,22 @@ fn maximal_scoring_subsequences(
 /// **A short stretch of another motif inside a repeat is an interruption, not a second
 /// repeat.** `ATATATATACACATATATAT` is an `AT` repeat with two copies changed to `AC`; the
 /// `AC` pair is a solid block, but splitting there leaves pieces too short for a copy floor,
-/// and the repeat is lost — on tomato, 876 STR segments of this shape. So a piece is
-/// **absorbed** into its neighbours when they share a motif and the three together, compared
-/// base by base with that motif tiled in phase, are at least as pure as the scoring holds a
-/// tract to (spec §3.3: a ratio `r` holds tracts to purity `r / (1 + r)`, 7/9 ≈ 0.78 at the
-/// defaults). That example matches `AT` at 18 of 20 bases, 0.9, and stays whole; so does
-/// `(TAC)×2 (TGC)×4 (TAC)×3`, 0.85, whose inner motif differs from the outer by one base.
+/// and the repeat is lost — on tomato, 876 STR segments of this shape. So when a piece's motif
+/// comes back, the pieces between are **absorbed**: the nearest earlier piece of the same motif,
+/// everything after it, and the new piece become one, provided the joined tract, compared base
+/// by base with that motif tiled in phase, is at least as pure as the scoring holds a tract to
+/// (spec §3.3: a ratio `r` holds tracts to purity `r / (1 + r)`, 7/9 ≈ 0.78 at the defaults).
+/// That example matches `AT` at 18 of 20 bases, 0.9, and stays whole; so does
+/// `(TAC)×2 (TGC)×4 (TAC)×3`, 0.85, whose inner motif differs from the outer by one base; so
+/// does `(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4`, 0.82, with two different interruptions in a row.
 /// Base by base, not piece by piece, because that is how the typing measures purity
 /// afterwards. No new knob: the tolerance is the one the scoring already states.
+///
+/// The phase is the one at the outer piece's **last** solid block, so an indel earlier in that
+/// piece makes the bases before it count as impure, and the interruption after it may then not
+/// be absorbed. That is deliberate rather than overlooked: the typing measures purity in one
+/// phase from the tract's start, so a joined tract with an indel in it would be rejected there
+/// whole, as it was before this split existed; splitting at least keeps the pure pieces.
 ///
 /// **A piece at either end is never absorbed**, however short: nothing of the first motif
 /// follows it, so it is where one repeat stops and another starts. `G×60 A×15` is `G` over 0.8
@@ -530,9 +538,46 @@ fn split_at_motif_changes(
         (0..p).any(|r| (0..p).all(|i| x[i] == y[(i + r) % p]))
     };
 
-    // The closed pieces, as `(first score index, last score index, where its motif is read)`.
-    // Empty — and never allocated — for a segment with one motif throughout.
-    let mut pieces: Vec<(usize, usize, usize)> = Vec::new();
+    let reward = i64::from(params.match_reward);
+    let penalty = i64::from(params.mismatch_penalty);
+    // How many bases in `from..to` match the motif read at `motif_at`, tiled in that block's
+    // phase — before it as well as after, so a piece that opens on a fragment shorter than a
+    // solid block is measured against the motif it actually repeats.
+    let in_phase = |motif_at: usize, from: usize, to: usize| {
+        (from..to)
+            .filter(|&x| canonical[x] == canonical[motif_at + (x % p + p - motif_at % p) % p])
+            .count() as i64
+    };
+    // The pieces so far, left to right, as `(first score index, last score index, where its
+    // motif is read, bases of its tract matching that motif in phase)`. A piece's tract is its
+    // score indices widened by `p + 1`, as the segment's is. Empty — and never allocated — for a
+    // segment with one motif throughout.
+    let mut pieces: Vec<(usize, usize, usize, i64)> = Vec::new();
+    // Push a piece, then absorb every interruption it closes: the nearest earlier piece of the
+    // same motif, with everything between, when the joined tract matches that motif in phase
+    // at the scoring's tolerance — matches / bases >= penalty / (reward + penalty), in
+    // integers. Only the new bases are compared, so a long run of absorbed interruptions costs
+    // one pass, not one per join.
+    let push = |pieces: &mut Vec<(usize, usize, usize, i64)>, (a, b, m): (usize, usize, usize)| {
+        pieces.push((a, b, m, in_phase(m, a, b + p + 1)));
+        loop {
+            let right = pieces[pieces.len() - 1];
+            let Some(j) = (0..pieces.len() - 1)
+                .rev()
+                .find(|&j| same_motif(pieces[j].2, right.2))
+            else {
+                return;
+            };
+            let left = pieces[j];
+            let (left_end, right_end) = (left.1 + p + 1, right.1 + p + 1);
+            let matches = left.3 + in_phase(left.2, left_end, right_end.max(left_end));
+            if matches * (reward + penalty) < penalty * (right_end - left.0) as i64 {
+                return;
+            }
+            pieces.truncate(j);
+            pieces.push((left.0, right.1, left.2, matches));
+        }
+    };
     // The open piece: where it starts, the last solid block's end, and that block's start
     // (whose first `p` bases are the piece's current motif).
     let mut piece_start = k0;
@@ -554,7 +599,7 @@ fn split_at_motif_changes(
         }
         match motif_at {
             Some(m) if !same_motif(m, b0) => {
-                pieces.push((piece_start, last_solid_end, m));
+                push(&mut pieces, (piece_start, last_solid_end, m));
                 piece_start = b0;
             }
             _ => {}
@@ -566,42 +611,13 @@ fn split_at_motif_changes(
         emit(k0, k1, score);
         return;
     };
-    pieces.push((piece_start, k1, last_motif));
-
-    // Absorb each interruption: a piece whose neighbours share a motif, when the three together
-    // are pure enough in the left one's motif. Left to right with a stack, so a joined piece is
-    // tested again against what follows it.
-    let reward = i64::from(params.match_reward);
-    let penalty = i64::from(params.mismatch_penalty);
-    // Of the tract a span of score indices certifies (widened by `p + 1`, as the segment's
-    // is), whether enough bases match the motif read at its first base, tiled in phase:
-    // matches / bases >= penalty / (reward + penalty), in integers.
-    let pure_enough = |first: usize, last: usize| {
-        let tract = &canonical[first..last + p + 1];
-        let matches = tract
-            .iter()
-            .enumerate()
-            .filter(|&(i, &b)| b == tract[i % p])
-            .count();
-        matches as i64 * (reward + penalty) >= penalty * tract.len() as i64
-    };
-    let mut kept: Vec<(usize, usize, usize)> = Vec::with_capacity(pieces.len());
-    for piece in pieces {
-        kept.push(piece);
-        while let [.., left, _, right] = kept[..] {
-            if !(same_motif(left.2, right.2) && pure_enough(left.0, right.1)) {
-                break;
-            }
-            kept.truncate(kept.len() - 3);
-            kept.push((left.0, right.1, left.2));
-        }
-    }
-    if kept.len() == 1 {
+    push(&mut pieces, (piece_start, k1, last_motif));
+    if pieces.len() == 1 {
         emit(k0, k1, score);
         return;
     }
     // Each piece's own score, over its own score indices, as the segment's was.
-    for (a, b, _) in kept {
+    for (a, b, _, _) in pieces {
         let piece_score = (a..=b)
             .map(|k| if is_match(k) { reward } else { -penalty })
             .sum();
@@ -1571,8 +1587,8 @@ mod tests {
 
     /// Two copies of another motif **inside** a repeat are an interruption, not a second
     /// repeat: `(AT)×4 A (CA)×2 (TA)×4 T` stays one `AT` interval, as it was before the split
-    /// existed. Its `AT` covers 17 of 20 bases, above the 7/9 the default scoring holds a tract
-    /// to. Found on tomato, where splitting this shape lost 876 STR segments.
+    /// existed. It matches `AT` at 18 of 20 bases, above the 7/9 the default scoring holds a
+    /// tract to. Found on tomato, where splitting this shape lost 876 STR segments.
     #[test]
     fn a_short_run_of_another_motif_inside_a_repeat_is_not_split() {
         let seq = b"ATATATATACACATATATAT";
@@ -1580,6 +1596,27 @@ mod tests {
         assert_eq!(
             got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
             vec![(0, 20)],
+            "{got:?}"
+        );
+    }
+
+    /// Two **different** interruptions in a row are absorbed too, once the outer motif comes
+    /// back: `(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4` matches `AAT` at 32 of 39 bases, 0.82. A test of
+    /// neighbours alone never saw it — no piece there has the same motif on both sides — and
+    /// on tomato 13 STR segments of this shape became plain sequence.
+    #[test]
+    fn two_different_interruptions_in_a_row_are_absorbed() {
+        let seq = [
+            b"AAT".repeat(4),
+            b"GAT".repeat(3),
+            b"GGT".repeat(2),
+            b"AAT".repeat(4),
+        ]
+        .concat();
+        let got = find_tandem_repeats(&seq, p(3, 3), &ScanParams::default());
+        assert_eq!(
+            got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
+            vec![(0, 39)],
             "{got:?}"
         );
     }

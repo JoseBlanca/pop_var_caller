@@ -249,12 +249,16 @@ before emission:
 2. **Motifs compared up to rotation.** An indel shifts phase, so the block after it carries a
    rotation of the motif before: the same motif. Consecutive solid blocks with the same motif
    form one piece; a block with a motif that is no rotation of the last one starts a new piece.
-3. **Interruptions are absorbed.** A piece whose neighbours on both sides share a motif is
-   joined to them when the three together, compared base by base with that motif tiled in
-   phase, are at least as pure as the scoring holds a tract to — `r / (1 + r)`, 7/9 at the
-   defaults. `(AT)×4 A (CA)×2 (TA)×4 T` matches `AT` at 18 of 20 bases and stays one interval;
-   `(CA)×10 (GT)×10 (CA)×10` matches `CA` at 40 of 60 and is three. No new knob: the tolerance
-   is the one §3.3 already states.
+3. **Interruptions are absorbed.** When a piece's motif comes back, the nearest earlier piece
+   of that motif, everything after it and the new piece are joined, provided the joined tract,
+   compared base by base with that motif tiled in phase, is at least as pure as the scoring
+   holds a tract to — `r / (1 + r)`, 7/9 at the defaults. `(AT)×4 A (CA)×2 (TA)×4 T` matches
+   `AT` at 18 of 20 bases and stays one interval; so does `(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4`,
+   32 of 39, with two different interruptions in a row; `(CA)×10 (GT)×10 (CA)×10` matches `CA`
+   at 40 of 60 and is three. No new knob: the tolerance is the one §3.3 already states. The
+   phase is the outer piece's last solid block, so an indel earlier in it counts the bases
+   before as impure; the typing measures purity in one phase from the tract's start and would
+   reject such a joined tract whole anyway, so splitting it keeps at least the pure pieces.
 4. **A piece at either end is never absorbed**: nothing of the first motif follows it, so it is
    where one repeat stops and another starts. `G×60 A×15` is `G` at 0.8 of its bases and still
    two repeats.
@@ -262,20 +266,26 @@ before emission:
 A segment with no mismatch (its score is all rewards) cannot hold a motif change and skips the
 walk; that is nearly every segment, and it keeps the cost to about 3% of a tomato catalog build.
 
+**Known gap: 7/9 here, 0.8 in the typing.** The typing's purity floor (`--min-purity`, 0.8 by
+default) is stricter than this tolerance, so a joined tract between the two passes here and is
+rejected there whole — the failure this section exists to prevent, in a narrow band. On tomato,
+joining only at 0.8 or more would type 240 more STR segments (489,617 against 489,377), about 5
+in 10,000. Closing it means handing the typing's floor to the scanner, a typing setting the
+user can change, into parameters the catalogue and the psp files record; left for a decision.
+
 **Measured on tomato SL4.00**, default settings, typed regions before and after:
 
 | | before | after |
-|---|---:|---|
-| STR segments | 462,678 | 489,355 |
-| — of which period 2 to 6 | 52,229 | 56,496 |
-| STR bundles | 22,755 | 30,324 |
-| repeat bases typed as no STR | 3,791,370 | 2,399,153 |
+|---|---:|---:|
+| STR segments | 462,678 | 489,377 |
+| — of which period 2 to 6 | 52,229 | 56,520 |
+| STR bundles | 22,755 | 30,282 |
+| repeat bases typed as no STR | 3,791,370 | 2,404,152 |
 
-461,127 segments are unchanged. Of the 1,551 segments that are gone, 1,313 are now members of a
-bundle with the repeat that abutted them, 218 are inside a satellite (a bundle that passes the
-100-base cap once its abutting repeat joins it), 7 are the same repeat with moved edges, and
-13 have become plain sequence — each a repeat with several different inner motifs, such as
-`(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4`.
+461,197 segments are unchanged. Of the 1,481 segments that are gone, 1,289 are now members of a
+bundle with the repeat that abutted them, 189 are inside a satellite (a bundle that passes the
+100-base cap once its abutting repeat joins it), 1 is the same repeat with moved edges, and 2
+have become plain sequence.
 
 ### 3.5 Non-ACGT and case
 

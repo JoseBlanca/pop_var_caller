@@ -2649,6 +2649,24 @@ mod tests {
         }
     }
 
+    /// **A two-copy tail of another motif leaves an STR segment a segment.** The scanner splits
+    /// `(AT)×10 (AC)×2` into two intervals, since nothing of `AT` follows the tail; but two
+    /// copies are under every period's copy floor, so the tail is dropped before bundles are
+    /// formed, and the `AT` repeat is typed on its own — as it was when the two came back as one.
+    #[test]
+    fn a_two_copy_tail_of_another_motif_does_not_make_a_bundle() {
+        let repeats = [b"AT".repeat(10), b"AC".repeat(2)].concat();
+        let bases = [filler(80), repeats, filler(80)].concat();
+        let regions =
+            partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
+        assert_partitions(&regions, ContigId(0), bases.len() as u64, "AT tail");
+        assert_eq!(
+            kinds_of(&regions),
+            vec!["generic", "locus", "generic"],
+            "{regions:?}"
+        );
+    }
+
     /// The typed regions and tally of a contig with two `(AT)*10` tracts 10 bases apart —
     /// one bundle at the default cap — typed with bundle cap `cap`.
     fn two_close_tracts_capped_at(cap: u64) -> (Vec<TypedRegion>, TypedRegionCounts) {

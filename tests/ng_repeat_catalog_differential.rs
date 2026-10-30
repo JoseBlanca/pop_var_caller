@@ -872,11 +872,13 @@ fn pseudorandom_from(alphabet: &[u8], len: usize, seed: u64) -> String {
 /// **AT-rich, 2 Mb, not uniform 200 kb.** Uniform random bases drove both gates only through
 /// a scanner fault: two different short repeats side by side came back as one tract in the
 /// first one's motif, which then failed the cut. With that fixed, 4 Mb of uniform bases
-/// rejects nothing at all; 4 Mb at 70% A+T rejects 103 (55 at the cut, 29 at the copy floor,
-/// 19 at the purity floor).
-/// The purity floor fires here too, but too rarely in the 2 Mb to rely on; it and the
-/// compound-motif gate, which a scan does not reach, are pinned instead by `segments.rs`'s own
-/// tests, which hand admission the rows directly.
+/// rejects nothing at all. This contig — 2 Mb, 8 of every 10 bases A or T — rejects 84: 55 at
+/// the cut and 29 at the copy floor. At 1 Mb the copy floor fires on none, which is why it is
+/// 2 Mb; the whole file still runs in half a second.
+///
+/// The other two gates — an impure tract and a compound motif — this scan does not reach, and
+/// they are pinned instead by `segments.rs`'s own tests, which hand admission the rows
+/// directly.
 fn tally_fixture() -> Vec<(&'static str, String)> {
     let mut contigs = fixture();
     contigs.push(("chr_random", pseudorandom_from(b"AAATTTCGAT", 2_000_000, 5)));
