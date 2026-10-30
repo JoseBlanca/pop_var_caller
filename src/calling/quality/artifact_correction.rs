@@ -893,7 +893,10 @@ mod tests {
     #[test]
     fn a_degenerate_share_still_gives_a_number() {
         assert!(two_sided_binomial_tail_phred(0.0, 20.0, 0.0).is_finite());
-        assert!(two_sided_binomial_tail_phred(20.0, 20.0, 1.0).is_finite());
+        // Every read where every read was expected is the one certain outcome, and costs
+        // nothing.
+        assert_eq!(two_sided_binomial_tail_phred(20.0, 20.0, 1.0), 0.0);
+        assert_eq!(two_sided_binomial_tail_phred(0.0, 20.0, 0.0), 0.0);
         // Every read where none was expected: the most surprising thing this can be told, and
         // it comes back at the floor rather than as an infinity.
         let impossible = two_sided_binomial_tail_phred(20.0, 20.0, 0.0);
@@ -901,6 +904,12 @@ mod tests {
             impossible.is_finite() && impossible > 1000.0,
             "an impossible observation is charged the floor's 3,000 Phred, not an infinity: \
              {impossible}"
+        );
+        // And its mirror: a reference read where every read was expected to be alternative.
+        let impossible = two_sided_binomial_tail_phred(10.0, 20.0, 1.0);
+        assert!(
+            impossible.is_finite() && impossible > 1000.0,
+            "ten reference reads against a share of one are charged the floor: {impossible}"
         );
     }
 
@@ -1032,6 +1041,18 @@ mod tests {
         assert_eq!(
             allele_balance_penalty(&balanced_counts(10.0, 0.0, 5.0)).get(),
             0.0
+        );
+    }
+
+    /// **One alternative read is weighed, not skipped.** The guard above stops at none; a
+    /// heterozygous call resting on one read in thirty is the deficit this test exists for.
+    /// A mutation that moved the guard to one read survived every other test here.
+    #[test]
+    fn a_single_alternative_read_against_a_heterozygous_expectation_is_charged() {
+        let penalty = allele_balance_penalty(&balanced_counts(29.0, 1.0, 15.0)).get();
+        assert!(
+            penalty > 30.0,
+            "one read in thirty where fifteen were expected: {penalty}"
         );
     }
 
