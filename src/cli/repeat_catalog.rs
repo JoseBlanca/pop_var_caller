@@ -52,8 +52,9 @@ pub struct RepeatCatalogArgs {
     /// How many contigs to scan at once. The catalogue is the same at any number.
     ///
     /// Each thread holds a whole contig in memory, so memory grows with the largest contigs
-    /// scanned together: six threads on the human genome need more than 16 GB, while one builds
-    /// its catalogue in under two minutes. Raise it on a machine with memory to spare.
+    /// scanned together: on the human genome one thread peaks at about 1 GB and takes about a
+    /// minute, six peak at about 4.5 GB and take about 20 seconds. Raise it on a machine with
+    /// memory to spare.
     #[arg(long, default_value_t = 1)]
     pub threads: usize,
 

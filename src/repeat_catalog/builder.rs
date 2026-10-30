@@ -6,10 +6,11 @@
 //! and a cap on the repeat length it can promise to catch whole. Scanning a contig in one
 //! slice removes all three: a satellite of any size comes out as one row.
 //!
-//! **What it costs is set by the largest contig, at about 16 bytes a base** — measured at
-//! 1.49 GB on tomato (largest contig 90 Mb) and 3.89 GB on GRCh38 (248 Mb), times the thread
-//! count. Most of that is the scan's own working set rather than the bases, which are a
-//! sixteenth of it (`doc/devel/reports/implementations/ng-repeat-catalog-E_2026-08-10.md`).
+//! **What it costs is set by the largest contig, at about 4 to 5 bytes a base** — measured at
+//! 404 MiB on tomato (largest contig 91 Mb) and 0.97 GiB on GRCh38 (248 Mb) at one thread, and
+//! 4.36 GiB on GRCh38 at six (macOS, 2026-10-30, `perf_repeat-scanner_2026-10-30.md`). It was
+//! about 16 bytes a base before the scan stopped returning the tracts no row can come from
+//! (`find_tandem_repeats_for_copy_floor`); the bases are now about a quarter of it.
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +19,7 @@ use crate::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::repeat_catalog::parquet_file::RepeatCatalogWriter;
 use crate::repeat_catalog::row::{RowRejection, row_for_interval};
 use crate::repeat_catalog::{FoundRepeat, RepeatCatalogError, RepeatCatalogHeader, RowsByPeriod};
-use crate::tandem_repeat::{ScanParams, find_tandem_repeats};
+use crate::tandem_repeat::{ScanParams, find_tandem_repeats_for_copy_floor};
 use crate::types::{Bp, ContigId};
 
 /// What a build wrote, and what it did not.
@@ -31,6 +32,11 @@ pub struct BuildTally {
     pub rows: RowsByPeriod,
     /// Detections dropped for holding fewer copies than the catalog's floor, measured on
     /// the **detected** span.
+    ///
+    /// **Only those the scan returns**, which is not every sub-floor repeat in the reference:
+    /// the scan leaves out the ones too short to remove a longer tract that clears the floor
+    /// (`find_tandem_repeats_for_copy_floor`). On tomato's chromosome 1 this counts 1,492,417
+    /// where the scan that returned everything counted 22,844,074.
     pub below_copy_floor: u64,
     /// Detections dropped for sitting closer to a contig's end than the flank floor.
     pub too_close_to_contig_end: u64,
@@ -251,8 +257,21 @@ impl RepeatCatalogBuilder {
             }
         }
 
-        // Nothing accumulates across flushes (spec §6).
-        self.pending.clear();
+        // Nothing accumulates across flushes (spec §6) — except one bases buffer, the largest,
+        // which the next contig fills instead of growing a new one from empty. Grown by
+        // doubling, a 91 Mb chromosome passes through buffers of every power of two below
+        // 128 MiB, and the allocator counts them in the peak.
+        let largest = self
+            .pending
+            .drain(..)
+            .map(|contig| contig.bases)
+            .max_by_key(Vec::capacity);
+        if let Some(mut bases) = largest
+            && bases.capacity() > self.bases.capacity()
+        {
+            bases.clear();
+            self.bases = bases;
+        }
         self.pending.shrink_to_fit();
     }
 }
@@ -282,9 +301,17 @@ fn scan_contig(
 ) -> ScannedContig {
     // One call over the whole contig: no window, so no margin and no length at which a
     // tract stops being caught whole (spec §2.3).
-    let intervals = find_tandem_repeats(&pending.bases, criteria.classification.periods, scan);
+    // Only the tracts that can reach the file, or remove one that does: the floor is the one
+    // `row_for_interval` applies, so the rows are the same as from the whole scan.
+    let floor = &criteria.classification.min_copies;
+    let intervals = find_tandem_repeats_for_copy_floor(
+        &pending.bases,
+        criteria.classification.periods,
+        scan,
+        |period| floor.for_period(period),
+    );
 
-    let mut rows = Vec::with_capacity(intervals.len());
+    let mut rows = Vec::new();
     let mut rejections = Vec::new();
     for interval in &intervals {
         match row_for_interval(

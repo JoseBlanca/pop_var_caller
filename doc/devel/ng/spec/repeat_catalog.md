@@ -143,10 +143,13 @@ the repeat length it can promise to catch whole — step 3 ties that margin and 
 **no length at which the geometry stops promising a whole tract** — a satellite of any size comes out
 as one row.
 
-**What it costs is set by the largest contig, and it is about 16 bytes a base** — measured, not
-arithmetic. A build peaks at **1.49 GB on tomato** (largest contig 90 Mb) and **3.89 GB on GRCh38**
-(248 Mb); the two agree to within 6%, so this is a rule rather than a coincidence, and `--threads N`
-multiplies it by N (§2.4).
+**What it costs is set by the largest contig, and it is about 4 to 5 bytes a base** — measured, not
+arithmetic. Since 2026-10-30 a build peaks at **404 MiB on tomato** (largest contig 91 Mb) and
+**0.97 GiB on GRCh38** (248 Mb) at one thread, and 4.36 GiB on GRCh38 at six (macOS, mimalloc;
+`perf_repeat-scanner_2026-10-30.md`); `--threads N` multiplies it by up to N (§2.4). **Those are
+macOS figures, and the Linux ones below them were 1.49 GB and 3.89 GB** — about 16 bytes a base,
+before the scan stopped returning the 97 in 100 tracts no row can come from; the Linux figures
+for the current build are owed.
 
 *The bases themselves are a sixteenth of that* — 90 MB and 250 MB — and this spec claimed the bases
 were the whole cost until [the measurement](../../reports/implementations/ng-repeat-catalog-E_2026-08-10.md)
@@ -610,9 +613,10 @@ two, without a second scan.
 
 **Memory.** The observer holds one contig's bases plus that contig's rows, and the scan holds its own
 working set over that contig — which is the larger of the two by a factor of fifteen (§2.3).
-**Measured: 1.49 GB on tomato, 3.89 GB on GRCh38, about 16 bytes a base of the largest contig**, times
-`--threads N`. That is the number to watch, and it is what makes the thread default 1. Nothing
-accumulates across contigs.
+**Measured: about 4 to 5 bytes a base of the largest contig** (§2.3, macOS, 2026-10-30; it was 16 on
+Linux before that date), times `--threads N`. That is the number to watch, and it is what makes the thread default 1. Nothing
+accumulates across contigs but one bases buffer, which the next contig fills instead of growing a
+new one from empty.
 
 **Compute.** The scan is the cost: a lag-`p` self-comparison plus a Ruzzo–Tompa pass, for each period
 in the range, over every base. The digest pass it attaches to is I/O-bound, so **the combined pass runs

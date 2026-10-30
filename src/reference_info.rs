@@ -536,11 +536,30 @@ fn read_fasta_bases(
                 });
             }
         }
-        for &b in &buf[..n] {
-            pass.push_byte(b)?;
-        }
+        pass.push_window(&buf[..n])?;
     }
     pass.finish()
+}
+
+/// Whether `b` is a base under the pass's single predicate (`[0x21, 0x7E]`, spec §3.4/§4).
+#[inline(always)]
+fn is_base_byte(b: u8) -> bool {
+    b.wrapping_sub(0x21) < 0x5e
+}
+
+/// How many leading bytes of `w` are bases. Checked sixteen at a time without an early exit,
+/// so the common case — a whole sequence line — compiles to vector compares.
+#[inline]
+fn leading_bases(w: &[u8]) -> usize {
+    let (chunks, _) = w.as_chunks::<16>();
+    let mut done = 0;
+    for chunk in chunks {
+        if !chunk.iter().fold(true, |all, &b| all & is_base_byte(b)) {
+            break;
+        }
+        done += 16;
+    }
+    done + w[done..].iter().take_while(|&&b| is_base_byte(b)).count()
 }
 
 /// Where the pass is in the file's grammar.
@@ -660,6 +679,52 @@ impl<'a> FastaPass<'a> {
             short_line_seen: false,
             upper: Vec::with_capacity(FASTA_PASS_BUFFER_SIZE),
             split_digests: rayon::current_num_threads() > 1,
+        }
+    }
+
+    /// Feed one read window. **A run of bases inside a sequence line is taken whole**; every
+    /// other byte — a line terminator, a header, a `>` at a line start, a `\r` or a space —
+    /// goes through [`push_byte`](Self::push_byte), which is where every geometry check and
+    /// every error lives. The run does exactly what `push_byte` does for each of its bytes
+    /// (counters, `pos`, `at_line_start`, the uppercased batch and its flush points), so the
+    /// digests, the observer's batches and the error offsets are the same.
+    fn push_window(&mut self, mut w: &[u8]) -> Result<(), ReferenceInfoError> {
+        while let Some(&first) = w.first() {
+            let in_sequence = matches!(self.mode, PassMode::Sequence);
+            if in_sequence && !(self.at_line_start && first == b'>') {
+                let run = leading_bases(w);
+                if run > 0 {
+                    self.push_bases(&w[..run]);
+                    w = &w[run..];
+                    continue;
+                }
+            }
+            self.push_byte(first)?;
+            w = &w[1..];
+        }
+        Ok(())
+    }
+
+    /// A run of base bytes inside a sequence line: `push_byte`'s `Sequence` arm, per byte,
+    /// done for the whole run at once.
+    fn push_bases(&mut self, run: &[u8]) {
+        let n = run.len() as u64;
+        self.at_line_start = false;
+        self.cur_line_width += n;
+        self.cur_line_bases += n;
+        self.length += n;
+        self.pos += n;
+        let mut rest = run;
+        while !rest.is_empty() {
+            let room = self.upper.capacity() - self.upper.len();
+            let take = room.min(rest.len());
+            let from = self.upper.len();
+            self.upper.extend_from_slice(&rest[..take]);
+            self.upper[from..].make_ascii_uppercase();
+            rest = &rest[take..];
+            if self.upper.len() == self.upper.capacity() {
+                self.flush_md5();
+            }
         }
     }
 

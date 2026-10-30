@@ -374,9 +374,8 @@ struct RtSeg {
 ///
 /// This is the textbook offline pass: a working stack of open segments, drained at the end.
 /// Its correctness is pinned by a brute-force property test (`ruzzo_tompa_matches_brute_force`).
-/// The stack is O(number of open segments) — bounded per window on the region seam's streaming
-/// path; on a whole-contig `find_tandem_repeats` (the catalog's use) it can grow to O(n) on a
-/// pathological input, an online-finalisation optimisation deferred behind that property test.
+/// The stack holds only the segments opened since the last Rule-2 push, which is when every
+/// segment below the pushed one becomes final and is emitted (see that arm).
 fn maximal_scoring_subsequences(
     scores: impl Iterator<Item = i64>,
     mut emit: impl FnMut(usize, usize, i64),
@@ -431,8 +430,20 @@ fn maximal_scoring_subsequences(
             }
             match found {
                 None => {
+                    // Rule 2: no left-smaller segment → `cur` is separate. **And everything
+                    // below it is final**: every stacked `l` is at least `cur.l`, so a later
+                    // search that would find one of them finds `cur`, which sits above them,
+                    // first — and `cur` being found, or merged into, leaves them untouched.
+                    // Emitting them now keeps the stack to the segments since the last such
+                    // push instead of a whole contig's: on tomato's chromosome 1 it reached
+                    // 1.34 GB at period 1 when they waited for the end. They come out in the
+                    // order the final drain would have emitted them.
+                    for seg in &stack {
+                        emit(seg.start, seg.end, seg.r - seg.l);
+                    }
+                    stack.clear();
                     cur.prev_smaller = 0;
-                    break; // Rule 2: no left-smaller segment → `cur` is separate.
+                    break;
                 }
                 Some(j) => {
                     if stack[j].r >= cur.r {
@@ -507,7 +518,14 @@ fn maximal_scoring_subsequences(
 /// of its bases, and still two repeats.
 ///
 /// A segment with one motif throughout — every segment that is not a junction — and a segment
-/// whose pieces were all absorbed are emitted unchanged, score and all.
+/// whose pieces were all absorbed are emitted unchanged, score and all. The caller sends only
+/// segments with a mismatch (one without cannot change motif) that are long enough to keep.
+///
+/// **Out of line on purpose**: inlined into the scan's per-segment closure it made that closure
+/// too big to inline into the scan loop, and the whole build paid a call per segment. Measured
+/// on tomato's chromosome 1: 1.69 s and 22.5 G instructions out of line, 1.77 s and 24.6 G
+/// inlined, four interleaved runs each.
+#[inline(never)]
 fn split_at_motif_changes(
     canonical: &[u8],
     p: usize,
@@ -517,15 +535,6 @@ fn split_at_motif_changes(
     params: &ScanParams,
     emit: &mut impl FnMut(usize, usize, i64),
 ) {
-    // No mismatch, no motif change: a segment's score is all rewards exactly when every
-    // comparison in it matched. Nearly every segment is this — at period 1 every pair of
-    // equal neighbouring bases is one, and tomato's scan meets about 197 million segments too
-    // short to keep — and they skip the walk below, which cost the catalog build a quarter
-    // more time without this.
-    if score == i64::from(params.match_reward) * (k1 - k0 + 1) as i64 {
-        emit(k0, k1, score);
-        return;
-    }
     let is_match = |k: usize| {
         let h = canonical[k + p];
         h != 0 && h == canonical[k]
@@ -668,6 +677,43 @@ pub fn find_tandem_repeats(
     periods: PeriodRange,
     params: &ScanParams,
 ) -> Vec<RepeatInterval> {
+    find_tandem_repeats_for_copy_floor(seq, periods, params, |_| 0)
+}
+
+/// [`find_tandem_repeats`] for a consumer that will drop every tract holding fewer than
+/// `copy_floor(period)` copies: every tract it returns at or above that floor is exactly one
+/// `find_tandem_repeats` returns, and of the tracts below it, it leaves out those too short
+/// to matter.
+///
+/// **Not simply the floor, because a tract below it can still remove one above it.** The
+/// period-multiple pass drops a tract that a shorter-period tract covers half of, so a
+/// period-2 tract of 9 bases, itself below a floor of 5 copies, can remove a period-4 tract
+/// of 16 that clears a floor of 4. What is left out is only what cannot do that: a tract of
+/// period `p` is needed when it clears its own floor, or when it is at least half as long
+/// as the shortest needed tract at some multiple of `p` in the range — and those lengths are
+/// worked out from the longest period down. A tract shorter than that eliminates nothing
+/// that is needed, and the tracts it would have shielded are shorter still, so leaving it
+/// out changes nothing that clears the floor.
+///
+/// Why it exists: on tomato's chromosome 1 the catalog keeps 774,585 of the 23.6 million
+/// tracts `find_tandem_repeats` returns, and holding all of them through the period-multiple
+/// pass was most of the build's peak memory.
+pub fn find_tandem_repeats_for_copy_floor(
+    seq: &[u8],
+    periods: PeriodRange,
+    params: &ScanParams,
+    copy_floor: impl Fn(u8) -> u32,
+) -> Vec<RepeatInterval> {
+    // `needed[p]`: the shortest tract of period `p` that can matter, as above.
+    let mut needed = vec![0u64; usize::from(periods.max()) + 1];
+    for p in (periods.min()..=periods.max()).rev() {
+        let own = u64::from(copy_floor(p)) * u64::from(p);
+        needed[usize::from(p)] = (2 * usize::from(p)..=usize::from(periods.max()))
+            .step_by(usize::from(p))
+            .map(|m| needed[m].div_ceil(2))
+            .fold(own, u64::min);
+    }
+
     let mut out = Vec::new();
     let n = seq.len();
     // Canonicalise ONCE, not twice per period. `bases_match` did two dependent table
@@ -702,7 +748,10 @@ pub fn find_tandem_repeats(
             // period 2 would be the scanner failing its own contract. The caller asked for
             // period 2; a period-1 tract dressed as period 2 is not that.
             let motif = &seq[tract_start as usize..tract_start as usize + p];
-            if copies >= u64::from(params.min_copies) && is_primitive_motif(motif) {
+            if copies >= u64::from(params.min_copies)
+                && tract_end - tract_start >= needed[p]
+                && is_primitive_motif(motif)
+            {
                 out.push(RepeatInterval {
                     start: tract_start,
                     end: tract_end,
@@ -711,8 +760,22 @@ pub fn find_tandem_repeats(
                 });
             }
         };
+        // The shortest tract `emit` keeps at this period. Every piece of a split lies inside its
+        // segment, so a segment shorter than this yields nothing however it splits — and on
+        // tomato's chromosome 1, 84 million of the 92 million segments at periods 2 to 6 are.
+        let shortest = (u64::from(params.min_copies) * p as u64).max(needed[p]) as usize;
+        let reward = i64::from(params.match_reward);
         maximal_scoring_subsequences(scores, |k0, k1, score| {
-            split_at_motif_changes(&canonical, p, k0, k1, score, params, &mut emit);
+            if k1 + p + 1 - k0 < shortest {
+                return;
+            }
+            // No mismatch, no motif change: a segment's score is all rewards exactly when
+            // every comparison in it matched, and it is emitted whole without the walk.
+            if score == reward * (k1 - k0 + 1) as i64 {
+                emit(k0, k1, score);
+            } else {
+                split_at_motif_changes(&canonical, p, k0, k1, score, params, &mut emit);
+            }
         });
     }
 
@@ -749,12 +812,23 @@ pub fn find_tandem_repeats(
     // 2,084,637 intervals** (tomato 8 Mb fixture, 2026-07-20) — a near-no-op pass
     // paying a quadratic price, with up to 26,836 intervals in a single window.
     let max_period = out.iter().map(|iv| iv.period).max().unwrap_or(0) as usize;
-    let mut by_period: Vec<Vec<RepeatInterval>> = vec![Vec::new(); max_period + 1];
-    let mut kept: Vec<RepeatInterval> = Vec::with_capacity(out.len());
+    // Only a period with a multiple in range is ever searched (fact 1), so only those keep a
+    // list, and the search reads nothing but the span. Each list is sized once to its period's
+    // count in `out` (sorted by period, so two binary searches give it): grown by doubling, a
+    // list of 18 M spans leaves its outgrown buffers behind as resident memory.
+    let mut by_period: Vec<Vec<RegionSpan>> = (0..=max_period / 2)
+        .map(|period| {
+            let from = out.partition_point(|iv| usize::from(iv.period) < period);
+            let to = out.partition_point(|iv| usize::from(iv.period) <= period);
+            Vec::with_capacity(to - from)
+        })
+        .collect();
     // The furthest end of this period's searched tracts so far, and the period it belongs to.
     // Only a kept tract moves it: a joined tract dropped here leaves its pieces searchable.
     let mut reach = (0u8, 0u64);
-    for iv in out {
+    // Survivors are compacted in place: `retain` visits in order, once each, which is all
+    // the pass needs — a second vector of survivors would hold the whole output twice.
+    out.retain(|&iv| {
         let nested = reach.0 == iv.period && iv.end <= reach.1;
         let iv_len = iv.end - iv.start;
         let mut redundant = false;
@@ -785,15 +859,18 @@ pub fn find_tandem_repeats(
                 break;
             }
         }
-        if !redundant {
-            if !nested {
-                reach = (iv.period, iv.end);
-                by_period[iv.period as usize].push(iv);
+        if !redundant && !nested {
+            reach = (iv.period, iv.end);
+            if let Some(list) = by_period.get_mut(usize::from(iv.period)) {
+                list.push(RegionSpan {
+                    start: iv.start,
+                    end: iv.end,
+                });
             }
-            kept.push(iv);
         }
-    }
-    kept
+        !redundant
+    });
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -1485,6 +1562,63 @@ mod tests {
                 "scores {scores:?}"
             );
         }
+    }
+
+    /// What a consumer with a copy floor keeps is the same from the floor-aware scan as from
+    /// the whole one — on repeat-dense sequence, where period-multiple eliminations are
+    /// common, and over floors from permissive to strict.
+    #[test]
+    fn the_floor_aware_scan_keeps_what_the_floor_keeps() {
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let floors: [[u32; 6]; 5] = [
+            [5, 5, 4, 4, 4, 3],
+            [2, 2, 2, 2, 2, 2],
+            [3, 7, 2, 5, 2, 2],
+            [12, 2, 6, 2, 3, 2],
+            [9, 9, 9, 9, 9, 9],
+        ];
+        let mut sub_floor_kept = 0usize;
+        for _ in 0..300 {
+            let mut seq = Vec::new();
+            while seq.len() < 3_000 {
+                let period = 1 + (next() % 6) as usize;
+                let motif: Vec<u8> = (0..period)
+                    .map(|_| b"ACGT"[(next() % 4) as usize])
+                    .collect();
+                for _ in 0..1 + next() % 10 {
+                    for &b in &motif {
+                        seq.push(if next() % 12 == 0 {
+                            b"ACGT"[(next() % 4) as usize]
+                        } else {
+                            b
+                        });
+                    }
+                }
+            }
+            let whole = find_tandem_repeats(&seq, p(1, 6), &ScanParams::default());
+            for floor in &floors {
+                let at = |period: u8| floor[usize::from(period) - 1];
+                let clears = |iv: &&RepeatInterval| {
+                    (iv.end - iv.start) / u64::from(iv.period) >= u64::from(at(iv.period))
+                };
+                let want: Vec<_> = whole.iter().filter(clears).collect();
+                let got_all =
+                    find_tandem_repeats_for_copy_floor(&seq, p(1, 6), &ScanParams::default(), at);
+                let got: Vec<_> = got_all.iter().filter(clears).collect();
+                assert_eq!(got, want, "floor {floor:?}");
+                sub_floor_kept += got_all.len().saturating_sub(got.len());
+            }
+        }
+        assert!(
+            sub_floor_kept > 0,
+            "the sequences exercise sub-floor tracts"
+        );
     }
 
     // ---- find_tandem_repeats ----------------------------------------------
