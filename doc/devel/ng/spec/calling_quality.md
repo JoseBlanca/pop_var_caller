@@ -93,7 +93,8 @@ Four terms; the last two are this document's.
   summed over samples: `0` at an invariant site, `2N` if every one of `N` diploid samples is
   homozygous for it. The site quality is a statement about this one number being zero.
 - **the primary alternative allele** — at a locus with more than one alternative, the one the most
-  reads across the cohort reached. The two artifact tests are defined against it and treat the
+  reads across the cohort reached among those some sample is called carrying (§6.3). The two
+  artifact tests are defined against it and treat the
   locus as if it had two alleles. Exact when it does; an approximation when it does not (§6.4).
 - **an artifact** — a systematic reason reads carry a sequence the sample does not: reads mapped
   from a paralogous copy elsewhere in the genome, a recurrent context error of the chemistry, a
@@ -481,8 +482,14 @@ hand. Two rules about who is counted:
   total while it contributes nothing to the expectation would manufacture an apparent excess — and
   since only a deficit is penalised, it would quietly *weaken* the test rather than break it
   loudly. Excluding it also keeps this cohort the same cohort as §5.1's.
-- **The primary alternative allele is chosen on pooled read count across the whole cohort**, before
-  any per-sample work, so every sample's counts are gathered against one allele.
+- **The primary alternative allele is chosen on pooled read count across the whole cohort, among
+  the alternatives the called genotypes carry**, after the samples are called and before their
+  counts are gathered, so every sample's counts are gathered against one allele. Where no called
+  alternative was reached by a read, the most-read alternative of all. Ties go to the allele whose
+  bases sort first, never to the lower allele id. (2026-10-30. Until then the most-read alternative
+  of all, ties to the lower id: on 8 tomato accessions the tests then weighed reads of an allele
+  absent from the record's `ALT` — SL4.0ch01:3493044 lost 126 of its 163 Phred that way — and the
+  id order followed the order the samples were given, so a site's quality changed with it.)
 
 ### 6.4 What the correction gives up
 

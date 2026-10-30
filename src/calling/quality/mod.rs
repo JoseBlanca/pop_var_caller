@@ -77,8 +77,10 @@ pub const MAX_SITE_QUALITY: f32 = 9999.0;
 /// conversion to the reader and gain nothing.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ArtifactTestCounts {
-    /// Which allele the tests treat as *the* alternative: the non-reference allele the most
-    /// reads across the cohort reached.
+    /// Which allele the tests treat as *the* alternative: of the alternatives some sample is
+    /// called carrying, the one the most reads across the cohort reached — or, where no such
+    /// allele was reached by a read, the most-read alternative of all. Ties go to the bases
+    /// that sort first.
     ///
     /// **One alternative, not all of them**, because both tests are two-sample comparisons
     /// against the reference and a triallelic locus has one quality, not three (§5.1).

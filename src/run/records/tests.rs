@@ -428,10 +428,10 @@ fn selected(observation: &CohortObservation) -> (AlleleRemap, Vec<UnmatchedSuppo
 /// the surviving alleles' counts land on the *record's* dense ids rather than the merge's.
 ///
 /// The merge's table here holds five sequences and the sample shows all five; the support rule
-/// drops the one it showed a single read of, so the merge's indices 1, 3 and 4 become the
-/// record's 1, 2 and 3, with a hole where index 2 was. **A table without a hole cannot tell a
+/// drops the one it showed a single read of, so the merge's indices 4, 1 and 3 (`AA`, `C`, `T`,
+/// in the order of their bases) become the record's 1, 2 and 3, with a hole where index 2 was. **A table without a hole cannot tell a
 /// correct remapping from one that merely counts up**, which is why this fixture has one: an
-/// off-by-one would put allele 3's four reads under allele 4's `ALT`, and the record would look
+/// off-by-one would put one allele's reads under another's `ALT`, and the record would look
 /// ordinary.
 #[test]
 fn ad_is_keyed_by_the_records_allele_table_and_not_the_merges() {
@@ -450,7 +450,7 @@ fn ad_is_keyed_by_the_records_allele_table_and_not_the_merges() {
     );
     let (remap, unmatched) = selected(&observation);
     let locus = locus_called_over(
-        &[b"A", b"C", b"T", b"AA"],
+        &[b"A", b"AA", b"C", b"T"],
         vec![called(&[0, 1], false)],
         true,
         None,
@@ -468,9 +468,9 @@ fn ad_is_keyed_by_the_records_allele_table_and_not_the_merges() {
 
     assert_eq!(
         evidence.samples[0].allele_reads,
-        vec![4, 3, 2, 2],
+        vec![4, 2, 3, 2],
         "the reference's four reads, then the three surviving alternatives in the record's own \
-         order — the merge's allele 3 is the record's allele 2",
+         order — the merge's allele 1 (C, three reads) is the record's allele 2",
     );
     assert_eq!(
         evidence.samples[0].reads_no_written_allele_explains, 1,

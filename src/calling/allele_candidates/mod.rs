@@ -612,10 +612,11 @@ pub struct SelectionScratch {
     ///
     /// **It holds two orders in turn, and the second is not decoration.** While the cap
     /// chooses, the indices are ordered by [`compare_best_first`]; once it has, the survivors
-    /// are sorted back into the merge table's own index order, because that is the order they
-    /// are admitted to [`CandidateAlleles`] in (arch §3.1). So the ranking decides *which*
-    /// alleles survive and the merge decides what order they appear in — which is the order
-    /// that reaches the VCF's `ALT` column.
+    /// are sorted by their bases, the order they are admitted to [`CandidateAlleles`] in. So
+    /// the ranking decides *which* alleles survive and their bases decide what order they
+    /// appear in — which is the order that reaches the VCF's `ALT` column. Not the merge
+    /// table's order: that is the order the samples were given, and an `ALT` column that
+    /// followed it changed when the cohort was listed differently.
     ranked_table_indices: Vec<u32>,
     /// **The repeat-tract path's grouping of the table by repeat count** — empty on the ordinary
     /// path, which never builds one.
