@@ -1,8 +1,8 @@
 # Overlapping variants
 
-When two variants overlap, such as a SNP inside a deletion, a VCF can write them in two ways.
-Callers differ in which way they use, and population-genetics tools read the two ways very
-differently. One of them, separate records, can distort the results.
+When two variants overlap, such as a SNP inside a deletion, a VCF can write them in one record
+or in separate records. Callers differ in which way they use, and population-genetics tools read
+them very differently. Separate records can distort the results.
 
 Let's imagine a reference `ATT` at positions 1 to 3 of `chrom1`, and three individuals:
 
@@ -30,7 +30,22 @@ chrom1  1    ATT  A     1/1   0/0   0/1
 chrom1  2    T    C,*   2/2   1/1   1/2
 ```
 
-Both say the same thing. The difference is what a downstream tool does with the second record.
+Written **as separate records, without `*`**. DeepVariant writes it this way. Each record lists
+only its own event, so a copy that carries the deletion is written as reference, `0`, in the
+SNP's record:
+
+```
+#CHROM  POS  REF  ALT   ind1  ind2  ind3
+chrom1  1    ATT  A     1/1   0/0   0/1
+chrom1  2    T    C     ./.   1/1   0/1
+```
+
+ind1, with no read covering position 2, gets `./.` or `0/0` depending on how the samples' calls
+are merged.
+
+The first two forms say the same thing. The third has already lost information: at position 2,
+ind3 looks like a `T/C` heterozygote, although no copy carries `T`. The difference between the
+first two is what a downstream tool does with the second record.
 
 ## What goes wrong with the separate-records form
 
@@ -48,7 +63,7 @@ missing.
 
 **`*` recoded as the reference allele.** ind1 becomes `T/T` and ind3 `T/C` at position 2. This
 invents an allele, `T`, that no copy in the sample carries, and counts the deletion a second
-time, as a SNP.
+time, as a SNP. It is what the form without `*` already holds, so the same applies to it.
 
 **`*` counted as another allele.**
 
