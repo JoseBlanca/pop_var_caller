@@ -377,9 +377,10 @@ fn build_csi_for_bam(bam_path: &Path) -> std::io::Result<()> {
     // depth=6 (~4.3 Gbp cap) is visible at the build site
     // rather than hidden behind a no-argument default.
     let mut indexer: Indexer<BinnedIndex> = Indexer::new(CSI_MIN_SHIFT, CSI_DEPTH);
-    populate_binning_index(&mut reader, &mut indexer)?;
+    let reference_sequence_count = header.reference_sequences().len();
+    populate_binning_index(&mut reader, &mut indexer, reference_sequence_count)?;
 
-    let index = indexer.build(header.reference_sequences().len());
+    let index = indexer.build(reference_sequence_count);
     noodles_csi::fs::write(bam_index_path_for(bam_path, BAM_INDEX_BUILD_FORMAT), &index)
 }
 
@@ -396,9 +397,18 @@ fn build_csi_for_bam(bam_path: &Path) -> std::io::Result<()> {
 /// cannot reach `pub(crate)` items. Reducing the production +
 /// in-crate-test duplication to one helper is the achievable
 /// part of the Mi9 cleanup; the integration-test copy stays.
+///
+/// # Errors
+///
+/// What reading the BAM refuses, and **a record naming a reference sequence the header does not
+/// list** (`reference_sequence_count` is the header's). The indexer keeps one entry per
+/// reference sequence up to the highest it is handed, so a record naming sequence 2.6 billion
+/// in a file listing two made it ask for 316 GB and aborted the run (found by fuzzing,
+/// 2026-10-31). The id is a field of the record, never checked against the header before this.
 pub(crate) fn populate_binning_index<I>(
     reader: &mut noodles_bam::io::Reader<noodles_bgzf::io::Reader<std::fs::File>>,
     indexer: &mut noodles_csi::binning_index::Indexer<I>,
+    reference_sequence_count: usize,
 ) -> std::io::Result<()>
 where
     I: noodles_csi::binning_index::index::reference_sequence::Index + Default,
@@ -417,6 +427,15 @@ where
             record.alignment_end().transpose()?,
         ) {
             (Some(id), Some(start), Some(end)) => {
+                if id >= reference_sequence_count {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "a record names reference sequence {id}, and the header lists \
+                             {reference_sequence_count}"
+                        ),
+                    ));
+                }
                 let is_mapped = !record.flags().is_unmapped();
                 Some((id, start, end, is_mapped))
             }
@@ -541,6 +560,52 @@ mod tests {
     }
 
     // --- BAM-side tests ----------------------------------------------
+
+    /// **Building an index refuses a record naming a reference sequence the header does not
+    /// list**, rather than handing the number to the indexer, which keeps one entry per
+    /// sequence up to the highest it sees: a record naming sequence 2.6 billion made it ask for
+    /// 316 GB (found by fuzzing, 2026-10-31). The BAM is written byte by byte, because no writer
+    /// will produce one.
+    #[test]
+    fn building_an_index_refuses_a_record_naming_a_sequence_the_header_lacks() {
+        let le = |n: i32| n.to_le_bytes();
+        let mut stream = b"BAM\x01".to_vec();
+        stream.extend(le(0)); // no header text
+        stream.extend(le(1)); // one reference sequence
+        stream.extend(le(5));
+        stream.extend(b"chr1\0");
+        stream.extend(le(1_000));
+        let mut record = Vec::new();
+        record.extend(le(7)); // reference sequence 7, of one
+        record.extend(le(0)); // position
+        record.extend([2, 60]); // read-name length, mapping quality
+        record.extend(4_680_u16.to_le_bytes()); // bin
+        record.extend(1_u16.to_le_bytes()); // one CIGAR op
+        record.extend(0_u16.to_le_bytes()); // flags
+        record.extend(le(1)); // one base
+        record.extend(le(-1));
+        record.extend(le(-1));
+        record.extend(le(0));
+        record.extend(b"r\0");
+        record.extend(((1_u32 << 4) | 0).to_le_bytes()); // 1M
+        record.extend([0x10, 30]); // the base A, and its quality
+        stream.extend(le(record.len() as i32));
+        stream.extend(record);
+
+        let dir = TempDir::new().expect("tempdir");
+        let bam = dir.path().join("sample.bam");
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bam).expect("create"));
+        writer.write_all(&stream).expect("write");
+        writer.finish().expect("finish");
+
+        let error = preflight_alignment_indexes(std::slice::from_ref(&bam), true)
+            .expect_err("sequence 7 is not in a header of one");
+        let chain = format!("{error:?}");
+        assert!(
+            chain.contains("names reference sequence 7, and the header lists 1"),
+            "{chain}"
+        );
+    }
 
     #[test]
     fn target_index_path_for_bam_picks_csi_not_bai() {
