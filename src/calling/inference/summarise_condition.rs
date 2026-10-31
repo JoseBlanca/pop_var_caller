@@ -1426,7 +1426,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
 fn mint_genotype(copies_of_each_allele: &[u32]) -> Genotype {
     let mut alleles = Vec::with_capacity(copies_of_each_allele.iter().sum::<u32>() as usize);
     for (allele, &copies) in copies_of_each_allele.iter().enumerate() {
-        // PANIC-FREE: as at `pool_reads_and_pick_primary_alternative` — the row is one entry
+        // PANIC-FREE: as at `pick_primary_alternative` — the row is one entry
         // per allele, and `GenotypeTable::build` caps `allele_count` at `MAX_ALLELE_COUNT`.
         let allele = AlleleId(u16::try_from(allele).expect("an allele id fits a u16"));
         alleles.extend(repeat_n(allele, copies as usize));
@@ -5771,6 +5771,52 @@ mod tests {
         assert_eq!(counts.primary_alternative, AlleleId(2), "C sorts before T");
         // And the counts are that allele's, not the other's — 1 forward against 3.
         assert_eq!(counts.alternative_forward_reads, 1.0);
+    }
+
+    /// **The most reads win over a lower id, and a tie is not won by the higher id.**
+    ///
+    /// The fixture above ties two alternatives whose higher id is also the one whose bases
+    /// sort first, so a rule that let a later allele win ties, or one that replaced the best
+    /// only on a tie, would pass it. Here allele 1 is `T` with 2 reads, and alleles 2 (`C`) and
+    /// 3 (`G`) draw 5 each: the most reads rule out `T` although it comes first, and of the two
+    /// tied `C` wins although `G` comes after it. No sample carries any of them.
+    #[test]
+    fn more_reads_beat_a_lower_id_and_a_tie_goes_to_the_bases_not_the_later_id() {
+        let (alleles, table) = generic_locus(3);
+        let view = table.view();
+        let rows = [
+            observation(0, 0, 9, 4, 5),
+            observation(1, 0, 2, 1, 1),
+            observation(2, 0, 5, 2, 3),
+            observation(3, 0, 5, 4, 1),
+        ];
+        let per_sample = [called_sample(&rows)];
+        let evidence = LocusEvidence::generic(locus_region(), &per_sample);
+
+        let mut favouring_reference = vec![-6.0; view.genotype_count()];
+        favouring_reference[0] = 0.0;
+        let inference = call_locus(
+            &[favouring_reference],
+            &evidence,
+            &[1.0, 0.5, 0.5, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert_eq!(
+            called(&inference, 0).0.alleles(),
+            [AlleleId(0), AlleleId(0)]
+        );
+        let counts = inference
+            .artifact_test_counts()
+            .expect("all three alternatives drew reads");
+        assert_eq!(
+            counts.primary_alternative,
+            AlleleId(2),
+            "C: 5 reads, and before G"
+        );
+        assert_eq!(counts.alternative_forward_reads, 2.0);
     }
 
     /// **An alternative a sample is called carrying is weighed before one with more reads that
