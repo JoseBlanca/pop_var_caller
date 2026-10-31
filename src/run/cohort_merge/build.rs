@@ -944,19 +944,13 @@ pub fn build_region_handing_over_windowed<'a, E>(
     dropped: Option<&DroppedLoci>,
 ) -> Result<(), E> {
     if no_locus_can_begin_in(builder_region, window) {
-        super::timing::REGIONS_WITH_NO_LOCUS.add(1);
         return Ok(());
     }
 
-    // The walk's setup is one allocation per sample several times over, so it is timed apart
-    // from the walk itself (`super::timing`): it is the fixed cost a building region pays
-    // whatever it holds, and the question is how much of the merge that comes to.
     // **One buffer for the region, cleared per locus** — the load/use/clear/reload shape, so
     // materialising a locus's members costs no allocation after the first that needed one.
     let mut scratch: Vec<SampleLocusObservations> = Vec::new();
-    let opening_the_walk = super::timing::Stopwatch::start();
     let mut closer = LocusCloser::over_windowed(window, max_cohort_locus_span, min_alt_reads);
-    opening_the_walk.add_to(&super::timing::WALK_SETUP_NANOS);
 
     // **Driven by hand rather than by `for`, so that each locus's member vector goes back to
     // the walk** ([`LocusCloser::recycle`]). A `for` loop moves the closer, which leaves

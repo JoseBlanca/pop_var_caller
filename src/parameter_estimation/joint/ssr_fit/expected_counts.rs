@@ -686,7 +686,7 @@ impl<'a> ScoredDistinctRows<'a> {
 }
 
 /// For the fitting bench's proxy for calling (plan step D6), not for a run.
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 impl ScoredDistinctRows<'_> {
     /// **The genotype each sample's weights put highest**: for every (tract, sample) with reads,
     /// in the order of `evidence.tracts` then each tract's samples, the genotype with the largest

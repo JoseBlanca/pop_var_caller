@@ -25,7 +25,6 @@ use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
-use super::timing;
 use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
     refuse_malformed_analysed_regions,
@@ -314,58 +313,32 @@ fn merge_handing_each_locus_over_with<S, E>(
 where
     S: ObservationSource<Error = E>,
 {
-    // Zero-sized and doing nothing without `--features merge-timing` (`super::timing`), and
-    // named the same parts as the parallel driver's so the two breakdowns can be compared
-    // line for line. A region is this driver's round.
-    let whole_merge = timing::Stopwatch::start();
     refuse_malformed_analysed_regions(analysed);
-    // The sink is timed apart from the assembling it happens inside, because in a calling run
-    // it *is* the genotyping and the two together are one undifferentiated builder time.
-    let mut timed_keep = |built| {
-        let after_assembly = timing::Stopwatch::start();
-        keep(built);
-        after_assembly.add_to(&timing::AFTER_ASSEMBLY_NANOS);
-    };
 
     for analysed_region in analysed {
         for building_region in
             building_regions_of(*analysed_region, cohort_locus_builder_regions_len)
         {
-            let evicting = timing::Stopwatch::start();
             cache.evict_before(GenomePosition {
                 contig: building_region.contig,
                 position: building_region.start,
             });
-            evicting.add_to(&timing::EVICT_NANOS);
-            let covering = timing::Stopwatch::start();
             cover(cache, building_region)?;
-            covering.add_to(&timing::COVER_NANOS);
-            timing::ROUNDS.add(1);
-            timing::REGIONS.add(1);
-            let builder = timing::Stopwatch::start();
             cache.with_observations(building_region, |window| {
                 build_region_handing_over_windowed(
                     building_region,
                     window,
                     max_cohort_locus_span,
                     min_alt_reads,
-                    &mut timed_keep,
+                    keep,
                     refused,
                     &|sample, index| cache.build_at(sample, index),
                     cache.dropped_loci(),
                 )
             })?;
-            // **The sink's own work is inside this**, where the collecting form's push was
-            // too: a run that calls each locus here charges the genotyping to the builder,
-            // which is what the milestone-E measurement has to be able to see.
-            let busy = builder.elapsed_nanos();
-            timing::BUILDER_BUSY_NANOS.add(busy);
-            timing::SLOWEST_BUILDER_NANOS.add(busy);
-            timing::ROUND_WALL_NANOS.add(busy);
         }
     }
 
-    whole_merge.add_to(&timing::MERGE_WALL_NANOS);
     Ok(())
 }
 

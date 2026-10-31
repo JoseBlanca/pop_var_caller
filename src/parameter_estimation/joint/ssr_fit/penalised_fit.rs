@@ -48,7 +48,7 @@ pub struct PenalisedFitConfig {
     ///
     /// **Coupled to [`allele_pseudo_draws`](Self::allele_pseudo_draws)**, which holds one draw a
     /// class spread over this window's lengths. Change the two together, through
-    /// [`with_allele_span`](Self::with_allele_span).
+    /// `with_allele_span`.
     pub allele_span: i32,
     /// Where every class's stutter starts. The allele length variation starts flat and the
     /// concentration at one, as in the counting fit.
@@ -80,7 +80,7 @@ pub struct PenalisedFitConfig {
     /// **The value is per length, so it is coupled to [`allele_span`](Self::allele_span)**: the
     /// fit adds it to each of the window's lengths and does not rescale it. Setting the window
     /// alone changes the floor a class gets (at ±4, 1/19 a length is 9/19 of a draw a class).
-    /// Change the two together, through [`with_allele_span`](Self::with_allele_span).
+    /// Change the two together, through `with_allele_span`.
     ///
     /// **Why not half a draw a length (the Jeffreys prior).** At one sample and 100 loci a class
     /// holds about 120 draws once clustering is allowed for, and 19 half-draws spread evenly moved
@@ -252,7 +252,7 @@ impl PenalisedFitConfig {
         })
     }
 
-    #[cfg(any(test, feature = "bench-fixtures"))]
+    #[cfg(test)]
     /// **These settings with the allele window set to `allele_span` and the first floor rescaled to
     /// match**: [`allele_pseudo_draws`](Self::allele_pseudo_draws) becomes
     /// [`ALLELE_PSEUDO_DRAWS_A_CLASS`] spread over the new window's lengths, whatever it held
@@ -564,7 +564,7 @@ pub struct SmoothCurves {
     pub allele_length_variation: Vec<ParameterCurve>,
 }
 
-/// What [`fit_period_by_penalised_counting`] returns.
+/// What `fit_period_by_penalised_counting` returns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PenalisedPeriodFit {
     /// One entry per class handed in, in the same order: `None` for a class with no reads at any
@@ -647,7 +647,7 @@ pub enum UndeterminedErrors {
     BetweenLocusShare,
 }
 
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 /// **Fits every class of one motif length at once, by penalised counting.**
 ///
 /// `classes` are the classes of one motif length, any order, each repeat count at most once.
@@ -783,7 +783,7 @@ fn fitted_period(
 /// the same order. This is the repeat-tract fit `estimate-parameters` is to run.
 ///
 /// The classes are grouped by motif length, and each group is fitted together by
-/// [`fit_period_by_penalised_counting`], since every curve runs across a motif length's repeat
+/// `fit_period_by_penalised_counting`, since every curve runs across a motif length's repeat
 /// counts. What each class gets back:
 ///
 /// - **A class with reads at even one locus is [`StratumOutcome::Fitted`].** Its numbers are
@@ -811,7 +811,7 @@ fn fitted_period(
 /// **Memory: one motif length at a time, and one class at a time within it.** Each motif
 /// length's classes are handed to its fit by reference, never copied, and everything that fit
 /// built beyond the outcomes — its curves, its timings — is dropped before the next motif length
-/// starts. Within a motif length, see [`fit_period_by_penalised_counting`].
+/// starts. Within a motif length, see `fit_period_by_penalised_counting`.
 ///
 /// **What it prints** (spec §2.9), to stderr as the other stages of `estimate-parameters` do
 /// (`parameter_estimation::progress`): first, the classes and the stutter prior the curves carry;

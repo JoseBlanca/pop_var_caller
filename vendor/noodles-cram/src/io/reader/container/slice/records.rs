@@ -341,14 +341,7 @@ impl<'c, 'ch: 'c> Records<'c, 'ch> {
     }
 
     fn read_data(&mut self, record: &mut Record<'c>) -> io::Result<()> {
-        #[cfg(feature = "perf-counters")]
-        let started = std::time::Instant::now();
         let read = self.read_data_inner(record);
-        #[cfg(feature = "perf-counters")]
-        crate::perf::record_slice_phase(
-            crate::perf::SlicePhase::ReadTags,
-            started.elapsed().as_nanos() as u64,
-        );
         read
     }
 

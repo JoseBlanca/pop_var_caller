@@ -790,7 +790,7 @@ const _: () = assert!(
 );
 
 /// Scales `weights` to sum to one. Only the bench's cohort draws and the tests use it.
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 fn normalise(weights: &mut [f64]) {
     let total: f64 = weights.iter().sum();
     for weight in weights.iter_mut() {
@@ -827,7 +827,7 @@ fn genotype_pairs(classes: usize) -> Vec<(usize, usize)> {
 ///
 /// **Compiled only for the bench and the tests**, with the per-library scoring it relies on:
 /// production fits collapse every library to one distribution before scoring.
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 struct TractLikelihoods {
     /// One row a sample-with-reads, over the genotypes, **laid end to end in one buffer**: row
     /// `r` is `scaled[r * width..][..width]`.
@@ -837,10 +837,6 @@ struct TractLikelihoods {
     /// each row and leave the rows scattered, where one buffer keeps them contiguous and lets the
     /// loop walk the whole tract without leaving cache.
     scaled: Vec<f64>,
-    /// How wide one row is — the number of genotype pairs.
-    width: usize,
-    /// That sample's homozygote excess, in the same order.
-    homozygote_excess: Vec<f64>,
     /// Σ over those samples of the log-likelihood each row was divided by.
     ln_offset: f64,
 }
@@ -860,7 +856,7 @@ struct ReadDistributionsByLevel {
     read_distribution_by_allele: Vec<Vec<Vec<f64>>>,
     /// Per library, the position of its distribution in `read_distribution_by_allele`. Read only
     /// by the per-library scoring of [`TractLikelihoods`], so compiled only where that is.
-    #[cfg(any(test, feature = "bench-fixtures"))]
+    #[cfg(test)]
     distribution_of_library: Vec<usize>,
 }
 
@@ -881,7 +877,7 @@ impl ReadDistributionsByLevel {
                 .then(f64::from_bits(left.1).total_cmp(&f64::from_bits(right.1)))
         });
         group_and_multiplier.dedup();
-        #[cfg(any(test, feature = "bench-fixtures"))]
+        #[cfg(test)]
         let distribution_of_library = libraries
             .iter()
             .map(|library| {
@@ -912,13 +908,13 @@ impl ReadDistributionsByLevel {
             .collect();
         Self {
             read_distribution_by_allele,
-            #[cfg(any(test, feature = "bench-fixtures"))]
+            #[cfg(test)]
             distribution_of_library,
         }
     }
 
     /// The read-length distribution from each allele that `library`'s reads are scored under.
-    #[cfg(any(test, feature = "bench-fixtures"))]
+    #[cfg(test)]
     fn of_library(&self, library: LibraryIndex) -> &[Vec<f64>] {
         &self.read_distribution_by_allele[self.distribution_of_library[library.get()]]
     }
@@ -928,7 +924,7 @@ impl ReadDistributionsByLevel {
     /// counts summed into `summed_by_distribution`, a scratch buffer whose count vectors are reused
     /// from one sample to the next; the rows returned are the part of it in use, so they last until
     /// it is next used.
-    #[cfg(any(test, feature = "bench-fixtures"))]
+    #[cfg(test)]
     fn rows_by_distribution<'a>(
         &self,
         sample: &SampleTractReads,
@@ -962,7 +958,7 @@ impl ReadDistributionsByLevel {
 /// **Adds to `total` the log-likelihood of one library's `counts` under the genotype of alleles
 /// `first` and `second`**, each read drawn from either allele with even odds; `per_allele` is the
 /// library's read-length distribution from each allele.
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 #[inline(always)]
 fn add_ln_reads(
     total: &mut f64,
@@ -980,18 +976,16 @@ fn add_ln_reads(
     }
 }
 
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 impl TractLikelihoods {
     /// `distributions` holds the read-length distributions the tract's libraries are scored under.
     fn of(
         tract: &TractReads,
         distributions: &ReadDistributionsByLevel,
         genotypes: &[(usize, usize)],
-        homozygote_excess: &[f64],
     ) -> Self {
         let width = genotypes.len();
         let mut scaled: Vec<f64> = Vec::with_capacity(tract.samples.len() * width);
-        let mut excess = Vec::with_capacity(tract.samples.len());
         let mut ln_offset = 0.0;
         let mut summed_by_distribution: Vec<(usize, Vec<u32>)> = Vec::new();
         for sample in &tract.samples {
@@ -1024,18 +1018,8 @@ impl TractLikelihoods {
             for value in row {
                 *value = float::exp(*value - largest);
             }
-            excess.push(
-                *homozygote_excess
-                    .get(sample.sample as usize)
-                    .expect("every sample in a tract has a homozygote excess"),
-            );
         }
-        Self {
-            scaled,
-            width,
-            homozygote_excess: excess,
-            ln_offset,
-        }
+        Self { scaled, ln_offset }
     }
 }
 
@@ -1043,18 +1027,9 @@ impl TractLikelihoods {
 // Small numerics
 // ---------------------------------------------------------------------
 
-// Only the bench fixtures (the held-out score and the cohort draw) and the tests use these two.
+// Only the cohort draw and the tests use this.
 
-#[cfg(any(test, feature = "bench-fixtures"))]
-fn ln_sum_exp(values: &[f64]) -> f64 {
-    let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !largest.is_finite() {
-        return largest;
-    }
-    largest + float::ln(values.iter().map(|v| float::exp(v - largest)).sum::<f64>())
-}
-
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 fn ln_gamma(x: f64) -> f64 {
     // Lanczos, g = 7, n = 9 — the same coefficients the harnesses carry.
     const COEFFICIENTS: [f64; 9] = [
@@ -1361,12 +1336,11 @@ pub fn gather_strata(
 /// drawn differently from the tests would be measuring a workload no test has ever checked.
 ///
 /// Nothing here is production code: a release build without the feature compiles none of it.
-#[cfg(any(test, feature = "bench-fixtures"))]
+#[cfg(test)]
 pub mod bench_fixtures {
     use super::*;
 
     pub mod cohort_draw;
-    pub mod fit_bench;
 
     /// A reproducible stream, the same one the harnesses use.
     struct Rng(u64);
@@ -1831,13 +1805,11 @@ mod tests {
             &one_sample_through_two_libraries(&one, &other),
             &ReadDistributionsByLevel::of(&slippage, &inverted, 1, 1),
             &genotypes,
-            &[0.4],
         );
         let listed_with_the_groups = TractLikelihoods::of(
             &one_sample_through_two_libraries(&other, &one),
             &ReadDistributionsByLevel::of(&slippage, &in_order, 1, 1),
             &genotypes,
-            &[0.4],
         );
         assert_eq!(
             the_bits_of(&listed_against_the_groups),
@@ -1864,7 +1836,6 @@ mod tests {
             &one_sample_through_two_libraries(&one, &other),
             &ReadDistributionsByLevel::of(&[class], &at_two_multipliers, 1, 1),
             &genotypes,
-            &[0.4],
         );
         let doubled = Slippage {
             level: class.level * 2.0,
@@ -1882,7 +1853,6 @@ mod tests {
                 1,
             ),
             &genotypes,
-            &[0.4],
         );
         assert_eq!(the_bits_of(&scored), the_bits_of(&in_two_groups));
         let summed: Vec<u32> = one.iter().zip(&other).map(|(a, b)| a + b).collect();
@@ -1895,7 +1865,6 @@ mod tests {
             },
             &ReadDistributionsByLevel::of(&[class], &[Library::in_group(ReadGroupId(0), 0)], 1, 1),
             &genotypes,
-            &[0.4],
         );
         assert_ne!(the_bits_of(&scored), the_bits_of(&at_the_class_rate));
     }
@@ -1920,7 +1889,6 @@ mod tests {
                 1,
             ),
             &genotypes,
-            &[0.4],
         );
         let summed = TractLikelihoods::of(
             &TractReads {
@@ -1931,7 +1899,6 @@ mod tests {
             },
             &ReadDistributionsByLevel::of(&[class], &[Library::in_group(ReadGroupId(0), 0)], 1, 1),
             &genotypes,
-            &[0.4],
         );
         assert_eq!(the_bits_of(&kept_apart), the_bits_of(&summed));
     }

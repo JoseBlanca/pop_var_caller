@@ -210,12 +210,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
 
 [features]
-# **Per-codec counters inside the vendored CRAM decompressor.** Off by default,
-# because the clock reads sit in the block-decode loop. On, a run can say how
-# many blocks each compression method decoded, how many bytes it inflated, and
-# how long it took — which is what `examples/ng_cram_decode_layers.rs` prints
-# and the only way to tell one codec's cost from another's.
-cram-perf-counters = ["noodles-cram/perf-counters"]
 # Enable in `cargo run --example dhat_ng_psp --no-default-features --features dhat-heap` to swap
 # the global allocator for `dhat::Alloc` and produce `dhat-heap.json`.
 # Off by default so production builds carry no dhat code.
@@ -266,18 +260,6 @@ default = ["alloc-mimalloc"]
 #
 #     cargo bench --features bench-fixtures --bench ng_joint_fit_perf
 bench-fixtures = []
-# Compile the cohort merge's stopwatches (`src/run/cohort_merge/timing.rs`), so a
-# probe can ask a merge where its own wall time went: drawing the readers forward,
-# evicting, the builders' own work, the wait for each round's slowest builder, and
-# what launching them costs.
-#
-# **Off by default because timing in the hot path is itself a change to what is being
-# measured.** Without the feature every counter is a zero-sized type whose methods are
-# empty, so the merge's source reads the same in both builds and the timed build is
-# the only one that reads a clock.
-#
-#     cargo run --release --features merge-timing --example ng_cohort_merge_real_cost
-merge-timing = []
 
 [dev-dependencies]
 bstr = "1"

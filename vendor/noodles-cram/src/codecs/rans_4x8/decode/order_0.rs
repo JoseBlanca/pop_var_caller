@@ -9,8 +9,6 @@ use crate::{
 type Frequencies = [u16; ALPHABET_SIZE]; // F
 
 pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
-    #[cfg(feature = "perf-counters")]
-    let table_started = std::time::Instant::now();
 
     let frequencies = read_frequencies(src)?;
 
@@ -18,11 +16,6 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
     // bounds check.
     let mut slots = Box::new([0; table::TOTAL_FREQUENCY]);
     table::fill_context(&frequencies, slots.as_mut_slice());
-
-    #[cfg(feature = "perf-counters")]
-    let table_nanos = table_started.elapsed().as_nanos() as u64;
-    #[cfg(feature = "perf-counters")]
-    let decode_started = std::time::Instant::now();
 
     let mut states = read_states(src)?;
 
@@ -37,14 +30,6 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
             *state = state_renormalize(*state, src)?;
         }
     }
-
-    #[cfg(feature = "perf-counters")]
-    crate::perf::record_rans(
-        false,
-        dst.len(),
-        table_nanos,
-        decode_started.elapsed().as_nanos() as u64,
-    );
 
     Ok(())
 }
