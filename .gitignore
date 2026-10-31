@@ -39,6 +39,7 @@ TRF-mod/
 # the skills has to travel the same way.
 /.claude/
 benchmarks/tomato1/crams/
+benchmarks/tomato1/crams_nobaq/
 benchmarks/tomato1/results/**
 # ...but keep the small perf result TSVs (reference snapshots the dashboard reads).
 !benchmarks/tomato1/results/perf/
