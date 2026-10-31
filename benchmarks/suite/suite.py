@@ -73,15 +73,18 @@ def selected_benchmarks(ctx):
 
 def build_pvc(ctx):
     ctx.log("building pvc (release)")
-    # The stuttering benchmark's simulator and typing checks are examples of this crate.
+    # The stuttering benchmark's simulator and typing check are examples of this crate. They need
+    # the bench-fixtures feature (the simulator's random draws live behind it), which pvc must not
+    # get, so they build in a call of their own, before pvc: pvc is linked last, from the library
+    # without the feature.
     examples = ["ng_str_stutter_benchmark", "ng_typed_region_dump"]
-    cmd = ["cargo", "build", "--release", "--quiet", "--bin", "pvc"]
+    cmd = ["cargo", "build", "--release", "--quiet", "--features", "bench-fixtures"]
     for e in examples:
         cmd += ["--example", e]
-    out = subprocess.run(cmd,
-                         cwd=ctx.project_dir, capture_output=True, text=True)
-    if out.returncode != 0:
-        sys.exit("pvc did not build:\n" + out.stderr[-4000:])
+    for c in (cmd, ["cargo", "build", "--release", "--quiet", "--bin", "pvc"]):
+        out = subprocess.run(c, cwd=ctx.project_dir, capture_output=True, text=True)
+        if out.returncode != 0:
+            sys.exit("pvc did not build:\n" + out.stderr[-4000:])
 
 
 def _steps(ctx, name):
