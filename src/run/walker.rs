@@ -132,12 +132,14 @@ impl<T> AlignmentFilesWalker<T> {
         self.loci_over_the_depth_ceiling
     }
 
+    #[cfg(test)]
     /// The individual this walk is of.
     #[must_use]
     pub fn sample_name(&self) -> &str {
         &self.sample
     }
 
+    #[cfg(test)]
     /// How far this walk has got. `NothingYet` until the first observation is yielded, and the last
     /// base of the last one after that — **not** the position the walk is decoding, which is ahead
     /// of it and which nothing outside the generators knows.
@@ -303,7 +305,7 @@ where
 /// gain, since every walker reads the same segments in the same order.
 ///
 /// **Its item is `Result<_, Infallible>` because reading it cannot fail.** A run's segments were
-/// read out of the repeat catalog once, at [`Segmentation::build`], and every catalog failure
+/// read out of the repeat catalog once, at `Segmentation::build`, and every catalog failure
 /// was reported there. The wrapped iterator takes a fallible stream because the catalog's own
 /// reader is one; this says, in the type, that this particular stream has nothing left to fail
 /// at.

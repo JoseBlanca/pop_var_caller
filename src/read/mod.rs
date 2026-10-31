@@ -38,7 +38,9 @@ pub mod prepared_read;
 mod reference_free_first_filter;
 
 pub use aligned_read::AlignedRead;
-pub use filtering::{READ_FILTER_PROVENANCE_KEYS, READ_FILTER_PROVENANCE_PREFIX, ReadFilterConfig};
+#[cfg(test)]
+pub use filtering::READ_FILTER_PROVENANCE_KEYS;
+pub use filtering::{READ_FILTER_PROVENANCE_PREFIX, ReadFilterConfig};
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
 // **`ReadFilterConfig` is the only one of step 1's *types* re-exported here, because it is
@@ -155,12 +157,6 @@ pub trait ReadPreparer {
     /// The default does nothing, which is honest for a preparer that reads no reference —
     /// most of them, including every passthrough.
     fn evict_reference_before(&self, _pos: u64) {}
-
-    /// How many reference bases this preparer is holding. Zero unless it reads a reference —
-    /// the bound made observable, so "it is bounded" is a test rather than an argument.
-    fn resident_reference_bases(&self) -> usize {
-        0
-    }
 }
 
 #[cfg(test)]

@@ -28,11 +28,11 @@
 //!   rule that turns a spilled row into the four numbers the scorer takes.
 //! - [`pass_one`] — [`CalledRecordSink`]: the VCF writer while the filter is off, the spill while
 //!   it is on.
-//! - [`pass_two`] — [`score_the_parked_records_and_resolve_the_cut`]: read the spill, score every
+//! - [`pass_two`] — `score_the_parked_records_and_resolve_the_cut`: read the spill, score every
 //!   record, fit how common duplications are in this run, resolve the target to a cut.
-//! - [`pass_three`] — [`write_the_records_the_filter_kept`]: read the spill again in step with
+//! - [`pass_three`] — `write_the_records_the_filter_kept`: read the spill again in step with
 //!   those ratios and write the VCF, dropping or tagging what the cut removes.
-//! - [`finish`] — [`fit_score_and_write_the_calls`]: **what a run actually calls.** The fit, then
+//! - [`finish`] — `fit_score_and_write_the_calls`: **what a run actually calls.** The fit, then
 //!   passes two and three, then the header's provenance and the report's words. Both subcommands
 //!   go through it, which is what stops the two modes filtering differently.
 
@@ -48,21 +48,24 @@ pub mod scoring_context;
 pub mod spill;
 pub mod spill_file;
 
+#[cfg(test)]
+pub use finish::fit_score_and_write_the_calls;
 pub use finish::{
-    DEFAULT_HIDDEN_DUP_WINDOW_BASES, FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor, WhereTheTimeWent,
-    fit_score_and_write_the_calls, fit_score_and_write_the_calls_explaining,
-    what_to_tell_the_operator,
+    DEFAULT_HIDDEN_DUP_WINDOW_BASES, FilteredRun, ParalogFilterError, WhatTheOperatorAskedFor,
+    WhereTheTimeWent, fit_score_and_write_the_calls_explaining, what_to_tell_the_operator,
 };
 pub use pass_one::{
     CalledRecordSink, PassOneError, PreparedRecord, RecordPreparer, SpillingSink, entry_for,
 };
+#[cfg(test)]
+pub use pass_three::write_the_records_the_filter_kept;
 pub use pass_three::{
-    PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept,
-    write_the_records_the_filter_kept_explaining,
+    PassThreeError, WhatTheFilterDid, write_the_records_the_filter_kept_explaining,
 };
+#[cfg(test)]
+pub use pass_two::score_the_parked_records_and_resolve_the_cut;
 pub use pass_two::{
     LrHistogramShape, NotATargetFdr, ParalogVerdicts, PassTwoError, TargetFdr,
-    score_the_parked_records_and_resolve_the_cut,
     score_the_parked_records_and_resolve_the_cut_windowed,
 };
 pub use patch::{LinePatchError, rewrite_filter_and_info};

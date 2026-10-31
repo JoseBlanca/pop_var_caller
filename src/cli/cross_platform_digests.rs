@@ -271,7 +271,10 @@ mod tests {
     /// no number moved, because every read group here is fitted; only the file's prose about a
     /// `defaulted` multiplier did. Putting the old prose back reproduces the old checksum,
     /// `467baf41a66b1053543571737bc7b48f`, exactly. Recorded in the Linux container (amd64).
-    const FITTED_PARAMETERS_MD5: &str = "999e03bef3448832ba0285f0cc77013c";
+    /// **Re-recorded 2026-10-30** when the whole-reference digest became the MD5 of the contig
+    /// digests (owner, `perf_repeat-scanner_2026-10-30.md`): only the `reference_digest` line and
+    /// the census's "reference digest" term moved, diffed against the run before. It was `999e03bef3448832ba0285f0cc77013c`.
+    const FITTED_PARAMETERS_MD5: &str = "76ca3f1d41df216bdebb31a211693ed0";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -420,7 +423,9 @@ mod tests {
     /// rate fitted around it" for the windowed duplication rate: only that `##INFO` line moved; putting
     /// the old description back reproduces the old checksum, `a98b088ade1653000a043072240ad900`, exactly. Recorded
     /// in the Linux container (amd64).
-    const CALLS_MD5: &str = "97c0120bca8f944d9d26e07695bf87c2";
+    /// **Re-recorded 2026-10-30** with the whole-reference digest's new definition: only the
+    /// `##pvcParameters` line moved, carrying the parameters file's new checksum. It was `97c0120bca8f944d9d26e07695bf87c2`.
+    const CALLS_MD5: &str = "879ac81cb2eed45e9e48363fa49383f2";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -534,7 +539,10 @@ mod tests {
     /// no number moved, because every read group here is fitted; only the file's prose about a
     /// `defaulted` multiplier did. Putting the old prose back reproduces the old checksum,
     /// `d80331a16f4cd86bfbdf885c90cc7188`, exactly. Recorded in the Linux container (amd64).
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "74601f6755190f65c159a41c95bff1ed";
+    /// **Re-recorded 2026-10-30** when the whole-reference digest became the MD5 of the contig
+    /// digests (owner, `perf_repeat-scanner_2026-10-30.md`): only the `reference_digest` line and
+    /// the census's "reference digest" term moved, diffed against the run before. It was `74601f6755190f65c159a41c95bff1ed`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "659b51f8718480f218e27ca58437699d";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -661,7 +669,9 @@ mod tests {
     /// rate fitted around it" for the windowed duplication rate: only that `##INFO` line moved; putting
     /// the old description back reproduces the old checksum, `658380c537ec2cd5964a6774d2deafd7`, exactly. Recorded
     /// in the Linux container (amd64).
-    const WITH_ERRORS_CALLS_MD5: &str = "d717848f594200eb3b7c4e39ddeeb3ae";
+    /// **Re-recorded 2026-10-30** with the whole-reference digest's new definition: only the
+    /// `##pvcParameters` line moved, carrying the parameters file's new checksum. It was `d717848f594200eb3b7c4e39ddeeb3ae`.
+    const WITH_ERRORS_CALLS_MD5: &str = "8d7af38234c53639f550e9042bae46c4";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -788,7 +798,10 @@ mod tests {
     /// errors — the largest, read group 15's multiplier, 0.47 → 0.58 against an error of 0.83.
     /// Setting the threshold back to 0.001 reproduces the old checksum,
     /// `b10618abc9bb00b0e089bfd64ae06858`, exactly. Recorded on the macOS host (arm64).
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "aef60ff6d9816096e75a960d9ca5d0e8";
+    /// **Re-recorded 2026-10-30** when the whole-reference digest became the MD5 of the contig
+    /// digests (owner, `perf_repeat-scanner_2026-10-30.md`): only the `reference_digest` line and
+    /// the census's "reference digest" term moved, diffed against the run before. It was `aef60ff6d9816096e75a960d9ca5d0e8`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "bc215cb5e61214c1ff95a30fb065f442";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -918,7 +931,9 @@ mod tests {
     /// the rest by 1 or 2), `AF` in its fifth decimal, and the `##pvcParameters` line move. Setting
     /// the threshold back reproduces `513fb4a876d6f1d82b36a77171a4d825` exactly. Recorded on the
     /// macOS host (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "ae8b4f7101b1a69eb2ec1972e57aa69c";
+    /// **Re-recorded 2026-10-30** with the whole-reference digest's new definition: only the
+    /// `##pvcParameters` line moved, carrying the parameters file's new checksum. It was `ae8b4f7101b1a69eb2ec1972e57aa69c`.
+    const OF_21_SAMPLES_CALLS_MD5: &str = "df2ccb357d21f864d657f1b9bdf7d285";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

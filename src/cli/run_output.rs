@@ -183,7 +183,6 @@ pub fn open_log(path: &Path, replace: bool) -> Result<RunLog, LogFileError> {
     })?;
     let log = RunLog {
         file: Arc::new(Mutex::new(file)),
-        path: path.to_path_buf(),
         opened: Instant::now(),
     };
     *lock_the_log() = Some(log.clone());
@@ -205,12 +204,6 @@ fn left_by_a_failed_run(path: &Path) -> bool {
     };
     last.split_once(FINISHED_WITH_EXIT_STATUS)
         .is_some_and(|(_, status)| !status.starts_with("0,"))
-}
-
-/// The path of the log this run is writing, while one is open.
-#[must_use]
-pub fn log_path() -> Option<PathBuf> {
-    lock_the_log().as_ref().map(|log| log.path.clone())
 }
 
 /// **Close the run's log with how the run ended**: the exit status, how long it took, and the
@@ -305,20 +298,13 @@ pub const PARAMETERS_BLOCK_ENDS: &str = "# ---- parameters file ends ----";
 #[derive(Clone)]
 pub struct RunLog {
     file: Arc<Mutex<File>>,
-    path: PathBuf,
     opened: Instant,
 }
 
 impl RunLog {
-    /// Where the log is.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// **The numbers the run scores with, as a parameters file**, between two marker lines that
     /// are TOML comments (`doc/devel/ng/spec/command_line.md` §7.3). Copied out of the log, the
-    /// block is a file `--parameters` reads; [`parameters_in`] does the copying.
+    /// block is a file `--parameters` reads; `parameters_in` does the copying.
     pub fn record_parameters(&self, parameters_file_text: &str) {
         let mut block = format!(
             "{} DEBUG parameters: the numbers this run scores with, as a parameters file between \
@@ -345,6 +331,7 @@ impl RunLog {
     }
 }
 
+#[cfg(test)]
 /// **The parameters block of a log, as a parameters file's text**: the lines between
 /// [`PARAMETERS_BLOCK_BEGINS`] and [`PARAMETERS_BLOCK_ENDS`], or `None` when the log holds none.
 #[must_use]

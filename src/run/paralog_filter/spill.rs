@@ -314,6 +314,7 @@ impl<W: Write> SpillWriter<W> {
         Ok(())
     }
 
+    #[cfg(test)]
     /// How many entries have been appended.
     #[must_use]
     pub fn entries_written(&self) -> u64 {

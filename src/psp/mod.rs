@@ -73,18 +73,18 @@ pub(crate) mod index;
 pub(crate) mod reader;
 pub(crate) mod record;
 pub(crate) mod segmentation_section;
-pub(crate) mod trailer;
 pub(crate) mod varint;
 pub(crate) mod walk;
 pub(crate) mod writer;
 
 pub use block::{
     BlockBuilder, BlockCompressError, BlockCompressor, BlockCutRuleError, BlockHead,
-    BlockHeadDecodeError, BlockReadError, BlockRecords, BlockStream, BlockWriteError,
-    COMPRESSED_BLOCK_LENGTH_BYTES, CompressedBlockAt, DecodedBlockHead, READ_CHUNK_BYTES,
+    BlockHeadDecodeError, BlockReadError, BlockStream, BlockWriteError,
+    COMPRESSED_BLOCK_LENGTH_BYTES, DecodedBlockHead, READ_CHUNK_BYTES,
     ROLLING_BUFFER_CEILING_BYTES, ROLLING_BYTES, StreamedRecord, ZSTD_COMPRESSION_LEVEL,
-    compressed_block_at,
 };
+#[cfg(test)]
+pub use block::{BlockRecords, CompressedBlockAt, compressed_block_at};
 pub use chain_ids::{LiveSet, LiveSetChanges, LiveSetReader, LiveSetWriter};
 pub use footer::{
     FOOTER_BYTES, FOOTER_MAGIC, FileSection, Footer, FooterDecodeError, decode_footer,
@@ -101,22 +101,26 @@ pub use header::{
 pub use index::{
     BlockIndexEntry, IndexDecodeError, IndexEntryField, checksum_index, decode_index, encode_index,
 };
-pub use reader::{
-    DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, PspReader, reset_trailer_bytes_read, trailer_bytes_read,
-};
+pub use reader::{DEFAULT_LOOK_BACK_WINDOW_BUDGET_BYTES, PspReader};
+#[cfg(test)]
+pub use reader::{reset_trailer_bytes_read, trailer_bytes_read};
 pub use record::{
     BodyByteCount, DecodedRecord, DecodedRecordBody, LocatedRecord, OffsetBase, RecordDecodeError,
-    RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError, decode_record,
-    decode_record_body, decode_the_body_of, encode_record_body, read_record_head, record_fields,
+    RecordEncodeError, RecordEncoder, RecordHead, RecordLayout, RecordLayoutError,
+    decode_record_body, decode_the_body_of, read_record_head, record_fields,
 };
-pub use trailer::{FileAfterAFailedReplacement, TrailerReplacementFailure, replace_trailer};
-pub use walk::{RecordIter, SelectiveRecordIter};
+#[cfg(test)]
+pub use record::{decode_record, encode_record_body};
+pub use walk::RecordIter;
+#[cfg(test)]
+pub use walk::SelectiveRecordIter;
 pub use writer::{PspWriter, WriteStats, ZSTD_COMPRESSION_LEVEL_KEY};
 
 // ---------------------------------------------------------------------
 // Inspecting a file without opening it as a reader
 // ---------------------------------------------------------------------
 
+#[cfg(test)]
 /// The header of a psp, read from the file and nothing else — no footer, no index, no block.
 ///
 /// **It works where opening the file as a reader correctly fails**, and that is its purpose
@@ -137,6 +141,7 @@ pub fn read_header(path: &Path) -> Result<Header, PspReadError> {
     read_header_and_its_length(path).map(|(header, _)| header)
 }
 
+#[cfg(test)]
 /// The same, and **how many bytes it occupies** — which is where the file's blocks begin.
 ///
 /// `PspReader::open` needs that to say whether a block offset from the index lands in the blocks
@@ -410,7 +415,7 @@ pub enum PspReadError {
     ///
     /// ⚠ **The message named the ceiling without naming a way to raise it** until the G1
     /// review pointed out that the sentence underneath said *raise the ceiling to read it*
-    /// while no `PspReader` had one. [`PspReader::with_a_record_buffer_ceiling`] is that knob.
+    /// while no `PspReader` had one. `PspReader::with_a_record_buffer_ceiling` is that knob.
     #[error(
         "{}: a record in block {block} needs more than the {allowed_bytes} bytes this reader \
          allows one record to hold; raise it with PspReader::with_a_record_buffer_ceiling",
@@ -450,7 +455,7 @@ pub enum PspReadError {
     ///
     /// **The second of the two variants here that report the caller's mistake rather than the
     /// file's** — see [`NoSuchBlock`](Self::NoSuchBlock) — and it is refused at
-    /// [`PspReader::with_a_record_buffer_ceiling`] rather than at the record that would have
+    /// `PspReader::with_a_record_buffer_ceiling` rather than at the record that would have
     /// tripped it, so a setting that could never work fails where it was made.
     #[error(
         "{}: a record-buffer ceiling of {ceiling} bytes, which is not above the \

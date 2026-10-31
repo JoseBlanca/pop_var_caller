@@ -144,10 +144,10 @@ pub struct ContigInfo {
 
 /// What reading a reference yields: the whole-assembly digest and every contig's info.
 pub struct ReferenceInfo {
-    /// The **whole-reference** MD5 — every contig's uppercased bases *concatenated* in file
-    /// order (§3.4; the `ssr-catalog` convention, and **not** a SAM field — SAM has no
-    /// reference-wide digest). Distinct from the per-contig `@SQ M5`, which lives on each
-    /// `ContigInfo`. `None` from a `.fai`-only read.
+    /// The **whole-reference** MD5 — the MD5 of every contig's `@SQ M5` digest, concatenated
+    /// in file order (§3.4; **not** a SAM field — SAM has no reference-wide digest). Distinct
+    /// from the per-contig `@SQ M5`, which lives on each `ContigInfo`. `None` from a
+    /// `.fai`-only read.
     pub md5: Option<[u8; 16]>,
     /// Every contig, **in file order** — the order that defines `ContigId` (T1). One source of
     /// truth: name, length, geometry and md5 all here, so there is nothing to keep in step
@@ -428,9 +428,9 @@ consumers are elsewhere:
   reconciliation deferred in §7, and the reason it will have teeth at all (T6). That check is
   the concrete answer to "who needs this": it is the difference between *this BAM names the
   same contigs* and *this BAM was aligned to these bases*.
-- **The reference digest** identifies the assembly as a whole — comparable to a `.cat`
-  header's `reference_md5` (below) — and, being a concatenation in file order, is the one
-  value that would catch a reordering (T1).
+- **The reference digest** identifies the assembly as a whole — the repeat catalog and every
+  psp carry it — and, being built in file order, is the one value that would catch a
+  reordering (T1).
 
 This module computes and hands them over. It does not decide what disagreement means; a
 caller that has something to compare against does.
@@ -440,12 +440,20 @@ caller that has something to compare against does.
   header), and M5 is defined on uppercased bases. A file-byte digest there would be a
   different number wearing the same name, and `ContigEntry`'s `PartialEq` would compare it
   against a real M5 and report a mismatch that isn't one.
-- **Whole reference** → `ReferenceInfo::reference_md5`: the uppercased bases of every
-  contig, concatenated in file order, which is exactly `ssr-catalog`'s `reference_md5`
-  ([`catalog/mod.rs:196-211`](../../../../src/ssr/catalog/mod.rs)). So an ng table and a `.cat`
-  header can be checked against each other, and re-wrapping the FASTA does not change it.
-  Being a concatenation in order, it also pins the **order** — two references with the same
-  contigs shuffled have different digests.
+- **Whole reference** → `ReferenceInfo::reference_md5`: **the MD5 of the contig digests** — the
+  16 bytes of each contig's M5, concatenated in file order (owner, 2026-10-30). Re-wrapping the
+  FASTA does not change it, since no M5 changes; and being in order, it pins the **order** — two
+  references with the same contigs shuffled have different digests.
+
+  *It was the MD5 of every contig's uppercased bases concatenated, which was the deleted
+  `ssr-catalog`'s `reference_md5`.* That meant a second MD5 over every base: most of the pass's
+  cost, and the pass runs on every command that checks its reference, so once per sample in a
+  cohort. Built from the contig digests, each base is hashed once; on tomato's chromosome 1 the
+  reference check went from 5.45 G to 2.88 G instructions
+  (`doc/devel/reports/reviews/perf_repeat-scanner_2026-10-30.md`). Two references with the same
+  contig digests in the same order have the same reference digest either way, so nothing it is
+  asked to tell apart is lost. What changed is the value: catalogs and psps written before
+  2026-10-30 carry the old one and are rebuilt.
 
 *Rejected: MD5 of the file's raw bytes.* It answers "is this the same file", which nothing
 asks; two identical assemblies wrapped differently would disagree, and it is comparable to no
@@ -876,7 +884,8 @@ for each record:
         line_bases = the bytes of the line that are 0x21..=0x7E
         the first line fixes both; every later line must match, except the last,
             which may be shorter                                  (`faidx.c:277-292`)
-        each base: to_ascii_uppercase, feed the contig MD5 and the reference MD5
+        each base: to_ascii_uppercase, feed the contig MD5
+    at each contig's end: feed its 16-byte MD5 to the reference MD5
         length += line_bases
     emit (name, length, offset, line_bases, line_width, contig md5)
 ```

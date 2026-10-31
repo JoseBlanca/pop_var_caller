@@ -97,18 +97,21 @@ pub fn ln_1p(x: f64) -> f64 {
     libm::log1p(x)
 }
 
+#[cfg(test)]
 /// `eˣ − 1`, accurate when `x` is near zero.
 #[inline]
 pub fn exp_m1(x: f64) -> f64 {
     libm::expm1(x)
 }
 
+#[cfg(any(test, feature = "bench-fixtures"))]
 /// The sine of `x` radians.
 #[inline]
 pub fn sin(x: f64) -> f64 {
     libm::sin(x)
 }
 
+#[cfg(any(test, feature = "bench-fixtures"))]
 /// The cosine of `x` radians.
 #[inline]
 pub fn cos(x: f64) -> f64 {

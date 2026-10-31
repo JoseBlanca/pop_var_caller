@@ -15,12 +15,12 @@
 //! [`records`], which turns each called locus into what a VCF record states; [`report`]'s
 //! [`RunReport`], what a finished run says about itself; [`gatherer`]'s
 //! [`SampleObservationGatherer`], psp mode's walk stage — one sample's observations drained
-//! into a psp on disk (spec §5.2); and [`psp_source`]'s [`PspObservationSource`], the same
+//! into a psp on disk (spec §5.2); and [`psp_source`]'s `PspObservationSource`, the same
 //! merge interface served from a psp instead of from alignment files — the one place the two
 //! calling modes differ (spec §3.1).
 //!
 //! **Three ways out, and only two are a real run's.**
-//! [`AlignedFilesVariantCaller::call_cohort`] collects every called locus and hands them back at
+//! `AlignedFilesVariantCaller::call_cohort` collects every called locus and hands them back at
 //! once, which is what an oracle wants and what no real run can afford;
 //! [`AlignedFilesVariantCaller::call_cohort_handing_each_record_over`] hands each record over as
 //! it is finished and keeps none, which is the path
@@ -33,7 +33,6 @@ mod calling_progress;
 pub mod census_cohort;
 pub mod census_fit;
 pub mod census_freshness;
-pub mod census_from_psp;
 pub mod cohort_merge;
 pub mod depth_ceiling;
 pub mod edge_deletion_gathering;
@@ -53,13 +52,17 @@ pub(crate) mod test_fixtures;
 mod tract_junction_ownership;
 pub mod walker;
 
+#[cfg(test)]
+pub use callers::CalledCohort;
 pub use callers::{
-    AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CalledCohort,
-    CohortWalkTallies, MergeParameters, SampleWalkTallies, WrittenCohort,
+    AlignedFilesVariantCaller, AlignmentInputs, AssemblyCheckOutcome, CohortWalkTallies,
+    MergeParameters, SampleWalkTallies, WrittenCohort,
 };
+#[cfg(test)]
+pub use census_cohort::every_census_in_the_cohorts_psps;
 pub use census_cohort::{
-    CensusCohortError, each_census_in_the_cohorts_psps, every_census_in_the_cohorts_psps,
-    read_groups_of, the_census_in_a_psp, the_censuses_as_one_cohort,
+    CensusCohortError, each_census_in_the_cohorts_psps, read_groups_of, the_census_in_a_psp,
+    the_censuses_as_one_cohort,
 };
 pub use census_fit::{
     CohortFit, CohortFitError, CohortTractStrata, every_read_group_pooled, fit_a_cohort,
@@ -72,12 +75,13 @@ pub use census_freshness::{
     what_the_heads_say_about_every_census_in_a_cohort,
     what_the_run_says_about_every_census_in_a_cohort,
 };
-pub use census_from_psp::{CensusFromPspError, CensusOfStoredPileup, CensusTally, census_from_psp};
 pub use gatherer::{CensusPlan, CensusSelection, SampleObservationGatherer, SampleWalkInputs};
 pub use psp_caller::{
     OpenPspCohort, PspVariantCaller, StoredCohortInputs, StoredCohortTallies, StoredSample,
 };
-pub use psp_source::{PspObservationSource, PspSourceError, StoredSampleTallies};
+#[cfg(test)]
+pub use psp_source::PspObservationSource;
+pub use psp_source::{PspSourceError, StoredSampleTallies};
 pub use report::RunReport;
 pub use segments::{
     RepeatGround, RepeatGroundSetting, RepeatSorting, Segmentation, SegmentationInputs,
@@ -151,7 +155,7 @@ pub enum RunError {
     /// What went wrong arrives through the cause — a read query that would not open, a
     /// reference fetch past a contig's end — which names the region it failed on in every case
     /// but one, a failure of the region *stream* itself having no region to name
-    /// ([`LocusGenerationError::region`](crate::locus_generation::LocusGenerationError::region)).
+    /// (`LocusGenerationError::region`).
     ///
     /// **The cause is a boxed trait object because the two modes fail differently**: a walker
     /// fails at reading alignment files

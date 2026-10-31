@@ -460,10 +460,6 @@ pub mod column_census {
     macro_rules! counters {
         ($($name:ident),* $(,)?) => {
             $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
-            /// Every counter's current value, in declaration order, with its name.
-            pub fn snapshot() -> Vec<(&'static str, u64)> {
-                vec![$((stringify!($name), $name.load(Ordering::Relaxed))),*]
-            }
         };
     }
 

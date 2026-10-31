@@ -23,8 +23,8 @@
 
 use pop_var_caller::float;
 use pop_var_caller::paralog::{
-    DEFAULT_ALLELE_DISPERSION,    LocusObservations, ParalogModelParams, ParalogScorePrecompute, SampleObservation,
-    score_locus_for_paralogy,
+    DEFAULT_ALLELE_DISPERSION, LocusObservations, ParalogModelParams, ParalogScorePrecompute,
+    SampleObservation, score_locus_for_paralogy,
 };
 
 struct Options {
@@ -45,7 +45,9 @@ fn parse_options() -> Options {
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
-        let value = args.next().unwrap_or_else(|| panic!("{flag} needs a value"));
+        let value = args
+            .next()
+            .unwrap_or_else(|| panic!("{flag} needs a value"));
         match flag.as_str() {
             "--sigma0" => options.sigma0 = value.parse().expect("--sigma0 is a number"),
             "--pi" => options.pi = value.parse().expect("--pi is a number"),

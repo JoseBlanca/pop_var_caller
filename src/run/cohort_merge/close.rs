@@ -81,6 +81,7 @@ pub struct ClosedLocusRanges {
 }
 
 impl ClosedLocusRanges {
+    #[cfg(test)]
     /// How many reference bases the locus covers — the width both verdicts are passed on.
     #[must_use]
     pub fn span(&self) -> u64 {
@@ -389,6 +390,7 @@ pub struct ClosedLocus<'a> {
 }
 
 impl ClosedLocus<'_> {
+    #[cfg(test)]
     /// How many reference bases the locus covers.
     ///
     /// **Not `region.len()`**, which overflows its `+ 1` before subtracting when a locus
@@ -712,6 +714,7 @@ pub struct LocusCloser<'a> {
 }
 
 impl<'a> LocusCloser<'a> {
+    #[cfg(test)]
     /// Walk `observations_per_sample`, one slice per sample in the run's sample order,
     /// each in coordinate order.
     ///
@@ -747,7 +750,7 @@ impl<'a> LocusCloser<'a> {
         )
     }
 
-    /// [`over`](Self::over) where the summaries are already in hand — the cache's path.
+    /// `over` where the summaries are already in hand — the cache's path.
     ///
     /// **The difference is where the summaries come from and nothing else.** Handed a window
     /// carrying them, the walk reads them; handed records alone it derives each one when it
@@ -872,7 +875,7 @@ impl<'a> Iterator for LocusCloser<'a> {
     /// locus's, so neither break condition can hold on the first pass: every call
     /// consumes at least one observation, and the iterator cannot spin. That is a
     /// property of the code rather than of the input, which is why the sortedness
-    /// precondition on [`LocusCloser::over`] carries no progress obligation — and why
+    /// precondition on `LocusCloser::over` carries no progress obligation — and why
     /// production's release-level `StalledCut` guard has no counterpart here (spec §10,
     /// lesson 2).
     fn next(&mut self) -> Option<Self::Item> {

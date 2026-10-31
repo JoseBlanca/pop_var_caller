@@ -500,18 +500,21 @@ impl SampleObservationGatherer {
         })
     }
 
+    #[cfg(test)]
     /// The header the sample's psp will carry — fixed at [`open`](Self::open).
     #[must_use]
     pub fn header(&self) -> &Header {
         &self.header
     }
 
+    #[cfg(test)]
     /// The individual this walk is of.
     #[must_use]
     pub fn sample_name(&self) -> &str {
         &self.header.sample
     }
 
+    #[cfg(test)]
     /// How far this walk has got: `NothingYet` until the first observation is yielded, and
     /// the last base of the last one after that.
     #[must_use]
@@ -519,6 +522,7 @@ impl SampleObservationGatherer {
         self.reached
     }
 
+    #[cfg(test)]
     /// The walk's running tally — current at any point, final once the walk is spent.
     /// [`write_psp`](Self::write_psp) hands the final tally back, since it consumes the
     /// gatherer.
@@ -1611,78 +1615,6 @@ mod census_tests {
         let (segmentation, plan) =
             crate::run::test_fixtures::a_census_plan_over(&cohort.reference, &cohort.catalog);
         (cohort, segmentation, plan)
-    }
-
-    /// **The psp's trailer is the sample's census** (`psp_census_pair.md` §3.1) — the same
-    /// evidence the walk accumulated.
-    ///
-    /// **What it is checked against is the census rebuilt from the psp's own records** — the
-    /// second producer, `census_from_psp`, reading back what the first one wrote. So a trailer
-    /// holding anything else fails here: an empty payload, another sample's census, or a census
-    /// the walk closed before it had fed it, which comes back short of the records the psp
-    /// holds.
-    ///
-    /// **This was compared against the census file beside the psp until step A2**, which is the
-    /// file that step deletes. The rebuild is the durable oracle and is what step A4 makes the
-    /// parity test at the command level.
-    #[test]
-    fn the_psps_trailer_is_the_census_the_walk_built() {
-        let (cohort, segmentation, plan) = a_cohort_with_a_census_plan();
-        let psp = cohort.directory.path().join("zeta.psp");
-
-        let _ = gatherer_over(
-            &cohort.alignments[0],
-            &cohort.reference,
-            &segmentation,
-            Some(&plan),
-        )
-        .write_psp(&psp)
-        .expect("the walk writes its psp");
-
-        let trailer = PspReader::open(&psp)
-            .expect("the psp opens")
-            .trailer()
-            .expect("the trailer reads");
-        let mut inside = decode_census(&trailer).expect("the trailer is a census this build reads");
-        let rebuilt = crate::run::census_from_psp::census_from_psp(&psp, &plan, &segmentation)
-            .expect("the psp the walk just wrote reads back");
-
-        assert_eq!(
-            inside.census, rebuilt.evidence,
-            "the trailer holds the census the walk accumulated",
-        );
-        // **And it holds reads rather than the shape of a census**, which the comparison above
-        // now does catch — the rebuild reads the psp's records, so a census closed early differs
-        // from it. This stays because it says which way the two would differ, and because it is
-        // the one assertion here that does not depend on the second producer being right.
-        //
-        // **The test is depth above zero, and not "was this position walked".** Building the
-        // writer marks every kept position of the analysed ground as walked — the `mark_walked`
-        // call in `CensusPlan::writer_for` — so an unfed census comes back walked at every
-        // position with a depth of zero. Measured by running exactly that mutation, which this
-        // assertion catches and the walked bits do not.
-        let groups = inside.census.read_groups();
-        let with_reads = inside
-            .census
-            .with_generic(&groups, |sections| {
-                sections
-                    .iter()
-                    .map(|section| {
-                        let depth = section.depth();
-                        (0..depth.len())
-                            .filter(|at| {
-                                matches!(depth.get(*at), DepthCode::Binned(bin) if bin.get() > 0)
-                            })
-                            .count()
-                    })
-                    .sum::<usize>()
-            })
-            .expect("a decoded census is resident");
-        assert!(
-            with_reads > 0,
-            "no kept position in the trailer's census has a read at it, so a census closed \
-             before the walk fed it would pass every comparison above",
-        );
     }
 
     /// **The fit can read a psp's census out of the trailer without reading the psp**

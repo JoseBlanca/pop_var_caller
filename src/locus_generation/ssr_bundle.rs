@@ -27,7 +27,7 @@
 
 use super::ssr::{
     EdgeRunPeriods, MeasuredRepeat, SsrGenerator, SsrGeneratorConfig, SsrGeneratorConfigError,
-    SsrGeneratorCounts, seed_for_repeat,
+    seed_for_repeat,
 };
 use super::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, SampleLocusObservations,
@@ -36,6 +36,8 @@ use super::{
 use crate::alignment::PerQualityEmission;
 use crate::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use crate::alignment::ssr_unit_robust::AnchorRule;
+#[cfg(test)]
+use crate::locus_generation::ssr::SsrGeneratorCounts;
 use crate::read::filtering::ReadFilterCounts;
 use crate::read::input::SampleReads;
 use crate::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq};
@@ -87,6 +89,7 @@ where
         })
     }
 
+    #[cfg(test)]
     /// The running counts — accumulated across every bundle, readable at any point.
     pub fn counts(&self) -> &SsrGeneratorCounts {
         self.hulls.counts()

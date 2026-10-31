@@ -106,6 +106,7 @@ pub struct SpillingSink {
 }
 
 impl SpillingSink {
+    #[cfg(test)]
     /// Park records beside `output`, encoding their lines against `contigs` at `ploidy`.
     #[must_use]
     pub fn beside(output: &std::path::Path, contigs: Vec<HeaderContig>, ploidy: Ploidy) -> Self {
@@ -157,24 +158,6 @@ impl SpillingSink {
 }
 
 impl CalledRecordSink {
-    /// **Close whatever this sink opened.**
-    ///
-    /// Consuming, so a forgotten close is a missing output rather than a truncated one — and it
-    /// is what lets the two call sites hand the sink over without recovering the writer from
-    /// inside it. An earlier version pattern-matched the off variant back out and declared the
-    /// other `unreachable!`, which was sound only because the caller had refused a non-zero
-    /// target ninety lines earlier: a panic waiting for the step that moves that guard.
-    ///
-    /// # Errors
-    ///
-    /// If the VCF cannot be finished, or the parked records cannot be made durable.
-    pub fn finish(self) -> Result<(), PassOneError> {
-        match self {
-            Self::StraightToTheVcf(writer) => writer.finish().map_err(PassOneError::Vcf),
-            Self::ParkedOnTheSpill(mut sink) => sink.finish_parking().map_err(PassOneError::Spill),
-        }
-    }
-
     /// **What the threads that call the loci use to get each record ready for this sink** —
     /// owned, so they can hold it while this sink stays with the thread that writes.
     #[must_use]

@@ -198,6 +198,35 @@ fn repeat_features_of_contig(
     //    the pre-screen and the bundling read (spec §3.1).
     let detected: Vec<RepeatInterval> = rows.iter().map(detected_interval).collect();
 
+    // 1b. One reading of each joined tract, as a scan chooses it — from the cut and purity
+    //     the row stored rather than from the bases. A joined tract within the file's flank
+    //     floor of a contig end has no row while a piece of it may, so there the two can
+    //     differ; that is the contig-end difference the differential already allows.
+    let keep = segment_criteria::choose_readings(&detected, |i| {
+        rows[i]
+            .purity
+            .is_some_and(|purity| purity >= class.min_purity)
+    });
+    // Nearly every contig holds a joined tract or two at most, so the rows are copied only
+    // when one reading has to go.
+    let chosen_rows: Vec<FoundRepeat>;
+    let (rows, detected) = if keep.iter().all(|&kept| kept) {
+        (rows, detected)
+    } else {
+        chosen_rows = rows
+            .iter()
+            .zip(&keep)
+            .filter(|&(_, &kept)| kept)
+            .map(|(row, _)| row.clone())
+            .collect();
+        let detected = detected
+            .into_iter()
+            .zip(&keep)
+            .filter_map(|(iv, &kept)| kept.then_some(iv))
+            .collect();
+        (&chosen_rows[..], detected)
+    };
+
     // 2. The pre-screen, unchanged: step 3's own `prefilter` over those intervals.
     let cleaned = segment_criteria::prefilter(&detected, class);
 

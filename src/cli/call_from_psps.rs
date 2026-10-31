@@ -62,6 +62,7 @@ use crate::vcf::writer::{VcfWriteError, VcfWriter, is_standard_output};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
 /// What this subcommand is called on the command line.
 pub const SUBCOMMAND: &str = "call-from-psps";
 

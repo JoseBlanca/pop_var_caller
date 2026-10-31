@@ -80,8 +80,6 @@
 //! qualities overstate quality by roughly that much. A defaulted scale is a compromise with a
 //! size, not a placeholder.
 
-use std::collections::BTreeMap;
-
 use crate::float;
 use crate::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::types::ReadGroupId;
@@ -174,6 +172,7 @@ pub struct MintedReadErrors {
 }
 
 impl MintedReadErrors {
+    #[cfg(test)]
     /// The unit the log-error sum is counted in, in nats — 2⁻²⁰, about 9.5 in ten million.
     ///
     /// **Exported so a consumer can state its own tolerance in terms of this rather than
@@ -302,28 +301,6 @@ pub fn minted_error_by_read_group(
         ));
     }
     out.sort_unstable_by_key(|&(group, _)| group);
-}
-
-/// Fold one locus's totals into a running per-read-group table.
-///
-/// **The order the groups arrive in cannot change the answer, and that is the fixed point's
-/// doing rather than this function's.** Each group is its own key and each sum is an exact
-/// integer, so nothing here is order-sensitive — measured, not argued: deleting
-/// [`minted_error_by_read_group`]'s sort changes no total in this module's tests. The sort is
-/// kept because that function *states* it
-/// returns ascending order and a caller reading the scratch vector directly should get it —
-/// `each_read_groups_mean_is_over_its_own_reads` hands it a locus whose groups arrive descending,
-/// so the claim is pinned. **It is not what makes this fold reproducible.** Were the sum an
-/// `f64` it would have to be, because `f64` addition is not associative — which is the trap
-/// [`MintedReadErrors`] exists to sidestep (`doc/devel/ng/spec/read_likelihoods.md` §8 on
-/// determinism).
-pub fn fold_into(
-    running: &mut BTreeMap<ReadGroupId, MintedReadErrors>,
-    of_locus: &[(ReadGroupId, MintedReadErrors)],
-) {
-    for &(group, totals) in of_locus {
-        running.entry(group).or_default().add(totals);
-    }
 }
 
 #[cfg(test)]

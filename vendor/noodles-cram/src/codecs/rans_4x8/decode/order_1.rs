@@ -53,16 +53,9 @@ impl DecodeTables {
 }
 
 pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
-    #[cfg(feature = "perf-counters")]
-    let table_started = std::time::Instant::now();
 
     let frequencies = read_frequencies(src)?;
     let tables = DecodeTables::build(&frequencies);
-
-    #[cfg(feature = "perf-counters")]
-    let table_nanos = table_started.elapsed().as_nanos() as u64;
-    #[cfg(feature = "perf-counters")]
-    let decode_started = std::time::Instant::now();
 
     let mut states = read_states(src)?;
     let mut prev_syms = [0; STATE_COUNT];
@@ -104,14 +97,6 @@ pub fn decode(src: &mut &[u8], dst: &mut [u8]) -> io::Result<()> {
 
         prev_sym = sym;
     }
-
-    #[cfg(feature = "perf-counters")]
-    crate::perf::record_rans(
-        true,
-        dst.len(),
-        table_nanos,
-        decode_started.elapsed().as_nanos() as u64,
-    );
 
     Ok(())
 }

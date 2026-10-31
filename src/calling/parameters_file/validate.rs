@@ -455,6 +455,7 @@ impl ParametersFile {
             read_groups,
         )?;
         self.no_repeat_tract_table_names_one_thing_twice()?;
+        self.every_group_number_is_below_the_read_group_count()?;
         names_the_samples(
             "inbreeding.by_sample",
             self.inbreeding
@@ -485,6 +486,72 @@ impl ParametersFile {
     /// **And this is the input path where it is plausible.** The fit cannot produce a duplicate;
     /// a person copying a `slippage_by_stratum_and_group` row to edit it and forgetting to change
     /// the stratum can. The refusal names the key, which the projection could not.
+    /// **Every slippage group and every batch is numbered below the file's read-group count.**
+    ///
+    /// Both are numbered from 0 and each holds at least one read group, so a number at or above
+    /// the count is one no run could have written. **And the number sizes a table**: the
+    /// projection makes every stratum as wide as the highest slippage group, and the calling loop
+    /// as wide as the highest batch, so `slippage_group = 4000000000` asked for a table of four
+    /// billion slots and the run was killed for memory rather than told what was wrong (found by
+    /// fuzzing, 2026-10-31).
+    fn every_group_number_is_below_the_read_group_count(&self) -> Result<(), ParametersFileError> {
+        let read_groups = self.fitted_from.read_groups.len();
+        let tracts = &self.repeat_tracts;
+        let numbered = [
+            (
+                "repeat_tracts.slippage_group_by_read_group",
+                "slippage_group",
+                tracts
+                    .slippage_group_by_read_group
+                    .iter()
+                    .map(|row| row.slippage_group)
+                    .max(),
+            ),
+            (
+                "repeat_tracts.slippage_by_stratum_and_group",
+                "slippage_group",
+                tracts
+                    .slippage_by_stratum_and_group
+                    .iter()
+                    .map(|row| row.slippage_group)
+                    .max(),
+            ),
+            (
+                "sequencing_batches.by_read_group",
+                "batch",
+                self.sequencing_batches
+                    .by_read_group
+                    .iter()
+                    .map(|row| row.batch)
+                    .max(),
+            ),
+            (
+                "sequencing_batches.by_sample",
+                "batch",
+                self.sequencing_batches
+                    .by_sample
+                    .iter()
+                    .map(|row| row.batch)
+                    .max(),
+            ),
+        ];
+        for (at, field, highest) in numbered {
+            if let Some(highest) = highest
+                && highest as usize >= read_groups
+            {
+                return Err(refuse(
+                    at.to_string(),
+                    format!(
+                        "names {field} {highest}, and the file lists {read_groups} read group(s); \
+                         every {field} holds at least one read group and they are numbered from \
+                         0, so none can be {read_groups} or more"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn no_repeat_tract_table_names_one_thing_twice(&self) -> Result<(), ParametersFileError> {
         let tracts = &self.repeat_tracts;
         names_each_key_once(
@@ -1921,6 +1988,33 @@ mod tests {
         ] {
             assert_eq!(at.0, table);
         }
+    }
+
+    /// **A slippage group or batch numbered past the read groups is refused, by name**, rather
+    /// than sizing a table by it: `slippage_group = 4000000000` killed a run for memory before
+    /// this check existed (found by fuzzing, 2026-10-31).
+    #[test]
+    fn a_group_numbered_past_the_read_groups_is_refused() {
+        let (field, problem) = refused(|file| {
+            file.repeat_tracts.slippage_group_by_read_group[0].slippage_group = 4_000_000_000;
+        });
+        assert_eq!(field, "repeat_tracts.slippage_group_by_read_group");
+        assert!(problem.contains("4000000000"), "{problem}");
+
+        let (field, _) = refused(|file| {
+            file.repeat_tracts.slippage_by_stratum_and_group[0].slippage_group = 4_000_000_000;
+        });
+        assert_eq!(field, "repeat_tracts.slippage_by_stratum_and_group");
+
+        let (field, _) = refused(|file| {
+            for row in &mut file.sequencing_batches.by_read_group {
+                row.batch = 4_000_000_000;
+            }
+            for row in &mut file.sequencing_batches.by_sample {
+                row.batch = 4_000_000_000;
+            }
+        });
+        assert_eq!(field, "sequencing_batches.by_read_group");
     }
 
     /// **An evidence count spelled in another quantity's unit is refused.**

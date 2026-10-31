@@ -972,6 +972,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
         })
     }
 
+    #[cfg(test)]
     /// The knobs this generator was built with.
     pub fn config(&self) -> &PileupGeneratorConfig {
         &self.config
@@ -982,6 +983,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
         &self.counts
     }
 
+    #[cfg(test)]
     /// **What the cursors did**, summed over every chromosome walked so far — reads decoded
     /// against reads replayed from memory, and regions reused against regions jumped.
     ///
@@ -1017,7 +1019,7 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
     /// Spec §8's finish-time sum, and the failure it names if it is skipped: *"drop rates
     /// under-report … silently, since every number stays plausible."* Retired chromosomes are
     /// added up as they go and the live one is asked directly, so the answer is current at any
-    /// moment — the same shape [`cursor_counts`](Self::cursor_counts) has, for the same reason.
+    /// moment — the same shape `cursor_counts` has, for the same reason.
     ///
     /// **The `None` key is reads that declared no read group**, which is the key the cursor
     /// itself uses; a run whose files all declare one never sees it.
@@ -1348,23 +1350,6 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable + Send + 'static, P: ReadPrepa
         if let Some(walk) = self.walk.as_mut() {
             walk.reference_kept_from = kept_from;
         }
-    }
-
-    /// How many reference bases this generator's readers are holding between them — the walk's,
-    /// the preparer's, and the cursor's.
-    ///
-    /// **The bound made observable.** Without it "the window is bounded" is an argument about
-    /// where [`release_reference_behind`](Self::release_reference_behind) is called from, and a
-    /// call site quietly dropped costs memory without changing a single answer — which is how
-    /// it went unnoticed in the first place.
-    pub fn resident_reference_bases(&self) -> usize {
-        self.reference.resident_bases()
-            + lock_preparation(&self.preparation)
-                .preparer
-                .resident_reference_bases()
-            + self.chromosome.as_ref().map_or(0, |chromosome| {
-                chromosome.walker.reads().reads.resident_reference_bases()
-            })
     }
 
     /// Retire the walker on the chromosome being left and build the one for `region`'s.

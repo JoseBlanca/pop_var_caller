@@ -318,6 +318,7 @@ impl StutterModel {
         })
     }
 
+    #[cfg(test)]
     /// HipSTR's EM **starting point** — an initialisation its fitting immediately moves away
     /// from, and **not** a default. Provided as a matched set for the same reason as
     /// [`Self::hipstr_shipped`]: whole-repeat one-step share 0.9 with 0.1/0.1, part-repeat
@@ -745,6 +746,7 @@ impl StutterModel {
     pub fn part_repeat_shorter_share(&self) -> f64 {
         self.part_repeat_shorter_share
     }
+    #[cfg(test)]
     /// **Of the reads that changed by part of a repeat**, the share that moved by exactly one
     /// base. HipSTR's `out_geom_`.
     #[must_use]

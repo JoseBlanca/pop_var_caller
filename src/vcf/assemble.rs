@@ -226,10 +226,11 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
         };
         repeat_tract = repeat_tract.map(|tract| {
             tract.widened(TractWidening {
-                left: u8::try_from(widened.left).expect("a flank holds fewer than 256 bases"),
-                right: u8::try_from(widened.right).expect("a flank holds fewer than 256 bases"),
+                left: u16::try_from(widened.left).expect("a flank holds fewer than 65,536 bases"),
+                right: u16::try_from(widened.right).expect("a flank holds fewer than 65,536 bases"),
                 flank_bases_per_allele: widened.flank_bases_per_allele,
                 reach_per_allele: widened.reach_per_allele,
+                base_before: widened.base_before,
             })
         });
         padding_base = widened.padding_base;
@@ -266,12 +267,15 @@ struct WidenedTract {
     /// Every allele over the widened reference, the reference first.
     alleles: Vec<Box<[u8]>>,
     /// How many flank bases each allele was given around its spelling, for `REPCN`.
-    flank_bases_per_allele: Vec<u8>,
+    flank_bases_per_allele: Vec<u16>,
     /// Each allele's reach into the left and the right flank, as the generic path places it.
     reach_per_allele: Vec<(u8, u8)>,
     /// The base before the widened record, for when an allele comes out empty — or the one
     /// after it, where the widened record starts at the contig's first base.
     padding_base: Option<PaddingBase>,
+    /// The base before the widened record, whether or not an allele needs it: merging a generic
+    /// record into this one in the gathering of the calls can make an allele empty.
+    base_before: Option<u8>,
 }
 
 impl WidenedTract {
@@ -361,8 +365,8 @@ impl WidenedTract {
             allele.extend_from_slice(bases);
             allele.extend_from_slice(after);
             flank_bases_per_allele.push(
-                u8::try_from(before.len() + after.len())
-                    .expect("two flanks of a tract hold fewer than 256 bases"),
+                u16::try_from(before.len() + after.len())
+                    .expect("two flanks of a tract hold fewer than 65,536 bases"),
             );
             widened.push(allele.into_boxed_slice());
         }
@@ -399,6 +403,10 @@ impl WidenedTract {
                 })
                 .collect(),
             padding_base,
+            base_before: match padding_base {
+                Some(PaddingBase::Left(base)) => Some(base),
+                _ => None,
+            },
         })
     }
 }
@@ -453,7 +461,7 @@ impl WidenedTract {
 /// candidate set and are **not** recomputed. That is the same choice `bcftools` makes, and the
 /// honest reading of the field: the quality is the evidence the site was judged on, not a
 /// property of the alleles that survived the judging.
-pub(crate) fn drop_alternatives_no_sample_calls(
+fn drop_alternatives_no_sample_calls(
     alleles: &mut Vec<Box<[u8]>>,
     expected_copies: &mut Vec<f64>,
     allele_mapq: &mut Vec<MapqPool>,

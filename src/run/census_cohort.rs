@@ -72,6 +72,27 @@ pub enum CensusCohortError {
         source: Box<CensusError>,
     },
 
+    /// A psp's census names a different sample from the psp's own header.
+    ///
+    /// **One file contradicting itself**, so neither name can be trusted: the census was
+    /// written with the records, by the same run, under the same name. A header edited by hand
+    /// is the way to it — the header is text and carries no checksum — and before this check it
+    /// reached an assertion pairing censuses with psps and aborted `estimate-parameters` (found
+    /// by fuzzing, 2026-10-31).
+    #[error(
+        "{} says it holds sample {header_sample:?} and its census says {census_sample:?}; \
+         the file contradicts itself, so regenerate it with `pvc generate-psps`",
+        path.display()
+    )]
+    SampleNamesDisagree {
+        /// The psp.
+        path: PathBuf,
+        /// The sample its header names.
+        header_sample: String,
+        /// The sample its census names.
+        census_sample: String,
+    },
+
     /// The samples cannot be fitted as one cohort.
     #[error("these censuses are not one cohort")]
     NotOneCohort {
@@ -81,6 +102,7 @@ pub enum CensusCohortError {
     },
 }
 
+#[cfg(test)]
 /// **Every census of an opened cohort, read out of the psps that carry them.**
 ///
 /// One sample a psp, in the cohort's own order, which is the order the run's samples are in.
@@ -111,7 +133,7 @@ pub fn every_census_in_the_cohorts_psps(
 
 /// **Each census of an opened cohort, read out of its psp and not yet assembled into a cohort** —
 /// one sample a psp, in the cohort's own order, read exactly as
-/// [`every_census_in_the_cohorts_psps`] reads them.
+/// `every_census_in_the_cohorts_psps` reads them.
 ///
 /// **Apart from the assembly because a command may have to judge each census before refusing the
 /// cohort.** Assembling refuses two samples that recorded different settings, naming the pair
@@ -121,7 +143,9 @@ pub fn every_census_in_the_cohorts_psps(
 ///
 /// # Errors
 ///
-/// [`CensusCohortError::CensusNotRead`] naming the psp whose trailer will not decode.
+/// [`CensusCohortError::CensusNotRead`] naming the psp whose trailer will not decode, and
+/// [`CensusCohortError::SampleNamesDisagree`] for a psp whose census names another sample than its
+/// header.
 pub fn each_census_in_the_cohorts_psps(
     cohort: &OpenPspCohort,
 ) -> Result<Vec<SampleCensusEvidence>, CensusCohortError> {
@@ -146,7 +170,9 @@ pub fn each_census_in_the_cohorts_psps(
 ///
 /// [`CensusCohortError::CensusNotRead`] naming the psp whose trailer will not decode — which
 /// includes a psp carrying no census at all, so a caller that means to tell those apart judges the
-/// head first ([`census_freshness`](super::census_freshness)).
+/// head first ([`census_freshness`](super::census_freshness)); and
+/// [`CensusCohortError::SampleNamesDisagree`] for a psp whose census names another sample than its
+/// header.
 pub fn the_census_in_a_psp(
     path: &Path,
     psp: &PspReader,
@@ -162,6 +188,13 @@ pub fn the_census_in_a_psp(
         path: path.to_path_buf(),
         source: Box::new(source),
     })?;
+    if evidence.sample != psp.header().sample {
+        return Err(CensusCohortError::SampleNamesDisagree {
+            path: path.to_path_buf(),
+            header_sample: psp.header().sample.clone(),
+            census_sample: evidence.sample.clone(),
+        });
+    }
     Ok(evidence)
 }
 
@@ -302,6 +335,35 @@ mod tests {
         );
     }
 
+    /// **A psp whose header was renamed by hand is refused, naming both names**, rather than
+    /// reaching the assertion that pairs censuses with psps and aborting the fit. The header is
+    /// text with no checksum, so an edit of the same length leaves the file opening cleanly.
+    #[test]
+    fn a_psp_whose_header_names_another_sample_than_its_census_is_refused() {
+        let (_cohort, paths, _open) = a_walked_cohort();
+        let mut bytes = std::fs::read(&paths[0]).expect("the walked psp reads");
+        let from = br#"sample = "alpha""#;
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .expect("the header names its sample");
+        bytes[at..at + from.len()].copy_from_slice(br#"sample = "omega""#);
+        let renamed = paths[0].with_file_name("renamed.psp");
+        std::fs::write(&renamed, bytes).expect("the renamed copy writes");
+
+        let psp = crate::psp::PspReader::open(&renamed).expect("a same-length edit still opens");
+        let error = the_census_in_a_psp(&renamed, &psp).expect_err("the names disagree");
+
+        assert!(
+            matches!(
+                &error,
+                CensusCohortError::SampleNamesDisagree { header_sample, census_sample, .. }
+                    if header_sample == "omega" && census_sample == "alpha"
+            ),
+            "{error}"
+        );
+    }
+
     /// **Reading a cohort's censuses takes no psp's trailer whole, decodes no section, and
     /// leaves every section where it is** — the property that lets a cohort too large to hold be
     /// opened at all (spec §5).
@@ -351,26 +413,6 @@ mod tests {
         assert!(
             bytes_read() > 0,
             "asking for a section reached the file, so the census was never held whole",
-        );
-    }
-
-    /// **A psp whose trailer is not a census is refused, naming the psp.**
-    ///
-    /// The trailer is replaced with bytes that are not a census — which is what a psp written
-    /// before the census moved into it looks like, except that its trailer is empty rather than
-    /// prose, and both arrive here the same way. **This is the message plan step C3 puts a
-    /// regeneration report in front of**; until then it is what a stale cohort says.
-    #[test]
-    fn a_psp_whose_trailer_is_not_a_census_is_refused_naming_the_psp() {
-        let (_cohort, paths, _open) = a_walked_cohort();
-        crate::psp::replace_trailer(&paths[1], b"not a census").expect("the tail rewrites");
-        let open = OpenPspCohort::open(&paths).expect("the psps still open");
-
-        let error = every_census_in_the_cohorts_psps(&open).expect_err("that is not a census");
-
-        assert!(
-            matches!(&error, CensusCohortError::CensusNotRead { path, .. } if path == &paths[1]),
-            "{error:?}",
         );
     }
 }

@@ -55,7 +55,6 @@
 //! open question sweeps them independently of selection's; what is shared is the type, and
 //! with it the impossibility of a negative share or a floor of zero reads.
 
-pub mod discovery;
 pub mod repeat_tract_parameters;
 pub(crate) mod slippage_refit;
 pub mod summarise_condition;
@@ -315,7 +314,7 @@ impl Default for SlippageRefitConfig {
 /// read before the caller sees it, so an observation's bases *are* the tract sequence a
 /// retrace would imply — the eligible set is a function of the observations and the candidate
 /// table alone, and no posterior enters it. Two consequences, both pinned by
-/// [`discovery`]'s tests:
+/// `discovery`'s tests:
 ///
 /// - a round over the same evidence can only fire once — with the first round's admissions on
 ///   the table, a second finds nothing — so wrapping rounds around the loop buys nothing;
@@ -408,6 +407,7 @@ impl DiscoveryConfig {
         max_rounds: non_zero_default(DEFAULT_DISCOVERY_MAX_ROUNDS),
     };
 
+    #[cfg(test)]
     /// Whether any round would run. True is the shipped setting.
     #[inline]
     #[must_use]
@@ -579,6 +579,7 @@ impl Default for CallingLoopConfig {
 pub struct RunnableCallingLoopConfig(CallingLoopConfig);
 
 impl RunnableCallingLoopConfig {
+    #[cfg(test)]
     /// The settings, unwrapped.
     #[inline]
     #[must_use]
@@ -692,6 +693,7 @@ pub trait LocusGenotyper<SsrEmissionScratch> {
         scratch: &mut CallingScratch<SsrEmissionScratch>,
     ) -> LocusInference;
 
+    #[cfg(test)]
     /// Which way of handling the cohort this is, for a run to record beside the genotypes it
     /// produced.
     ///

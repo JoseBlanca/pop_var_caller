@@ -24,7 +24,6 @@ use crate::repeat_catalog::{
     FoundRepeat, OwnedScope, ReadScope, RepeatCatalogError, RepeatCatalogHeader,
     sibling_catalog_path,
 };
-use crate::tandem_repeat::ScanParams;
 use crate::types::Bp;
 use crate::types::ContigId;
 
@@ -118,6 +117,7 @@ impl RepeatCatalog {
         &self.header.contigs
     }
 
+    #[cfg(test)]
     /// Every tandem repeat the file holds in `scope` — **exactly as stored, with no criteria
     /// applied**.
     ///
@@ -347,27 +347,6 @@ impl RepeatCatalog {
                     "a region names contig {}, and the catalog holds {held}",
                     missing.contig.get()
                 ),
-            });
-        }
-        Ok(())
-    }
-
-    /// Refuse unless this catalog was scored with `scan`'s weights — **for a caller that
-    /// scans as well as reads**, and must not mix tracts from two weightings.
-    ///
-    /// The weights are checked for **equality**, not permissiveness: a different match
-    /// reward or mismatch penalty is a different set of tracts, not a subset of this one,
-    /// and no filter over the file reproduces it (spec §4.2). A reader that only reads has
-    /// nothing to compare and never calls this.
-    pub fn check_scored_with(&self, scan: &ScanParams) -> Result<(), RepeatCatalogError> {
-        if self.header.scan.match_reward != scan.match_reward
-            || self.header.scan.mismatch_penalty != scan.mismatch_penalty
-        {
-            return Err(RepeatCatalogError::ScoringWeightsDiffer {
-                built_match_reward: self.header.scan.match_reward,
-                built_mismatch_penalty: self.header.scan.mismatch_penalty,
-                wanted_match_reward: scan.match_reward,
-                wanted_mismatch_penalty: scan.mismatch_penalty,
             });
         }
         Ok(())

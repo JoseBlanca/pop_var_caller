@@ -663,16 +663,6 @@ impl ReadGroupResolution {
         matches!(self, Self::Sole(_))
     }
 
-    /// Which read group a record belongs to, given the **name** its `RG` names.
-    ///
-    /// The same decision [`owner_of`](Self::owner_of) makes, reached from a borrowed name
-    /// rather than from a record. A CRAM stores the read group as a *number* — an index into
-    /// the header's `@RG` list — and noodles turns that number into the declared name without
-    /// copying it, so a CRAM decoder can decide who owns a record before it builds anything.
-    pub fn owner_of_name(&self, name: Option<&str>) -> Result<RecordOwner, UnresolvedReadGroup> {
-        self.owner_of(name.map(str::as_bytes))
-    }
-
     pub fn owner_of(&self, tag: Option<&[u8]>) -> Result<RecordOwner, UnresolvedReadGroup> {
         match self {
             Self::Sole(id) => Ok(RecordOwner::Mine(*id)),

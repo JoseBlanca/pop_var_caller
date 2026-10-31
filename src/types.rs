@@ -726,6 +726,7 @@ impl ErrorRate {
     }
 }
 
+#[cfg(test)]
 /// How common one genotype is in a sample's genome — the share of sites carrying
 /// it. A probability in `[0, 1]`; a set of them over the genotypes at one ploidy
 /// sums to one.
@@ -735,6 +736,7 @@ impl ErrorRate {
 #[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
 pub struct GenotypeFrequency(f64);
 
+#[cfg(test)]
 impl GenotypeFrequency {
     /// The only constructor. A frequency that is not a probability in `[0, 1]` is
     /// rejected rather than coerced.
@@ -787,7 +789,7 @@ impl InbreedingF {
     /// type deliberately excludes ([`DomainError::InbreedingFAtCeiling`]). The
     /// shared `[0, 1]` predicate is reused for the first and the ceiling is checked
     /// on top of it: [`checked_probability`] admits `1.0` for [`ErrorRate`] and
-    /// [`GenotypeFrequency`], where it is a real answer, and tightening it there
+    /// `GenotypeFrequency`, where it is a real answer, and tightening it there
     /// would break both (`arch/calling_priors.md` §2.1).
     pub fn try_new(coefficient: f64) -> Result<Self, DomainError> {
         let fraction = checked_probability(coefficient, DomainError::InbreedingF)?;
@@ -867,7 +869,7 @@ impl ExpectedHeterozygosity {
     ///
     /// **A value of the type rather than a bare `f64`**, following [`AlleleId::REFERENCE`]
     /// — the same reason. As a loose float it constructs an [`ErrorRate`], an
-    /// [`InbreedingF`] and a [`GenotypeFrequency`] just as happily, which is the
+    /// [`InbreedingF`] and a `GenotypeFrequency` just as happily, which is the
     /// confusion the five separate types in this section exist to prevent, and it would
     /// be the only diversity constant in the shared vocabulary for an STR-path author to
     /// reach for.
@@ -917,61 +919,6 @@ impl ExpectedAlternativeFrequency {
     /// rejected rather than coerced.
     pub fn try_new(frequency: f64) -> Result<Self, DomainError> {
         checked_probability(frequency, DomainError::ExpectedAlternativeFrequency).map(Self)
-    }
-
-    #[inline]
-    pub fn get(self) -> f64 {
-        self.0
-    }
-}
-
-/// The chance that two repeat-tract copies drawn at random from the cohort carry
-/// different numbers of repeats — Nei's gene diversity, measured on repeat tracts.
-///
-/// **The same question as [`ExpectedHeterozygosity`], asked of a different site class,
-/// and it is a type of its own so the two cannot be swapped.** Repeat tracts mutate
-/// orders of magnitude faster than bases do, so the two numbers are not the same size
-/// and neither substitutes for the other; the pre-pass is required to emit them
-/// separately precisely so a consumer cannot confuse them
-/// (`doc/devel/ng/spec/calling_priors.md` §5,
-/// `doc/devel/ng/spec/parameter_prepass_cohort.md` §3). Today's production STR path is
-/// what happens when they are not separated: it takes a fixed `SFS_THETA = 0.01`
-/// (`src/ssr/cohort/freebayes_emit.rs`), freebayes' SNP-scale default, commented
-/// *"Fixed, not a per-run knob"* — a constant standing in for a quantity nobody
-/// measured. As bare floats, that substitution compiles.
-///
-/// **A gene diversity and not a heterozygosity, because a tract is multi-allelic by
-/// length.** "How often do two copies differ" is still the right question; the
-/// two-allele arithmetic is not. Like [`ExpectedHeterozygosity`] it is a cohort
-/// quantity, so an individual's inbreeding does not enter it — the pre-pass divides the
-/// observed rate by `(1 − F)` before it gets here.
-///
-/// **Fitted at every cohort size down to one.** With a single genome it is that
-/// genome's own observed rate over its `(1 − F)`; one diploid genome carries two copies
-/// of every tract, and how often those two differ is exactly what this asks. So unlike
-/// a frequency spectrum it never comes back absent for want of a panel.
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
-pub struct RepeatGeneDiversity(f64);
-
-impl RepeatGeneDiversity {
-    /// The only constructor. A value that is not a probability in `[0, 1]` is rejected
-    /// rather than coerced.
-    ///
-    /// **The whole of `[0, 1]` is accepted**, and there is no consumer left that can
-    /// refuse a value inside it. Until 2026-08-26 the repeat tract's genotype prior
-    /// scaled a constructed geometric shape to reproduce this measurement, which was
-    /// possible only below a ceiling the shape itself set — at one outbred sample, below
-    /// every measurement — and the builder refused above it. The prior is now seeded from
-    /// the allele length variation the joint repeat fit produces per stratum
-    /// (`doc/devel/ng/spec/population_diversity.md` §4.2), which asserts no such scaling,
-    /// so nothing reads this value today.
-    ///
-    /// **It stays because the pre-pass still owes it**
-    /// (`doc/devel/ng/spec/parameter_prepass_cohort.md` §3): the STR gene diversity is one
-    /// of the two diversities that step is specified to emit, separately from
-    /// [`ExpectedHeterozygosity`] and precisely so that a consumer cannot confuse them.
-    pub fn try_new(diversity: f64) -> Result<Self, DomainError> {
-        checked_probability(diversity, DomainError::RepeatGeneDiversity).map(Self)
     }
 
     #[inline]
@@ -1055,7 +1002,7 @@ pub enum DomainError {
     /// ever needs to tell them apart, that is a variant split, not a message edit.
     #[error("per-base error rate {0} is not a finite probability in [0, 1]")]
     ErrorRate(f64),
-    /// A [`GenotypeFrequency`] was built from a value that is not a finite
+    /// A `GenotypeFrequency` was built from a value that is not a finite
     /// probability in `[0, 1]`.
     #[error("genotype frequency {0} is not a finite probability in [0, 1]")]
     GenotypeFrequency(f64),
@@ -1090,7 +1037,7 @@ pub enum DomainError {
     /// Its own variant beside [`Self::GenotypeFrequency`], and here the two are
     /// genuinely easy to confuse, because **ng carries a heterozygosity under each
     /// type**. This one draws its two chromosomes from the **cohort**, so an
-    /// individual's inbreeding does not touch it; the one a [`GenotypeFrequency`]
+    /// individual's inbreeding does not touch it; the one a `GenotypeFrequency`
     /// carries (`parameter_estimation::generic`'s `observed_heterozygosity`) draws them
     /// from **one individual**, so inbreeding drives it down — the two differ by a
     /// factor of `(1 − F)`. A message naming the wrong one sends the reader to the
@@ -1106,7 +1053,7 @@ pub enum DomainError {
     /// sends the reader to the wrong half of a two-number fit.
     #[error("expected alternative-allele frequency {0} is not a finite probability in [0, 1]")]
     ExpectedAlternativeFrequency(f64),
-    /// A [`RepeatGeneDiversity`] was built from a value that is not a finite
+    /// A `RepeatGeneDiversity` was built from a value that is not a finite
     /// probability in `[0, 1]`.
     ///
     /// **Its own variant beside [`Self::ExpectedHeterozygosity`], and the pair is the

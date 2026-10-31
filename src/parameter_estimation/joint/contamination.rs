@@ -152,9 +152,9 @@ use crate::float;
 use crate::parameter_estimation::depth_bins::DepthBinEdges;
 use crate::types::ReadGroupId;
 
-use super::census::{
-    CensusError, CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections,
-};
+#[cfg(test)]
+use super::census::{CensusError, CohortCensusEvidence};
+use super::census::{DepthCap, DepthCode, SampleGenericSections};
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -513,6 +513,7 @@ impl std::fmt::Display for NotIdentifiedReason {
     }
 }
 
+#[cfg(test)]
 /// Every sample's contamination fractions — **one for each read group it holds** — with the
 /// samples in the order they are given.
 ///

@@ -330,7 +330,7 @@ impl LocusLen {
     }
 
     /// The length of `region` — the canonical source once a locus exists, and what
-    /// [`SampleLocusObservations::locus_len`](super::SampleLocusObservations::locus_len) returns.
+    /// `SampleLocusObservations::locus_len` returns.
     pub fn of_region(region: GenomeRegion) -> Self {
         Self::from_positions(region.len())
     }

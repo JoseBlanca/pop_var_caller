@@ -475,9 +475,6 @@ impl<'c> Slice<'c> {
             tag_policy,
         );
 
-        #[cfg(feature = "perf-counters")]
-        let phase_started = std::time::Instant::now();
-
         // **Nothing is resolved for the extents pass**, on either path: it reads coordinates,
         // and a slice-wide fetch here would consult the repository for a single-sequence slice
         // and defeat the whole point of the pass.
@@ -497,32 +494,9 @@ impl<'c> Slice<'c> {
             )?
         };
 
-        #[cfg(feature = "perf-counters")]
-        {
-            crate::perf::record_slice_phase(
-                crate::perf::SlicePhase::Reference,
-                phase_started.elapsed().as_nanos() as u64,
-            );
-            crate::perf::record_slice_records(self.header.record_count());
-        }
-
         let substitution_matrix = compression_header.preservation_map().substitution_matrix();
 
-        #[cfg(feature = "perf-counters")]
-        let phase_started = std::time::Instant::now();
-
         let mut records = vec![Record::default(); self.header.record_count()];
-
-        #[cfg(feature = "perf-counters")]
-        {
-            crate::perf::record_slice_phase(
-                crate::perf::SlicePhase::Allocate,
-                phase_started.elapsed().as_nanos() as u64,
-            );
-        }
-
-        #[cfg(feature = "perf-counters")]
-        let phase_started = std::time::Instant::now();
 
         for record in &mut records {
             reader.read_record(record)?;
@@ -560,27 +534,8 @@ impl<'c> Slice<'c> {
             }
         }
 
-        #[cfg(feature = "perf-counters")]
-        {
-            crate::perf::record_slice_phase(
-                crate::perf::SlicePhase::ReadRecords,
-                phase_started.elapsed().as_nanos() as u64,
-            );
-        }
-
-        #[cfg(feature = "perf-counters")]
-        let phase_started = std::time::Instant::now();
-
         if mate_resolution == MateResolution::Resolve {
             resolve_mates(&mut records)?;
-        }
-
-        #[cfg(feature = "perf-counters")]
-        {
-            crate::perf::record_slice_phase(
-                crate::perf::SlicePhase::ResolveMates,
-                phase_started.elapsed().as_nanos() as u64,
-            );
         }
 
         Ok(records)

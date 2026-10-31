@@ -247,6 +247,7 @@ pub enum PassTwoError {
 /// lost beside the scoring, small enough that the batch's lines are a bounded amount of memory.
 const SCORING_BATCH: usize = 2048;
 
+#[cfg(test)]
 /// **Score every record pass one parked, and resolve the target false-discovery rate to a cut.**
 ///
 /// One sequential read of the spill. Nothing is held across records but the ratios: each entry
@@ -267,16 +268,10 @@ pub fn score_the_parked_records_and_resolve_the_cut(
     target_fdr: TargetFdr,
     config: &CalibrationConfig,
 ) -> Result<ParalogVerdicts, PassTwoError> {
-    score_the_parked_records_and_resolve_the_cut_windowed(
-        spill,
-        context,
-        target_fdr,
-        config,
-        None,
-    )
+    score_the_parked_records_and_resolve_the_cut_windowed(spill, context, target_fdr, config, None)
 }
 
-/// [`score_the_parked_records_and_resolve_the_cut`], with a windowed duplication rate where
+/// `score_the_parked_records_and_resolve_the_cut`, with a windowed duplication rate where
 /// `--hidden-dup-window` asked for one. `None` is the one run-wide rate.
 ///
 /// With a window, each record's contig and position are kept beside its ratio — 12 bytes a
@@ -285,7 +280,7 @@ pub fn score_the_parked_records_and_resolve_the_cut(
 ///
 /// # Errors
 ///
-/// As [`score_the_parked_records_and_resolve_the_cut`].
+/// As `score_the_parked_records_and_resolve_the_cut`.
 pub fn score_the_parked_records_and_resolve_the_cut_windowed(
     spill: &SpillFile,
     context: &ParalogScoringContext,

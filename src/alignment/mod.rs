@@ -15,15 +15,15 @@
 //!
 //! Landed so far: [`Alignment`] and [`RepeatSpan`], the two output shapes; [`RepeatGeometry`]
 //! and [`RepeatContext`], which tell a repeat-aware algorithm where the repeat sits and how it
-//! slips; the [`BestPathAligner`] and [`MarginalAligner`] traits they meet at; and the two
+//! slips; the [`BestPathAligner`] and `MarginalAligner` traits they meet at; and the two
 //! shared components, the [`emission`] scoring every aligner uses and the [`stutter`] model;
 //! and the first algorithm, [`ssr_best_path_flat_gap`] — the repeat-aware delimiter, which is
 //! this module's **only byte-parity oracle** against production (`delimit_parity`, test-only; since
 //! promotion step C10 against production's recorded answers).
-//! The [`MarginalAligner`] trait has two implementations: algorithm 5
-//! ([`ssr_marginal_sequence`] — the sequence-versus-sequence marginal, a linear-space port of
+//! The `MarginalAligner` trait has two implementations: algorithm 5
+//! (`ssr_marginal_sequence` — the sequence-versus-sequence marginal, a linear-space port of
 //! production's `align_subst`, byte-parity-checked against it) and algorithm 6
-//! ([`ssr_marginal_whole_read`] — the whole-read two-regime forward, new code with no port
+//! (`ssr_marginal_whole_read` — the whole-read two-regime forward, new code with no port
 //! oracle, run with fixed synthetic qualities). Still to come in
 //! `doc/devel/ng/impl_plan/alignment_best_path.md`: the affine aligner (E, gated).
 
@@ -31,19 +31,11 @@
 mod delimit_parity;
 pub mod emission;
 pub mod indel_norm;
-pub mod left_align_repeated;
 pub mod left_align_structured;
 #[cfg(test)]
 mod leftmost_property;
 pub(crate) mod norm_seqs;
-pub mod ssr_anchor_firm;
-pub mod ssr_anchor_robust;
 pub mod ssr_best_path_flat_gap;
-pub mod ssr_best_path_unit_slip;
-pub mod ssr_marginal_sequence;
-pub mod ssr_marginal_whole_read;
-pub mod ssr_noise_robust;
-pub mod ssr_robust_indel;
 pub mod ssr_unit_robust;
 pub mod stutter;
 
@@ -51,7 +43,9 @@ pub use emission::{BaseScores, Emission, FlatEmission, PerQualityEmission};
 pub use stutter::{StutterModel, StutterRates};
 
 use crate::bam::alignment_input::CigarOp;
-use crate::types::{BaseQual, Bp, DomainError, LogProb, Motif};
+#[cfg(test)]
+use crate::types::LogProb;
+use crate::types::{BaseQual, Bp, DomainError, Motif};
 use std::ops::Range;
 
 /// A read placed against a reference stretch: where the placement starts, and the
@@ -142,7 +136,7 @@ pub struct Alignment {
 /// **Producer's invariant:** every span is well-formed, `start <= end`. Nothing enforces
 /// it — the aligner is the only producer — and an inverted range would read as a
 /// zero-length tract, which is the same short-allele failure the enum exists to prevent.
-/// [`Self::length_lower_bound`] saturates rather than wrapping so a violation cannot turn
+/// `Self::length_lower_bound` saturates rather than wrapping so a violation cannot turn
 /// into an enormous length.
 ///
 /// [`RepeatInterval`]: crate::tandem_repeat::RepeatInterval
@@ -172,7 +166,7 @@ impl RepeatSpan {
     /// The repeat's length in the read — **only when the read actually measured it**.
     ///
     /// This is the accessor a genotype path wants, and the reason it exists separately
-    /// from [`Self::observed_span`]: taking a length off the raw span is a one-line
+    /// from `Self::observed_span`: taking a length off the raw span is a one-line
     /// mistake that leaves no trace. `observed_span().map(|s| s.end - s.start)` returns a
     /// perfectly plausible number for a read that ran off its own end, and that number is
     /// a **short allele that was never observed**. The correct version differs from the
@@ -186,6 +180,7 @@ impl RepeatSpan {
         }
     }
 
+    #[cfg(test)]
     /// The largest repeat length this read rules out — a length the repeat is **at least**.
     ///
     /// Defined for every case, because even an unanchored read says something: the repeat
@@ -208,6 +203,7 @@ impl RepeatSpan {
         }
     }
 
+    #[cfg(test)]
     /// The stretch of the read the aligner read out as repeat, **whether or not it
     /// measures the repeat's length**.
     ///
@@ -223,6 +219,7 @@ impl RepeatSpan {
         }
     }
 
+    #[cfg(test)]
     /// Whether this span **measures** the repeat, rather than bounding it below.
     ///
     /// Written as an exhaustive `match` rather than `matches!`, deliberately. `matches!`
@@ -365,6 +362,7 @@ impl<'a> ReadBases<'a> {
         self.bases
     }
 
+    #[cfg(test)]
     /// The per-base qualities, the same length as [`Self::bases`].
     #[must_use]
     pub fn qualities(&self) -> &'a [u8] {
@@ -485,6 +483,7 @@ pub trait BestPathAligner: Sized {
     ) -> Self::Output;
 }
 
+#[cfg(test)]
 /// The total probability the reference produced this read, summed over **every** line-up
 /// rather than the single best one — one number, returned as a natural logarithm.
 ///
@@ -587,7 +586,7 @@ pub trait MarginalAligner: Sized {
 /// left as it can go without introducing a mismatch, and merges adjacent gaps of the same
 /// kind. Nothing about the alignment's quality changes; only its spelling (spec §6).
 ///
-/// It shares **no machinery** with [`BestPathAligner`] and [`MarginalAligner`]: no dynamic
+/// It shares **no machinery** with [`BestPathAligner`] and `MarginalAligner`: no dynamic
 /// programming, no matrix, no scratch. It is in this module only because it operates on
 /// alignments, and it is a separate trait because it is a separate task (spec §1, §6).
 ///
@@ -617,7 +616,7 @@ pub trait MarginalAligner: Sized {
 /// field. **No `Result`:** an alignment that is already leftmost is normalized to itself, an
 /// answer rather than a failure, so `normalize` returns nothing and mutates in place.
 ///
-/// The `Sized` supertrait matches [`BestPathAligner`] and [`MarginalAligner`]: implementations
+/// The `Sized` supertrait matches [`BestPathAligner`] and `MarginalAligner`: implementations
 /// are selected by generic type parameter, never behind `dyn`. Normalization runs per read as
 /// the caller walks a cohort, and the module's rule is static dispatch throughout (spec §7,
 /// arch §4). Stating it makes that a compile error rather than a convention.
@@ -644,10 +643,10 @@ pub trait AlignmentNormalizer: Sized {
 ///   production's `left_align_indels` (GATK `leftAlignIndels`). One structured pass: always
 ///   leftmost, merges/trims/propagates across blocks, no loop, and — for a read with no indel —
 ///   returns after a single cigar scan with no allocation. **This is the default.**
-/// - **1b** [`RepeatedLeftAligner`](left_align_repeated::RepeatedLeftAligner) — freebayes' repeated
+/// - **1b** `RepeatedLeftAligner` — freebayes' repeated
 ///   capped passes. It can ship a *non-leftmost* result (its 20-pass cap), so it is the comparator
 ///   that shows freebayes' shape is worse here, not a production candidate.
-/// - **1c** [`FixpointLeftAligner`](left_align_structured::FixpointLeftAligner) — 1a to a fixpoint; built only to *test* whether 1a is a true
+/// - **1c** `FixpointLeftAligner` — 1a to a fixpoint; built only to *test* whether 1a is a true
 ///   fixpoint. It is, empirically (the differ-at-all screen saw 0 panics and 0 disagreements with 1a
 ///   across 63,821 real and adversarial reads), so 1c is retained as a regression guard, not a
 ///   default.

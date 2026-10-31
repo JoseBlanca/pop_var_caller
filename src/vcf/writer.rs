@@ -216,6 +216,7 @@ impl VcfWriter {
         Ok(())
     }
 
+    #[cfg(test)]
     /// **Write a whole stream of records, in the order it yields them.**
     ///
     /// This is the shape the run is built around: variants come off the caller, pass through
@@ -242,6 +243,7 @@ impl VcfWriter {
         Ok(())
     }
 
+    #[cfg(test)]
     /// How many records have been written.
     #[must_use]
     pub fn records_written(&self) -> u64 {

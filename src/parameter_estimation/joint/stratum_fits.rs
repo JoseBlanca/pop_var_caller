@@ -1034,6 +1034,7 @@ impl StratumFits {
         self.stated_concentration_with_own_shares_warrant
     }
 
+    #[cfg(test)]
     /// How many strata carry an allele length variation of their own — the tract ladder's top rung,
     /// which is **not** [`Self::strata`]: a stratum an older parameters file holds numbers for
     /// that the climb furnished from its period's slippage curves carries slippage numbers and no
@@ -1043,6 +1044,7 @@ impl StratumFits {
         self.allele_length_variation_by_stratum.len()
     }
 
+    #[cfg(test)]
     /// How many motif periods carry a pooled allele length variation — zero unless an older
     /// parameters file supplied pools.
     #[must_use]
@@ -1191,6 +1193,7 @@ impl StratumFits {
             })
     }
 
+    #[cfg(test)]
     /// How many strata carry an answer — what a run summary reports.
     ///
     /// **It cannot tell a cohort with no repeat tracts from one where every stratum was

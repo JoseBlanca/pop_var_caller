@@ -9,8 +9,8 @@
 //! - a low-level **interval finder** — `find_tandem_repeats(seq, PeriodRange,
 //!   &ScanParams) -> Vec<RepeatInterval>` — raw, possibly-overlapping intervals, for
 //!   consumers that resolve overlaps themselves (the STR catalog); and
-//! - a mid-level **windowed scan** — [`scan_windowed`], which yields one
-//!   [`ScannedWindow`] at a time (the core + margin geometry, every detection in the
+//! - a mid-level **windowed scan** — `scan_windowed`, which yields one
+//!   `ScannedWindow` at a time (the core + margin geometry, every detection in the
 //!   fetched slice, and the two window rules — coverage clipped to cores, intervals
 //!   attributed by start — as methods the consumer applies to *its own* interval set)
 //!   and takes **no routing decision**; for a consumer that must inject its own policy
@@ -31,7 +31,7 @@
 //! done** — the type vocabulary, the `find_tandem_repeats` interval finder (lag-`p`
 //! scoring + a Ruzzo–Tompa maximal-scoring-segment pass), the `RegionScanner` region seam
 //! (coverage-merge tiling, resident via `over_slice` and windowed-streaming via `stream`),
-//! and trf-mod parity. **Plus typed-regions B1**: [`scan_windowed`] promoted from a private
+//! and trf-mod parity. **Plus typed-regions B1**: `scan_windowed` promoted from a private
 //! whole-contig-eager helper to a public per-window stream (`typed_regions.md` §6.1).
 //!
 //! Visibility note: types are `pub` (matching the sibling ng modules, e.g. `types.rs`),
@@ -39,7 +39,7 @@
 //! vocabulary as reachable API, which also lets Milestone-A types be defined ahead of
 //! their Milestone-B/C consumers without tripping `dead_code`.
 
-use crate::fasta::{ChromRefFetchError, ChromRefFetcher};
+use crate::fasta::ChromRefFetchError;
 
 // ---------------------------------------------------------------------
 // Inputs — the scope and scoring knobs
@@ -374,9 +374,8 @@ struct RtSeg {
 ///
 /// This is the textbook offline pass: a working stack of open segments, drained at the end.
 /// Its correctness is pinned by a brute-force property test (`ruzzo_tompa_matches_brute_force`).
-/// The stack is O(number of open segments) — bounded per window on the region seam's streaming
-/// path; on a whole-contig `find_tandem_repeats` (the catalog's use) it can grow to O(n) on a
-/// pathological input, an online-finalisation optimisation deferred behind that property test.
+/// The stack holds only the segments opened since the last Rule-2 push, which is when every
+/// segment below the pushed one becomes final and is emitted (see that arm).
 fn maximal_scoring_subsequences(
     scores: impl Iterator<Item = i64>,
     mut emit: impl FnMut(usize, usize, i64),
@@ -431,8 +430,20 @@ fn maximal_scoring_subsequences(
             }
             match found {
                 None => {
+                    // Rule 2: no left-smaller segment → `cur` is separate. **And everything
+                    // below it is final**: every stacked `l` is at least `cur.l`, so a later
+                    // search that would find one of them finds `cur`, which sits above them,
+                    // first — and `cur` being found, or merged into, leaves them untouched.
+                    // Emitting them now keeps the stack to the segments since the last such
+                    // push instead of a whole contig's: on tomato's chromosome 1 it reached
+                    // 1.34 GB at period 1 when they waited for the end. They come out in the
+                    // order the final drain would have emitted them.
+                    for seg in &stack {
+                        emit(seg.start, seg.end, seg.r - seg.l);
+                    }
+                    stack.clear();
                     cur.prev_smaller = 0;
-                    break; // Rule 2: no left-smaller segment → `cur` is separate.
+                    break;
                 }
                 Some(j) => {
                     if stack[j].r >= cur.r {
@@ -456,6 +467,187 @@ fn maximal_scoring_subsequences(
     }
     for seg in stack.drain(..) {
         emit(seg.start, seg.end, seg.r - seg.l);
+    }
+}
+
+/// Split one maximal scoring segment wherever the **motif changes**, emitting each piece as
+/// `(k0, k1, score)` — the same score-index form [`maximal_scoring_subsequences`] emits.
+///
+/// The lag-`p` comparison asks only "is this base the one `p` back?", which is as true inside a
+/// run of `A` as inside a run of `T`. So `A×12 T×12` scores 11 matches, one mismatch, 11 matches
+/// at period 1, and the segment runs across the junction: one tract, motif `A`, half of it `T`.
+/// The consumer's purity floor then rejects it and **both** repeats are lost. The same holds
+/// for `(CA)×10 (GT)×10` at period 2, or `(GA)×12` running into `C×12`.
+///
+/// The test is what tells a motif change from the interruptions §3.4 keeps whole. A
+/// **solid block** is a run of consecutive lag-`p` matches long enough to be a repeat by the
+/// scanner's own floor — at least `min_copies` copies, and never less than two, so its motif is
+/// fully determined. Its motif is compared up to rotation:
+///
+/// - a substitution leaves fewer than `p` matches between its two mismatches (spec §3.3), so it
+///   never makes a solid block, and the blocks either side share the motif;
+/// - an indel shifts phase, so the block after it carries a **rotation** of the motif before —
+///   the same motif;
+/// - a different repeat abutting this one carries a motif that is no rotation of it — a split.
+///
+/// Consecutive solid blocks with the same motif form one piece; the bases between two pieces
+/// (the junction's mismatches) belong to neither.
+///
+/// **A short stretch of another motif inside a repeat is an interruption, not a second
+/// repeat.** `ATATATATACACATATATAT` is an `AT` repeat with two copies changed to `AC`; the
+/// `AC` pair is a solid block, but splitting there leaves pieces too short for a copy floor,
+/// and the repeat is lost — on tomato, 876 STR segments of this shape. So when a piece's motif
+/// comes back, the pieces between are **absorbed**: the nearest earlier piece of the same motif,
+/// everything after it, and the new piece become one, provided the joined tract, compared base
+/// by base with that motif tiled in phase, is at least as pure as the scoring holds a tract to
+/// (spec §3.3: a ratio `r` holds tracts to purity `r / (1 + r)`, 7/9 ≈ 0.78 at the defaults).
+/// That example matches `AT` at 18 of 20 bases, 0.9, and stays whole; so does
+/// `(TAC)×2 (TGC)×4 (TAC)×3`, 0.85, whose inner motif differs from the outer by one base; so
+/// does `(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4`, 0.82, with two different interruptions in a row.
+/// Base by base, not piece by piece, because that is how the typing measures purity
+/// afterwards. No new knob: the tolerance is the one the scoring already states.
+///
+/// The phase is the one at the outer piece's **last** solid block, so an indel earlier in that
+/// piece makes the bases before it count as impure, and the interruption after it may then not
+/// be absorbed. That is deliberate rather than overlooked: the typing measures purity in one
+/// phase from the tract's start, so a joined tract with an indel in it would be rejected there
+/// whole, as it was before this split existed; splitting at least keeps the pure pieces.
+///
+/// **A piece at either end is never absorbed**, however short: nothing of the first motif
+/// follows it, so it is where one repeat stops and another starts. `G×60 A×15` is `G` over 0.8
+/// of its bases, and still two repeats.
+///
+/// A segment with one motif throughout — every segment that is not a junction — and a segment
+/// whose pieces were all absorbed are emitted unchanged, score and all. The caller sends only
+/// segments with a mismatch (one without cannot change motif) that are long enough to keep.
+///
+/// **Out of line on purpose**: inlined into the scan's per-segment closure it made that closure
+/// too big to inline into the scan loop, and the whole build paid a call per segment. Measured
+/// on tomato's chromosome 1: 1.69 s and 22.5 G instructions out of line, 1.77 s and 24.6 G
+/// inlined, four interleaved runs each.
+#[inline(never)]
+fn split_at_motif_changes(
+    canonical: &[u8],
+    p: usize,
+    k0: usize,
+    k1: usize,
+    score: i64,
+    params: &ScanParams,
+    emit: &mut impl FnMut(usize, usize, i64),
+) {
+    let is_match = |k: usize| {
+        let h = canonical[k + p];
+        h != 0 && h == canonical[k]
+    };
+    // A block of `len` consecutive matches covers `len + p` bases, so `min_copies` copies need
+    // `(min_copies - 1) · p` matches; at least `p`, so the block holds two whole copies.
+    let solid_len = p * (params.min_copies.max(2) as usize - 1);
+    let same_motif = |a: usize, b: usize| {
+        let (x, y) = (&canonical[a..a + p], &canonical[b..b + p]);
+        (0..p).any(|r| (0..p).all(|i| x[i] == y[(i + r) % p]))
+    };
+
+    let reward = i64::from(params.match_reward);
+    let penalty = i64::from(params.mismatch_penalty);
+    // How many bases in `from..to` match the motif read at `motif_at`, tiled in that block's
+    // phase — before it as well as after, so a piece that opens on a fragment shorter than a
+    // solid block is measured against the motif it actually repeats.
+    let in_phase = |motif_at: usize, from: usize, to: usize| {
+        (from..to)
+            .filter(|&x| canonical[x] == canonical[motif_at + (x % p + p - motif_at % p) % p])
+            .count() as i64
+    };
+    // Every piece as split, `(first score index, last score index)`: the second reading of a
+    // joined tract. Empty — and never allocated — for a segment with one motif throughout.
+    let mut split: Vec<(usize, usize)> = Vec::new();
+    // The pieces so far after absorption, left to right, as `(first score index, last score
+    // index, where its motif is read, bases of its tract matching that motif in phase, the first
+    // of `split` it holds)`. A piece's tract is its score indices widened by `p + 1`, as the
+    // segment's is.
+    let mut pieces: Vec<(usize, usize, usize, i64, usize)> = Vec::new();
+    // Push a piece, then absorb every interruption it closes: the nearest earlier piece of the
+    // same motif, with everything between, when the joined tract matches that motif in phase
+    // at the scoring's tolerance — matches / bases >= penalty / (reward + penalty), in
+    // integers. Only the new bases are compared, so a long run of absorbed interruptions costs
+    // one pass, not one per join.
+    let push = |pieces: &mut Vec<(usize, usize, usize, i64, usize)>,
+                split: &mut Vec<(usize, usize)>,
+                (a, b, m): (usize, usize, usize)| {
+        pieces.push((a, b, m, in_phase(m, a, b + p + 1), split.len()));
+        split.push((a, b));
+        loop {
+            let right = pieces[pieces.len() - 1];
+            let Some(j) = (0..pieces.len() - 1)
+                .rev()
+                .find(|&j| same_motif(pieces[j].2, right.2))
+            else {
+                return;
+            };
+            let left = pieces[j];
+            let (left_end, right_end) = (left.1 + p + 1, right.1 + p + 1);
+            let matches = left.3 + in_phase(left.2, left_end, right_end.max(left_end));
+            if matches * (reward + penalty) < penalty * (right_end - left.0) as i64 {
+                return;
+            }
+            pieces.truncate(j);
+            pieces.push((left.0, right.1, left.2, matches, left.4));
+        }
+    };
+    // The open piece: where it starts, the last solid block's end, and that block's start
+    // (whose first `p` bases are the piece's current motif).
+    let mut piece_start = k0;
+    let mut motif_at: Option<usize> = None;
+    let mut last_solid_end = k0;
+    let mut k = k0;
+    while k <= k1 {
+        if !is_match(k) {
+            k += 1;
+            continue;
+        }
+        let b0 = k;
+        while k <= k1 && is_match(k) {
+            k += 1;
+        }
+        let b1 = k - 1;
+        if b1 + 1 - b0 < solid_len {
+            continue;
+        }
+        match motif_at {
+            Some(m) if !same_motif(m, b0) => {
+                push(&mut pieces, &mut split, (piece_start, last_solid_end, m));
+                piece_start = b0;
+            }
+            _ => {}
+        }
+        motif_at = Some(b0);
+        last_solid_end = b1;
+    }
+    let (Some(last_motif), false) = (motif_at, pieces.is_empty()) else {
+        emit(k0, k1, score);
+        return;
+    };
+    push(&mut pieces, &mut split, (piece_start, k1, last_motif));
+    // Each piece's own score, over its own score indices, as the segment's was — the
+    // segment's own for a piece that is the whole segment.
+    let score_of = |a: usize, b: usize| {
+        if (a, b) == (k0, k1) {
+            score
+        } else {
+            (a..=b)
+                .map(|k| if is_match(k) { reward } else { -penalty })
+                .sum()
+        }
+    };
+    // A joined piece is emitted **with the pieces it was joined from**: both readings, the
+    // consumer's purity floor to choose between them (`segment_criteria::choose_readings`).
+    for (i, &(a, b, _, _, first_split)) in pieces.iter().enumerate() {
+        emit(a, b, score_of(a, b));
+        let end_split = pieces.get(i + 1).map_or(split.len(), |next| next.4);
+        if end_split - first_split > 1 {
+            for &(sa, sb) in &split[first_split..end_split] {
+                emit(sa, sb, score_of(sa, sb));
+            }
+        }
     }
 }
 
@@ -485,6 +677,43 @@ pub fn find_tandem_repeats(
     periods: PeriodRange,
     params: &ScanParams,
 ) -> Vec<RepeatInterval> {
+    find_tandem_repeats_for_copy_floor(seq, periods, params, |_| 0)
+}
+
+/// [`find_tandem_repeats`] for a consumer that will drop every tract holding fewer than
+/// `copy_floor(period)` copies: every tract it returns at or above that floor is exactly one
+/// `find_tandem_repeats` returns, and of the tracts below it, it leaves out those too short
+/// to matter.
+///
+/// **Not simply the floor, because a tract below it can still remove one above it.** The
+/// period-multiple pass drops a tract that a shorter-period tract covers half of, so a
+/// period-2 tract of 9 bases, itself below a floor of 5 copies, can remove a period-4 tract
+/// of 16 that clears a floor of 4. What is left out is only what cannot do that: a tract of
+/// period `p` is needed when it clears its own floor, or when it is at least half as long
+/// as the shortest needed tract at some multiple of `p` in the range — and those lengths are
+/// worked out from the longest period down. A tract shorter than that eliminates nothing
+/// that is needed, and the tracts it would have shielded are shorter still, so leaving it
+/// out changes nothing that clears the floor.
+///
+/// Why it exists: on tomato's chromosome 1 the catalog keeps 774,585 of the 23.6 million
+/// tracts `find_tandem_repeats` returns, and holding all of them through the period-multiple
+/// pass was most of the build's peak memory.
+pub fn find_tandem_repeats_for_copy_floor(
+    seq: &[u8],
+    periods: PeriodRange,
+    params: &ScanParams,
+    copy_floor: impl Fn(u8) -> u32,
+) -> Vec<RepeatInterval> {
+    // `needed[p]`: the shortest tract of period `p` that can matter, as above.
+    let mut needed = vec![0u64; usize::from(periods.max()) + 1];
+    for p in (periods.min()..=periods.max()).rev() {
+        let own = u64::from(copy_floor(p)) * u64::from(p);
+        needed[usize::from(p)] = (2 * usize::from(p)..=usize::from(periods.max()))
+            .step_by(usize::from(p))
+            .map(|m| needed[m].div_ceil(2))
+            .fold(own, u64::min);
+    }
+
     let mut out = Vec::new();
     let n = seq.len();
     // Canonicalise ONCE, not twice per period. `bases_match` did two dependent table
@@ -506,7 +735,7 @@ pub fn find_tandem_repeats(
             .iter()
             .zip(here.iter())
             .map(|(&b, &h)| if h != 0 && h == b { reward } else { penalty });
-        maximal_scoring_subsequences(scores, |k0, k1, score| {
+        let mut emit = |k0: usize, k1: usize, score: i64| {
             // Segment [k0, k1] → tract [k0, k1 + p + 1): the earliest base involved is
             // `j0 - p = k0`, the latest is `j1 = k1 + p`, so the exclusive end is `k1+p+1`.
             let tract_start = k0 as u64;
@@ -519,13 +748,33 @@ pub fn find_tandem_repeats(
             // period 2 would be the scanner failing its own contract. The caller asked for
             // period 2; a period-1 tract dressed as period 2 is not that.
             let motif = &seq[tract_start as usize..tract_start as usize + p];
-            if copies >= u64::from(params.min_copies) && is_primitive_motif(motif) {
+            if copies >= u64::from(params.min_copies)
+                && tract_end - tract_start >= needed[p]
+                && is_primitive_motif(motif)
+            {
                 out.push(RepeatInterval {
                     start: tract_start,
                     end: tract_end,
                     period,
                     score: i32::try_from(score).unwrap_or(i32::MAX),
                 });
+            }
+        };
+        // The shortest tract `emit` keeps at this period. Every piece of a split lies inside its
+        // segment, so a segment shorter than this yields nothing however it splits — and on
+        // tomato's chromosome 1, 84 million of the 92 million segments at periods 2 to 6 are.
+        let shortest = (u64::from(params.min_copies) * p as u64).max(needed[p]) as usize;
+        let reward = i64::from(params.match_reward);
+        maximal_scoring_subsequences(scores, |k0, k1, score| {
+            if k1 + p + 1 - k0 < shortest {
+                return;
+            }
+            // No mismatch, no motif change: a segment's score is all rewards exactly when
+            // every comparison in it matched, and it is emitted whole without the walk.
+            if score == reward * (k1 - k0 + 1) as i64 {
+                emit(k0, k1, score);
+            } else {
+                split_at_motif_changes(&canonical, p, k0, k1, score, params, &mut emit);
             }
         });
     }
@@ -537,7 +786,7 @@ pub fn find_tandem_repeats(
     // sitting inside a period-4 `(GAAA)` covers a sliver and stays (a genuinely different,
     // smaller repeat — the copy floor, downstream, decides if it is significant). No
     // copy-number policy here: purely how much of `iv` the shorter `a` explains.
-    out.sort_by_key(|iv| (iv.period, iv.start));
+    out.sort_by_key(|iv| (iv.period, iv.start, std::cmp::Reverse(iv.end)));
 
     // Survivors grouped by period, which is what turns the redundancy test from a
     // rescan of every survivor into a binary search.
@@ -549,22 +798,38 @@ pub fn find_tandem_repeats(
     // 2. **Those lists are already complete** when `iv` is reached: `out` is sorted by
     //    period first, so every shorter period was processed before it. (The old code
     //    relied on the same ordering, implicitly.)
-    // 3. **Within one period the tracts are start- AND end-sorted.** Ruzzo–Tompa's
+    // 3. **Within one period the searched tracts are start- AND end-sorted.** Ruzzo–Tompa's
     //    segments are disjoint by construction, and each tract extends its segment by
     //    the same `p + 1`, so both endpoints stay monotonic. That is the precondition
-    //    `partition_point` needs.
-    //
-    // Behaviour is unchanged — same predicate, same survivors, same order (flattening
-    // by ascending period reproduces the `(period, start)` sort the old loop kept).
+    //    `partition_point` needs. The one exception is a joined tract's pieces, emitted
+    //    beside it (`split_at_motif_changes`) and nested inside it: they are kept out of
+    //    the searched lists, which loses nothing, since the tract enclosing a piece
+    //    overlaps anything at least as much as the piece does. The sort puts the
+    //    enclosing tract first, so a piece is known by ending no later than the reach so far.
     //
     // Why it was worth doing: the old `kept.iter().any(…)` was O(survivors²) per
     // window, and measured at **28.6% of the walk's total CPU while discarding 707 of
     // 2,084,637 intervals** (tomato 8 Mb fixture, 2026-07-20) — a near-no-op pass
     // paying a quadratic price, with up to 26,836 intervals in a single window.
     let max_period = out.iter().map(|iv| iv.period).max().unwrap_or(0) as usize;
-    let mut by_period: Vec<Vec<RepeatInterval>> = vec![Vec::new(); max_period + 1];
-    let mut kept_len = 0usize;
-    for iv in out {
+    // Only a period with a multiple in range is ever searched (fact 1), so only those keep a
+    // list, and the search reads nothing but the span. Each list is sized once to its period's
+    // count in `out` (sorted by period, so two binary searches give it): grown by doubling, a
+    // list of 18 M spans leaves its outgrown buffers behind as resident memory.
+    let mut by_period: Vec<Vec<RegionSpan>> = (0..=max_period / 2)
+        .map(|period| {
+            let from = out.partition_point(|iv| usize::from(iv.period) < period);
+            let to = out.partition_point(|iv| usize::from(iv.period) <= period);
+            Vec::with_capacity(to - from)
+        })
+        .collect();
+    // The furthest end of this period's searched tracts so far, and the period it belongs to.
+    // Only a kept tract moves it: a joined tract dropped here leaves its pieces searchable.
+    let mut reach = (0u8, 0u64);
+    // Survivors are compacted in place: `retain` visits in order, once each, which is all
+    // the pass needs — a second vector of survivors would hold the whole output twice.
+    out.retain(|&iv| {
+        let nested = reach.0 == iv.period && iv.end <= reach.1;
         let iv_len = iv.end - iv.start;
         let mut redundant = false;
         for shorter in 1..iv.period {
@@ -594,16 +859,18 @@ pub fn find_tandem_repeats(
                 break;
             }
         }
-        if !redundant {
-            kept_len += 1;
-            by_period[iv.period as usize].push(iv);
+        if !redundant && !nested {
+            reach = (iv.period, iv.end);
+            if let Some(list) = by_period.get_mut(usize::from(iv.period)) {
+                list.push(RegionSpan {
+                    start: iv.start,
+                    end: iv.end,
+                });
+            }
         }
-    }
-    let mut kept: Vec<RepeatInterval> = Vec::with_capacity(kept_len);
-    for group in by_period {
-        kept.extend(group);
-    }
-    kept
+        !redundant
+    });
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -720,344 +987,18 @@ fn tile(
     build_regions(coverage, intervals, n, opts)
 }
 
-/// One window's worth of scan — what [`scan_windowed`] yields per step.
-///
-/// **The data is one field; the window *rules* are the two methods.** A window
-/// yields every detection in the slice it fetched, and the two derivations that
-/// make a windowed scan add up to a whole-contig one —
-/// [`coverage_in_core`](Self::coverage_in_core) and
-/// [`starting_in_core`](Self::starting_in_core) — are methods **taking the
-/// intervals as an argument** rather than pre-computed fields.
-///
-/// That shape is what lets the two consumers differ where they must and agree
-/// where they must not. `RegionScanner` applies the rules to the raw detections;
-/// the typed-region walk applies them to its **pre-filtered** ones (`segment_criteria::
-/// prefilter`, which the scanner must not know about — this module holds no
-/// consumer policy). Pre-computed fields would have forced the walk to either
-/// accept raw-derived coverage — capping detector noise, which spec §2.4 forbids —
-/// or to re-implement the clipping, which is exactly the invariant duplication
-/// `typed_regions.md` §6.1 says to avoid.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScannedWindow {
-    /// The window's core, `[start, end)`, 0-based — **not** the fetched slice
-    /// ([`fetched`](Self::fetched)), which is the core plus a `max_repeat_len`
-    /// margin each side. Cores tile the contig exactly: each starts where the last
-    /// ended, so core-clipped coverage from adjacent windows abuts and a later union
-    /// can rejoin a satellite across every window it spans.
-    pub core: RegionSpan,
-    /// The slice actually fetched and scanned, `[start, end)`, 0-based: the core
-    /// plus a `max_repeat_len` margin each side, **clamped to the contig**.
-    ///
-    /// Public because the walk fetches these same bases for itself — classification needs
-    /// the sequence, which a scan result does not carry — and must not compute the
-    /// range independently: that arithmetic is this module's rule, and two copies of
-    /// it are two copies that can drift.
-    pub fetched: RegionSpan,
-    /// **Every** detection in the fetched slice, in contig coordinates — including
-    /// those starting in the margin, which is what makes them useful: a consumer's
-    /// set-wise policy (redundancy elimination, the bundle flank test) needs an
-    /// in-core interval's *neighbours* to reach the same verdict a whole-contig run
-    /// would, and the `max_repeat_len` margin is exactly the radius that guarantees
-    /// it.
-    ///
-    /// **Two caveats, both handled by the methods** rather than by the reader:
-    ///
-    /// - a detection is whole *unless* it runs off the fetched slice, where it is
-    ///   **truncated**. Harmless by construction: to be truncated it must be longer
-    ///   than `max_repeat_len` (i.e. satellite coverage, which
-    ///   [`coverage_in_core`](Self::coverage_in_core) rejoins across windows anyway),
-    ///   and it cannot then start in this core, so
-    ///   [`starting_in_core`](Self::starting_in_core) never hands one out as exact.
-    /// - concatenating these across windows **double-counts** the margins. Use
-    ///   [`starting_in_core`](Self::starting_in_core) to attribute each to exactly
-    ///   one window.
-    ///
-    /// **Order: period-major, then ascending start** — inherited from
-    /// [`find_tandem_repeats`], which scans one period at a time. It is **not**
-    /// start-sorted, and neither is the concatenation across windows. A consumer
-    /// that needs coordinate order must sort; `classify` and `prefilter` both do, and
-    /// `build_regions` re-sorts. Stated because the type is public and the ordering
-    /// is not what a reader would assume.
-    pub detections: Vec<RepeatInterval>,
-}
-
-impl ScannedWindow {
-    /// `intervals`, **clipped to this window's core** — the coverage rule.
-    ///
-    /// Cores tile the contig, so unioning this across every window reconstructs the
-    /// whole-contig coverage of the same intervals, and a satellite (necessarily
-    /// longer than a window's reach) rejoins across all the windows it spans. This
-    /// is why a truncated detection is harmless: whatever it loses lies outside
-    /// some core, and that core's own window contributes it.
-    ///
-    /// `intervals` is a parameter rather than `self.detections` because the caller's
-    /// policy decides *which* intervals count — see the type's docs.
-    pub fn coverage_in_core(&self, intervals: &[RepeatInterval]) -> Vec<(u64, u64)> {
-        intervals
-            .iter()
-            .filter_map(|iv| {
-                let start = iv.start.max(self.core.start);
-                let end = iv.end.min(self.core.end);
-                (start < end).then_some((start, end))
-            })
-            .collect()
-    }
-
-    /// The intervals this window **owns**: kept whole, and only those whose *start*
-    /// lands in the core — the attribution rule.
-    ///
-    /// Cores tile and do not overlap, so every interval is owned by exactly one
-    /// window, whichever holds its start. An owned interval is never truncated: it
-    /// starts at least `max_repeat_len` inside the fetched slice on the left and,
-    /// were it long enough to reach the right edge, it would be satellite coverage
-    /// rather than an exact repeat.
-    pub fn starting_in_core<'a>(
-        &self,
-        intervals: &'a [RepeatInterval],
-    ) -> impl Iterator<Item = &'a RepeatInterval> {
-        let core = self.core;
-        intervals
-            .iter()
-            .filter(move |iv| iv.start >= core.start && iv.start < core.end)
-    }
-}
-
-/// One window's geometry: the core it owns, and the slice that must be read to scan it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowPlan {
-    /// The core, `[start, end)` 0-based — the bases this window is responsible for.
-    pub core: RegionSpan,
-    /// The core plus a `max_repeat_len` margin each side, clamped to the contig.
-    pub fetched: RegionSpan,
-}
-
-/// Walks a range of a contig as windows — **the geometry rule, and the only copy of it.**
-///
-/// # Why this is a separate type from [`scan_windowed`]
-///
-/// Because a consumer that **owns** its reference cannot share an iterator with one that
-/// borrows it: `scan_windowed` yields windows it fetched through a borrowed byte source,
-/// and a consumer holding an iterator that borrows a reference it also owns is a
-/// self-referential struct, which safe Rust does not have. A cursor such a consumer can
-/// step by hand is the shape that fits both, and `typed_regions.md` §6.1 is explicit that
-/// the thing not to do is duplicate this arithmetic ("a subtle invariant that can then
-/// drift"). Since the typed-region walk was removed, the only consumer left is
-/// [`scan_windowed`] itself — the cursor stays as the one copy of the geometry.
-///
-/// # Cores tile `cores`; margins reach outside it
-///
-/// `cores` is the range to walk and `contig_len` bounds the **margins**, which is not the
-/// same number the moment a caller walks part of a contig (a BED region — spec §2.5): the
-/// window at the range's edge must still read its margin from the sequence *beyond* the
-/// range, or the repeat lying across that edge is measured as a fragment.
-pub struct WindowCursor {
-    cores: RegionSpan,
-    contig_len: u64,
-    window: u64,
-    margin: u64,
-    next_core: u64,
-}
-
-impl WindowCursor {
-    /// Walk `cores` (0-based `[start, end)`) as windows, taking margins from a contig
-    /// `contig_len` long. `window_bp = 0` coerces to 1 — a zero-length core would step
-    /// forever, and a hang is the one failure a `should_panic` test cannot catch.
-    pub fn new(cores: RegionSpan, contig_len: u64, opts: &SegmentOptions) -> Self {
-        Self {
-            cores,
-            contig_len,
-            window: opts.window_bp.max(1),
-            margin: opts.max_repeat_len,
-            next_core: cores.start,
-        }
-    }
-
-    /// The next window, or `None` at the end of the range.
-    pub fn next_window(&mut self) -> Option<WindowPlan> {
-        if self.next_core >= self.cores.end {
-            return None;
-        }
-        let core = RegionSpan {
-            start: self.next_core,
-            end: self
-                .next_core
-                .saturating_add(self.window)
-                .min(self.cores.end),
-        };
-        let fetched = RegionSpan {
-            start: core.start.saturating_sub(self.margin),
-            end: core.end.saturating_add(self.margin).min(self.contig_len),
-        };
-        self.next_core = core.end;
-        Some(WindowPlan { core, fetched })
-    }
-
-    /// Stop the walk: the next [`Self::next_window`] yields `None`. For a caller that has
-    /// hit a fatal error and must not scan on — continuing would scan a hole.
-    pub fn halt(&mut self) {
-        self.next_core = self.cores.end;
-    }
-}
-
-/// Scan one window's already-fetched bases into a [`ScannedWindow`] — **the lift, and the
-/// only copy of it**: detections come out of [`find_tandem_repeats`] as offsets into
-/// `bases`, and everything downstream speaks contig coordinates.
-///
-/// `bases` must be exactly `plan.fetched`, which is [`WindowCursor`]'s to say and not the
-/// caller's to work out.
-pub fn scan_window(
-    plan: &WindowPlan,
-    bases: &[u8],
-    periods: PeriodRange,
-    params: &ScanParams,
-) -> ScannedWindow {
-    debug_assert_eq!(
-        bases.len() as u64,
-        plan.fetched.end - plan.fetched.start,
-        "bases must be exactly the planned slice"
-    );
-    ScannedWindow {
-        core: plan.core,
-        fetched: plan.fetched,
-        detections: find_tandem_repeats(bases, periods, params)
-            .into_iter()
-            .map(|iv| RepeatInterval {
-                start: iv.start + plan.fetched.start,
-                end: iv.end + plan.fetched.start,
-                period: iv.period,
-                score: iv.score,
-            })
-            .collect(),
-    }
-}
-
-/// Scan a contig in windows through a `ChromRefFetcher`, **yielding one
-/// [`ScannedWindow`] at a time** — memory-bounded (peak ≈ `window_bp +
-/// 2·max_repeat_len`, not the contig length; spec §3.6).
-///
-/// # Why this is public, and why it streams
-///
-/// It is the primitive the **typed-region generator** stands on
-/// (`typed_regions.md` §6.1): that walk cannot use [`RegionScanner`], because
-/// `RegionScanner` merges coverage and classifies satellites **before any
-/// classification policy can run**, on raw permissive intervals, with nowhere to inject
-/// the pre-filter between detection and merge. The layer underneath it fits
-/// exactly — this one — because it does the genuinely hard part (core + margin,
-/// coverage clipped to cores, intervals attributed by start) and takes **no
-/// routing decision at all**.
-///
-/// Streaming rather than returning two contig-wide `Vec`s is what makes it usable
-/// there: the walk holds one window plus a few open coordinates, never a contig
-/// (`typed_regions.md` §2.6, §7). `RegionScanner::stream` collects it right back
-/// up, which is fine — it was always whole-contig-eager.
-///
-/// # Why the byte source is a closure and not a `ChromRefFetcher`
-///
-/// Because its two consumers need **different bytes**, and neither can have the
-/// other's:
-///
-/// - `RegionScanner` reads through production's `ChromRefFetcher`, which
-///   **canonicalises** (`{A,C,G,T,N}`) as it fills its buffer.
-/// - The **typed-region walk** needs **raw** bytes: the STR catalog reads the FASTA
-///   verbatim and `Locus` compares *by value*, so canonical bytes would make every
-///   IUPAC-carrying locus compare unequal to the catalog's and silently break the
-///   `.cat` oracle (`typed_regions.md` §6). That is what
-///   [`crate::ref_seq::WindowedRefSeq`]'s raw path exists for — and it is a
-///   `RawRefSeq`, not a `ChromRefFetcher`, so it cannot be handed to a fetcher-bound
-///   scan at all.
-///
-/// Binding this to either source would force the other to reimplement the
-/// windowing — which `typed_regions.md` §6.1 names as exactly the thing not to do
-/// (*"duplicates a subtle invariant that can then drift"*) — or to hold **two**
-/// readers, which §6's 14.6 GB lesson forbids. A closure lets both pass their own
-/// bytes through **one** copy of the window rules.
-///
-/// Only *classification* needs raw, incidentally: detection is case-insensitive and
-/// non-ACGT never matches, so `find_tandem_repeats` gives the same answer either
-/// way. That is why nothing before the walk tripped on this.
-///
-/// The error type is the **caller's** (`E`): this function never inspects it, only
-/// propagates it, so `RegionScanner` can yield a `ScanError` and the walk a
-/// `TypedRegionError` without either bending to the other. `contig_len` likewise
-/// comes from the caller — the source knows its own length, and for the walk that
-/// number must come from the reference's contig table (`typed_regions.md` §2.6's
-/// provenance obligation), which a fetcher-derived length could not guarantee.
-///
-/// A fetch failure is yielded once as `Some(Err(_))`, and the iterator then stops:
-/// continuing would silently scan a hole, which is the failure this module's
-/// callers are least able to see. The stop is a latch ([`WindowCursor::halt`]),
-/// **and the returned iterator is `FusedIterator`** — [`ScanError`]'s own doc
-/// already promises this, and `std::iter::FromFn` does not provide it, so the
-/// promise is declared rather than merely kept. Mirrors the ng sibling
-/// `ReadFilter`, which states the same contract the same way.
-///
-/// This function is now a thin loop: [`WindowCursor`] holds the geometry and
-/// [`scan_window`] the lift, so the walk — which cannot use this iterator at all, see
-/// [`WindowCursor`] — still runs the same two rules rather than a second copy of them.
-/// What it adds is the **fetch loop and the failure latch**, and that is the whole of it.
-///
-/// Each window fetches its core plus a `max_repeat_len` margin on **each** side and runs
-/// `find_tandem_repeats` on that slice; the two derivations that make the result
-/// window-invariant are [`ScannedWindow`]'s methods. The margins are load-bearing:
-/// Ruzzo–Tompa segmentation is context-dependent, so a shorter margin would let a window
-/// re-segment a long repeat mid-tract and emit a spurious in-core fragment.
-pub fn scan_windowed<F, E>(
-    contig_len: u64,
-    periods: PeriodRange,
-    params: &ScanParams,
-    opts: &SegmentOptions,
-    mut fetch: F,
-) -> impl std::iter::FusedIterator<Item = Result<ScannedWindow, E>>
-where
-    F: FnMut(u64, u64, &mut Vec<u8>) -> Result<(), E>,
-{
-    // Both config structs are `Copy` and are read out here, so tying the stream to
-    // their borrows would constrain it for nothing.
-    let params = *params;
-    let mut cursor = WindowCursor::new(
-        RegionSpan {
-            start: 0,
-            end: contig_len,
-        },
-        contig_len,
-        opts,
-    );
-    // One buffer, reused across windows — the caller's `fetch` fills it. This is
-    // why `fetch` writes into a `&mut Vec<u8>` rather than returning one: a window
-    // is ~102 kb, and re-allocating it per step would be the memory profile the
-    // streaming shape exists to avoid.
-    let mut bases: Vec<u8> = Vec::new();
-
-    let scan = std::iter::from_fn(move || {
-        let plan = cursor.next_window()?;
-        // `fetch` is 1-based.
-        if let Err(e) = fetch(
-            plan.fetched.start + 1,
-            plan.fetched.end - plan.fetched.start,
-            &mut bases,
-        ) {
-            // Stop after reporting: a fetch failure is fatal, and continuing would
-            // silently scan a hole.
-            cursor.halt();
-            return Some(Err(e));
-        }
-        Some(Ok(scan_window(&plan, &bases, periods, &params)))
-    });
-    scan.fuse()
-}
-
 /// Streams a repeat/satellite/unique tiling of a reference as an iterator of [`Region`]s —
 /// the routing seam the snp/ssr caller consumes (spec §3.6). Yields `Result<Region,
 /// ScanError>`.
 ///
 /// Two constructors: [`over_slice`](Self::over_slice) tiles a resident sequence, and
-/// [`stream`](Self::stream) tiles a whole contig windowed through a `ChromRefFetcher`
+/// `stream` tiles a whole contig windowed through a `ChromRefFetcher`
 /// without holding it in memory. `stream` is **window-count invariant for the STR tiling** —
 /// it yields exactly the `Repeat`/`Unique` structure `over_slice` would, regardless of
 /// `window_bp`. A `Satellite` (a repeat longer than `max_repeat_len`, hence longer than a
 /// window's reach) may segment differently between the two, because its internal structure
 /// depends on global context a bounded window cannot see; that is harmless, since satellites
-/// are mask/skip regions, not genotyping targets (see [`scan_windowed`]).
+/// are mask/skip regions, not genotyping targets (see `scan_windowed`).
 pub struct RegionScanner {
     regions: std::vec::IntoIter<Region>,
 }
@@ -1073,59 +1014,6 @@ impl RegionScanner {
         Self {
             regions: tile(seq, periods, params, opts).into_iter(),
         }
-    }
-
-    /// Tile a whole contig windowed through `fetcher`, memory-bounded (spec §3.6). The
-    /// contig length is taken from `fetcher.length()`. A reference-read failure during the
-    /// windowed scan is surfaced here as `Err` (fail-fast), keeping iteration infallible.
-    pub fn stream(
-        fetcher: impl ChromRefFetcher,
-        periods: PeriodRange,
-        params: &ScanParams,
-        opts: &SegmentOptions,
-    ) -> Result<Self, ScanError> {
-        let contig_len = u64::from(fetcher.length());
-        // Collected straight back up: this consumer was always whole-contig-eager
-        // (`build_regions` needs every window's coverage before it can union a
-        // satellite). The streaming shape exists for the typed-region walk, which
-        // cannot afford that — see `scan_windowed`.
-        //
-        // This closure is the **canonical** byte source: production's fetcher folds
-        // to `{A,C,G,T,N}` as it fills, which is right for a routing tiling and
-        // wrong for the walk (see `scan_windowed`'s docs on why the source is a
-        // parameter at all).
-        //
-        // PANIC-FREE: every coordinate `scan_windowed` produces is bounded by
-        // `contig_len`, which came from this fetcher's own `u32` length, so both
-        // casts fit by construction. `expect` over `as`: were that reasoning ever
-        // to lapse, a truncated fetch would silently scan the WRONG WINDOW — the
-        // failure this module is least able to see.
-        let mut coverage = Vec::new();
-        let mut str_intervals = Vec::new();
-        let windows = scan_windowed(contig_len, periods, params, opts, |start, len, dst| {
-            let start = u32::try_from(start).expect("start <= contig_len, itself a u32");
-            let len = u32::try_from(len).expect("len <= contig_len, itself a u32");
-            let bytes = fetcher
-                .fetch(start, len)
-                .map_err(|source| ScanError::Fetch { source })?;
-            dst.clear();
-            dst.extend_from_slice(&bytes);
-            Ok(())
-        });
-        for window in windows {
-            let window = window?;
-            // The two window rules, applied to the **raw** detections: this consumer
-            // has no policy to insert between detection and merge, which is exactly
-            // why it cannot serve the typed-region walk and `scan_windowed` is public
-            // (`typed_regions.md` §6.1). The walk applies the same two rules to its
-            // pre-filtered set.
-            coverage.extend(window.coverage_in_core(&window.detections));
-            str_intervals.extend(window.starting_in_core(&window.detections).copied());
-        }
-        let regions = build_regions(coverage, str_intervals, contig_len, opts);
-        Ok(Self {
-            regions: regions.into_iter(),
-        })
     }
 }
 
@@ -1297,6 +1185,63 @@ mod tests {
         }
     }
 
+    /// What a consumer with a copy floor keeps is the same from the floor-aware scan as from
+    /// the whole one — on repeat-dense sequence, where period-multiple eliminations are
+    /// common, and over floors from permissive to strict.
+    #[test]
+    fn the_floor_aware_scan_keeps_what_the_floor_keeps() {
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let floors: [[u32; 6]; 5] = [
+            [5, 5, 4, 4, 4, 3],
+            [2, 2, 2, 2, 2, 2],
+            [3, 7, 2, 5, 2, 2],
+            [12, 2, 6, 2, 3, 2],
+            [9, 9, 9, 9, 9, 9],
+        ];
+        let mut sub_floor_kept = 0usize;
+        for _ in 0..300 {
+            let mut seq = Vec::new();
+            while seq.len() < 3_000 {
+                let period = 1 + (next() % 6) as usize;
+                let motif: Vec<u8> = (0..period)
+                    .map(|_| b"ACGT"[(next() % 4) as usize])
+                    .collect();
+                for _ in 0..1 + next() % 10 {
+                    for &b in &motif {
+                        seq.push(if next() % 12 == 0 {
+                            b"ACGT"[(next() % 4) as usize]
+                        } else {
+                            b
+                        });
+                    }
+                }
+            }
+            let whole = find_tandem_repeats(&seq, p(1, 6), &ScanParams::default());
+            for floor in &floors {
+                let at = |period: u8| floor[usize::from(period) - 1];
+                let clears = |iv: &&RepeatInterval| {
+                    (iv.end - iv.start) / u64::from(iv.period) >= u64::from(at(iv.period))
+                };
+                let want: Vec<_> = whole.iter().filter(clears).collect();
+                let got_all =
+                    find_tandem_repeats_for_copy_floor(&seq, p(1, 6), &ScanParams::default(), at);
+                let got: Vec<_> = got_all.iter().filter(clears).collect();
+                assert_eq!(got, want, "floor {floor:?}");
+                sub_floor_kept += got_all.len().saturating_sub(got.len());
+            }
+        }
+        assert!(
+            sub_floor_kept > 0,
+            "the sequences exercise sub-floor tracts"
+        );
+    }
+
     // ---- find_tandem_repeats ----------------------------------------------
 
     fn p(min: u8, max: u8) -> PeriodRange {
@@ -1364,6 +1309,130 @@ mod tests {
         );
         assert_eq!(period3[0].start, 0);
         assert_eq!(period3[0].end, seq.len() as u64);
+    }
+
+    /// Two abutting repeats of different motifs come back as **two** intervals, each with its
+    /// own motif — not one interval in the first motif, half of it the second, which the
+    /// purity floor then rejects whole. The four two-repeat shapes a simulator found merged.
+    #[test]
+    fn abutting_repeats_of_different_motifs_are_split() {
+        /// A sequence, and the `(start, end, period)` intervals it must yield.
+        type Case = (Vec<u8>, Vec<(u64, u64, u8)>);
+        let rep = |unit: &[u8], n: usize| unit.repeat(n);
+        let cases: Vec<Case> = vec![
+            (
+                [rep(b"A", 12), rep(b"T", 12)].concat(),
+                vec![(0, 12, 1), (12, 24, 1)],
+            ),
+            (
+                [rep(b"G", 60), rep(b"A", 15)].concat(),
+                vec![(0, 60, 1), (60, 75, 1)],
+            ),
+            (
+                [rep(b"GA", 12), rep(b"C", 12)].concat(),
+                vec![(0, 24, 2), (24, 36, 1)],
+            ),
+            (
+                [rep(b"CA", 10), rep(b"GT", 10)].concat(),
+                vec![(0, 20, 2), (20, 40, 2)],
+            ),
+        ];
+        for (seq, want) in cases {
+            let got = find_tandem_repeats(&seq, p(1, 6), &ScanParams::default());
+            let mut spans: Vec<(u64, u64, u8)> =
+                got.iter().map(|r| (r.start, r.end, r.period)).collect();
+            spans.sort_unstable();
+            for w in &want {
+                assert!(
+                    spans.contains(w),
+                    "{} lacks {w:?}: {spans:?}",
+                    String::from_utf8_lossy(&seq)
+                );
+            }
+            // Nothing spans the junction in the first motif's period.
+            let junction = want[0].1;
+            assert!(
+                !got.iter().any(|r| r.start < junction - 1
+                    && r.end > junction + 1
+                    && r.period == want[0].2),
+                "{} still has a merged interval: {spans:?}",
+                String::from_utf8_lossy(&seq)
+            );
+        }
+    }
+
+    /// The intervals of `got`, as `(start, end)`, after asserting the first is `joined` and
+    /// every other one lies inside it — the shape of a joined tract emitted with its pieces.
+    fn joined_with_pieces(got: &[RepeatInterval], joined: (u64, u64)) -> Vec<(u64, u64)> {
+        let spans: Vec<(u64, u64)> = got.iter().map(|r| (r.start, r.end)).collect();
+        assert_eq!(spans.first(), Some(&joined), "{got:?}");
+        assert!(spans.len() > 1, "the pieces come with it: {got:?}");
+        assert!(
+            spans[1..]
+                .iter()
+                .all(|&(s, e)| s >= joined.0 && e <= joined.1),
+            "every piece lies inside the joined tract: {got:?}"
+        );
+        spans
+    }
+
+    /// Two copies of another motif **inside** a repeat are an interruption, not a second
+    /// repeat: `(AT)×4 A (CA)×2 (TA)×4 T` comes back as one `AT` interval over all of it, as it
+    /// did before the split existed — and with the pieces it was joined from, for the typing to
+    /// fall back on if the joined tract is not pure enough for it (`choose_readings`). It
+    /// matches `AT` at 18 of 20 bases, above the 7/9 the default scoring holds a tract to.
+    /// Found on tomato, where splitting this shape lost 876 STR segments.
+    #[test]
+    fn a_short_run_of_another_motif_inside_a_repeat_is_not_split() {
+        let seq = b"ATATATATACACATATATAT";
+        let got = find_tandem_repeats(seq, p(2, 2), &ScanParams::default());
+        assert_eq!(
+            joined_with_pieces(&got, (0, 20)),
+            vec![(0, 20), (0, 9), (8, 13), (12, 20)]
+        );
+    }
+
+    /// Two **different** interruptions in a row are absorbed too, once the outer motif comes
+    /// back: `(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4` matches `AAT` at 32 of 39 bases, 0.82. A test of
+    /// neighbours alone never saw it — no piece there has the same motif on both sides — and
+    /// on tomato 13 STR segments of this shape became plain sequence.
+    #[test]
+    fn two_different_interruptions_in_a_row_are_absorbed() {
+        let seq = [
+            b"AAT".repeat(4),
+            b"GAT".repeat(3),
+            b"GGT".repeat(2),
+            b"AAT".repeat(4),
+        ]
+        .concat();
+        let got = find_tandem_repeats(&seq, p(3, 3), &ScanParams::default());
+        joined_with_pieces(&got, (0, 39));
+    }
+
+    /// The same interruption, too long for the tolerance: `(CA)×10 (GT)×10 (CA)×10` has `CA`
+    /// over two thirds of its bases, under 7/9, so all three repeats come back.
+    #[test]
+    fn a_long_run_of_another_motif_inside_a_repeat_is_split() {
+        let seq = [b"CA".repeat(10), b"GT".repeat(10), b"CA".repeat(10)].concat();
+        let got = find_tandem_repeats(&seq, p(2, 2), &ScanParams::default());
+        assert_eq!(
+            got.iter().map(|r| (r.start, r.end)).collect::<Vec<_>>(),
+            vec![(0, 20), (20, 40), (40, 60)],
+            "{got:?}"
+        );
+    }
+
+    /// A homopolymer on its own is untouched by the split.
+    #[test]
+    fn a_lone_homopolymer_is_one_interval() {
+        let seq = b"AAAAAAAAAAAA";
+        let got = find_tandem_repeats(seq, p(1, 6), &ScanParams::default());
+        assert_eq!(
+            got.iter()
+                .map(|r| (r.start, r.end, r.period))
+                .collect::<Vec<_>>(),
+            vec![(0, 12, 1)]
+        );
     }
 
     /// A run of `N` yields nothing — `N == N` is not a match (spec §3.5).
@@ -1647,477 +1716,5 @@ mod tests {
 
     // ---- scan_windowed (the streamed primitive, B1) -------------------------
 
-    /// `scan_windowed` over a `ChromRefFetcher` — the canonical source, which is
-    /// what `RegionScanner` uses and what these tests exercise. The typed-region
-    /// walk passes a **raw** source instead; that the two share one copy of the
-    /// window rules is the reason the source is a parameter (see `scan_windowed`).
-    fn scan_over<'f>(
-        fetcher: &'f impl ChromRefFetcher,
-        periods: PeriodRange,
-        params: &'f ScanParams,
-        opts: &'f SegmentOptions,
-    ) -> impl std::iter::FusedIterator<Item = Result<ScannedWindow, ScanError>> + 'f {
-        scan_windowed(
-            u64::from(fetcher.length()),
-            periods,
-            params,
-            opts,
-            |start, len, dst| {
-                let bytes = fetcher
-                    .fetch(start as u32, len as u32)
-                    .map_err(|source| ScanError::Fetch { source })?;
-                dst.clear();
-                dst.extend_from_slice(&bytes);
-                Ok(())
-            },
-        )
-    }
-
-    /// The streamed scan must say exactly what the whole-contig-eager form said —
-    /// B1 reshapes the seam, it does not change the answer. `RegionScanner::stream`
-    /// collecting it back up and still passing its own tests is one half of that;
-    /// this is the other, stated directly against the primitive.
-    #[test]
-    fn scan_windowed_concatenates_to_the_whole_contig_scan() {
-        let seq = mixed_contig();
-        let (_dir, fetcher) = fetcher_over(&seq);
-        let opts = SegmentOptions {
-            window_bp: 40,
-            ..SegmentOptions::default()
-        };
-
-        let windows: Vec<_> = scan_over(&fetcher, p(2, 6), &ScanParams::default(), &opts)
-            .map(|w| w.expect("fetch"))
-            .collect();
-        assert!(windows.len() > 1, "the fixture must actually span windows");
-
-        // The exact intervals, concatenated across windows, are the SAME SET a
-        // single whole-contig scan finds — each attributed to exactly one core,
-        // none lost, none doubled.
-        //
-        // **As a set, not a sequence, and the difference is real** (review found
-        // this): `find_tandem_repeats` is period-major, so a whole-contig scan
-        // groups by period while the stream groups by window. On this fixture at
-        // `p(2, 6)` the stream yields periods [2,3,4,6,2,4,4] and the resident
-        // scan [2,2,3,4,4,4,6] — same intervals, different order. An ordered
-        // assertion here would be true only for a single period, which is exactly
-        // how it was first written and why it passed.
-        let mut streamed: Vec<RepeatInterval> = windows
-            .iter()
-            .flat_map(|w| w.starting_in_core(&w.detections).copied())
-            .collect();
-        let mut resident = find_tandem_repeats(&seq, p(2, 6), &ScanParams::default());
-        assert!(!resident.is_empty(), "the fixture must find repeats");
-        let key = |i: &RepeatInterval| (i.start, i.end, i.period);
-        streamed.sort_by_key(key);
-        resident.sort_by_key(key);
-        assert_eq!(
-            streamed, resident,
-            "the streamed intervals must be exactly the resident scan's set"
-        );
-    }
-
-    /// The cores tile `[0, contig_len)` exactly — contiguous, non-overlapping,
-    /// complete. That is what lets a consumer trust that concatenating per-window
-    /// coverage reconstructs the contig's, and it is the property the typed-region
-    /// walk's own partition invariant will rest on.
-    #[test]
-    fn scan_windowed_cores_tile_the_contig_exactly() {
-        let seq = mixed_contig();
-        let (_dir, fetcher) = fetcher_over(&seq);
-        for window_bp in [1u64, 7, 40, 1000, 100_000] {
-            let opts = SegmentOptions {
-                window_bp,
-                ..SegmentOptions::default()
-            };
-            let cores: Vec<RegionSpan> =
-                scan_over(&fetcher, p(3, 3), &ScanParams::default(), &opts)
-                    .map(|w| w.expect("fetch").core)
-                    .collect();
-
-            assert_eq!(cores[0].start, 0, "window_bp = {window_bp}: starts at 0");
-            assert_eq!(
-                cores.last().unwrap().end,
-                seq.len() as u64,
-                "window_bp = {window_bp}: ends at the contig end"
-            );
-            for pair in cores.windows(2) {
-                assert_eq!(
-                    pair[0].end, pair[1].start,
-                    "window_bp = {window_bp}: cores must abut, not gap or overlap"
-                );
-            }
-            for c in &cores {
-                assert!(c.start < c.end, "window_bp = {window_bp}: no empty core");
-            }
-        }
-    }
-
-    /// Coverage is clipped to the core and owned intervals are kept whole — the two
-    /// derivations that make the scan window-invariant, and the reason they are
-    /// **methods over a caller-chosen interval set** rather than fields.
-    #[test]
-    fn scan_windowed_clips_coverage_to_the_core_but_keeps_intervals_whole() {
-        let seq = mixed_contig();
-        let (_dir, fetcher) = fetcher_over(&seq);
-        // A window small enough that the (CAG)*15 tract must straddle a core edge.
-        let opts = SegmentOptions {
-            window_bp: 8,
-            ..SegmentOptions::default()
-        };
-        let windows: Vec<_> = scan_over(&fetcher, p(3, 3), &ScanParams::default(), &opts)
-            .map(|w| w.expect("fetch"))
-            .collect();
-
-        for w in &windows {
-            for (s, e) in w.coverage_in_core(&w.detections) {
-                assert!(
-                    s >= w.core.start && e <= w.core.end,
-                    "coverage {s}..{e} escapes core {:?}",
-                    w.core
-                );
-            }
-            for iv in w.starting_in_core(&w.detections) {
-                assert!(
-                    iv.start >= w.core.start && iv.start < w.core.end,
-                    "an interval is attributed to the core holding its START"
-                );
-            }
-        }
-
-        // Whole, not clipped: at least one owned interval must reach past its own
-        // core, or this fixture is not exercising the property it claims to.
-        assert!(
-            windows.iter().any(|w| w
-                .starting_in_core(&w.detections)
-                .any(|iv| iv.end > w.core.end)),
-            "the fixture must place a tract across a core edge"
-        );
-    }
-
-    /// **The margin is visible, and it is what a set-wise consumer stands on.**
-    ///
-    /// `detections` carries the margin's repeats too, which is the whole reason the
-    /// walk can pre-filter a window and reach the verdict a whole-contig run would:
-    /// redundancy elimination and the bundle flank test are both *neighbour* rules,
-    /// and the neighbours live in the margin. The old shape threw them away.
-    ///
-    /// Also pins the fetched span, which the walk re-fetches its bases from (it must
-    /// not compute that range itself).
-    #[test]
-    fn a_window_carries_its_margins_detections_and_says_what_it_fetched() {
-        let seq = mixed_contig();
-        let (_dir, fetcher) = fetcher_over(&seq);
-        let opts = SegmentOptions {
-            window_bp: 8,
-            // A margin the fixture can actually show: the 1 kb default would swallow
-            // this whole contig, and every window would be the whole contig.
-            max_repeat_len: 12,
-            ..SegmentOptions::default()
-        };
-        let windows: Vec<_> = scan_over(&fetcher, p(3, 3), &ScanParams::default(), &opts)
-            .map(|w| w.expect("fetch"))
-            .collect();
-
-        for w in &windows {
-            assert_eq!(
-                w.fetched.start,
-                w.core.start.saturating_sub(12),
-                "the fetched slice reaches a margin left of the core, clamped at 0"
-            );
-            assert_eq!(
-                w.fetched.end,
-                (w.core.end + 12).min(seq.len() as u64),
-                "and a margin right of it, clamped at the contig end"
-            );
-            for iv in &w.detections {
-                assert!(
-                    iv.start >= w.fetched.start && iv.end <= w.fetched.end,
-                    "a detection lies inside the slice it was found in"
-                );
-            }
-        }
-
-        // The property that matters: some window sees a repeat it does NOT own —
-        // the neighbour context. Without this, `detections` would be `starting_in_core`
-        // by another name and the walk's pre-filter would have no more context than
-        // the old shape gave it.
-        assert!(
-            windows.iter().any(|w| {
-                let owned = w.starting_in_core(&w.detections).count();
-                w.detections.len() > owned
-            }),
-            "the margins must actually carry detections the core does not own"
-        );
-    }
-
-    /// **A fetch failure is reported once and stops the scan.**
-    ///
-    /// New behaviour in B1, and untested until mutation said so: the eager form
-    /// used `?` and returned `Err` immediately, so there was no "and then what?".
-    /// An iterator has to answer it, and the wrong answers are both silent — keep
-    /// yielding `Ok(empty)` and the consumer scans a **hole** it cannot see; keep
-    /// going after the `Err` and it gets partial data past a failure.
-    ///
-    /// Driven by a `.fai` that overstates the contig: the fetcher believes there
-    /// are 4 kb to read and the file holds ~100 bytes, so a window past the real
-    /// EOF fails the way a truncated or corrupt reference would.
-    #[test]
-    fn scan_windowed_reports_a_fetch_failure_once_then_stops() {
-        use std::io::Write;
-        std::fs::create_dir_all("tmp").unwrap();
-        let dir = tempfile::tempdir_in("tmp").unwrap();
-        let fa = dir.path().join("ref.fa");
-        let fai = dir.path().join("ref.fa.fai");
-        let seq = mixed_contig();
-        {
-            let mut f = std::fs::File::create(&fa).unwrap();
-            f.write_all(b">chr\n").unwrap();
-            f.write_all(&seq).unwrap();
-            f.write_all(b"\n").unwrap();
-        }
-        {
-            // The lie: claim 4 kb where the file holds `seq.len()`.
-            let mut f = std::fs::File::create(&fai).unwrap();
-            writeln!(f, "chr\t4000\t5\t4000\t4001").unwrap();
-        }
-        let fetcher = crate::fasta::StreamingChromRefFetcher::for_contig(&fa, "chr").unwrap();
-        let opts = SegmentOptions {
-            window_bp: 64,
-            max_repeat_len: 8,
-            ..SegmentOptions::default()
-        };
-
-        let items: Vec<_> = scan_over(&fetcher, p(3, 3), &ScanParams::default(), &opts).collect();
-
-        let errs = items.iter().filter(|i| i.is_err()).count();
-        assert_eq!(
-            errs, 1,
-            "the failure is reported exactly once, not per window"
-        );
-        assert!(
-            items.last().unwrap().is_err(),
-            "the Err is the LAST item: the scan must stop, not carry on past a \
-             window it could not read"
-        );
-        assert!(
-            items[..items.len() - 1].iter().all(|i| i.is_ok()),
-            "windows before the failure are still reported"
-        );
-    }
-
-    /// **`window_bp = 0` must terminate.** The `.max(1)` is the only thing between
-    /// this and `core_end == core`, which never advances the cursor: an iterator
-    /// yielding empty windows **forever** — no panic, no memory growth, just a
-    /// hang. Worse than a crash, and `window_bp` is a `pub` unvalidated field on a
-    /// now-`pub` function.
-    ///
-    /// Untested until review: the other sweep starts at 1, and the pre-existing
-    /// invariance helper does its own `.max(1)` over a sweep whose smallest value
-    /// is 3 — so zero never reached the function from any direction. Coercion (not
-    /// rejection) is the inherited behaviour and is kept: `window_bp` is a pure
-    /// memory knob, so 0 → 1 changes the memory profile and not the answer, which
-    /// the equality below states.
-    #[test]
-    fn scan_windowed_terminates_at_window_bp_zero() {
-        let seq = mixed_contig();
-        let (_dir, fetcher) = fetcher_over(&seq);
-        let degenerate = SegmentOptions {
-            window_bp: 0,
-            ..SegmentOptions::default()
-        };
-        let windows: Vec<_> = scan_over(&fetcher, p(2, 6), &ScanParams::default(), &degenerate)
-            .map(|w| w.expect("fetch"))
-            .collect();
-
-        // It terminates (reaching this line at all is the assertion), and coerces
-        // to a 1 bp core: one window per base.
-        assert_eq!(
-            windows.len(),
-            seq.len(),
-            "window_bp = 0 coerces to 1, so there is one core per base"
-        );
-        assert!(windows.iter().all(|w| w.core.end == w.core.start + 1));
-
-        // And it is still the same answer — a memory knob must not move the result.
-        let mut streamed: Vec<RepeatInterval> = windows
-            .iter()
-            .flat_map(|w| w.starting_in_core(&w.detections).copied())
-            .collect();
-        let mut resident = find_tandem_repeats(&seq, p(2, 6), &ScanParams::default());
-        let key = |i: &RepeatInterval| (i.start, i.end, i.period);
-        streamed.sort_by_key(key);
-        resident.sort_by_key(key);
-        assert_eq!(
-            streamed, resident,
-            "window_bp = 0 must not change the answer"
-        );
-    }
-
-    /// A repeat-free contig still tiles: every window yields, with nothing in it.
-    #[test]
-    fn scan_windowed_yields_empty_windows_for_repeat_free_sequence() {
-        let seq = b"ACGTTGCAAGCTTGCAACGTTGCAAGCTTGCA".repeat(4);
-        let (_dir, fetcher) = fetcher_over(&seq);
-        let opts = SegmentOptions {
-            window_bp: 16,
-            ..SegmentOptions::default()
-        };
-        let windows: Vec<_> = scan_over(&fetcher, p(3, 3), &ScanParams::default(), &opts)
-            .map(|w| w.expect("fetch"))
-            .collect();
-        assert!(windows.len() > 1);
-        assert!(
-            windows.iter().all(|w| w.detections.is_empty()),
-            "no repeats to find, but every window must still be reported"
-        );
-    }
-
     // ---- RegionScanner::stream (windowed, C2) ------------------------------
-
-    /// Build a single-contig `StreamingChromRefFetcher` over `seq` via a project-local temp
-    /// FASTA + a hand-computed `.fai` (single-line record, so `offset` is the fixed 5-byte
-    /// `>chr\n` header). The returned `TempDir` must be kept alive for the file to persist.
-    fn fetcher_over(seq: &[u8]) -> (tempfile::TempDir, crate::fasta::StreamingChromRefFetcher) {
-        use std::io::Write;
-        std::fs::create_dir_all("tmp").unwrap();
-        let dir = tempfile::tempdir_in("tmp").unwrap();
-        let fa = dir.path().join("ref.fa");
-        let fai = dir.path().join("ref.fa.fai");
-        {
-            let mut f = std::fs::File::create(&fa).unwrap();
-            f.write_all(b">chr\n").unwrap();
-            f.write_all(seq).unwrap();
-            f.write_all(b"\n").unwrap();
-        }
-        {
-            let mut f = std::fs::File::create(&fai).unwrap();
-            // name  length  offset  line_bases  line_width
-            writeln!(f, "chr\t{}\t5\t{}\t{}", seq.len(), seq.len(), seq.len() + 1).unwrap();
-        }
-        let fetcher = crate::fasta::StreamingChromRefFetcher::for_contig(&fa, "chr").unwrap();
-        (dir, fetcher)
-    }
-
-    /// The mixed test contig: two flanks, a (CAG)*15 tract, a non-repetitive gap, an
-    /// (AT)*20 tract, and a trailing flank — repeats, unique, and multi-period overlap.
-    fn mixed_contig() -> Vec<u8> {
-        let mut s = b"TGCATGCA".to_vec();
-        for _ in 0..15 {
-            s.extend_from_slice(b"CAG");
-        }
-        s.extend_from_slice(b"TTGACGTACGT"); // 11 bp non-repetitive gap
-        for _ in 0..20 {
-            s.extend_from_slice(b"AT");
-        }
-        s.extend_from_slice(b"GGCCTTAACC");
-        s
-    }
-
-    fn stream_regions(seq: &[u8], periods: PeriodRange, opts: &SegmentOptions) -> Vec<Region> {
-        let (_dir, fetcher) = fetcher_over(seq);
-        RegionScanner::stream(fetcher, periods, &ScanParams::default(), opts)
-            .unwrap()
-            .map(|r| r.unwrap())
-            .collect()
-    }
-
-    /// The streamed tiling equals the resident tiling for every `window_bp` — the
-    /// boundary-halo / attribution correctness gate (spec §3.6; the analogue of the cohort
-    /// DUST split-invariance test).
-    fn assert_window_invariant(seq: &[u8], periods: PeriodRange, base: &SegmentOptions) {
-        let oracle = regions_of(seq, periods, base);
-        assert_tiles(&oracle, seq.len() as u64);
-        for wbp in [seq.len() as u64 + 5, 100, 40, 16, 7, 3] {
-            let opts = SegmentOptions {
-                window_bp: wbp.max(1),
-                ..*base
-            };
-            let streamed = stream_regions(seq, periods, &opts);
-            assert_eq!(
-                streamed, oracle,
-                "window_bp={wbp}: streamed tiling must equal the resident oracle"
-            );
-        }
-    }
-
-    /// Two isolated STRs (each ≤ `max_repeat_len`) separated by an aperiodic gap wider than
-    /// the window margin — so a small `max_repeat_len` genuinely truncates the per-window
-    /// fetch, exercising real cross-window coverage assembly (not the whole-contig-per-window
-    /// case the default cap degenerates to on a tiny contig).
-    fn spaced_str_contig() -> Vec<u8> {
-        let mut s = Vec::new();
-        let mut st: u64 = 0x1234_5678_9abc_def0;
-        let mut filler = |n: usize, out: &mut Vec<u8>| {
-            for _ in 0..n {
-                st = st
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                out.push(b"ACGT"[((st >> 40) % 4) as usize]);
-            }
-        };
-        filler(15, &mut s); // left flank
-        for _ in 0..8 {
-            s.extend_from_slice(b"CAG"); // STR 1: 24 bp
-        }
-        filler(45, &mut s); // aperiodic gap, wider than the 30 bp margin below
-        for _ in 0..10 {
-            s.extend_from_slice(b"AT"); // STR 2: 20 bp
-        }
-        filler(15, &mut s); // right flank
-        s
-    }
-
-    #[test]
-    fn stream_is_window_invariant_default() {
-        assert_window_invariant(&mixed_contig(), p(2, 6), &SegmentOptions::default());
-    }
-
-    #[test]
-    fn stream_is_window_invariant_with_smoothing() {
-        let opts = SegmentOptions {
-            merge_gap: 15, // bridges the 11 bp gap between the two tracts
-            min_repeat_len: 5,
-            ..SegmentOptions::default()
-        };
-        assert_window_invariant(&mixed_contig(), p(2, 6), &opts);
-    }
-
-    #[test]
-    fn stream_is_window_invariant_across_truncated_windows() {
-        // A 30 bp cap (hence 30 bp margins) < the contig, so small windows really truncate the
-        // fetch. Both STRs are ≤ 30 bp and the gap between them exceeds the margin, so each is
-        // captured whole by its own window and segmented identically to the resident scan.
-        let opts = SegmentOptions {
-            max_repeat_len: 30,
-            ..SegmentOptions::default()
-        };
-        assert_window_invariant(&spaced_str_contig(), p(2, 6), &opts);
-    }
-
-    #[test]
-    fn stream_detects_a_satellite_within_a_window() {
-        // A small cap makes the whole mixed contig one satellite. Windowed streaming
-        // reproduces the resident tiling when the window contains the satellite; a satellite
-        // longer than a window's reach may segment differently (context-dependent, and it is
-        // mask/skip not an analysis target — see `scan_windowed`), so this asserts the
-        // fits-in-window case only.
-        let seq = mixed_contig();
-        let opts = SegmentOptions {
-            max_repeat_len: 20,
-            ..SegmentOptions::default()
-        };
-        let oracle = regions_of(&seq, p(2, 6), &opts);
-        assert!(
-            oracle.iter().any(|r| matches!(r, Region::Satellite(_))),
-            "the capped contig is a satellite: {oracle:?}"
-        );
-        for wbp in [seq.len() as u64 + 5, seq.len() as u64, 150] {
-            let o = SegmentOptions {
-                window_bp: wbp,
-                ..opts
-            };
-            assert_eq!(stream_regions(&seq, p(2, 6), &o), oracle, "window_bp={wbp}");
-        }
-    }
 }

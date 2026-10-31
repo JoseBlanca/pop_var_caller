@@ -326,7 +326,7 @@ pub fn seed_from_population_moments(
 /// polymorphism independent of how many alleles it happens to carry** — a triallelic site is not
 /// twice as polymorphic as a biallelic one merely for holding a third allele
 /// (`doc/devel/ng/spec/calling_priors.md` §4). That is the shape of production's
-/// `alpha_from_diversity` ([`genetics.rs`](crate::genetics::alpha_from_diversity)), ported with
+/// `alpha_from_diversity` (`genetics.rs`), ported with
 /// the fitted pair as input instead of `α_ref = 1` and `α_alt = θ` hard-coded, and filling a
 /// caller's buffer instead of returning a fresh `Vec` per locus.
 ///

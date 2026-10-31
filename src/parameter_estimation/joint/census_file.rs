@@ -54,16 +54,17 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use crate::parameter_estimation::calibration::MintedReadErrors;
+use crate::parameter_estimation::depth_bins::CENSUS_DEPTH_BIN_COUNT;
 use crate::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
 use crate::repeat_catalog::StratumCounts;
 use crate::types::{ContigId, ReadGroupId};
 use std::collections::BTreeMap;
 
 use super::census::{
-    AlleleObservation, ByteExtent, CensusError, DEPTH_CODE_BITS, DepthCap, DepthLadderDigest,
-    GenericEvidence, GuardObservation, NamedReadGroup, OFFSET_BUCKETS, ObservedAllele,
-    OffsetCounts, PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section,
-    SectionKey, SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
+    AlleleObservation, ByteExtent, CensusError, DEPTH_CODE_BITS, DepthCap, DepthCode,
+    DepthLadderDigest, GenericEvidence, GuardObservation, NamedReadGroup, OFFSET_BUCKETS,
+    ObservedAllele, OffsetCounts, PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence,
+    Section, SectionKey, SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
 };
 
 /// What every census file starts with, so a file that is not one is refused rather than decoded.
@@ -114,6 +115,7 @@ pub(super) fn count_bytes_read(bytes: u64) {
     BYTES_READ.with(|counter| counter.set(counter.get() + bytes));
 }
 
+#[cfg(test)]
 /// How many bytes of census file this thread has read since [`reset_bytes_read`].
 ///
 /// **This is spec §7.15's counting reader, and it is the half worth having.** An
@@ -127,11 +129,13 @@ pub fn bytes_read() -> u64 {
     BYTES_READ.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
 /// Start counting again from zero.
 pub fn reset_bytes_read() {
     BYTES_READ.with(|counter| counter.set(0));
 }
 
+#[cfg(test)]
 /// A census file, read whole.
 #[derive(Debug)]
 pub struct CensusFile {
@@ -352,22 +356,7 @@ fn put_str(out: &mut Vec<u8>, value: &str) {
 // Reading
 // ---------------------------------------------------------------------
 
-/// Read a whole census file.
-///
-/// **This is the parity oracle for the seeking reader**, not the shape a large run uses: it
-/// decodes every section. What a run reading one stratum at a time will use is the directory
-/// this returns alongside.
-///
-/// # Errors
-///
-/// [`CensusError::Malformed`] when the stream is not a census, is of another version, or ends
-/// inside a value; [`CensusError::Io`] when the stream itself fails.
-pub fn read_census(input: &mut impl Read) -> Result<CensusFile, CensusError> {
-    let mut bytes = Vec::new();
-    input.read_to_end(&mut bytes)?;
-    decode_census(&bytes)
-}
-
+#[cfg(test)]
 /// The same, from bytes already in hand.
 pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     let mut cursor = Cursor::new(bytes);
@@ -395,6 +384,7 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
     })
 }
 
+#[cfg(test)]
 /// Open a census file **without decoding a section**: the header is checked and the directory is
 /// read, and nothing else is touched until a scoped call asks for something.
 ///
@@ -509,7 +499,7 @@ fn read_as_much_as_there_is(from: &mut impl Read, into: &mut [u8]) -> Result<usi
 /// census: they do not start with its magic, or they end before the word.
 ///
 /// **This is what lets a census of another format be named as one rather than as damage**
-/// (`psp_census_pair.md` §4.2). [`decode_census`] refuses both with the same
+/// (`psp_census_pair.md` §4.2). `decode_census` refuses both with the same
 /// [`CensusError::Malformed`], which sends a user looking for a corrupted file when what happened
 /// is that this build changed what a census holds. A judgement that reads the word first can tell
 /// the two apart, and it costs [`BYTES_THAT_NAME_THE_VERSION`] bytes rather than a decode.
@@ -527,6 +517,7 @@ pub fn version_word_of(head: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes([word[0], word[1]]))
 }
 
+#[cfg(test)]
 /// Where each section sits, without decoding one — what the seeking reader will open with.
 ///
 /// # Errors
@@ -757,10 +748,18 @@ fn decode_generic(cursor: &mut Cursor<'_>) -> Result<GenericEvidence, CensusErro
     {
         return Err(CensusError::Malformed);
     }
-    Ok(GenericEvidence::from_parts(
-        PackedDepthCodes::from_bytes(bits, positions),
-        non_reference,
-    ))
+    // **Every code names a rung of the census ladder, or the never-walked sentinel.** A code
+    // fills a byte, so 120 values between the last rung and the sentinel decode to a bin the
+    // ladder does not have, and the fit then asked the ladder for its depth range and aborted on
+    // the assertion there. Seven changed bytes in a psp's census did it (found by fuzzing,
+    // 2026-10-31); the census carries no checksum.
+    let depth = PackedDepthCodes::from_bytes(bits, positions);
+    if depth.iter().any(|code| {
+        matches!(code, DepthCode::Binned(bin) if usize::from(bin.get()) >= CENSUS_DEPTH_BIN_COUNT)
+    }) {
+        return Err(CensusError::Malformed);
+    }
+    Ok(GenericEvidence::from_parts(depth, non_reference))
 }
 
 fn decode_ssr(cursor: &mut Cursor<'_>) -> Result<SsrEvidence, CensusError> {
@@ -1193,6 +1192,31 @@ mod tests {
         write_census(&census, &mut first).expect("a vector accepts every write");
         write_census(&census, &mut second).expect("a vector accepts every write");
         assert_eq!(first, second);
+    }
+
+    /// **A depth code past the ladder's last rung is refused when the section is decoded**, not
+    /// carried into the fit, where asking the ladder for that bin's depth range aborted
+    /// `estimate-parameters` (found by fuzzing, 2026-10-31). The never-walked sentinel and every
+    /// rung still read back.
+    #[test]
+    fn a_depth_code_the_ladder_has_no_rung_for_is_refused() {
+        let section = |code: u8| {
+            let depth = PackedDepthCodes::from_bytes(vec![0, code], 2);
+            encode_generic(&GenericEvidence::from_parts(depth, Vec::new()))
+        };
+        let last_rung = (CENSUS_DEPTH_BIN_COUNT - 1) as u8;
+        for code in [0, last_rung, u8::MAX] {
+            let bytes = section(code);
+            assert!(
+                decode_generic(&mut Cursor::new(&bytes)).is_ok(),
+                "code {code} is a rung or the sentinel"
+            );
+        }
+        let bytes = section(last_rung + 1);
+        assert!(matches!(
+            decode_generic(&mut Cursor::new(&bytes)),
+            Err(CensusError::Malformed)
+        ));
     }
 
     /// The three states an ordinary position can be in, read back off the file rather than off

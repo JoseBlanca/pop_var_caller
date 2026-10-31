@@ -195,6 +195,7 @@ impl HeldLiveSets {
         self.skipped_since_last_push = true;
     }
 
+    #[cfg(test)]
     /// How many read identifiers are held, changes and restart points together.
     pub(super) fn held_ids(&self) -> usize {
         self.ids.len()

@@ -19,7 +19,9 @@
 //! file copies each share, its curve and whether the stratum sat inside the curve's range exactly
 //! as written, and calling uses the share.
 
-use super::slippage_curve::{CurveReach, PenalisedPoint};
+#[cfg(test)]
+use super::slippage_curve::CurveReach;
+use super::slippage_curve::PenalisedPoint;
 
 // ---------------------------------------------------------------------
 // The shape a share follows
@@ -86,7 +88,7 @@ pub struct ShareCurve {
     /// **A curve that does not depend on repeat count spans the whole axis.** The two bottom
     /// rungs of the ladder — another period's mean, and the built-in default — are one value
     /// everywhere, so there is no range to hold them at the ends of and
-    /// [`ShareCurve::reach`] reports every repeat count as inside.
+    /// `ShareCurve::reach` reports every repeat count as inside.
     pub fitted_from: u64,
     /// The highest. Beyond `fitted_from ..= fitted_to` the share is held at the nearer end.
     pub fitted_to: u64,
@@ -133,6 +135,7 @@ pub enum ShareCurveSource {
 }
 
 impl ShareCurve {
+    #[cfg(test)]
     /// Whether `repeats` sat inside the repeat counts this curve was fitted over.
     pub fn reach(&self, repeats: u64) -> CurveReach {
         if repeats < self.fitted_from {
@@ -168,6 +171,7 @@ pub enum ShareSource {
 }
 
 impl ShareSource {
+    #[cfg(test)]
     /// The share the parametric curve carried — 1 for [`ShareSource::Curve`], 0 for
     /// [`ShareSource::Stratum`], the weight for a blend — and `None` for
     /// [`ShareSource::PenalisedCurve`], which no parametric curve was weighed against.

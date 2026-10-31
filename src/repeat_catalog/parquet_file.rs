@@ -96,13 +96,29 @@ impl RepeatCatalogWriter {
             source,
         })?;
 
-        let properties = WriterProperties::builder()
+        let mut properties = WriterProperties::builder()
             .set_created_by(CREATED_BY.to_string())
             .set_compression(Compression::ZSTD(
                 ZstdLevel::try_new(ZSTD_LEVEL).expect("zstd level 3 is valid"),
             ))
-            .set_dictionary_enabled(true)
-            .build();
+            .set_dictionary_enabled(true);
+        // **The four coordinate columns are delta-encoded, not dictionary-encoded.** Within a
+        // row group they ascend (or nearly), so almost every value is distinct: a dictionary
+        // fills to its page limit, hashing every value on the way, and then falls back to
+        // plain. Deltas between neighbouring coordinates are small numbers that pack into a
+        // few bits each.
+        for column in [
+            "detected_start",
+            "detected_end",
+            "trimmed_start",
+            "trimmed_end",
+        ] {
+            let path = parquet::schema::types::ColumnPath::from(column);
+            properties = properties
+                .set_column_dictionary_enabled(path.clone(), false)
+                .set_column_encoding(path, parquet::basic::Encoding::DELTA_BINARY_PACKED);
+        }
+        let properties = properties.build();
 
         let schema = catalog_schema();
         let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(properties))

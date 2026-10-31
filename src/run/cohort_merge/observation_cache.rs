@@ -10,12 +10,12 @@
 //!
 //! **A *region* here is a building region** — the stretch of genome assigned to one builder,
 //! `cohort_locus_builder_regions_len` bases (spec §6.1). The run's own intervals are called
-//! *analysed regions*, as in [`merge_cohort_serially`](super::serial::merge_cohort_serially),
+//! *analysed regions*, as in `merge_cohort_serially`,
 //! and are much longer.
 //!
 //! **Why the merge needs this rather than merely liking it.** A builder closes loci from the
 //! beginning of whatever observations it is handed and discards those that opened before its
-//! own ground ([`build_region`](super::build::build_region)), so handing every builder the
+//! own ground (`build_region`), so handing every builder the
 //! whole analysed stretch costs each of them the whole prefix — about **3.3 µs per prefix
 //! base at 63 samples**, measured in a release build by the C1 review
 //! (`doc/devel/reports/reviews/ng_cohort_merge_c1_2026-08-17.md`). The same effect end to
@@ -1064,7 +1064,7 @@ impl<S> ObservationCache<S> {
     /// length of the call — a builder's only way in, and read-only by construction.
     ///
     /// The slices are handed out in the run's sample order, which is what
-    /// [`build_region`](super::build::build_region) indexes by.
+    /// `build_region` indexes by.
     ///
     /// **`span`'s two ends do different jobs, and neither is the obvious one.** Its start
     /// selects the window's left edge. Its end does **not** bound the right — trimming there
@@ -1114,7 +1114,6 @@ impl<S> ObservationCache<S> {
         // again into its own array (`LocusCloser::over`); doing it twice costs nothing beside
         // the walk, and the alternative — a scratch buffer on the cache — would need interior
         // mutability on a `&self` method that several builders will hold at once.
-        let windowing = super::timing::Stopwatch::start();
         // **Both views start at the same index**, because the two arrays are one sequence held
         // twice (`SampleWindow::held_summaries`): the summary at index *i* is the summary of
         // the observation at index *i*, so a member range decided on one addresses the other.
@@ -1135,7 +1134,6 @@ impl<S> ObservationCache<S> {
                 observations_per_sample.push(&sample.held_observations[from..]);
             }
         }
-        windowing.add_to(&super::timing::WINDOW_NANOS);
         let records = (!self.keeps_evidence).then_some(&observations_per_sample[..]);
         f(&WindowedCohort {
             observations: records,
@@ -1171,6 +1169,7 @@ impl<S> ObservationCache<S> {
         );
     }
 
+    #[cfg(test)]
     /// How many observations are held, summed across samples — the size of the window this
     /// cache is the memory of (spec §8).
     ///
@@ -1460,14 +1459,11 @@ where
                 // without it inference reads the `?` below as converting into that bound's
                 // type rather than into the source's own error.
                 .map(|sample| -> Result<GenomePosition, E> {
-                    let drawing = super::timing::Stopwatch::start();
                     let mut reach = snapshot;
                     sample.draw_to(&mut reach)?;
-                    drawing.add_to(&super::timing::COVER_BUSY_NANOS);
                     Ok(reach)
                 })
                 .try_reduce(|| snapshot, |left, right| Ok(left.max(right)))?;
-            super::timing::COVER_SWEEPS.add(1);
             if widest == chain_reach {
                 break;
             }
@@ -1744,13 +1740,10 @@ where
     /// One sweep of every sample against `chain_reach`. Answers whether any of them moved it.
     fn sweep(&mut self, chain_reach: &mut GenomePosition) -> Result<bool, E> {
         let mut reach_grew = false;
-        super::timing::COVER_SWEEPS.add(1);
         for sample in &mut self.samples {
             // Not `reach_grew |= sample.draw_to(…)?`: that reads as though the call could be
             // skipped, and a later `||` in its place would skip it.
-            let drawing = super::timing::Stopwatch::start();
             let grew = sample.draw_to(chain_reach)?;
-            drawing.add_to(&super::timing::COVER_BUSY_NANOS);
             if grew {
                 reach_grew = true;
             }
@@ -1887,13 +1880,6 @@ where
             self.spent = true;
             return Ok(None);
         };
-        // **Every record the merge will later free passes here**, which is why the count that
-        // prices Milestone G is taken here rather than at the mint: the generator's own
-        // records include ones the region clamp discards, and those the merge never owns.
-        super::timing::RECORDS_DRAWN.add(1);
-        if let Drawn::Built(record) = &next {
-            super::timing::OBSERVATIONS_DRAWN.add(record.observations.len() as u64);
-        }
         let summary = next.summary();
 
         // **A release check, not a `debug_assert!`** — the release profile is the one this

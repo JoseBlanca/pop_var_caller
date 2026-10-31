@@ -202,7 +202,7 @@ pub const DEFAULT_OUTLIER_WEIGHT: f64 = 0.07;
 /// `defaulted`, which is the file, the report and the score disagreeing while looking wired up.
 ///
 /// **It is reported once for the run and never folded into a repeat tract's per-cell warrant**
-/// ([`RunParameterReport::repeat_tract_outlier_weight`](crate::calling::run_report::RunParameterReport::repeat_tract_outlier_weight)):
+/// (`RunParameterReport::repeat_tract_outlier_weight`):
 /// it is one run-wide number, so folding it in would mark *every* tract of every run as
 /// resting on a defaulted parameter — or, under a supplied weight, on a supplied one, which the
 /// ladder ranks only a rung above — and erase the fitted-against-borrowed distinction the

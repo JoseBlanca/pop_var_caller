@@ -40,6 +40,7 @@ use crate::region_typing::GenomeRegions;
 use crate::types::{GenomeRegion, ReadGroupId};
 
 use super::callers::{CohortCallingTallies, CohortWalkTallies, WrittenCohort};
+use super::edge_deletion_gathering::EdgeDeletionGatheringCounts;
 use super::psp_caller::StoredCohortTallies;
 
 /// **The two bounds a run's refusals were measured against**, so the report can name each beside
@@ -224,6 +225,27 @@ impl<'a> RunReport<'a> {
                 "loci left out for a site quality below --min-site-quality: {}",
                 self.calling.loci_below_minimum_site_quality,
             ));
+        }
+        let gathering = self.calling.edge_deletion_gathering;
+        if gathering != EdgeDeletionGatheringCounts::default() {
+            lines.push(format!(
+                "SNP/indel records merged into an STR record widened over a deletion into its \
+                 flank: {} (counted per sample and SNP/indel record: genotypes matching the \
+                 STR record's deletion: {}, overridden by the STR record: {}; paired with an \
+                 STR allele from the cohort: {}; lost to an STR no-call: {})",
+                gathering.generic_records_merged,
+                gathering.samples_in_agreement,
+                gathering.samples_overridden,
+                gathering.samples_paired_from_the_cohort,
+                gathering.generic_calls_lost_to_an_str_no_call,
+            ));
+            if gathering.generic_records_left_unmerged > 0 {
+                lines.push(format!(
+                    "  SNP/indel records left beside the STR record they overlap, the merged \
+                     record not being buildable: {}",
+                    gathering.generic_records_left_unmerged,
+                ));
+            }
         }
     }
 

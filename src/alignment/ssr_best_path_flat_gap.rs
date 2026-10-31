@@ -4,7 +4,7 @@
 //!
 //! # Not the recommended delimiter — kept as the oracle and the baseline
 //!
-//! **[`super::ssr_best_path_unit_slip`] (algorithm 4) measured better and is the recommended
+//! **`super::ssr_best_path_unit_slip` (algorithm 4) measured better and is the recommended
 //! STR delimiter.** On synthetic reads with known truth it was uniformly more accurate and
 //! free of the small reference-pull bias this flat-gap model carries (the D2 comparison,
 //! `doc/devel/reports/research/ssr_delimiter_3v4_comparison_2026-07-23.md`). So a new caller
@@ -302,6 +302,7 @@ pub struct ViterbiScratch {
 }
 
 impl ViterbiScratch {
+    #[cfg(test)]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -442,6 +443,7 @@ pub struct SsrFlatGapAligner<E: Emission> {
 }
 
 impl<E: Emission> SsrFlatGapAligner<E> {
+    #[cfg(test)]
     /// Algorithm 3 as ported: a flank is anchored when the path crossed into it. The parity
     /// oracle and every bake-off build this.
     #[must_use]

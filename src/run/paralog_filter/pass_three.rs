@@ -99,6 +99,7 @@ pub enum PassThreeError {
     },
 }
 
+#[cfg(test)]
 /// **Write the VCF, applying each record's verdict.**
 ///
 /// `tag_instead_of_dropping` is the operator's `--hidden-dup-tag`: with it, a record the cut
@@ -127,13 +128,13 @@ pub fn write_the_records_the_filter_kept(
     )
 }
 
-/// [`write_the_records_the_filter_kept`], also keeping the verdict of every record `explained`
+/// `write_the_records_the_filter_kept`, also keeping the verdict of every record `explained`
 /// asks about (`--explain-loci`, `doc/devel/ng/spec/explain_loci.md`). **What is written does
 /// not depend on it**: the verdict is read where it is decided and nothing else is touched.
 ///
 /// # Errors
 ///
-/// As [`write_the_records_the_filter_kept`].
+/// As `write_the_records_the_filter_kept`.
 pub fn write_the_records_the_filter_kept_explaining(
     spill: &SpillFile,
     verdicts: &ParalogVerdicts,

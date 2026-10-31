@@ -293,18 +293,21 @@ impl GenotypeTable {
         }
     }
 
+    #[cfg(test)]
     /// How many copies of the genome a sample called against this table has.
     #[inline]
     pub fn ploidy(&self) -> Ploidy {
         self.ploidy
     }
 
+    #[cfg(test)]
     /// How many alleles the locus is called over — the width of one allele-count row.
     #[inline]
     pub fn allele_count(&self) -> usize {
         self.allele_count
     }
 
+    #[cfg(test)]
     /// How many candidate genotypes the shape has, and so how many rows each of the
     /// three tables holds.
     #[inline]
@@ -312,18 +315,21 @@ impl GenotypeTable {
         self.genotype_count
     }
 
+    #[cfg(test)]
     /// The whole allele-count table, `genotype_count × allele_count`, row-major.
     #[inline]
     pub fn genotype_allele_counts(&self) -> &[u32] {
         &self.genotype_allele_counts
     }
 
+    #[cfg(test)]
     /// One log multinomial coefficient per genotype, in genotype order.
     #[inline]
     pub fn log_multinomial_coeffs(&self) -> &[f64] {
         &self.log_multinomial_coeffs
     }
 
+    #[cfg(test)]
     /// The homozygous lookup, one entry per genotype — the caller's one homozygous
     /// test (see the type's documentation).
     #[inline]
@@ -331,6 +337,7 @@ impl GenotypeTable {
         &self.homozygous_allele_for
     }
 
+    #[cfg(test)]
     /// How many copies of each allele one genotype carries, or `None` if this table
     /// has no such genotype.
     ///
@@ -342,6 +349,7 @@ impl GenotypeTable {
         self.view().allele_counts_of(genotype)
     }
 
+    #[cfg(test)]
     /// `ln` of the number of ways the genome's copies order to spell one genotype, or
     /// `None` if this table has no such genotype.
     #[inline]
@@ -349,6 +357,7 @@ impl GenotypeTable {
         self.view().log_multinomial_coeff_of(genotype)
     }
 
+    #[cfg(test)]
     /// The allele one genotype is homozygous for — `Some(a)` when every copy is allele
     /// *a*, `None` when the genotype carries more than one allele, and `None` too when
     /// this table has no such genotype. **The two `None`s are not the same fact**, so
@@ -437,6 +446,7 @@ impl<'a> GenotypeTableView<'a> {
             .get(start..start + self.allele_count)
     }
 
+    #[cfg(test)]
     /// `ln` of the number of ways the genome's copies order to spell one genotype, or
     /// `None` if this table has no such genotype.
     #[inline]
@@ -446,6 +456,7 @@ impl<'a> GenotypeTableView<'a> {
             .copied()
     }
 
+    #[cfg(test)]
     /// The allele one genotype is homozygous for; see
     /// [`GenotypeTable::homozygous_allele_of`] for what the two kinds of `None` mean.
     #[inline]

@@ -1,7 +1,7 @@
 //! **A round of building regions, each region built *and called* on a worker**, with the
 //! results folded back in genome order.
 //!
-//! This is [`merge_cohort_in_parallel`](super::parallel::merge_cohort_in_parallel)'s round
+//! This is `merge_cohort_in_parallel`'s round
 //! structure with one difference, and the difference is what the arrangement is for: the
 //! worker does not stop at a [`CohortObservation`]. It hands
 //! each locus straight to a caller-supplied closure while the observation is still on the
@@ -66,7 +66,7 @@ pub struct CalledRegion<T> {
 /// calling thread, in genome order.
 ///
 /// **Returns how many loci the frontier rule dropped**, which is
-/// [`Organiser::displaced_locus_count`](super::organise::Organiser::displaced_locus_count)'s
+/// `Organiser::displaced_locus_count`'s
 /// number and is kept for that type's reason: spec §6.1's argument says a builder cannot
 /// produce a locus on ground an earlier locus already owns — given that eviction happens at the
 /// round's first region's first base, which is what this driver does — and the count is how a

@@ -41,7 +41,6 @@ pub mod encode;
 pub mod header;
 pub mod writer;
 
-pub(crate) use assemble::drop_alternatives_no_sample_calls;
 pub use assemble::{LocusEvidenceForOutput, SampleEvidenceForOutput, assemble_record};
 pub(crate) use encode::written_position;
 pub use encode::{
@@ -62,7 +61,7 @@ use crate::types::{GenomeRegion, Genotype, Motif, Phred, Position};
 /// The first base of a contig, in the 1-based inclusive coordinates
 /// [`GenomeRegion`] uses — the one position at which an empty allele must be padded from the
 /// right, because there is no base to its left (spec §5).
-const FIRST_POSITION_OF_A_CONTIG: Position = Position(1);
+pub(crate) const FIRST_POSITION_OF_A_CONTIG: Position = Position(1);
 
 /// **One record of the file, complete, with its locus released.**
 ///
@@ -435,6 +434,7 @@ pub enum PaddingBase {
 }
 
 impl PaddingBase {
+    #[cfg(test)]
     /// The base itself, whichever side it came from.
     #[inline]
     #[must_use]
@@ -514,6 +514,7 @@ impl SampleCall {
         }
     }
 
+    #[cfg(test)]
     /// Whether this sample's `GT` is written `./.`.
     #[inline]
     #[must_use]
@@ -751,15 +752,22 @@ enum RepeatGround {
 /// and what `REPCN` needs to count the repeat rather than the flank.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TractWidening {
-    /// Flank bases the record's reference took before the tract, and after it.
-    pub left: u8,
-    pub right: u8,
+    /// Flank bases the record's reference took before the tract, and after it — over the
+    /// generic records it absorbed as well, once the gathering of the calls has merged them
+    /// (`str_edge_deletion_alleles.md` §6), which is why a byte is not enough.
+    pub left: u16,
+    pub right: u16,
     /// How many flank bases each allele was given around its spelling, at the allele's index.
-    pub flank_bases_per_allele: Vec<u8>,
+    pub flank_bases_per_allele: Vec<u16>,
     /// How far each allele reaches into the left flank and into the right one, as the generic
     /// path places its deletion — the flank bases a carrier of it has not got where the
     /// generic path looks. At the allele's index; the reference's is `(0, 0)`.
     pub reach_per_allele: Vec<(u8, u8)>,
+    /// **The reference base just before the widened span**, or `None` where the span starts at
+    /// the contig's first base. Kept whether or not an allele is empty, because merging a
+    /// generic record into the record can make one empty where none was, and nothing past
+    /// assembly holds the reference to fetch it from.
+    pub base_before: Option<u8>,
 }
 
 impl TractAnnotation {
@@ -865,6 +873,38 @@ impl TractAnnotation {
         self.widening.as_deref()
     }
 
+    /// **The annotation of a record whose alleles were rebuilt from this one's**: allele `i` of
+    /// the new record is built on allele `origins[i]` of this one, so an STR bundle's run
+    /// counts follow it there, and the record is widened as `widening` says.
+    ///
+    /// # Panics
+    ///
+    /// If an origin names an allele a bundle's counts do not hold, where it holds any.
+    #[must_use]
+    pub(crate) fn rebuilt_over(self, origins: &[usize], widening: TractWidening) -> Self {
+        let repeat = match self.repeat {
+            RepeatGround::Bundle {
+                run_motifs,
+                run_counts_per_allele,
+            } => RepeatGround::Bundle {
+                run_counts_per_allele: if run_counts_per_allele.is_empty() {
+                    Vec::new()
+                } else {
+                    origins
+                        .iter()
+                        .map(|&origin| run_counts_per_allele[origin].clone())
+                        .collect()
+                },
+                run_motifs,
+            },
+            segment @ RepeatGround::Segment(_) => segment,
+        };
+        Self {
+            repeat,
+            widening: Some(Box::new(widening)),
+        }
+    }
+
     /// **`REPCN` for allele `index` of the record**: [`repeat_copies_of`](Self::repeat_copies_of)
     /// over its bases less the flank bases a widened record gave it.
     #[inline]
@@ -878,6 +918,7 @@ impl TractAnnotation {
         self.repeat_copies_of(&allele[..allele.len().saturating_sub(flank_bases)])
     }
 
+    #[cfg(test)]
     /// The `RU` field of a segment record: the motif's bases. At a bundle, its first run's
     /// ([`Self::units`] has them all).
     #[inline]

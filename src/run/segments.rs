@@ -9,13 +9,18 @@
 //! That is why they are computed once and shared: k samples over one segmentation, never k
 //! segmentations that happen to agree.
 
-use std::path::PathBuf;
-
 use crate::region_typing::{GenomeRegions, TypedRegion, hand_satellites_to_the_generic_path};
-use crate::repeat_catalog::{RepeatCatalogError, RepeatCatalogHeader, StrRepeatCriteria};
+#[cfg(test)]
+use crate::repeat_catalog::RepeatCatalogError;
+#[cfg(test)]
+use crate::repeat_catalog::RepeatCatalogHeader;
+#[cfg(test)]
+use crate::repeat_catalog::StrRepeatCriteria;
+#[cfg(test)]
+use crate::run::RunError;
 use crate::types::GenomeRegion;
-
-use super::RunError;
+#[cfg(test)]
+use std::path::PathBuf;
 
 /// Re-exported from its own module so `run`'s call sites keep their import path.
 /// [`SegmentationInputs`] moved to a top-level home when the psp header started carrying it
@@ -57,6 +62,7 @@ pub struct Segmentation {
 }
 
 impl Segmentation {
+    #[cfg(test)]
     /// Consume the typed-region generator's stream once, and record what produced it, under the
     /// default setting for repeat ground ([`RepeatGround::StrPaths`]).
     ///
@@ -102,7 +108,7 @@ impl Segmentation {
     /// ([`hand_satellites_to_the_generic_path`]), so a segmentation recorded under that setting
     /// cannot hold one.
     ///
-    /// The same promise as [`build`](Self::build) otherwise: the caller cut `segments` with the
+    /// The same promise as `build` otherwise: the caller cut `segments` with the
     /// catalog and criteria `repeat_ground` records, and only the caller can guarantee it.
     #[must_use]
     pub fn of_segments(
@@ -163,7 +169,7 @@ impl Segmentation {
     ///
     /// The merge advances over the *analysed regions*, not over the segments: it cuts them
     /// into its own building regions and asks each sample for what falls inside
-    /// ([`merge_cohort_through_cache`](crate::run::cohort_merge::serial::merge_cohort_through_cache)).
+    /// (`merge_cohort_through_cache`).
     /// A sample's walk advances over the segments. Both come out of this one object, so the
     /// two cannot be built from different ground.
     #[must_use]

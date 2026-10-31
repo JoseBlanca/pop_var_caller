@@ -5,7 +5,9 @@
 //! written: **where a wrong read's probability goes.**
 
 use super::MAX_PLOIDY_COPIES;
-use crate::calling::{CandidateAlleles, GenotypeIdx, GenotypeTableView};
+#[cfg(test)]
+use crate::calling::GenotypeIdx;
+use crate::calling::{CandidateAlleles, GenotypeTableView};
 use crate::float;
 use crate::locus_generation::{LocusKind, LocusLen, WitnessedLocusPositions};
 use crate::run::cohort_merge::build::{LocusBorder, PartialObservation};
@@ -244,7 +246,7 @@ pub fn fill_wrong_read_charges(
 /// nothing crashes — so the fix is structural rather than another assertion. The crate argues
 /// the same case against itself twice already: [`CandidateAlleles::bases_of`] returns an
 /// `Option` because indexing "would hand back a real but wrong allele without complaint", and
-/// [`GenotypeIdx`] carries the same warning about rows meaning different genotypes at different
+/// `GenotypeIdx` carries the same warning about rows meaning different genotypes at different
 /// shapes.
 ///
 /// [`CandidateAlleles::bases_of`]: super::super::CandidateAlleles::bases_of
@@ -283,6 +285,7 @@ impl<'a> WrongReadChargeTable<'a> {
         }
     }
 
+    #[cfg(test)]
     /// One genotype's whole row of cells — one entry per allele, in allele order.
     ///
     /// **The shape the row function wants**, because its inner loop already holds the matching
@@ -297,6 +300,7 @@ impl<'a> WrongReadChargeTable<'a> {
         self.values.get(start..start + self.allele_count)
     }
 
+    #[cfg(test)]
     /// How a wrong read is charged at one `(genotype, allele)` pair.
     ///
     /// # Panics
@@ -326,7 +330,7 @@ impl<'a> WrongReadChargeTable<'a> {
     ///
     /// **The shape the row's inner loop wants**, because for a fixed observation the allele is
     /// fixed and what varies is the genotype. Walking a column checks the allele once and then
-    /// strides; calling [`at`](Self::at) per genotype would put a bounds check, a
+    /// strides; calling `at` per genotype would put a bounds check, a
     /// `checked_mul` and a formatting closure inside a loop whose whole stated shape is a
     /// multiply and an add.
     ///
@@ -638,6 +642,7 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
     bases_agreeing_from_the_left + bases_agreeing_from_the_right >= bases.len()
 }
 
+#[cfg(test)]
 /// One sample's whole `Lg` row at an ordinary site — one log-probability per candidate
 /// genotype: spec §3.6's contamination mixture, which is spec §3.3 wherever nothing is
 /// contaminated.
@@ -880,11 +885,11 @@ pub fn fill_generic_emissions(
 /// all, so its row is the same value at every pass and the driver assembles it once.
 ///
 /// The formula, the two approximations inside it and what contamination costs the aggregation
-/// contract are all [`genotype_log_likelihood_row`]'s, which is this and the fill together.
+/// contract are all `genotype_log_likelihood_row`'s, which is this and the fill together.
 ///
 /// # Panics
 ///
-/// **In release as well as debug** (spec §8), for [`genotype_log_likelihood_row`]'s reasons, and
+/// **In release as well as debug** (spec §8), for `genotype_log_likelihood_row`'s reasons, and
 /// additionally on a cache prepared for a different locus's allele count or for a different
 /// sample's observations — the two are what makes a fill and an assembly that were not paired a
 /// stop rather than a wrong genotype.
@@ -3945,6 +3950,47 @@ mod tests {
         // `0.05 × 0.3`, against a misread's `0.95 × e⁻⁷`.
         let expected = 3.0 * float::ln(0.95 * float::exp(-7.0) + 0.05 * 0.3);
         assert!((contaminated[hom_ref] - expected).abs() < 1e-12);
+        // And where the genotype explains it, the contaminant's share adds to the individual's
+        // copy share rather than taking from it: half of `0.95` for one copy, all of it for two.
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+        let expected_het = 3.0 * float::ln(0.95 * 0.5 + 0.05 * 0.3);
+        let expected_hom_alt = 3.0 * float::ln(0.95 + 0.05 * 0.3);
+        assert!((contaminated[het] - expected_het).abs() < 1e-12);
+        assert!((contaminated[hom_alt] - expected_hom_alt).abs() < 1e-12);
+    }
+
+    /// **A carrier's sequence is the flank and then the whole allele, or the allele and then the
+    /// whole flank**: matching one part is not enough. `TAAA` ends with the `T` before the locus
+    /// but its last three bases are not `ACG`, and `ACGA` starts with `ACG` but the reference after
+    /// is `TT`.
+    #[test]
+    fn a_carriers_sequence_needs_both_the_allele_and_the_flank() {
+        assert!(carrier_sequence_ends_with(b"TT", b"ACG", b"TACG"));
+        assert!(!carrier_sequence_ends_with(b"TT", b"ACG", b"TAAA"));
+        assert!(!carrier_sequence_ends_with(b"TT", b"ACG", b"AACG"));
+        assert!(carrier_sequence_starts_with(b"ACG", b"TT", b"ACGT"));
+        assert!(!carrier_sequence_starts_with(b"ACG", b"TT", b"AAAT"));
+        assert!(!carrier_sequence_starts_with(b"ACG", b"TT", b"ACGA"));
+    }
+
+    /// **The largest ploidy the caller accepts is scored**, complete reads and partial ones: both
+    /// hold a copy count's term in an array sized for that ploidy, so this is where one a slot
+    /// short would show.
+    #[test]
+    fn a_row_at_the_largest_ploidy_is_scored() {
+        let ploidy = crate::calling::likelihood::MAX_PLOIDY_COPIES;
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = GenotypeTable::build(
+            Ploidy::try_new(u8::try_from(ploidy).expect("a small ploidy")).expect("a ploidy"),
+            2,
+        );
+        let every_copy_alternative = genotype_carrying(&table, &[0, ploidy as u32]).get() as usize;
+        let supported = [observation(1, 0, 3, -21.0)];
+        let partials = [partial(&[(0, 2)], b"TT", 2, -14.0)];
+        let scored = row_with_partials(&supported, &partials, &alleles, &table);
+        assert!(scored.iter().all(|score| score.is_finite()), "{scored:?}");
+        assert_eq!(scored[every_copy_alternative], 0.0);
     }
 
     /// **A run anchored to neither border makes the whole test vacuous, and the rule has to say

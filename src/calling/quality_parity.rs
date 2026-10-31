@@ -364,16 +364,18 @@ mod tests {
         );
     }
 
-    /// **A cohort whose reads say nothing at all.** Every genotype is equally likely, so what
-    /// is left is the prior and the fold's own combinatorics — the one fixture where a mistake
-    /// in the Beta-Binomial cannot hide behind the evidence.
+    /// **A cohort whose reads say nothing at all is where ng now parts from production, on
+    /// purpose.** Every genotype is equally likely in every sample. Production folded them in
+    /// and scored the prior alone; ng leaves a sample whose reads said nothing out of the fold
+    /// (`calling_em_loop.md` §5.0.2, owner's ruling 2026-10-31), so with nobody left nothing is
+    /// evidence of a variant and the quality is zero. The frozen production answer stays as the
+    /// record of what it was.
     #[test]
-    fn a_cohort_with_no_evidence_scores_the_prior_alone_on_both_sides() {
+    fn a_cohort_with_no_evidence_scores_zero_where_production_scored_the_prior() {
         let table = row(0.0, 0.0, 0.0).repeat(8);
-        assert_agrees(
-            &Locus::at_productions_prior(&table, 8, 2),
-            "eight silent samples",
-        );
+        let locus = Locus::at_productions_prior(&table, 8, 2);
+        assert!(locus.production_site_quality() > 0.0);
+        assert_eq!(locus.ng_at_productions_prior(), 0.0);
     }
 
     /// **Both sides read the same two concentrations, and this is what says so.**

@@ -335,11 +335,6 @@ impl RawChromReader {
         })
     }
 
-    /// Total bases in the bound contig.
-    pub fn length(&self) -> u32 {
-        self.fai.length
-    }
-
     /// Raw bases `[start_1based, start_1based + length)` as a borrowed slice,
     /// extending the buffer forward or backward as needed.
     ///
@@ -425,6 +420,7 @@ impl RawChromReader {
         self.buf_start_base = pos;
     }
 
+    #[cfg(test)]
     /// How many bases this reader is holding — the memory bound made observable, and what
     /// [`evict_before`](Self::evict_before) is judged on. Cheap: a `Vec`'s length.
     pub fn resident_bases(&self) -> usize {

@@ -16,7 +16,7 @@
 //!   source's error and passes it through, so in a run over a thousand samples an error saying
 //!   only *block 41 would not inflate* names neither the individual to look at nor the ground
 //!   already called ([`RunError::SourceFailed`], spec §9). On the path a run takes
-//!   ([`PspObservationSource::over`]) the name is read from the file's own header, so the name
+//!   (`PspObservationSource::over`) the name is read from the file's own header, so the name
 //!   in the error and the file it came from cannot come apart.
 //! - **Refusals where the merge would otherwise assert or go quiet** — see [`PspSourceError`],
 //!   which says of each whether the mistake is the file's or this crate's.
@@ -34,7 +34,7 @@
 //!
 //! **Generic over the walk, and that is what makes the head-only refusal reachable.** A psp's
 //! records can be walked two ways: [`RecordIter`], which builds every record, and
-//! [`SelectiveRecordIter`](crate::psp::SelectiveRecordIter), which builds only the bodies a
+//! `SelectiveRecordIter`, which builds only the bodies a
 //! predicate asks for and hands the rest back as a head alone. **A merge fed the second would
 //! be handed a cohort with observations missing and no error anywhere** — wrong genotypes, not
 //! a failure. So this type takes either and refuses the moment a body is missing, rather than
@@ -42,7 +42,9 @@
 //! defers.
 
 use crate::locus_generation::SampleLocusObservations;
-use crate::psp::{PspReadError, PspReader, RecordIter, StreamedRecord};
+#[cfg(test)]
+use crate::psp::{PspReadError, StreamedRecord};
+use crate::psp::{PspReader, RecordIter};
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
@@ -134,6 +136,41 @@ pub enum PspSourceError {
         previous: GenomePosition,
         /// Where the record that goes backwards starts.
         offered: GenomePosition,
+    },
+
+    /// A record begins at or before the end of the one in front of it.
+    ///
+    /// **One sample's records are disjoint and in coordinate order**, which the merge relies on
+    /// to draw each sample forward and to compose a read's allele across a locus. The store
+    /// writes them so; a file reaching this was damaged after it was written, or written by
+    /// something that is not this store.
+    #[error(
+        "its stored observations overlap or go backwards: the record at {offered} begins at or \
+         before the end of the one at {previous}"
+    )]
+    ObservationsOverlap {
+        /// The record in front of it.
+        previous: GenomeRegion,
+        /// The record that overlaps it or goes backwards.
+        offered: GenomeRegion,
+    },
+
+    /// A record's reference bases are not as many as the positions it spans.
+    ///
+    /// The store writes one reference base per position of a record, and the merge pads every
+    /// allele of a locus from them; a file reaching this was damaged or written by something
+    /// that is not this store.
+    #[error(
+        "the stored observation at {at} carries {carries} reference bases for a {spans}-base \
+         span"
+    )]
+    ReferenceBasesDoNotSpanTheRecord {
+        /// The record.
+        at: GenomeRegion,
+        /// How many reference bases it carries.
+        carries: usize,
+        /// How many positions it spans.
+        spans: u64,
     },
 
     /// A record arrived with its head alone, its body never built.
@@ -277,6 +314,8 @@ pub struct PspSummarySource<'a> {
     /// The run's depth ceiling, or `None` for a walk that keeps every record
     /// ([`depth_ceiling`](super::depth_ceiling)). A record over it is dropped as it is read.
     depth_ceiling: Option<DepthCeiling>,
+    /// The last record walked, to refuse one that does not begin after it ends.
+    last_region: Option<GenomeRegion>,
     /// What this sample contributed, for the run report.
     read: StoredSampleTallies,
 }
@@ -378,6 +417,7 @@ impl<'a> PspSummarySource<'a> {
             read_cap: None,
             thinned: std::sync::Mutex::new(ThinnedSoFar::default()),
             depth_ceiling: None,
+            last_region: None,
             read: StoredSampleTallies::default(),
         })
     }
@@ -408,6 +448,7 @@ impl<'a> PspSummarySource<'a> {
         }
     }
 
+    #[cfg(test)]
     /// How many body bytes this source is holding — **the number the arena is bounded by**,
     /// exposed so that a test can say the bound holds rather than assert that a call was made.
     #[must_use]
@@ -415,6 +456,7 @@ impl<'a> PspSummarySource<'a> {
         self.kept.len()
     }
 
+    #[cfg(test)]
     /// How many records' heads this source is holding, for the reason
     /// [`held_bytes`](Self::held_bytes) exists.
     #[must_use]
@@ -422,6 +464,7 @@ impl<'a> PspSummarySource<'a> {
         self.heads.len()
     }
 
+    #[cfg(test)]
     /// How many read identifiers this source is holding — the third arena, and the one whose
     /// cut cannot be derived from either of the others.
     #[must_use]
@@ -457,6 +500,29 @@ impl<'a> PspSummarySource<'a> {
             Ok(streamed) => streamed,
             Err(failed) => return Some(Err(self.refuse(failed))),
         };
+        // **Each record must begin after the one before it ends.** One sample's records are
+        // disjoint and in coordinate order: the merge draws a sample forward on that rule and
+        // assembles a locus from it, and a record that broke it aborted the run there
+        // (`observation_cache.rs`'s draw, `build.rs`'s `LocusReferenceBases::over`), where it is
+        // a bug in this crate. Here, at the file, it is damage, and is refused as such. A psp
+        // whose blocks were copied over each other passes every block's checksum and reached
+        // that abort (found by fuzzing, 2026-10-31). Two records starting on one base are
+        // refused too, as the merge refused them.
+        let region = LocusSummary::from(&streamed.head).region();
+        let start = LocusSummary::from(&streamed.head).start_position();
+        if let Some(previous) = self.last_region {
+            let previous_end = GenomePosition {
+                contig: previous.contig,
+                position: previous.end.max(previous.start),
+            };
+            if start <= previous_end {
+                return Some(Err(self.refuse(PspSourceError::ObservationsOverlap {
+                    previous,
+                    offered: region,
+                })));
+            }
+        }
+        self.last_region = Some(region);
         if streamed.too_large_to_hold {
             // Nothing of it reached the arena, and its reads' changes are applied in the walk.
             self.live.skip();
@@ -531,6 +597,7 @@ impl<'a> PspSummarySource<'a> {
     }
 }
 
+#[cfg(test)]
 pub struct PspObservationSource<W> {
     /// The individual this file holds. **[`over`](Self::over) takes it from the psp's own
     /// header**, so on the path a run uses, the name a failure carries and the file it came
@@ -623,6 +690,7 @@ impl StoredSampleTallies {
     }
 }
 
+#[cfg(test)]
 /// **The sample's name and how far it has got, not the walk.** The sibling walker hand-writes
 /// its own for the same reason ([`AlignmentFilesWalker`](super::walker::AlignmentFilesWalker)):
 /// a derived one would print the decoder's buffers. It also drops the `W: Debug` bound a derive
@@ -638,6 +706,7 @@ impl<W> std::fmt::Debug for PspObservationSource<W> {
     }
 }
 
+#[cfg(test)]
 impl<W> PspObservationSource<W> {
     /// A source over `walk`, reporting failures under `sample`.
     ///
@@ -709,6 +778,7 @@ fn source_failed(
     }
 }
 
+#[cfg(test)]
 impl<'a> PspObservationSource<RecordIter<'a>> {
     /// Every record of an open psp, as a source named by the file's own header.
     ///
@@ -854,6 +924,22 @@ impl ObservationSource for PspSummarySource<'_> {
             decode_the_body_of(&found, live.ids(), &self.layout)
         });
         let mut record = decoded.map_err(|source| self.refuse(source))?.record;
+        // One reference base a position, which the merge pads every allele from and asserts.
+        let spans = record
+            .region
+            .end
+            .get()
+            .saturating_sub(record.region.start.get())
+            .saturating_add(1);
+        if record.reference_bases.len() as u64 != spans {
+            return Err(
+                self.refuse(PspSourceError::ReferenceBasesDoNotSpanTheRecord {
+                    at: record.region,
+                    carries: record.reference_bases.len(),
+                    spans,
+                }),
+            );
+        }
         // **The same renumbering the building source makes, for the same reason**: every
         // sample numbers its read groups from zero, so without it every sample's first group
         // would reach the merge as identifier 0 and the cohort would score them as one lane.
@@ -917,6 +1003,7 @@ impl ObservationSource for PspSummarySource<'_> {
     }
 }
 
+#[cfg(test)]
 impl<W> ObservationSource for PspObservationSource<W>
 where
     W: Iterator<Item = Result<StreamedRecord, PspReadError>>,
@@ -1189,6 +1276,42 @@ mod tests {
             StoredSampleTallies::default(),
             "nothing was handed over, so nothing is counted: {:?}",
             source.read(),
+        );
+    }
+
+    /// **A stored record that begins inside the one before it is refused by the source the run
+    /// reads with, naming the sample**, rather than reaching the merge, which aborted on it
+    /// (found by fuzzing, 2026-10-31: blocks copied over each other pass their checksums). The
+    /// writer accepts such a pair — it refuses only a start before the previous one — so the
+    /// file is a real one. A record beginning one base past the previous end is not refused.
+    #[test]
+    fn a_stored_record_overlapping_the_one_before_it_is_refused_naming_the_sample() {
+        let summarise = |records: &[SampleLocusObservations]| {
+            let (_dir, path) = a_psp_of(records);
+            let mut psp = PspReader::open(&path).expect("the writer accepted the pair");
+            let mut source =
+                PspSummarySource::over(&mut psp, &as_walked()).expect("the summary walk starts");
+            let mut outcomes = Vec::new();
+            while let Some(next) = source.next_summary() {
+                outcomes.push(next.map(|_| ()));
+            }
+            outcomes
+        };
+
+        let abutting = summarise(&[a_record(0, 1_000, 10), a_record(0, 1_010, 10)]);
+        assert!(abutting.iter().all(Result::is_ok), "{abutting:?}");
+
+        let overlapping = summarise(&[a_record(0, 1_000, 10), a_record(0, 1_005, 10)]);
+        assert!(overlapping[0].is_ok());
+        let Err(RunError::SourceFailed { source: cause, .. }) = &overlapping[1] else {
+            panic!("an overlapping record must fail the source: {overlapping:?}");
+        };
+        assert!(
+            matches!(
+                cause.downcast_ref::<PspSourceError>(),
+                Some(PspSourceError::ObservationsOverlap { .. })
+            ),
+            "{cause}"
         );
     }
 

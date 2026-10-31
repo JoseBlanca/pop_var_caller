@@ -119,9 +119,8 @@ pub fn select_generic(
         discovery_nominated: _,
     } = scratch;
     cap_cut_table_indices.clear();
-    // Every alternative some sample's reads earned, in the merge table's own order — which is
-    // also the order they are admitted in, so nothing has to sort it. Step C2's cap is what
-    // first reorders this buffer, and it puts it back before admission.
+    // Every alternative some sample's reads earned, in the merge table's own order. Step C2's
+    // cap reorders this buffer by rank, and admission below by bases.
     ranked_table_indices.extend(
         (1..observation.alleles.len())
             .filter(|&index| per_allele[index].cleared_the_bar())
@@ -131,10 +130,9 @@ pub fn select_generic(
     );
 
     // The cap, and the two orders the buffer holds in turn. First the ranking, so that what is
-    // cut is the worst-evidenced; then the merge table's own index order, because that is the
-    // order the survivors are admitted in (arch §3.1) and so the order that reaches the VCF's
-    // `ALT` column. The ranking decides *which* alleles survive and never what order they
-    // appear in.
+    // cut is the worst-evidenced; then the alleles' bases, the order the survivors are admitted
+    // in and so the order that reaches the VCF's `ALT` column. The ranking decides *which*
+    // alleles survive and never what order they appear in.
     let allowed_alternatives = usize::from(config.max_candidate_alleles.alternatives());
     let verdict = if ranked_table_indices.len() <= allowed_alternatives {
         SelectionVerdict::Selected
@@ -152,11 +150,17 @@ pub fn select_generic(
         cap_cut_table_indices.extend_from_slice(&ranked_table_indices[allowed_alternatives..]);
         cap_cut_table_indices.sort_unstable();
         ranked_table_indices.truncate(allowed_alternatives);
-        ranked_table_indices.sort_unstable();
         SelectionVerdict::Truncated {
             dropped: u32::try_from(dropped).expect("a merge table narrower than four billion"),
         }
     };
+    // **Admitted in the order of their bases, not the merge table's.** The table numbers its
+    // alleles in the order it first met them, which is the order the samples were given, so
+    // admitting in table order made the `ALT` column — and every tie broken by allele id
+    // downstream — depend on how the cohort was listed. Two entries never have equal bases.
+    ranked_table_indices.sort_unstable_by(|&left, &right| {
+        observation.alleles[left as usize].cmp(&observation.alleles[right as usize])
+    });
 
     let mut alleles = CandidateAlleles::new(observation.alleles[0].clone(), LocusKind::Generic);
     let mut remap = AlleleRemap::with_all_dropped(observation.alleles.len());
@@ -219,7 +223,8 @@ mod tests {
     ///
     /// Five sequences, and the middle one is the only alternative no sample earned — one
     /// sample showed it a single read where the rule asks two. So the merge's indices 1, 3 and
-    /// 4 survive and 2 does not, and the survivors take the dense candidate ids 1, 2 and 3.
+    /// 4 survive and 2 does not, and the survivors take the dense candidate ids 1, 2 and 3 in
+    /// the order of their bases: `AA`, `C`, `T`.
     ///
     /// **The hole is what the test is for.** An off-by-one in the remapping hands the calling
     /// loop a real but *wrong* allele's evidence, which is a wrong genotype rather than a
@@ -245,19 +250,19 @@ mod tests {
 
         assert_eq!(
             surviving_bases(&selection),
-            vec![b"A".to_vec(), b"C".to_vec(), b"T".to_vec(), b"AA".to_vec()],
-            "the reference and the three alternatives some sample's reads earned"
+            vec![b"A".to_vec(), b"AA".to_vec(), b"C".to_vec(), b"T".to_vec()],
+            "the reference and the three alternatives some sample's reads earned, by bases"
         );
         let remap = selection.remap();
         assert_eq!(remap.candidate_for(0), Some(AlleleId::REFERENCE));
-        assert_eq!(remap.candidate_for(1), Some(AlleleId(1)));
+        assert_eq!(remap.candidate_for(1), Some(AlleleId(2)));
         assert_eq!(
             remap.candidate_for(2),
             None,
             "the one allele the rule dropped, and the hole the ids close over"
         );
-        assert_eq!(remap.candidate_for(3), Some(AlleleId(2)));
-        assert_eq!(remap.candidate_for(4), Some(AlleleId(3)));
+        assert_eq!(remap.candidate_for(3), Some(AlleleId(3)));
+        assert_eq!(remap.candidate_for(4), Some(AlleleId(1)));
         assert_eq!(remap.table_len(), 5);
         assert_eq!(remap.num_admitted(), 4);
     }
@@ -727,18 +732,19 @@ mod tests {
         );
     }
 
-    /// **The survivors of a binding cap are admitted in the merge table's order, not in rank
-    /// order** — the whole `ALT` column depends on it, and no test before this one could see it.
+    /// **The survivors of a binding cap are admitted in the order of their bases, not in rank
+    /// order and not in the merge table's** — the whole `ALT` column depends on it.
     ///
-    /// A reviewer deleted the sort that puts the kept prefix back into index order and every
-    /// test in this file still passed while the column came out permuted. Here the best-ranked
-    /// alternative is the *last* of the table's four, so admitting in rank order gives
-    /// `AA, C` where the table's order gives `C, AA`.
+    /// A reviewer once deleted the sort that follows the cap and every test in this file still
+    /// passed while the column came out permuted. Here the best-ranked alternative is `C` and
+    /// the table's first is `T`, so admitting in rank order gives `C, AA` and the table's order
+    /// gives `T, AA`, where the bases give `AA, C`. The table's order is the order the samples
+    /// were given, which is why it is not the one used.
     #[test]
-    fn the_survivors_of_a_binding_cap_are_admitted_in_the_merge_tables_order() {
+    fn the_survivors_of_a_binding_cap_are_admitted_in_the_order_of_their_bases() {
         let observation = locus_of(
-            &[b"A", b"C", b"G", b"T", b"AA"],
-            one_sample_showing(&[2, 4, 2, 3, 9]),
+            &[b"A", b"T", b"G", b"AA", b"C"],
+            one_sample_showing(&[2, 3, 2, 4, 9]),
         );
         let selection = selection_capped_at(&observation, cap_of(3));
         assert_eq!(
@@ -747,13 +753,13 @@ mod tests {
         );
         assert_eq!(
             surviving_bases(&selection),
-            vec![b"A".to_vec(), b"C".to_vec(), b"AA".to_vec()],
-            "the best-ranked alternative is the table's last, and it stays last"
+            vec![b"A".to_vec(), b"AA".to_vec(), b"C".to_vec()],
+            "the best-ranked alternative is the table's last and sorts after AA"
         );
-        assert_eq!(selection.remap().candidate_for(1), Some(AlleleId(1)));
+        assert_eq!(selection.remap().candidate_for(3), Some(AlleleId(1)));
         assert_eq!(selection.remap().candidate_for(4), Some(AlleleId(2)));
         assert_eq!(
-            selection.remap().candidate_for(3),
+            selection.remap().candidate_for(1),
             None,
             "the 3-read alternative is what the cap cut"
         );
@@ -833,7 +839,7 @@ mod tests {
 
     /// **A cap that binds does not change which alleles cleared the rule**, only how many of
     /// them are kept — so the same locus under a wide cap and a tight one gives the tight one's
-    /// survivors as a subset of the wide one's, and the same relative order.
+    /// survivors as a subset of the wide one's, both in the order of their bases.
     #[test]
     fn the_cap_keeps_a_subset_of_what_a_wider_cap_would_keep() {
         let observation = locus_of(
@@ -846,10 +852,10 @@ mod tests {
             wide,
             vec![
                 b"A".to_vec(),
+                b"AA".to_vec(),
                 b"C".to_vec(),
                 b"G".to_vec(),
-                b"T".to_vec(),
-                b"AA".to_vec()
+                b"T".to_vec()
             ]
         );
         assert_eq!(tight, vec![b"A".to_vec(), b"C".to_vec(), b"T".to_vec()]);
@@ -1027,7 +1033,7 @@ mod tests {
         );
         assert_eq!(
             surviving_bases(&selection),
-            vec![b"A".to_vec(), b"CG".to_vec(), b"CA".to_vec()],
+            vec![b"A".to_vec(), b"CA".to_vec(), b"CG".to_vec()],
             "each alternative takes 3 of the sample's 13 reads for one sample, so all three \
              numbers tie and the bases break it ascending: CA and CG survive, CT is cut"
         );

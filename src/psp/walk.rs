@@ -30,6 +30,7 @@ use super::record::RecordHead;
 pub(super) const DEFAULT_RECORD_BUFFER_CEILING_BYTES: usize =
     super::block::ROLLING_BUFFER_CEILING_BYTES;
 
+#[cfg(test)]
 /// Whether a walk could honour this ceiling on one record's share of its rolling buffer.
 ///
 /// **The rule lives beside the buffer it is about.** A ceiling at or under the buffer itself
@@ -207,6 +208,7 @@ impl<'a> RecordIter<'a> {
         self.stream.blocks_begun()
     }
 
+    #[cfg(test)]
     /// The ordinal of the block the record last handed back came from, into
     /// [`super::PspReader::block_index`].
     ///
@@ -247,6 +249,7 @@ impl<'a> RecordIter<'a> {
         }
     }
 
+    #[cfg(test)]
     pub fn building_only_where<F>(self, want: F) -> SelectiveRecordIter<'a, F>
     where
         F: FnMut(&RecordHead) -> bool,
@@ -373,6 +376,7 @@ impl Iterator for RecordIter<'_> {
     }
 }
 
+#[cfg(test)]
 /// A walk that builds only the records a predicate asks for.
 ///
 /// **The skip is the reader's decision rather than a separate call** (spec §6.2). Every record
@@ -416,6 +420,7 @@ pub struct SelectiveRecordIter<'a, F> {
     want: F,
 }
 
+#[cfg(test)]
 /// **Written out rather than derived, because a derived one needs `F: Debug` and a closure is
 /// not** — so the derive was inert for every predicate a caller can actually pass, and the type
 /// looked printable in rustdoc while being unprintable at every call site. The predicate is the
@@ -431,17 +436,9 @@ impl<F> std::fmt::Debug for SelectiveRecordIter<'_, F> {
     }
 }
 
+#[cfg(test)]
 impl<'a, F> SelectiveRecordIter<'a, F> {
-    /// The walk underneath, for everything a full walk can be asked.
-    ///
-    /// **An accessor rather than a forwarded method each.** The three below are the questions a
-    /// selective walk is asked often enough to be worth spelling; anything added to
-    /// [`RecordIter`] later — Milestone H4 and H5 are both about numbers a walk could be asked
-    /// for — is reachable through this without also having to be added here.
-    pub fn walk(&self) -> &RecordIter<'a> {
-        &self.walk
-    }
-
+    #[cfg(test)]
     /// Which reads are live at the record last handed back — see [`RecordIter::live_reads`].
     ///
     /// **Exact after a declined record too**, which is the whole point of putting the chain-id
@@ -451,11 +448,13 @@ impl<'a, F> SelectiveRecordIter<'a, F> {
         self.walk.live_reads()
     }
 
+    #[cfg(test)]
     /// How many blocks this walk has opened — see [`RecordIter::blocks_begun`].
     pub fn blocks_begun(&self) -> u64 {
         self.walk.blocks_begun()
     }
 
+    #[cfg(test)]
     /// The ordinal of the block the record last handed back came from — see
     /// [`RecordIter::current_block`].
     pub fn current_block(&self) -> u64 {
@@ -463,6 +462,7 @@ impl<'a, F> SelectiveRecordIter<'a, F> {
     }
 }
 
+#[cfg(test)]
 impl<F: FnMut(&RecordHead) -> bool> Iterator for SelectiveRecordIter<'_, F> {
     type Item = Result<StreamedRecord, PspReadError>;
 

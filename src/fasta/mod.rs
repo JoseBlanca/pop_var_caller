@@ -7,13 +7,13 @@
 //! on the cohort side, the per-group merger when extracting REF
 //! sequence for compound alleles) reaches in here.
 //!
-//! - [`fetcher::StreamingChromRefFetcher`] /
-//!   [`fetcher::ManualEvictChromRefFetcher`] /
-//!   [`fetcher::RepositoryRefFetcher`] — the production
+//! - `fetcher::StreamingChromRefFetcher` /
+//!   `fetcher::ManualEvictChromRefFetcher` /
+//!   `fetcher::RepositoryRefFetcher` — the production
 //!   implementations; see [`fetcher`] for the per-impl tradeoffs.
-//! - [`fetcher::ChromRefFetcher`] — single-chromosome trait
+//! - `fetcher::ChromRefFetcher` — single-chromosome trait
 //!   (sliding-buffer contract, used by single-chrom consumers).
-//! - [`MultiChromRefFetcher`] — multi-chromosome trait used by the
+//! - `MultiChromRefFetcher` — multi-chromosome trait used by the
 //!   pileup walker.
 //! - [`ChromRefFetchError`] — typed errors raised by every fetcher.
 //! - [`ContigEntry`] / [`ContigList`] — the reference's contig table
@@ -23,10 +23,7 @@
 
 pub mod fetcher;
 
-pub use fetcher::{
-    ChromRefBaseIter, ChromRefFetchError, ChromRefFetcher, ManualEvictChromRefFetcher,
-    RepositoryRefFetcher, STREAMING_REF_BUFFER_BYTES, StreamingChromRefFetcher,
-};
+pub use fetcher::ChromRefFetchError;
 
 // ---------------------------------------------------------------------
 // ContigList
@@ -104,6 +101,7 @@ impl ContigList {
 // MultiChromRefFetcher trait
 // ---------------------------------------------------------------------
 
+#[cfg(test)]
 /// Multi-chromosome reference-FASTA fetcher used by the Stage 1
 /// pileup walker. Errors are typed ([`ChromRefFetchError`]) so
 /// callers can route I/O failures, range failures, and contract
@@ -130,33 +128,9 @@ pub trait MultiChromRefFetcher {
         start_1based: u32,
         length: u32,
     ) -> Result<Vec<u8>, ChromRefFetchError>;
-
-    /// Forward sequential iterator over every uppercased base of
-    /// `chrom_id`'s contig, in 1..=`length` order. Used by the DUST
-    /// mask construction (one pass per chrom) to avoid materialising
-    /// the whole contig as a single `Vec<u8>`.
-    ///
-    /// Default impl materialises via `fetch(chrom_id, 1, length)`;
-    /// streaming fetchers override to walk a sliding buffer instead.
-    /// The boxed iterator costs one heap allocation per chrom plus
-    /// one virtual dispatch per byte — the latter is dominated by
-    /// the inner sdust scoring work in practice.
-    ///
-    /// # Errors
-    ///
-    /// Same failure modes as [`Self::fetch`] (the default impl
-    /// just calls `fetch(chrom_id, 1, length)`).
-    fn iter_bases<'a>(
-        &'a self,
-        chrom_id: u32,
-        length: u32,
-    ) -> Result<Box<dyn Iterator<Item = Result<u8, ChromRefFetchError>> + 'a>, ChromRefFetchError>
-    {
-        let seq = self.fetch(chrom_id, 1, length)?;
-        Ok(Box::new(seq.into_iter().map(Ok)))
-    }
 }
 
+#[cfg(test)]
 /// Forwarding impl so callers may pass either an owned fetcher or a
 /// shared reference. The fetcher's methods all take `&self`, so the borrow is
 /// sufficient. (Production's pileup walker, deleted in promotion Milestone D,
@@ -169,14 +143,5 @@ impl<T: MultiChromRefFetcher + ?Sized> MultiChromRefFetcher for &T {
         length: u32,
     ) -> Result<Vec<u8>, ChromRefFetchError> {
         (**self).fetch(chrom_id, start_1based, length)
-    }
-
-    fn iter_bases<'a>(
-        &'a self,
-        chrom_id: u32,
-        length: u32,
-    ) -> Result<Box<dyn Iterator<Item = Result<u8, ChromRefFetchError>> + 'a>, ChromRefFetchError>
-    {
-        (**self).iter_bases(chrom_id, length)
     }
 }

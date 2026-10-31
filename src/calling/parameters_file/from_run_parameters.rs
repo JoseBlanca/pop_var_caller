@@ -10,6 +10,7 @@
 //! documented on [`ParametersFile::of_run`] itself — this module is private, so prose here
 //! reaches no rendered page.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 use super::bindings::hex_digest;
@@ -43,7 +44,9 @@ use crate::parameter_estimation::joint::stratum_fits::StratumFits;
 use crate::parameter_estimation::{Estimate, Provenance};
 use crate::read::input::read_groups::ReadGroups;
 use crate::repeat_catalog::StrRepeatCriteria;
-use crate::types::{ErrorRate, InbreedingF, ReadGroupId};
+#[cfg(test)]
+use crate::types::ErrorRate;
+use crate::types::{InbreedingF, ReadGroupId};
 
 /// **How much data stood behind each read group's base-quality multiplier** — one entry a read
 /// group in the run's dense order, from whichever of spec §7's three sources the run had.
@@ -54,7 +57,7 @@ use crate::types::{ErrorRate, InbreedingF, ReadGroupId};
 /// or the fit — and after assembly the run cannot tell them apart*. The multiplier and its
 /// warrant do come out of [`RunParameters`](crate::calling::run_parameters::RunParameters)
 /// the same way whatever the source, but **the count beside them does not**, and until
-/// 2026-08-31 [`ParametersFile::of_run`] took the fit's own
+/// 2026-08-31 `ParametersFile::of_run` took the fit's own
 /// `BTreeMap<ReadGroupId, Estimate<ErrorRate>>` for it. Two of the three sources cannot produce
 /// one:
 ///
@@ -106,6 +109,7 @@ impl ReadsBehindEachCalibration {
         Self(counts)
     }
 
+    #[cfg(test)]
     /// **The pre-pass's own rates**, which is where the count lives on a run that fitted them:
     /// [`ReadGroupCalibration`] is a multiplier and a warrant with no count on it, and the count
     /// spec §3.3 asks for is on the `Estimate<ErrorRate>` assembly read and did not store.
@@ -195,6 +199,7 @@ impl ReadsBehindEachCalibration {
 }
 
 impl ParametersFile {
+    #[cfg(test)]
     /// **Write down what this run scored its reads under.**
     ///
     /// **This is spec §7's one writer, and it is reached from all three of its sources** — a
@@ -348,13 +353,13 @@ impl ParametersFile {
         )
     }
 
-    /// As [`of_run`](Self::of_run), for a run that may have sorted no repeats: `repeat_routing`
+    /// As `of_run`, for a run that may have sorted no repeats: `repeat_routing`
     /// is `None` under `--generic-path-only`, which asked no catalog anything, and the file then
     /// records no `[repeat_routing]` (spec §3.9: absent means the file does not say).
     ///
     /// # Panics
     ///
-    /// As [`of_run`](Self::of_run).
+    /// As `of_run`.
     #[must_use]
     pub fn of_run_under(
         run: &RunParameters,
@@ -469,7 +474,7 @@ impl ParametersFile {
     /// **Record how each start of the SNP/indel fit behind these numbers ended** — `None` where no
     /// fit stands behind them (spec `fit_precision.md` §5.2).
     ///
-    /// **A builder beside [`Self::of_run`] rather than an eighth argument to it**: a fit's starts
+    /// **A builder beside `Self::of_run` rather than an eighth argument to it**: a fit's starts
     /// are not part of what calling scored with, and only the two runs that have them — the fit
     /// that made them, and a calling run writing back the file it read — have anything to say.
     #[must_use]

@@ -497,6 +497,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         }
     }
 
+    #[cfg(test)]
     /// The chromosome this cursor covers.
     ///
     /// A caller compares against this and mints a new cursor at a chromosome boundary; the
@@ -857,14 +858,6 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         self.reference.evict_before(pos);
     }
 
-    /// How many reference bases this cursor's reader is holding — the bound made observable.
-    pub fn resident_reference_bases(&self) -> usize
-    where
-        R: EvictableRefSeq,
-    {
-        self.reference.resident_bases()
-    }
-
     /// Step-1's per-read-group tally, for as much of the chromosome as this cursor has read.
     ///
     /// **One entry per read group met, in first-seen order, and never summed here.** A drop rate
@@ -922,6 +915,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             .saturating_sub(self.other_sample_at_window_start)
     }
 
+    #[cfg(test)]
     /// Start a fresh tally window: [`read_group_counts`](Self::read_group_counts) reports only
     /// what happens from here.
     ///

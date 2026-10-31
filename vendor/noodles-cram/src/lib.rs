@@ -3,7 +3,6 @@
 #[cfg(feature = "async")]
 pub mod r#async;
 
-pub mod perf;
 pub mod codecs;
 pub mod container;
 pub mod crai;

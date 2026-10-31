@@ -13,7 +13,9 @@
 //! ```
 
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+#[cfg(test)]
+use std::io::Seek;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use super::block::{BlockBuilder, BlockCompressError, BlockCompressor, BlockHead, BlockWriteError};
@@ -22,7 +24,9 @@ use super::header::Header;
 use super::index::BlockIndexEntry;
 use super::{PspWriteError, footer, index};
 use crate::locus_generation::SampleLocusObservations;
-use crate::types::{GenomePosition, GenomeRegion};
+use crate::types::GenomePosition;
+#[cfg(test)]
+use crate::types::GenomeRegion;
 
 /// The header-parameter key under which a writer records the zstd level it compressed at.
 ///
@@ -402,6 +406,7 @@ impl PspWriter {
         Ok(writer)
     }
 
+    #[cfg(test)]
     /// Reopen a finished psp and add records to it.
     ///
     /// **The footer says where the blocks end, so appending is truncating at the index offset and
@@ -505,6 +510,7 @@ impl PspWriter {
         })
     }
 
+    #[cfg(test)]
     /// The region of the last record already in a file, or `None` if it holds none.
     ///
     /// **Heads only.** The walk declines every body, so this costs the last block's framing and
@@ -525,6 +531,7 @@ impl PspWriter {
         Ok(last)
     }
 
+    #[cfg(test)]
     /// Build a compressor at the window the manifest declares and the level the header records.
     ///
     /// **A header that records no level gives this build's**, which is what a file written before

@@ -166,16 +166,19 @@ impl RegionSet {
         &self.regions[start..end]
     }
 
+    #[cfg(test)]
     /// Iterate the spans in genomic order.
     pub fn iter(&self) -> std::slice::Iter<'_, Region> {
         self.regions.iter()
     }
 
+    #[cfg(test)]
     /// Number of spans.
     pub fn len(&self) -> usize {
         self.regions.len()
     }
 
+    #[cfg(test)]
     /// Whether the set selects no spans at all.
     pub fn is_empty(&self) -> bool {
         self.regions.is_empty()

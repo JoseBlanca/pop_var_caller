@@ -17,7 +17,7 @@
 //! - [`LevelSource`], [`PenalisedPoint`] and [`CurveReach`]: where an emitted level came from —
 //!   the cell, the curve, a blend of the two, or a point on the penalised fit's curve — and whether
 //!   the cell sat inside the curve's range;
-//! - [`LEVEL_CEILING`], the largest level the climb's curves reported.
+//! - `LEVEL_CEILING`, the largest level the climb's curves reported.
 
 use std::fmt;
 
@@ -47,9 +47,11 @@ use std::fmt;
 pub struct RiseShape(f64);
 
 impl RiseShape {
+    #[cfg(test)]
     /// The multiplying end: each extra repeat multiplies the level by a fixed factor.
     pub const MULTIPLYING: Self = Self(0.0);
 
+    #[cfg(test)]
     /// The adding end: each extra repeat adds a fixed amount, which is production's shape.
     pub const ADDING: Self = Self(1.0);
 
@@ -105,6 +107,7 @@ pub struct SlippageCurve {
 }
 
 impl SlippageCurve {
+    #[cfg(test)]
     /// Whether `repeats` sat inside the repeat counts this curve was fitted over.
     pub fn reach(&self, repeats: u64) -> CurveReach {
         if repeats < self.fitted_from {
@@ -117,6 +120,7 @@ impl SlippageCurve {
     }
 }
 
+#[cfg(test)]
 /// **The largest level the climb's curves reported**, and so the largest level an older file can
 /// carry from one.
 ///
@@ -157,6 +161,7 @@ pub enum LevelSource {
 }
 
 impl LevelSource {
+    #[cfg(test)]
     /// The share the parametric curve carried — 1 for [`LevelSource::Curve`], 0 for
     /// [`LevelSource::Cell`], the weight for a blend — and `None` for
     /// [`LevelSource::PenalisedCurve`], which no parametric curve was weighed against.

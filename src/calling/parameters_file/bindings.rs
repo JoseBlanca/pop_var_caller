@@ -522,7 +522,7 @@ impl ParametersFile {
     /// 3. the census, which **demotes rather than refusing**: the numbers are still numbers, and
     ///    a file fitted from another census of this same cohort is interpretable, merely less
     ///    warranted.
-    /// 4. [`Self::to_run_parameters`], on the file as demotion left it.
+    /// 4. `Self::to_run_parameters`, on the file as demotion left it.
     ///
     /// # `census: None` — the run that has no census to compare against
     ///
@@ -799,6 +799,7 @@ pub enum CensusAgreement {
 }
 
 impl CensusAgreement {
+    #[cfg(test)]
     /// **Which term the two censuses first differ on**, and `None` where they do not differ or
     /// were never compared.
     ///

@@ -147,6 +147,12 @@ partition); across paths, the reference partition is exclusive and complete
 ([`typed_regions.md`](typed_regions.md) §2.3). The one place two records can share a *POS* — while
 still not sharing a base — is the anchor shift, and §5 defines the order there.
 
+*Amended 2026-10-29.* One step crosses the partition: an STR record **widened over a deletion into
+its flank** claims flank bases the generic path also calls. The gathering pass merges every generic
+record that overlaps such a record into it, as one record over their union whose alleles are
+haplotypes ([`str_edge_deletion_alleles.md`](str_edge_deletion_alleles.md) §6), so the rule holds
+without exception and **no record carries a `*` allele**. The encoder refuses one.
+
 ---
 
 ## 4. The header
@@ -282,7 +288,8 @@ hull order — `RU=CT,AT,T;PERIOD=2,2,1` — so both are declared `Number=.` (th
 moved; segment records still write one value). `STR`'s description names bundles. **A bundle with no
 run writes none of `STR`, `RU` and `PERIOD`**, which keeps this section's rule that the three travel
 together; it is still the repeat path's record for the gathering of edge deletions (§6 of
-`str_edge_deletion_alleles.md`) and for the writer's ordering.
+`str_edge_deletion_alleles.md`), which merges into it the generic records it overlaps, and for the
+writer's ordering.
 
 **Not carried over, by name:** `CA` (production's chain-anchor flag — the chain machinery has no
 ng counterpart); `PARALOG_POST` (the hidden-paralog score — ng has no paralog filter yet; the id

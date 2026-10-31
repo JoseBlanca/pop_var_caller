@@ -9,7 +9,7 @@
 //! (`doc/devel/ng/spec/read_likelihoods.md` §3.6;
 //! `doc/devel/ng/arch/parameter_prepass_joint_fit.md` §1.6).
 //!
-//! **Nothing declares one yet.** [`SequencingBatches::declared`] has no caller outside this
+//! **Nothing declares one yet.** `SequencingBatches::declared` has no caller outside this
 //! module's tests: the command-line flag that would carry a batching is unbuilt, so every run
 //! today gets [`SequencingBatches::all_together`] and every contaminated read group is scored
 //! against the whole cohort's frequency. That is the honest default and costs such a run
@@ -43,18 +43,22 @@
 //!
 //! The sample-keyed view needs one batch per sample, and a sample split across two batches has
 //! no single answer: the choices are to pick one, to average the two populations, or to refuse.
-//! **This refuses** ([`SequencingBatchError::SampleSequencedInSeveralBatches`]), because the
+//! **This refuses** (`SequencingBatchError::SampleSequencedInSeveralBatches`), because the
 //! read likelihood deliberately declined to invent a rule here and because picking a majority
 //! batch would score half a sample's reads against the wrong neighbours with nothing said.
 //! **Under the shipped default it cannot arise** — one batch holds everything — so what this
 //! refusal costs is a run that declares a batching splitting a sample, and what it buys is that
 //! nobody discovers the rule by reading the genotypes.
 
+#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::read::input::read_groups::ReadGroups;
-use crate::types::{BatchId, BatchOfEachReadGroup, BatchOfEachSample, ReadGroupId};
+#[cfg(test)]
+use crate::types::ReadGroupId;
+use crate::types::{BatchId, BatchOfEachReadGroup, BatchOfEachSample};
 
+#[cfg(test)]
 /// Why a declared batching does not describe this run.
 ///
 /// Every variant is a refusal rather than a repair, and each names the thing the run would have
@@ -212,6 +216,7 @@ impl SequencingBatches {
         }
     }
 
+    #[cfg(test)]
     /// The batching the run was given — batch *i* is the *i*-th entry of `batches`.
     ///
     /// # Errors
@@ -312,7 +317,7 @@ impl SequencingBatches {
     /// **The batching read back out of a run's parameters file**, as the two dense columns the
     /// file writes rather than as a declaration to be resolved.
     ///
-    /// **Why not [`Self::declared`].** That one takes the batches as sets of read groups and the
+    /// **Why not `Self::declared`.** That one takes the batches as sets of read groups and the
     /// run's own [`ReadGroups`] table, from which it derives the sample column — it is the door a
     /// *user's declaration* comes through, and it is where a declaration that does not describe
     /// the run is refused. A parameters file has already been through that door once: it carries
@@ -330,7 +335,7 @@ impl SequencingBatches {
     /// — the columns are read by index into a table of that many rows, so an id past its end is
     /// an out-of-range read at whichever locus first carries one of that library's reads.
     ///
-    /// **It does not check that a sample's read groups share a batch**, which [`Self::declared`]
+    /// **It does not check that a sample's read groups share a batch**, which `Self::declared`
     /// refuses: this constructor has no read-group table to join the two columns through, so
     /// that is the file reader's to check against the file's own table
     /// (`ParametersFile::validate`).

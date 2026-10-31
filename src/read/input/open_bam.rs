@@ -350,11 +350,13 @@ impl AlignmentFile {
         }))
     }
 
+    #[cfg(test)]
     /// How this file's records are assigned to read groups (see the field).
     pub fn read_group_resolution(&self) -> &ReadGroupResolution {
         &self.resolution
     }
 
+    #[cfg(test)]
     /// The chromosomes this file may be read over.
     ///
     /// **The file's own `@SQ` list**, which the open gate proved agrees with the reference's

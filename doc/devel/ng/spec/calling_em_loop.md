@@ -611,8 +611,8 @@ locus's numbers — otherwise the locus is corrupted cohort-wide and refusing it
 answer. Setting them aside at the loop's entrance is what closes that.
 
 **Excluding costs the loop nothing it does not already tolerate.** A sample with no reads at the
-locus already contributes zero for every genotype and is decided by the prior alone (§7), so a
-smaller cohort is a shape the loop is built for. What it does change is the denominator of the
+locus already contributes zero for every genotype, is decided by the prior alone, and puts no copies
+in the cohort's sum (§5.0.2), so a smaller cohort is a shape the loop is built for. What it does change is the denominator of the
 fitted frequencies, which is the right denominator: the samples the locus was actually called on.
 
 **The ruling has a producer and no carrier, and the gap is in the shared vocabulary rather than
@@ -673,6 +673,61 @@ unmeasured (§8, §12's Q5) — on the STR path one evaluation is a stutter term
 alignment, against the loop's two `lgamma` calls. The slippage numbers are inside that function. Re-fitting them on every pass would rebuild the table up to 50 times per
 locus; re-fitting them between runs of the loop rebuilds it at most four times at production's cap
 (§5.1). Same adaptation, an order of magnitude apart in cost.
+
+#### 5.0.2 A sample whose reads said nothing puts nothing in the cohort's sum
+
+**A sample whose genotype likelihoods are flat at a locus — every genotype scored alike, which is
+what no reads gives — is still called, and is counted nowhere** (owner's ruling, 2026-10-31). It
+keeps its row and its genotype: the prior decides it alone, and the VCF writes it as `./.`
+([`vcf_output.md`](vcf_output.md) §7.1). But its expected allele copies are zero, on every pass, so
+it adds nothing to the cohort's sum. With them go everything the sum feeds:
+
+- the allele frequencies the record reports;
+- every other sample's leave-one-out prior (§2);
+- the loop's convergence test, whose chromosome count is the informative samples' (§6);
+- and, by the same rule in [`calling_quality.md`](calling_quality.md) §5.1, the site quality.
+
+Its own prior is then the rest of the cohort's copies, which is the right prior for a sample
+nobody observed.
+
+**Why: the sample is evidence of nothing, and counting its prior-only copies fed the cohort's own
+frequency back in as if a sample had shown it.** Until this ruling the M-step summed every row, so a
+no-read sample contributed the copies its prior expected. Those copies are the seed-smoothed cohort
+frequency, so they acted as extra prior weight: they pulled the frequency toward the seed, and every
+other sample's prior moved with it. Measured on the GIAB trio over its 100 benchmark regions, with
+a fourth sample added that has a read group and no reads:
+
+| | 30x | 5x |
+|---|---|---|
+| records whose `AF` changed | 766 of 767 | 710 of 710 |
+| records whose `QUAL` rose (never fell) | 746, median +3.7, up to +17.6 | 695, median +3.6 |
+| sample `GQ`s that changed | 341, up to +24 | 508 |
+| records newly written at the default `--min-site-quality` | 0 | 3 |
+| written genotypes that changed | 0 | 1 |
+
+**Every one of those moves had no read behind it.** And the case is not contrived: a sample with no
+reads at a locus is routine at low coverage — about 1 position in 20 at 3 reads a position, so
+around three of the 63 tomato accessions at every locus.
+
+**This is the full model's answer, not an approximation of it.** Under a Dirichlet-multinomial
+prior, a sample whose likelihood is flat marginalises out of the joint posterior exactly: summing it
+over its genotypes leaves the others' posterior as it would be without it. The mean-field loop
+broke that by feeding the sample's posterior expectation back as data. With its copies at zero, the
+loop's fixed point no longer depends on it. Measured after the change on the same trio: adding the
+empty sample leaves every field of every record unchanged, at 30x and at 5x, except the hidden-dup
+filter's score. That filter's allele-frequency prior is built once a run over every sample in the
+cohort, which is a separate decision.
+
+**The test is the same one emission uses**, and in one place: a row whose entries are all exactly
+equal (`calling::quality::reads_said_nothing`). Exact equality is right here, because an empty sum
+is `0.0` for every genotype by one code path. A *nearly* flat row — one read at three reads a
+position — still counts, as weakly as its likelihood says. Drawing a threshold there would be a
+different claim, and nothing has measured one.
+
+**At one sample, and at a thousand.** A lone sample with no reads leaves an empty sum, and the locus
+reports no frequency and a site quality of zero. Both are true, and neither is a fitted zero. A
+cohort of thousands is unaffected in cost: the test is one comparison per genotype per sample per
+pass, beside the scoring that already reads the same row.
 
 ### 5.1 Re-fitting the slippage numbers at the locus — three settings, one to be measured
 
@@ -735,7 +790,8 @@ quantity moves.
 ## 6. Stopping
 
 **Converge on the quantity the loop actually feeds back — the cohort's expected allele copies —
-divided by the number of chromosomes in the cohort.** Stop when the largest such change between two
+divided by the number of chromosomes in the cohort**, counting only the samples whose reads said
+something at the locus, since only they put copies in the sum (§5.0.2). Stop when the largest such change between two
 passes falls below a threshold. **The division is not decoration and dropping it is the easy
 mistake:** expected copies are a count, and the threshold is a fraction. `1e-3` in raw copies means a
 different thing at 1 sample from what it means at 1,000, so a criterion written on counts tightens by

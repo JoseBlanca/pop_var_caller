@@ -19,11 +19,7 @@ fork, not in the diff.
 
 | file | | change |
 |---|---|---|
-| `Cargo.toml` | the `perf-counters` feature | 1 |
 | `FORK.md` | this file | — |
-| `src/lib.rs` | declares `perf` | 1 |
-| `src/perf.rs` | new — every counter | 1 |
-| `src/io/reader/container/block.rs` | `decode` split into a timed wrapper and `decode_inner` | 1 |
 | `src/codecs/rans_4x8/decode.rs` | declares `table` | 2 |
 | `src/codecs/rans_4x8/decode/table.rs` | new — the packed slot | 2 |
 | `src/codecs/rans_4x8/decode/order_0.rs` | the decode loop, and two builders deleted | 2 |
@@ -53,31 +49,12 @@ field accessors take a caller-supplied buffer, and the record's fields are `pub(
 
 ## The changes
 
-### 1. Per-codec counters, behind the `perf-counters` feature — measurement only
+### 1. Per-codec counters, behind a `perf-counters` feature — removed 2026-10-31
 
-`src/perf.rs` (new), declared in `src/lib.rs`; `Block::decode` in
-`src/io/reader/container/block.rs` split into a timed wrapper and a `decode_inner` carrying
-the body it always had; the feature declared in this crate's `Cargo.toml`.
-
-**With the feature off, `decode` is the upstream function under a different name and nothing
-else changes** — no counter, no clock read, no atomic, and every call site below compiles to
-nothing. With it on there are three sets of counters, each answering a question a sampling
-profile cannot:
-
-- **per compression method** — blocks, compressed and inflated bytes, nanoseconds. A profile
-  shows `Block::decode` as one frame whatever method the block used, so this is the only way to
-  tell gzip's cost from rANS's.
-- **per rANS order, and split between building the decode tables and decoding symbols**
-  (`decode/order_0.rs`, `decode/order_1.rs`). This is what showed that the setup cost more than
-  the decoding — see change 2.
-- **per stage of `Slice::records`** — fetching and digesting the reference, allocating the
-  record vector, reading the records, the auxiliary tags within that, and linking mates
-  (`slice.rs`, `slice/records.rs`). **Read its tag figure with care**: it puts a clock-read pair
-  around every record, and on 1.2 million records that overhead was most of the number it
-  reported. It is good for ranking stages and bad for sizing one.
-
-This is a measuring instrument, not a change to what noodles does, and it is not the kind of
-thing to send upstream.
+The counters, `src/perf.rs` and the timed wrapper around `Block::decode` were taken out when the
+only program that read them, `examples/ng_cram_decode_layers.rs`, was deleted with the rest of
+the code `pvc` does not reach. Change 2's before-and-after figures were measured with them; git
+history before 2026-10-31 has both.
 
 ### 2. rANS 4x8 builds one packed lookup per used context, not three arrays over all 256
 

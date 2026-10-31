@@ -22,12 +22,16 @@ use std::path::{Path, PathBuf};
 use super::footer::{FOOTER_BYTES, Footer, decode_footer};
 use super::header::{HEAD_MAGIC, Header, MAX_LOOK_BACK_WINDOW_LOG};
 use super::index::BlockIndexEntry;
-use super::walk::{self, RecordIter, SelectiveRecordIter};
+#[cfg(test)]
+use super::walk::SelectiveRecordIter;
+use super::walk::{self, RecordIter};
 // **The head through the module root, which is where its public path already is.** Naming the
 // type a predicate is shown is not importing a decoder — but a path into the record module is
 // what `the_opener_cannot_reach_any_block_decoding_code` forbids this file, comments included,
 // so the type comes through `super` and this note spells no such path.
-use super::{PspReadError, RecordHead, index, read_header_from};
+#[cfg(test)]
+use super::RecordHead;
+use super::{PspReadError, index, read_header_from};
 use crate::types::GenomePosition;
 
 thread_local! {
@@ -40,6 +44,7 @@ fn count_trailer_bytes_read(bytes: u64) {
     TRAILER_BYTES_READ.with(|counter| counter.set(counter.get() + bytes));
 }
 
+#[cfg(test)]
 /// How many bytes of psp trailer this thread has read since [`reset_trailer_bytes_read`].
 ///
 /// **The only thing that tells a reader of a payload's front from a reader of the whole
@@ -56,6 +61,7 @@ pub fn trailer_bytes_read() -> u64 {
     TRAILER_BYTES_READ.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
 /// Start counting again from zero.
 pub fn reset_trailer_bytes_read() {
     TRAILER_BYTES_READ.with(|counter| counter.set(0));
@@ -99,10 +105,6 @@ pub struct PspReader {
     header: Header,
     footer: Footer,
     block_index: Vec<BlockIndexEntry>,
-    /// The ceiling this reader was opened under. **Kept because an open reader should be able to
-    /// say what it holds**: at several thousand open samples the budget is the number that
-    /// multiplies, and a caller tuning it needs to read back what it actually got.
-    window_budget_bytes: u64,
     /// How far a walk's rolling buffer may grow for **one record**, which is a different
     /// ceiling from the window above and is spent only while a walk is running.
     record_buffer_ceiling_bytes: usize,
@@ -206,11 +208,11 @@ impl PspReader {
             header,
             footer,
             block_index: blocks,
-            window_budget_bytes,
             record_buffer_ceiling_bytes: walk::DEFAULT_RECORD_BUFFER_CEILING_BYTES,
         })
     }
 
+    #[cfg(test)]
     /// The same reader, with a different ceiling on how much of a walk's rolling buffer **one
     /// record** may have.
     ///
@@ -230,6 +232,7 @@ impl PspReader {
         Ok(self)
     }
 
+    #[cfg(test)]
     /// How much of a walk's rolling buffer one record may have, under this reader.
     pub fn record_buffer_ceiling_bytes(&self) -> usize {
         self.record_buffer_ceiling_bytes
@@ -254,11 +257,7 @@ impl PspReader {
         &self.footer
     }
 
-    /// The look-back window ceiling this reader was opened under.
-    pub fn look_back_window_budget_bytes(&self) -> u64 {
-        self.window_budget_bytes
-    }
-
+    #[cfg(test)]
     /// The writer's closing payload: at most one seek and one read, and it may be empty.
     ///
     /// **Opaque here.** The container stores bytes and hands them back; what is in them is the
@@ -283,7 +282,7 @@ impl PspReader {
     /// what that means — a payload too short to be what the caller was looking for — is the
     /// caller's to decide.
     ///
-    /// Every byte it returns is counted against [`trailer_bytes_read`].
+    /// Every byte it returns is counted against `trailer_bytes_read`.
     pub fn trailer_head(&mut self, at_most: usize) -> Result<Vec<u8>, PspReadError> {
         // **`try_from` and not `as`**, which would wrap on a 32-bit target and turn a trailer
         // wider than a `usize` into a few bytes reported as the whole of it.
@@ -321,6 +320,7 @@ impl PspReader {
         self.walk_from(0, at)
     }
 
+    #[cfg(test)]
     /// Every record in the file, building only the bodies `want` asks for.
     ///
     /// **This is the shape the cohort's first pass uses** (spec §6.2), and it is the whole-file
@@ -436,7 +436,6 @@ impl PspReader {
             header,
             footer,
             block_index: _,
-            window_budget_bytes: _,
             record_buffer_ceiling_bytes,
         } = self;
         walk::walk_from(

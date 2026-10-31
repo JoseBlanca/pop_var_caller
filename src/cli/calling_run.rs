@@ -629,7 +629,7 @@ impl TheRunsNumbers {
     /// the data determined about the fit's density and duplicated class.
     ///
     /// **The one door both calling commands write through**, so that neither can drop something
-    /// it read: [`ParametersFile::of_run`] writes no fit starts and no informational tables, and a
+    /// it read: `ParametersFile::of_run` writes no fit starts and no informational tables, and a
     /// writer that forgot [`ParametersFile::with_snp_indel_fit_starts`] or
     /// [`ParametersFile::with_what_the_data_determine`] would compile and lose them.
     #[must_use]

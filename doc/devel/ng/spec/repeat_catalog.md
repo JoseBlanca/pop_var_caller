@@ -143,10 +143,14 @@ the repeat length it can promise to catch whole — step 3 ties that margin and 
 **no length at which the geometry stops promising a whole tract** — a satellite of any size comes out
 as one row.
 
-**What it costs is set by the largest contig, and it is about 16 bytes a base** — measured, not
-arithmetic. A build peaks at **1.49 GB on tomato** (largest contig 90 Mb) and **3.89 GB on GRCh38**
-(248 Mb); the two agree to within 6%, so this is a rule rather than a coincidence, and `--threads N`
-multiplies it by N (§2.4).
+**What it costs is set by the largest contig, and it is about 4 to 5 bytes a base** — measured, not
+arithmetic. Since 2026-10-30 a build peaks at **404 MiB on tomato** (largest contig 91 Mb) and
+**0.97 GiB on GRCh38** (248 Mb) at one thread, and 4.36 GiB on GRCh38 at six (macOS, mimalloc;
+`perf_repeat-scanner_2026-10-30.md`); `--threads N` multiplies it by up to N (§2.4). With reading
+overlapped (§2.4) the reader holds one more contig: 1.36 GiB on GRCh38 at one thread, 4.68 GiB at six. **Those are
+macOS figures, and the Linux ones below them were 1.49 GB and 3.89 GB** — about 16 bytes a base,
+before the scan stopped returning the 97 in 100 tracts no row can come from; the Linux figures
+for the current build are owed.
 
 *The bases themselves are a sixteenth of that* — 90 MB and 250 MB — and this spec claimed the bases
 were the whole cost until [the measurement](../../reports/implementations/ng-repeat-catalog-E_2026-08-10.md)
@@ -172,10 +176,14 @@ contained swap, not a redesign — but it is a worse file, so it is the fallback
 **This file is built once per reference, by a command whose only job is that** (§2.6), so scan
 throughput is not on any path that runs twice. The design spends nothing on it:
 
-- **sequential by default** — each contig is scanned as the stream finishes it, and the pass waits;
-- **`--threads N` scans up to N contigs at once**, each on its own buffer, which is the whole of the
-  parallelism. Rows are written in the reference's contig order regardless, so the file is
-  byte-identical at every thread count (§10.5).
+- **`--threads N` scans up to N contigs at once**, each on its own buffer. Rows are written in the
+  reference's contig order regardless, so the file is byte-identical at every thread count (§10.5).
+- **Reading runs beside the scanning** (owner, 2026-10-30): the pass reads the next contig while the
+  scanners work and hands it to the first one free, so `--threads N` uses N + 1 cores. Before, the
+  pass read N contigs, waited for the slowest scan and its write, and only then read on; at two
+  threads the scanners sat idle 6 of 18 seconds. Whole tomato, overlapped against batched: 1 thread
+  11.5 s against 13.8 s, 2 threads 6.0 against 9.1, 4 threads 3.7 against 6.3; the peak grows by the
+  contig the reader holds meanwhile (`perf_repeat-scanner_2026-10-30.md`, H6).
 
 **Nothing else is pipelined**, and the digest keeps its own shape: it is computed from the same bytes
 as they stream, in order, exactly as it is today. The catalog is a second value taken from that one
@@ -610,9 +618,10 @@ two, without a second scan.
 
 **Memory.** The observer holds one contig's bases plus that contig's rows, and the scan holds its own
 working set over that contig — which is the larger of the two by a factor of fifteen (§2.3).
-**Measured: 1.49 GB on tomato, 3.89 GB on GRCh38, about 16 bytes a base of the largest contig**, times
-`--threads N`. That is the number to watch, and it is what makes the thread default 1. Nothing
-accumulates across contigs.
+**Measured: about 4 to 5 bytes a base of the largest contig** (§2.3, macOS, 2026-10-30; it was 16 on
+Linux before that date), times `--threads N`. That is the number to watch, and it is what makes the thread default 1. Nothing
+accumulates across contigs but one bases buffer, which the next contig fills instead of growing a
+new one from empty.
 
 **Compute.** The scan is the cost: a lag-`p` self-comparison plus a Ruzzo–Tompa pass, for each period
 in the range, over every base. The digest pass it attaches to is I/O-bound, so **the combined pass runs

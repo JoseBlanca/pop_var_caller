@@ -95,18 +95,16 @@ impl Default for SfsPriorSpec {
 /// inclusive of both ends. Used for the carrier-frequency `q` under H2.
 ///
 /// A well-formed grid has `lo < hi` and `n_points >= 2` (so it spans the
-/// interval rather than collapsing to a point / empty set); [`new`]
+/// interval rather than collapsing to a point / empty set); `new`
 /// enforces that at the construction boundary. The fields stay public
 /// because the scorer (Q3) reads `lo`/`hi`/`n_points` directly to lay out
 /// the linspace — but callers building a grid from untrusted input should
-/// go through [`new`] rather than a raw literal.
+/// go through `new` rather than a raw literal.
 ///
 /// (Unlike [`SfsPriorSpec`], which has one canonical default and so gets a
 /// [`Default`] impl, `GridSpec` is a generic grid with no universal
 /// default; its one named default is [`GridSpec::DEFAULT_CARRIER_FREQ`], an
 /// associated `const` usable in `const` context.)
-///
-/// [`new`]: GridSpec::new
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GridSpec {
     /// Lower endpoint (included).
@@ -129,6 +127,7 @@ impl GridSpec {
         n_points: DEFAULT_CARRIER_FREQ_POINTS,
     };
 
+    #[cfg(test)]
     /// Build a grid, returning `None` for a degenerate spec (`lo >= hi`, a
     /// non-finite endpoint, or `n_points < 2`) that would give an empty or
     /// point-collapsed integration. The trusted [`DEFAULT_CARRIER_FREQ`]

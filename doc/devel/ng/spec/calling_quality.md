@@ -93,7 +93,8 @@ Four terms; the last two are this document's.
   summed over samples: `0` at an invariant site, `2N` if every one of `N` diploid samples is
   homozygous for it. The site quality is a statement about this one number being zero.
 - **the primary alternative allele** — at a locus with more than one alternative, the one the most
-  reads across the cohort reached. The two artifact tests are defined against it and treat the
+  reads across the cohort reached among those some sample is called carrying (§6.3). The two
+  artifact tests are defined against it and treat the
   locus as if it had two alleles. Exact when it does; an approximation when it does not (§6.4).
 - **an artifact** — a systematic reason reads carry a sequence the sample does not: reads mapped
   from a paralogous copy elsewhere in the genome, a recurrent context error of the chemistry, a
@@ -308,6 +309,14 @@ denominator [`calling_em_loop.md`](calling_em_loop.md) §9 uses for the cohort's
 using a different one here would make two numbers on the same record disagree about who was in the
 cohort.
 
+**Nor does a sample whose reads said nothing** — flat likelihoods, which is what no reads gives
+(owner's ruling, 2026-10-31; [`calling_em_loop.md`](calling_em_loop.md) §5.0.2). Folded in, it
+would add its chromosomes to the count axis as pure uncertainty. The probability that nobody carries
+the variant would then fall by that sample's prior chance of carrying it, a quality earned with no
+read behind it. On the GIAB trio at 30x, one empty sample added raised `QUAL` at 746 of 767 records,
+by up to 17.6. So the fold, and the prior on the count, run over the samples whose reads said
+something. Where none did, nothing here is evidence of a variant, and the quality is zero.
+
 ### 5.2 How it is computed
 
 Four steps, in the order the code runs them, ported from
@@ -481,8 +490,14 @@ hand. Two rules about who is counted:
   total while it contributes nothing to the expectation would manufacture an apparent excess — and
   since only a deficit is penalised, it would quietly *weaken* the test rather than break it
   loudly. Excluding it also keeps this cohort the same cohort as §5.1's.
-- **The primary alternative allele is chosen on pooled read count across the whole cohort**, before
-  any per-sample work, so every sample's counts are gathered against one allele.
+- **The primary alternative allele is chosen on pooled read count across the whole cohort, among
+  the alternatives the called genotypes carry**, after the samples are called and before their
+  counts are gathered, so every sample's counts are gathered against one allele. Where no called
+  alternative was reached by a read, the most-read alternative of all. Ties go to the allele whose
+  bases sort first, never to the lower allele id. (2026-10-30. Until then the most-read alternative
+  of all, ties to the lower id: on 8 tomato accessions the tests then weighed reads of an allele
+  absent from the record's `ALT` — SL4.0ch01:3493044 lost 126 of its 163 Phred that way — and the
+  id order followed the order the samples were given, so a site's quality changed with it.)
 
 ### 6.4 What the correction gives up
 

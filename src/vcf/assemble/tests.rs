@@ -527,6 +527,7 @@ fn a_tract_record_is_widened_over_its_alleles_reach_into_the_flanks() {
         right: 1,
         flank_bases_per_allele: widened.flank_bases_per_allele.clone(),
         reach_per_allele: widened.reach_per_allele.clone(),
+        base_before: widened.base_before,
     });
     assert_eq!(
         annotation.repeat_copies_of_allele(0, &widened.alleles[0]),

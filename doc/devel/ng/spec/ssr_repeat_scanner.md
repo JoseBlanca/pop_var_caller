@@ -229,6 +229,77 @@ tract, can produce a burst that outruns the flanking score and splits the segmen
 caller that cares can stitch same-period neighbours (deferred, §8). It is not built in: the
 local-comparison property already covers the cases that occur in practice.
 
+### 3.4a Two abutting repeats are two intervals (added 2026-10-30)
+
+The locality that keeps an interrupted repeat whole has a blind side: the lag-*p* comparison
+asks whether a base equals the one *p* back, and that is as true inside a run of `A` as inside
+a run of `T`. So two **different** repeats side by side score as one repeat with a single
+interruption at the junction. `A×12 T×12` at period 1 is 11 matches, one mismatch and 11
+matches, and came back as one interval whose motif — read at its first base — is `A`. Half its
+bases are `T`, the catalog's purity floor rejected it, and **both** repeats were lost. The same
+held for `(CA)×10 (GT)×10`, for `(GA)×12` running into `C×12`, and for `G×60 A×15`, which a
+simulator's flank re-scan found (owner's report, 2026-10-30).
+
+Each maximal scoring segment is therefore cut where its motif changes, after Ruzzo–Tompa and
+before emission:
+
+1. **Solid blocks.** A run of consecutive lag-*p* matches long enough to hold `min_copies`
+   copies (at least two) fixes a motif. A substitution never makes one — it leaves fewer than
+   *p* matches between its two mismatches (§3.3).
+2. **Motifs compared up to rotation.** An indel shifts phase, so the block after it carries a
+   rotation of the motif before: the same motif. Consecutive solid blocks with the same motif
+   form one piece; a block with a motif that is no rotation of the last one starts a new piece.
+3. **Interruptions are absorbed.** When a piece's motif comes back, the nearest earlier piece
+   of that motif, everything after it and the new piece are joined, provided the joined tract,
+   compared base by base with that motif tiled in phase, is at least as pure as the scoring
+   holds a tract to — `r / (1 + r)`, 7/9 at the defaults. `(AT)×4 A (CA)×2 (TA)×4 T` matches
+   `AT` at 18 of 20 bases and stays one interval; so does `(AAT)×4 (GAT)×3 (GGT)×2 (AAT)×4`,
+   32 of 39, with two different interruptions in a row; `(CA)×10 (GT)×10 (CA)×10` matches `CA`
+   at 40 of 60 and is three. No new knob: the tolerance is the one §3.3 already states. The
+   phase is the outer piece's last solid block, so an indel earlier in it counts the bases
+   before as impure; the typing measures purity in one phase from the tract's start and would
+   reject such a joined tract whole anyway, so splitting it keeps at least the pure pieces.
+4. **A piece at either end is never absorbed**: nothing of the first motif follows it, so it is
+   where one repeat stops and another starts. `G×60 A×15` is `G` at 0.8 of its bases and still
+   two repeats.
+
+A segment with no mismatch (its score is all rewards) cannot hold a motif change and skips the
+walk; that is nearly every segment, and it keeps the cost to about 3% of a tomato catalog build.
+
+**Both readings of a joined tract are emitted; the reader's purity floor chooses.** The
+scanner's tolerance, 7/9 at the default weights, is not the typing's purity floor (`--min-purity`,
+0.8 by default). A tract joined between the two would pass here and be rejected there whole —
+the loss this section exists to prevent. The scanner cannot use the typing's floor instead: the
+catalog is built once per reference and serves a reader at any floor (`repeat_catalog` spec
+§4.2), so what it stores cannot depend on one. So a joined tract is emitted **together with the
+pieces it was joined from**, nested inside it at its period — nothing else nests within one
+period — and the reader keeps one reading (`segment_criteria::choose_readings`): the joined
+tract when it has a clean whole-motif cut and the cut tract clears the floor, its pieces
+otherwise. A scan judges this from the bases; the catalog from the cut and purity its row
+stores, computed by the same two functions. A joined tract within the catalog's 15-base flank
+floor of a contig end has no row while a piece of it may; that is the contig-end difference the
+catalog differential already allows.
+
+`(AT)×7 (AC)×11 (AT)×7` is 0.78 pure joined: at the default 0.8 it is typed as a bundle of its
+three repeats, where it used to be rejected whole; at a floor of 0.75 it is one `AT` segment.
+
+**Measured on tomato SL4.00**, default settings, typed regions before and after:
+
+| | before | after |
+|---|---:|---:|
+| STR segments | 462,678 | 489,434 |
+| — of which period 2 to 6 | 52,229 | 56,379 |
+| STR bundles | 22,755 | 30,529 |
+| repeat bases typed as no STR | 3,791,370 | 2,380,359 |
+| bases rejected at the purity floor | 545,552 | 94,535 |
+
+460,845 segments are unchanged. Of the 1,833 segments that are gone, 1,465 are now members of a
+bundle with the repeat that abutted them, 365 are inside a satellite (a bundle that passes the
+100-base cap once its abutting repeat joins it), 1 is the same repeat with moved edges, and 2
+have become plain sequence. Compound stretches are now typed as one bundle of their repeats:
+`(AT)×15 (TATT)×6 (TA)×9` at SL4.0ch01:8,185,566 is a bundle of all three, where joining inside
+the scanner at 0.8 gave two `AT` segments and left the `TATT` run as plain sequence.
+
 ### 3.5 Non-ACGT and case
 
 The scanner **upper-cases** each base before comparing (so soft-masked, i.e. lowercase,
