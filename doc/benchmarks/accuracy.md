@@ -42,16 +42,29 @@ the three, whichever the truth is, so the count needs no truth set. Among the si
 three samples have a genotype, the record passes the caller's filters, and at least one sample
 carries a variant:
 
-| depth | pvc SNPs | freebayes SNPs | DeepVariant SNPs | pvc indels | freebayes indels | DeepVariant indels |
-|---|---|---|---|---|---|---|
-| 5× | 68 of 580 | 62 of 510 | 61 of 445 | 14 of 75 | 11 of 65 | 9 of 47 |
-| 10× | 13 of 652 | 10 of 604 | 9 of 621 | 5 of 82 | 4 of 79 | 4 of 69 |
-| 30× | 1 of 656 | 0 of 626 | 0 of 667 | 1 of 87 | 1 of 102 | 1 of 79 |
-| ~300× | 0 of 626 | 0 of 640 | 5 of 661 | 1 of 117 | 1 of 92 | 1 of 78 |
+SNPs:
+
+| depth | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|
+| 5× | 68 of 580 | 58 of 428 | 62 of 510 | 61 of 445 |
+| 10× | 13 of 652 | 9 of 610 | 10 of 604 | 9 of 621 |
+| 30× | 1 of 656 | 0 of 668 | 0 of 626 | 0 of 667 |
+| ~300× | 0 of 626 | 0 of 671 | 0 of 640 | 5 of 661 |
+
+Indels:
+
+| depth | pvc | GATK | freebayes | DeepVariant |
+|---|---|---|---|---|
+| 5× | 14 of 75 | 18 of 60 | 11 of 65 | 9 of 47 |
+| 10× | 5 of 82 | 7 of 74 | 4 of 79 | 4 of 69 |
+| 30× | 1 of 87 | 1 of 78 | 1 of 102 | 1 of 79 |
+| ~300× | 1 of 117 | 1 of 79 | 1 of 92 | 1 of 78 |
 
 The GIAB truth sets themselves have 0 errors among 667 SNP sites and 1 among 79 indel sites over
-these regions. At 5× the share of sites with an error is about the same for the three callers,
-one in seven to one in nine; pvc checks more sites, because it leaves fewer genotypes missing.
+these regions. At 5× the share of SNP sites with an error is about the same for the four callers,
+one in seven to one in nine; pvc checks more sites (580, against 428 to 510), because it leaves
+fewer genotypes missing. For indels at 5×, GATK has an error at one site in three, the other
+three callers at about one in five.
 
 ## Repeats: the GIAB tandem-repeat benchmark
 
