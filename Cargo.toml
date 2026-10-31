@@ -313,6 +313,30 @@ test = true
 name = "ng_str_stutter_benchmark"
 test = true
 
+# The joint fit's drawn-cohort harnesses name their read groups with
+# `NamedReadGroup::drawn_for`, which is compiled only for tests and this feature because `pvc`
+# never reaches it. Declaring the feature lets a plain `cargo test` skip them rather than fail
+# to compile; `cargo test --features bench-fixtures` still builds them.
+[[example]]
+name = "ng_joint_sample_count_sweep"
+required-features = ["bench-fixtures"]
+
+[[example]]
+name = "dhat_ng_joint_fit"
+required-features = ["bench-fixtures"]
+
+[[example]]
+name = "ng_joint_duplicated_in_fit"
+required-features = ["bench-fixtures"]
+
+[[example]]
+name = "ng_joint_duplicated_drifting"
+required-features = ["bench-fixtures"]
+
+[[example]]
+name = "ng_prior_moment_one_sample_inbreeding"
+required-features = ["bench-fixtures"]
+
 # The site quality's cost across the cohort sizes the caller commits to —
 # `doc/devel/ng/spec/calling_quality.md` §13's Q3, which names this benchmark as the way to
 # settle it. It draws its own likelihood table, so it needs no fixture feature and

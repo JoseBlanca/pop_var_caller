@@ -43,7 +43,7 @@
 //! The population diversity is `s · 2 (m1 - m2)`, which is in the ratio `1 - F`. At `F = 0.8`
 //! that is a factor of five.
 //!
-//! Run: `./scripts/dev.sh cargo run --release --example ng_prior_moment_one_sample_inbreeding`
+//! Run: `./scripts/dev.sh cargo run --release --features bench-fixtures --example ng_prior_moment_one_sample_inbreeding`
 
 #![allow(
     clippy::disallowed_methods,

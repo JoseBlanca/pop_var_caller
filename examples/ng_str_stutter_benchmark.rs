@@ -398,10 +398,14 @@ impl Draw {
     }
 
     /// A standard normal draw (Box–Muller).
+    ///
+    /// The cosine is `libm`'s, which is what `float::cos` wraps: that one is compiled only for
+    /// tests and `--features bench-fixtures`, since `pvc` never reaches it, and this example has to
+    /// build in a plain `cargo test`.
     fn normal(&mut self) -> f64 {
         let first = 1.0 - self.unit(); // (0, 1], so the logarithm is finite
         let second = self.unit();
-        (-2.0 * float::ln(first)).sqrt() * float::cos(2.0 * std::f64::consts::PI * second)
+        (-2.0 * float::ln(first)).sqrt() * libm::cos(2.0 * std::f64::consts::PI * second)
     }
 
     /// An exponential draw with mean one.
