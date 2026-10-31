@@ -208,6 +208,13 @@ pub use crate::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 /// making the sample's whole row `NaN` (spec §8).
 pub const MIN_BASE_ERROR: f64 = 1e-12;
 
+/// **How far above zero a genotype log-likelihood may sit before a debug build stops.** Every
+/// value is a sum of logarithms of probabilities, so it is at most zero; a mixture of copy
+/// shares that sums to one can round to one plus a unit in the last place, and 300 reads of it
+/// add up to about `7 × 10⁻¹⁴`. A billionth is far above that and far below anything a defect
+/// produces — the one this guards against gave `+4.16`.
+pub const ROW_ROUNDING_ALLOWANCE: f64 = 1e-9;
+
 /// **The multiplier a read group's reads are charged where nothing was fitted — two: every read's
 /// reported error probability is doubled, about 3 Phred less confident than the instrument
 /// claimed.**
