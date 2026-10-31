@@ -180,10 +180,23 @@ while read -r contig start end _; do
   call_direct "regions_split/$line" "$threads" \
     "--defaults --hidden-dup-fdr 0 --regions $out/regions_split/$line.bed" "${alignments[@]}"
 done < <(grep -v '^#\|^track\|^browser' "$regions")
-# The joined file takes the header of the first piece; the records are each piece's, in BED order.
+# The joined file takes the header of the first piece; the records are each piece's, put in the
+# order a whole run writes them — contigs as the header's `##contig` lines list them, then by
+# position. Not BED order: a BED sorted by name puts chr10 before chr2, and a whole run does not.
 {
   grep '^#' "$out/regions_split/1.vcf"
-  for ((i = 1; i <= line; i++)); do grep -v '^#' "$out/regions_split/$i.vcf" || true; done
+  for ((i = 1; i <= line; i++)); do grep -v '^#' "$out/regions_split/$i.vcf" || true; done |
+    awk -F'\t' -v OFS='\t' -v header="$out/regions_split/1.vcf" '
+      BEGIN {
+        while ((getline row < header) > 0) {
+          if (row ~ /^##contig=<ID=/) {
+            id = row; sub(/^##contig=<ID=/, "", id); sub(/[,>].*$/, "", id)
+            rank[id] = ++contigs
+          }
+        }
+      }
+      { print rank[$1], $2, $0 }' |
+    sort -s -t$'\t' -k1,1n -k2,2n | cut -f3-
 } > "$out/regions_joined.vcf"
 compare "regions: whole BED vs one run per line, joined" \
   "$out/regions_whole.vcf" "$out/regions_joined.vcf" vcf
