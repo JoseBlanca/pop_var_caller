@@ -60,10 +60,10 @@ read depth, with the errors split by kind.
     a position over 91 Mb of chromosome 1, on the same server, 2026-10-26 to 30, pvc c3d1ed69.
     Memory is the total of the processes running at once. pvc's one step is direct mode
     (`call-from-alignments`) run on 3 segments of the regions at once, 10 threads each, and the
-    three VCFs joined; as one process with 30 threads it took 2 h 35 min and 21 GB. pvc's three
-    steps are psp mode: pileup files, parameter estimation, calling. freebayes did not finish:
-    6 of its 114 blocks of regions stayed on a single site for 24 to 36 hours, possibly because
-    those sites had too many alleles, and the run was stopped after 41 hours.
+    three VCFs joined. pvc's three steps are psp mode: pileup files, parameter estimation,
+    calling. freebayes did not finish: 6 of its 114 blocks of regions stayed on a single site
+    for 24 to 36 hours, possibly because those sites had too many alleles, and the run was
+    stopped after 41 hours.
 
 ## Install
 

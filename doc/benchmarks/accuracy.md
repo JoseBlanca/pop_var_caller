@@ -102,3 +102,64 @@ fewer the mistakes.
 
 ![False positives against false negatives for STRs and complex variants in HG002 over chromosome 20](figures/errors_giab_chr20_scatter_strs_complex.svg)
 
+
+## Simulated STRs: stutter with an exact truth
+
+Real data cannot say how a caller copes with stutter, because neither the true genotypes at
+every repeat nor the stutter rates are known. Here both are. A 4 Mb genome is drawn with 3,000
+STRs, 500 for each motif length from 1 to 6 bases, and reads are drawn from it through a stutter
+model, then mapped with minimap2. The simulation is run twice: once with PCR stutter, where a
+read often gains or loses a repeat unit, and once with the much lower stutter of a PCR-free
+library. Each is called with 1 sample and with 50, at 5×, 15×, 30× and 60×.
+
+The unit counted is one sample at one STR. Per sample, 1,202 of the 3,000 STRs carry a variant
+in the truth and 1,798 are reference. Each cell gives two numbers:
+
+- the share of the variant genotypes called **right**: both of the sample's sequences over the
+  STR, and 30 bases either side, are the truth's;
+- the **false calls** per 1,000 reference genotypes: a variant called where the sample has none.
+
+pvc estimated its parameters, stutter included, from the run's own reads. freebayes is kept at
+QUAL ≥ 20. HipSTR ran at its defaults.
+
+**PCR stutter.** Share right, then false calls per 1,000:
+
+| samples | depth | pvc | GATK | freebayes | HipSTR |
+|---|---|---|---|---|---|
+| 1 | 5× | 42% · 4 | 45% · 28 | 28% · 13 | nothing called |
+| 1 | 15× | 86% · 5 | 84% · 112 | 64% · 41 | nothing called |
+| 1 | 30× | 96% · 2 | 92% · 174 | 84% · 79 | nothing called |
+| 1 | 60× | 99% · 1 | 93% · 219 | 93% · 128 | nothing called |
+| 50 | 5× | 72% · 22 | 45% · 25 | 56% · 88 | 62% · 63 |
+| 50 | 15× | 95% · 10 | 88% · 92 | 88% · 132 | 89% · 30 |
+| 50 | 30× | 99% · 7 | 94% · 119 | 95% · 124 | 93% · 16 |
+| 50 | 60× | 100% · 6 | 96% · 125 | 97% · 121 | 94% · 11 |
+
+**PCR-free.** Share right, then false calls per 1,000:
+
+| samples | depth | pvc | GATK | freebayes | HipSTR |
+|---|---|---|---|---|---|
+| 1 | 5× | 45% · 3 | 44% · 3 | 27% · 2 | nothing called |
+| 1 | 15× | 90% · 3 | 90% · 3 | 67% · 1 | nothing called |
+| 1 | 30× | 98% · 0 | 99% · 4 | 89% · 1 | nothing called |
+| 1 | 60× | 100% · 0 | 100% · 2 | 97% · 1 | nothing called |
+| 50 | 5× | 75% · 11 | 48% · 2 | 59% · 12 | 66% · 22 |
+| 50 | 15× | 97% · 2 | 92% · 6 | 92% · 15 | 92% · 5 |
+| 50 | 30× | 100% · 0 | 98% · 4 | 97% · 7 | 94% · 1 |
+| 50 | 60× | 100% · 0 | 99% · 2 | 99% · 3 | 94% · 0 |
+
+- **With PCR stutter, the callers without a stutter model call stutter as variants.** At 30× in
+  50 samples, GATK and freebayes call a variant at about 120 of every 1,000 reference genotypes,
+  pvc at 7 and HipSTR at 16. More reads do not help them: GATK's false calls rise with depth,
+  in one sample from 28 per 1,000 at 5× to 219 at 60×. They are worst in homopolymers, where
+  stutter is highest: at 30× in 50 samples GATK calls a variant at 371 of every 1,000 reference
+  homopolymer genotypes and at 67 for longer motifs; pvc at 25 and 3.
+- **Without PCR stutter, every caller makes few false calls**, at most 22 per 1,000. The
+  differences are in the share right, and largest at 5× in 50 samples: pvc 75%, HipSTR 66%,
+  freebayes 59% and GATK 48%. GATK leaves about
+  one genotype in eight missing there (7,520 of 61,458).
+- **HipSTR calls nothing in one sample at its defaults.** It needs about 100 reads at a repeat
+  before it calls it. Given a fixed stutter model and no read floor, it reaches 91% right at 60×
+  with PCR stutter, with 139 false calls per 1,000.
+- **pvc's stutter estimated from the reads is as good as the true one.** Given the simulator's
+  own stutter rates instead, pvc gets the same share right to within 3 points in every row.
