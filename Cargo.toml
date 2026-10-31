@@ -327,4 +327,7 @@ harness = false
 # `doc/devel/ng/research/cram_read_path_2026-09-04.md`.
 [patch.crates-io]
 noodles-cram = { path = "vendor/noodles-cram" }
+# **And of noodles-bam 0.89.0**, changed so a BAM's declared sizes do not reserve memory before
+# the bytes arrive; the list is `vendor/noodles-bam/FORK.md`.
+noodles-bam = { path = "vendor/noodles-bam" }
 

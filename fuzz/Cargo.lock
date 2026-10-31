@@ -840,8 +840,6 @@ dependencies = [
 [[package]]
 name = "noodles-bam"
 version = "0.89.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0c1872afd5963f751ae78ef04ab3fb050aefc615c05c04cda7c54120eedf9b0"
 dependencies = [
  "bstr",
  "indexmap",

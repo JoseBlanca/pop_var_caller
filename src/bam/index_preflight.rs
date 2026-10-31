@@ -587,7 +587,7 @@ mod tests {
         record.extend(le(-1));
         record.extend(le(0));
         record.extend(b"r\0");
-        record.extend(((1_u32 << 4) | 0).to_le_bytes()); // 1M
+        record.extend((1_u32 << 4).to_le_bytes()); // 1M: a length of one, operation 0
         record.extend([0x10, 30]); // the base A, and its quality
         stream.extend(le(record.len() as i32));
         stream.extend(record);

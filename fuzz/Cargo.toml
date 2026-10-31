@@ -19,9 +19,10 @@ pop_var_caller = { path = ".." }
 [workspace]
 members = ["."]
 
-# The main crate's fork of noodles-cram, so the fuzzers read CRAM with the code pvc ships.
+# The main crate's forks of noodles-cram and noodles-bam, so the fuzzers read with the code pvc ships.
 [patch.crates-io]
 noodles-cram = { path = "../vendor/noodles-cram" }
+noodles-bam = { path = "../vendor/noodles-bam" }
 
 [profile.release]
 debug = 1

@@ -62,14 +62,17 @@ touches it. Those found on 2026-10-31, all now refused with an error:
 | `psp/crashed_renamed_header` | the header's sample renamed by hand; the census's name disagreed and aborted `estimate-parameters` |
 | `parameters/crashed_slippage_group` | `slippage_group = 4000000000` sized a table and the run was killed for memory |
 | `bam/crashed_reference_number` | a record naming reference sequence 2.6 billion, in a header listing two; building the index asked for 316 GB |
+| `bam/aborted_under_a_cap_reference_count` | a header declaring 2^31 reference sequences; noodles-bam reserved 38 GB, and pvc aborted under an 8 GB cap |
+| `bam/aborted_under_a_cap_record_size` | a record declaring 4.26 GB; noodles-bam reserved it, and pvc aborted under a 4 GB cap |
 
-**The `bam` target looked as if it leaked, and it does not.** Its memory rose by about 35 MB a run
-and reached 2 GB in about 55 runs. One valid BAM replayed 150 times in one process stays at 437 MB.
-What rose was the high-water mark: noodles-bam allocates what a BAM header's reference-sequence
-count, a reference name's length, or a record's size declares before reading the bytes, so a
-mutated input asks for up to gigabytes, and the sanitizer keeps freed memory in quarantine. The
-target now skips inputs declaring sizes no real file has (see its doc comment), and fork mode
-keeps one input's memory out of the next run's:
+**The `bam` target looked as if it leaked, and it did not.** Its memory rose by about 35 MB a run
+and reached 2 GB in about 55 runs, while one valid BAM replayed 150 times in one process stayed at
+437 MB. What rose was the high-water mark: noodles-bam reserved what a BAM header's
+reference-sequence count, a reference name's length or a record's size declared before reading
+the bytes, so a mutated input asked for gigabytes — and under a memory cap (`ulimit -v`, a
+cluster's `h_vmem`) that aborted pvc itself. The fork in `vendor/noodles-bam` reads all three as
+the bytes arrive (its `FORK.md`). Run the target in fork mode anyway, so one input's memory stays
+out of the next run's:
 
 ```
 target-container/aarch64-unknown-linux-gnu/release/bam tmp/fuzz-corpus/bam fuzz/corpus/bam \
@@ -77,11 +80,3 @@ target-container/aarch64-unknown-linux-gnu/release/bam tmp/fuzz-corpus/bam fuzz/
     -max_total_time=2400 -rss_limit_mb=3000 -malloc_limit_mb=3000 -timeout=60 \
     -artifact_prefix=tmp/fuzz-artifacts/bam/
 ```
-
-On 2026-10-31 that ran 363,936 inputs in 40 minutes with no crash.
-
-**What the skipped inputs do to pvc itself**, measured on the soak build: with no memory cap,
-each ends in a clean error, because the operating system lends the memory without touching it.
-Under a virtual-memory cap — `ulimit -v`, or a cluster's `h_vmem` — a header claiming 2^31
-reference sequences aborts at an 8 GB cap, and a record declaring 4.26 GB aborts at a 4 GB cap.
-That is noodles' behaviour, and fixing it means patching noodles-bam.
