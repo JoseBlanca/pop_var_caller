@@ -432,12 +432,12 @@ fn one_sample_is_called_on_its_own_reads() {
 /// rather than a confident call, and the assertion below is on the genotype the code produces
 /// rather than on one anybody derived first.
 ///
-/// **This is close to a question the owner has open and is not the same one.** C1's ⚑ is that a
-/// silent sample's *flat pass* inflates the cohort estimate **other** samples see; here the
-/// leave-one-out subtraction removes its own vote from its own prior, so what decides it is
-/// genuinely its two neighbours. What the two share is the underlying fact — a sample with no
-/// reads is not a sample with no answer — and at three reads a position roughly one sample in
-/// twenty is silent at any given position.
+/// **And it is counted nowhere else** (`calling_em_loop.md` §5.0.2, owner's ruling 2026-10-31).
+/// Its expected copies are zero on every pass, so the cohort's copies are its two neighbours'
+/// alone, `[2.0, 2.0]` to the loop's tolerance. Before the ruling its prior-only posterior was
+/// folded in as if it had shown something, and the cohort came out at about `[3.2, 2.8]`, which
+/// moved what every other sample's prior was built from. A sample with no reads is not a sample
+/// with no answer — but its answer is the prior's, and is not evidence.
 #[test]
 fn a_sample_that_covered_nothing_keeps_its_place_and_is_called_from_its_neighbours() {
     let per_sample = vec![
@@ -480,8 +480,9 @@ fn a_sample_that_covered_nothing_keeps_its_place_and_is_called_from_its_neighbou
 
     let copies = inference.cohort_expected_copies().copies();
     assert!(
-        (copies[0] - 3.199_763_6).abs() < 1e-6,
-        "the cohort after the silent sample's own posterior is folded in: {copies:?}"
+        (copies[0] - 2.0).abs() < 1e-4 && (copies[1] - 2.0).abs() < 1e-4,
+        "the cohort's copies are the two neighbours' alone, the silent sample holding none: \
+         {copies:?}"
     );
 }
 
