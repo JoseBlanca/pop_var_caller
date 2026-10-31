@@ -3945,6 +3945,47 @@ mod tests {
         // `0.05 × 0.3`, against a misread's `0.95 × e⁻⁷`.
         let expected = 3.0 * float::ln(0.95 * float::exp(-7.0) + 0.05 * 0.3);
         assert!((contaminated[hom_ref] - expected).abs() < 1e-12);
+        // And where the genotype explains it, the contaminant's share adds to the individual's
+        // copy share rather than taking from it: half of `0.95` for one copy, all of it for two.
+        let het = genotype_carrying(&table, &[1, 1]).get() as usize;
+        let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+        let expected_het = 3.0 * float::ln(0.95 * 0.5 + 0.05 * 0.3);
+        let expected_hom_alt = 3.0 * float::ln(0.95 + 0.05 * 0.3);
+        assert!((contaminated[het] - expected_het).abs() < 1e-12);
+        assert!((contaminated[hom_alt] - expected_hom_alt).abs() < 1e-12);
+    }
+
+    /// **A carrier's sequence is the flank and then the whole allele, or the allele and then the
+    /// whole flank**: matching one part is not enough. `TAAA` ends with the `T` before the locus
+    /// but its last three bases are not `ACG`, and `ACGA` starts with `ACG` but the reference after
+    /// is `TT`.
+    #[test]
+    fn a_carriers_sequence_needs_both_the_allele_and_the_flank() {
+        assert!(carrier_sequence_ends_with(b"TT", b"ACG", b"TACG"));
+        assert!(!carrier_sequence_ends_with(b"TT", b"ACG", b"TAAA"));
+        assert!(!carrier_sequence_ends_with(b"TT", b"ACG", b"AACG"));
+        assert!(carrier_sequence_starts_with(b"ACG", b"TT", b"ACGT"));
+        assert!(!carrier_sequence_starts_with(b"ACG", b"TT", b"AAAT"));
+        assert!(!carrier_sequence_starts_with(b"ACG", b"TT", b"ACGA"));
+    }
+
+    /// **The largest ploidy the caller accepts is scored**, complete reads and partial ones: both
+    /// hold a copy count's term in an array sized for that ploidy, so this is where one a slot
+    /// short would show.
+    #[test]
+    fn a_row_at_the_largest_ploidy_is_scored() {
+        let ploidy = crate::calling::likelihood::MAX_PLOIDY_COPIES;
+        let alleles = locus(&[b"ACG", b"TTG"]);
+        let table = GenotypeTable::build(
+            Ploidy::try_new(u8::try_from(ploidy).expect("a small ploidy")).expect("a ploidy"),
+            2,
+        );
+        let every_copy_alternative = genotype_carrying(&table, &[0, ploidy as u32]).get() as usize;
+        let supported = [observation(1, 0, 3, -21.0)];
+        let partials = [partial(&[(0, 2)], b"TT", 2, -14.0)];
+        let scored = row_with_partials(&supported, &partials, &alleles, &table);
+        assert!(scored.iter().all(|score| score.is_finite()), "{scored:?}");
+        assert_eq!(scored[every_copy_alternative], 0.0);
     }
 
     /// **A run anchored to neither border makes the whole test vacuous, and the rule has to say
