@@ -492,13 +492,26 @@ pub fn score_uncorrected_site_quality(
     }
 
     // 1. Collapse: genotypes → how many non-reference copies they carry.
+    //
+    // **Only the samples whose reads said something, packed to the front.** A sample whose
+    // likelihoods are flat — no reads here — would enter the fold as two chromosomes of pure
+    // uncertainty, and the count prior would spread over them too, so the probability that
+    // *nobody* carries the variant would fall by that sample's prior chance of carrying it:
+    // a quality earned by the prior with no read behind it. Measured on the GIAB trio at 30x
+    // with a fourth, empty sample: QUAL rose at 746 of 767 records, by up to 17.6. In the full
+    // model a sample with flat likelihoods marginalises out of the cohort exactly, so leaving
+    // it out is that model's answer, not an approximation (`calling_quality.md` §3.2).
     copy_count_log_likelihoods.fill(f64::NEG_INFINITY);
     let copies_per_genotype = genotypes.genotype_allele_counts();
-    for (sample, copy_counts) in copy_count_log_likelihoods
-        .chunks_exact_mut(copy_counts_per_sample)
+    let informative_rows = genotype_likelihoods
+        .chunks_exact(genotype_count)
         .enumerate()
+        .filter(|(_, row)| !reads_said_nothing(row));
+    let mut informative_samples = 0;
+    for ((sample, row), copy_counts) in
+        informative_rows.zip(copy_count_log_likelihoods.chunks_exact_mut(copy_counts_per_sample))
     {
-        let row = &genotype_likelihoods[sample * genotype_count..(sample + 1) * genotype_count];
+        informative_samples += 1;
         for (genotype, likelihood) in row.iter().enumerate() {
             // Allele 0 is the reference, always, so the non-reference copies are the rest.
             let reference_copies = copies_per_genotype[genotype * allele_count] as usize;
@@ -532,6 +545,21 @@ pub fn score_uncorrected_site_quality(
     // beside the fold that follows. The expressions, their operands and
     // their order are what they were when this loop ran per locus, so the row it adds is the
     // row that loop added, bit for bit.
+    // **No sample said anything, so nothing here is evidence of a variant** — the probability
+    // of none is the prior's, over no chromosomes, which is one.
+    if informative_samples == 0 {
+        return Phred::ZERO;
+    }
+    // The chromosomes the evidence covers: the count axis and its prior run over these alone,
+    // and the buffers, sized for every sample, are read only as far as this.
+    let largest_count = informative_samples * ploidy;
+    let copy_count_log_likelihoods =
+        &copy_count_log_likelihoods[..informative_samples * copy_counts_per_sample];
+    let allele_count_distribution = &mut allele_count_distribution[..ploidy + largest_count + 1];
+    let allele_count_distribution_next =
+        &mut allele_count_distribution_next[..ploidy + largest_count + 1];
+    let log_allele_count_distribution = &mut log_allele_count_distribution[..largest_count + 1];
+
     let alpha_reference = prior.reference;
     let alpha_alternative = prior.alternative_total.max(MIN_ALT_CONCENTRATION);
     let built_for = (
@@ -605,6 +633,30 @@ pub fn score_uncorrected_site_quality(
             log_allele_count_distribution.len()
         ),
     }
+}
+
+/// **Whether a sample's reads said nothing about which genotype it has** — every genotype
+/// equally probable under its own likelihoods, so the prior decides alone.
+///
+/// **Such a sample is evidence of nothing, and every cohort quantity leaves it out**: the
+/// expected allele copies the frequency loop sums (`calling_em_loop.md` §7), and with them the
+/// allele frequency and every other sample's prior, and the site quality's fold. It still gets
+/// a genotype, from the prior, and is written as `./.` (`vcf_output.md` §7.1).
+///
+/// **Exact equality, not a tolerance, and the shape of the arithmetic is why.** A sample with
+/// no reads at this locus contributes an empty sum to every genotype, and an empty sum is
+/// `0.0` for all of them by the same code path — not three numbers that happen to agree. So a
+/// tolerance would buy nothing here and would start calling *nearly* flat rows flat, which is
+/// a different claim and one nothing has measured a threshold for.
+///
+/// **A row of one genotype is flat**, trivially and correctly: a haploid locus over one allele
+/// has one genotype, the reads cannot distinguish it from anything, and there is nothing for
+/// them to have said.
+///
+/// **A row that is `−∞` throughout is not flat**: its reads made every genotype impossible,
+/// which is a defect upstream and not silence, and the checks that refuse it must still see it.
+pub(crate) fn reads_said_nothing(likelihoods: &[LogProb]) -> bool {
+    likelihoods[0].get().is_finite() && likelihoods.iter().all(|score| *score == likelihoods[0])
 }
 
 /// Fold every sample's copy-count row into the cohort's allele-count distribution, writing the result
@@ -875,6 +927,28 @@ mod tests {
             }
         }
         score_uncorrected_site_quality(scratch.site_quality_buffers_mut(), &view, seed)
+    }
+
+    /// **A sample whose reads said nothing leaves the site quality exactly where it was**
+    /// (`calling_em_loop.md` §5.0.2). Folded in, its flat row added two chromosomes of pure
+    /// uncertainty and raised the quality by its prior chance of carrying the variant: on the
+    /// GIAB trio at 30x one empty sample raised `QUAL` at 746 of 767 records.
+    #[test]
+    fn a_sample_with_no_reads_leaves_the_site_quality_unchanged() {
+        let observed = vec![vec![-6.0, 0.0, -6.0], vec![0.0, -3.0, -9.0]];
+        let mut with_an_empty_sample = observed.clone();
+        with_an_empty_sample.insert(1, vec![0.0, 0.0, 0.0]);
+        assert_eq!(
+            site_quality_of(&with_an_empty_sample, human_like_seed()).get(),
+            site_quality_of(&observed, human_like_seed()).get(),
+        );
+    }
+
+    /// Where no sample said anything, nothing is evidence of a variant.
+    #[test]
+    fn a_cohort_whose_reads_said_nothing_has_a_site_quality_of_zero() {
+        let quality = site_quality_of(&[vec![0.0; 3], vec![0.0; 3]], human_like_seed());
+        assert_eq!(quality.get(), 0.0);
     }
 
     // -----------------------------------------------------------------------------------

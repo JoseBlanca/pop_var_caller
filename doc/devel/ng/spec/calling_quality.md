@@ -309,6 +309,14 @@ denominator [`calling_em_loop.md`](calling_em_loop.md) §9 uses for the cohort's
 using a different one here would make two numbers on the same record disagree about who was in the
 cohort.
 
+**Nor does a sample whose reads said nothing** — flat likelihoods, which is what no reads gives
+(owner's ruling, 2026-10-31; [`calling_em_loop.md`](calling_em_loop.md) §5.0.2). Folded in, it
+would add its chromosomes to the count axis as pure uncertainty. The probability that nobody carries
+the variant would then fall by that sample's prior chance of carrying it, a quality earned with no
+read behind it. On the GIAB trio at 30x, one empty sample added raised `QUAL` at 746 of 767 records,
+by up to 17.6. So the fold, and the prior on the count, run over the samples whose reads said
+something. Where none did, nothing here is evidence of a variant, and the quality is zero.
+
 ### 5.2 How it is computed
 
 Four steps, in the order the code runs them, ported from

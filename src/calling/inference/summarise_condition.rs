@@ -38,7 +38,8 @@ use crate::calling::likelihood::ssr::genotype_log_likelihood_row;
 use crate::calling::likelihood::ssr_emission::SsrEmissionModel;
 use crate::calling::likelihood::{FrozenContamination, ReadGroupCalibrations};
 use crate::calling::quality::{
-    ArtifactTestCounts, SiteQualityPrior, score_best_genotype, score_uncorrected_site_quality,
+    ArtifactTestCounts, SiteQualityPrior, reads_said_nothing, score_best_genotype,
+    score_uncorrected_site_quality,
 };
 use crate::calling::{
     CallingScratch, CandidateAlleles, CohortSummingBuffers, ContaminationMixture,
@@ -384,7 +385,17 @@ pub(crate) fn score_one_sample(
 
     // 4. The posterior read as expected allele copies. Genotypes in the table's own order,
     //    so the same evidence gives the same sum at any thread count.
+    //
+    //    **A sample whose reads said nothing holds none**: its posterior is the prior alone, and
+    //    counting it would feed the cohort's own frequency back in as if a sample had shown
+    //    it — pulling the frequency toward the seed and moving every other sample's prior,
+    //    with no read behind either. In the full model such a sample marginalises out exactly
+    //    (`doc/devel/ng/spec/calling_em_loop.md` §7). Zero copies also keep its own
+    //    leave-one-out prior right: the cohort less nothing is the cohort.
     sample_expected_copies.fill(0.0);
+    if reads_said_nothing(genotype_likelihoods) {
+        return;
+    }
     for (copies_per_allele, &genotype_probability) in genotypes
         .genotype_allele_counts()
         .chunks_exact(allele_count)
@@ -849,11 +860,20 @@ pub(crate) fn run_frequency_loop<SsrEmissionScratch>(
         sum_cohort_expected_copies(scratch.cohort_summing_buffers_mut());
         passes += 1;
 
+        // **The samples whose reads said something**, since only they put copies in the sum:
+        // measuring the movement against every row's chromosomes would loosen the threshold by
+        // each sample with no reads here, and a cohort with one more such sample would stop at
+        // a different frequency. A locus nobody covered has nothing moving, and settles on the
+        // first pass at any count, so one stands in for none.
+        let informative_rows = (0..row_count)
+            .filter(|&row| !reads_said_nothing(scratch.sample_genotype_likelihoods(row)))
+            .count()
+            .max(1);
         if cohort_expected_copies_have_settled(
             scratch.previous_cohort_expected_copies(),
             scratch.cohort_expected_copies(),
             genotypes.ploidy(),
-            row_count,
+            informative_rows,
             config.convergence_threshold,
         ) {
             return FrequencyLoopOutcome {
@@ -1469,22 +1489,6 @@ fn is_callable(evidence: &LocusEvidence<'_>, run_sample: usize) -> bool {
         } => per_sample[run_sample].is_callable(),
         LocusEvidence::Ssr { .. } => true,
     }
-}
-
-/// **Whether a sample's reads said nothing about which genotype it has** — every genotype
-/// equally probable under its own likelihoods, so the prior decides alone.
-///
-/// **Exact equality, not a tolerance, and the shape of the arithmetic is why.** A sample with
-/// no reads at this locus contributes an empty sum to every genotype, and an empty sum is
-/// `0.0` for all of them by the same code path — not three numbers that happen to agree. So a
-/// tolerance would buy nothing here and would start calling *nearly* flat rows flat, which is
-/// a different claim and one nothing has measured a threshold for.
-///
-/// **A row of one genotype is flat**, trivially and correctly: a haploid locus over one allele
-/// has one genotype, the reads cannot distinguish it from anything, and there is nothing for
-/// them to have said.
-fn reads_said_nothing(likelihoods: &[LogProb]) -> bool {
-    likelihoods.iter().all(|score| *score == likelihoods[0])
 }
 
 /// **The weakest warrant behind any parameter that reached this locus** — what the record is
@@ -4655,21 +4659,16 @@ mod tests {
         );
     }
 
-    /// **A sample with no reads votes for a 50% allele frequency on the flat pass**, and the
-    /// design does not currently say whether it should.
+    /// **A sample with no reads puts no copies in the cohort's sum, even on the flat pass**
+    /// (`spec/calling_em_loop.md` §5.0.2).
     ///
-    /// `spec/calling_em_loop.md` §7 says a sample with no coverage *"scores every genotype
-    /// alike, so the prior decides it alone — the right answer rather than a special case"*.
-    /// **On a flat pass there is no prior to decide it**, so its posterior is the normalised
-    /// genotype table and its expected copies come out as the average genotype: a full copy of
-    /// the alternative allele at a biallelic locus, the same contribution as a confident
-    /// heterozygote.
-    ///
-    /// This test pins the behaviour rather than endorsing it — the number is `1.0`, and at
-    /// three reads a position roughly one sample in twenty is silent at any given position, so
-    /// this is the ordinary case rather than a corner. Raised for the owner against §3 and §7.
+    /// On a flat pass there is no prior, so its posterior is the normalised genotype table and
+    /// its copies would be the average genotype: a full copy of the alternative allele at a
+    /// biallelic locus, the same vote as a confident heterozygote. This test used to pin that
+    /// `1.0`, raised for the owner as undecided; the ruling of 2026-10-31 is that a sample
+    /// whose reads said nothing contributes nothing, on every pass.
     #[test]
-    fn a_sample_with_no_reads_contributes_a_full_alternative_copy_to_the_flat_pass() {
+    fn a_sample_with_no_reads_contributes_no_copies_to_the_flat_pass() {
         let (alleles, table) = generic_locus(1);
         let view = table.view();
         let mut scratch = CallingScratch::<()>::default();
@@ -4688,15 +4687,7 @@ mod tests {
             PassPrior::Flat,
         );
 
-        let copies = scratch.sample_expected_copies(0);
-        assert!(
-            (copies[1] - 1.0).abs() < 1e-12,
-            "a silent sample's flat-pass copies of the alternative allele: {copies:?}"
-        );
-        assert!(
-            (copies[0] - 1.0).abs() < 1e-12,
-            "and of the reference: {copies:?}"
-        );
+        assert_eq!(scratch.sample_expected_copies(0), &[0.0, 0.0]);
     }
 
     // ---------------------------------------------------------------------------------
@@ -5945,6 +5936,60 @@ mod tests {
     /// sample aside before the loop yet — that is step D1's — so this test hands the loop a
     /// complete table and flags the sample only in the evidence. What it pins is the final
     /// pass's half of the ruling, which is the half this step owns.
+    /// **A sample whose reads said nothing is called and counted nowhere**
+    /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.2): adding one leaves the cohort's copies,
+    /// and every other sample's genotype and quality, exactly as they were. Before the ruling
+    /// its prior-only copies entered the sum and moved all three — on the GIAB trio at 30x, `AF`
+    /// at 766 of 767 records and `GQ` by up to 24, with no read behind any of it.
+    #[test]
+    fn a_sample_with_no_reads_changes_no_other_samples_call() {
+        let (alleles, table) = generic_locus(1);
+        let view = table.view();
+        let reads = [
+            [observation(0, 0, 6, 3, 3), observation(1, 0, 4, 2, 2)],
+            [observation(0, 0, 9, 4, 5), observation(1, 0, 1, 1, 0)],
+        ];
+        let likelihoods = vec![vec![-3.0, 0.0, -4.0], vec![0.0, -1.5, -7.0]];
+        let observed = [called_sample(&reads[0]), called_sample(&reads[1])];
+        let alone = call_locus(
+            &likelihoods,
+            &LocusEvidence::generic(locus_region(), &observed),
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+        let with_an_empty_sample = [
+            called_sample(&reads[0]),
+            called_sample(&[]),
+            called_sample(&reads[1]),
+        ];
+        let flat = vec![0.0, 0.0, 0.0];
+        let together = call_locus(
+            &[likelihoods[0].clone(), flat, likelihoods[1].clone()],
+            &LocusEvidence::generic(locus_region(), &with_an_empty_sample),
+            &[1.0, 0.5],
+            &alleles,
+            &view,
+            &MarginalizedDirichletPrior,
+        );
+
+        assert_eq!(
+            together.cohort_expected_copies().copies(),
+            alone.cohort_expected_copies().copies(),
+            "the empty sample put copies in the cohort's sum"
+        );
+        assert_eq!(together.per_sample[0], alone.per_sample[0]);
+        assert_eq!(together.per_sample[2], alone.per_sample[1]);
+        assert!(matches!(
+            together.per_sample[1],
+            SampleGenotypeCall::Called {
+                reads_were_uninformative: true,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn a_sample_the_candidate_step_set_aside_is_missing_and_counted_nowhere() {
         let (alleles, table) = generic_locus(1);
