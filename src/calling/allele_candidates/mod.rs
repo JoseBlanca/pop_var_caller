@@ -560,6 +560,7 @@ impl LocusSelection {
         (self.alleles, self.verdict, self.unmatched, self.remap)
     }
 
+    #[cfg(test)]
     /// How many alternatives survived — the locus's allele count **without** the reference.
     ///
     /// Zero at a locus that selected down to the reference alone, which is legal and
@@ -722,55 +723,11 @@ impl SelectionScratch {
         discovery_nominated.clear();
     }
 
+    #[cfg(test)]
     /// How many alleles the buffers are currently sized for.
     #[inline]
     pub fn table_len(&self) -> usize {
         self.per_allele.len()
-    }
-
-    /// **The cap's first ranking key for one allele of the last locus folded** — the largest
-    /// share of one sample's compared reads that allele took, over the samples that cleared
-    /// the bar for it (spec §4.1).
-    ///
-    /// **Zero means no sample cleared the bar for it**, which is not the same as no sample
-    /// showing it: those reads are in [`cohort_reads_of`](Self::cohort_reads_of). Allele 0 is
-    /// the reference, which is folded like any other but exempt from the bar (spec §6.1).
-    ///
-    /// **This exists for `examples/ng_candidate_selection_probe.rs` and nothing in the
-    /// pipeline calls it** (step D1). The measurement reports the ranking's own keys, and the
-    /// only other way to report them is to recompute them — which is the duplicate rule D1
-    /// exists to delete, and which had drifted from this one twice over. Two scalars are
-    /// exported rather than the fold's own type, so the shape of the computation stays
-    /// private (arch §2.4).
-    ///
-    /// **It reads a reused buffer**, so it means nothing until a fold has filled it and it
-    /// means the previous locus after the next [`reset_for`](Self::reset_for). Ask it between
-    /// a [`select_generic`](generic::select_generic) on a locus and the next call on any
-    /// other.
-    ///
-    /// # Panics
-    ///
-    /// If `table_index` is not an allele of the locus last folded — a measurement reading a
-    /// buffer sized for a different locus, which would otherwise answer with a neighbour's
-    /// number.
-    #[inline]
-    pub fn best_within_sample_share_of(&self, table_index: usize) -> f64 {
-        self.per_allele[table_index].best_within_sample_share
-    }
-
-    /// **One allele's reads across the cohort, over every covering sample** — including the
-    /// samples that did not clear the bar for it, which is what separates it from
-    /// [`best_within_sample_share_of`](Self::best_within_sample_share_of).
-    ///
-    /// The ranking's third key, and production's only one. Same buffer, same lifetime and
-    /// same panic as the accessor above.
-    ///
-    /// # Panics
-    ///
-    /// If `table_index` is not an allele of the locus last folded.
-    #[inline]
-    pub fn cohort_reads_of(&self, table_index: usize) -> u64 {
-        self.per_allele[table_index].cohort_reads
     }
 }
 

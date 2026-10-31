@@ -486,11 +486,13 @@ pub const REFERENCE_ALLELE: usize = 0;
 /// the evidence they read.
 #[derive(Debug)]
 pub struct AlleleTable {
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     /// The locus's reference, gathered once and kept: every allele here was composed from
     /// it, and B3 attributes each sample's support against the same table.
     reference: LocusReferenceBases,
     /// The distinct alleles and the lookup that unified them, **the reference first**.
     alleles: AlleleLookup,
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     /// How many of the cohort's reads were removed as evidence here, summed over the
     /// samples — see [`reads_removed_as_evidence`](Self::reads_removed_as_evidence).
     reads_removed_as_evidence: u32,
@@ -560,6 +562,7 @@ impl AlleleLookup {
 }
 
 impl AlleleTable {
+    #[cfg(test)]
     /// Unify every sample's evidence over `locus` into one table.
     ///
     /// The reference goes in first, so it is allele 0 whether or not any sample's reads
@@ -735,6 +738,7 @@ impl AlleleTable {
         )
     }
 
+    #[cfg(test)]
     /// How many reads were removed as evidence over this locus, summed across the samples.
     ///
     /// **A removal is lost depth, and it would otherwise be invisible.** The reads counted
@@ -753,17 +757,20 @@ impl AlleleTable {
         self.reads_removed_as_evidence
     }
 
+    #[cfg(test)]
     /// The locus's reference bases — allele 0, and what every allele here was composed
     /// from.
     pub fn reference(&self) -> &LocusReferenceBases {
         &self.reference
     }
 
+    #[cfg(test)]
     /// The distinct alleles, the reference first.
     pub fn alleles(&self) -> &[Box<[u8]>] {
         &self.alleles.distinct
     }
 
+    #[cfg(test)]
     /// Which allele `bases` is, if the table holds it.
     ///
     /// **Every allele every read showed is in the table**, so a later step can find which
@@ -781,6 +788,7 @@ impl AlleleTable {
     }
 }
 
+#[cfg(test)]
 /// What one building region delivers: the cohort observations built over it, and the ground
 /// of the loci it refused (arch §4).
 ///
@@ -814,6 +822,7 @@ pub struct RegionOutcome {
     pub failed_locus_spans: Vec<GenomeRegion>,
 }
 
+#[cfg(test)]
 /// Build one region: close the cohort's loci over it, judge them, and assemble the survivors
 /// (spec §6.2).
 ///
@@ -889,6 +898,7 @@ pub fn build_region(
     }
 }
 
+#[cfg(test)]
 /// [`build_region`] over a window whose summaries are already in hand — the cache's path.
 pub fn build_region_windowed<'a, E>(
     builder_region: GenomeRegion,
@@ -918,56 +928,7 @@ pub fn build_region_windowed<'a, E>(
     Ok(outcome)
 }
 
-/// Build one region, **handing each surviving locus to `keep` the moment it is assembled**
-/// rather than collecting them, and each refused locus's ground to `refused`.
-///
-/// This is [`build_region`]'s own body; that function is this one with `Vec::push` for a sink.
-/// The ownership rule, the walk and the verdicts are written once, here, because widening
-/// either end of the ownership comparison loses a locus from the run with nothing to say so —
-/// about one in twenty at the shipped twenty-base building regions, and more as the regions
-/// get shorter. A second copy of that loop is the last thing this module should have.
-///
-/// **What the sink is for: a run that calls each locus where it is built.** Buffering every
-/// [`CohortObservation`] for a whole run is what
-/// [`merge_cohort_through_cache`](super::serial::merge_cohort_through_cache) does and what
-/// spec §5.1's bound forbids. Calling inside this loop lets each observation be dropped as
-/// soon as its genotypes exist, and the spec says the placement commutes — the call reads
-/// nothing outside its own locus (`doc/devel/ng/spec/run_streaming.md` §3.1,
-/// `cohort_merge.md` §6.3).
-///
-/// **`keep` cannot fail, and that is a fact about calling rather than a simplification.**
-/// `LocusGenotyper::call_locus` returns an inference, never an error: a locus whose loop did
-/// not settle is emitted with `converged` false rather than refused. A sink that could fail
-/// would need the failure threaded through the merge's every driver for a case that does not
-/// arise.
-pub fn build_region_handing_over(
-    builder_region: GenomeRegion,
-    observations_per_sample: &[&[SampleLocusObservations]],
-    max_cohort_locus_span: MaxCohortLocusSpan,
-    min_alt_reads: MinAltReads,
-    keep: &mut impl FnMut(CohortObservation),
-    refused: &mut Vec<GenomeRegion>,
-) {
-    match build_region_handing_over_windowed::<std::convert::Infallible>(
-        builder_region,
-        &WindowedCohort {
-            observations: Some(observations_per_sample),
-            summaries: None,
-            finalised_windows: None,
-        },
-        max_cohort_locus_span,
-        min_alt_reads,
-        keep,
-        refused,
-        &|_, _| unreachable!("a window holding records never asks for one to be built"),
-        None,
-    ) {
-        Ok(()) => {}
-        Err(never) => match never {},
-    }
-}
-
-/// [`build_region_handing_over`] over a window whose summaries are already in hand.
+/// `build_region_handing_over` over a window whose summaries are already in hand.
 #[expect(
     clippy::too_many_arguments,
     reason = "the seven the build has always taken, and the --explain-loci log it may note into"
@@ -1262,7 +1223,7 @@ pub struct SampleSupport {
     pub sample: usize,
     /// **What this sample's reads showed, one row per `(allele, read group)`**, in ascending
     /// `(allele, read group)` order. A pair it showed no reads for has no entry, which
-    /// [`pooled_support_for`](Self::pooled_support_for) reads as no reads and no sums — the
+    /// `pooled_support_for` reads as no reads and no sums — the
     /// same answer a zeroed row would give, without a row per sample per allele per group.
     ///
     /// **The read-group axis all but spent what the sparse shape was saving, and that is worth
@@ -1348,6 +1309,7 @@ pub struct SampleSupport {
 }
 
 impl SampleSupport {
+    #[cfg(test)]
     /// What this sample's reads lend `allele` **added up over its read groups** — nothing,
     /// where it showed that allele no reads, which is the answer a zeroed row would have
     /// given.
@@ -1437,7 +1399,7 @@ pub struct PartialObservation {
     /// nobody.
     ///
     /// The mint measures a witness against the *record* it belongs to
-    /// ([`SampleLocusObservations::locus_len`]), and a cohort locus can hold several of one
+    /// (`SampleLocusObservations::locus_len`), and a cohort locus can hold several of one
     /// sample's records and start before any of them, so the runs are shifted onto the locus
     /// when the row is built. **A consumer indexing an allele's projection with an unshifted run
     /// would read the wrong bases and nothing would say so.**
@@ -1551,7 +1513,7 @@ pub enum LocusBorder {
 /// of grain, not only of wording**: two lanes' shares of one divided read are now rounded
 /// separately, so adding the rows back can differ by up to half a read per lane from what a
 /// single row would have held. The row is what a model reads, and a row has to be whole reads
-/// to be usable on its own; [`SampleSupport::pooled_support_for`] is where the difference
+/// to be usable on its own; `SampleSupport::pooled_support_for` is where the difference
 /// shows, and `tests::a_divided_read_is_rounded_once_per_read_group_not_once_per_allele` pins it
 /// at one forward read. (Named rather than linked: a `#[cfg(test)]` item does not exist in a doc
 /// build, so a link to one is an unresolved link.)
@@ -1597,6 +1559,7 @@ pub struct AlleleSupport {
 }
 
 impl AlleleSupport {
+    #[cfg(test)]
     /// Two rows added together — **the read-group fold, and the only place it happens**.
     ///
     /// Every field is additive, so this is exact wherever the rows themselves are.

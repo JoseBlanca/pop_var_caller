@@ -18,11 +18,16 @@
 //! the cache is generic over its source's error type and the run's own `ObservationSource` and
 //! `RunError` do not exist yet.
 
+#[cfg(test)]
 use std::collections::{BTreeMap, VecDeque};
 
-use super::build::{CohortObservation, RegionOutcome};
+#[cfg(test)]
+use super::build::CohortObservation;
+#[cfg(test)]
+use super::build::RegionOutcome;
 use crate::types::{GenomePosition, GenomeRegion};
 
+#[cfg(test)]
 /// Where one building region falls in the order the run hands them out — 0 for the run's
 /// first, 1 for its second, counting on across every analysed region of the run.
 ///
@@ -35,12 +40,14 @@ use crate::types::{GenomePosition, GenomeRegion};
 #[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RegionIndex(pub u64);
 
+#[cfg(test)]
 impl std::fmt::Display for RegionIndex {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.0)
     }
 }
 
+#[cfg(test)]
 /// A run that ended owing output — the release-level guard production keeps as
 /// `WriterError::MissingChunks` (`var_calling/vcf_writer.rs:152-158`), and what arch §5 will
 /// fold into `RunError` when that type exists.
@@ -89,6 +96,7 @@ pub enum RunEndedShort {
     },
 }
 
+#[cfg(test)]
 /// What a finished run has to say about the loci it did not emit.
 ///
 /// **Both counts leave with the organiser**, because `finish` consumes it: a caller that read
@@ -104,6 +112,7 @@ pub struct MergeTally {
     pub displaced_loci: u64,
 }
 
+#[cfg(test)]
 /// Holds the builders' outcomes and releases their loci in genome order (spec §6.1, §6.3).
 ///
 /// **Builders finish out of order and the consumer must see genome order**, so the outcomes
@@ -202,6 +211,7 @@ pub struct Organiser {
     displaced_locus_count: u64,
 }
 
+#[cfg(test)]
 impl Default for Organiser {
     /// [`Organiser::new`], and only that: a second construction path would be a second place
     /// to forget a field, which is the thing `new` is written out longhand to prevent.
@@ -210,6 +220,7 @@ impl Default for Organiser {
     }
 }
 
+#[cfg(test)]
 impl Organiser {
     /// An organiser expecting region index 0 and holding nothing.
     ///
@@ -228,6 +239,7 @@ impl Organiser {
         }
     }
 
+    #[cfg(test)]
     /// Take one region's outcome, and release everything the arrival makes releasable.
     ///
     /// **Releasing here rather than in [`drain_ready`](Self::drain_ready) is production's
@@ -263,6 +275,7 @@ impl Organiser {
         self.release_regions_in_turn();
     }
 
+    #[cfg(test)]
     /// Everything released and not yet taken, in genome order.
     ///
     /// **What is left when the iterator is dropped early stays here**, to be handed out by the
@@ -275,12 +288,14 @@ impl Organiser {
         std::iter::from_fn(move || released_loci.pop_front())
     }
 
+    #[cfg(test)]
     /// The failed loci of every region released so far, summed (spec §3.3).
     #[must_use]
     pub fn failed_locus_count(&self) -> u64 {
         self.failed_locus_count
     }
 
+    #[cfg(test)]
     /// How many loci — emitted and failed alike — were dropped because an earlier locus
     /// already owned the ground they started on (spec §6.1).
     ///
@@ -293,6 +308,7 @@ impl Organiser {
         self.displaced_locus_count
     }
 
+    #[cfg(test)]
     /// Nothing outstanding: every region the run handed out has been released, and every
     /// released locus taken (arch §4).
     ///
@@ -362,6 +378,7 @@ impl Organiser {
         }
     }
 
+    #[cfg(test)]
     /// Release the unbroken run of regions now at the head, oldest first.
     fn release_regions_in_turn(&mut self) {
         while let Some(outcome) = self.held_outcomes.remove(&self.next_expected_region) {
@@ -384,6 +401,7 @@ impl Organiser {
         }
     }
 
+    #[cfg(test)]
     /// One region's loci and failed spans, taken in genome order, each claiming its ground or
     /// losing it to a locus that got there first (spec §6.1).
     ///
@@ -423,6 +441,7 @@ impl Organiser {
         }
     }
 
+    #[cfg(test)]
     /// Release `locus` if it claims its ground, and drop it if an earlier locus owns it.
     fn claim_and_release(&mut self, locus: CohortObservation) {
         if self.claim(locus.region) {
@@ -430,6 +449,7 @@ impl Organiser {
         }
     }
 
+    #[cfg(test)]
     /// Claim `locus_span`'s ground for the locus that covers it, or refuse it to a locus that
     /// got there first — spec §6.1's one rule, with no special case for a failed locus. The
     /// span is a **locus's** own ground, not a building region's, which is the other thing this

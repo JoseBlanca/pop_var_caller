@@ -3,7 +3,7 @@
 //! (`doc/devel/ng/research/str_fit_research_plan.md` §2, §5).
 //!
 //! The bench itself is `examples/ng_str_fit_bench.rs`: it draws a cohort with
-//! [`cohort_draw`](super::cohort_draw), runs each method through this interface, and writes one row
+//! `cohort_draw`, runs each method through this interface, and writes one row
 //! per method, class and number.
 //!
 //! # Adding a method
@@ -270,10 +270,10 @@ pub trait PeriodFit: Sync {
 // ---------------------------------------------------------------------
 
 /// **Method B: the counting fit**, class by class
-/// ([`fit_class_by_counting_with_pairs`](super::super::expected_counts::fit_class_by_counting_with_pairs)
+/// (`fit_class_by_counting_with_pairs`
 /// with `pairs`, the within-sample version without), as `examples/ng_str_counting_fit.rs` runs it.
 /// A class with fewer loci carrying reads than
-/// [`COUNTING_FIT_FLOOR`](super::super::expected_counts::COUNTING_FIT_FLOOR) (8, the climb's
+/// `COUNTING_FIT_FLOOR` (8, the climb's
 /// refusal floor) is left absent, as that example leaves it. Its concentration is absent where the
 /// fit cannot place it.
 ///
@@ -288,7 +288,7 @@ pub struct TheCountingFit {
     pub alternations: usize,
     pub errors: CountingFitErrorMethod,
     /// The shares' prior weight, in tracts
-    /// ([`SHARE_PRIOR_TRACTS`](super::super::expected_counts::SHARE_PRIOR_TRACTS) by default; zero is
+    /// (`SHARE_PRIOR_TRACTS` by default; zero is
     /// the fit before the prior). Read only with `pairs`.
     pub share_prior_tracts: f64,
 }
@@ -301,122 +301,6 @@ pub enum CountingFitErrorMethod {
     Sandwich,
     /// The tracts resampled this many times, each draw refitted.
     Bootstrap(usize),
-}
-
-impl Default for TheCountingFit {
-    fn default() -> Self {
-        Self {
-            pairs: true,
-            max_rounds: 2000,
-            tolerance: 1e-7,
-            alternations: 10,
-            errors: CountingFitErrorMethod::Sandwich,
-            share_prior_tracts: super::super::expected_counts::SHARE_PRIOR_TRACTS,
-        }
-    }
-}
-
-impl PeriodFit for TheCountingFit {
-    fn name(&self) -> String {
-        let estimator = match (self.pairs, self.share_prior_tracts == 0.0) {
-            (true, false) => "B",
-            (true, true) => "B_noprior",
-            (false, _) => "B_within",
-        };
-        if self.tolerance < 1e-7 {
-            return format!("{estimator}_tight");
-        }
-        match self.errors {
-            CountingFitErrorMethod::Sandwich => estimator.to_owned(),
-            CountingFitErrorMethod::None => format!("{estimator}_noerrors"),
-            CountingFitErrorMethod::Bootstrap(_) => format!("{estimator}_bootstrap"),
-        }
-    }
-
-    fn fit_period(
-        &self,
-        classes: &[StratumEvidence],
-        homozygote_excess: &[f64],
-        allele_span: i32,
-    ) -> Vec<ClassEstimate> {
-        use super::super::counting_fit_errors::{
-            BootstrapSettings, CountedClassErrors, bootstrap_errors, sandwich_errors,
-        };
-        let start = Slippage {
-            level: 0.05,
-            shorter_share: 0.5,
-            fall_off: 0.3,
-        };
-        // The classes are independent, so they are fitted side by side; each also spreads its
-        // loci over the pool.
-        classes
-            .par_iter()
-            .map(|evidence| {
-                if evidence.tracts_with_reads() < super::super::expected_counts::COUNTING_FIT_FLOOR
-                {
-                    return ClassEstimate::absent(evidence);
-                }
-                let fit = if self.pairs {
-                    super::super::expected_counts::fit_class_by_counting_with_pairs_at_share_prior(
-                        evidence,
-                        start,
-                        homozygote_excess,
-                        allele_span,
-                        self.max_rounds,
-                        self.tolerance,
-                        self.alternations,
-                        self.share_prior_tracts,
-                    )
-                } else {
-                    super::super::expected_counts::fit_class_by_counting(
-                        evidence,
-                        start,
-                        homozygote_excess,
-                        allele_span,
-                        self.max_rounds,
-                        self.tolerance,
-                    )
-                };
-                let found: Option<CountedClassErrors> = match self.errors {
-                    CountingFitErrorMethod::None => None,
-                    CountingFitErrorMethod::Sandwich => Some(
-                        sandwich_errors(evidence, &fit, homozygote_excess, allele_span).sandwich,
-                    ),
-                    CountingFitErrorMethod::Bootstrap(replicates) => Some(bootstrap_errors(
-                        evidence,
-                        &fit,
-                        homozygote_excess,
-                        allele_span,
-                        BootstrapSettings {
-                            replicates,
-                            seed: evidence.stratum.reference_repeats,
-                            max_rounds: self.max_rounds,
-                            tolerance: self.tolerance,
-                            alternations: self.alternations,
-                        },
-                    )),
-                };
-                let errors = found.map_or_else(ClassErrors::default, |errors| ClassErrors {
-                    level: errors.level.value(),
-                    shorter_share: errors.shorter_share.value(),
-                    fall_off: errors.fall_off.value(),
-                    concentration: errors.concentration.value(),
-                    allele_length_variation: errors
-                        .allele_length_variation
-                        .iter()
-                        .map(|error| error.value())
-                        .collect(),
-                });
-                ClassEstimate {
-                    stratum: evidence.stratum,
-                    slippage: Some(fit.slippage),
-                    allele_length_variation: Some(fit.allele_length_variation),
-                    concentration: fit.concentration,
-                    errors,
-                }
-            })
-            .collect()
-    }
 }
 
 /// **Method D: penalised counting**, every class of the motif length at once, each number a

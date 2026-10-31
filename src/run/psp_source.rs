@@ -16,7 +16,7 @@
 //!   source's error and passes it through, so in a run over a thousand samples an error saying
 //!   only *block 41 would not inflate* names neither the individual to look at nor the ground
 //!   already called ([`RunError::SourceFailed`], spec §9). On the path a run takes
-//!   ([`PspObservationSource::over`]) the name is read from the file's own header, so the name
+//!   (`PspObservationSource::over`) the name is read from the file's own header, so the name
 //!   in the error and the file it came from cannot come apart.
 //! - **Refusals where the merge would otherwise assert or go quiet** — see [`PspSourceError`],
 //!   which says of each whether the mistake is the file's or this crate's.
@@ -34,7 +34,7 @@
 //!
 //! **Generic over the walk, and that is what makes the head-only refusal reachable.** A psp's
 //! records can be walked two ways: [`RecordIter`], which builds every record, and
-//! [`SelectiveRecordIter`](crate::psp::SelectiveRecordIter), which builds only the bodies a
+//! `SelectiveRecordIter`, which builds only the bodies a
 //! predicate asks for and hands the rest back as a head alone. **A merge fed the second would
 //! be handed a cohort with observations missing and no error anywhere** — wrong genotypes, not
 //! a failure. So this type takes either and refuses the moment a body is missing, rather than
@@ -42,7 +42,9 @@
 //! defers.
 
 use crate::locus_generation::SampleLocusObservations;
-use crate::psp::{PspReadError, PspReader, RecordIter, StreamedRecord};
+#[cfg(test)]
+use crate::psp::{PspReadError, StreamedRecord};
+use crate::psp::{PspReader, RecordIter};
 use crate::types::{GenomePosition, GenomeRegion, ReadGroupId};
 
 use super::cohort_merge::observation_cache::ObservationSource;
@@ -408,6 +410,7 @@ impl<'a> PspSummarySource<'a> {
         }
     }
 
+    #[cfg(test)]
     /// How many body bytes this source is holding — **the number the arena is bounded by**,
     /// exposed so that a test can say the bound holds rather than assert that a call was made.
     #[must_use]
@@ -415,6 +418,7 @@ impl<'a> PspSummarySource<'a> {
         self.kept.len()
     }
 
+    #[cfg(test)]
     /// How many records' heads this source is holding, for the reason
     /// [`held_bytes`](Self::held_bytes) exists.
     #[must_use]
@@ -422,6 +426,7 @@ impl<'a> PspSummarySource<'a> {
         self.heads.len()
     }
 
+    #[cfg(test)]
     /// How many read identifiers this source is holding — the third arena, and the one whose
     /// cut cannot be derived from either of the others.
     #[must_use]
@@ -531,6 +536,7 @@ impl<'a> PspSummarySource<'a> {
     }
 }
 
+#[cfg(test)]
 pub struct PspObservationSource<W> {
     /// The individual this file holds. **[`over`](Self::over) takes it from the psp's own
     /// header**, so on the path a run uses, the name a failure carries and the file it came
@@ -623,6 +629,7 @@ impl StoredSampleTallies {
     }
 }
 
+#[cfg(test)]
 /// **The sample's name and how far it has got, not the walk.** The sibling walker hand-writes
 /// its own for the same reason ([`AlignmentFilesWalker`](super::walker::AlignmentFilesWalker)):
 /// a derived one would print the decoder's buffers. It also drops the `W: Debug` bound a derive
@@ -638,6 +645,7 @@ impl<W> std::fmt::Debug for PspObservationSource<W> {
     }
 }
 
+#[cfg(test)]
 impl<W> PspObservationSource<W> {
     /// A source over `walk`, reporting failures under `sample`.
     ///
@@ -709,6 +717,7 @@ fn source_failed(
     }
 }
 
+#[cfg(test)]
 impl<'a> PspObservationSource<RecordIter<'a>> {
     /// Every record of an open psp, as a source named by the file's own header.
     ///
@@ -917,6 +926,7 @@ impl ObservationSource for PspSummarySource<'_> {
     }
 }
 
+#[cfg(test)]
 impl<W> ObservationSource for PspObservationSource<W>
 where
     W: Iterator<Item = Result<StreamedRecord, PspReadError>>,

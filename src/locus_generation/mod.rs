@@ -117,6 +117,7 @@ impl SampleLocusObservations {
         depth
     }
 
+    #[cfg(test)]
     /// This locus's length, for the [`ReadWitness`] predicates that need it.
     ///
     /// **The one source a consumer should use.** The mint derives the same quantity from
@@ -174,6 +175,7 @@ impl SampleLocusObservations {
         self.region.end.max(self.region.start)
     }
 
+    #[cfg(test)]
     /// Where this observation begins, genome-wide — the key the cohort merge orders on.
     ///
     /// A [`Position`] alone does not identify a base, and every consumer of this one
@@ -188,7 +190,7 @@ impl SampleLocusObservations {
     }
 
     /// The last base this observation covers, genome-wide — [`reach`](Self::reach) with
-    /// its contig, and the sibling of [`start_position`](Self::start_position).
+    /// its contig, and the sibling of `start_position`.
     pub fn reach_position(&self) -> GenomePosition {
         GenomePosition {
             contig: self.region.contig,
@@ -196,6 +198,7 @@ impl SampleLocusObservations {
         }
     }
 
+    #[cfg(test)]
     /// How many reads here showed something other than the reference — the number the
     /// cohort merge's keep rule sums across a locus
     /// (`doc/devel/ng/spec/cohort_merge.md` §4.3).
@@ -228,6 +231,7 @@ impl SampleLocusObservations {
             .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
     }
 
+    #[cfg(test)]
     /// How many reads here were compared against the reference at all — the denominator
     /// [`non_reference_reads`](Self::non_reference_reads) is the numerator of.
     ///
@@ -253,8 +257,8 @@ impl SampleLocusObservations {
             .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
     }
 
-    /// [`non_reference_reads`](Self::non_reference_reads) and
-    /// [`reads_compared_with_reference`](Self::reads_compared_with_reference) in **one pass**
+    /// `non_reference_reads` and
+    /// `reads_compared_with_reference` in **one pass**
     /// over this record's sequences — the numerator and the denominator of the cohort merge's
     /// keep rule, which asks for both at every record it walks
     /// (`spec/cohort_merge.md` §4.3).
@@ -630,7 +634,7 @@ pub trait LocusGenerator<S: ?Sized> {
     /// truncations that explained it into a struct nobody could see (Milestone C
     /// review).
     ///
-    /// Defaulted to `None` so a generator with nothing to report — [`NoLoci`], a test
+    /// Defaulted to `None` so a generator with nothing to report — `NoLoci`, a test
     /// fake — says so by saying nothing.
     fn counts(&self) -> Option<GeneratorCounts<'_>> {
         None
@@ -644,7 +648,7 @@ pub trait LocusGenerator<S: ?Sized> {
     /// committed baselines.
     ///
     /// Spec §8 requires a run to sum these when it finishes, or drop rates under-report
-    /// silently. Empty by default, so a generator with no reader of its own — [`NoLoci`], a
+    /// silently. Empty by default, so a generator with no reader of its own — `NoLoci`, a
     /// test fake — says so by saying nothing.
     fn read_filter_counts(&self) -> Vec<(Option<ReadGroupId>, ReadFilterCounts)> {
         Vec::new()
@@ -671,6 +675,7 @@ pub enum GeneratorCounts<'a> {
     Ssr(&'a ssr::SsrGeneratorCounts),
 }
 
+#[cfg(test)]
 /// A generator that produces no loci and reports why.
 ///
 /// One implementation covers every kind, because it ignores the segment entirely — the
@@ -695,6 +700,7 @@ pub enum UnhandledReason {
     NotImplemented,
 }
 
+#[cfg(test)]
 impl<S: ?Sized> LocusGenerator<S> for NoLoci {
     fn begin_segment(&mut self, _region: GenomeRegion) {}
 
@@ -826,6 +832,7 @@ impl From<std::convert::Infallible> for LocusGenerationError {
 }
 
 impl LocusGenerationError {
+    #[cfg(test)]
     /// The region the failure is attributed to, or `None` for a failure of the region
     /// *stream* itself.
     ///
@@ -1038,6 +1045,7 @@ impl GeneratorSet {
         &self.counts
     }
 
+    #[cfg(test)]
     /// What the **STR** generator has counted, if one is filled and counts anything.
     pub fn ssr_counts(&self) -> Option<GeneratorCounts<'_>> {
         self.ssr.counts()
@@ -1051,12 +1059,6 @@ impl GeneratorSet {
     /// tally.
     pub fn generic_counts(&self) -> Option<GeneratorCounts<'_>> {
         self.generic.counts()
-    }
-
-    /// What the **STR bundle** generator has counted, if one is filled and counts anything
-    /// (`str_bundle_loci.md` §6.1).
-    pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
-        self.ssr_bundle.counts()
     }
 
     /// **Why this sample's reads were dropped, per read group, summed over every generator of

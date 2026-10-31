@@ -77,6 +77,7 @@ pub struct ReadFilterConfig {
     pub mismatch_bq_floor: BaseQual,
 }
 
+#[cfg(test)]
 /// Every provenance key [`ReadFilterConfig::provenance_parameters`] can write, so a
 /// caller replacing an earlier recording can clear the whole family first — the key set
 /// shrinks when the mismatch filter turns off, and a stale floor beside an `"off"` is
@@ -94,7 +95,7 @@ pub const READ_FILTER_PROVENANCE_KEYS: [&str; 6] = [
 /// out of a header it did not write.
 ///
 /// Both spellings are needed and they answer different questions.
-/// [`READ_FILTER_PROVENANCE_KEYS`] is *what this build records* — a writer clearing its own
+/// `READ_FILTER_PROVENANCE_KEYS` is *what this build records* — a writer clearing its own
 /// keys, or a test holding the set exhaustive, wants exactly those six. This is *what a read
 /// filter's key looks like*, which is what a reader comparing two psps written by different
 /// builds needs: a key a later ng added is a read-filter setting, and dropping it because this

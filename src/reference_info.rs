@@ -1143,12 +1143,6 @@ pub struct VerificationHandle {
 }
 
 impl VerificationHandle {
-    /// Non-blocking: `true` once verification has finished, so a caller can defer `join` until
-    /// it will not block.
-    pub fn is_finished(&self) -> bool {
-        self.handle.as_ref().is_none_or(|h| h.is_finished())
-    }
-
     /// Block until verification finishes and take its result — the **verified**
     /// `ReferenceInfo` (MD5s filled) on success, the geometry or read error on failure.
     pub fn join(mut self) -> Result<Arc<ReferenceInfo>, ReferenceInfoError> {

@@ -133,7 +133,7 @@ impl ParalogLrHistogram {
     /// A new empty histogram of `n_bins` uniform bins over `[lo, hi]`.
     /// Returns `None` for a degenerate range (`n_bins == 0`, a non-finite
     /// edge, or `lo >= hi`) — the same construction-boundary convention as
-    /// the sibling [`super::GridSpec::new`].
+    /// the sibling `super::GridSpec::new`.
     pub fn new(lo: f64, hi: f64, n_bins: usize) -> Option<Self> {
         UniformBinning::new(lo, hi, n_bins).map(|binning| Self {
             binning,
@@ -142,6 +142,7 @@ impl ParalogLrHistogram {
         })
     }
 
+    #[cfg(test)]
     /// A new empty histogram with the default range and resolution (the
     /// trusted compile-time defaults, so construction cannot fail).
     pub fn with_defaults() -> Self {
@@ -234,6 +235,7 @@ impl ParalogPrior {
         sigmoid(lr + logit(clamp_probability(self.prior_probability)))
     }
 
+    #[cfg(test)]
     /// The LR at which the posterior crosses `0.5`:
     /// `log((1 − π) / π) = −logit π` — positive, since hidden duplications are
     /// rare (the cut is NOT at `LR = 0`).

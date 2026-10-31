@@ -243,7 +243,7 @@ impl WindowCoverageAccumulator {
     /// finalised no window at all, or none that cleared the floor, or the windows it did have
     /// reported no positive median depth. The three are three different reports, and this is the
     /// only place the difference exists; a caller that does not act on it can say
-    /// [`fitted`](SampleHistogram::fitted) and get an `Option` back.
+    /// `fitted` and get an `Option` back.
     #[must_use = "the tail windows and the histogram are the pass's whole output; dropping \
                   them discards every window the accumulator has not already handed over"]
     pub fn finish(mut self) -> (Vec<(GenomePosition, WindowCoverage)>, SampleHistogram) {

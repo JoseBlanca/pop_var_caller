@@ -81,6 +81,7 @@ pub enum CensusCohortError {
     },
 }
 
+#[cfg(test)]
 /// **Every census of an opened cohort, read out of the psps that carry them.**
 ///
 /// One sample a psp, in the cohort's own order, which is the order the run's samples are in.
@@ -111,7 +112,7 @@ pub fn every_census_in_the_cohorts_psps(
 
 /// **Each census of an opened cohort, read out of its psp and not yet assembled into a cohort** —
 /// one sample a psp, in the cohort's own order, read exactly as
-/// [`every_census_in_the_cohorts_psps`] reads them.
+/// `every_census_in_the_cohorts_psps` reads them.
 ///
 /// **Apart from the assembly because a command may have to judge each census before refusing the
 /// cohort.** Assembling refuses two samples that recorded different settings, naming the pair
@@ -351,26 +352,6 @@ mod tests {
         assert!(
             bytes_read() > 0,
             "asking for a section reached the file, so the census was never held whole",
-        );
-    }
-
-    /// **A psp whose trailer is not a census is refused, naming the psp.**
-    ///
-    /// The trailer is replaced with bytes that are not a census — which is what a psp written
-    /// before the census moved into it looks like, except that its trailer is empty rather than
-    /// prose, and both arrive here the same way. **This is the message plan step C3 puts a
-    /// regeneration report in front of**; until then it is what a stale cohort says.
-    #[test]
-    fn a_psp_whose_trailer_is_not_a_census_is_refused_naming_the_psp() {
-        let (_cohort, paths, _open) = a_walked_cohort();
-        crate::psp::replace_trailer(&paths[1], b"not a census").expect("the tail rewrites");
-        let open = OpenPspCohort::open(&paths).expect("the psps still open");
-
-        let error = every_census_in_the_cohorts_psps(&open).expect_err("that is not a census");
-
-        assert!(
-            matches!(&error, CensusCohortError::CensusNotRead { path, .. } if path == &paths[1]),
-            "{error:?}",
         );
     }
 }

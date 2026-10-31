@@ -144,7 +144,7 @@
 //! three refusals of §6 and the fourth binding's demotion.
 //!
 //! **Three ways in, and they answer three different questions.** [`ParametersFile::from_toml`] asks
-//! whether the text is this shape. [`ParametersFile::to_run_parameters`] asks whether it means
+//! whether the text is this shape. `ParametersFile::to_run_parameters` asks whether it means
 //! something, and gives the parameters it means.
 //! [`ParametersFile::to_run_parameters_for`] asks whether it means something **about this run**,
 //! and is the one a run calls.
@@ -366,6 +366,7 @@ pub enum ParametersFileError {
 }
 
 impl ParametersFileError {
+    #[cfg(test)]
     /// **The line the failure is on, where it has one** — the one question every variant can
     /// answer, so that a caller reporting a bad file need not match on which kind of bad it is.
     ///
@@ -383,6 +384,7 @@ impl ParametersFileError {
         }
     }
 
+    #[cfg(test)]
     /// What the parser itself said, rendered — the line, the column, the offending line of the
     /// file and a caret under it.
     ///

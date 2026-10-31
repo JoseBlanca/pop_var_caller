@@ -56,7 +56,7 @@ pub const THE_COMMAND_THAT_REWRITES_A_PSP: &str = "generate-psps";
 ///
 /// **An older census is named as an older census, never as damage.** A version word this build
 /// does not know reaches the user as *malformed* today
-/// ([`decode_census`](crate::parameter_estimation::joint::census_file::decode_census)), which
+/// (`decode_census`), which
 /// sends someone looking for a corrupted file when what happened is that this build changed what
 /// a census holds (spec §4.2). Plan step B2 reads the version before that check, so it reaches
 /// them as [`AnotherFormat`](Self::AnotherFormat) instead.
@@ -83,7 +83,7 @@ pub enum CensusVerdict {
     /// The psp carries no census at all: its trailer is empty.
     ///
     /// A psp written before the census moved into the trailer, or one whose trailer an
-    /// [`append`](crate::psp::PspWriter::append) discarded (spec §3.4).
+    /// `append` discarded (spec §3.4).
     NoCensus,
 
     /// The version word at the front of the psp's census is not the one this build reads.
@@ -108,11 +108,11 @@ pub enum CensusVerdict {
     ///
     /// **Not one of spec §4.2's three causes, and it is here because the read that reaches them
     /// can meet this instead.** §4.2 asks for the version word to be read before
-    /// [`decode_census`](crate::parameter_estimation::joint::census_file::decode_census) can
+    /// `decode_census` can
     /// call an old census malformed; reading that word means first knowing the bytes are a
     /// census, and bytes that are not are damage rather than an old format. Regenerating the
     /// census rewrites exactly those bytes and touches nothing else
-    /// ([`replace_trailer`](crate::psp::replace_trailer)), so it is still the repair to try.
+    /// (`replace_trailer`), so it is still the repair to try.
     NotACensus,
 
     /// The psp carries a census this build reads, recorded under settings other than the ones
@@ -211,7 +211,7 @@ impl CensusVerdict {
 /// (`estimate-parameters`, spec §4.2) is what this alone serves.
 ///
 /// **The whole trailer is never read**, and
-/// [`trailer_bytes_read`](crate::psp::trailer_bytes_read) is what says so: a census in a
+/// `trailer_bytes_read` is what says so: a census in a
 /// whole-genome psp is tens of megabytes (spec §3.1) and a cohort is thousands of psps, which is
 /// the memory the census's own reader is lazy to avoid (spec §5).
 ///
@@ -279,7 +279,7 @@ pub struct JudgedPsp {
 ///
 /// **The cost is at most one seek and ten bytes a sample, and nothing at all for a psp with no
 /// census**, and no census is decoded — see
-/// [`trailer_bytes_read`](crate::psp::trailer_bytes_read). A thousand-sample cohort's
+/// `trailer_bytes_read`. A thousand-sample cohort's
 /// censuses are tens of gigabytes (spec §5) and this reads ten kilobytes of them.
 #[must_use]
 pub fn what_the_heads_say_about_every_census_in_a_cohort(
@@ -477,12 +477,14 @@ impl CensusesToRegenerate {
         }
     }
 
+    #[cfg(test)]
     /// How many samples need their census rebuilt.
     #[must_use]
     pub fn stale_count(&self) -> usize {
         self.stale.len()
     }
 
+    #[cfg(test)]
     /// How many of the cohort's psps would not read.
     #[must_use]
     pub fn unreadable_count(&self) -> usize {

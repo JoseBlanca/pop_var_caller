@@ -80,7 +80,7 @@
 //!   iteration after a profile put the allocator's self-time at about a sixth of cycles.
 //!   **The buffers themselves are amortised rather than allocation-free** — they grow when a
 //!   sample or locus is wider than any before it and never shrink — and
-//!   [`GenericEvidenceBuffer`], which is where the evidence lives rather than where the row
+//!   `GenericEvidenceBuffer`, which is where the evidence lives rather than where the row
 //!   scribbles, is the same.
 //! - **An empty evidence row is all zeros, with no branch to make it so.** An empty sum is
 //!   zero, so a sample that showed nothing scores every genotype alike and the prior decides
@@ -459,6 +459,7 @@ impl ReadGroupCalibration {
         }
     }
 
+    #[cfg(test)]
     /// The scale in log space — what spec §3.3's log-space form adds, once per observation.
     ///
     /// §3.3 charges an unexplained observation `q_sum + n·(log scale − log m)`, so the
@@ -1069,6 +1070,7 @@ impl<'a> FrozenContamination<'a> {
         }
     }
 
+    #[cfg(test)]
     /// How many sequencing batches the run declares.
     #[must_use]
     pub fn batch_count(&self) -> usize {
@@ -1151,6 +1153,7 @@ impl<'a> ContaminationMixture<'a> {
         }
     }
 
+    #[cfg(test)]
     /// A fraction per read group, the batch each read group ran in, and one frequency per
     /// candidate allele **per batch** — batch-major, `allele_count` to a row.
     ///
@@ -1238,6 +1241,7 @@ impl<'a> ContaminationMixture<'a> {
         self.allele_count
     }
 
+    #[cfg(test)]
     /// How many sequencing batches the run declared — `1` under the default batching, and `0`
     /// where there is no mixture.
     #[must_use]
@@ -1711,6 +1715,7 @@ impl<'a> SsrSampleEvidence<'a> {
     }
 }
 
+#[cfg(test)]
 /// Where one sample's narrowed merge rows live while the SNP/indel row reads them.
 ///
 /// **One per worker, reused across every sample of every locus** — which is the point, and
@@ -1737,7 +1742,9 @@ pub struct GenericEvidenceBuffer {
     supported: Vec<GenericObservation>,
 }
 
+#[cfg(test)]
 impl GenericEvidenceBuffer {
+    #[cfg(test)]
     /// Narrow one sample's merge rows into the buffer under selection's mapping, and hand
     /// back the rows together with the quality of the ones the mapping dropped.
     ///
@@ -1854,11 +1861,13 @@ impl<ModelScratch> SsrRowScratch<ModelScratch> {
         self.emissions[slot] = value;
     }
 
+    #[cfg(test)]
     /// How many slots the cache holds — one per `(observation, candidate)`.
     pub fn emission_count(&self) -> usize {
         self.emissions.len()
     }
 
+    #[cfg(test)]
     /// The whole cache, for a filler that walks it in order rather than by index.
     pub fn emissions_mut(&mut self) -> &mut [f64] {
         &mut self.emissions
@@ -1911,16 +1920,6 @@ impl<'a> ReadGroupCalibrations<'a> {
         Self(calibration)
     }
 
-    /// How many read groups the run supplied a calibration for.
-    ///
-    /// **No `is_empty` beside it**, which clippy would normally ask for: an empty one is a run
-    /// whose read-group axis went missing, and `FrozenParameters` refuses it at construction, so
-    /// the question has one answer everywhere it could be asked.
-    #[must_use]
-    pub fn count(&self) -> usize {
-        self.0.len()
-    }
-
     /// One read group's calibration.
     ///
     /// # Panics
@@ -1947,13 +1946,14 @@ impl<'a> ReadGroupCalibrations<'a> {
 /// Both are dense over [`ReadGroupId`], and a run whose calibration covers ten read groups and
 /// whose mixture covers four is a caller bug the row can only find lazily — at whichever locus
 /// first holds a read from the fifth, or never. Pairing them puts that check at construction,
-/// which is where [`ContaminationMixture::new`] already puts the checks between the mixture's
+/// which is where `ContaminationMixture::new` already puts the checks between the mixture's
 /// own two halves.
 ///
 /// It also keeps the row's argument list inside what a reader can hold: the row takes what the
 /// sample showed, what the locus is, what the run's chemistry is, its scratch, and its output.
 #[derive(Copy, Clone, Debug)]
 pub struct ReadGroupParameters<'a> {
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     calibration: ReadGroupCalibrations<'a>,
     contamination: ContaminationMixture<'a>,
 }
@@ -1982,24 +1982,14 @@ impl<'a> ReadGroupParameters<'a> {
         }
     }
 
+    #[cfg(test)]
     /// A run with no contamination estimate — a single sample, or a fit that emitted none.
     #[must_use]
     pub fn uncontaminated(calibration: &'a [ReadGroupCalibration]) -> Self {
         Self::new(calibration, ContaminationMixture::uncontaminated())
     }
 
-    /// One read group's calibration.
-    ///
-    /// # Panics
-    ///
-    /// On a read group the run supplied no calibration for. A row scoring evidence from a group
-    /// the parameters do not cover is a caller bug, and reading it as uncalibrated would be a
-    /// genotype quietly moved rather than a run that stopped.
-    #[must_use]
-    pub fn calibration_of(&self, read_group: ReadGroupId) -> &'a ReadGroupCalibration {
-        self.calibration.of(read_group)
-    }
-
+    #[cfg(test)]
     /// Just the calibration half — what the row's frequency-free fill is handed.
     #[must_use]
     pub fn calibrations(&self) -> ReadGroupCalibrations<'a> {
@@ -2010,12 +2000,6 @@ impl<'a> ReadGroupParameters<'a> {
     #[must_use]
     pub fn contamination(&self) -> ContaminationMixture<'a> {
         self.contamination
-    }
-
-    /// How many read groups the run has.
-    #[must_use]
-    pub fn read_group_count(&self) -> usize {
-        self.calibration.count()
     }
 }
 
@@ -2049,7 +2033,7 @@ impl<'a> ReadGroupParameters<'a> {
 /// (spec §6.1). **One of these per scratch row**, therefore, and not one reused across samples:
 /// a shared one would be overwritten by the next sample before the next pass could read it.
 ///
-/// # Why it is a separate type from [`GenericEvidenceBuffer`]
+/// # Why it is a separate type from `GenericEvidenceBuffer`
 ///
 /// **The evidence view borrows that buffer**, so it is still borrowed while the row runs, and a
 /// row taking `&mut` the same object the evidence borrows cannot be called at all. A2 recorded
@@ -2224,6 +2208,7 @@ impl GenericRowScratch {
         self.compatible[slot] = compatible;
     }
 
+    #[cfg(test)]
     /// How many verdicts the cache is sized for.
     #[must_use]
     pub fn verdict_count(&self) -> usize {

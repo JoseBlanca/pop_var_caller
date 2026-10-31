@@ -59,7 +59,6 @@ use std::sync::Arc;
 
 use rayon::prelude::*;
 
-pub mod counting_fit_errors;
 pub mod expected_counts;
 pub mod penalised_fit;
 
@@ -376,7 +375,7 @@ impl StratumEvidence {
 
     /// Tracts carrying at least one spanning read — the count the penalised fit spreads its
     /// allele-length prior over, and the one the bench's
-    /// [`COUNTING_FIT_FLOOR`](expected_counts::COUNTING_FIT_FLOOR) is measured in.
+    /// `COUNTING_FIT_FLOOR` is measured in.
     pub fn tracts_with_reads(&self) -> usize {
         self.tracts.iter().filter(|t| !t.samples.is_empty()).count()
     }
@@ -392,30 +391,7 @@ impl StratumEvidence {
             .sum()
     }
 
-    /// Spanning reads whose tract was **not** the reference's length, over every tract and
-    /// sample.
-    ///
-    /// **This is not the count of slipped reads and must not be read as one.** A read sits off
-    /// the reference length because the polymerase slipped *or* because the chromosome it came
-    /// from genuinely carries another length, and this count cannot tell the two apart — at a
-    /// polymorphic tract most of it is the second. It is here because it is the observable that
-    /// bounds how sharply a stratum can determine its slippage numbers: a stratum with none of
-    /// these determines nothing.
-    pub fn reads_off_reference_length(&self) -> u64 {
-        self.tracts
-            .iter()
-            .flat_map(|tract| tract.samples.iter())
-            .flat_map(|sample| sample.by_library.iter())
-            .flat_map(|(_, counts)| {
-                counts
-                    .iter()
-                    .enumerate()
-                    .filter(|(bucket, _)| *bucket as i32 != self.read_span)
-            })
-            .map(|(_, reads)| u64::from(*reads))
-            .sum()
-    }
-
+    #[cfg(test)]
     /// The stratum's substitution rate, which needs none of the other numbers (spec §4.2) — see
     /// [`StratumSubstitutionCounts::substitution_rate`], which is never exactly zero or one.
     ///
@@ -576,7 +552,7 @@ pub enum StratumError {
     /// **The tracts do not tell it apart from the stratum's other numbers**: once they are accounted
     /// for, the log-likelihood is not curved downwards in its direction — flat, or a saddle.
     ///
-    /// **Only the counting fit's research errors produce it** ([`counting_fit_errors`], which the
+    /// **Only the counting fit's research errors produce it** (`counting_fit_errors`, which the
     /// fitting bench and two examples call). The penalised fit, the one a run uses, never does:
     /// it reports that case as [`StratumError::NotPlaced`] (the mapping in
     /// `doc/devel/ng/arch/str_penalised_fit.md` §1.4), so no parameters file or run log carries it.
@@ -608,6 +584,7 @@ pub enum StratumError {
 }
 
 impl StratumErrors {
+    #[cfg(test)]
     /// Whether any number of the stratum has an error.
     pub fn any(&self) -> bool {
         let slippage = self.slippage.iter().flatten().any(|group| {
@@ -779,14 +756,6 @@ impl StratumOutcome {
         match self {
             Self::Fitted(fit) => &fit.shares_provenance,
             Self::Refused { .. } => &[],
-        }
-    }
-
-    /// Tracts this stratum holds with at least one spanning read — its own, never a pooled set's.
-    pub fn tracts_of_its_own(&self) -> usize {
-        match self {
-            Self::Fitted(fit) => fit.tracts_of_its_own,
-            Self::Refused { tracts, .. } => *tracts,
         }
     }
 }

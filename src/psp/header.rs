@@ -205,7 +205,7 @@ impl WriterProvenance {
     /// left standing. A caller replacing an earlier recording whose key set may have
     /// shrunk — the read filters' conditional floor, say — clears its own keys first
     /// (the producer of the entries names them, e.g.
-    /// [`READ_FILTER_PROVENANCE_KEYS`](crate::read::READ_FILTER_PROVENANCE_KEYS)).
+    /// `READ_FILTER_PROVENANCE_KEYS`).
     pub fn record_parameters(
         &mut self,
         entries: impl IntoIterator<Item = (String, ParameterValue)>,

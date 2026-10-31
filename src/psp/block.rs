@@ -122,7 +122,7 @@ impl BlockHead {
     /// At the very start of a block a short buffer is the ordinary state of affairs rather than
     /// an exceptional one, which is why the split matters here as much as it does in a record.
     ///
-    /// **A caller that already holds the whole block wants [`BlockRecords::split`] instead**,
+    /// **A caller that already holds the whole block wants `BlockRecords::split` instead**,
     /// which converts the first class into the second: with every byte in hand, *fetch more*
     /// is a retry that never ends.
     pub fn decode(bytes: &[u8]) -> Result<DecodedBlockHead, BlockHeadDecodeError> {
@@ -277,6 +277,7 @@ pub enum BlockHeadDecodeError {
     },
 }
 
+#[cfg(test)]
 /// A whole block payload split into its head and the records behind it.
 ///
 /// **For a caller holding a block entire** — a writer's own tests, and the compressed-block
@@ -295,6 +296,7 @@ pub struct BlockRecords<'a> {
     pub records: &'a [u8],
 }
 
+#[cfg(test)]
 impl<'a> BlockRecords<'a> {
     /// Split a whole block payload into its head and the records behind it.
     ///
@@ -508,6 +510,7 @@ impl BlockBuilder {
         Self::new(*genomic_block_size_bp, *block_byte_ceiling)
     }
 
+    #[cfg(test)]
     /// The same builder, told which record the file it is extending ends with.
     ///
     /// **Coordinate order runs across the seam** (spec §6.4): the first appended record must not
@@ -878,6 +881,7 @@ impl BlockCompressor {
         Self::with_level(*look_back_window_log, ZSTD_COMPRESSION_LEVEL)
     }
 
+    #[cfg(test)]
     /// A compressor for a file declaring `look_back_window_log`, at the level every psp is
     /// written at.
     ///
@@ -934,11 +938,13 @@ impl BlockCompressor {
         })
     }
 
+    #[cfg(test)]
     /// The look-back window this compressor caps at, as the exponent the file declares.
     pub fn look_back_window_log(&self) -> u8 {
         self.look_back_window_log
     }
 
+    #[cfg(test)]
     /// The level this compressor writes at. **Nothing in a psp records it** — see
     /// [`ZSTD_COMPRESSION_LEVEL`] for why, and for whose job recording it is.
     pub fn compression_level(&self) -> i32 {
@@ -985,6 +991,7 @@ impl BlockCompressor {
     }
 }
 
+#[cfg(test)]
 /// What is at the front of a run of bytes a reader has pulled from a file.
 ///
 /// **Three states and not a length**, because the distinction is the one the whole module
@@ -1009,6 +1016,7 @@ pub enum CompressedBlockAt<'a> {
     NoLengthYet,
 }
 
+#[cfg(test)]
 /// What is at the front of `bytes`, at a block boundary.
 ///
 /// **Nothing is allocated and no frame is touched** — the four-byte length is read and that is
@@ -1501,6 +1509,7 @@ impl<R: std::io::Read> BlockStream<R> {
         self.live_reads.changes()
     }
 
+    #[cfg(test)]
     pub fn parses_restarted(&self) -> u64 {
         self.parses_restarted
     }
@@ -1513,6 +1522,7 @@ impl<R: std::io::Read> BlockStream<R> {
         self.blocks_begun
     }
 
+    #[cfg(test)]
     /// How many times a block head's parse has been restarted after asking for more bytes.
     pub fn block_heads_restarted(&self) -> u64 {
         self.block_heads_restarted
@@ -1558,16 +1568,19 @@ impl<R: std::io::Read> BlockStream<R> {
         self.skips_records_too_large_to_hold = skip;
     }
 
+    #[cfg(test)]
     /// How far this reader's rolling buffer may grow for one record.
     pub fn buffer_ceiling(&self) -> usize {
         self.buffer_ceiling
     }
 
+    #[cfg(test)]
     /// The look-back window this reader's decoder is configured for, as the file declared it.
     pub fn look_back_window_log(&self) -> u8 {
         self.look_back_window_log
     }
 
+    #[cfg(test)]
     /// How many bytes this reader's two buffers are holding right now.
     ///
     /// **This is the number the whole format is shaped around.** A caller holds one of these per
@@ -1583,6 +1596,7 @@ impl<R: std::io::Read> BlockStream<R> {
         self.compressed.capacity() + self.rolling.capacity()
     }
 
+    #[cfg(test)]
     /// The next record, built — the walk a caller takes when it wants everything.
     pub fn next_record(&mut self) -> Option<Result<StreamedRecord, BlockReadError>> {
         self.next_record_where(|_| true)

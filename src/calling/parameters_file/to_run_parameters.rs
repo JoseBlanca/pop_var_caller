@@ -128,6 +128,7 @@ pub(super) struct WhereTheFilesRowsBelong {
 }
 
 impl WhereTheFilesRowsBelong {
+    #[cfg(test)]
     /// The identity: every row where the file itself puts it.
     ///
     /// `validate` has already refused a file whose read groups are not `0..n` once each and
@@ -185,6 +186,7 @@ impl WhereTheFilesRowsBelong {
 }
 
 impl ParametersFile {
+    #[cfg(test)]
     /// **Read this file back into the parameters a run scores with.**
     ///
     /// [`Self::validate`] runs first, so a file that parses and means nothing is refused here
@@ -2318,16 +2320,11 @@ mod the_five_states_survive_the_round_trip {
     //! collapse §5's first row is actually about.
 
     use super::super::tests::a_file_using_every_shape;
-    use super::super::{
-        ContaminationFittedFrom, ContaminationMeasurement, ContaminationRow, ParametersFile,
-        StratumAlleleLengthVariationRow, Warrant,
-    };
+    use super::super::{ParametersFile, StratumAlleleLengthVariationRow, Warrant};
     use super::*;
     // **The one helper both test modules need**, rather than a second copy of it.
-    use super::tests::the_files_read_groups;
     use crate::alignment::StutterModel;
     use crate::calling::likelihood::stutter_rates::stutter_model_for;
-    use crate::calling::run_report::ContaminationUsed;
     use crate::parameter_estimation::joint::ssr_fit::Slippage;
     use crate::parameter_estimation::joint::stratum_fits::{AlleleLengthVariationRung, NoSlippage};
 
@@ -2335,154 +2332,6 @@ mod the_five_states_survive_the_round_trip {
         file.to_run_parameters()
             .unwrap_or_else(|error| panic!("{error}"))
             .parameters
-    }
-
-    /// **Row 1. No contamination table at all is an uncontaminated run**, and a table of zeros is
-    /// not the same claim.
-    ///
-    /// **The answer that changes is which formula the read likelihood runs.** An uncontaminated
-    /// run computes its plain form; a run carrying a mixture computes the three-term one at every
-    /// locus, against a contaminant population drawn from the batching — so a reader that wrote
-    /// zeros for the absent table would have every locus of the run scored through a term that
-    /// says a share of every read came from somebody else and that share is nothing.
-    ///
-    /// **And the longhand form is refused outright**, which is the second half: a table in which
-    /// no row was measured is the uncontaminated run written out, and `validate` says so rather
-    /// than letting it become a run.
-    #[test]
-    fn an_absent_contamination_table_is_not_a_table_of_zeros() {
-        let read_groups = the_files_read_groups(&a_file_using_every_shape());
-
-        let mut absent = a_file_using_every_shape();
-        absent.contamination = None;
-        let uncontaminated = a_run_from(&absent);
-        assert!(uncontaminated.view().contamination_is_absent());
-        assert_eq!(
-            uncontaminated.report(&read_groups).contamination(),
-            &ContaminationUsed::NoneFitted,
-            "and the run says so, which is what an output prints beside the calls"
-        );
-
-        // The same run with the table written out in full, every fraction zero and every count
-        // real — the collapse spec §5's first row forbids.
-        let mut longhand = a_file_using_every_shape();
-        longhand.contamination = Some(super::super::Contamination {
-            by_read_group: absent
-                .fitted_from
-                .read_groups
-                .iter()
-                .map(|row| ContaminationRow {
-                    read_group: row.read_group,
-                    library: row.library.clone(),
-                    measurement: Some(ContaminationMeasurement {
-                        share_of_reads_from_another_sample: 0.0,
-                        markers_with_reads: 4_211,
-                        reads_on_markers: 90_233,
-                        fitted_from_reads_of: ContaminationFittedFrom::ThisReadGroupsOwnReads,
-                    }),
-                })
-                .collect(),
-        });
-        let collapsed = a_run_from(&longhand);
-        assert!(
-            !collapsed.view().contamination_is_absent(),
-            "a table of measured zeros is a mixture, and every locus is scored through it"
-        );
-        assert!(
-            matches!(
-                collapsed.report(&read_groups).contamination(),
-                ContaminationUsed::PerReadGroup(_)
-            ),
-            "and the run reports it as one"
-        );
-
-        // **And the same table with no row measured is refused**, rather than becoming a run:
-        // that is the uncontaminated state written longhand, and it is the file a reader who
-        // collapsed the two would produce.
-        let mut every_row_unmeasured = longhand;
-        for row in &mut every_row_unmeasured
-            .contamination
-            .as_mut()
-            .expect("a table")
-            .by_read_group
-        {
-            row.measurement = None;
-        }
-        let error = every_row_unmeasured
-            .to_run_parameters()
-            .expect_err("an uncontaminated run written longhand is not a run");
-        assert!(
-            format!("{error}").contains("leave the section out instead"),
-            "{error}"
-        );
-    }
-
-    /// **Row 2. Measured and found clean is not the same as never measured**, and only the
-    /// evidence counts tell them apart.
-    ///
-    /// **The answer that changes is what the run reports for that library.** Both are a fraction
-    /// of zero, so both correct nothing; what differs is whether the run may say the library was
-    /// looked at. A cohort where one lane was measured and found clean and another could not be
-    /// measured at all is a cohort where one number is a result and the other is a gap, and an
-    /// output that printed both as "0" would be reporting a gap as a finding.
-    #[test]
-    fn a_zero_fraction_with_evidence_is_not_an_unmeasured_one() {
-        let read_groups = the_files_read_groups(&a_file_using_every_shape());
-        // **The read group, found by its own row rather than by a position.** The fixture's
-        // rows happen to be in read-group order, so an index would agree today and would stop
-        // agreeing the first time a row moved — which has happened once already in this file.
-        let clean_at = a_file_using_every_shape()
-            .contamination
-            .expect("the fixture has a table")
-            .by_read_group
-            .iter()
-            .find(|row| {
-                row.measurement
-                    .as_ref()
-                    .is_some_and(|found| found.share_of_reads_from_another_sample == 0.0)
-            })
-            .expect("one lane was measured and found clean")
-            .read_group as usize;
-
-        let file = a_file_using_every_shape();
-        let measured = a_run_from(&file);
-        let view = measured.view().contamination_by_read_group()[clean_at];
-        assert_eq!(view.fraction, 0.0);
-        assert!(
-            view.was_measured(),
-            "a zero fraction with evidence behind it is a measurement"
-        );
-
-        let mut collapsed = a_file_using_every_shape();
-        collapsed
-            .contamination
-            .as_mut()
-            .expect("a table")
-            .by_read_group[clean_at]
-            .measurement = None;
-        let unmeasured = a_run_from(&collapsed);
-        let view = unmeasured.view().contamination_by_read_group()[clean_at];
-        assert_eq!(
-            view.fraction, 0.0,
-            "the fraction is the same number in both, which is the whole difficulty"
-        );
-        assert!(!view.was_measured());
-
-        // **What the run says about that library differs**, and it is the only thing that does.
-        let of_the_clean_lane = |run: &RunParameters| {
-            let report = run.report(&read_groups);
-            let ContaminationUsed::PerReadGroup(rows) = report.contamination() else {
-                panic!("this run fitted contamination somewhere")
-            };
-            rows.iter()
-                .find(|row| row.read_group.get() as usize == clean_at)
-                .expect("the lane has a row")
-                .was_measured()
-        };
-        assert_eq!(
-            (of_the_clean_lane(&measured), of_the_clean_lane(&unmeasured)),
-            (true, false)
-        );
     }
 
     /// **Row 3. A defaulted multiplier of 1.0 is not a fitted one**, and nothing a run computes

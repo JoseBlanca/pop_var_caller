@@ -10,12 +10,12 @@
 //!
 //! **A *region* here is a building region** — the stretch of genome assigned to one builder,
 //! `cohort_locus_builder_regions_len` bases (spec §6.1). The run's own intervals are called
-//! *analysed regions*, as in [`merge_cohort_serially`](super::serial::merge_cohort_serially),
+//! *analysed regions*, as in `merge_cohort_serially`,
 //! and are much longer.
 //!
 //! **Why the merge needs this rather than merely liking it.** A builder closes loci from the
 //! beginning of whatever observations it is handed and discards those that opened before its
-//! own ground ([`build_region`](super::build::build_region)), so handing every builder the
+//! own ground (`build_region`), so handing every builder the
 //! whole analysed stretch costs each of them the whole prefix — about **3.3 µs per prefix
 //! base at 63 samples**, measured in a release build by the C1 review
 //! (`doc/devel/reports/reviews/ng_cohort_merge_c1_2026-08-17.md`). The same effect end to
@@ -1064,7 +1064,7 @@ impl<S> ObservationCache<S> {
     /// length of the call — a builder's only way in, and read-only by construction.
     ///
     /// The slices are handed out in the run's sample order, which is what
-    /// [`build_region`](super::build::build_region) indexes by.
+    /// `build_region` indexes by.
     ///
     /// **`span`'s two ends do different jobs, and neither is the obvious one.** Its start
     /// selects the window's left edge. Its end does **not** bound the right — trimming there
@@ -1171,6 +1171,7 @@ impl<S> ObservationCache<S> {
         );
     }
 
+    #[cfg(test)]
     /// How many observations are held, summed across samples — the size of the window this
     /// cache is the memory of (spec §8).
     ///

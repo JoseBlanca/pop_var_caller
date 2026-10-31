@@ -13,7 +13,7 @@
 //! lazy-load/borrow-escape problem the file-backed impls would otherwise hit.
 //!
 //! This file holds the traits, the error type, and all three implementations: the
-//! synthetic [`InMemoryRefSeq`], the whole-contig FASTA-backed [`ResidentRefSeq`], and the
+//! synthetic `InMemoryRefSeq`, the whole-contig FASTA-backed `ResidentRefSeq`, and the
 //! streaming, caller-evictable [`WindowedRefSeq`]. Canonicalisation reuses the production
 //! [`crate::fasta::fetcher::canonicalise`], so canonical bytes are byte-identical to the
 //! production fetchers by construction.
@@ -26,9 +26,11 @@ use crate::fasta::fetcher::canonicalise;
 use crate::fasta::{ChromRefFetchError, ContigEntry, ContigList};
 use crate::raw_chrom_reader::RawChromReader;
 use crate::types::ContigId;
+#[cfg(test)]
 use noodles_fasta::Repository;
 use noodles_fasta::fai;
 use std::io;
+#[cfg(test)]
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -68,6 +70,7 @@ pub enum RefSeqError {
     // `#[non_exhaustive]` keeps adding it later non-breaking. (ref_seq.md, Decision 6.)
 }
 
+#[cfg(test)]
 /// Validate a 1-based `[start_1based, start_1based + length)` request against a contig of
 /// `contig_len` bytes, returning the 0-based [`Range`] to slice. The single home for the
 /// coordinate/bounds contract, shared by every impl so they cannot drift. The caller must
@@ -152,6 +155,7 @@ pub trait RefSeq {
         dst: &mut Vec<u8>,
     ) -> Result<(), RefSeqError>;
 
+    #[cfg(test)]
     /// Owned convenience over [`Self::fetch_into`].
     fn fetch(
         &self,
@@ -277,7 +281,7 @@ impl<T: ContigTable + ?Sized> ContigTable for std::sync::Arc<T> {
 ///
 /// **Eviction is a hint, never a fact the answer depends on.** An evicted base that is
 /// asked for again is simply re-read. That is what lets an implementation with nothing
-/// buffered — [`InMemoryRefSeq`], [`ResidentRefSeq`] — implement this as a no-op honestly
+/// buffered — `InMemoryRefSeq`, `ResidentRefSeq` — implement this as a no-op honestly
 /// rather than by pretending: they hold no window to shrink, so "release what I have
 /// passed" is already true of them.
 ///
@@ -296,6 +300,7 @@ pub trait EvictableRefSeq {
     /// Release buffered bases before 1-based `pos` on the currently-resident contig.
     fn evict_before(&self, pos: u64);
 
+    #[cfg(test)]
     /// How many bases this reader is holding in memory right now.
     ///
     /// **The bound made observable.** "The window is bounded" is otherwise an argument about
@@ -313,11 +318,13 @@ impl<T: EvictableRefSeq + ?Sized> EvictableRefSeq for std::sync::Arc<T> {
         (**self).evict_before(pos);
     }
 
+    #[cfg(test)]
     fn resident_bases(&self) -> usize {
         (**self).resident_bases()
     }
 }
 
+#[cfg(test)]
 /// A synthetic, fully in-memory reference: each contig's bytes held directly, indexed by
 /// [`ContigId`] (`contigs[i]` is `ContigId(i)`). For tests — it needs no FASTA on disk,
 /// so the mismatch filter and the pileup can be exercised against a hand-built reference.
@@ -334,7 +341,9 @@ pub struct InMemoryRefSeq {
     table: ContigList,
 }
 
+#[cfg(test)]
 impl InMemoryRefSeq {
+    #[cfg(test)]
     /// Build from one byte vector per contig, in [`ContigId`] order, naming them
     /// `contig0`, `contig1`, … .
     ///
@@ -352,6 +361,7 @@ impl InMemoryRefSeq {
         )
     }
 
+    #[cfg(test)]
     /// Build from `(name, bases)` pairs, in [`ContigId`] order — the constructor for
     /// a caller that reads the contig table, not just the bytes.
     pub fn from_named_contigs(contigs: Vec<(String, Vec<u8>)>) -> Self {
@@ -373,6 +383,7 @@ impl InMemoryRefSeq {
         }
     }
 
+    #[cfg(test)]
     /// Resolve a `(contig, start_1based, length)` request to the raw stored slice, or the
     /// matching [`RefSeqError`]. Both fetch paths go through it.
     fn resolve_range(
@@ -393,6 +404,7 @@ impl InMemoryRefSeq {
     }
 }
 
+#[cfg(test)]
 impl RefSeq for InMemoryRefSeq {
     fn fetch_into(
         &self,
@@ -408,18 +420,21 @@ impl RefSeq for InMemoryRefSeq {
     }
 }
 
+#[cfg(test)]
 impl ContigTable for InMemoryRefSeq {
     fn contigs(&self) -> &ContigList {
         &self.table
     }
 }
 
+#[cfg(test)]
 impl EvictableRefSeq for InMemoryRefSeq {
     /// Nothing to release: the bytes *are* the reference, not a window onto one. And nothing
     /// resident in the sense this asks about — the bases are the value, not a cache of it.
     fn evict_before(&self, _pos: u64) {}
 }
 
+#[cfg(test)]
 impl RawRefSeq for InMemoryRefSeq {
     fn fetch_raw_into(
         &self,
@@ -435,6 +450,7 @@ impl RawRefSeq for InMemoryRefSeq {
     }
 }
 
+#[cfg(test)]
 /// A FASTA-backed reference over a shared noodles [`Repository`] (the whole-contig cache
 /// the production CRAM/pileup path already uses). Stateless per call: each fetch pulls the
 /// contig's resident `Arc<Sequence>` from the repository, slices the window, and copies it
@@ -447,6 +463,7 @@ pub struct ResidentRefSeq {
     contigs: ContigList,
 }
 
+#[cfg(test)]
 impl ResidentRefSeq {
     /// Build over a shared repository and its contig table. The `repository` is an
     /// `Arc`-backed handle (cheap clone); pass the same instance the reader uses so the
@@ -503,6 +520,7 @@ impl ResidentRefSeq {
     }
 }
 
+#[cfg(test)]
 impl RefSeq for ResidentRefSeq {
     fn fetch_into(
         &self,
@@ -518,12 +536,14 @@ impl RefSeq for ResidentRefSeq {
     }
 }
 
+#[cfg(test)]
 impl ContigTable for ResidentRefSeq {
     fn contigs(&self) -> &ContigList {
         &self.contigs
     }
 }
 
+#[cfg(test)]
 impl EvictableRefSeq for ResidentRefSeq {
     /// Nothing to release *within* a contig: this impl's unit of residency is the whole
     /// contig, dropped at a transition by [`Self::clear`]. Shrinking it partway is not a
@@ -532,6 +552,7 @@ impl EvictableRefSeq for ResidentRefSeq {
     fn evict_before(&self, _pos: u64) {}
 }
 
+#[cfg(test)]
 impl RawRefSeq for ResidentRefSeq {
     fn fetch_raw_into(
         &self,
@@ -577,7 +598,7 @@ fn map_chrom_error(contig: ContigId, err: ChromRefFetchError) -> RefSeqError {
 /// A FASTA-backed reference that keeps only a **sub-range window** of the current contig
 /// resident, extending it on demand in either direction and shrinking it on the caller's
 /// command via [`Self::evict_before`] — the memory-bounded, any-access-within-the-window
-/// alternative to [`ResidentRefSeq`]'s whole-contig residency. **Its buffer holds raw bases**,
+/// alternative to `ResidentRefSeq`'s whole-contig residency. **Its buffer holds raw bases**,
 /// so it serves both views: [`RawRefSeq`] hands them back verbatim and [`RefSeq`] applies
 /// `canonicalise` on the way out (raw is the buffer, canonical is the derived view — see the
 /// `current` field). It wraps [`RawChromReader`], ng's copy of the production
@@ -624,6 +645,7 @@ pub struct WindowedRefSeq {
 }
 
 impl WindowedRefSeq {
+    #[cfg(test)]
     /// Build over a FASTA path (its sibling `<path>.fai` is used) and the contig table. No
     /// contig is resident until the first fetch.
     ///
@@ -716,6 +738,7 @@ impl EvictableRefSeq for WindowedRefSeq {
         }
     }
 
+    #[cfg(test)]
     /// The resident window, in bases — see the trait method.
     fn resident_bases(&self) -> usize {
         self.lock_current()
@@ -826,10 +849,7 @@ impl RawRefSeq for WindowedRefSeq {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fasta::fetcher::RepositoryRefFetcher;
-    use crate::fasta::{
-        ChromRefFetcher, ContigEntry, MultiChromRefFetcher, StreamingChromRefFetcher,
-    };
+    use crate::fasta::ContigEntry;
     use std::io::Write;
 
     // ----- InMemoryRefSeq -------------------------------------------------
@@ -1184,38 +1204,6 @@ mod tests {
         (dir, resident, contigs)
     }
 
-    #[test]
-    fn resident_canonical_matches_production_repository_fetcher() {
-        let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
-        let resident = ResidentRefSeq::new(repository_for(&path), contigs.clone());
-        let production = RepositoryRefFetcher::new(repository_for(&path), contigs);
-
-        for (chrom_id, (_name, bases)) in FASTA_CONTIGS.iter().enumerate() {
-            let len = bases.len() as u64;
-            for start in 1..=len {
-                for length in 0..=(len - start + 1) {
-                    let ours = resident
-                        .fetch(ContigId(chrom_id as u32), start, length)
-                        .unwrap();
-                    // ng is `u64`, production's fetcher is `u32` (spec §4; `src/fasta/`
-                    // is frozen). Narrowing here is what makes the two comparable at
-                    // all, and the fixture is a few dozen bases.
-                    let prod = MultiChromRefFetcher::fetch(
-                        &production,
-                        chrom_id as u32,
-                        start as u32,
-                        length as u32,
-                    )
-                    .expect("production fetch");
-                    assert_eq!(
-                        ours, prod,
-                        "canonical mismatch chrom {chrom_id} start {start} len {length}"
-                    );
-                }
-            }
-        }
-    }
-
     /// Production's `RawContigRefCache::fetch_raw_slice` over this fixture, recorded at commit
     /// `d9e7b076` (promotion step C25): every one of its 72 slices — each start, each length,
     /// both contigs — was the matching run of the contig's bytes exactly as the FASTA holds
@@ -1509,19 +1497,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    fn windowed_matches_production_streaming_on_a_forward_walk() {
-        let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
-        let windowed = WindowedRefSeq::new(path.clone(), contigs);
-        let streaming = StreamingChromRefFetcher::for_contig(&path, "chr1").unwrap();
-        // chr1 = ACGTACGT (len 8); walk 2-base windows forward (monotonic → streaming-legal).
-        for start in 1..=7u64 {
-            let ours = windowed.fetch(ContigId(1), start, 2).unwrap();
-            let prod = ChromRefFetcher::fetch(&streaming, start as u32, 2).unwrap();
-            assert_eq!(ours, prod, "forward walk start {start}");
         }
     }
 

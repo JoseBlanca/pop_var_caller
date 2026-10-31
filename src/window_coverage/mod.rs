@@ -298,7 +298,7 @@ impl WindowCoverageConfig {
 /// repeating a coordinate every consumer already knows.
 ///
 /// **Both fields are `NaN` where the sample has no usable window there** — a value, not an
-/// error, built and tested through [`absent`](Self::absent) and [`is_absent`](Self::is_absent)
+/// error, built and tested through [`absent`](Self::absent) and `is_absent`
 /// so that the two numbers can only go missing together: a half-absent pair would divide a real
 /// depth by a missing yardstick. [`PartialEq`] compares bit patterns for that reason — a derived
 /// one would make an absent window unequal to itself and break every comparison of two runs.
@@ -328,6 +328,7 @@ impl WindowCoverage {
         }
     }
 
+    #[cfg(test)]
     /// Whether either number is missing.
     ///
     /// **Ask this rather than comparing against [`absent`](Self::absent).** Equality here is
@@ -385,6 +386,7 @@ pub enum SampleHistogram {
 }
 
 impl SampleHistogram {
+    #[cfg(test)]
     /// The histogram, or `None` for a sample that has none — for a caller that does not act on
     /// which silence it was.
     #[must_use]

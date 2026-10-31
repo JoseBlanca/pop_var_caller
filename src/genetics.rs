@@ -4,7 +4,7 @@
 //!
 //! What lives here is what more than one module uses. The genotype priors
 //! ([`calling::genotype_prior`](crate::calling::genotype_prior)) build a site's prior from
-//! [`alpha_from_diversity`] and [`wright_genotype_log_priors`]; the site quality
+//! `alpha_from_diversity` and [`wright_genotype_log_priors`]; the site quality
 //! ([`calling::quality`](crate::calling::quality)) needs [`lgamma`] for the same
 //! Beta-Binomial the prior is built on; and the hidden-duplication filter
 //! ([`paralog`](crate::paralog)) walks a grid of allele frequencies with
@@ -197,6 +197,7 @@ pub fn wright_genotype_log_priors(p: f64, f: f64) -> (f64, f64, f64) {
     )
 }
 
+#[cfg(test)]
 /// The reference-allele Dirichlet concentration `α_ref`. Fixed at `1`, the value
 /// that makes the biallelic-diploid het:hom-alt ratio `2·α_ref/(α_alt+1)`
 /// approach the defensible **2:1** as `α_alt → 0`. It doubles as the
@@ -214,6 +215,7 @@ pub const ALPHA_REF: f64 = 1.0;
 /// matching the biallelic grid path's `θ = 0` behaviour.
 pub const MIN_ALT_CONCENTRATION: f64 = 1e-12;
 
+#[cfg(test)]
 /// The Dirichlet concentration `α = (α_ref, α_alt(1), …, α_alt(k−1))` for the SFS
 /// genotype prior at estimated diversity `theta` (`θ̂`).
 ///

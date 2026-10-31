@@ -14,7 +14,7 @@
 //! agree bit for bit (spec
 //! [`window_coverage.md`](../../../../../doc/devel/ng/spec/window_coverage.md) §10).
 //!
-//! **Both halves of the row format live here**, [`write_the_row`] beside [`read_a_row`], because
+//! **Both halves of the row format live here**, [`write_the_row`] beside `read_a_row`, because
 //! the reader is in another crate target: a column reordered on one side alone would still parse
 //! on the other, and the comparison would then report every locus as one the run had no window
 //! for — which is the shape of a *pass* in this measurement, not of a failure.
@@ -38,7 +38,9 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::{Mutex, OnceLock};
 
-use crate::types::{ContigId, GenomePosition, Position};
+use crate::types::GenomePosition;
+#[cfg(test)]
+use crate::types::{ContigId, Position};
 use crate::window_coverage::{CoverageByGcHistogram, SampleHistogram, WindowCoverage};
 
 /// The environment variable naming the file to write. Anything else about the run is unchanged.
@@ -113,6 +115,7 @@ pub fn write_the_row(row: RecordedWindow, into: &mut String) {
     .expect("writing into a String cannot fail");
 }
 
+#[cfg(test)]
 /// [`write_the_row`]'s inverse, for the comparison in the other crate target.
 ///
 /// # Errors
@@ -262,7 +265,7 @@ pub const HISTOGRAMS_SUFFIX: &str = ".histograms";
 /// **Exhaustively matched, so a fifth silence is a compile error here** rather than a line that
 /// says nothing about it.
 ///
-/// `pub` for the same reason [`read_a_row`] is: the whole-store recomputation renders its own
+/// `pub` for the same reason `read_a_row` is: the whole-store recomputation renders its own
 /// histogram through this, so the two sides cannot disagree about what a histogram is or about
 /// which of its fields a comparison covers.
 pub fn write_the_histogram(sample: usize, histogram: &SampleHistogram, into: &mut String) {

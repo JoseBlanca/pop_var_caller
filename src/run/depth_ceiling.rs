@@ -11,7 +11,7 @@
 //! reduced to their changes (`doc/devel/reports/psp_pileup_memory_2026-09-28/report.md`).
 //!
 //! So a sample's record over the ceiling is not held. Its source hands the merge only where it
-//! lay ([`LocusSummary::over_depth_ceiling`](super::cohort_merge::LocusSummary::over_depth_ceiling)),
+//! lay (`LocusSummary::over_depth_ceiling`),
 //! and **the merge builds no cohort locus over that ground for any sample** (owner, 2026-09-29):
 //! a locus that one sample's reads say is a pile-up is not one the others can call either.
 //!
@@ -59,12 +59,6 @@ impl DepthCeiling {
     #[must_use]
     pub fn at(reads: u32) -> Self {
         Self { reads }
-    }
-
-    /// The most reads a read group may have.
-    #[must_use]
-    pub fn reads(self) -> u32 {
-        self.reads
     }
 
     /// Whether `record` has a read group deeper than the ceiling.

@@ -136,6 +136,7 @@ impl CatalogRejectionCounts {
         *slot += bp;
     }
 
+    #[cfg(test)]
     /// Bases turned down, over every reason this type holds.
     pub fn total(&self) -> u64 {
         self.copy_floor + self.purity + self.compound + self.no_clean_trim

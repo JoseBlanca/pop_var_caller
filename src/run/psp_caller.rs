@@ -190,7 +190,7 @@ impl OpenPspCohort {
     ///
     /// **Names are compared byte by byte**, so the order does not depend on the machine's locale.
     /// No two samples share a name: `open` refused that. **Within a sample, read groups keep the
-    /// file's header order**, which is what [`read_group_remap`](Self::read_group_remap) relies
+    /// file's header order**, which is what `read_group_remap` relies
     /// on; the census evidence orders them by declared ID on its own
     /// ([`SampleCensusEvidence::with_read_groups_in_declared_id_order`](crate::parameter_estimation::joint::census::SampleCensusEvidence::with_read_groups_in_declared_id_order)).
     #[must_use]
@@ -255,6 +255,7 @@ impl OpenPspCohort {
         &self.read_groups
     }
 
+    #[cfg(test)]
     /// The widest reference span an observation in this cohort can have — what the merge sizes
     /// its cache for (`cohort_merge.md` §13).
     #[must_use]
@@ -375,6 +376,7 @@ impl OpenPspCohort {
             .zip(self.psps.iter())
     }
 
+    #[cfg(test)]
     /// One sample's map from the numbers its own walk gave its read groups to the numbers this
     /// run gives them, by the sample's position in the run's order.
     ///
@@ -587,6 +589,7 @@ impl PspVariantCaller {
         self
     }
 
+    #[cfg(test)]
     /// How many samples this run calls.
     #[must_use]
     pub fn sample_count(&self) -> usize {
@@ -604,41 +607,14 @@ impl PspVariantCaller {
         self.cohort.read_groups()
     }
 
+    #[cfg(test)]
     /// The ground this run analyses, and the record of what it was computed from.
     #[must_use]
     pub fn segmentation(&self) -> &Segmentation {
         &self.segmentation
     }
 
-    /// **The widest reference span an observation in this cohort can have** — the maximum over
-    /// the files' own ceilings (`cohort_merge.md` §13).
-    ///
-    /// **A sizing fact, not a correctness one**, which is why nothing refuses on it and why the
-    /// merge does not read it: what it bounds is how far the observation cache may have to
-    /// reach past a building region before a chain closes
-    /// ([`ObservationCache::cover`](super::cohort_merge::observation_cache::ObservationCache)),
-    /// and that cache grows on demand rather than being given a capacity. It is read at open
-    /// and exposed here so that whatever does size on it — the psp-mode performance work — has
-    /// the number without re-opening a file. Direct mode's counterpart is the configured
-    /// `max_record_span` its walkers are built with; a psp records it because the walk that
-    /// wrote the file is over.
-    #[must_use]
-    pub fn observation_reach_ceiling(&self) -> Bp {
-        self.cohort.observation_reach_ceiling()
-    }
-
-    /// The cohort's open files and what their headers agreed on.
-    #[must_use]
-    pub fn cohort(&self) -> &OpenPspCohort {
-        &self.cohort
-    }
-
-    /// The numbers every call is scored against.
-    #[must_use]
-    pub fn parameters(&self) -> &RunParameters {
-        &self.parameters
-    }
-
+    #[cfg(test)]
     /// **Call this cohort and hand every record over as it is finished, keeping none** — the
     /// same body direct mode drives, over sources that decode rather than walk (spec §3.1).
     ///
@@ -678,7 +654,7 @@ impl PspVariantCaller {
         )
     }
 
-    /// [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over), with
+    /// `call_cohort_handing_each_record_over`, with
     /// each record **got ready by `prepare` on the thread that called its locus** and then taken
     /// by `hand_over` on the calling thread, in genome order, beside every sample's window.
     ///
@@ -688,7 +664,7 @@ impl PspVariantCaller {
     ///
     /// # Errors
     ///
-    /// As [`call_cohort_handing_each_record_over`](Self::call_cohort_handing_each_record_over),
+    /// As `call_cohort_handing_each_record_over`,
     /// and the first record `prepare` refuses.
     pub fn call_cohort_preparing_each_record<S, G, P, E>(
         self,

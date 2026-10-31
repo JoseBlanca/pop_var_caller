@@ -105,11 +105,10 @@ pub const DEFAULT_MAX_OVERFLOW_FRACTION: f64 = 0.20;
 
 /// Acceptance bounds on the `mode/median` depth ratio: the fit is rejected
 /// unless `mode/median ∈ [lo, hi]`. A well-formed pair has `0 < lo <= hi`;
-/// [`new`] enforces that at the construction boundary, and [`DEFAULT`] is the
+/// `new` enforces that at the construction boundary, and [`DEFAULT`] is the
 /// tomato2-measured `[0.5, 1.5]` (a healthy sample sits at ≈ 0.83–0.98, so a
 /// ratio near 2 means the mode landed on a 2× peak).
 ///
-/// [`new`]: ModeMedianRatioBounds::new
 /// [`DEFAULT`]: ModeMedianRatioBounds::DEFAULT
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModeMedianRatioBounds {
@@ -126,6 +125,7 @@ impl ModeMedianRatioBounds {
         hi: DEFAULT_MODE_MEDIAN_RATIO_HI,
     };
 
+    #[cfg(test)]
     /// Build bounds, returning `None` for a degenerate window (`lo <= 0`,
     /// `lo > hi`, or a non-finite endpoint). Use for bounds derived from
     /// input; the trusted [`DEFAULT`] is a compile-time literal.
@@ -339,6 +339,7 @@ impl SingleCopyCoverageModel {
         self.single_copy_scale
     }
 
+    #[cfg(test)]
     /// The analysis window width in bp.
     pub fn window_bp(&self) -> u32 {
         self.window_bp

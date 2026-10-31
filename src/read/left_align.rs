@@ -216,10 +216,6 @@ impl<R: RefSeq + EvictableRefSeq, N: AlignmentNormalizer> ReadPreparer for LeftA
     fn evict_reference_before(&self, pos: u64) {
         self.reference.evict_before(pos);
     }
-
-    fn resident_reference_bases(&self) -> usize {
-        self.reference.resident_bases()
-    }
 }
 
 /// Build the `PreparedRead` from a record whose CIGAR is final.
@@ -247,7 +243,6 @@ fn into_prepared(read: AlignedRead) -> PreparedRead {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alignment::left_align_repeated::RepeatedLeftAligner;
     use crate::read::PLACEHOLDER_READ_GROUP;
     use crate::ref_seq::{InMemoryRefSeq, RefSeqError};
     use crate::types::ReadGroupId;
@@ -338,19 +333,6 @@ mod tests {
         preparer
             .reference()
             .fetch_into(ContigId(0), 1, 4, &mut window)
-            .expect("the fixture contig is 10 bases long");
-        assert_eq!(window, b"ACGT");
-    }
-
-    /// A second normalizer can be named at construction — the bake-off surface the type
-    /// parameter exists for. If this stops compiling, the comparison has been foreclosed.
-    #[test]
-    fn an_alternative_normalizer_can_be_named() {
-        let preparer = LeftAlignPreparer::new(reference(), RepeatedLeftAligner::new());
-        let mut window = Vec::new();
-        preparer
-            .reference()
-            .fetch_into(ContigId(0), 5, 4, &mut window)
             .expect("the fixture contig is 10 bases long");
         assert_eq!(window, b"ACGT");
     }

@@ -77,6 +77,7 @@ use crate::types::{ContigId, InbreedingF, Ploidy};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
 /// What this subcommand is called on the command line.
 pub const SUBCOMMAND: &str = "estimate-parameters";
 

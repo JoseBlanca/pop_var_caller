@@ -375,6 +375,7 @@ impl GenericEvidence {
         &self.non_reference
     }
 
+    #[cfg(test)]
     /// What this read group saw at the `index`-th kept position, as `(depth, alleles)`.
     pub fn at(&self, index: usize) -> (DepthCode, Vec<AlleleObservation>) {
         let start = self
@@ -523,6 +524,7 @@ impl GuardTally {
         self.whole_repeat_differing_reads += other.whole_repeat_differing_reads;
     }
 
+    #[cfg(test)]
     /// Of the reads that differ from the reference tract length, how many in each one the guard
     /// caught; `None` when no read differs.
     pub fn non_whole_share(self) -> Option<f64> {
@@ -806,11 +808,6 @@ impl SsrEvidence {
         }
     }
 
-    /// Whether the walk reached this locus at all.
-    pub fn walked(&self, locus: usize) -> bool {
-        self.walked.get(locus)
-    }
-
     /// The walked bits themselves, for a consumer measuring what the evidence costs.
     pub fn walked_bits(&self) -> &WalkedBits {
         &self.walked
@@ -990,7 +987,7 @@ pub struct SelectionTermsDigest {
 /// read no catalog (`--generic-path-only`).
 const NO_CATALOG_READ: &[u8] = b"no catalog was read";
 
-/// The seven, in the order [`SelectionTerms::first_disagreement`] checks them and under the
+/// The seven, in the order `SelectionTerms::first_disagreement` checks them and under the
 /// names it gives them. **One list, so the writer, the reader and the refusal cannot drift.**
 pub const SELECTION_FIELDS: [&str; 7] = [
     "selection seed",
@@ -1476,6 +1473,7 @@ impl Sections {
         }
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         match self {
             Self::Resident(sections) => sections.len(),
@@ -1483,6 +1481,7 @@ impl Sections {
         }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -1519,6 +1518,7 @@ pub struct NamedReadGroup {
 }
 
 impl NamedReadGroup {
+    #[cfg(any(test, feature = "bench-fixtures"))]
     /// **Names for a drawn sample's read groups** — for a harness or a test whose cohort has no
     /// alignment files to take them from.
     ///
@@ -1557,7 +1557,7 @@ impl NamedReadGroup {
 /// run reading a census file has quietly reassembled the file in memory — the outcome the
 /// by-section design exists to prevent, arrived at without anyone deciding to
 /// (`parameter_prepass_joint_records.md` §6.2). So a section is **lent for the length of a
-/// call** by [`with_generic`](Self::with_generic) and [`with_strata`](Self::with_strata), and
+/// call** by `with_generic` and `with_strata`, and
 /// there is no field a caller could put one in.
 ///
 /// **One type for both kinds of run.** A walk fills every section and holds it; a file-backed
@@ -1734,6 +1734,7 @@ impl SampleCensusEvidence {
             .collect()
     }
 
+    #[cfg(test)]
     /// This sample's ordinary-position evidence for a band of read groups, **for the length of
     /// the call**.
     ///
@@ -1773,6 +1774,7 @@ impl SampleCensusEvidence {
         Ok(f(&sections))
     }
 
+    #[cfg(test)]
     /// This sample's tracts for one read group over a band of strata, **for the length of the
     /// call**.
     ///
@@ -1810,6 +1812,7 @@ impl SampleCensusEvidence {
         Ok(f(&sections))
     }
 
+    #[cfg(test)]
     /// This sample's depth at the `index`-th kept generic position, summed over its read
     /// groups.
     ///
@@ -2256,6 +2259,7 @@ impl CohortCensusEvidence {
         &self.read_groups
     }
 
+    #[cfg(test)]
     pub fn strata(&self) -> &[Stratum] {
         &self.strata
     }
@@ -2325,11 +2329,6 @@ impl CohortCensusEvidence {
     /// and the scoped calls are still the only door.
     pub fn samples(&self) -> &[SampleCensusEvidence] {
         &self.samples
-    }
-
-    /// The samples back, for a caller that has finished with the cohort.
-    pub fn into_samples(self) -> Vec<SampleCensusEvidence> {
-        self.samples
     }
 }
 

@@ -928,6 +928,7 @@ impl TractScoringFits {
         }
     }
 
+    #[cfg(test)]
     /// The tract lengths the junk term is spread over.
     #[inline]
     #[must_use]
@@ -984,6 +985,7 @@ impl TractScoringFits {
         &self.frozen_slippage
     }
 
+    #[cfg(test)]
     /// The three numbers one cell's stutter model currently stands on — the frozen fit after
     /// a gather, the re-fitted numbers after [`Self::apply_refitted_slippage`], and `None`
     /// where the cell runs on the shipped constants.

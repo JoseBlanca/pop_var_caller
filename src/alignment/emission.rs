@@ -83,7 +83,7 @@ impl BaseScores {
 ///   is not `b'A'` — a soft-masked stretch would score as a mismatch at every base.
 ///   Soft-masking marks repeats, which is precisely where the repeat-aware aligner works,
 ///   so this is not a remote hazard. ng offers both shapes deliberately:
-///   [`RefSeq::fetch`] canonicalizes (upper-cases ACGT, folds everything else to `N`)
+///   `RefSeq::fetch` canonicalizes (upper-cases ACGT, folds everything else to `N`)
 ///   while [`RawRefSeq`] returns bases verbatim, soft-mask intact. **Feed this the
 ///   canonical form.**
 /// - **`N` is a base like any other here.** An `N` read base against an `N` reference
@@ -94,7 +94,6 @@ impl BaseScores {
 /// Both behaviours are pinned by `emission_compares_bases_by_raw_byte_equality` so they
 /// are recorded rather than discovered.
 ///
-/// [`RefSeq::fetch`]: crate::ref_seq::RefSeq::fetch
 /// [`RawRefSeq`]: crate::ref_seq::RawRefSeq
 pub trait Emission: Sized {
     /// Resolve the two scores for one quality, so a caller can hoist the lookup out of
@@ -125,6 +124,7 @@ pub trait Emission: Sized {
     /// see its documentation for the reasoning.
     fn insert_ln(&self) -> f64;
 
+    #[cfg(test)]
     /// Score `read_base` against `reference_base` at one quality — the convenience form
     /// of [`Self::scores_for`], for callers not in an inner loop.
     #[inline]

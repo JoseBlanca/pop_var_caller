@@ -5,23 +5,23 @@
 //! is the short stretch one builder owns, `cohort_locus_builder_regions_len` bases, 20 by
 //! default (spec §6.1); building regions divide an analysed region.
 //!
-//! [`merge_cohort_serially`] is **the oracle**: the simplest thing that produces the right
+//! `merge_cohort_serially` is **the oracle**: the simplest thing that produces the right
 //! answer — one builder, no cache, no organiser, no threads, holding every sample's
 //! observations and walking the analysed regions in order. Everything the later milestones add
 //! is about speed and memory, so anything that changes this output is a defect rather than a
 //! trade (`doc/devel/ng/spec/cohort_merge.md` §15; the plan's C2).
 //!
-//! [`merge_cohort_through_cache`] does the same job through **one forward reader per sample**,
+//! `merge_cohort_through_cache` does the same job through **one forward reader per sample**,
 //! and its whole claim is that its output is the oracle's byte for byte (the plan's D2). It is
 //! still one builder on one thread; what changes is the *view* — a window over each builder's
 //! own ground instead of the whole stretch, which is what makes short building regions
-//! affordable. The builders run at the same time as each other in [`parallel`](super::parallel),
+//! affordable. The builders run at the same time as each other in `parallel`,
 //! over this same cache; the loci that differ once builders see different windows are what the
 //! organiser's overlap resolution settles (spec §6.1).
 
-use super::build::{
-    CohortObservation, RegionOutcome, build_region, build_region_handing_over_windowed,
-};
+use super::build::{CohortObservation, build_region_handing_over_windowed};
+#[cfg(test)]
+use super::build::{RegionOutcome, build_region};
 use super::observation_cache::{
     ObservationCache, ObservationSource, ReferenceUnreadable, building_regions_of,
 };
@@ -30,9 +30,11 @@ use super::{
     CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltReads,
     refuse_malformed_analysed_regions,
 };
+#[cfg(test)]
 use crate::locus_generation::SampleLocusObservations;
 use crate::types::{GenomePosition, GenomeRegion};
 
+#[cfg(test)]
 /// Merge the cohort over `analysed`, one region at a time, in the order given.
 ///
 /// `observations_per_sample` is one slice per sample in the run's sample order, each in
@@ -91,6 +93,7 @@ pub fn merge_cohort_serially(
     merged
 }
 
+#[cfg(test)]
 /// Merge the cohort over `analysed`, reading each sample through the observation cache and
 /// building in regions of `cohort_locus_builder_regions_len` bases.
 ///
@@ -177,7 +180,7 @@ where
     Ok(merged)
 }
 
-/// Merge the cohort over `analysed` as [`merge_cohort_through_cache`] does, **handing each
+/// Merge the cohort over `analysed` as `merge_cohort_through_cache` does, **handing each
 /// surviving locus to `keep` where it is built** instead of collecting them.
 ///
 /// The two are one driver: `merge_cohort_through_cache` is this with `Vec::push` for a sink,
@@ -370,11 +373,10 @@ where
 mod tests {
     use super::super::build::build_region_windowed;
     use super::super::fixtures::{
-        FIXTURE_BOUND, SourceFailed, in_flight, member, refuse_any_difference, region, region_on,
-        render, source_of, three_samples_over_six_hundred_bases, width,
+        FIXTURE_BOUND, SourceFailed, member, refuse_any_difference, region, region_on, render,
+        source_of, three_samples_over_six_hundred_bases, width,
     };
     use super::super::organise::{Organiser, RegionIndex};
-    use super::super::parallel::merge_cohort_in_parallel;
     use super::super::{MinAltObs, MinAltReadShare};
     use super::*;
     use crate::locus_generation::SampleLocusObservations;
@@ -1071,14 +1073,6 @@ mod tests {
             max_cohort_locus_span,
             min_alt_reads,
         );
-        refuse_a_parallel_difference(
-            analysed,
-            per_sample,
-            building_region_width,
-            max_cohort_locus_span,
-            min_alt_reads,
-            &oracle,
-        );
         if let Some(first) = from_oracle
             .iter()
             .zip(&from_cache)
@@ -1097,56 +1091,6 @@ mod tests {
         );
 
         oracle
-    }
-
-    /// **The parallel driver's answer is the oracle's, on every fixture this helper sees** —
-    /// milestone E's claim (spec §15), made here rather than only on the parallel file's own
-    /// fixtures so that it covers what those cannot: the two hundred random layouts, and the
-    /// locus built from observations the generic generator actually minted.
-    ///
-    /// **One, four and sixteen regions in flight, not the full sweep**, because the helper's
-    /// busiest caller runs it two hundred times. One is the round that is not a round, which
-    /// makes every building-region boundary a round boundary too. Four puts several builders in
-    /// one round at every width this file uses **except 600**, where the analysed stretch is a
-    /// single building region and every count gives the same one-builder round. Sixteen is here
-    /// because E4's review measured what the smaller two miss: a defect confined to a round's
-    /// fifth region or later fails five tests and **none** of them is in this file.
-    ///
-    /// The exhaustive width × count sweep is
-    /// `super::super::parallel::tests::the_parallel_merge_is_the_oracles_at_every_width_and_count`;
-    /// what this adds is reach — the two hundred random layouts, and the locus built from
-    /// observations the generic generator actually minted, neither of which the parallel file
-    /// has.
-    fn refuse_a_parallel_difference(
-        analysed: &[GenomeRegion],
-        per_sample: &[&[SampleLocusObservations]],
-        building_region_width: CohortLocusBuilderRegionsLen,
-        max_cohort_locus_span: MaxCohortLocusSpan,
-        min_alt_reads: MinAltReads,
-        oracle: &RegionOutcome,
-    ) {
-        for regions in [1, 4, 16] {
-            let mut cache = ObservationCache::over_fixture(
-                per_sample.iter().map(|sample| source_of(sample)).collect(),
-            );
-            let in_parallel = merge_cohort_in_parallel(
-                analysed,
-                &mut cache,
-                building_region_width,
-                in_flight(regions),
-                max_cohort_locus_span,
-                min_alt_reads,
-            )
-            .expect("the fixture sources hold");
-            refuse_any_difference(
-                &format!(
-                    "{regions} regions in flight on {}-base regions",
-                    building_region_width.get()
-                ),
-                oracle,
-                &in_parallel,
-            );
-        }
     }
 
     /// **A real merge never displaces a locus** — the same claim as

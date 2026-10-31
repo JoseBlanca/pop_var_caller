@@ -55,13 +55,16 @@ use crate::read::input::reference::OpenReference;
 use crate::read::input::{AssemblyMismatch, check_assembly};
 use crate::ref_seq::WindowedRefSeq;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
-use crate::run::cohort_merge::build::{CohortObservation, RegionOutcome};
+use crate::run::cohort_merge::build::CohortObservation;
+#[cfg(test)]
+use crate::run::cohort_merge::build::RegionOutcome;
 use crate::run::cohort_merge::observation_cache::{ObservationCache, ObservationSource};
 use crate::run::cohort_merge::recorded_windows::{record_the_histograms, record_the_windows_at};
-use crate::run::cohort_merge::serial::{
-    merge_cohort_handing_each_locus_over,
-    merge_cohort_handing_each_locus_over_covering_samples_in_parallel, merge_cohort_through_cache,
-};
+#[cfg(test)]
+use crate::run::cohort_merge::serial::merge_cohort_handing_each_locus_over;
+use crate::run::cohort_merge::serial::merge_cohort_handing_each_locus_over_covering_samples_in_parallel;
+#[cfg(test)]
+use crate::run::cohort_merge::serial::merge_cohort_through_cache;
 use crate::run::cohort_merge::{
     CohortLocusBuilderRegionsInFlight, CohortLocusBuilderRegionsLen, MaxCohortLocusSpan,
     MinAltReads,
@@ -215,6 +218,7 @@ pub struct AlignedFilesVariantCaller {
     /// One per sample, in the run's sample order — the order
     /// [`ReadGroups::read_groups_per_sample`] gave.
     samples: Vec<SampleReads>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     /// Every read group of every sample, numbered run-wide.
     ///
     /// **Kept, not borrowed and dropped.** The fitted parameters are keyed by read-group
@@ -223,14 +227,8 @@ pub struct AlignedFilesVariantCaller {
     /// would mint a second numbering, which is the accident the run's one sample order exists
     /// to prevent.
     read_groups: ReadGroups,
-    /// The one copy of the reference the whole run reads against.
-    ///
-    /// **Kept rather than borrowed at open**, because every walk needs it again: a cursor is
-    /// built with a reference accessor taken from here. Cloning shares the cache rather than
-    /// copying it.
-    reference: OpenReference,
-    /// Which reads are admitted. Kept for the same reason as the reference: each sample's walk
-    /// opens its cursors with it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
+    /// Which reads are admitted.
     read_filters: ReadFilterConfig,
     /// The reference the walk fetches its bases from, with its index parsed once for the run.
     ///
@@ -354,7 +352,6 @@ impl AlignedFilesVariantCaller {
             assembly_check,
             samples,
             read_groups: alignments.read_groups.clone(),
-            reference: alignments.reference.clone(),
             read_filters: alignments.read_filters,
             walk_reference,
             segmentation: Arc::new(segmentation),
@@ -394,6 +391,7 @@ impl AlignedFilesVariantCaller {
         self
     }
 
+    #[cfg(test)]
     /// How many samples this run calls — the length every per-sample row downstream has.
     #[must_use]
     pub fn sample_count(&self) -> usize {
@@ -411,77 +409,70 @@ impl AlignedFilesVariantCaller {
         self.samples().map(SampleReads::sample_name)
     }
 
+    #[cfg(test)]
     /// One sample's open files, by its position in the run's sample order.
     #[must_use]
     pub fn sample_reads(&self, sample_index: usize) -> Option<&SampleReads> {
         self.samples.get(sample_index)
     }
 
+    #[cfg(test)]
     /// Every read group of every sample, numbered run-wide.
     #[must_use]
     pub fn read_groups(&self) -> &ReadGroups {
         &self.read_groups
     }
 
+    #[cfg(test)]
     /// The ground this run analyses, and the record of what it was computed from.
     #[must_use]
     pub fn segmentation(&self) -> &Segmentation {
         &self.segmentation
     }
 
-    /// A handle on that ground, for a walker to keep for the whole run.
-    ///
-    /// **A second accessor rather than a wider return on the first**, because the two answer
-    /// different questions: [`segmentation`](Self::segmentation) is for reading it here, and this
-    /// is for holding it elsewhere. Handing out the `Arc` from one accessor would make every
-    /// reader take shared ownership of the genome-sized list to ask how many segments it has.
-    #[must_use]
-    pub fn shared_segmentation(&self) -> Arc<Segmentation> {
-        Arc::clone(&self.segmentation)
-    }
-
+    #[cfg(test)]
     /// The numbers the pre-pass fitted, which every call is scored against.
     #[must_use]
     pub fn parameters(&self) -> &RunParameters {
         &self.parameters
     }
 
+    #[cfg(test)]
     /// How the calling loop is configured for this run.
     #[must_use]
     pub fn calling_loop_config(&self) -> &RunnableCallingLoopConfig {
         &self.calling_loop_config
     }
 
+    #[cfg(test)]
     /// Which alleles a locus of this run is called over.
     #[must_use]
     pub fn candidate_selection(&self) -> &CandidateSelectionConfig {
         &self.candidate_selection
     }
 
+    #[cfg(test)]
     /// What the merge of this run admits and bounds.
     #[must_use]
     pub fn merge_parameters(&self) -> MergeParameters {
         self.merge_parameters
     }
 
-    /// The reference every sample's walk reads against.
-    #[must_use]
-    pub fn reference(&self) -> &OpenReference {
-        &self.reference
-    }
-
+    #[cfg(test)]
     /// Which reads this run admits.
     #[must_use]
     pub fn read_filters(&self) -> ReadFilterConfig {
         self.read_filters
     }
 
+    #[cfg(test)]
     /// The settings every locus generator of this run is built with.
     #[must_use]
     pub fn locus_generator_settings(&self) -> PileupGeneratorConfig {
         self.locus_generator_settings
     }
 
+    #[cfg(test)]
     /// Whether this run could check what assembly its samples were aligned to, and over how
     /// much.
     ///
@@ -531,6 +522,7 @@ impl AlignedFilesVariantCaller {
         })
     }
 
+    #[cfg(test)]
     /// **Read this run's cohort into cohort loci, in genome order, on one thread.**
     ///
     /// Every sample's walker advances at the merge frontier, in one place; the merge draws each
@@ -565,6 +557,7 @@ impl AlignedFilesVariantCaller {
         )
     }
 
+    #[cfg(test)]
     /// **Call this run's cohort: reads in, one called locus per locus the merge kept, in
     /// genome order.**
     ///
@@ -743,7 +736,7 @@ impl AlignedFilesVariantCaller {
 
     /// **Call this run's cohort and hand every record over as it is finished, keeping none.**
     ///
-    /// The path a command takes, where [`call_cohort`](Self::call_cohort) is the oracle:
+    /// The path a command takes, where `call_cohort` is the oracle:
     /// identical calling, and the answers leave one at a time instead of accumulating. What a
     /// run holds is then its open files, the merge's frontier and one record — spec §5.1's
     /// bound.
@@ -1737,6 +1730,7 @@ struct RunReadyToWalk {
 /// it the right words, and it is the name any later concurrency work will want.
 pub type RunWalker = AlignmentFilesWalker<RunSegments>;
 
+#[cfg(test)]
 /// **What a calling run produced: the genotypes, the two kinds of ground it produced no
 /// genotypes for, and what the walk counted on the way.**
 ///
@@ -1802,7 +1796,7 @@ pub struct CalledCohort {
     pub window_coverage_histograms: Vec<SampleHistogram>,
 }
 
-/// **What a run that wrote its calls out produced** — everything [`CalledCohort`] carries
+/// **What a run that wrote its calls out produced** — everything `CalledCohort` carries
 /// except the loci themselves, which such a run hands over one at a time rather than keeping.
 ///
 /// **Written and called are different counts, and the difference is a fact about the run.** A
@@ -1818,7 +1812,7 @@ pub struct WrittenCohort {
     pub calling: CohortCallingTallies,
     /// What each sample's walk saw, and what the run could check about the assembly.
     pub walk: CohortWalkTallies,
-    /// Each sample's coverage-by-GC histogram, or the reason it has none — [`CalledCohort`]'s
+    /// Each sample's coverage-by-GC histogram, or the reason it has none — `CalledCohort`'s
     /// own field, and carried for the same reason.
     pub window_coverage_histograms: Vec<SampleHistogram>,
 }
@@ -1844,12 +1838,12 @@ pub struct CohortCallingTallies {
     /// [`loci_called`](Self::loci_called).
     pub loci_below_minimum_site_quality: u64,
     /// **The ground of the loci the merge declined to assemble for being wider than
-    /// `max_cohort_locus_span`**, in genome order — [`CalledCohort::loci_too_wide_to_assemble`].
+    /// `max_cohort_locus_span`**, in genome order — `CalledCohort::loci_too_wide_to_assemble`.
     pub loci_too_wide_to_assemble: Vec<GenomeRegion>,
     /// **The ground of the loci no sample of the run could be called at**, in genome order —
-    /// [`CalledCohort::loci_with_nobody_to_call`].
+    /// `CalledCohort::loci_with_nobody_to_call`.
     pub loci_with_nobody_to_call: Vec<GenomeRegion>,
-    /// **What became of this run's repeat tracts** — [`CalledCohort::tracts`].
+    /// **What became of this run's repeat tracts** — `CalledCohort::tracts`.
     pub tracts: TractOutcomes,
     /// **The `--explain-loci` rows of every locus explained**, in the order the loci were met;
     /// empty when the run explained nothing (`doc/devel/ng/spec/explain_loci.md`).
@@ -1885,6 +1879,7 @@ impl CohortCallingTallies {
 }
 
 impl WrittenCohort {
+    #[cfg(test)]
     /// How many loci were called — written, plus those that established no variant.
     #[inline]
     #[must_use]

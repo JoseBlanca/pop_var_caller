@@ -49,9 +49,9 @@ use std::sync::Arc;
 
 use crate::bam::errors::AlignmentIndexError;
 use crate::read::filtering::ReadFilterConfig;
+use crate::read::input::read_groups::build_read_groups;
 use crate::read::input::read_groups::{
     ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, RecordOwner, SampleReadGroups,
-    build_read_groups,
 };
 use crate::read::input::reference::OpenReference;
 use crate::reference_info::{ReferenceInfo, format_md5_hex};
@@ -603,6 +603,7 @@ impl SampleReads {
         }
     }
 
+    #[cfg(test)]
     /// How many files this sample has.
     ///
     /// **Not** the space a read's `read_group` lives in: that identifier is

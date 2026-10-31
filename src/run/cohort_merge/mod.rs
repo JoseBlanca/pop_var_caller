@@ -21,7 +21,7 @@
 //! [`serial`]'s **two** single-threaded drivers — the oracle every later milestone must
 //! reproduce and the same merge read through the cache, byte for byte — plus, since the run
 //! driver's E1, a third whose only departure is that each cover sweeps the samples
-//! concurrently; and [`parallel`]'s
+//! concurrently; and `parallel`'s
 //! round-by-round arrangement of the builders, whose output is those two byte for byte at any
 //! number of regions in flight and any region width.
 //!
@@ -39,7 +39,6 @@ pub mod build;
 pub mod close;
 pub mod observation_cache;
 pub mod organise;
-pub mod parallel;
 pub mod recorded_windows;
 pub mod rounds;
 pub mod serial;
@@ -819,7 +818,7 @@ pub const DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN: u32 = 500;
 /// **A command-line parameter, and the only one of this module's four with no constant
 /// default**: what it should be depends on the machine's cores and on how much memory the
 /// cohort's width leaves, neither of which is knowable where the other three defaults are
-/// written. A run given no value takes [`one_per_worker_thread`](Self::one_per_worker_thread).
+/// written. A run given no value takes `one_per_worker_thread`.
 ///
 /// **Owed:** the resolved value belongs in the run's output beside the other three, because
 /// two runs differing only in it differ in memory and in nothing a reader of the output can
@@ -831,6 +830,7 @@ impl CohortLocusBuilderRegionsInFlight {
     /// One region at a time — the streaming driver's arrangement, and every default's.
     pub const ONE: Self = Self(NonZeroUsize::MIN);
 
+    #[cfg(test)]
     /// One region in flight per thread in rayon's pool — what a run takes when the operator
     /// names no value.
     ///

@@ -55,9 +55,10 @@ use crate::locus_generation::{
     HeldFlank, LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
     SsrBundleDetail, SsrDetail, WitnessedLocusPositions,
 };
+#[cfg(test)]
+use crate::psp::chain_ids::LiveSet;
 use crate::psp::chain_ids::{
-    LiveSet, LiveSetReader, LiveSetWriter, as_a_read_set, decode_read_list, encode_read_list,
-    residual_reads,
+    LiveSetReader, LiveSetWriter, as_a_read_set, decode_read_list, encode_read_list, residual_reads,
 };
 use crate::psp::header::{FieldEncoding, FieldName, FieldSpec, Manifest};
 use crate::psp::varint::{
@@ -541,6 +542,7 @@ pub struct RecordLayout {
 }
 
 impl RecordLayout {
+    #[cfg(test)]
     /// The layout this build of the code writes: every field it knows, and nothing after them.
     ///
     /// # When this is right
@@ -732,7 +734,7 @@ pub enum RecordDecodeError {
         /// observations**, so a field name alone does not say where to look.
         ///
         /// **Measured from the record's first byte** by [`read_record_head`] and
-        /// [`decode_record`], which is where a caller holding a block's bytes needs it. It is
+        /// `decode_record`, which is where a caller holding a block's bytes needs it. It is
         /// measured from the *body's* first byte only by [`decode_record_body`] called on its
         /// own, which has no head in front of it.
         bytes_in: usize,
@@ -998,6 +1000,7 @@ fn check_a_read_list_against_its_read_count(names: usize, num_obs: u32) -> bool 
     names <= reads && names * 2 >= reads
 }
 
+#[cfg(test)]
 /// Append `record`'s body to `out`, and never fail.
 ///
 /// **The chain ids are dropped.** [`SequenceObservation::chain_ids`] is Milestone E of
@@ -1267,10 +1270,10 @@ fn put_flank_deletions(out: &mut Vec<u8>, observations: &[SequenceObservation]) 
 /// cover its region. **The kind is what says whether the body's last three fields are there at
 /// all**: a repeat tract's motif and flanks follow the depth-cap count, and the other two kinds
 /// end without them. `layout` comes from the file's manifest, once, at open
-/// ([`RecordLayout::from_manifest`]); [`RecordLayout::as_this_build_writes_it`] is for
+/// ([`RecordLayout::from_manifest`]); `RecordLayout::as_this_build_writes_it` is for
 /// bytes this process encoded itself and skips every check that function makes.
 ///
-/// **The chain-id lists come back empty** — see [`encode_record_body`], which also states the
+/// **The chain-id lists come back empty** — see `encode_record_body`, which also states the
 /// property this half has to keep: nothing this reads out of `bytes` depends on any record read
 /// before it, which is what lets a reader skip a body and still trust the next one. (`region`
 /// does come from every record before it, through the head's running offset — but it is a
@@ -1291,9 +1294,9 @@ fn put_flank_deletions(out: &mut Vec<u8>, observations: &[SequenceObservation]) 
 /// **⚠ `live_reads` must be the set this record's head produced.** See
 /// [`decode_the_body_of`], which is the call a reader that has read a head should be making.
 ///
-/// **The set arrives as a slice rather than as a [`LiveSet`]**, which is what the one use below
+/// **The set arrives as a slice rather than as a `LiveSet`**, which is what the one use below
 /// wants — the residual derivation reads the identifiers in order and nothing here needs the
-/// owning type. A reader that holds a `LiveSet` passes [`LiveSet::ids`]; a reader that keeps its
+/// owning type. A reader that holds a `LiveSet` passes `LiveSet::ids`; a reader that keeps its
 /// identifiers in an arena of its own passes the span it already has, which is what
 /// `PspSummarySource` does. Copying the span into a `LiveSet` to satisfy this parameter was 19%
 /// of the calling thread on a 63-sample cohort.
@@ -2105,12 +2108,7 @@ impl RecordEncoder {
         self.write_a_record(record, 0, span, body_bytes, out)
     }
 
-    /// What the next record's offset will be measured from — the block's first position until a
-    /// record has been written, and the last written record's start after that.
-    pub fn measured_from(&self) -> OffsetBase {
-        self.block.measured_from
-    }
-
+    #[cfg(test)]
     /// The reads live at the record last written.
     pub fn live_reads(&self) -> &LiveSet {
         self.live_reads.live()
@@ -2439,6 +2437,7 @@ pub struct DecodedRecord {
     pub record_bytes: usize,
 }
 
+#[cfg(test)]
 /// Read one whole record — head, then body — and check that the two agree.
 ///
 /// **The check is the reason this exists rather than being two calls.** The head declares how

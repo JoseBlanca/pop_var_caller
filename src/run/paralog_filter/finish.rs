@@ -196,6 +196,7 @@ pub enum ParalogFilterError {
     },
 }
 
+#[cfg(test)]
 /// **Fit, score, calibrate and write** — passes two and three, and the fit between them.
 ///
 /// `histograms` and `inbreeding` are both in the run's sample order and are the same length;
@@ -224,16 +225,16 @@ pub fn fit_score_and_write_the_calls(
     )
 }
 
-/// [`fit_score_and_write_the_calls`], also keeping the verdict of every record `explained` asks
+/// `fit_score_and_write_the_calls`, also keeping the verdict of every record `explained` asks
 /// about (`--explain-loci`). **What is written does not depend on it.**
 ///
 /// # Panics
 ///
-/// As [`fit_score_and_write_the_calls`].
+/// As `fit_score_and_write_the_calls`.
 ///
 /// # Errors
 ///
-/// As [`fit_score_and_write_the_calls`].
+/// As `fit_score_and_write_the_calls`.
 #[expect(
     clippy::too_many_arguments,
     reason = "fit_score_and_write_the_calls's seven and the explanation it may be asked for"

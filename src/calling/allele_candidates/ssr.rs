@@ -465,7 +465,7 @@ pub struct SsrSelectionConfig {
     /// it was before discovery existed.
     ///
     /// When set, [`select_ssr`] runs the discovery decision of
-    /// [`inference::discovery`](crate::calling::inference::discovery) as a pre-pass over the
+    /// `inference::discovery` as a pre-pass over the
     /// merge's rows: a sequence one sample showed with reads clearing this bar is admitted as a
     /// candidate even where nomination's top-`ploidy` cut left its length behind. The bar's
     /// numbers are discovery's own ([`DEFAULT_DISCOVERY_BAR`](crate::calling::inference::DEFAULT_DISCOVERY_BAR),

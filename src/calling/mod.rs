@@ -65,25 +65,28 @@ pub mod likelihood;
 pub mod parameters_file;
 pub mod quality;
 pub mod run_parameters;
-pub mod run_report;
 
 pub use genotype_table::{GenotypeIdx, GenotypeTable, GenotypeTableView};
+#[cfg(test)]
+pub use likelihood::GenericEvidenceBuffer;
 /// Re-exported for a different reason from [`genotype_table`]'s three, and the reason is
 /// worth stating: **without a `use` of it that has to compile, deleting `pub mod
 /// likelihood;` orphans the whole module silently.** The crate still builds, clippy is
 /// still clean, and `cargo test --lib calling::likelihood` reports `0 passed; ok` —
 /// a green run naming a module that is no longer compiled. With this line the same
 /// deletion is `error[E0432]: unresolved import`.
+#[cfg(test)]
+pub use likelihood::generic::genotype_log_likelihood_row;
 pub use likelihood::generic::{
     ERROR_SPREAD_BASES, NO_ERROR_SPREAD, ReferenceBesideLocus, WrongReadCharge,
     WrongReadChargeTable, allele_is_compatible_with_partial, fill_wrong_read_charges,
-    genotype_log_likelihood_row, partial_row_fits_allele,
+    partial_row_fits_allele,
 };
 pub use likelihood::{
-    ContaminationMixture, ContaminationView, GenericEvidenceBuffer, GenericObservation,
-    GenericRowScratch, GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY,
-    ReadGroupCalibration, ReadGroupParameters, SsrRowScratch, SsrSampleEvidence,
-    fill_batch_allele_copies, fill_contaminant_allele_frequencies,
+    ContaminationMixture, ContaminationView, GenericObservation, GenericRowScratch,
+    GenericSampleEvidence, MIN_BASE_ERROR, MIN_CONTAMINANT_FREQUENCY, ReadGroupCalibration,
+    ReadGroupParameters, SsrRowScratch, SsrSampleEvidence, fill_batch_allele_copies,
+    fill_contaminant_allele_frequencies,
 };
 
 use crate::calling::genotype_prior::SpectrumSeed;
@@ -178,12 +181,6 @@ impl CandidateAlleles {
             .get(index)
             .copied()
             .unwrap_or(crate::locus_generation::FlankDeletion::NONE)
-    }
-
-    /// Whether some allele here has a flank deletion.
-    #[inline]
-    pub fn has_a_flank_deletion(&self) -> bool {
-        !self.flank_deletions.is_empty()
     }
 
     /// Admit `allele` with its flank deletion — [`admit`](Self::admit) for an STR segment's
@@ -1163,7 +1160,7 @@ impl<'a> FrozenParameters<'a> {
 
     /// The sequencing batch **one sample** ran in, by its index in the run's sample order.
     ///
-    /// **It takes a `usize` where [`Self::batch_of_read_group`] takes a [`ReadGroupId`], and
+    /// **It takes a `usize` where `Self::batch_of_read_group` takes a [`ReadGroupId`], and
     /// that is the point.** The two batchings are the same slice type over different axes, and
     /// at one library per sample — every sample of every benchmark cohort here — they are the
     /// same length too, so an index handed to the wrong one passes every shape check and comes
@@ -1190,6 +1187,7 @@ impl<'a> FrozenParameters<'a> {
             })
     }
 
+    #[cfg(test)]
     /// The sequencing batch **one read group** ran in. See [`Self::batch_of_sample`] for why the
     /// two are separate calls.
     ///
@@ -1802,6 +1800,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.row_count
     }
 
+    #[cfg(test)]
     /// How many genotypes the buffers are currently sized for.
     #[inline]
     #[must_use]
@@ -1809,6 +1808,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         self.genotype_count
     }
 
+    #[cfg(test)]
     /// How many alleles the buffers are currently sized for.
     #[inline]
     #[must_use]
@@ -1887,6 +1887,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self.cohort_expected_copies
     }
 
+    #[cfg(test)]
     /// The cohort's expected allele copies, to fill.
     ///
     /// # Panics
@@ -1959,6 +1960,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &mut self.seed_concentration
     }
 
+    #[cfg(test)]
     /// The sample being scored, its own concentration.
     ///
     /// # Panics
@@ -1971,6 +1973,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self.sample_concentration
     }
 
+    #[cfg(test)]
     /// The sample being scored, its own concentration, to fill per sample per pass.
     ///
     /// # Panics
@@ -1982,6 +1985,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &mut self.sample_concentration
     }
 
+    #[cfg(test)]
     /// The sample being scored, its log-prior over every candidate genotype.
     ///
     /// # Panics
@@ -1994,6 +1998,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self.prior_row
     }
 
+    #[cfg(test)]
     /// The sample's log-prior row, to fill.
     ///
     /// # Panics
@@ -2017,6 +2022,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self.posterior_row
     }
 
+    #[cfg(test)]
     /// The sample's posterior row, to fill.
     ///
     /// # Panics
@@ -2028,6 +2034,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &mut self.posterior_row
     }
 
+    #[cfg(test)]
     /// The genotype prior's per-allele working space.
     ///
     /// # Panics
@@ -2040,6 +2047,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self.prior_per_allele_workspace
     }
 
+    #[cfg(test)]
     /// The genotype prior's per-allele working space, to lend it.
     ///
     /// # Panics
@@ -2459,6 +2467,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &mut self.generic_rows[row]
     }
 
+    #[cfg(test)]
     /// The repeat-tract row's own scratch, which owns its own sizing.
     #[inline]
     pub fn ssr_row_mut(&mut self) -> &mut SsrRowScratch<SsrEmissionScratch> {
@@ -2490,6 +2499,7 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
         &self.tract_fits
     }
 
+    #[cfg(test)]
     /// How many per-locus slippage re-fit rounds the last locus adopted — the loop's probe
     /// for its own stopping rule, written by the driver after the rounds stop. Zero at the
     /// shipped configuration and at every SNP/indel locus.
@@ -2959,6 +2969,7 @@ impl SampleGenotypeCall {
         }
     }
 
+    #[cfg(test)]
     /// How sure the caller is, or `None` where the sample was set aside — which carries no
     /// quality, because no genotype was scored to have one.
     #[inline]

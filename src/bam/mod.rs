@@ -10,7 +10,7 @@
 //! - [`alignment_input`] — validates a list of coordinate-sorted
 //!   alignment files for one sample (their `@SQ` headers against each
 //!   other, a single sample name, coordinate sort order) via
-//!   [`alignment_input::load_pileup_inputs`], and owns the
+//!   `alignment_input::load_pileup_inputs`, and owns the
 //!   format-agnostic per-read filter cascade
 //!   ([`alignment_input::AlignmentMergedReaderConfig`]) plus the shared
 //!   `RecordBuf` → [`alignment_input::MappedRead`] conversion the

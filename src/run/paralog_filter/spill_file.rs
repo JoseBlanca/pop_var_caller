@@ -98,6 +98,7 @@ enum Stage {
 }
 
 impl SpillFile {
+    #[cfg(test)]
     /// Name the spill that would sit beside `output`. **Creates nothing** — the file appears
     /// when the first entry is appended.
     #[must_use]
@@ -118,12 +119,13 @@ impl SpillFile {
     }
 
     /// Name the spill inside `directory` — the run's own temporary directory
-    /// (`doc/devel/ng/spec/command_line.md` §7.5). **Creates nothing**, as [`Self::beside`].
+    /// (`doc/devel/ng/spec/command_line.md` §7.5). **Creates nothing**, as `Self::beside`.
     #[must_use]
     pub fn in_directory(directory: &Path) -> Self {
         Self::at(directory.join(SPILL_FILE_NAME))
     }
 
+    #[cfg(test)]
     /// Where the file is, or would be.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -457,6 +459,7 @@ pub enum SpillFileError {
 /// The spill's name inside a run's temporary directory.
 const SPILL_FILE_NAME: &str = "hidden-dup-spill.tmp";
 
+#[cfg(test)]
 /// `<output>.paralog-spill.tmp`, the convention [`vcf::writer`](crate::vcf::writer) already
 /// uses for `<output>.tmp`.
 ///

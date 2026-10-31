@@ -79,6 +79,7 @@ pub struct MintedErrorTotals {
 }
 
 impl MintedErrorTotals {
+    #[cfg(test)]
     /// The geometric mean of the per-read error probabilities — what the scale's denominator is
     /// (`doc/devel/ng/spec/read_likelihoods.md` §3.2). `None` where no read was seen.
     #[must_use]
@@ -86,6 +87,7 @@ impl MintedErrorTotals {
         (self.reads > 0).then(|| float::exp(self.log_error_sum / self.reads as f64))
     }
 
+    #[cfg(test)]
     /// The arithmetic mean of the same probabilities — what §3.2 asked for before the correction
     /// of 2026-08-24. `None` where no read was seen.
     #[must_use]
@@ -93,6 +95,7 @@ impl MintedErrorTotals {
         (self.reads > 0).then(|| self.error_sum / self.reads as f64)
     }
 
+    #[cfg(test)]
     /// **How much of the arithmetic mean is reads charged a full unit of error** — their share of
     /// `Σ ε`, which is their count over that sum because each contributes exactly one.
     ///
@@ -187,41 +190,6 @@ pub fn drop_locus(locus_start: u64) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .pending
         .remove(&locus_start);
-}
-
-/// How many loci were built and never ruled on — a walk that ended mid-region, or a locus the
-/// generator neither kept nor discarded.
-///
-/// **Printed by the tool rather than asserted**, because a non-zero here does not make the
-/// answer wrong: those reads are simply not in it. It is the number that says how much.
-#[must_use]
-pub fn loci_never_ruled_on() -> usize {
-    census()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pending
-        .len()
-}
-
-/// The kept loci's totals, in ascending read-group order.
-#[must_use]
-pub fn snapshot() -> Vec<(ReadGroupId, MintedErrorTotals)> {
-    census()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .kept
-        .iter()
-        .map(|(&group, &totals)| (group, totals))
-        .collect()
-}
-
-/// Empty both tables, so one process can walk several samples and report each on its own.
-pub fn reset() {
-    let mut census = census()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    census.kept.clear();
-    census.pending.clear();
 }
 
 #[cfg(test)]

@@ -48,6 +48,7 @@ impl<R: RawRefSeq> SampleCursor<R> {
         }
     }
 
+    #[cfg(test)]
     /// The chromosome every file cursor here covers.
     pub fn contig(&self) -> ContigId {
         match self {
@@ -142,21 +143,6 @@ impl<R: RawRefSeq> SampleCursor<R> {
                 .cursors
                 .iter()
                 .for_each(|cursor| cursor.evict_reference_before(pos)),
-        }
-    }
-
-    /// How many reference bases this sample's readers hold between them.
-    pub fn resident_reference_bases(&self) -> usize
-    where
-        R: crate::ref_seq::EvictableRefSeq,
-    {
-        match self {
-            Self::Single(cursor) => cursor.resident_reference_bases(),
-            Self::Merged(merged) => merged
-                .cursors
-                .iter()
-                .map(|cursor| cursor.resident_reference_bases())
-                .sum(),
         }
     }
 

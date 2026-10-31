@@ -2403,6 +2403,7 @@ where
     Model: SsrEmissionModel,
     Prior: GenotypePriorModel,
 {
+    #[cfg(test)]
     fn name(&self) -> &'static str {
         "summarise the cohort, then condition each sample on it (arm A)"
     }
@@ -3134,10 +3135,6 @@ mod tests {
             for (slot, &value) in out.iter_mut().zip(&self.0) {
                 *slot = LogProb(value);
             }
-        }
-
-        fn name(&self) -> &'static str {
-            "log-priors chosen by the test"
         }
     }
 

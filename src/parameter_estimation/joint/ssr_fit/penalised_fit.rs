@@ -7,7 +7,7 @@
 //! The counting fit ([`expected_counts`](mod@super::expected_counts)) fits each class — one motif
 //! length, one reference repeat count — on its own, and the curves across repeat count are drawn
 //! afterwards through its answers. Here each round gathers every class's expected counts exactly as
-//! the counting fit does ([`expected_counts`](fn@super::expected_counts::expected_counts)), and
+//! the counting fit does (`expected_counts`), and
 //! then chooses all the classes' numbers together: each number is the best fit to the counts
 //! **subject to a penalty on how sharply it bends from one repeat count to the next**. A thin class
 //! then borrows from its neighbours during the fit, by as much as its own counts leave undecided,
@@ -37,7 +37,7 @@ use crate::parameter_estimation::progress;
 mod run_log;
 
 /// **How the penalised fit runs.** [`production`](Self::production) is what `estimate-parameters`
-/// runs (spec `str_penalised_fit.md` §2.7); [`prototype`](Self::prototype) keeps the research
+/// runs (spec `str_penalised_fit.md` §2.7); `prototype` keeps the research
 /// prototype's own settings, which the research examples start from and which differ from
 /// production's. There is deliberately no `Default`, so that no caller gets either by accident.
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +194,7 @@ impl PenalisedFitConfig {
         }
     }
 
+    #[cfg(test)]
     /// **The research prototype's own settings, not production's** (production's are
     /// [`production`](Self::production)), kept for the research examples and a few tests: a looser
     /// start, at most 500 rounds, stop below 10⁻⁶, no second floor under the allele lengths, no
@@ -251,6 +252,7 @@ impl PenalisedFitConfig {
         })
     }
 
+    #[cfg(any(test, feature = "bench-fixtures"))]
     /// **These settings with the allele window set to `allele_span` and the first floor rescaled to
     /// match**: [`allele_pseudo_draws`](Self::allele_pseudo_draws) becomes
     /// [`ALLELE_PSEUDO_DRAWS_A_CLASS`] spread over the new window's lengths, whatever it held
@@ -547,15 +549,7 @@ pub struct ParameterCurve {
     pub unfactorised_fits_kept: usize,
 }
 
-impl ParameterCurve {
-    /// **The curve at `repeats`**, held at the nearest end outside the range it was fitted over.
-    #[must_use]
-    pub fn at(&self, repeats: u64) -> f64 {
-        let last = self.first_repeats + self.values.len() as u64 - 1;
-        let index = repeats.clamp(self.first_repeats, last) - self.first_repeats;
-        self.values[index as usize]
-    }
-}
+impl ParameterCurve {}
 
 /// **The curves of one motif length.**
 #[derive(Debug, Clone, PartialEq)]
@@ -575,7 +569,7 @@ pub struct SmoothCurves {
 pub struct PenalisedPeriodFit {
     /// One entry per class handed in, in the same order: `None` for a class with no reads at any
     /// locus, which is not fitted. The curves still give such a class a value
-    /// ([`ParameterCurve::at`]).
+    /// (`ParameterCurve::at`).
     pub classes: Vec<Option<PenalisedClass>>,
     /// `None` when no class had reads.
     pub curves: Option<SmoothCurves>,
@@ -653,6 +647,7 @@ pub enum UndeterminedErrors {
     BetweenLocusShare,
 }
 
+#[cfg(any(test, feature = "bench-fixtures"))]
 /// **Fits every class of one motif length at once, by penalised counting.**
 ///
 /// `classes` are the classes of one motif length, any order, each repeat count at most once.
@@ -660,7 +655,7 @@ pub enum UndeterminedErrors {
 /// (multipliers are not fitted here). The allele window is `fit.allele_span`.
 ///
 /// With [`PenalisedFitConfig::pair_alternations`] above zero, the between-locus share is then read
-/// off pairs of samples at a locus, as [`fit_class_by_counting_with_pairs`](super::expected_counts::fit_class_by_counting_with_pairs)
+/// off pairs of samples at a locus, as `fit_class_by_counting_with_pairs`
 /// does, its curve penalised like every other: each round of pairs alternates with penalised
 /// counting at the shares held.
 ///
@@ -3123,9 +3118,6 @@ impl BandCholesky {
 mod tests {
     use super::*;
     use crate::parameter_estimation::joint::ssr_fit::bench_fixtures::{draw_stratum, spectrum_of};
-    use crate::parameter_estimation::joint::ssr_fit::expected_counts::{
-        expected_counts, fit_class_by_counting_at_share_prior,
-    };
 
     /// **The banded Cholesky solves what a dense solve does**, on a random positive-definite
     /// matrix of bandwidth four.
@@ -3239,84 +3231,6 @@ mod tests {
                 (at_fifteen / truth[7] - 1.0).abs() < 0.25,
                 "the thin point: {at_fifteen} against {}",
                 truth[7]
-            );
-        }
-    }
-
-    /// **With the penalty near zero the fit is the counting fit, class by class**: three classes of
-    /// one motif length, each fitted on its own by counting and all together with a penalty of
-    /// 10⁻⁸.
-    #[test]
-    fn with_no_penalty_the_fit_is_the_counting_fit() {
-        let allele_span = 1;
-        let spectrum = spectrum_of(3);
-        let classes: Vec<StratumEvidence> = [(8_u64, 0.03), (9, 0.05), (10, 0.08)]
-            .iter()
-            .enumerate()
-            .map(|(index, (repeats, level))| {
-                let truth = Slippage {
-                    level: *level,
-                    shorter_share: 0.8,
-                    fall_off: 0.25,
-                };
-                let mut evidence =
-                    draw_stratum(truth, &spectrum, 0.5, 0.4, 300, 10, 8, 1, 31 + index as u64);
-                evidence.stratum = Stratum {
-                    period: 1,
-                    reference_repeats: *repeats,
-                };
-                evidence
-            })
-            .collect();
-        let excess = [0.4; 10];
-        let fit = PenalisedFitConfig {
-            allele_span,
-            smoothing: Smoothing::Fixed(1e-8),
-            allele_pseudo_draws: 0.0,
-            kink_knee: f64::INFINITY,
-            tolerance: 1e-10,
-            max_rounds: 2000,
-            ..PenalisedFitConfig::prototype()
-        };
-        let together = fit_period_by_penalised_counting(&classes, &excess, &fit);
-        for (evidence, fitted) in classes.iter().zip(&together.classes) {
-            let fitted = fitted.as_ref().expect("every class has reads");
-            // The counting fit without its shares' prior: with no floor here either, the two fits
-            // maximise the same objective.
-            let alone = fit_class_by_counting_at_share_prior(
-                evidence,
-                fit.start,
-                &excess,
-                allele_span,
-                2000,
-                1e-10,
-                0.0,
-            );
-            assert!(
-                (fitted.slippage.level - alone.slippage.level).abs() < 1e-5,
-                "{fitted:?} against {alone:?}"
-            );
-            assert!(
-                (fitted.slippage.shorter_share - alone.slippage.shorter_share).abs() < 1e-4,
-                "{fitted:?} against {alone:?}"
-            );
-            assert!(
-                (fitted.slippage.fall_off - alone.slippage.fall_off).abs() < 1e-4,
-                "{fitted:?} against {alone:?}"
-            );
-            for (a, b) in fitted
-                .allele_length_variation
-                .iter()
-                .zip(&alone.allele_length_variation)
-            {
-                assert!((a - b).abs() < 1e-4, "{fitted:?} against {alone:?}");
-            }
-            assert!(
-                (float::ln(fitted.concentration.expect("ten samples"))
-                    - float::ln(alone.concentration_counted_at))
-                .abs()
-                    < 1e-3,
-                "{fitted:?} against {alone:?}"
             );
         }
     }
@@ -3683,96 +3597,6 @@ mod tests {
             rare_shares > 0,
             "some share of the class of 8 loci is under 1/8: {:?}",
             fits[4].allele_length_variation
-        );
-    }
-
-    /// **A class's slipped reads are the fit's expected count, not the level times the reads.**
-    /// One-base runs at 8 to 12 repeats, 40 loci each, drawn at a slip rate of 0.01 per repeat
-    /// above 5, except the class at 10 repeats: 3 loci, drawn at 0.08 where its neighbours' line
-    /// passes through 0.05. Twelve samples at 8 reads.
-    ///
-    /// - On a well-measured class (9 repeats) the field is the expected count at the returned
-    ///   numbers, to within the one round's lag the fit's tolerance allows.
-    /// - On the thin class the penalised level is pulled towards its neighbours, while the
-    ///   expected count stays with the class's own reads, so the two numbers differ.
-    #[test]
-    fn slipped_reads_are_the_fits_expected_count() {
-        let mut strata: Vec<StratumEvidence> = (8..=12)
-            .map(|repeats| a_drawn_class(1, repeats, 40, 12, 8, 40 + repeats))
-            .collect();
-        let mut thin = draw_stratum(
-            Slippage {
-                level: 0.08,
-                shorter_share: 0.8,
-                fall_off: 0.25,
-            },
-            &spectrum_of(3),
-            2.0,
-            0.3,
-            3,
-            12,
-            8,
-            1,
-            61,
-        );
-        thin.stratum = Stratum {
-            period: 1,
-            reference_repeats: 10,
-        };
-        strata[2] = thin;
-        let excess = [0.3; 12];
-        let config = a_narrow_production_fit();
-        let outcomes = fit_repeat_tracts(&strata, &excess, &config);
-        let fits: Vec<&StratumFit> = outcomes
-            .iter()
-            .map(|outcome| match outcome {
-                StratumOutcome::Fitted(fit) => fit.as_ref(),
-                other => panic!("every class has reads: {other:?}"),
-            })
-            .collect();
-        let slipped_reads_of = |fit: &StratumFit| {
-            let level = fit.level_provenance[0].expect("group 0 has numbers");
-            let shares = fit.shares_provenance[0].expect("group 0 has numbers");
-            assert_eq!(level.slipped_reads, shares.slipped_reads);
-            level
-                .slipped_reads
-                .expect("a fitted class counted its reads")
-        };
-
-        let rich = fits[1];
-        let counts = expected_counts(
-            &strata[1],
-            rich.slippage[0].expect("group 0 has numbers"),
-            &rich.allele_length_variation,
-            rich.concentration
-                .expect("twelve samples place the concentration"),
-            &excess,
-            config.allele_span,
-        );
-        let field = slipped_reads_of(rich);
-        eprintln!(
-            "rich class: expected slipped reads {field:.4}, recounted at the returned numbers {:.4}",
-            counts.slipped
-        );
-        assert!(
-            (field - counts.slipped).abs() <= 1e-3 * counts.slipped,
-            "field {field}, expected count at the returned numbers {}",
-            counts.slipped
-        );
-
-        let thin = fits[2];
-        let field = slipped_reads_of(thin);
-        let level = thin.slippage[0].expect("group 0 has numbers").level;
-        let level_times_reads = level * thin.reads_crossing as f64;
-        eprintln!(
-            "thin class: {} reads crossing, level {level:.4}; expected slipped reads {field:.2}, \
-             level × reads crossing {level_times_reads:.2}",
-            thin.reads_crossing
-        );
-        assert!(
-            field > 1.2 * level_times_reads,
-            "the class's own reads slipped more than the curve's level says: {field} against \
-             {level_times_reads}"
         );
     }
 

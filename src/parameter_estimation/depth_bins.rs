@@ -151,7 +151,7 @@ const _: () = assert!(
 ///
 /// Only `0..DepthBinEdges::bin_count()` is a legal value. The field is public because
 /// the cell key is built from one and matched on; the accessors that take a bin check
-/// the range rather than trusting it — see [`DepthBinEdges::row_start`].
+/// the range rather than trusting it — see `DepthBinEdges::row_start`.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DepthBin(pub u16);
 
@@ -193,6 +193,7 @@ pub struct DepthBinEdges {
     /// is the top of bin `b`, so the ladder is stated once and everything else is
     /// derived from it.
     bin_tops: Vec<u32>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests read it"))]
     /// Where bin `b`'s row starts in a histogram's flat cell vector. One longer than
     /// `bin_tops`: the trailing entry is the total cell count, which is what
     /// [`DepthBinEdges::cell_count`] reads and what
@@ -347,6 +348,7 @@ impl DepthBinEdges {
         DepthBin((FIRST_WIDENING_BIN + widening).min(self.bin_count() - 1) as u16)
     }
 
+    #[cfg(test)]
     /// Where this bin's row starts in a histogram's flat cell vector.
     ///
     /// **The range check is not ceremony.** `row_starts` carries a trailing total, so
@@ -386,6 +388,7 @@ impl DepthBinEdges {
         first..=self.bin_tops[index]
     }
 
+    #[cfg(test)]
     /// How many cells a histogram binned this way holds — the flat vector's length.
     #[must_use]
     pub fn cell_count(&self) -> usize {
@@ -429,6 +432,7 @@ impl DepthBinEdges {
         (0..self.bin_count()).map(|bin| DepthBin(bin as u16))
     }
 
+    #[cfg(test)]
     /// The deepest depth the ladder has a bin for. A site above it is subsampled down
     /// to it before it is entered.
     ///

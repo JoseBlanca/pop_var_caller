@@ -105,6 +105,7 @@ impl LiveSet {
         self.ids.is_empty()
     }
 
+    #[cfg(test)]
     /// Build a set by copying ids that are already ascending and distinct.
     ///
     /// **It had no caller for a while, and the one it has now is the reverse of the one it
@@ -186,6 +187,7 @@ impl LiveSetChanges {
         &self.arrived
     }
 
+    #[cfg(test)]
     /// Whether nothing changed — the common case at depth between two adjacent positions, and the
     /// reason this form is cheap.
     ///
@@ -546,6 +548,7 @@ impl LiveSetWriter {
         self.block = PerBlockState::at_block_start();
     }
 
+    #[cfg(test)]
     /// The reads live at the record last written. **After** `write_changes`, not before.
     #[must_use]
     pub fn live(&self) -> &LiveSet {
@@ -684,7 +687,7 @@ impl LiveSetReader {
     /// What changed at the record last read. Handed back so a caller can see the shape of the
     /// stream without diffing two sets.
     ///
-    /// **Only after a [`read_changes`](Self::read_changes) that returned `Ok`.** After a fault it
+    /// **Only after a `read_changes` that returned `Ok`.** After a fault it
     /// holds however much of the record was decoded before the fault, which is not a record's
     /// changes — spec §6.7's *"none of these may reach a caller as a half-built record"* is about
     /// exactly this.
@@ -693,6 +696,7 @@ impl LiveSetReader {
         &self.changes
     }
 
+    #[cfg(test)]
     /// Read one record's changes off the front of `bytes` and apply them, returning how many
     /// bytes they took.
     ///

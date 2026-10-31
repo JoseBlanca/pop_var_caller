@@ -186,6 +186,7 @@ pub struct UnambiguousRuns {
 }
 
 impl UnambiguousRuns {
+    #[cfg(test)]
     /// How many bases were not `A`, `C`, `G` or `T`.
     pub fn ambiguous_bases(&self) -> u64 {
         self.ambiguous_bases
@@ -259,6 +260,7 @@ impl ReferenceBasesObserver for UnambiguousRuns {
 // The generic rule
 // ---------------------------------------------------------------------
 
+#[cfg(test)]
 /// The value a position is selected by: a hash of **where it is**, not of what is there.
 ///
 /// Position and not content, so that the selection cannot come to depend on the data; and
@@ -275,10 +277,10 @@ pub fn hash_position(contig_name: &str, position: u64, seed: u64) -> u64 {
     ContigHasher::new(contig_name, seed).hash_position(position)
 }
 
-/// [`hash_position`] with the contig's name already absorbed.
+/// `hash_position` with the contig's name already absorbed.
 ///
 /// One contig's name is hashed once and the per-position work is a clone and one `u64`.
-/// **The value is identical to [`hash_position`]'s** — the same bytes reach the same
+/// **The value is identical to `hash_position`'s** — the same bytes reach the same
 /// hasher in the same order — which is what the `hoisting_the_contig_name_changes_no_hash`
 /// test pins, because the whole selection rests on those two agreeing.
 #[derive(Clone)]
@@ -322,12 +324,6 @@ pub fn threshold_for(target: u64, selectable_length: Bp) -> u64 {
     // `target < length` gives a quotient strictly below `2^64`, so the cast is exact; the
     // clamp is the belt to that argument's braces.
     u64::try_from(scaled).unwrap_or(u64::MAX)
-}
-
-/// Keep this position? — the whole generic rule, on one position.
-#[inline]
-pub fn keeps_position(hasher: &ContigHasher, position: Position, threshold: u64) -> bool {
-    hasher.hash_position(position.get()) < threshold
 }
 
 /// Every position the generic rule keeps, ascending in genome order.
@@ -384,7 +380,7 @@ pub fn select_generic_positions(
 ///
 /// The whole-reference MD5 [`ReferenceInfo`] already computes — every contig's uppercased
 /// bases concatenated in file order — so it pins the contig *order* as well as the bases,
-/// which matters here because [`hash_position`] is keyed by a contig's name and two
+/// which matters here because `hash_position` is keyed by a contig's name and two
 /// references holding the same contigs in a different order would select different
 /// positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,6 +564,7 @@ impl PartialEq for SelectionTerms {
 }
 
 impl SelectionTerms {
+    #[cfg(test)]
     /// Which field two sets of selection terms first disagree on, in the order a reader
     /// would check them — `None` when they agree.
     ///
@@ -624,6 +621,7 @@ pub struct CensusLoci {
 }
 
 impl CensusLoci {
+    #[cfg(test)]
     /// Assemble from parts.
     ///
     /// **[`select_kept_loci`] is how a run gets one.** This exists for the consumer that
@@ -755,6 +753,7 @@ impl CensusLociDigester {
         }
     }
 
+    #[cfg(test)]
     /// How many loci have been absorbed — the count the caller checks against
     /// [`CensusLoci::generic`]'s length before trusting the digest.
     pub fn observed(&self) -> usize {
@@ -771,6 +770,7 @@ impl CensusLociDigester {
 }
 
 impl CensusLociDigest {
+    #[cfg(test)]
     /// The first megabase two digests disagree on, as `(contig, megabase)` — `None` when
     /// they agree.
     ///

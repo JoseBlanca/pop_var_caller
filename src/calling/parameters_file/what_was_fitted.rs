@@ -185,7 +185,7 @@ impl GroupOfNumbers {
     /// **What this group is, in the words a geneticist would use for it** — a noun phrase that
     /// reads inside a sentence listing several of them, and not a key path.
     ///
-    /// The key path is [`Self::key`], and the two are both given because they answer different
+    /// The key path is `Self::key`, and the two are both given because they answer different
     /// questions: this one tells a reader what was not measured, and that one tells them where to
     /// look.
     #[must_use]
@@ -233,6 +233,7 @@ impl GroupOfNumbers {
         }
     }
 
+    #[cfg(test)]
     /// **Where in the file to look** — the key path, in the file's own spelling.
     #[must_use]
     pub fn key(self) -> &'static str {

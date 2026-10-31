@@ -306,11 +306,6 @@ harness = false
 name = "ng_generic_pileup_perf"
 harness = false
 
-# ng's psp store: a full walk, a head-only walk, a one-in-a-hundred walk, and a write.
-[[bench]]
-name = "ng_psp_perf"
-harness = false
-
 # The joint parameters fit. Needs `--features bench-fixtures` to measure anything;
 # without it the target still builds (so `cargo bench --no-run` covers it) and
 # refuses at startup rather than reporting a time for a fixture it could not draw.
@@ -321,32 +316,11 @@ harness = false
 name = "ng_joint_fit_perf"
 harness = false
 
-
-# The generic walk probe carries its own tests: it is the instrument spec §11 makes every
-# alignment-cursor milestone answer to, so its guards must run where a developer will see
-# them, not only in CI.
-#
-# What this entry buys, measured rather than assumed. `--examples` (which CI runs,
-# ci.yml:47) and `--all-targets` already run every example's tests, with or without it.
-# What they do *not* cover is a plain `cargo test`, which is the command a developer
-# actually types — and `--all-targets` is no substitute, because it also launches the
-# criterion benches. `test = true` adds this one example to the default selection.
-[[example]]
-name = "ng_generic_walk_probe"
-test = true
-
 # The open-cost harness carries a test on the one piece of logic it has: which field of
 # `/proc/self/status` the peak is read from. `VmHWM` and `VmRSS` differ by three characters and
 # by everything that matters, and reading the wrong one turns the measurement into noise.
 [[example]]
 name = "ng_psp_open_cost"
-test = true
-
-# The skip-value harness carries a test on its one piece of logic: that a reading is the cheapest
-# of its rounds rather than the first or the mean. A noisy round would otherwise move the ratio
-# the whole step turns on.
-[[example]]
-name = "ng_psp_skip_value"
 test = true
 
 # The stuttering benchmark's simulator carries the tests that say its reads stutter at the rates
@@ -356,28 +330,6 @@ test = true
 [[example]]
 name = "ng_str_stutter_benchmark"
 test = true
-
-# Whether the counting fit's standard errors are honest: draws repeat classes from a known
-# truth and counts how often it lies within one and two reported errors, for the bootstrap,
-# the sandwich and the naive curvature (`ssr_fit::counting_fit_errors`).
-#
-# It draws from `ssr_fit::bench_fixtures`, which exists only under `cfg(test)` or the
-# `bench-fixtures` feature; without this entry a plain `cargo test` — which builds every
-# example — fails to compile the crate at all. The `ng_joint_fit_perf` bench above
-# deliberately avoids `required-features` so that `cargo bench --no-run` still catches it
-# going stale. That trade is not available here: this example *names* the gated module in a
-# `use`, so there is no version of it that compiles without the feature and refuses at
-# startup instead. The same holds for every example below that draws from the module.
-[[example]]
-name = "ng_str_counting_fit_errors"
-required-features = ["bench-fixtures"]
-
-# The repeat-tract fitting bench: draws a cohort from a known model and scores every fitting
-# method on it (`doc/devel/ng/research/str_fit_research_plan.md` §2, §3.1). Draws from
-# `ssr_fit::bench_fixtures`, so it needs the same feature.
-[[example]]
-name = "ng_str_fit_bench"
-required-features = ["bench-fixtures"]
 
 # The site quality's cost across the cohort sizes the caller commits to —
 # `doc/devel/ng/spec/calling_quality.md` §13's Q3, which names this benchmark as the way to
@@ -394,18 +346,3 @@ harness = false
 [patch.crates-io]
 noodles-cram = { path = "vendor/noodles-cram" }
 
-# Penalised counting against the counting fit on one drawn motif length
-# (`doc/devel/ng/research/str_fit/`). Draws its classes from `ssr_fit::bench_fixtures`.
-[[example]]
-name = "str_fit_penalised_em"
-required-features = ["bench-fixtures"]
-
-# Where penalised counting's time goes against the counting fit's, on one bench cell.
-[[example]]
-name = "str_fit_penalised_cost"
-required-features = ["bench-fixtures"]
-
-# Where the repeat-tract fits' time goes, a class at a time, on real or drawn evidence.
-[[example]]
-name = "str_fit_cost_probe"
-required-features = ["bench-fixtures"]

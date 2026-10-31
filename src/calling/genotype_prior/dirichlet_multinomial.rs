@@ -226,10 +226,6 @@ fn one_genotypes_log_prior(
 pub struct MarginalizedDirichletPrior;
 
 impl GenotypePriorModel for MarginalizedDirichletPrior {
-    fn name(&self) -> &'static str {
-        "marginalized-dirichlet"
-    }
-
     fn fill_genotype_log_priors(&self, row: &mut PriorRow<'_>, inbreeding: InbreedingF) {
         fill_inbreeding_mixture_log_priors(row, inbreeding.get());
     }

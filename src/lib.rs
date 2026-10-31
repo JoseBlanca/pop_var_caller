@@ -105,11 +105,11 @@ pub mod types;
 pub mod vcf;
 pub mod window_coverage;
 
-pub use ref_seq::{
-    ContigTable, EvictableRefSeq, InMemoryRefSeq, RawRefSeq, RefSeq, RefSeqError, ResidentRefSeq,
-    WindowedRefSeq,
-};
+pub use ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqError, WindowedRefSeq};
+#[cfg(test)]
+pub use ref_seq::{InMemoryRefSeq, ResidentRefSeq};
+#[cfg(test)]
+pub use types::GenotypeFrequency;
 pub use types::{
-    BaseQual, Bp, ContigId, DomainError, ErrorRate, GenotypeFrequency, InbreedingF, MapQual,
-    MismatchFraction, Ploidy,
+    BaseQual, Bp, ContigId, DomainError, ErrorRate, InbreedingF, MapQual, MismatchFraction, Ploidy,
 };

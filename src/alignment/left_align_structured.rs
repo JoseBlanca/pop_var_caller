@@ -41,7 +41,7 @@
 //!
 //! # Algorithm 1c also lives here
 //!
-//! [`FixpointLeftAligner`] (1c) is a thin wrapper that applies 1a to a fixpoint, with an iteration
+//! `FixpointLeftAligner` (1c) is a thin wrapper that applies 1a to a fixpoint, with an iteration
 //! cap as a safety net that **fails loudly** (panics) rather than returning a half-normalised
 //! alignment. It shares this file with 1a because it *is* 1a in a loop — no shifting of its own
 //! (arch §Module home). It is the deliberate contrast with algorithm 1b, which *reports* cap
@@ -97,7 +97,7 @@ impl AlignmentNormalizer for StructuredLeftAligner {
     }
 }
 
-/// The most times [`FixpointLeftAligner`] applies its inner normalizer before giving up.
+/// The most times `FixpointLeftAligner` applies its inner normalizer before giving up.
 ///
 /// A correct [`StructuredLeftAligner`] reaches its fixpoint in **at most two** applications — one to
 /// left-align, one to confirm nothing moved (`left_align_indels` is idempotent on already-leftmost
@@ -114,6 +114,7 @@ const _: () = assert!(
     "FIXPOINT_MAX_ITERATIONS must allow the two applications a one-pass fixpoint needs"
 );
 
+#[cfg(test)]
 /// Algorithm 1c: apply algorithm 1a repeatedly until the alignment stops changing, with the
 /// iteration cap as a safety net that **fails loudly**.
 ///
@@ -128,6 +129,7 @@ const _: () = assert!(
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FixpointLeftAligner;
 
+#[cfg(test)]
 impl AlignmentNormalizer for FixpointLeftAligner {
     /// Left-align to a fixpoint by re-applying 1a. **Panics** if the alignment has not stopped
     /// changing after [`FIXPOINT_MAX_ITERATIONS`] applications — see the type docs.
@@ -142,6 +144,7 @@ impl AlignmentNormalizer for FixpointLeftAligner {
     }
 }
 
+#[cfg(test)]
 /// Apply `inner` to `alignment` until it stops changing, up to `max_iterations` times; **panic** if
 /// it has not converged by then.
 ///

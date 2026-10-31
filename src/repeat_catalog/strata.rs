@@ -62,6 +62,7 @@ pub struct StratumSample {
 }
 
 impl StratumSample {
+    #[cfg(test)]
     /// The loci kept for that stratum, in coordinate order.
     pub fn get(&self, period: u8, repeat_count: u64) -> &[SsrSegment] {
         self.kept
@@ -77,11 +78,6 @@ impl StratumSample {
         keys.into_iter()
             .map(|k| (k, self.kept[&k].as_slice()))
             .collect()
-    }
-
-    /// Loci kept, all strata.
-    pub fn total(&self) -> usize {
-        self.kept.values().map(Vec::len).sum()
     }
 }
 

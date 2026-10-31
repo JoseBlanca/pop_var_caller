@@ -434,6 +434,7 @@ pub enum PaddingBase {
 }
 
 impl PaddingBase {
+    #[cfg(test)]
     /// The base itself, whichever side it came from.
     #[inline]
     #[must_use]
@@ -513,6 +514,7 @@ impl SampleCall {
         }
     }
 
+    #[cfg(test)]
     /// Whether this sample's `GT` is written `./.`.
     #[inline]
     #[must_use]
@@ -916,6 +918,7 @@ impl TractAnnotation {
         self.repeat_copies_of(&allele[..allele.len().saturating_sub(flank_bases)])
     }
 
+    #[cfg(test)]
     /// The `RU` field of a segment record: the motif's bases. At a bundle, its first run's
     /// ([`Self::units`] has them all).
     #[inline]
