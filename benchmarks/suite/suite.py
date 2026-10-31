@@ -74,7 +74,7 @@ def selected_benchmarks(ctx):
 def build_pvc(ctx):
     ctx.log("building pvc (release)")
     # The stuttering benchmark's simulator and typing checks are examples of this crate.
-    examples = ["ng_str_stutter_benchmark", "ng_typed_region_dump", "ng_str_bundle_runs"]
+    examples = ["ng_str_stutter_benchmark", "ng_typed_region_dump"]
     cmd = ["cargo", "build", "--release", "--quiet", "--bin", "pvc"]
     for e in examples:
         cmd += ["--example", e]

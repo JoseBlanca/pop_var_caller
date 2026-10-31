@@ -93,9 +93,10 @@ def _configuration(ctx, design, n_samples, depth):
                                        f"&& samtools faidx {q(reference)} "
                                        f"&& samtools dict {q(reference)} -o {q(d)}/reference.dict")],
                          logs)
-        # The typed STR segments must be the planted ones, and each planted bundle typed as one
-        # bundle with the caller's reference runs at the simulator's stutter sites; the driver's
-        # check, unchanged. Needs a catalogue, built here only for this check.
+        # The typed STR segments must be the planted ones; the driver's check, unchanged. Needs a
+        # catalogue, built here only for this check. (The check that each planted bundle was typed
+        # as one bundle went with its example, ng_str_bundle_runs, removed from the crate in
+        # 0f9281c5.)
         catalog = os.path.join(d, "check_catalog.parquet")
         check = (
             f"{q(ctx.pvc_bin)} repeat-catalog --reference {q(reference)} --output {q(catalog)} --force "
@@ -104,9 +105,6 @@ def _configuration(ctx, design, n_samples, depth):
             f"{q(confident)} calling > {q(d)}/typing_check.tsv "
             f"&& diff <(awk -F'\\t' '$4==\"ssr_locus\" {{print $1\"\\t\"($2-1)\"\\t\"$3\"\\t\"$6}}' "
             f"{q(d)}/typing_check.tsv | sort) <(sort {q(d)}/segments.bed) "
-            f"&& NG_REFERENCE_CHECK=skip {q(_example(ctx, 'ng_str_bundle_runs'))} {q(reference)} "
-            f"{q(confident)} > {q(d)}/bundle_runs_check.tsv "
-            f"&& python3 {q(os.path.join(ctx.project_dir, 'scripts', 'ng_str_stutter_check_bundles.py'))} {q(d)} "
             f"&& rm -f {q(reference)}.repeats.parquet {q(catalog)}")
         run_commands([("check_typing", check)], logs)
         return {"measurement": m}
