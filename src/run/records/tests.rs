@@ -1320,6 +1320,241 @@ fn a_spelling_with_a_longer_insertion_is_left_alone() {
     assert!(observation.per_sample[0].partials.is_empty());
 }
 
+/// **Two spellings with as many reads as each other: the longer allele is re-read from.** The
+/// guard asks the longer allele for *at least* the spelling's reads, so a tie passes it — a
+/// guard that asked for more would leave a homozygous insertion whose reads stop half inside it
+/// and half beyond as `1/2`.
+#[test]
+fn a_spelling_with_as_many_reads_as_the_longer_allele_is_reread() {
+    let mut observation = cut_short_locus(&[b"ACG", b"AGGCG", b"AGG"], &[(0, 6), (1, 4), (2, 4)]);
+    reread(&mut observation);
+    let partials = &observation.per_sample[0].partials;
+    assert_eq!(partials.len(), 1, "{partials:?}");
+    assert_eq!(
+        partials[0].sequence_may_run_on_past,
+        Some(LocusBorder::Right)
+    );
+}
+
+/// **Many reads alone do not make a spelling a haplotype of its own.** `AGG` has 6 reads against
+/// `AGGCG`'s 10, enough for the reads guard, but it departs from the reference at its `G` and
+/// `AGGCG` does not end with `GG`: it is no substitution `AGGCG` carries after its insertion, so
+/// the reads are `AGGCG`'s cut short whatever their number.
+#[test]
+fn a_well_supported_spelling_that_is_no_haplotype_of_the_longer_allele_is_reread() {
+    let mut observation = cut_short_locus(&[b"ACG", b"AGGCG", b"AGG"], &[(0, 6), (1, 10), (2, 6)]);
+    reread(&mut observation);
+    let partials = &observation.per_sample[0].partials;
+    assert_eq!(partials.len(), 1, "{partials:?}");
+    assert_eq!(
+        partials[0].sequence_may_run_on_past,
+        Some(LocusBorder::Right)
+    );
+}
+
+/// **The reads of a deletion that stop just past it are re-read as the deletion.** At `ACGCAT`,
+/// the deletion `AT` followed by the reference after the locus spells `ATCCCC`, as long as the
+/// reference: a read the mapper laid straight across rather than open a gap so near its end. The
+/// flank this needs is the whole length difference, four bases, so a flank cut short of it
+/// misses the match.
+#[test]
+fn a_spelling_that_is_a_deletion_followed_by_the_reference_is_reread() {
+    const CONTIG: &[u8] = b"TTTTTACGCATCCCCC";
+    let mut observation = observed(
+        &[b"ACGCAT", b"AT", b"ATCCCC"],
+        vec![covering(
+            0,
+            vec![row(0, 6, 360), row(1, 10, 600), row(2, 3, 180)],
+        )],
+    );
+    observation.region = region(6, 11);
+    reread_spellings_cut_short(
+        &reference_of(CONTIG),
+        &mut observation,
+        &mut ReferenceBesideScratch::default(),
+    )
+    .expect("the fixture reference serves every flank");
+    let partials = &observation.per_sample[0].partials;
+    assert_eq!(partials.len(), 1, "{partials:?}");
+    assert_eq!(&*partials[0].bases, b"ATCCCC");
+    assert_eq!(
+        partials[0].sequence_may_run_on_past,
+        Some(LocusBorder::Right)
+    );
+}
+
+/// **A repeat tract is never re-read**: its reads are re-aligned against flanks the tract carries,
+/// and the rule is the generic path's. The same alleles and reads that re-read `AGG` at an
+/// ordinary locus leave every row complete at a tract.
+#[test]
+fn a_repeat_tract_is_not_reread() {
+    let mut observation = cut_short_locus(&[b"ACG", b"AGGCG", b"AGG"], &[(0, 6), (1, 10), (2, 4)]);
+    observation.kind = LocusKind::Ssr(tract_detail());
+    reread(&mut observation);
+    assert!(
+        observation.per_sample[0].partials.is_empty(),
+        "{:?}",
+        observation.per_sample[0].partials
+    );
+}
+
+// ---------------------------------------------------------------------
+// The reference beside an ordinary locus
+// ---------------------------------------------------------------------
+
+/// `CATGC`, then the locus `ACG` at 6..=8, then `TAGCT` — every neighbour of the locus a
+/// different letter from the next, so a fetch one base off is visible.
+const BESIDE_CONTIG: &[u8] = b"CATGCACGTAGCT";
+
+/// One partial row of `bases` over `witness`, with the re-read mark `mark`.
+fn partial_over(
+    witness: WitnessedLocusPositions,
+    bases: &[u8],
+    mark: Option<LocusBorder>,
+) -> PartialObservation {
+    PartialObservation {
+        held_flank: None,
+        witnessed_in_locus: witness,
+        read_group: ReadGroupId(0),
+        bases: Box::from(bases),
+        num_reads: 1,
+        q_sum: -1.0,
+        sequence_may_run_on_past: mark,
+    }
+}
+
+/// A locus over `alleles` at `region` on [`BESIDE_CONTIG`], its one sample holding `partials`.
+fn locus_with_partials(
+    alleles: &[&[u8]],
+    at: GenomeRegion,
+    partials: Vec<PartialObservation>,
+) -> CohortObservation {
+    let mut sample = covering(0, vec![row(0, 4, 240)]);
+    sample.partials = partials;
+    let mut observation = observed(alleles, vec![sample]);
+    observation.region = at;
+    observation
+}
+
+fn one_run(offset: u16, positions: u16) -> WitnessedLocusPositions {
+    WitnessedLocusPositions::one_run_from_offset_and_length(offset, positions)
+        .expect("a run of at least one position")
+}
+
+/// **Each side is read as far as the longest partial anchored there showed past the shortest
+/// allele.** The locus's shortest allele is three bases. A read flush to the left border showed
+/// five, so two reference bases after the locus (`TA`); one flush to the right showed six, so
+/// three before it (`TGC`). A read with a hole in its witness is anchored at neither border and
+/// asks for nothing, though it showed ten bases.
+#[test]
+fn the_reference_beside_a_locus_reaches_as_far_as_its_partials_showed() {
+    let observation = locus_with_partials(
+        &[b"ACG", b"AGGCG"],
+        region(6, 8),
+        vec![
+            partial_over(one_run(0, 2), b"AGGCG", None),
+            partial_over(one_run(1, 2), b"TTAGCG", None),
+            partial_over(
+                WitnessedLocusPositions::from_half_open_runs([(0, 1), (2, 3)]).expect("two runs"),
+                b"AAAAAAAAAA",
+                None,
+            ),
+        ],
+    );
+    let mut scratch = ReferenceBesideScratch::default();
+    let beside = reference_beside_locus(&reference_of(BESIDE_CONTIG), &observation, &mut scratch)
+        .expect("the fixture reference serves every flank");
+    assert_eq!((beside.before, beside.after), (&b"TGC"[..], &b"TA"[..]));
+}
+
+/// **A re-read row asks for the side its mark names, whatever its witness.** Both cover the whole
+/// locus; the one marked to run on past the right border showed five bases, so two after, and the
+/// one marked left showed four, so one before.
+#[test]
+fn a_reread_row_asks_for_the_flank_its_mark_names() {
+    let observation = locus_with_partials(
+        &[b"ACG", b"AGGCG"],
+        region(6, 8),
+        vec![
+            partial_over(one_run(0, 3), b"AGGCG", Some(LocusBorder::Right)),
+            partial_over(one_run(0, 3), b"GACG", Some(LocusBorder::Left)),
+        ],
+    );
+    let mut scratch = ReferenceBesideScratch::default();
+    let beside = reference_beside_locus(&reference_of(BESIDE_CONTIG), &observation, &mut scratch)
+        .expect("the fixture reference serves every flank");
+    assert_eq!((beside.before, beside.after), (&b"C"[..], &b"TA"[..]));
+}
+
+/// **A contig's ends clamp the flank rather than fail.** At 2..=4, four bases before are asked
+/// for and only the contig's first, `C`, exists; at 11..=12, four after are asked for and only the
+/// last, `T`, exists; at the contig's last base nothing exists after it.
+#[test]
+fn the_reference_beside_a_locus_stops_at_the_contigs_ends() {
+    let reference = reference_of(BESIDE_CONTIG);
+    let mut scratch = ReferenceBesideScratch::default();
+
+    let at_start = locus_with_partials(
+        &[b"ATG", b"ATTTG"],
+        region(2, 4),
+        vec![partial_over(one_run(1, 2), b"AAAAAAA", None)],
+    );
+    let beside = reference_beside_locus(&reference, &at_start, &mut scratch)
+        .expect("a fetch past the contig's start is clamped");
+    assert_eq!((beside.before, beside.after), (&b"C"[..], &b""[..]));
+
+    let near_end = locus_with_partials(
+        &[b"GC", b"GTTC"],
+        region(11, 12),
+        vec![partial_over(one_run(0, 1), b"GCAAAA", None)],
+    );
+    let beside = reference_beside_locus(&reference, &near_end, &mut scratch)
+        .expect("a fetch past the contig's end is clamped");
+    assert_eq!((beside.before, beside.after), (&b""[..], &b"T"[..]));
+
+    let at_end = locus_with_partials(
+        &[b"T", b"TTT"],
+        region(13, 13),
+        vec![partial_over(
+            one_run(0, 1),
+            b"TAAA",
+            Some(LocusBorder::Right),
+        )],
+    );
+    let beside = reference_beside_locus(&reference, &at_end, &mut scratch)
+        .expect("a fetch past the contig's end is clamped");
+    assert_eq!((beside.before, beside.after), (&b""[..], &b""[..]));
+}
+
+/// **The flanks the re-read compares against are `flank` bases either side, clamped at the
+/// contig's ends.**
+#[test]
+fn the_rereads_flanks_are_clamped_at_the_contigs_ends() {
+    let reference = reference_of(BESIDE_CONTIG);
+    let mut scratch = ReferenceBesideScratch::default();
+
+    fetch_flanks(&reference, region(6, 8), 3, &mut scratch).expect("inside the contig");
+    assert_eq!(
+        (&*scratch.before, &*scratch.after),
+        (&b"TGC"[..], &b"TAG"[..])
+    );
+
+    fetch_flanks(&reference, region(2, 3), 3, &mut scratch).expect("clamped at the start");
+    assert_eq!(
+        (&*scratch.before, &*scratch.after),
+        (&b"C"[..], &b"GCA"[..])
+    );
+
+    fetch_flanks(&reference, region(12, 12), 3, &mut scratch).expect("clamped at the end");
+    assert_eq!(
+        (&*scratch.before, &*scratch.after),
+        (&b"TAG"[..], &b"T"[..])
+    );
+
+    fetch_flanks(&reference, region(13, 13), 3, &mut scratch).expect("clamped at the end");
+    assert_eq!((&*scratch.before, &*scratch.after), (&b"AGC"[..], &b""[..]));
+}
+
 /// **The base before a repeat tract's left flank is the reference's, one past the flank.**
 ///
 /// The tract `ATAT` at bases 9–12 holds the four-base flank `CCCC` at bases 5–8, so the base
