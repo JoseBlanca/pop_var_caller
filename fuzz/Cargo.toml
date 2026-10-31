@@ -1,0 +1,79 @@
+# The cargo-fuzz targets: one per file a user hands pvc. See fuzz/README.md.
+[package]
+name = "pop_var_caller-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+clap = { version = "4", features = ["derive"] }
+noodles-bgzf = "0.47.0"
+pop_var_caller = { path = ".." }
+
+# Kept out of the main workspace, which builds with the pinned stable compiler; this one needs
+# nightly.
+[workspace]
+members = ["."]
+
+# The main crate's fork of noodles-cram, so the fuzzers read CRAM with the code pvc ships.
+[patch.crates-io]
+noodles-cram = { path = "../vendor/noodles-cram" }
+
+[profile.release]
+debug = 1
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "bam"
+path = "fuzz_targets/bam.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cram"
+path = "fuzz_targets/cram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fasta"
+path = "fuzz_targets/fasta.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bed"
+path = "fuzz_targets/bed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parameters"
+path = "fuzz_targets/parameters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "psp"
+path = "fuzz_targets/psp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "psp_fit"
+path = "fuzz_targets/psp_fit.rs"
+test = false
+doc = false
+bench = false
