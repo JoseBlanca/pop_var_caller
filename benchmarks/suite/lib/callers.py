@@ -70,11 +70,13 @@ def pvc_generate_psps(ctx, reference, catalog, alignments_by_sample, regions, ou
     return cmds
 
 
-def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log):
+def pvc_estimate_parameters(ctx, reference, catalog, psps, out, log, inbreeding=None):
+    """`inbreeding` states one F for every sample (`--inbreeding`) instead of fitting each one's."""
     psp_args = " ".join(f"--psp {q(p)}" for p in psps)
+    stated = f"--inbreeding {inbreeding} " if inbreeding is not None else ""
     return ("estimate_parameters",
             f"{q(ctx.pvc_bin)} estimate-parameters --reference {q(reference)} "
-            f"--catalog {q(catalog)} {psp_args} --threads {ctx.threads} --output {q(out)} "
+            f"--catalog {q(catalog)} {psp_args} {stated}--threads {ctx.threads} --output {q(out)} "
             f"--log {q(log)} --force")
 
 
