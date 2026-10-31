@@ -660,9 +660,11 @@ fn a_locus_with_two_alternatives_is_called_over_all_three_and_the_ids_are_select
 /// loop takes four passes**, which is the regime the tomato cohort is in (about three reads a
 /// position, 63 accessions) and the one `CLAUDE.md` names as the hardest.
 ///
-/// The cohort's expected copies land at **3.3044 reference against 2.6956 alternative** out of
+/// The cohort's expected copies land at **3.3094 reference against 2.6906 alternative** out of
 /// six — further from an even split than the twenty-read fixture's two parts in a million,
-/// because at three reads the prior is still worth something against the reads.
+/// because at three reads the prior is still worth something against the reads. (3.3044 until
+/// 2026-10-31, when `read_likelihoods.md` §3.3's amendment began charging a read `1 − ε` from a
+/// copy of its own allele.)
 #[test]
 fn at_three_reads_a_sample_the_loop_iterates_and_the_calls_hold() {
     let per_sample = vec![
@@ -684,7 +686,7 @@ fn at_three_reads_a_sample_the_loop_iterates_and_the_calls_hold() {
 
     let copies = inference.cohort_expected_copies().copies();
     assert!(
-        (copies[0] - 3.304_434_8).abs() < 1e-6,
+        (copies[0] - 3.309_384_0).abs() < 1e-6,
         "the prior still moves the cohort at three reads: {copies:?}"
     );
 }

@@ -93,12 +93,13 @@
 //! - **Every probability is floored before a logarithm**, so one impossible observation
 //!   yields a finite very negative number instead of turning a sample's whole row into
 //!   `NaN`. The floor is [`MIN_BASE_ERROR`] here, and the geometric clamps in the stutter
-//!   distribution. **Floored and not capped**, which C1 corrected on 2026-08-24 and the owner
-//!   settled the same day: production pairs that floor with a ceiling at a half, and a ceiling
-//!   binds on a single read and not on the fold of that read with others — a non-linear
-//!   function of a per-read quality, which is exactly what the aggregation contract forbids.
-//!   The ceiling and the method that applied it are deleted;
-//!   `tests::what_the_row_charges_a_poor_read_is_not_capped` is what stops them coming back.
+//!   distribution. **An observation's charged error is floored here and capped at a half by the
+//!   generic row** ([`generic::MAX_CHARGED_ERROR`]). The cap was refused on 2026-08-24 because
+//!   it binds on a single read and not on the fold of that read with others, which the
+//!   aggregation contract then forbade; the owner amended that contract on 2026-10-31 (spec
+//!   §2.3, §3.3), because without a cap a read minted near an error of one argued against the
+//!   allele it showed. [`ReadGroupCalibration::charged_error`] itself stays uncapped, and
+//!   `tests::what_the_row_charges_a_poor_read_is_not_capped` pins that.
 //!
 //! ## Three tiers of parameter, and only the middle one is open
 //!
@@ -481,9 +482,17 @@ impl ReadGroupCalibration {
 
     /// **The error probability the row actually charges an observation** — this read group's
     /// scale times the geometric mean of its reads' minted error, floored against zero and
-    /// **not capped from above**.
+    /// **not capped from above** — the generic row caps what it charges at
+    /// [`generic::MAX_CHARGED_ERROR`], after the reads are pooled (spec §3.3 as amended
+    /// 2026-10-31), and the reasons below are why the cap is not here.
     ///
     /// # Why it floors and does not cap
+    ///
+    /// **Superseded in part on 2026-10-31**: the owner accepted the cost measured below for the
+    /// generic row, which now caps the pooled charge, because uncapped a read minted near an
+    /// error of one argued against the allele it showed. What follows is the original argument,
+    /// which still decides where the cap sits — after pooling, on the observation, never on the
+    /// reads before it.
     ///
     /// Production pairs its floor with a ceiling at a half, and ng adopted both at A2 before
     /// anything consumed them. **The ceiling cannot be applied to what the row charges**,
@@ -504,11 +513,8 @@ impl ReadGroupCalibration {
     /// — so it changes no answer that can occur and exists only so a logarithm never sees a
     /// zero (spec §8).
     ///
-    /// **So this may return a number above one**, where a poor read is scaled up. Spec §3.3's
-    /// log-space form does the same thing: it charges `q_sum + n·log scale`, which is
-    /// positive under exactly the same conditions. That is a property of the model as
-    /// specified, not something introduced here, and a row that clamped it would silently
-    /// disagree with §3.3 wherever the clamp bit.
+    /// **So this may return a number above one**, where a poor read is scaled up; the generic
+    /// row's cap is what keeps that from reaching a likelihood.
     ///
     /// # Panics
     ///
@@ -2680,8 +2686,8 @@ mod tests {
     /// floor moved to `1e-9` changes an impossible observation's charge by 7 nats, which is a
     /// plausible-looking number rather than a failure.
     ///
-    /// **Production's ceiling is deliberately not adopted and so is not pinned here** — see
-    /// `what_the_row_charges_a_poor_read_is_not_capped`.
+    /// **Production's ceiling is not applied here and so is not pinned here** — the generic row
+    /// applies its own, after pooling; see `what_the_row_charges_a_poor_read_is_not_capped`.
     #[test]
     fn the_floor_still_equals_productions() {
         // Production's `var_calling::contamination_estimation::MIN_BASE_ERROR` at commit
@@ -4391,8 +4397,9 @@ mod tests {
 
     // ---- C1: what the row charges a wrong read ----
 
-    /// **A poor read is charged what it was minted with, past a half and all**, which is the
-    /// property a ceiling would break.
+    /// **This method charges a poor read what it was minted with, past a half and all** — the
+    /// cap belongs to the generic row, applied to the pooled observation (spec §3.3 as amended
+    /// 2026-10-31), and a cap here would act on single reads before pooling.
     ///
     /// A read minted at Phred 1 is an error of 0.794. Production's ceiling would return 0.5 —
     /// 0.46 nats away — and spec §2.3 forbids it: the merge hands the row *folds* of reads and
@@ -4404,8 +4411,8 @@ mod tests {
     /// pinned to a relative `2 × 10⁻¹⁴`.
     ///
     /// The ceiling and the method that applied it were deleted on the owner's decision
-    /// (2026-08-24) once nothing outside this module's tests read either. **This test is what
-    /// is left of them**, so that reintroducing a cap fails here rather than moving genotypes.
+    /// (2026-08-24) once nothing outside this module's tests read either, and the cap came back
+    /// on 2026-10-31 in the row rather than here. **This test keeps it out of this method.**
     #[test]
     fn what_the_row_charges_a_poor_read_is_not_capped() {
         let calibration = ReadGroupCalibration::unscaled();

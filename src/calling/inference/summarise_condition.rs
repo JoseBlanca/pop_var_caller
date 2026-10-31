@@ -6933,8 +6933,8 @@ mod tests {
         assert_eq!(inference.passes, 2);
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 2.015_067_414_196_071).abs() < 1e-12
-                && (copies[1] - 1.984_932_585_803_929_3).abs() < 1e-12,
+            (copies[0] - 2.017_218_810_602_41).abs() < 1e-12
+                && (copies[1] - 1.982_781_189_397_590_2).abs() < 1e-12,
             "the cohort's four chromosomes split as the reads split them: {copies:?}"
         );
         assert_eq!(
@@ -7070,8 +7070,10 @@ mod tests {
 
         assert_eq!(inference.passes, 2);
         assert!(inference.converged);
+        // Re-recorded 2026-10-31, when spec §3.3's amendment began scoring a read as the average
+        // over a genotype's copies, `1 − ε` from its own allele's.
         let copies = inference.cohort_expected_copies().copies();
-        let expected = [3.008_738_983_972_081_7, 2.991_261_016_027_918];
+        let expected = [3.009_985_352_332_220_6, 2.990_014_647_667_779_4];
         assert!(
             copies
                 .iter()
@@ -7102,7 +7104,7 @@ mod tests {
             .collect();
         for (sample, (got, want)) in qualities
             .iter()
-            .zip([20.701_796_f32, 30.193_914, 17.712_873])
+            .zip([20.104_8_f32, 29.945_402, 17.118_761])
             .enumerate()
         {
             assert!(
@@ -7111,7 +7113,7 @@ mod tests {
             );
         }
         assert!(
-            (inference.site_quality.get() - 119.721_42_f32).abs() < 1e-3,
+            (inference.site_quality.get() - 117.716_15_f32).abs() < 1e-3,
             "the site quality: {}",
             inference.site_quality.get()
         );
@@ -7123,7 +7125,8 @@ mod tests {
         // the convergence threshold, so the numbers above barely move whether or not that
         // assembly happens; stopped after one pass they have not converged, and dropping the
         // assembly moves the site quality from **119.720 to 119.742** and this sample's
-        // confidence from **30.194 to 30.180** (measured 2026-08-26). The cohort's expected
+        // confidence from **30.194 to 30.180** (measured 2026-08-26, before spec §3.3's
+        // amendment of 2026-10-31 moved every value here; they were re-recorded then). The cohort's expected
         // copies are identical either way, which is the point: they are the loop's own output
         // and the loop has already stopped.
         let mut capped_scratch = worker_scratch();
@@ -7136,12 +7139,12 @@ mod tests {
         );
         assert!(!capped.converged, "one pass is not enough for this locus");
         assert!(
-            (capped.site_quality.get() - 119.720_436_f32).abs() < 1e-4,
+            (capped.site_quality.get() - 117.714_85_f32).abs() < 1e-4,
             "the capped run's site quality: {}",
             capped.site_quality.get()
         );
         assert!(
-            (called(&capped, 1).1.get() - 30.193_907_f32).abs() < 1e-4,
+            (called(&capped, 1).1.get() - 29.945_393_f32).abs() < 1e-4,
             "the capped run's middle sample: {}",
             called(&capped, 1).1.get()
         );
@@ -9915,8 +9918,8 @@ mod tests {
         );
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 0.007_744_253_786_433_548).abs() < 1e-12
-                && (copies[1] - 1.992_255_746_213_566_4).abs() < 1e-12,
+            (copies[0] - 0.008_884_578_139_146_705).abs() < 1e-12
+                && (copies[1] - 1.991_115_421_860_853_3).abs() < 1e-12,
             "the one called sample's two chromosomes are nearly all alternative: {copies:?}"
         );
     }
@@ -10067,14 +10070,13 @@ mod tests {
         let outbred_quality = called(&inference, 0).1.get();
         let inbred_quality = called(&inference, 1).1.get();
         assert!(
-            (outbred_quality - 32.323_853).abs() < 1e-3
-                && (inbred_quality - 20.752_254).abs() < 1e-3,
+            (outbred_quality - 32.109_31).abs() < 1e-3 && (inbred_quality - 20.539_87).abs() < 1e-3,
             "the same reads under F = 0 and F = 0.9: {outbred_quality} and {inbred_quality}"
         );
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 2.003_187_445_790_709_7).abs() < 1e-12,
-            "scoring both rows at F = 0 gives 2.000584 instead: {copies:?}"
+            (copies[0] - 2.003_347_292_611_038_3).abs() < 1e-12,
+            "scoring both rows at F = 0 gives a different split: {copies:?}"
         );
     }
 
@@ -10277,8 +10279,8 @@ mod tests {
         assert!(inference.converged);
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 1.019_039_125_169_859_6).abs() < 1e-12
-                && (copies[1] - 0.980_960_874_830_140_3).abs() < 1e-12,
+            (copies[0] - 1.020_306_935_702_036).abs() < 1e-12
+                && (copies[1] - 0.979_693_064_297_963_8).abs() < 1e-12,
             "one diploid sample's two chromosomes, split as its reads split them: {copies:?}"
         );
     }

@@ -933,7 +933,14 @@ mod tests {
     /// macOS host (arm64).
     /// **Re-recorded 2026-10-30** with the whole-reference digest's new definition: only the
     /// `##pvcParameters` line moved, carrying the parameters file's new checksum. It was `ae8b4f7101b1a69eb2ec1972e57aa69c`.
-    const OF_21_SAMPLES_CALLS_MD5: &str = "df2ccb357d21f864d657f1b9bdf7d285";
+    /// **Re-recorded 2026-10-31** when the generic read likelihood began scoring a read as the
+    /// average over the genotype's copies, its error capped at a half (`read_likelihoods.md` §3.3
+    /// as amended that day; measured on HG002 chr20 at 5×, 10× and 30× before it was recorded):
+    /// every genotype, `GQ`, `DP` and `AD` in all 21 samples is unchanged; `QUAL` moves by 0.1 at
+    /// four records and `AF` in its fifth decimal at three. The fit's file is unchanged. Putting
+    /// the previous `generic.rs` back reproduces `df2ccb357d21f864d657f1b9bdf7d285` exactly.
+    /// Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "5390c37f58aa0200fb9fcfa6a7c8700a";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
