@@ -50,6 +50,18 @@ cargo +nightly fuzz run --fuzz-dir fuzz -a --target aarch64-unknown-linux-gnu ps
 
 `-a` keeps debug assertions on. Keep the working corpus and the artifacts under `tmp/`.
 
+**`regressions/` holds every input that once crashed pvc**, one directory a target, named for
+what it broke. Pass that directory as a further corpus (`fuzz/regressions/psp` beside
+`fuzz/corpus/psp`) so each run checks them first; `make_fixture.sh` rebuilds `corpus/` and never
+touches it. Those found on 2026-10-31, all now refused with an error:
+
+| file | what it did |
+|---|---|
+| `psp/crashed_overlapping_blocks` | blocks copied over each other, each passing its checksum; two records on one base aborted `call-from-psps` in the merge |
+| `psp/crashed_census_depth_bin` | seven bytes of the census changed; a depth code past the ladder aborted `estimate-parameters` |
+| `psp/crashed_renamed_header` | the header's sample renamed by hand; the census's name disagreed and aborted `estimate-parameters` |
+| `parameters/crashed_slippage_group` | `slippage_group = 4000000000` sized a table and the run was killed for memory |
+
 **The `bam` target's memory grows by about 35 MB a run**, held across runs in one process, and
 reaches 2 GB in about 55 runs; give it `-rss_limit_mb=9000` and keep `-malloc_limit_mb=2048`, so a
 single oversized allocation is still caught.

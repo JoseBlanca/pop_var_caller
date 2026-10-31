@@ -54,16 +54,17 @@ use std::io::{Read, Seek, Write};
 use std::path::Path;
 
 use crate::parameter_estimation::calibration::MintedReadErrors;
+use crate::parameter_estimation::depth_bins::CENSUS_DEPTH_BIN_COUNT;
 use crate::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
 use crate::repeat_catalog::StratumCounts;
 use crate::types::{ContigId, ReadGroupId};
 use std::collections::BTreeMap;
 
 use super::census::{
-    AlleleObservation, ByteExtent, CensusError, DEPTH_CODE_BITS, DepthCap, DepthLadderDigest,
-    GenericEvidence, GuardObservation, NamedReadGroup, OFFSET_BUCKETS, ObservedAllele,
-    OffsetCounts, PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section,
-    SectionKey, SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
+    AlleleObservation, ByteExtent, CensusError, DEPTH_CODE_BITS, DepthCap, DepthCode,
+    DepthLadderDigest, GenericEvidence, GuardObservation, NamedReadGroup, OFFSET_BUCKETS,
+    ObservedAllele, OffsetCounts, PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence,
+    Section, SectionKey, SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
 };
 
 /// What every census file starts with, so a file that is not one is refused rather than decoded.
@@ -747,10 +748,18 @@ fn decode_generic(cursor: &mut Cursor<'_>) -> Result<GenericEvidence, CensusErro
     {
         return Err(CensusError::Malformed);
     }
-    Ok(GenericEvidence::from_parts(
-        PackedDepthCodes::from_bytes(bits, positions),
-        non_reference,
-    ))
+    // **Every code names a rung of the census ladder, or the never-walked sentinel.** A code
+    // fills a byte, so 120 values between the last rung and the sentinel decode to a bin the
+    // ladder does not have, and the fit then asked the ladder for its depth range and aborted on
+    // the assertion there. Seven changed bytes in a psp's census did it (found by fuzzing,
+    // 2026-10-31); the census carries no checksum.
+    let depth = PackedDepthCodes::from_bytes(bits, positions);
+    if depth.iter().any(|code| {
+        matches!(code, DepthCode::Binned(bin) if usize::from(bin.get()) >= CENSUS_DEPTH_BIN_COUNT)
+    }) {
+        return Err(CensusError::Malformed);
+    }
+    Ok(GenericEvidence::from_parts(depth, non_reference))
 }
 
 fn decode_ssr(cursor: &mut Cursor<'_>) -> Result<SsrEvidence, CensusError> {
@@ -1183,6 +1192,31 @@ mod tests {
         write_census(&census, &mut first).expect("a vector accepts every write");
         write_census(&census, &mut second).expect("a vector accepts every write");
         assert_eq!(first, second);
+    }
+
+    /// **A depth code past the ladder's last rung is refused when the section is decoded**, not
+    /// carried into the fit, where asking the ladder for that bin's depth range aborted
+    /// `estimate-parameters` (found by fuzzing, 2026-10-31). The never-walked sentinel and every
+    /// rung still read back.
+    #[test]
+    fn a_depth_code_the_ladder_has_no_rung_for_is_refused() {
+        let section = |code: u8| {
+            let depth = PackedDepthCodes::from_bytes(vec![0, code], 2);
+            encode_generic(&GenericEvidence::from_parts(depth, Vec::new()))
+        };
+        let last_rung = (CENSUS_DEPTH_BIN_COUNT - 1) as u8;
+        for code in [0, last_rung, u8::MAX] {
+            let bytes = section(code);
+            assert!(
+                decode_generic(&mut Cursor::new(&bytes)).is_ok(),
+                "code {code} is a rung or the sentinel"
+            );
+        }
+        let bytes = section(last_rung + 1);
+        assert!(matches!(
+            decode_generic(&mut Cursor::new(&bytes)),
+            Err(CensusError::Malformed)
+        ));
     }
 
     /// The three states an ordinary position can be in, read back off the file rather than off
