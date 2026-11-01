@@ -407,10 +407,9 @@ All four as recommended.
 
 ---
 
-## 11. Open questions — **ruled by the owner, 2026-11-01, except Q3**
+## 11. Open questions — **ruled by the owner, 2026-11-01**
 
-Each with the recommendation it was ruled on. Q1, Q2 and Q5–Q8 as recommended; Q4: measure; Q3
-waits for the mixed-cohort measurement of §8.2.
+Each with the recommendation it was ruled on. Q1–Q3 and Q5–Q8 as recommended; Q4: measure.
 
 1. **Calls at no-read sites only with evidence nearby (§4.2)?** **Ruled: yes.** Without it the pass
    writes `0/0` at `GQ` about 17 where a sample has no informative record within reach — a failed
@@ -419,7 +418,8 @@ waits for the mixed-cohort measurement of §8.2.
 2. **After the pass: drop alternatives no sample carries, and records with none left (§4.1)?**
    **Ruled: yes**, the rule calling already applies. The alternative is a record with `AC` 0 and a
    variant `QUAL`, which no reader can interpret.
-3. **Mixed cohorts — open.** A run-level switch by the median inbreeding runs the pass on a few outbred
+3. **Mixed cohorts — ruled: run-level now; the mixed-cohort measurement of §8.2 decides whether to
+   switch per sample.** A run-level switch by the median inbreeding runs the pass on a few outbred
    members of an inbred panel, where heterozygous templates blur, and turns it off for inbred lines
    in an outbred-majority cohort. *Recommend: run-level now, and the mixed-cohort measurement of §8.2
    decides whether to switch per sample* (each sample re-called only if its own fitted inbreeding is
