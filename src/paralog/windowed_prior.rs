@@ -12,17 +12,20 @@
 //!
 //! **What this does instead.** The contig is cut into bins of 10,000 bases. For each bin that holds
 //! a scored record, the rate is re-estimated from the records within half a window of the bin's
-//! centre, by the same iteration as the run-wide rate, but pulled towards the run-wide rate as if
-//! `K` extra records sat in the window at that rate ([`LOCAL_PRIOR_SHRINK_RECORDS`]). A window
-//! with few records therefore keeps about the run-wide rate; a window with many keeps its own. In
-//! symbols, the bin's rate `π_b` is the fixed point of
+//! centre, by the same iteration as the run-wide rate, but pulled towards a typical window's rate
+//! as if `K` extra records sat in the window at that rate ([`LOCAL_PRIOR_SHRINK_RECORDS`]). A
+//! window with few records therefore keeps about the typical rate; a window with many keeps its
+//! own. The typical rate is the median of the bins' rates when each is first pulled towards the
+//! run-wide rate ([`WindowedVerdicts::pulled_towards`]). In symbols, the bin's rate `π_b` is the
+//! fixed point of
 //!
 //! ```text
 //! π_b = ( Σ_i σ(LR_i + logit π_b) + K·π ) / (n + K)
 //! ```
 //!
 //! where the sum runs over the `n` scored records within `W/2` of the bin's centre, `σ` is the
-//! logistic function, `π` the run-wide rate and `K` the pull towards it, counted in records. Each
+//! logistic function, `π` the typical window's rate and `K` the pull towards it, counted in
+//! records. Each
 //! record's probability of being a duplication is then `σ(LR + logit π_b)` with its own bin's rate.
 //!
 //! **The cut** is the run's tail false-discovery rule applied to these local probabilities
@@ -35,8 +38,9 @@
 //! **Cost.** Pass two keeps a contig and a position (12 bytes) beside each record's ratio, and the
 //! calibration briefly holds an index (8 bytes) a record to sort them, then one probability (8
 //! bytes) a record until pass three. All of it is flat in the sample count. The time is one
-//! iteration per occupied bin over the records in its window, so it grows with the window: about
-//! `records × W / 10,000 × iterations` logistic evaluations, at most 50 iterations a bin.
+//! iteration per occupied bin over the records in its window, twice (once to find the typical
+//! rate, once towards it), so it grows with the window: about `2 × records × W / 10,000 ×
+//! iterations` logistic evaluations, at most 50 iterations a bin.
 
 use rayon::prelude::*;
 
@@ -51,10 +55,11 @@ pub const LOCAL_PRIOR_MAX_ITERATIONS: usize = 50;
 /// The local rate is held inside `[floor, 1 − floor]`, so its log-odds stay finite.
 pub const LOCAL_PRIOR_FLOOR: f64 = 1e-9;
 
-/// **How hard each window's rate is pulled towards the run-wide rate**, counted in records: the
-/// iteration behaves as if this many extra records sat in every window at the run-wide rate.
+/// **How hard each window's rate is pulled towards the typical window's rate**, counted in
+/// records: the iteration behaves as if this many extra records sat in every window at that rate
+/// ([`WindowedVerdicts::pulled_towards`]).
 ///
-/// A window holding far fewer scored records than this keeps about the run-wide rate, and one
+/// A window holding far fewer scored records than this keeps about the typical rate, and one
 /// holding far more keeps its own. **Not tuned**: 10 is the value the measurements in spec §3.3
 /// were taken at, and nothing beyond them was tried. It is written on the `##paralogFilter` line
 /// as `shrink=`.
@@ -66,7 +71,7 @@ pub struct WindowedPriorConfig {
     /// The window's width in bases: the records within half of it of a bin's centre set that
     /// bin's rate.
     pub window_bases: u64,
-    /// How hard the local rate is pulled towards the run-wide one, in records
+    /// How hard the local rate is pulled towards the typical window's, in records
     /// ([`LOCAL_PRIOR_SHRINK_RECORDS`] in a run).
     pub shrink_records: f64,
 }
@@ -108,6 +113,18 @@ pub struct WindowedVerdicts {
     pub occupied_bins: usize,
     /// The spread of those rates, or `None` where no bin was occupied.
     pub local_rates: Option<LocalRateSpread>,
+    /// **The rate every window was pulled towards**: the typical window's rate, the median of the
+    /// bins' rates when each is first pulled towards the run-wide rate.
+    ///
+    /// Not the run-wide rate itself, because that is a mixture: a run whose genome holds a few
+    /// dense stretches of duplications fits a run-wide rate far above an ordinary window's, and
+    /// pulling clean windows towards it lifts their real variants over the cut. On HG002
+    /// chromosome 20 at 30x the run-wide rate is 0.145 and the median window's 0.018
+    /// (`doc/devel/reports/ng_dup_filter_misses_2026-11-01.md`). Where windows hold too few
+    /// records to move far from the run-wide rate, their median stays near it, and the filter
+    /// behaves as it did with the run-wide rate as the anchor. The run-wide rate where no bin is
+    /// occupied.
+    pub pulled_towards: f64,
 }
 
 impl WindowedVerdicts {
@@ -202,6 +219,10 @@ pub fn tail_fdr_posterior_cut(posteriors: &[f64], target_fdr: f64) -> Option<f64
 /// `ratios`, `contigs` and `positions` are parallel, in spill order. `global_rate` is the run's
 /// fitted rate (or its fallback), and `target_fdr` the operator's target.
 ///
+/// **Two rounds of bin rates.** The first pulls every bin towards `global_rate`; the median of
+/// those rates is the typical window's rate; the second pulls every bin towards that median, and
+/// its rates are the ones the records get. See [`WindowedVerdicts::pulled_towards`].
+///
 /// # Panics
 ///
 /// If the three slices differ in length — pass two fills them together, one entry a record.
@@ -226,10 +247,14 @@ pub fn windowed_verdicts(
         .collect();
     order.sort_by_key(|&i| (contigs[i], positions[i]));
 
-    let mut posteriors = vec![f64::NAN; ratios.len()];
-    let mut all_rates: Vec<f64> = Vec::new();
-    let half_window = config.window_bases / 2;
-
+    // One contig's scored records and its occupied bins, in position order.
+    struct ContigRecords<'a> {
+        members: &'a [usize],
+        positions: Vec<u64>,
+        ratios: Vec<f64>,
+        bins: Vec<u64>,
+    }
+    let mut contig_records = Vec::new();
     let mut contig_start = 0;
     while contig_start < order.len() {
         let contig = contigs[order[contig_start]];
@@ -240,46 +265,70 @@ pub fn windowed_verdicts(
                 .count();
         let members = &order[contig_start..contig_end];
         let contig_positions: Vec<u64> = members.iter().map(|&i| positions[i]).collect();
-        let contig_ratios: Vec<f64> = members.iter().map(|&i| ratios[i]).collect();
-
         let mut bins: Vec<u64> = contig_positions
             .iter()
             .map(|&p| p / LOCAL_PRIOR_BIN_BASES)
             .collect();
         bins.dedup();
+        contig_records.push(ContigRecords {
+            members,
+            ratios: members.iter().map(|&i| ratios[i]).collect(),
+            positions: contig_positions,
+            bins,
+        });
+        contig_start = contig_end;
+    }
 
-        let rates: Vec<f64> = bins
-            .par_iter()
-            .map(|&bin| {
-                let centre = bin * LOCAL_PRIOR_BIN_BASES + LOCAL_PRIOR_BIN_BASES / 2;
-                let low = centre.saturating_sub(half_window);
-                let high = centre.saturating_add(half_window);
-                let first = contig_positions.partition_point(|&p| p < low);
-                let past = contig_positions.partition_point(|&p| p <= high);
-                local_rate(
-                    &contig_ratios[first..past],
-                    global_rate,
-                    config.shrink_records,
-                )
+    let half_window = config.window_bases / 2;
+    // Every occupied bin's rate, pulled towards `anchor`, contig by contig.
+    let rates_pulled_towards = |anchor: f64| -> Vec<Vec<f64>> {
+        contig_records
+            .iter()
+            .map(|contig| {
+                contig
+                    .bins
+                    .par_iter()
+                    .map(|&bin| {
+                        let centre = bin * LOCAL_PRIOR_BIN_BASES + LOCAL_PRIOR_BIN_BASES / 2;
+                        let low = centre.saturating_sub(half_window);
+                        let high = centre.saturating_add(half_window);
+                        let first = contig.positions.partition_point(|&p| p < low);
+                        let past = contig.positions.partition_point(|&p| p <= high);
+                        local_rate(&contig.ratios[first..past], anchor, config.shrink_records)
+                    })
+                    .collect()
             })
-            .collect();
+            .collect()
+    };
 
+    // The typical window's rate: the median bin rate when every bin is pulled towards the
+    // run-wide rate. With no occupied bin there is nothing to pull, and the run-wide rate stands.
+    let mut first_round: Vec<f64> = rates_pulled_towards(global_rate).concat();
+    first_round.sort_unstable_by(f64::total_cmp);
+    let pulled_towards = if first_round.is_empty() {
+        global_rate
+    } else {
+        first_round[(first_round.len() - 1) / 2]
+    };
+    let rates = rates_pulled_towards(pulled_towards);
+
+    let mut posteriors = vec![f64::NAN; ratios.len()];
+    for (contig, rates) in contig_records.iter().zip(&rates) {
         // Bins and records are both in position order, so one walk pairs each record with its
         // bin's rate.
         let mut bin_at = 0;
-        for (k, &record) in members.iter().enumerate() {
-            let bin = contig_positions[k] / LOCAL_PRIOR_BIN_BASES;
-            while bins[bin_at] != bin {
+        for (k, &record) in contig.members.iter().enumerate() {
+            let bin = contig.positions[k] / LOCAL_PRIOR_BIN_BASES;
+            while contig.bins[bin_at] != bin {
                 bin_at += 1;
             }
-            posteriors[record] = posterior_at(contig_ratios[k], rates[bin_at]);
+            posteriors[record] = posterior_at(contig.ratios[k], rates[bin_at]);
         }
-        all_rates.extend(rates);
-        contig_start = contig_end;
     }
 
     let posterior_cut = tail_fdr_posterior_cut(&posteriors, target_fdr);
 
+    let mut all_rates = rates.concat();
     let occupied_bins = all_rates.len();
     all_rates.sort_unstable_by(f64::total_cmp);
     let local_rates = (!all_rates.is_empty()).then(|| LocalRateSpread {
@@ -294,6 +343,7 @@ pub fn windowed_verdicts(
         posterior_cut,
         occupied_bins,
         local_rates,
+        pulled_towards,
     }
 }
 
@@ -460,6 +510,81 @@ mod tests {
         );
         assert!(dense > posterior_at(5.0, rate), "dense {dense} vs run-wide");
         assert_eq!(windowed.occupied_bins, 1_000);
+    }
+
+    /// **A clean window is pulled towards a clean window's rate, not the run-wide one.** A genome
+    /// whose last fifth is a dense duplicated stretch fits a run-wide rate near a fifth; the
+    /// typical window is clean, so the rate every window is pulled towards sits far below it, and a
+    /// real variant with a moderate ratio in a clean window gets a lower probability than the
+    /// run-wide anchor would give it. Inside the duplicated stretch, the records outweigh the pull.
+    #[test]
+    fn windows_are_pulled_towards_the_typical_window_not_the_run_wide_rate() {
+        let mut ratios = Vec::new();
+        let mut positions = Vec::new();
+        for i in 0..4_000u64 {
+            ratios.push(-8.0);
+            positions.push(i * 1_000 + 500);
+        }
+        for i in 0..1_000u64 {
+            ratios.push(12.0);
+            positions.push(4_000_000 + i * 1_000 + 500);
+        }
+        let moderate = ratios.len();
+        ratios.push(4.5);
+        positions.push(2_000_123);
+        let contigs = vec![0u32; ratios.len()];
+
+        let run_wide = 0.2;
+        let config = WindowedPriorConfig::for_window(50_000).expect("a window above zero");
+        let windowed = windowed_verdicts(&ratios, &contigs, &positions, run_wide, 0.01, &config);
+
+        // A clean window's first-round rate is about the pull alone, 10 records at 0.2 over its 50
+        // records and the 10: about 0.033.
+        assert!(
+            windowed.pulled_towards < 0.04,
+            "the typical window's rate {} should be far below the run-wide {run_wide}",
+            windowed.pulled_towards
+        );
+        // The moderate record's bin is centred on 2,005,000; its window holds records 1,980 to
+        // 2,029 and the moderate one.
+        let mut in_its_window = ratios[1_980..2_030].to_vec();
+        in_its_window.push(4.5);
+        let clean_window = local_rate(&in_its_window, run_wide, config.shrink_records);
+        assert!(
+            windowed.posteriors[moderate] < posterior_at(4.5, clean_window),
+            "pulled towards the typical rate {} vs towards the run-wide rate {}",
+            windowed.posteriors[moderate],
+            posterior_at(4.5, clean_window)
+        );
+        assert!(windowed.posteriors[4_500] > 0.999_99);
+    }
+
+    /// **Where windows are too sparse to move, the anchor stays at the run-wide rate**, so a run
+    /// over a few scattered records behaves as it did with the run-wide rate as the anchor.
+    #[test]
+    fn sparse_windows_keep_the_run_wide_rate_as_their_anchor() {
+        let ratios: Vec<f64> = (0..50)
+            .map(|i| if i % 2 == 0 { -3.0 } else { 1.0 })
+            .collect();
+        let positions: Vec<u64> = (0..50u64).map(|i| i * 1_000_000).collect();
+        let contigs = vec![0u32; ratios.len()];
+        let config = WindowedPriorConfig::for_window(50_000).expect("a window above zero");
+        let windowed = windowed_verdicts(&ratios, &contigs, &positions, 0.1, 0.01, &config);
+        assert!(
+            (windowed.pulled_towards - 0.1).abs() < 0.02,
+            "one record a window barely moves its rate: anchor {}",
+            windowed.pulled_towards
+        );
+    }
+
+    /// With nothing scored there is no window to take a median over, and the run-wide rate is the
+    /// anchor.
+    #[test]
+    fn with_no_scored_record_the_anchor_is_the_run_wide_rate() {
+        let config = WindowedPriorConfig::for_window(50_000).expect("a window above zero");
+        let windowed = windowed_verdicts(&[f64::NAN], &[0], &[10], 0.07, 0.01, &config);
+        assert_eq!(windowed.pulled_towards, 0.07);
+        assert_eq!(windowed.occupied_bins, 0);
     }
 
     /// An unscored record carries no probability and is never flagged, and it does not count in

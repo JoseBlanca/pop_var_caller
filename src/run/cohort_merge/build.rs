@@ -1610,6 +1610,9 @@ pub struct AlleleSupport {
     ///
     /// A fraction for the reason [`num_fwd`](Self::num_fwd) is.
     pub placed_left: f64,
+    /// How many had a low base quality inside the record they were seen at
+    /// ([`SequenceObservation::num_low_quality`]) — the low-base-quality penalty's count.
+    pub num_low_quality: u32,
 }
 
 impl AlleleSupport {
@@ -1627,6 +1630,7 @@ impl AlleleSupport {
             mapq_sum: self.mapq_sum.saturating_add(other.mapq_sum),
             mapq_sum_sq: self.mapq_sum_sq.saturating_add(other.mapq_sum_sq),
             placed_left: self.placed_left + other.placed_left,
+            num_low_quality: self.num_low_quality.saturating_add(other.num_low_quality),
         }
     }
 }
@@ -1685,6 +1689,7 @@ impl AlleleSupportTally {
             mapq_sum: round_to_u32(self.sums.mapq_sum),
             mapq_sum_sq: round_to_u64(self.sums.mapq_sum_sq),
             placed_left: self.sums.placed_left,
+            num_low_quality: round_to_u32(self.sums.num_low_quality),
         }
     }
 }
@@ -1708,6 +1713,7 @@ struct SupportSums {
     mapq_sum: f64,
     mapq_sum_sq: f64,
     placed_left: f64,
+    num_low_quality: f64,
 }
 
 impl SupportSums {
@@ -1723,6 +1729,7 @@ impl SupportSums {
         // behind one sequence.
         self.mapq_sum_sq += sequence.mapq_sum_sq as f64;
         self.placed_left += f64::from(sequence.placed_left);
+        self.num_low_quality += f64::from(sequence.num_low_quality);
     }
 
     /// **Destructured rather than field-accessed**, so that a sixth sum added to this type
@@ -1734,12 +1741,14 @@ impl SupportSums {
             mapq_sum,
             mapq_sum_sq,
             placed_left,
+            num_low_quality,
         } = other;
         self.num_fwd += num_fwd;
         self.q_sum += q_sum;
         self.mapq_sum += mapq_sum;
         self.mapq_sum_sq += mapq_sum_sq;
         self.placed_left += placed_left;
+        self.num_low_quality += num_low_quality;
     }
 
     /// Divide the four count-like sums by the reads they were measured over — **not the
@@ -1752,11 +1761,13 @@ impl SupportSums {
             mapq_sum,
             mapq_sum_sq,
             placed_left,
+            num_low_quality,
         } = self;
         *num_fwd /= reads;
         *mapq_sum /= reads;
         *mapq_sum_sq /= reads;
         *placed_left /= reads;
+        *num_low_quality /= reads;
     }
 }
 
@@ -2394,6 +2405,7 @@ mod tests {
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -3709,6 +3721,7 @@ mod tests {
                 mapq_sum: 100,
                 mapq_sum_sq: 5_000,
                 placed_left: 0.0,
+                num_low_quality: 0,
             },
             "the reads that agreed with the reference are support for allele 0",
         );
@@ -3726,6 +3739,7 @@ mod tests {
                 mapq_sum: 240,
                 mapq_sum_sq: 14_400,
                 placed_left: 1.0,
+                num_low_quality: 0,
             },
         );
     }
@@ -3791,6 +3805,7 @@ mod tests {
                 mapq_sum: 150,
                 mapq_sum_sq: 7_500,
                 placed_left: 0.0,
+                num_low_quality: 0,
             },
         );
         assert_eq!(
@@ -3802,6 +3817,7 @@ mod tests {
                 mapq_sum: 120,
                 mapq_sum_sq: 7_200,
                 placed_left: 1.0,
+                num_low_quality: 0,
             },
         );
         assert_eq!(
@@ -3813,6 +3829,7 @@ mod tests {
                 mapq_sum: 270,
                 mapq_sum_sq: 14_700,
                 placed_left: 1.0,
+                num_low_quality: 0,
             },
             "the two rows add back to the one row this used to be",
         );
@@ -4308,6 +4325,7 @@ mod tests {
                 mapq_sum: 170,
                 mapq_sum_sq: 9_700,
                 placed_left: 1.0,
+                num_low_quality: 0,
             },
             "and adding the two rows back gives what the one row used to hold",
         );
@@ -4320,6 +4338,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: 0.0,
+                num_low_quality: 0,
             },
             "the other allele keeps its own, unmixed",
         );
@@ -4376,6 +4395,7 @@ mod tests {
                 mapq_sum: 57,
                 mapq_sum_sq: 3_233,
                 placed_left: 1.0 / 3.0,
+                num_low_quality: 0,
             },
         );
         assert_eq!(support.reads_composed_across_records, 1);
@@ -4456,6 +4476,7 @@ mod tests {
                 mapq_sum: 120,
                 mapq_sum_sq: 7_200,
                 placed_left: 0.0,
+                num_low_quality: 0,
             },
             "reads 7 and 9, each taking the weaker −0.5 of its two sightings",
         );
@@ -4468,6 +4489,7 @@ mod tests {
                 mapq_sum: 53,
                 mapq_sum_sq: 2_925,
                 placed_left: 0.25,
+                num_low_quality: 0,
             },
             "read 11, from the sequence it was sighted at rather than the record's first",
         );
@@ -4657,6 +4679,7 @@ mod tests {
                 mapq_sum: 90,
                 mapq_sum_sq: 5_400,
                 placed_left: 1.5,
+                num_low_quality: 0,
             },
             "three halves of a left-placed read are 1.5, where three halves rounded are 3",
         );

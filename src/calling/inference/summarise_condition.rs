@@ -969,6 +969,8 @@ struct PooledArtifactCounts {
     alternative_reads: u64,
     alternative_forward_reads: f64,
     alternative_placed_left_reads: f64,
+    reference_low_quality_reads: u64,
+    alternative_low_quality_reads: u64,
     total_reads: u64,
     genotype_expected_alternative_reads: f64,
 }
@@ -1009,10 +1011,12 @@ impl PooledArtifactCounts {
                 self.reference_reads += reads;
                 self.reference_forward_reads += observation.forward_reads;
                 self.reference_placed_left_reads += observation.placed_left_reads;
+                self.reference_low_quality_reads += u64::from(observation.low_quality_reads);
             } else if observation.allele == primary_alternative {
                 self.alternative_reads += reads;
                 self.alternative_forward_reads += observation.forward_reads;
                 self.alternative_placed_left_reads += observation.placed_left_reads;
+                self.alternative_low_quality_reads += u64::from(observation.low_quality_reads);
             }
         }
         self.total_reads += depth;
@@ -1034,6 +1038,8 @@ impl PooledArtifactCounts {
             alternative_reads: self.alternative_reads as f64,
             alternative_forward_reads: self.alternative_forward_reads,
             alternative_placed_left_reads: self.alternative_placed_left_reads,
+            reference_low_quality_reads: self.reference_low_quality_reads as f64,
+            alternative_low_quality_reads: self.alternative_low_quality_reads as f64,
             total_reads: self.total_reads as f64,
             genotype_expected_alternative_reads: self.genotype_expected_alternative_reads,
         }
@@ -1083,7 +1089,8 @@ fn pool_allele_reads(per_sample: &[GenericLocusSample<'_>], pooled_reads: &mut [
             );
             assert!(
                 observation.forward_reads <= f64::from(observation.num_reads)
-                    && observation.placed_left_reads <= f64::from(observation.num_reads),
+                    && observation.placed_left_reads <= f64::from(observation.num_reads)
+                    && observation.low_quality_reads <= observation.num_reads,
                 "sample {sample}'s {} reads of allele {allele} carry {} on the forward \
                  strand and {} placed left: both are shares of those same reads, and the \
                  artifact tests read them as fractions",
@@ -2854,6 +2861,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -2884,6 +2892,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -5472,6 +5481,7 @@ mod tests {
             q_sum: -3.0 * f64::from(num_reads),
             forward_reads: f64::from(forward_reads),
             placed_left_reads: f64::from(placed_left_reads),
+            low_quality_reads: 0,
         }
     }
 

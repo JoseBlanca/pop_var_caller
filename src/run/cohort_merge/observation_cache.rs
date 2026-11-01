@@ -2043,6 +2043,7 @@ mod tests {
                 mapq_sum: 180,
                 mapq_sum_sq: 10_800,
                 placed_left: 0,
+                num_low_quality: 0,
                 chain_ids: vec![1, 2, 3],
             }],
             reads_without_observation: 0,

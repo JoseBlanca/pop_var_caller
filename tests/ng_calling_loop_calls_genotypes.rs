@@ -129,6 +129,7 @@ fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObs
         mapq_sum: 60 * reads,
         mapq_sum_sq: u64::from(reads) * 3_600,
         placed_left: reads / 2,
+        num_low_quality: 0,
         chain_ids: Vec::new(),
     }
 }
@@ -835,6 +836,7 @@ fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         mapq_sum: 60 * reads,
         mapq_sum_sq: u64::from(reads) * 3_600,
         placed_left: reads / 2,
+        num_low_quality: 0,
         chain_ids: Vec::new(),
     }
 }

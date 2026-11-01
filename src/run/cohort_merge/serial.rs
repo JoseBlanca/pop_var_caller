@@ -746,6 +746,7 @@ mod tests {
                 mapq_sum: minted.mapq_sum,
                 mapq_sum_sq: minted.mapq_sum_sq,
                 placed_left: f64::from(minted.placed_left),
+                num_low_quality: 0,
             },
             "one record, so every sum is the one the generator wrote",
         );

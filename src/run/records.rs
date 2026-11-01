@@ -595,7 +595,8 @@ where
 ///   aside;
 /// - **the cohort's mapping qualities per written allele** — the same reads `AD` counts, which
 ///   is why they are summed from the same rows;
-/// - **the site quality after the artifact correction**, and the two penalties it charged.
+/// - **the site quality after the artifact correction**, and the penalties it charged — the
+///   low-base-quality one at `low_base_quality_weight` times its tail, zero leaving it off.
 ///   `LocusInference`'s own quality field is the **uncorrected** baseline and nothing between
 ///   the worker and this correction may read it as a site quality
 ///   (`doc/devel/ng/spec/calling_quality.md` §3.5);
@@ -613,6 +614,11 @@ where
 /// And on an observation whose windows and covering samples are different lengths, for the same
 /// reason: the two are one sequence held twice.
 #[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the seven things a record is assembled from, plus the run's one setting the artifact \
+              correction takes — a struct grouping them would exist for this signature alone"
+)]
 pub fn evidence_for_output(
     locus: &LocusInference,
     observation: &CohortObservation,
@@ -621,6 +627,7 @@ pub fn evidence_for_output(
     selection: SelectionVerdict,
     padding_base: Option<PaddingBase>,
     base_before_left_flank: Option<u8>,
+    low_base_quality_weight: f64,
 ) -> LocusEvidenceForOutput {
     let written_alleles = locus.alleles().len();
     let run_sample_count = locus.per_sample.len();
@@ -722,8 +729,11 @@ pub fn evidence_for_output(
 
     let (corrected_site_quality, artifact_penalties) = match locus.artifact_test_counts() {
         Some(counts) => {
-            let (quality, penalties) =
-                correct_site_quality(locus.uncorrected_site_quality(), &counts);
+            let (quality, penalties) = correct_site_quality(
+                locus.uncorrected_site_quality(),
+                &counts,
+                low_base_quality_weight,
+            );
             (quality, Some(penalties))
         }
         // **A locus that gave the two tests nothing to weigh keeps its baseline**, and the

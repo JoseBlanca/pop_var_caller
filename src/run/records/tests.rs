@@ -303,6 +303,7 @@ fn a_covering_samples_window_lands_on_the_run_sample_it_names() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(evidence.samples[0].window_coverage, first);
@@ -464,6 +465,7 @@ fn ad_is_keyed_by_the_records_allele_table_and_not_the_merges() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(
@@ -506,6 +508,7 @@ fn the_pooled_mapping_qualities_count_the_same_reads_as_ad() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     for allele in 0..2 {
@@ -560,6 +563,7 @@ fn a_covering_samples_reads_land_on_the_run_sample_it_names() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![9, 2]);
@@ -602,6 +606,7 @@ fn a_read_that_stopped_inside_the_locus_is_in_dp_and_in_no_ad_slot() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![4, 3]);
@@ -626,6 +631,8 @@ fn counts_the_tests_charge_on() -> ArtifactTestCounts {
         alternative_reads: 4.0,
         alternative_forward_reads: 4.0,
         alternative_placed_left_reads: 4.0,
+        reference_low_quality_reads: 0.0,
+        alternative_low_quality_reads: 0.0,
         total_reads: 24.0,
         genotype_expected_alternative_reads: 12.0,
     }
@@ -657,9 +664,11 @@ fn the_records_site_quality_is_the_corrected_one_and_the_penalties_are_beside_it
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
-    let (expected, penalties) = correct_site_quality(locus.uncorrected_site_quality(), &counts);
+    let (expected, penalties) =
+        correct_site_quality(locus.uncorrected_site_quality(), &counts, 0.0);
     assert_eq!(evidence.corrected_site_quality, expected);
     assert_eq!(evidence.artifact_penalties, Some(penalties));
     assert!(
@@ -691,6 +700,7 @@ fn a_locus_the_artifact_tests_did_not_run_on_carries_no_penalties() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(evidence.artifact_penalties, None);
@@ -723,6 +733,7 @@ fn a_locus_whose_loop_did_not_settle_carries_the_filter_that_says_so() {
             SelectionVerdict::Selected,
             None,
             None,
+            0.0,
         )
         .filter,
         FilterVerdict::Pass,
@@ -736,6 +747,7 @@ fn a_locus_whose_loop_did_not_settle_carries_the_filter_that_says_so() {
             SelectionVerdict::Selected,
             None,
             None,
+            0.0,
         )
         .filter,
         FilterVerdict::EmDidNotConverge,
@@ -776,6 +788,7 @@ fn a_samples_reads_for_one_allele_are_summed_over_its_read_groups() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(
@@ -830,6 +843,7 @@ fn a_samples_leftover_is_read_off_the_merges_covering_list_and_not_the_runs_orde
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(
@@ -864,6 +878,7 @@ fn a_read_removed_as_evidence_is_in_dp_and_in_no_ad_slot() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![4, 3]);
@@ -909,6 +924,7 @@ fn the_three_kinds_of_unexplained_read_are_added_together() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     );
 
     assert_eq!(evidence.samples[0].allele_reads, vec![4, 3]);
@@ -993,6 +1009,7 @@ fn a_tract_record_carries_its_motif_and_an_ordinary_one_carries_none() {
         SelectionVerdict::Selected,
         None,
         None,
+        0.0,
     )
     .repeat_tract
     .expect("a tract record carries its motif");
@@ -1010,6 +1027,7 @@ fn a_tract_record_carries_its_motif_and_an_ordinary_one_carries_none() {
             SelectionVerdict::Selected,
             None,
             None,
+            0.0,
         )
         .repeat_tract,
         None,
@@ -1031,7 +1049,17 @@ fn a_tracts_filter_comes_from_selection_unless_the_loop_did_not_settle() {
     let (remap, unmatched) = selected(&observation);
     let per_sample = vec![called(&[0, 1], false)];
     let filter_of = |locus: &LocusInference, verdict| {
-        evidence_for_output(locus, &observation, &remap, &unmatched, verdict, None, None).filter
+        evidence_for_output(
+            locus,
+            &observation,
+            &remap,
+            &unmatched,
+            verdict,
+            None,
+            None,
+            0.0,
+        )
+        .filter
     };
 
     let settled = tract_called_over(&[b"ATAT", b"ATATAT"], per_sample.clone(), true);

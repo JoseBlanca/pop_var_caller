@@ -575,6 +575,7 @@ impl SsrEvidenceScratch {
                     mapq_sum: row.support.mapq_sum,
                     mapq_sum_sq: row.support.mapq_sum_sq,
                     placed_left: whole_reads(row.support.placed_left),
+                    num_low_quality: row.support.num_low_quality,
                     // Empty on the STR path, which does not phase: a tract is one record, so
                     // the witness already says whether a read spanned it.
                     chain_ids: Vec::new(),
@@ -596,6 +597,7 @@ impl SsrEvidenceScratch {
                     mapq_sum: 0,
                     mapq_sum_sq: 0,
                     placed_left: 0,
+                    num_low_quality: 0,
                     chain_ids: Vec::new(),
                 });
             }
@@ -665,6 +667,7 @@ mod tests {
                 mapq_sum: 60 * num_reads,
                 mapq_sum_sq: u64::from(num_reads) * 3_600,
                 placed_left: f64::from(num_reads / 2),
+                num_low_quality: 0,
             },
         }
     }
@@ -1330,6 +1333,7 @@ mod tests {
             mapq_sum: 300,
             mapq_sum_sq: 18_000,
             placed_left: 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }];
         let per_run_sample: [&[SequenceObservation]; 2] = [&seen, &[]];

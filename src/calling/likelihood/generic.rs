@@ -1745,6 +1745,7 @@ mod tests {
             q_sum,
             forward_reads: f64::from(num_reads / 2),
             placed_left_reads: f64::from(num_reads / 2),
+            low_quality_reads: 0,
         }
     }
 
