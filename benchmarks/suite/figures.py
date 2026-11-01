@@ -342,10 +342,10 @@ def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggreg
 
 # The simulated inbreeding benchmark (bench/inbreeding_sim.py) counts each sample's genotype against
 # the truth by true and called genotype; these sums gather them into the error types. One figure per
-# group of samples with the same F, at one depth, with a row for each of pvc's three runs.
-INBREEDING_CALLERS = ["pvc (fitted)", "pvc (defaults)", "pvc (F stated 0.9)", "GATK", "DeepVariant"]
-INBREEDING_LABEL = {"pvc (fitted)": "pvc, F estimated", "pvc (defaults)": "pvc, F = 0",
-                    "pvc (F stated 0.9)": "pvc, F = 0.9 stated"}
+# group of samples with the same F, at one depth. pvc is drawn only with F estimated (owner,
+# 1 November 2026); its runs with a wrong F are in the page's tables.
+INBREEDING_CALLERS = ["pvc (fitted)", "GATK", "DeepVariant"]
+INBREEDING_LABEL = {"pvc (fitted)": "pvc, F estimated"}
 INBREEDING_ERRORS = {
     "wrong_gt_truth_ref": tuple(f"true hom_ref, called {c}" for c in ("het", "hom_alt",
                                                                       "other_allele")),

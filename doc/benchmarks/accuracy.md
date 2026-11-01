@@ -220,7 +220,8 @@ group):
 | 1 | 1 | 4,103 | 15 | 458 |
 
 **Errors at 15× in the two most inbred groups**, drawn as in the trio's figures: each row is one
-run, and its marks count the 10 samples' genotypes of each kind of mistake.
+caller, pvc with F estimated, and its marks count the 10 samples' genotypes of each kind of
+mistake.
 
 ![Errors at 15× in the 10 samples simulated at F = 1](figures/errors_inbreeding_f1.svg)
 
@@ -240,6 +241,6 @@ run, and its marks count the 10 samples' genotypes of each kind of mistake.
   At 30× GATK and DeepVariant are slightly ahead of pvc, 99.7% and 99.8% against 99.5%.
 - **At 15×, pvc's largest error does not depend on F.** In both figures most of pvc's circle is
   homozygous-alternative genotypes called reference: 119 in the F = 1 group and 107 in the
-  F = 0.75 group, the same in all three of pvc's runs. GATK makes 53 of these at F = 1, and
-  DeepVariant 57. A wrong F shows instead as homozygotes called heterozygous: at F = 1, 30
-  with F = 0 and none with F estimated.
+  F = 0.75 group, the same in all three of pvc's runs (F estimated, F = 0 and F = 0.9 stated).
+  GATK makes 53 of these at F = 1, and DeepVariant 57. A wrong F shows instead as homozygotes
+  called heterozygous: at F = 1, 30 with F = 0 and none with F estimated.
