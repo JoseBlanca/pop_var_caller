@@ -82,6 +82,15 @@ any coupling between segments: nothing about calling changes. **The stage's inpu
 buffer**: if the pass falls behind, the calling workers wait for it rather than the buffer growing
 without limit; how often that happens is measured (§8).
 
+**Built (2026-11-01) as the tightest such buffer: the stage lives inside the VCF writer** and runs
+on the thread that writes. Every line, with the filter on or off, already ends in one call, the
+writer's `write_line`, made on the calling thread; the writer checks the line's place against the
+one before it as before, hands the line to the stage, and writes whatever the stage hands back;
+finishing the file finishes the last contig's windows. So calling waits while a window is solved,
+the stage never holds more than a window, and neither the filter's third pass nor the filter-off
+path changed. A thread of its own, letting calling run ahead by a bounded number of lines, is the
+change to make if §8.6 finds the wait matters (`src/neighbour_evidence/stage.rs`).
+
 ### 2.2 Windows
 
 The pass cannot write a record until it has seen the records after it, because a sample's state at a
@@ -258,9 +267,21 @@ Rust pass and those numbers is not by itself a defect:
   `ALT`, and every sample's `PL` and `GP` keep only the genotypes over the written alleles
   (`vcf_output.md` §7.2's subsetting). **A record left with no alternative carried is dropped** — the
   same rule calling applies to a locus whose alternatives no sample is called with. *Both are the
-  owner's to confirm, §11 Q2.*
+  owner's to confirm, §11 Q2.* As in calling, a record where no sample is called at all keeps its
+  alleles. The subsetting reaches every per-allele field — `AD`, and `AF`, `MQALT` and `MQDIFF` in
+  `INFO` — and re-shifts `PL` so the best kept genotype is 0. **One thing it cannot redo**: calling
+  drops alleles before it widens a repeat tract's alleles over their flanks, so a tract record that
+  loses an allele here keeps the padding computed over the larger set — a longer `REF` than calling
+  would have written, still a correct description of the alleles.
+- **`GQ` comes from the written `GP`** — after the subsetting, by the same function calling uses
+  (`calling_quality.md` §4); a withheld sample's `GQ` is `.`, as calling writes for a no-call.
+- **A repeat count no input column names is written `.`.** The rule above holds for alternatives;
+  the reference allele can be named by no input call (every sample homozygous for an alternative),
+  and re-calling a sample to carry it then has no column to read its count from. The run's log
+  counts these.
 - **The header** gains one line recording whether the pass ran and why, and its parameters, and `GP`'s
-  declaration says the posteriors are the pass's:
+  declaration says the posteriors are the pass's. A run where the pass is off writes the line too,
+  with `ran=no` and the reason, and no parameters:
 
       ##neighbourEvidence=<ran=yes,why="57 samples, median inbreeding 0.98",templates=16,mismatch=0.01,core=2000000,margin=1000000>
       ##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">
@@ -298,8 +319,14 @@ taken once, before the first record is written:
   outbred simulation gained nothing; between the two ends is unmeasured.
 
 Both are starting values, to be set from §8's measurements. `--neighbour-evidence auto|on|off`,
-`auto` the default, overrides the decision either way. At a record, the walk's `K` is
-`min(16, samples with rows − 1)`; a record where fewer than two samples have rows is no site.
+`auto` the default, overrides the decision either way — except that `on` cannot run the pass on one
+sample or at a ploidy other than two. The median of an even count is the mean of the middle two.
+Within a window a sample's `K` is fixed at `min(16, N − 1)`; a template without a row at a record
+carries equal shares there (§3.2), and a record where fewer than two samples have rows is no site.
+The decision goes into the run's log as well as the header, and after the run one log line says
+what the pass did: records re-called, genotypes called (and how many of them where the sample had
+no reads), withheld, changed, alleles and records dropped. **The run's record count is read from
+the file**, since the pass can drop records.
 
 **At a ploidy other than two the pass is off**: the pair state is diploid.
 

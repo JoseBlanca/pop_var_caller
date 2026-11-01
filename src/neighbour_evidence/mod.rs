@@ -9,11 +9,15 @@
 //! - [`windows`] — where each window's core and margins end, under the memory budget (§2.2, §6).
 //! - [`refine`] — re-calling every sample in one window, and the rule for samples without reads
 //!   (§4.2).
+//! - [`line`] — reading a finished VCF line into the pass and writing it back re-called (§4.1).
+//! - [`stage`] — the pass as a stage in front of the writer, and whether a run uses it (§2, §5).
 
 pub mod fit;
+pub mod line;
 pub mod model;
 pub mod records;
 pub mod refine;
+pub mod stage;
 pub mod templates;
 pub mod windows;
 

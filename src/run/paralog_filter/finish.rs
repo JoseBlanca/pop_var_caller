@@ -21,7 +21,8 @@ use crate::paralog::windowed_prior::WindowedPriorConfig;
 use crate::paralog::{CalibrationConfig, CoverageFitConfig, ParalogModelParams};
 use crate::types::{InbreedingF, Ploidy};
 use crate::vcf::{
-    HiddenParalogProvenance, VcfHeaderMetadata, VcfWriteError, VcfWriter, WindowedPriorProvenance,
+    FinishedVcf, HiddenParalogProvenance, VcfHeaderMetadata, VcfWriteError, VcfWriter,
+    WindowedPriorProvenance,
 };
 use crate::window_coverage::SampleHistogram;
 
@@ -152,6 +153,9 @@ pub struct FilteredRun {
     /// does not number it**: an index is a fact about this run's argument order and an operator
     /// would have to count their own command line to use it.
     pub sample_names: Vec<String>,
+    /// What the file holds once written: its record count, and what the neighbour-evidence pass
+    /// did where it ran in front of the writer.
+    pub finished: FinishedVcf,
 }
 
 /// What can stop a run once its records are parked.
@@ -331,7 +335,7 @@ pub fn fit_score_and_write_the_calls_explaining(
         source,
     })?;
 
-    writer
+    let finished = writer
         .finish()
         .map_err(|source| ParalogFilterError::CallsNotFinished {
             path: output.to_path_buf(),
@@ -352,6 +356,7 @@ pub fn fit_score_and_write_the_calls_explaining(
         verdicts,
         scoring,
         sample_names,
+        finished,
     })
 }
 
@@ -451,6 +456,7 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         verdicts,
         scoring,
         sample_names,
+        finished: _,
     } = run;
     let mut lines = vec![format!(
         "hidden-duplication filter: {} record(s) dropped, {} tagged, {} written; \

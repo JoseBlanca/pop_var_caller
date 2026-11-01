@@ -527,7 +527,7 @@ fn genotype_field(call: &SampleCall, ploidy: Ploidy) -> String {
 /// bcftools use and the one this project's quality module already applies — restated here
 /// because the file's own field is what downstream tools read, and production clamps at write
 /// time for the same reason.
-fn written_genotype_quality(quality: Phred) -> u32 {
+pub(crate) fn written_genotype_quality(quality: Phred) -> u32 {
     let capped = quality.get().clamp(0.0, MAX_GENOTYPE_QUALITY);
     capped.round() as u32
 }

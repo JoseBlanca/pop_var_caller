@@ -58,12 +58,12 @@ pub struct WalkResult {
 /// The two copies' alleles behind each genotype index, read off the shared genotype table — never
 /// an index formula of our own (spec §7) — and kept per allele count.
 #[derive(Default)]
-struct GenotypePairs {
+pub(crate) struct GenotypePairs {
     by_allele_count: HashMap<usize, Vec<(usize, usize)>>,
 }
 
 impl GenotypePairs {
-    fn of(&mut self, allele_count: usize) -> &[(usize, usize)] {
+    pub(crate) fn of(&mut self, allele_count: usize) -> &[(usize, usize)] {
         self.by_allele_count.entry(allele_count).or_insert_with(|| {
             let diploid = Ploidy::try_new(2).expect("two copies is a ploidy");
             let table = GenotypeTable::build(diploid, allele_count);

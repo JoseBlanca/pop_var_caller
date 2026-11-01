@@ -230,6 +230,7 @@ fn a_cohort_of_psps() -> (ACohortOnDisk, CallFromPspsArgs) {
             crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
         hidden_dup_tag: false,
         hidden_dup_window: 0,
+        neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
         locus_builder_regions_len: None,
         psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
         threads: 0,

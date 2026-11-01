@@ -259,6 +259,18 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub hidden_dup_window: u64,
 
+    /// Whether to re-call each sample's genotypes with the evidence of the samples it shares
+    /// stretches of chromosome with, and of its own neighbouring sites. `auto` runs it on a
+    /// diploid cohort of at least 10 samples whose median inbreeding is at least 0.5; the VCF
+    /// header says whether it ran and why.
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = calling_run::NeighbourEvidenceArg::Auto,
+        help_heading = "Advanced"
+    )]
+    pub neighbour_evidence: calling_run::NeighbourEvidenceArg,
+
     /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
@@ -751,6 +763,12 @@ pub fn run_call_from_alignments(
     } else {
         metadata
     };
+    let metadata =
+        metadata.the_neighbour_evidence_decision(calling_run::neighbour_evidence_decision(
+            args.neighbour_evidence,
+            &inbreeding_by_sample,
+            ploidy,
+        ));
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what
     // makes `--hidden-dup-fdr 0` byte-identical by construction rather than by hope. With it on, the
@@ -776,14 +794,14 @@ pub fn run_call_from_alignments(
             ploidy,
         ))
     } else {
-        CalledRecordSink::StraightToTheVcf(
+        CalledRecordSink::StraightToTheVcf(Box::new(
             VcfWriter::create(&args.output, metadata.clone(), ploidy).map_err(|source| {
                 CallFromAlignmentsCliError::Output {
                     path: args.output.clone(),
                     source,
                 }
             })?,
-        )
+        ))
     };
 
     let mut written = caller
@@ -795,15 +813,16 @@ pub fn run_call_from_alignments(
 
     // **The spill has to stay alive until pass three has read it**, so the sink is taken apart
     // rather than consumed: `finish` would drop the file the next two passes need.
-    let parked = match sink {
+    let (parked, finished_straight) = match sink {
         CalledRecordSink::StraightToTheVcf(writer) => {
-            writer
-                .finish()
-                .map_err(|source| CallFromAlignmentsCliError::CallsNotWritten {
-                    path: args.output.clone(),
-                    source: crate::run::paralog_filter::PassOneError::Vcf(source),
-                })?;
-            None
+            let finished =
+                writer
+                    .finish()
+                    .map_err(|source| CallFromAlignmentsCliError::CallsNotWritten {
+                        path: args.output.clone(),
+                        source: crate::run::paralog_filter::PassOneError::Vcf(source),
+                    })?;
+            (None, Some(finished))
         }
         CalledRecordSink::ParkedOnTheSpill(mut spilling) => {
             spilling.finish_parking().map_err(|source| {
@@ -812,7 +831,7 @@ pub fn run_call_from_alignments(
                     source: crate::run::paralog_filter::PassOneError::Spill(source),
                 }
             })?;
-            Some(spilling)
+            (Some(spilling), None)
         }
     };
 
@@ -883,9 +902,13 @@ pub fn run_call_from_alignments(
         .with_satellite_bases_on_the_generic_path(satellite_bases_on_the_generic_path),
         &filter_lines,
     );
-    let records = filtered
-        .as_ref()
-        .map_or(written.calling.records_written, |run| run.did.written);
+    // **Counted from the file**: the neighbour-evidence pass can drop a record whose alternatives
+    // it left uncalled, so neither calling's count nor the filter's is the file's.
+    let finished = finished_straight
+        .or_else(|| filtered.as_ref().map(|run| run.finished))
+        .expect("the calls were written by one of the two paths");
+    calling_run::log_neighbour_evidence(&finished);
+    let records = finished.records_written;
     tracing::info!(
         "done: {} records written to {} in {}",
         run_output::with_thousands(records),

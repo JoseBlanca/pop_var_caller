@@ -433,7 +433,12 @@ mod tests {
     /// the header gains their two `##FORMAT` lines and every sample column the two fields after
     /// `AD`, and nothing else moves — taking the two declarations and fields out reproduces the
     /// old checksum, `eeb54b8cccb65e7a31fde3545329e3a3`, exactly. Recorded in the Linux container (arm64).
-    const CALLS_MD5: &str = "8d06ba1d16363cfbeef432a4a3633879";
+    /// **Re-recorded 2026-11-01** when the header began stating whether the neighbour-evidence
+    /// pass ran (`neighbour_evidence_pass.md` §4.1): one `##neighbourEvidence=<ran=no,…>` line
+    /// after the contigs, and nothing else moves — the pass is off on this cohort, too few samples or too
+    /// little inbreeding for `auto` — and leaving that line out of the checksum reproduces the old one, `8d06ba1d16363cfbeef432a4a3633879`,
+    /// exactly. Recorded on macOS (arm64).
+    const CALLS_MD5: &str = "443a89c2b2066d269a43107f4e253a16";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -687,7 +692,12 @@ mod tests {
     /// the header gains their two `##FORMAT` lines and every sample column the two fields after
     /// `AD`, and nothing else moves — taking the two declarations and fields out reproduces the
     /// old checksum, `4e24472e81c47b3d842ca21f1cedf85f`, exactly. Recorded in the Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "d30f2cde2e78096f28b1bf1357eeae05";
+    /// **Re-recorded 2026-11-01** when the header began stating whether the neighbour-evidence
+    /// pass ran (`neighbour_evidence_pass.md` §4.1): one `##neighbourEvidence=<ran=no,…>` line
+    /// after the contigs, and nothing else moves — the pass is off on this cohort, too few samples or too
+    /// little inbreeding for `auto` — and leaving that line out of the checksum reproduces the old one, `d30f2cde2e78096f28b1bf1357eeae05`,
+    /// exactly. Recorded on macOS (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "35933d51ad28e7a7f30ac8272e18c6d5";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -970,7 +980,12 @@ mod tests {
     /// the header gains their two `##FORMAT` lines and every sample column the two fields after
     /// `AD`, and nothing else moves — taking the two declarations and fields out reproduces the
     /// old checksum, `40067fb11da202a3bb5dc8a0b85d9ca1`, exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "26a52f1d4675bfcf7d73fae613b9e6c8";
+    /// **Re-recorded 2026-11-01** when the header began stating whether the neighbour-evidence
+    /// pass ran (`neighbour_evidence_pass.md` §4.1): one `##neighbourEvidence=<ran=no,…>` line
+    /// after the contigs, and nothing else moves — the pass is off on this cohort, too few samples or too
+    /// little inbreeding for `auto` — and leaving that line out of the checksum reproduces the old one, `26a52f1d4675bfcf7d73fae613b9e6c8`,
+    /// exactly. Recorded on macOS (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "c21340eb1a9d52d3b5f540a95e45969c";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -1032,6 +1047,7 @@ mod tests {
                 crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
+            neighbour_evidence: crate::cli::calling_run::NeighbourEvidenceArg::Auto,
             locus_builder_regions_len: None,
             psp_prefetch_bytes: crate::run::psp_prefetch::DEFAULT_PSP_PREFETCH_BUDGET_BYTES,
             threads: 0,

@@ -53,7 +53,7 @@ pub use header::{
     HiddenParalogProvenance, MAX_CONTIG_LENGTH, PARALOG_POSTERIOR_DECIMALS, PARALOG_RATIO_DECIMALS,
     VcfHeaderMetadata, WindowedPriorProvenance, header_text,
 };
-pub use writer::{RecordPlace, VcfWriteError, VcfWriter};
+pub use writer::{FinishedVcf, RecordPlace, VcfWriteError, VcfWriter};
 
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::types::{GenomeRegion, Genotype, GenotypeRows, Motif, Phred, Position};

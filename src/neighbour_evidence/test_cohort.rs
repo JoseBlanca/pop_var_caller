@@ -33,6 +33,9 @@ pub(crate) struct TestCohort {
     pub records: Vec<SiteRecord>,
     pub truth: Vec<Vec<usize>>,
     pub called: Vec<Vec<usize>>,
+    /// The records as calling would write them, on contig `chr1`: `GT` (`./.` without reads),
+    /// `PL`, `GP` and `AF`.
+    pub lines: Vec<String>,
 }
 
 struct Draw(u64);
@@ -89,11 +92,13 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
     let mut records = Vec::with_capacity(shape.records);
     let mut truth = Vec::with_capacity(shape.records);
     let mut called = Vec::with_capacity(shape.records);
+    let mut lines = Vec::with_capacity(shape.records);
     for record in 0..shape.records {
         let mut phred = Vec::with_capacity(shape.samples);
         let mut posteriors = Vec::with_capacity(shape.samples);
         let mut true_genotypes = Vec::with_capacity(shape.samples);
         let mut called_genotypes = Vec::with_capacity(shape.samples);
+        let mut written = Vec::with_capacity(shape.samples);
         for (sample, founders) in copies.iter_mut().enumerate() {
             for copy in founders.iter_mut() {
                 if record > 0 && draw.uniform() < switch {
@@ -164,6 +169,17 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
                 }
             });
             called_genotypes.push(call);
+            let genotype = if reads == 0 {
+                "./."
+            } else {
+                ["0/0", "0/1", "1/1"][call]
+            };
+            let join = |values: Vec<String>| values.join(",");
+            written.push(format!(
+                "{genotype}:{}:{}",
+                join(sample_phred.iter().map(ToString::to_string).collect()),
+                join(sample_posteriors.iter().map(ToString::to_string).collect())
+            ));
             phred.push(sample_phred);
             posteriors.push(sample_posteriors);
         }
@@ -182,6 +198,12 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
             &[frequencies[record]],
             &columns,
         ));
+        lines.push(format!(
+            "chr1\t{}\t.\tA\tC\t50\tPASS\tAF={};AC=0;AN=0\tGT:PL:GP\t{}",
+            1 + record as u64 * shape.spacing,
+            frequencies[record],
+            written.join("\t")
+        ));
         truth.push(true_genotypes);
         called.push(called_genotypes);
     }
@@ -189,5 +211,6 @@ pub(crate) fn test_cohort(shape: CohortShape) -> TestCohort {
         records,
         truth,
         called,
+        lines,
     }
 }
