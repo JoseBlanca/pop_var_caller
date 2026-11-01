@@ -381,6 +381,111 @@ def inbreeding_figures(rows, out, depth="15x"):
     return made
 
 
+# The scatter's two kinds of error, from the dot plot's three: a genotype called wrong (either way)
+# and a genotype left missing.
+INBREEDING_KINDS = [
+    ("wrong", "wrong genotype", INBREEDING_ERRORS["wrong_gt_truth_ref"]
+     + INBREEDING_ERRORS["wrong_gt_truth_var"]),
+    ("missing", "missing genotype", INBREEDING_ERRORS["no_call"]),
+]
+
+
+def tint(colour, share=0.5):
+    """`colour` mixed with the page's surface: the same hue, subdued."""
+    rgb = matplotlib.colors.to_rgb(colour)
+    base = matplotlib.colors.to_rgb(SURFACE)
+    return tuple(c * (1 - share) + b * share for c, b in zip(rgb, base))
+
+
+def inbreeding_totals(rows, depth):
+    """{(caller, kind): [(F, count over the group's 10 samples)]}, one point per group."""
+    groups = sorted({r["variant_class"] for r in rows if r["benchmark"] == "inbreeding_sim"
+                     and r["variant_class"].startswith("F = ")})
+    series = {}
+    for group in groups:
+        for caller in INBREEDING_CALLERS:
+            m = {r["metric"]: float(r["value"]) for r in rows
+                 if r["benchmark"] == "inbreeding_sim" and r["depth"] == depth
+                 and r["variant_class"] == group and r["caller"] == caller and r["value"] != ""}
+            if not m:
+                continue
+            for kind, _, outcomes in INBREEDING_KINDS:
+                series.setdefault((caller, kind), []).append(
+                    (float(group.split("=")[1]), sum(m.get(o, 0) for o in outcomes)))
+    return series
+
+
+def inbreeding_scatter_figure(rows, out, depths=("15x", "30x")):
+    """Errors in a group of samples against the group's F, one panel per depth on its own scale:
+    for each caller a line of wrong genotypes and a paler, dashed line of missing ones."""
+    panels = [(d, inbreeding_totals(rows, d)) for d in depths]
+    panels = [(d, s) for d, s in panels if s]
+    if not panels:
+        return None
+    fig, axes = plt.subplots(len(panels), 1, figsize=(6.4, 4.6 * len(panels)), facecolor=SURFACE,
+                             squeeze=False)
+    for (depth, series), ax in zip(panels, axes[:, 0]):
+        style_axes(ax, "inbreeding coefficient F of the group's 10 samples",
+                   "errors in the group's 10 samples\n(log scale)", depth_label(depth))
+        ax.set_xscale("linear")
+        ax.set_xticks([0, 0.25, 0.5, 0.75, 1])
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.set_xlim(-0.05, 1.32)
+        counts = [y for pts in series.values() for _, y in pts]
+        if min(counts) == 0:
+            # A zero has no place on a log axis: a short linear stretch from 0 to 1 holds it.
+            ax.set_yscale("symlog", linthresh=1, linscale=0.4)
+            low = -0.3
+        else:
+            ax.set_yscale("log")
+            low = min(counts) / 1.3
+        high = max(counts) * 1.3
+        ax.set_ylim(low, high)
+        ax.set_yticks([t for t in (0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000,
+                                   20000) if low <= t <= high])
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
+        ax.yaxis.set_minor_formatter(NullFormatter())
+        for caller in INBREEDING_CALLERS:
+            st = STYLE[caller]
+            label = SCATTER_LABEL.get(caller, st["label"])
+            for kind, kind_label, _ in INBREEDING_KINDS:
+                pts = series.get((caller, kind))
+                if not pts:
+                    continue
+                missing = kind == "missing"
+                colour = tint(st["color"]) if missing else st["color"]
+                xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+                ax.plot(xs, ys, color=colour, linestyle="--" if missing else "-", linewidth=2,
+                        marker=st["marker"], markersize=7,
+                        markerfacecolor=SURFACE if missing else colour,
+                        markeredgecolor=colour if missing else SURFACE, markeredgewidth=1.5,
+                        zorder=3)
+                ax.annotate(f"{label}, {'missing' if missing else 'wrong'}", (xs[-1], ys[-1]),
+                            xytext=(6, 0), textcoords="offset points", fontsize=8.5,
+                            color=TEXT if not missing else TEXT_2, va="center", zorder=4,
+                            gid="caller")
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    handles = [Line2D([], [], color=TEXT_2, linestyle="-", linewidth=2, marker="o",
+                      markerfacecolor=TEXT_2, markeredgecolor=SURFACE, label="wrong genotype"),
+               Line2D([], [], color=tint(TEXT_2), linestyle="--", linewidth=2, marker="o",
+                      markerfacecolor=SURFACE, markeredgecolor=tint(TEXT_2),
+                      label="missing genotype (./.)")]
+    fig.legend(handles=handles, loc="lower center", ncol=2, frameon=False, fontsize=9,
+               bbox_to_anchor=(0.5, -0.01), labelcolor=TEXT)
+    pt = 1 / 72 / fig.get_figheight()
+    y = 4
+    for text, size, colour in (
+            ("50 samples called together, 10 at each F; each point counts one group's 10 samples' "
+             "genotypes at the planted SNPs, plus variants called where none was planted; pvc "
+             "estimates each sample's F, GATK and DeepVariant take none", 9, TEXT_2),
+            ("Errors against inbreeding — simulated tomato samples", 13, TEXT)):
+        wrapped = textwrap.fill(text, int(fig.get_figwidth() * 72 / (0.5 * size)))
+        fig.text(0.01, 1 + y * pt, wrapped, ha="left", va="bottom", color=colour, fontsize=size,
+                 linespacing=1.3)
+        y += (wrapped.count("\n") + 1) * size * 1.3 + 2
+    return save(fig, out, "errors_inbreeding_by_f")
+
+
 # ---- accuracy: false positives against false negatives ---------------------------------------
 #
 # For a benchmark where no caller leaves a genotype missing (one sample called alone: every
@@ -607,6 +712,7 @@ def main():
                                  exclude=("HipSTR",)),
         *stutter_figures(rows, out),
         *inbreeding_figures(rows, out),
+        inbreeding_scatter_figure(rows, out),
         performance_figure(
             rows, "giab_chr20", depth_key, lambda s, d: d,
             # depth_key orders the raw depths; their labels are made readable below.
