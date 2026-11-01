@@ -1,8 +1,11 @@
 use super::*;
+use crate::neighbour_evidence::records::background_shares;
 
 /// One window from the reference file, with what the prototype computed for it.
 struct ReferenceCase {
+    /// The sampled templates; the walk adds the background when `background` says so.
     templates: usize,
+    background: bool,
     parameters: WalkParameters,
     sites: Vec<(u64, usize, Vec<f64>, Vec<f64>)>,
     log_likelihood: f64,
@@ -25,6 +28,7 @@ fn reference_cases() -> Vec<ReferenceCase> {
         match fields[0] {
             "case" => cases.push(ReferenceCase {
                 templates: fields[1].parse().expect("a template count"),
+                background: fields[7] == "1",
                 parameters: WalkParameters {
                     segment_bases: fields[3].parse().expect("a segment length"),
                     run_bases: fields[4].parse().expect("a run length"),
@@ -40,11 +44,18 @@ fn reference_cases() -> Vec<ReferenceCase> {
                 let alleles: usize = fields[2].parse().expect("an allele count");
                 let values = numbers(3);
                 let genotypes = alleles * (alleles + 1) / 2;
+                let shares_end = genotypes + case.templates * alleles;
+                let mut shares = values[genotypes..shares_end].to_vec();
+                if case.background {
+                    let mut background = Vec::new();
+                    background_shares(&values[shares_end..], &mut background);
+                    shares.extend(background);
+                }
                 case.sites.push((
                     fields[1].parse().expect("a position"),
                     alleles,
                     values[..genotypes].to_vec(),
-                    values[genotypes..].to_vec(),
+                    shares,
                 ));
             }
             "expect" => {
@@ -62,13 +73,14 @@ fn reference_cases() -> Vec<ReferenceCase> {
     cases
 }
 
-/// **The walk reproduces the prototype** on three windows — biallelic; two to four alleles with
-/// long gaps; two templates, five-allele sites and a high mismatch rate — to 1e-9 in every
-/// posterior and in the log-likelihood.
+/// **The walk reproduces the prototype** on four windows — biallelic; two to four alleles with
+/// long gaps; two templates, five-allele sites and a high mismatch rate; two templates and the
+/// background template built from the records' `AF` (§3.3) — to 1e-9 in every posterior and in the
+/// log-likelihood.
 #[test]
 fn the_walk_reproduces_the_python_prototype() {
     let cases = reference_cases();
-    assert_eq!(cases.len(), 3, "the reference file holds three windows");
+    assert_eq!(cases.len(), 4, "the reference file holds four windows");
     for (number, case) in cases.iter().enumerate() {
         let sites: Vec<WalkSite<'_>> = case
             .sites
@@ -80,7 +92,8 @@ fn the_walk_reproduces_the_python_prototype() {
                 template_shares: shares,
             })
             .collect();
-        let result = walk(&sites, case.templates, case.parameters);
+        let templates = case.templates + usize::from(case.background);
+        let result = walk(&sites, templates, case.parameters);
         assert!(
             (result.log_likelihood - case.log_likelihood).abs() < 1e-9,
             "case {number}: log-likelihood {} against {}",

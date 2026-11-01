@@ -27,6 +27,16 @@ def stays(gap, share, run_bases):
     return share + (1 - share) * decay, (1 - share) + share * decay
 
 
+def background_shares(alt_frequencies):
+    """The background template's allele shares at one record (spec §3.3): the cohort's allele
+    frequencies, the reference taking the rest. Rounded frequencies can sum past one; the
+    reference is then 0 and the shares are rescaled to sum to one. Appended to `haplotypes`'
+    templates as one more row, it is a template like the others in every state."""
+    alt = np.asarray(alt_frequencies, dtype=float)
+    shares = np.concatenate([[max(0.0, 1.0 - alt.sum())], alt])
+    return shares / shares.sum()
+
+
 def genotype_pairs(n_alleles):
     """(j, k) with j <= k for each genotype index in VCF order."""
     return [(j, k) for k in range(n_alleles) for j in range(k + 1)]

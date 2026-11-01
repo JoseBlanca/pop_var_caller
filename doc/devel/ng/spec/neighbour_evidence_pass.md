@@ -97,7 +97,10 @@ solved, with *margins* either side read for context and written by the neighbour
   transition (§3.5) returns the state to its long-run share across it. A window is cut only at a
   contig's end; nothing crosses contigs.
 - **Sizes are set by length and by a memory budget** (§6): the core starts at 2 Mb and each margin at
-  1 Mb, and both shrink with the cohort, the margin never below 500 kb.
+  1 Mb, and both shrink with the cohort, the margin never below 500 kb. The core shrinks first, down
+  to the margins' length; then core and margins shrink together, in steps of 50 kb, to the floor. A
+  window's size is chosen from the records it would hold, so a window waits until the records its
+  largest affordable size reaches have arrived (`src/neighbour_evidence/windows.rs`).
 
 ### 2.3 Parallelism
 
@@ -141,8 +144,9 @@ What a record contributes depends on what it carries:
 
 For each sample and window, the `K = min(16, N − 1)` other samples whose allele shares agree best with
 its own, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the sample's informative records
-in the window — on a fixed sample of at most 500 of them, drawn by record order, so the choice is
-deterministic. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
+in the window — on a fixed sample of at most 500 of them, spread evenly over them by record order
+(the `i`-th of 500 is record `⌊i · n / 500⌋` of the `n`), so the choice is deterministic and
+weighs the whole window, not its left margin. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
 what the prototype ran; how accuracy and cost move with `K` is a measurement (§8).
 
 **A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
@@ -191,9 +195,16 @@ Between records `d` bases apart:
 
 **The parameters, per sample.** `F` starts at the sample's fitted inbreeding coefficient from the
 parameters file, clamped to [0.01, 0.99], and is re-estimated as the mean autozygous posterior,
-clamped the same. `S` and `R` are chosen by likelihood from small grids — `S` ∈ {30, 300} kb,
+clamped the same, over every site the fitting windows walked; it is frozen with `S` and `R`. A
+per-window `F` would turn the long-run share into a local one, which is the autozygous state's job. `S` and `R` are chosen by likelihood from small grids — `S` ∈ {30, 300} kb,
 `R` ∈ {10, 30, 100, 300, 1,000, 3,000} kb — **on the first windows of the run that hold at least
-5,000 of the sample's informative records, and then frozen** for the rest of the run. Refitting every
+5,000 of the sample's informative records, and then frozen** for the rest of the run. Until then
+each window adds its twelve walks' log-likelihoods to a running total a grid point, walks with the
+point whose total is largest (ties to the smaller `S`, then the smaller `R`), and re-estimates `F` from
+that point's walk — so a second fitting window refines the first one's choice rather than replacing
+it. A fitting window costs thirteen walks: the grid's twelve and the one that gives its posteriors.
+*Settled in code 2026-11-01 (`src/neighbour_evidence/fit.rs`); the sentence before left open how
+several windows combine and whether `F` freezes.* Refitting every
 window would multiply the pass's cost by the grid's twelve walks (§6); whether a frozen fit loses
 accuracy is a measurement (§8).
 
@@ -266,7 +277,9 @@ informative record nearby, every emission around the site is 1, the state poster
 and the posterior genotype is the cohort's frequency — `0/0` at `GQ` 17 for a 2% allele, the
 confident prior-only call `vcf_output.md` §7.1 exists to forbid. So **a flat-`PL` sample is written
 with a genotype only if it has an informative record within one segment length `S` on each side of
-the site** (on one side, where the contig ends within `S` on the other); otherwise it stays `./.` and
+the site** (on one side, where the contig ends within `S` on the other — at a contig's right end only
+when the header gives its length); a record at the same position counts on neither side, since it
+shares the site's reads rather than bracketing it; otherwise it stays `./.` and
 its `GP` is the pass's posterior, as calling writes a prior. *This narrows ruling Q1 to the cases its
 reason covers; the owner's to confirm, §11 Q1.*
 
@@ -330,9 +343,14 @@ per thread.
 - **Genotype order.** `PL` and `GP` are in the shared table's order (`vcf_output.md` §7.2); the pass
   must read and write them through the same table, never by a hand-rolled index.
 - **A moved `GT` moves `REPCN`, `REPCNB`, `AC` and `AN`** (§4.1); a stale `REPCN` is a silent error.
-- **A flat-`PL` site contributes an emission of 1 to every state.** With the corrected transition
-  (§3.5), skipping it in the walk is exact; it must still get a posterior, since that is where the
-  pass gives its genotype (§4.2).
+- **A flat-`PL` site contributes an emission of 1 to every state — and is walked anyway.** Skipping
+  it is not exact: the transition over two gaps is not the transition over their sum, because a
+  state that leaves its class and returns redraws its templates, which one long step counts as kept.
+  On the prototype, removing one flat site from a nine-site window moved the other sites' posteriors
+  by up to 0.0005 (`S` = `R` = 30 kb). So every record with at least two rows is a site of every
+  sample's walk, a sample's flat and absent records included (an absent sample's likelihood is flat
+  too); the sample's posterior is kept only where it has a row. *Corrected 2026-11-01: this line
+  said skipping was exact.*
 - **Positions are unsigned.** A distance is computed from non-decreasing `POS` within a contig; a
   record out of order is a fault to report, not a negative gap.
 - **Each record is written by exactly one window's core** (§2.2); writing one twice, or not at all,

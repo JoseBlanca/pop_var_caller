@@ -341,16 +341,25 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
             .sum();
         autozygous_probability[index] = both_autozygous / (both_autozygous + both_pairs);
 
+        // The pair states' weight on each ordered allele pair, Q̃ᵀ · W · Q̃ (§3.6): first each
+        // first-copy template's weight spread over the second copy's alleles (K² · A), then over
+        // the first copy's (K · A²) — not K² · A² by summing every state over every pair.
         let blurred = &site_terms.blurred;
-        let mut pair_weight = vec![0.0; alleles * alleles];
+        let mut second_copy = vec![0.0; k * alleles];
         for first in 0..k {
             for second in 0..k {
                 let weight = state_pairs[first * k + second];
-                for a in 0..alleles {
-                    let first_share = weight * blurred[first * alleles + a];
-                    for b in 0..alleles {
-                        pair_weight[a * alleles + b] += first_share * blurred[second * alleles + b];
-                    }
+                for b in 0..alleles {
+                    second_copy[first * alleles + b] += weight * blurred[second * alleles + b];
+                }
+            }
+        }
+        let mut pair_weight = vec![0.0; alleles * alleles];
+        for first in 0..k {
+            for a in 0..alleles {
+                let first_share = blurred[first * alleles + a];
+                for b in 0..alleles {
+                    pair_weight[a * alleles + b] += first_share * second_copy[first * alleles + b];
                 }
             }
         }

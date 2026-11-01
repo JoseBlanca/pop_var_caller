@@ -1,0 +1,122 @@
+use super::*;
+use crate::neighbour_evidence::records::SampleColumns;
+
+const HOMOZYGOUS_REFERENCE: ([u32; 3], [f64; 3]) = ([0, 30, 60], [1.0, 0.0, 0.0]);
+const HOMOZYGOUS_ALTERNATIVE: ([u32; 3], [f64; 3]) = ([60, 30, 0], [0.0, 0.0, 1.0]);
+
+/// A window of `records` records where each sample is homozygous for the allele its pattern
+/// names — `true` alternative — or absent (`None`).
+/// Which records a sample carries the alternative at, or `None` for a sample written `.`.
+type Pattern = Option<fn(usize) -> bool>;
+
+fn window(patterns: &[Pattern], records: usize) -> Vec<SiteRecord> {
+    (0..records)
+        .map(|record| {
+            let columns: Vec<Option<SampleColumns<'_>>> = patterns
+                .iter()
+                .map(|pattern| {
+                    pattern.map(|carries| {
+                        let (phred, posteriors) = if carries(record) {
+                            &HOMOZYGOUS_ALTERNATIVE
+                        } else {
+                            &HOMOZYGOUS_REFERENCE
+                        };
+                        SampleColumns {
+                            phred_likelihoods: phred,
+                            genotype_posteriors: posteriors,
+                        }
+                    })
+                })
+                .collect();
+            SiteRecord::new(1 + record as u64 * 100, &[0.5], &columns)
+        })
+        .collect()
+}
+
+fn even(record: usize) -> bool {
+    record.is_multiple_of(2)
+}
+
+fn third(record: usize) -> bool {
+    record.is_multiple_of(3)
+}
+
+/// **A sample copies the samples that carry its alleles**: samples 0–2 carry one pattern, 3–4
+/// another; sample 0's two templates are 1 and 2, sample 3's first is 4.
+#[test]
+fn a_sample_copies_the_samples_that_carry_its_alleles() {
+    let records = window(
+        &[Some(even), Some(even), Some(even), Some(third), Some(third)],
+        30,
+    );
+    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+    assert_eq!(choose_templates(&records, 3, 1), Some(vec![4]));
+}
+
+/// **Ties break by sample order, and a sample is never its own template.**
+#[test]
+fn ties_break_by_sample_order_and_never_choose_the_sample() {
+    let records = window(&[Some(even as fn(usize) -> bool) as Pattern; 5], 10);
+    assert_eq!(choose_templates(&records, 2, 3), Some(vec![0, 1, 3]));
+    assert_eq!(choose_templates(&records, 2, 16), Some(vec![0, 1, 3, 4]));
+}
+
+/// **An absent sample is a template of equal shares**: half a copy's difference from a homozygous
+/// sample at every record, so it ranks between a sample that agrees and one that disagrees.
+#[test]
+fn an_absent_sample_compares_as_equal_shares() {
+    fn never(_: usize) -> bool {
+        false
+    }
+    fn always(_: usize) -> bool {
+        true
+    }
+    let records = window(&[Some(never), Some(always), None, Some(never)], 10);
+    assert_eq!(choose_templates(&records, 0, 3), Some(vec![3, 2, 1]));
+}
+
+/// **A sample with no informative record in the window has no templates**, so it is not
+/// re-called there (§3.3).
+#[test]
+fn a_sample_without_informative_records_has_no_templates() {
+    let flat_phred = [0_u32; 3];
+    let prior = [0.25, 0.5, 0.25];
+    let records: Vec<SiteRecord> = (0..5)
+        .map(|record| {
+            let columns = [
+                Some(SampleColumns {
+                    phred_likelihoods: &flat_phred,
+                    genotype_posteriors: &prior,
+                }),
+                Some(SampleColumns {
+                    phred_likelihoods: &HOMOZYGOUS_REFERENCE.0,
+                    genotype_posteriors: &HOMOZYGOUS_REFERENCE.1,
+                }),
+            ];
+            SiteRecord::new(1 + record * 100, &[0.5], &columns)
+        })
+        .collect();
+    assert_eq!(choose_templates(&records, 0, 16), None);
+    assert_eq!(choose_templates(&records, 1, 16), Some(vec![0]));
+}
+
+/// **More than [`AGREEMENT_RECORDS`] informative records are compared on that many, spread over
+/// the window**: a sample agreeing with sample 1 over the window's first half and with sample 2
+/// over its second still ties them, where taking the first 500 records would pick sample 1.
+#[test]
+fn the_records_compared_are_spread_over_the_window() {
+    fn first_half(record: usize) -> bool {
+        record < 1_000
+    }
+    fn second_half(record: usize) -> bool {
+        record >= 1_000
+    }
+    fn always(_: usize) -> bool {
+        true
+    }
+    let records = window(&[Some(always), Some(first_half), Some(second_half)], 2_000);
+    let templates = choose_templates(&records, 0, 2).expect("informative records");
+    assert_eq!(templates, vec![1, 2], "a tie, broken by sample order");
+    let records = window(&[Some(always), Some(second_half), Some(first_half)], 2_000);
+    assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
+}
