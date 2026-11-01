@@ -117,7 +117,10 @@
 //! | `hard_bundle_share` | 0.6 | the share of bundles laid in a hard shape (HG002's); `0` lays every bundle as before hard shapes existed, byte for byte |
 //! | `genome_bp` | 4000000 | the reference's length, all contigs together |
 //! | `contigs` | 4 | how many contigs the reference is cut into |
-//! | `inbreeding` | 0 | the chance a sample's two copies at a site are one draw |
+//! | `inbreeding` | 0 | without founders, the chance a sample's two copies at a site are one draw; with them, the share of each sample's genome in autozygous runs |
+//! | `founders` | 0 | how many founder haplotypes the cohort descends from (spec §12); `0` draws every site's genotype on its own, byte for byte as before |
+//! | `segment_kb` | 300 | with founders: the mean stretch one copy copies from one founder |
+//! | `run_kb` | 2000 | with founders: the mean autozygous run |
 //! | `threads` | all | how many samples are sequenced at once |
 //! | `seed` | 20261009 | the draw's seed; the whole output is a function of it and the rest |
 //!
@@ -277,6 +280,11 @@ const SECOND_MEMBER_CHANGE_SHARE: f64 = 0.25;
 /// Mixed into the seed for the bundles' own draw, so that laying bundles takes nothing from the
 /// draw everything else comes from, and `bundles=0` leaves that draw untouched.
 const BUNDLE_SEED_SALT: u64 = 0x5851_F42D_4C95_7F2D;
+
+/// What the founder draw's seed is the main seed XOR'd with, so that the founders, the samples'
+/// ancestries and the founders' alleles are a stream of their own and the default population —
+/// every site drawn on its own — keeps every draw it made before founders existed (spec §12).
+const FOUNDER_SEED_SALT: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// The share of bundles laid in a **hard shape** — members that abut or carry an interruption —
 /// by default: HG002's. Of the 2,410 bundles of at most 100 bases the typing finds in HG002's
@@ -577,6 +585,13 @@ struct Settings {
     genome_bp: usize,
     contigs: usize,
     inbreeding: f64,
+    /// How many founder haplotypes the cohort descends from; `0` draws every site's genotype on
+    /// its own, as before founders existed (spec §12).
+    founders: usize,
+    /// The mean length of a stretch one chromosome copy copies from one founder, in kilobases.
+    segment_kb: f64,
+    /// The mean length of an autozygous run, in kilobases.
+    run_kb: f64,
     threads: usize,
     seed: u64,
 }
@@ -593,6 +608,9 @@ impl Default for Settings {
             genome_bp: 4_000_000,
             contigs: 4,
             inbreeding: 0.0,
+            founders: 0,
+            segment_kb: 300.0,
+            run_kb: 2_000.0,
             threads: std::thread::available_parallelism().map_or(1, usize::from),
             seed: 20_261_009,
         }
@@ -623,10 +641,22 @@ impl Settings {
                 "genome_bp" => settings.genome_bp = number()? as usize,
                 "contigs" => settings.contigs = number()? as usize,
                 "inbreeding" => settings.inbreeding = number()?,
+                "founders" => settings.founders = number()? as usize,
+                "segment_kb" => settings.segment_kb = number()?,
+                "run_kb" => settings.run_kb = number()?,
                 "threads" => settings.threads = number()? as usize,
                 "seed" => settings.seed = number()? as u64,
                 other => return Err(format!("unknown setting `{other}`")),
             }
+        }
+        if settings.founders > usize::from(u8::MAX) + 1 {
+            return Err("founders must be at most 256".to_string());
+        }
+        if settings.founders > 0 && !(settings.segment_kb > 0.0 && settings.run_kb > 0.0) {
+            return Err("segment_kb and run_kb must be positive".to_string());
+        }
+        if !(0.0..=1.0).contains(&settings.inbreeding) {
+            return Err("inbreeding must be between 0 and 1".to_string());
         }
         if settings.samples == 0 || settings.contigs == 0 || settings.threads == 0 {
             return Err("samples, contigs and threads must all be at least one".to_string());
@@ -2320,6 +2350,137 @@ fn draw_pair(frequencies: &[f64], inbreeding: f64, draw: &mut Draw) -> [u8; 2] {
     }
 }
 
+/// **One stretch of one sample's ancestry along one contig** (spec §12): over `[start, end)` the
+/// first copy is copied from founder `first` and the second from founder `second`; where
+/// `autozygous`, the second copy is the first counted twice, and `second == first`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AncestryPiece {
+    start: usize,
+    end: usize,
+    first: usize,
+    second: usize,
+    autozygous: bool,
+}
+
+/// One copy's founders along a contig of `length` bases: stretches of exponential length with
+/// mean `mean_bp`, each copied from a founder drawn uniformly. Covers `[0, length)`.
+fn founder_track(
+    length: usize,
+    mean_bp: f64,
+    founders: usize,
+    draw: &mut Draw,
+) -> Vec<(usize, usize)> {
+    let mut track = Vec::new();
+    let mut start = 0_usize;
+    while start < length {
+        let span = (mean_bp * draw.exponential()).ceil().max(1.0) as usize;
+        track.push((start, draw.below(founders as u64) as usize));
+        start = start.saturating_add(span);
+    }
+    track
+}
+
+/// Where a sample's two copies are one copy counted twice, along a contig of `length` bases:
+/// alternating runs and gaps, runs of mean `run_bp`, gaps of mean `run_bp · (1 − F) / F`, so that
+/// a share `F` of the contig is autozygous on average. The first stretch is a run with probability
+/// `F`. Returns the starts of each stretch and whether it is a run.
+fn autozygous_track(
+    length: usize,
+    run_bp: f64,
+    inbreeding: f64,
+    draw: &mut Draw,
+) -> Vec<(usize, bool)> {
+    if inbreeding <= 0.0 {
+        return vec![(0, false)];
+    }
+    if inbreeding >= 1.0 {
+        return vec![(0, true)];
+    }
+    let gap_bp = run_bp * (1.0 - inbreeding) / inbreeding;
+    let mut track = Vec::new();
+    let mut in_run = draw.unit() < inbreeding;
+    let mut start = 0_usize;
+    while start < length {
+        let mean = if in_run { run_bp } else { gap_bp };
+        track.push((start, in_run));
+        start = start.saturating_add((mean * draw.exponential()).ceil().max(1.0) as usize);
+        in_run = !in_run;
+    }
+    track
+}
+
+/// The value a step track holds at `position`: the entry with the last start at or before it.
+fn track_at<T: Copy>(track: &[(usize, T)], position: usize) -> T {
+    let index = track.partition_point(|(start, _)| *start <= position);
+    track[index.saturating_sub(1)].1
+}
+
+/// **One sample's ancestry along one contig**: the two copies' founder tracks and the autozygous
+/// track, merged at every breakpoint of any of the three.
+fn ancestry_of(length: usize, settings: &Settings, draw: &mut Draw) -> Vec<AncestryPiece> {
+    let segment_bp = settings.segment_kb * 1_000.0;
+    let first = founder_track(length, segment_bp, settings.founders, draw);
+    let second = founder_track(length, segment_bp, settings.founders, draw);
+    let runs = autozygous_track(length, settings.run_kb * 1_000.0, settings.inbreeding, draw);
+    let mut breaks: Vec<usize> = first
+        .iter()
+        .map(|(start, _)| *start)
+        .chain(second.iter().map(|(start, _)| *start))
+        .chain(runs.iter().map(|(start, _)| *start))
+        .collect();
+    breaks.sort_unstable();
+    breaks.dedup();
+    breaks
+        .iter()
+        .enumerate()
+        .map(|(index, &start)| {
+            let end = breaks.get(index + 1).copied().unwrap_or(length);
+            let autozygous = track_at(&runs, start);
+            let founder = track_at(&first, start);
+            AncestryPiece {
+                start,
+                end,
+                first: founder,
+                second: if autozygous {
+                    founder
+                } else {
+                    track_at(&second, start)
+                },
+                autozygous,
+            }
+        })
+        .collect()
+}
+
+/// The piece of an ancestry that covers `position`.
+fn piece_at(ancestry: &[AncestryPiece], position: usize) -> AncestryPiece {
+    let index = ancestry.partition_point(|piece| piece.start <= position);
+    ancestry[index.saturating_sub(1)]
+}
+
+/// **The genotypes at one event when the cohort descends from founders**: each founder carries one
+/// allele, drawn from the event's frequencies, and each sample's copies carry their founders'
+/// alleles at the event's position.
+fn founder_genotypes(
+    frequencies: &[f64],
+    contig: usize,
+    position: usize,
+    ancestries: &[Vec<Vec<AncestryPiece>>],
+    founders: usize,
+    draw: &mut Draw,
+) -> Vec<[u8; 2]> {
+    let alleles: Vec<u8> = (0..founders)
+        .map(|_| draw.categorical(frequencies) as u8)
+        .collect();
+    ancestries
+        .iter()
+        .map(|by_contig| {
+            let piece = piece_at(&by_contig[contig], position);
+            [alleles[piece.first], alleles[piece.second]]
+        })
+        .collect()
+}
+
 /// One sample's library.
 #[derive(Debug, Clone, Copy)]
 struct Library {
@@ -2343,6 +2504,9 @@ struct Cohort {
     libraries: Vec<Library>,
     /// Per contig, every segment, bundle and variant on it in order along the contig.
     events: Vec<Vec<Event>>,
+    /// `[sample][contig]`, each sample's ancestry along each contig; empty unless the cohort
+    /// descends from founders (spec §12).
+    ancestries: Vec<Vec<Vec<AncestryPiece>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2392,33 +2556,96 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
             multiplier: float::exp(LIBRARY_MULTIPLIER_LOG_SD * draw.normal()),
         })
         .collect();
-    let segment_genotypes = segments
-        .iter()
-        .map(|segment| {
-            let frequencies: Vec<f64> = segment.alleles.iter().map(|one| one.frequency).collect();
-            (0..settings.samples)
-                .map(|_| draw_pair(&frequencies, settings.inbreeding, draw))
-                .collect()
-        })
-        .collect();
-    let generic_genotypes = generic
-        .iter()
-        .map(|variant| {
-            let frequencies = [1.0 - variant.frequency, variant.frequency];
-            (0..settings.samples)
-                .map(|_| draw_pair(&frequencies, settings.inbreeding, draw))
-                .collect()
-        })
-        .collect();
-    let bundle_genotypes = bundles
-        .iter()
-        .map(|bundle| {
-            let frequencies: Vec<f64> = bundle.alleles.iter().map(|one| one.frequency).collect();
-            (0..settings.samples)
-                .map(|_| draw_pair(&frequencies, settings.inbreeding, &mut bundle_draw))
-                .collect()
-        })
-        .collect();
+    let ancestries: Vec<Vec<Vec<AncestryPiece>>>;
+    let (segment_genotypes, generic_genotypes, bundle_genotypes) = if settings.founders == 0 {
+        ancestries = Vec::new();
+        let segment_genotypes = segments
+            .iter()
+            .map(|segment| {
+                let frequencies: Vec<f64> =
+                    segment.alleles.iter().map(|one| one.frequency).collect();
+                (0..settings.samples)
+                    .map(|_| draw_pair(&frequencies, settings.inbreeding, draw))
+                    .collect()
+            })
+            .collect();
+        let generic_genotypes = generic
+            .iter()
+            .map(|variant| {
+                let frequencies = [1.0 - variant.frequency, variant.frequency];
+                (0..settings.samples)
+                    .map(|_| draw_pair(&frequencies, settings.inbreeding, draw))
+                    .collect()
+            })
+            .collect();
+        let bundle_genotypes = bundles
+            .iter()
+            .map(|bundle| {
+                let frequencies: Vec<f64> =
+                    bundle.alleles.iter().map(|one| one.frequency).collect();
+                (0..settings.samples)
+                    .map(|_| draw_pair(&frequencies, settings.inbreeding, &mut bundle_draw))
+                    .collect()
+            })
+            .collect();
+        (segment_genotypes, generic_genotypes, bundle_genotypes)
+    } else {
+        let mut founder_draw = Draw::new(settings.seed ^ FOUNDER_SEED_SALT);
+        ancestries = (0..settings.samples)
+            .map(|_| {
+                contigs
+                    .iter()
+                    .map(|contig| ancestry_of(contig.bases.len(), settings, &mut founder_draw))
+                    .collect()
+            })
+            .collect();
+        let founders = settings.founders;
+        let segment_genotypes = segments
+            .iter()
+            .map(|segment| {
+                let frequencies: Vec<f64> =
+                    segment.alleles.iter().map(|one| one.frequency).collect();
+                founder_genotypes(
+                    &frequencies,
+                    segment.contig,
+                    segment.window_start(),
+                    &ancestries,
+                    founders,
+                    &mut founder_draw,
+                )
+            })
+            .collect();
+        let generic_genotypes = generic
+            .iter()
+            .map(|variant| {
+                let frequencies = [1.0 - variant.frequency, variant.frequency];
+                founder_genotypes(
+                    &frequencies,
+                    variant.contig,
+                    variant.position,
+                    &ancestries,
+                    founders,
+                    &mut founder_draw,
+                )
+            })
+            .collect();
+        let bundle_genotypes = bundles
+            .iter()
+            .map(|bundle| {
+                let frequencies: Vec<f64> =
+                    bundle.alleles.iter().map(|one| one.frequency).collect();
+                founder_genotypes(
+                    &frequencies,
+                    bundle.contig,
+                    bundle.window_start(),
+                    &ancestries,
+                    founders,
+                    &mut founder_draw,
+                )
+            })
+            .collect();
+        (segment_genotypes, generic_genotypes, bundle_genotypes)
+    };
 
     let mut events: Vec<Vec<(usize, Event)>> = vec![Vec::new(); contigs.len()];
     for (index, segment) in segments.iter().enumerate() {
@@ -2449,6 +2676,7 @@ fn draw_cohort(settings: &Settings, draw: &mut Draw) -> Result<Cohort, String> {
         samples,
         libraries,
         events,
+        ancestries,
     })
 }
 
@@ -3199,7 +3427,35 @@ fn write_tables(out_dir: &Path, cohort: &Cohort) -> std::io::Result<()> {
             }
         }
     }
-    rates.flush()
+    rates.flush()?;
+
+    // Where each sample's copies came from, when the cohort descends from founders (spec §12):
+    // the truth a model of shared haplotypes or autozygous runs is scored against.
+    if cohort.ancestries.is_empty() {
+        return Ok(());
+    }
+    let mut ancestry = create(&out_dir.join("ancestry.tsv"))?;
+    writeln!(
+        ancestry,
+        "sample\tchrom\tstart\tend\tfirst_copy_founder\tsecond_copy_founder\tautozygous"
+    )?;
+    for (sample, by_contig) in cohort.samples.iter().zip(&cohort.ancestries) {
+        for (contig, pieces) in cohort.contigs.iter().zip(by_contig) {
+            for piece in pieces {
+                writeln!(
+                    ancestry,
+                    "{sample}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    contig.name,
+                    piece.start,
+                    piece.end,
+                    piece.first,
+                    piece.second,
+                    u8::from(piece.autozygous)
+                )?;
+            }
+        }
+    }
+    ancestry.flush()
 }
 
 // ---------------------------------------------------------------------------

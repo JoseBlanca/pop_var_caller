@@ -554,3 +554,47 @@ one. The same flaw reached separated shapes, more rarely: 2 of 20,000, each a re
 flank (`separated_bundles_rarely_need_new_flanks`); before the fix such a run stopped at the typing
 check. After it, every bundle passed on two hard-only runs of 3,000 shapes (the default seed and
 seed 11) and on the default seed and seed 7 at the default share.
+
+## 12. A cohort that descends from founders (added 2026-11-01)
+
+**What it is for.** Until this section every site's genotype was drawn on its own, so neighbouring
+sites said nothing about each other. The neighbour-evidence pass the owner ruled to build
+([`../research/neighbour_evidence_hmm.md`](../research/neighbour_evidence_hmm.md) §11) works by
+exactly that: samples share stretches of chromosome with each other, and inbred samples carry long
+runs where their two copies are one. This section adds a cohort with both, at read level, with the
+truth written down.
+
+**The model.** `founders=K` draws K founder haplotypes. At every event — an STR segment, an STR
+bundle, a SNP or an indel away from the segments — each founder carries one allele, drawn from the
+event's frequencies (the same frequencies the default draws genotypes from). Each sample's two copies
+of each contig are then patchworks of founders:
+
+- **Shared stretches.** Along the contig, a copy copies one founder for a stretch of exponential
+  length with mean `segment_kb`, then a founder drawn afresh, and so on; the two copies are drawn
+  independently.
+- **Autozygous runs.** Independently of the stretches, the contig alternates between runs, where the
+  second copy is the first counted twice, and gaps, where it is its own; runs have mean length
+  `run_kb` and gaps `run_kb · (1 − F) / F`, so a share F of each genome is in runs on average, with F
+  the `inbreeding` setting. F = 0 lays no runs and F = 1 makes every sample one copy counted twice.
+- A sample's genotype at an event is its two copies' founders' alleles at the event's position.
+
+Everything else — the reference, the alleles and their frequencies, the libraries, the stutter, the
+reads and the errors — is drawn as before. The founder draws are a stream of their own, seeded from
+the main seed XOR'd with a fixed salt, so **`founders=0`, the default, writes every file byte for
+byte as before** (checked 2026-11-01 against main's build on three samples over 300 kb).
+
+**The truth it adds.** `ancestry.tsv`: one row per stretch of one sample's contig, with its start and
+end (zero-based, half-open), each copy's founder and whether it is autozygous. The genotypes in
+`truth.vcf` and the segment and bundle tables follow from it.
+
+**Checked** on 20 samples from 8 founders, F = 0.8, `run_kb=500`, over 4 Mb: the share of each
+genome in runs is 0.66 to 0.88 (mean 0.79), no genotype inside a run is heterozygous (64,300), and
+copies of one founder carry the same allele at a record in 132,238 of 132,246 sample-records; the 8
+others lie within 28 bases of a stretch's edge, where a record's written position (a padding base,
+an STR window's start) is on the other side of the edge from the position the genotype was drawn at.
+
+**What it does not model.** Founders are unrelated to each other and equally common; a real
+population's haplotypes are related by a tree and some are rare. Stretch lengths do not vary along
+the genome as recombination rates do. Residual heterozygosity in an inbred line comes in blocks, as
+here, but its mutations since the founders are not drawn: a copy carries its founder's alleles
+exactly.
