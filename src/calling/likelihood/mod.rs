@@ -1396,8 +1396,8 @@ pub struct GenericObservation {
     /// locus (`doc/devel/ng/spec/calling_quality.md` §3.3). This view is where that
     /// specification says the counts travel, and the merge's `AlleleSupport` already has
     /// them; anything that gathered them a second way would be a second answer to the same
-    /// question.
-    pub forward_reads: u32,
+    /// question. A fraction where a read was composed across records, as the merge's is.
+    pub forward_reads: f64,
     /// Of those reads, how many started strictly left of the record they were seen at —
     /// freebayes' `placedLeft`, and the read-position half of the same correction.
     ///
@@ -1405,8 +1405,9 @@ pub struct GenericObservation {
     /// the mint that produced it; nothing re-anchors it, so where a locus spans several of a
     /// sample's records this mixes as many questions as it has records. Carried forward from
     /// [`AlleleSupport::placed_left`](crate::run::cohort_merge::build::AlleleSupport::placed_left),
-    /// whose own comment is the one to read before drawing a conclusion from it.
-    pub placed_left_reads: u32,
+    /// whose own comment is the one to read before drawing a conclusion from it. A fraction,
+    /// as [`Self::forward_reads`] is.
+    pub placed_left_reads: f64,
 }
 
 impl GenericObservation {
@@ -2300,11 +2301,11 @@ mod tests {
             read_group: ReadGroupId(read_group),
             support: AlleleSupport {
                 num_reads,
-                num_fwd: 7,
+                num_fwd: 7.0,
                 q_sum,
                 mapq_sum: 611,
                 mapq_sum_sq: 37_442,
-                placed_left: 3,
+                placed_left: 3.0,
             },
         }
     }
@@ -2395,8 +2396,8 @@ mod tests {
         let observation =
             GenericObservation::of_supported_allele(&supported_row(3, 9, 17, -41.25), AlleleId(3));
 
-        assert_eq!(observation.forward_reads, 7);
-        assert_eq!(observation.placed_left_reads, 3);
+        assert_eq!(observation.forward_reads, 7.0);
+        assert_eq!(observation.placed_left_reads, 3.0);
     }
 
     /// The type's doc promises plain scalars and cheap copying. A field owning heap would
@@ -2404,11 +2405,12 @@ mod tests {
     /// works under (spec §8), so the width is pinned rather than described.
     #[test]
     fn the_observation_stays_a_handful_of_scalars_wide() {
-        // **32, and it was 24 before the two site-quality counters joined it.** Not 34: the
-        // `f64` wants eight-byte alignment, so the two-byte allele id and the four
-        // four-byte counts are padded out to twenty-four before it. The two counters cost
-        // eight bytes on a struct the merge already pays 48 for.
-        assert_eq!(std::mem::size_of::<GenericObservation>(), 32);
+        // **40: it was 24 before the two site-quality counters joined it, and 32 while they were
+        // whole reads.** They became `f64` shares on 2026-11-01, because rounding a composed
+        // read's strand share made the strand test asymmetric. `f32` shares kept it at 32 and
+        // saved nothing measurable: a row lives for one locus on one worker. Three eights, plus
+        // the two-byte allele id and the two four-byte counts padded out to sixteen.
+        assert_eq!(std::mem::size_of::<GenericObservation>(), 40);
         assert_eq!(std::mem::align_of::<GenericObservation>(), 8);
         assert!(!std::mem::needs_drop::<GenericObservation>());
     }

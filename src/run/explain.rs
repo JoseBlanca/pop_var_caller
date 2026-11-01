@@ -294,12 +294,17 @@ pub(crate) fn selection_rows(
                 continue;
             }
             let reads: u32 = groups.iter().map(|row| row.support.num_reads).sum();
-            let forward: u32 = groups.iter().map(|row| row.support.num_fwd).sum();
+            let forward: f64 = groups
+                .iter()
+                .map(|row| f64::from(row.support.num_fwd))
+                .sum();
+            let placed_left: f64 = groups.iter().map(|row| row.support.placed_left).sum();
             rows.push(
                 ExplainRow::of(region, ExplainStep::Reads, reads.to_string())
                     .for_sample(sample.sample)
                     .about(spelled(bases))
                     .with("forward", forward)
+                    .with("placed_left", placed_left)
                     .with("read_groups", groups.len()),
             );
         }

@@ -516,13 +516,38 @@ const POOLED_SHARE_FLOOR: f64 = 0.001;
 /// at least [`EXPECTED_SHARE_PRIOR_READS`] — so "no more likely than observed" is two flanks. The mode and
 /// the far flank's edge are each a binary search on the log-probability, and each flank is summed
 /// outward from its edge only until a term no longer moves the sum.
+///
+/// # A count that is not whole
+///
+/// **`observed` can be a fraction**: at a locus built from several of a sample's records, a read
+/// composed across them counts as its share of forward or placed-left sightings
+/// (`AlleleSupport::num_fwd`). The tail is defined at whole counts, so a fraction is weighed
+/// **between the two whole counts either side of it, in proportion**. Rounding instead made the
+/// answer jump at every half: at SL4.0ch07:48298526, 56.5 of 57 placed-left reads rounded to 57,
+/// the most likely count, and was charged nothing, while the same total a last bit lower rounded
+/// to 56 and was charged 17.8 Phred after the weight. Interpolating is also what keeps the test
+/// symmetric when every read's strand is swapped: `observed` becomes `total − observed` against a
+/// mirrored distribution, and the two whole counts and their weights mirror with it, where a half
+/// rounded up on both strands (read-transform oracle, 2026-11-01).
 fn beta_binomial_two_sided_tail_phred(observed: f64, total: f64, alpha: f64, beta: f64) -> f64 {
     if total < 1.0 {
         return 0.0;
     }
     let n = total.round() as u64;
-    let k_observed = observed.round().clamp(0.0, n as f64) as u64;
+    let observed = observed.clamp(0.0, n as f64);
+    let below = observed.floor();
+    let fraction = observed - below;
     let distribution = BetaBinomial::new(n, alpha, beta);
+    let at_below = tail_phred_at(&distribution, n, below as u64);
+    if fraction == 0.0 {
+        return at_below;
+    }
+    let at_above = tail_phred_at(&distribution, n, below as u64 + 1);
+    (1.0 - fraction) * at_below + fraction * at_above
+}
+
+/// [`beta_binomial_two_sided_tail_phred`] at a whole count `k_observed` of `n`.
+fn tail_phred_at(distribution: &BetaBinomial, n: u64, k_observed: u64) -> f64 {
     let mode = distribution.mode();
     if k_observed == mode {
         return 0.0;
@@ -1367,6 +1392,46 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// **A fractional count has no jump at a half**, the case SL4.0ch07:48298526 hit: 56.5 of 57
+    /// placed-left reads, against a share near one. Rounded, a last bit either side of the half
+    /// was the difference between no penalty and 17.8 Phred after the weight.
+    #[test]
+    fn a_count_either_side_of_a_half_gets_nearly_the_same_tail() {
+        let (alpha, beta) = (588.2 + 9.9, 4.8 + 0.1);
+        let just_below = beta_binomial_two_sided_tail_phred(56.5 - 1e-7, 57.0, alpha, beta);
+        let just_above = beta_binomial_two_sided_tail_phred(56.5 + 1e-7, 57.0, alpha, beta);
+        assert!(
+            (just_below - just_above).abs() < 1e-5,
+            "{just_below} against {just_above}"
+        );
+        let whole_below = beta_binomial_two_sided_tail_phred(56.0, 57.0, alpha, beta);
+        let whole_above = beta_binomial_two_sided_tail_phred(57.0, 57.0, alpha, beta);
+        let half = beta_binomial_two_sided_tail_phred(56.5, 57.0, alpha, beta);
+        assert!(
+            (half - (whole_below + whole_above) / 2.0).abs() < 1e-9,
+            "halfway between {whole_below} and {whole_above}: {half}"
+        );
+    }
+
+    /// **Swapping every read's strand mirrors the count and the distribution, and the tail does
+    /// not move** — fractions included, which rounding broke: a half rounded up on both strands.
+    #[test]
+    fn a_mirrored_fractional_count_gets_the_same_tail() {
+        for (observed, total, alpha, beta) in [
+            (12.5, 30.0, 40.0, 25.0),
+            (2.25, 7.0, 5.0, 5.0),
+            (56.5, 57.0, 598.1, 4.9),
+            (0.4, 3.0, 9.95, 0.05),
+        ] {
+            let as_read = beta_binomial_two_sided_tail_phred(observed, total, alpha, beta);
+            let swapped = beta_binomial_two_sided_tail_phred(total - observed, total, beta, alpha);
+            assert!(
+                (as_read - swapped).abs() < 1e-6 * as_read.max(1.0),
+                "{observed} of {total} at Beta({alpha}, {beta}): {as_read} against {swapped}"
+            );
         }
     }
 

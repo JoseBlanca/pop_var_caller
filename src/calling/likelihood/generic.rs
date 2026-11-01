@@ -1743,8 +1743,8 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum,
-            forward_reads: num_reads / 2,
-            placed_left_reads: num_reads / 2,
+            forward_reads: f64::from(num_reads / 2),
+            placed_left_reads: f64::from(num_reads / 2),
         }
     }
 
