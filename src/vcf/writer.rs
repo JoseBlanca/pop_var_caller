@@ -117,8 +117,25 @@ impl VcfWriter {
         metadata: VcfHeaderMetadata,
         ploidy: Ploidy,
     ) -> Result<Self, VcfWriteError> {
-        let mut sink = Sink::open_tmp(final_path)?;
         let header = header_text(&metadata);
+        Self::create_with_header(final_path, metadata, ploidy, &header)
+    }
+
+    /// **Open the output with a header written elsewhere** — `pvc refine-genotypes`, which keeps
+    /// the header of the VCF it rewrites and amends it. `metadata` still supplies what the writer
+    /// itself reads: the contigs, the sample count and whether the neighbour-evidence pass runs.
+    /// `header` must end with the `#CHROM` line and its newline.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create`].
+    pub fn create_with_header(
+        final_path: &Path,
+        metadata: VcfHeaderMetadata,
+        ploidy: Ploidy,
+        header: &str,
+    ) -> Result<Self, VcfWriteError> {
+        let mut sink = Sink::open_tmp(final_path)?;
         sink.write_all(header.as_bytes())
             .map_err(|source| VcfWriteError::Write {
                 tmp_path: tmp_path_for(final_path),

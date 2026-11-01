@@ -438,6 +438,15 @@ All four as recommended.
    (`##parametersFile=`), and **refuses a VCF the pass has already refined**: refined `GP` as templates
    would count the cohort's evidence twice.
 
+   *Built 2026-11-01 (`src/cli/refine_genotypes.rs`).* `--parameters` is required rather than read
+   off `##pvcParameters=`, which records a path relative to wherever the run started; a file whose
+   checksum differs from the one that line records is warned about, not refused, since the
+   coefficients only start each sample's fit. The output keeps the input's header, with the
+   `##neighbourEvidence=` line replaced, `GP`'s declaration changed and the command recorded in
+   `##refineGenotypesCommandline=`. The pass always runs (it is the command's purpose); a cohort
+   it cannot run on — one sample, a ploidy other than two — is an error naming why. On the
+   20-sample simulated cohort its records are byte-identical to those the in-run pass wrote.
+
 ---
 
 ## 10. Deferred, with a recommended home

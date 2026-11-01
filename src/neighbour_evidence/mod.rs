@@ -22,4 +22,4 @@ pub mod templates;
 pub mod windows;
 
 #[cfg(test)]
-mod test_cohort;
+pub(crate) mod test_cohort;
