@@ -383,8 +383,56 @@ represent, and is written `./.` for that reason.
 **A per-sample quality floor is a fourth possible route and is deliberately not adopted here** —
 §14 Q4.
 
-**Not carried over:** `GP` (opt-in posterior rows — the loop's posteriors live in reused scratch
-and retaining them is a real memory decision; deferred, §13).
+#### 7.2 `PL` and `GP` — the evidence and the answer, per genotype (added 2026-11-01)
+
+```
+##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods, the most likely genotype 0, VCF genotype order">
+##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities, VCF genotype order">
+```
+
+**What they are for.** `GT` and `GQ` give one answer and how sure it is; a second pass that weighs
+neighbouring loci — the planned neighbour-evidence pass
+([`../research/neighbour_evidence_hmm.md`](../research/neighbour_evidence_hmm.md) §11), or any
+external imputation tool — needs what the reads said about *every* genotype, and what the call made
+of it. `PL` is the first and `GP` the second. With them and `AF`, a pass can rebuild the prior each
+sample was called under (the report's §2). Every low-coverage imputation tool reads `PL`.
+
+**Written on every record, always** — no option turns them off (owner, 2026-11-01). The FORMAT
+string gains them after `AD`: `GT:GQ:DP:AD:PL:GP` on a generic record, `GT:GQ:DP:AD:PL:GP:REPCN` on
+a tract, `GT:GQ:DP:AD:PL:GP:REPCNB` on a bundle with runs. §10 prices them.
+
+- **`PL`** — the sample's genotype log-likelihoods from the final calling pass, the same row the
+  call was scored with, converted to Phred and shifted so the most likely genotype is 0:
+  `round(−10 · log10 e · (ℓ_g − max ℓ))`. Integers, as every tool that reads `PL` expects; one Phred
+  unit is a likelihood ratio of 1.26, finer than any decision downstream draws.
+- **`GP`** — the sample's posterior over the genotypes, the row `GT` is the argmax of and `GQ` is
+  read from. Probabilities, not Phred (VCF 4.3 onwards), written with three decimals and trailing
+  zeros dropped (`0.998,0.002,0`), so a row sums to one within 0.0005 a genotype.
+- **Order and length.** The genotype order is §7's, the shared table's — `0/0, 0/1, 1/1, 0/2, 1/2,
+  2/2, …`, and at any ploidy the same enumeration `GT` decodes through. `Number=G` means one entry a
+  genotype of the record's written alleles: `A(A+1)/2` at diploidy.
+- **When the file keeps fewer alleles than the call was made over** — an alternative no sample was
+  called with is dropped from `ALT` (`drop_alternatives_no_sample_calls`) — both rows keep only the
+  genotypes whose alleles are all written, in the same order. `PL` is shifted again so its best kept
+  genotype is 0; `GP` is divided by what is left so it sums to one, the dropped alleles carrying no
+  call by construction. A widened tract keeps its alleles and their order and needs nothing.
+- **A no-call** (§7.1) writes the rows it has. A sample whose likelihood is flat writes its `PL`, all
+  zeros — what the reads said, exactly — and its `GP`, which with no evidence is the prior it was
+  scored under. That is the posterior honestly reported, not a call: `GT` stays `./.`, and §7.1's
+  objection is to reading a genotype off that row, which nothing here does. It also saves a second
+  pass rebuilding the prior from `AF` and the parameters file's seed (owner, 2026-11-01). A sample
+  the candidate step set aside has no likelihood row at this locus and writes `.` in both.
+- **A record merged from an STR record and the generic records in its flank**
+  ([`str_edge_deletion_alleles.md`](str_edge_deletion_alleles.md) §6) writes `.` in both for every
+  sample: its alleles are haplotypes assembled from two calls, and no likelihood was computed over
+  them. 15 of 9,189 records carried no rows on the tomato measurement in §10, 172 of 76,229 on HG002
+  chromosome 20.
+
+**Memory.** The final pass already holds every called sample's likelihood row for the locus; the
+posterior rows are a second table of the same size, kept until the record is assembled instead of
+overwritten sample by sample (`calling_quality.md` §3.1 rejected keeping them to produce one number,
+`GQ`; here they are output). At 3,000 samples and a ten-allele repeat tract — 55 genotypes — that is
+1.3 MB a worker for one locus at a time.
 
 ---
 
@@ -441,6 +489,14 @@ bytes a sample, so ~60 KB a record, linear in `N` and bgzf-compressed on disk (�
 the format is quadratic and no header line grows with the cohort beyond the `#CHROM` line itself.
 The real pressure at that scale is *which loci are written*, and that is step 11b's threshold, not
 the format.
+
+**`PL` and `GP` take a cohort file to about 2.4 times its size** (§7.2). Measured 2026-11-01 on 57
+tomato accessions at 3× over five 100-kb regions (9,189 records): a sample's column goes from 16 to
+39 bytes on average — 16 to 38 at a biallelic SNP or indel, 19 to 63 at a multi-allelic one, 26 to 81
+at a multi-allelic repeat tract. They grow with the genotype count, `A(A+1)/2` at diploidy, so a
+tract with ten written alleles carries 55 entries in each. A one-sample file grows less, 1.14 times
+on HG002 chromosome 20 at 5×, because the fixed columns dominate its lines. The hidden-duplication
+filter's spill holds the finished lines and grows by the same.
 
 **Three reads a position.** No-calls are common and honest (§7) — this is where "never force-call
 `0/0`" earns its place, and where `AN` counting only called samples keeps `AF`'s denominator
@@ -503,9 +559,7 @@ changes this file's bytes is typed configuration, the repository rule.
   emission; this format gains `<NON_REF>` machinery only if that document asks.
 - **`PARALOG_POST`.** Reserved id, semantics as production's. **Home:** step 11a's document, with
   ng's paralog filter when one exists.
-- **`GP` (per-sample genotype posteriors).** Wants the loop to retain per-sample posterior rows
-  it currently overwrites ([`calling_quality.md`](calling_quality.md) §3.1) — a memory decision,
-  not a formatting one. **Home:** a measurement, then this document gains the field.
+- ~~**`GP` (per-sample genotype posteriors).**~~ Added with `PL` on 2026-11-01, §7.2.
 - **A stable tract id in the ID column.** The repeat catalog has one per tract; nothing consumes
   it yet. **Home:** here, the day a consumer names itself.
 - **Tract-side artifact penalties.** `ABPEN`/`SPPEN` slots exist; what fills them at a tract is

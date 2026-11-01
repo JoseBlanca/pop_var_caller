@@ -56,7 +56,7 @@ pub use header::{
 pub use writer::{RecordPlace, VcfWriteError, VcfWriter};
 
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
-use crate::types::{GenomeRegion, Genotype, Motif, Phred, Position};
+use crate::types::{GenomeRegion, Genotype, GenotypeRows, Motif, Phred, Position};
 
 /// The first base of a contig, in the 1-based inclusive coordinates
 /// [`GenomeRegion`] uses — the one position at which an empty allele must be padded from the
@@ -456,6 +456,10 @@ pub struct SampleColumn {
     pub call: SampleCall,
     /// What this sample's reads showed — `DP` and the per-allele `AD`.
     pub read_counts: SampleReadCounts,
+    /// The sample's likelihood and posterior over every genotype of the written alleles — `PL`
+    /// and `GP` (spec §7.2). `None` writes `.` in both: a sample the candidate step set aside, and
+    /// a record whose alleles were merged from several calls, have no such rows.
+    pub genotype_rows: Option<GenotypeRows>,
 }
 
 /// **What the file says this sample is** — a genotype, or no call at all.

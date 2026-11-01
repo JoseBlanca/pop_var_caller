@@ -48,6 +48,13 @@ pub const MAPPING_QUALITY_DECIMALS: usize = 2;
 /// recovering the uncorrected quality the way spec §6 says it does.
 pub const PENALTY_DECIMALS: usize = 1;
 
+/// How many decimal places a genotype posterior is written to.
+///
+/// **Three, with trailing zeros dropped** (`0.998,0.002,0`): a second pass rebuilding a sample's
+/// expected allele copies from `GP` is then wrong by under 0.0005 a genotype, and a confident row
+/// stays short (spec §7.2).
+pub const POSTERIOR_DECIMALS: usize = 3;
+
 /// **A site or genotype quality, as the file writes it** — [`QUALITY_DECIMALS`] places.
 ///
 /// **Negative zero cannot reach here**, and that is upstream's doing rather than this
@@ -86,6 +93,38 @@ pub fn mapping_quality_text(mapping_quality: f64) -> String {
 #[must_use]
 pub fn penalty_text(penalty: Phred) -> String {
     format!("{:.*}", PENALTY_DECIMALS, penalty.get())
+}
+
+/// **A sample's `PL`**: its genotype log-likelihoods in Phred, shifted so the most likely genotype
+/// is 0 — `round(−10 · log10 e · (ℓ − max ℓ))` — as every reader of `PL` expects (spec §7.2).
+#[must_use]
+pub fn phred_likelihoods_text(log_likelihoods: &[f64]) -> String {
+    let best = log_likelihoods
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    join_with_commas(log_likelihoods.iter().map(|&likelihood| {
+        let phred = (-10.0 * std::f64::consts::LOG10_E * (likelihood - best)).round();
+        // A non-finite or enormous gap is a genotype the reads rule out; the cap keeps the field
+        // an integer every reader can parse.
+        (phred.min(f64::from(i32::MAX)) as i64).to_string()
+    }))
+}
+
+/// **A sample's `GP`**: its genotype posteriors at [`POSTERIOR_DECIMALS`] places, trailing zeros
+/// and a bare point dropped — `1`, `0`, `0.25`.
+#[must_use]
+pub fn posteriors_text(posteriors: &[f64]) -> String {
+    join_with_commas(posteriors.iter().map(|&posterior| {
+        let fixed = format!("{posterior:.*}", POSTERIOR_DECIMALS);
+        let trimmed = fixed.trim_end_matches('0').trim_end_matches('.');
+        // `-0.000` cannot arise from a probability, but a row is printed as it is handed in.
+        if trimmed == "-0" {
+            "0".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }))
 }
 
 /// **The seven fixed columns**, `CHROM` through `FILTER`, tab-separated and with no trailing
@@ -359,18 +398,19 @@ fn join_with_commas(values: impl Iterator<Item = String>) -> String {
 /// **The `FORMAT` column**: which per-sample fields this record carries, in the order the
 /// sample columns write them.
 ///
-/// A repeat-tract record carries one more than a SNP or indel — `REPCN`, each called allele's
-/// length in whole repeat units — and that is the only difference between the two.
+/// Every record carries `PL` and `GP` after `AD` (spec §7.2). A repeat-tract record carries one
+/// more than a SNP or indel — `REPCN`, each called allele's length in whole repeat units — and
+/// that is the only difference between the two.
 ///
 /// **An STR bundle record carries `REPCNB` instead** — each called allele's run counts — and one
 /// with no run carries neither (`str_bundle_loci.md` §7.5).
 #[must_use]
 pub fn format_keys(record: &VcfRecord) -> &'static str {
     match record.repeat_tract() {
-        None => "GT:GQ:DP:AD",
-        Some(tract) if !tract.is_bundle() => "GT:GQ:DP:AD:REPCN",
-        Some(tract) if tract.units().is_empty() => "GT:GQ:DP:AD",
-        Some(_) => "GT:GQ:DP:AD:REPCNB",
+        None => "GT:GQ:DP:AD:PL:GP",
+        Some(tract) if !tract.is_bundle() => "GT:GQ:DP:AD:PL:GP:REPCN",
+        Some(tract) if tract.units().is_empty() => "GT:GQ:DP:AD:PL:GP",
+        Some(_) => "GT:GQ:DP:AD:PL:GP:REPCNB",
     }
 }
 
@@ -404,7 +444,18 @@ fn one_sample_column(record: &VcfRecord, column: &SampleColumn, ploidy: Ploidy) 
     let allele_depths =
         join_with_commas(column.read_counts.allele_reads().iter().map(u32::to_string));
 
-    let mut fields = format!("{genotype}:{quality}:{depth}:{allele_depths}");
+    let (likelihoods, posteriors) = column.genotype_rows.as_ref().map_or_else(
+        || (MISSING_FIELD.to_string(), MISSING_FIELD.to_string()),
+        |rows| {
+            (
+                phred_likelihoods_text(&rows.log_likelihoods),
+                posteriors_text(&rows.posteriors),
+            )
+        },
+    );
+
+    let mut fields =
+        format!("{genotype}:{quality}:{depth}:{allele_depths}:{likelihoods}:{posteriors}");
     if let Some(tract) = record.repeat_tract()
         && tract.is_bundle()
     {

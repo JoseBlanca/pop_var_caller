@@ -35,6 +35,14 @@ fn alleles() -> CandidateAlleles {
     table
 }
 
+/// Each called sample's rows made flat over `allele_count` alleles, so the assembly can index them.
+fn flat_rows(calls: Vec<SampleGenotypeCall>, allele_count: usize) -> Vec<SampleGenotypeCall> {
+    calls
+        .into_iter()
+        .map(|call| call.with_flat_rows(allele_count))
+        .collect()
+}
+
 fn called(alleles: &[u16], genotype_quality: f32) -> SampleGenotypeCall {
     called_saying(alleles, genotype_quality, false)
 }
@@ -51,12 +59,14 @@ fn called_saying(
         genotype: Genotype::new(alleles.iter().copied().map(AlleleId).collect()),
         genotype_quality: quality(genotype_quality),
         reads_were_uninformative,
+        genotype_rows: crate::calling::placeholder_genotype_rows(),
     }
 }
 
 /// A called locus over the two-allele table, with the given per-sample calls.
 fn locus(calls: Vec<SampleGenotypeCall>, copies: Vec<f64>, converged: bool) -> LocusInference {
     let table = alleles();
+    let calls = flat_rows(calls, table.len());
     let expected = ExpectedAlleleCopies::new(copies, &table);
     LocusInference::new(
         region(),
@@ -135,7 +145,10 @@ fn a_sample_whose_reads_said_nothing_is_written_as_a_no_call() {
     );
 
     let columns = sample_columns(&record, diploid());
-    assert_eq!(columns, "0/1:40:19:10,9\t./.:.:0:0,0");
+    assert_eq!(
+        columns,
+        "0/1:40:19:10,9:0,0,0:0.333,0.333,0.333\t./.:.:0:0,0:0,0,0:0.333,0.333,0.333"
+    );
     // The loop had given the second sample a genotype; the file does not repeat it.
     assert!(matches!(
         locus.per_sample[1],
@@ -163,7 +176,7 @@ fn a_sample_the_caller_declined_to_call_is_written_as_a_no_call_too() {
     // Its evidence is still written beside the missing call.
     assert_eq!(
         sample_columns(&record, diploid()),
-        "0/1:40:19:10,9\t./.:.:9:2,2"
+        "0/1:40:19:10,9:0,0,0:0.333,0.333,0.333\t./.:.:9:2,2:.:."
     );
 }
 
@@ -174,7 +187,10 @@ fn a_sample_with_reads_that_spoke_keeps_the_genotype_the_loop_gave_it() {
         &locus,
         evidence(vec![sample(vec![1, 14], 2)], FilterVerdict::Pass),
     );
-    assert_eq!(sample_columns(&record, diploid()), "1/1:55:17:1,14");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "1/1:55:17:1,14:0,0,0:0.333,0.333,0.333"
+    );
 }
 
 #[test]
@@ -241,7 +257,7 @@ fn a_tract_annotation_makes_it_a_tract_record() {
     let record = assemble_record(&locus, inputs);
 
     assert!(record.is_repeat_tract());
-    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:REPCN");
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:PL:GP:REPCN");
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +314,7 @@ fn three_alleles() -> CandidateAlleles {
 
 fn locus_over_three(calls: Vec<SampleGenotypeCall>, copies: Vec<f64>) -> LocusInference {
     let table = three_alleles();
+    let calls = flat_rows(calls, table.len());
     let expected = ExpectedAlleleCopies::new(copies, &table);
     LocusInference::new(
         region(),
@@ -361,7 +378,7 @@ fn an_alternative_no_sample_calls_is_dropped_and_its_reads_become_unexplained() 
     );
     assert_eq!(
         sample_columns(&record, diploid()),
-        "0/1:40:20:9,8",
+        "0/1:40:20:9,8:0,0,0:0.333,0.333,0.333",
         "the call is renumbered onto the surviving table, and DP still counts all 20 reads \
          with the dropped allele's three in DP − ΣAD",
     );
@@ -390,7 +407,7 @@ fn an_alternative_one_sample_calls_survives_for_the_whole_cohort() {
     );
     assert_eq!(
         sample_columns(&record, diploid()),
-        "0/1:40:17:9,8,0\t0/2:35:13:7,0,6",
+        "0/1:40:17:9,8,0:0,0,0,0,0,0:0.167,0.167,0.167,0.167,0.167,0.167\t0/2:35:13:7,0,6:0,0,0,0,0,0:0.167,0.167,0.167,0.167,0.167,0.167",
         "and neither sample's call is renumbered",
     );
 }
@@ -411,7 +428,10 @@ fn a_record_every_sample_no_calls_keeps_its_alternatives() {
         "no genotype names an allele, so there is nothing to trim against and the record \
          states the alternatives it was called over",
     );
-    assert_eq!(sample_columns(&record, diploid()), "./.:.:4:0,0,0");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "./.:.:4:0,0,0:0,0,0,0,0,0:0.167,0.167,0.167,0.167,0.167,0.167"
+    );
 }
 
 /// Reference `A` against the SNP `T` and the deletion of the `A` itself, which the table holds
@@ -425,6 +445,7 @@ fn snp_and_deletion() -> CandidateAlleles {
 
 fn padded_record(calls: Vec<SampleGenotypeCall>, reads: Vec<u32>) -> VcfRecord {
     let table = snp_and_deletion();
+    let calls = flat_rows(calls, table.len());
     let copies = vec![1.0; 3];
     let expected = ExpectedAlleleCopies::new(copies, &table);
     let locus = LocusInference::new(
@@ -590,4 +611,56 @@ fn a_deletion_spending_the_whole_left_flank_is_padded_with_the_base_before_it() 
     let at_contig_start =
         WidenedTract::over(&alleles, &deletions, (left_flank, right_flank), None).expect("a reach");
     assert_eq!(at_contig_start.padding_base, Some(PaddingBase::Right(b'C')));
+}
+
+/// **Dropping an allele keeps the rows of the genotypes over the rest, in order** (spec §7.2): of
+/// `0/0, 0/1, 1/1, 0/2, 1/2, 2/2`, dropping allele 1 leaves entries 0, 3 and 5 — `0/0, 0/2, 2/2`,
+/// which over the renumbered alleles are `0/0, 0/1, 1/1` — and the posteriors left are divided by
+/// what they sum to.
+#[test]
+fn dropping_an_allele_keeps_the_rows_of_the_genotypes_over_the_rest() {
+    let rows = GenotypeRows {
+        ploidy: Ploidy::try_new(2).expect("a ploidy"),
+        log_likelihoods: Box::new([0.0, -1.0, -2.0, -3.0, -4.0, -5.0]),
+        posteriors: Box::new([0.1, 0.1, 0.1, 0.2, 0.2, 0.3]),
+    };
+    let kept = rows_over_kept_alleles(&rows, &[true, false, true]);
+    assert_eq!(&*kept.log_likelihoods, &[0.0, -3.0, -5.0]);
+    for (written, expected) in kept
+        .posteriors
+        .iter()
+        .zip([1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0])
+    {
+        assert!((written - expected).abs() < 1e-12, "{:?}", kept.posteriors);
+    }
+}
+
+/// **The order claim, checked against the table at three copies**: every entry kept after dropping
+/// allele 2 of four is, renumbered, the genotype the table over the three kept alleles has at that
+/// position.
+#[test]
+fn the_rows_kept_follow_the_table_over_the_kept_alleles() {
+    let ploidy = Ploidy::try_new(3).expect("a ploidy");
+    let old = GenotypeTable::build(ploidy, 4);
+    let new = GenotypeTable::build(ploidy, 3);
+    let index: Vec<f64> = (0..old.genotype_count()).map(|g| g as f64).collect();
+    let rows = GenotypeRows {
+        ploidy,
+        log_likelihoods: index.clone().into(),
+        posteriors: vec![1.0; index.len()].into(),
+    };
+    let kept = rows_over_kept_alleles(&rows, &[true, true, false, true]);
+    assert_eq!(kept.log_likelihoods.len(), new.genotype_count());
+    for (position, &old_index) in kept.log_likelihoods.iter().enumerate() {
+        let copies = old
+            .allele_counts_of(GenotypeIdx(old_index as u32))
+            .expect("an old genotype");
+        let renumbered = [copies[0], copies[1], copies[3]];
+        assert_eq!(
+            new.allele_counts_of(GenotypeIdx(position as u32)),
+            Some(&renumbered[..]),
+            "kept entry {position} was old genotype {old_index}"
+        );
+        assert_eq!(copies[2], 0, "a kept genotype names no dropped allele");
+    }
 }

@@ -854,6 +854,9 @@ fn build_merged_record(
         columns.push(SampleColumn {
             call,
             read_counts: SampleReadCounts::new(reads, unexplained),
+            // The merged record's alleles are haplotypes no likelihood was computed over, so it
+            // has no rows to write (`vcf_output.md` §7.2).
+            genotype_rows: None,
         });
     }
 

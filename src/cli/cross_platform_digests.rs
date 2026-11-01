@@ -429,7 +429,11 @@ mod tests {
     /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
     /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
     /// reproduces the old checksum, `879ac81cb2eed45e9e48363fa49383f2`, exactly. Recorded in the Linux container (arm64).
-    const CALLS_MD5: &str = "eeb54b8cccb65e7a31fde3545329e3a3";
+    /// **Re-recorded 2026-11-01** when every record gained `PL` and `GP` (`vcf_output.md` §7.2):
+    /// the header gains their two `##FORMAT` lines and every sample column the two fields after
+    /// `AD`, and nothing else moves — taking the two declarations and fields out reproduces the
+    /// old checksum, `eeb54b8cccb65e7a31fde3545329e3a3`, exactly. Recorded in the Linux container (arm64).
+    const CALLS_MD5: &str = "8d06ba1d16363cfbeef432a4a3633879";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -679,7 +683,11 @@ mod tests {
     /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
     /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
     /// reproduces the old checksum, `8d7af38234c53639f550e9042bae46c4`, exactly. Recorded in the Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "4e24472e81c47b3d842ca21f1cedf85f";
+    /// **Re-recorded 2026-11-01** when every record gained `PL` and `GP` (`vcf_output.md` §7.2):
+    /// the header gains their two `##FORMAT` lines and every sample column the two fields after
+    /// `AD`, and nothing else moves — taking the two declarations and fields out reproduces the
+    /// old checksum, `4e24472e81c47b3d842ca21f1cedf85f`, exactly. Recorded in the Linux container (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "d30f2cde2e78096f28b1bf1357eeae05";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -958,7 +966,11 @@ mod tests {
     /// records move in `QUAL` and `SPPEN` only, chrV:55 96.4 → 81.5 and chrV:377 277.9 → 269.4;
     /// every genotype and the fit's file are unchanged. Putting the old rule back reproduces
     /// `df9ca7838395f42ee2a5f1b4f461c6b9` exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "40067fb11da202a3bb5dc8a0b85d9ca1";
+    /// **Re-recorded 2026-11-01** when every record gained `PL` and `GP` (`vcf_output.md` §7.2):
+    /// the header gains their two `##FORMAT` lines and every sample column the two fields after
+    /// `AD`, and nothing else moves — taking the two declarations and fields out reproduces the
+    /// old checksum, `40067fb11da202a3bb5dc8a0b85d9ca1`, exactly. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "26a52f1d4675bfcf7d73fae613b9e6c8";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

@@ -6484,7 +6484,7 @@ mod records_handed_over_as_the_run_finishes_them {
                 11,
                 "nine fixed columns and two samples: {line}"
             );
-            assert_eq!(columns[8], "GT:GQ:DP:AD", "the generic FORMAT string");
+            assert_eq!(columns[8], "GT:GQ:DP:AD:PL:GP", "the generic FORMAT string");
         }
     }
 

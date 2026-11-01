@@ -226,6 +226,7 @@ fn called(genotype: &[u16], reads_were_uninformative: bool) -> SampleGenotypeCal
         genotype: Genotype::new(genotype.iter().map(|allele| AlleleId(*allele)).collect()),
         genotype_quality: Phred::try_new(30.0).expect("a quality"),
         reads_were_uninformative,
+        genotype_rows: crate::calling::placeholder_genotype_rows(),
     }
 }
 
@@ -243,6 +244,10 @@ fn locus_called_over(
     artifact_test_counts: Option<ArtifactTestCounts>,
 ) -> LocusInference {
     let table = table_of(alleles);
+    let per_sample = per_sample
+        .into_iter()
+        .map(|call| call.with_flat_rows(table.len()))
+        .collect();
     let copies = ExpectedAlleleCopies::new(vec![1.0; table.len()], &table);
     LocusInference::new(
         region(100, 100),
