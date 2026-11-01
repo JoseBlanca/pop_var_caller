@@ -88,6 +88,7 @@ pub mod float;
 pub mod genetics;
 pub mod iter_ext;
 pub mod locus_generation;
+pub mod neighbour_evidence;
 pub mod paralog;
 pub mod parameter_estimation;
 pub mod psp;
