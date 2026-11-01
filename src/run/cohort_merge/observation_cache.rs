@@ -627,22 +627,28 @@ impl WindowCoverageInProgress {
             observed_through,
         } = self;
         // **A record dropped for its depth contributes no coverage**: it has no evidence to
-        // measure, and the ground under it is called for nobody. Marked as seen all the same, so
-        // the next cover does not offer it again.
+        // measure, and the ground under it is called for nobody. **It still moves the frontier
+        // to its first base**, as a position at depth 0 does. Without that, a stretch of dropped
+        // records — a satellite at hundreds of reads a position — holds back every centre within
+        // half a window before it until some later record reports, and whether that record is
+        // drawn before the builder reads those centres depends on where the building regions
+        // end, which is set by the thread count. Measured on HG002 chr20 at 30x: nine records
+        // read as unscored at two threads and scored at one (`window_coverage.md` §3.3).
         if summary.is_over_depth_ceiling() {
-            *observed_through = Some(summary.start_position());
-            return Ok(());
+            let first_base = summary.start_position();
+            accumulator.advance_without_covering(first_base.contig, first_base.position);
+        } else {
+            for_each_reported_depth(summary, evidence, build, |at, depth| {
+                let base = base_in(bases, bases_from, at).unwrap_or_else(|| {
+                    panic!(
+                        "the cover read no reference base at {at:?}, where this sample holds a \
+                         record — the ground a cover reads is computed from the records it \
+                         holds, so this is that computation and not the data"
+                    )
+                });
+                accumulator.observe(at.contig, at.position, base, depth);
+            })?;
         }
-        for_each_reported_depth(summary, evidence, build, |at, depth| {
-            let base = base_in(bases, bases_from, at).unwrap_or_else(|| {
-                panic!(
-                    "the cover read no reference base at {at:?}, where this sample holds a \
-                     record — the ground a cover reads is computed from the records it holds, \
-                     so this is that computation and not the data"
-                )
-            });
-            accumulator.observe(at.contig, at.position, base, depth);
-        })?;
         *observed_through = Some(summary.start_position());
         while let Some(window) = accumulator.pop_ready() {
             finalised.push(window);
@@ -1391,7 +1397,11 @@ where
     /// the chain ([`draw_to`](SampleWindow::draw_to)) and **holds** it, and every held record no
     /// accumulator has seen is observed by this same cover
     /// ([`read_the_ground_and_measure_coverage_over_it`](Self::read_the_ground_and_measure_coverage_over_it)).
-    /// So a sample with any record at all past the chain has had it observed here. What is left
+    /// So a sample with any record at all past the chain has had it observed here — **and
+    /// observing it moves the frontier even when the record was dropped for depth**
+    /// ([`WindowCoverageInProgress::observe`]), which until 2026-11-01 it did not: a cover ending
+    /// in a stretch of dropped records left the centres before it unfinalised, at the thread
+    /// counts whose building regions ended there and not at the others. What is left
     /// over is a sample with no such record — the last half-window of its last records on its last
     /// contig — whose centres a contig change closes, or, at the very end of a sample's stream,
     /// nothing in the merge does: `WindowCoverageAccumulator::finish` has no caller until plan
@@ -2235,6 +2245,86 @@ mod tests {
             cache.reference_base_at(position_on(0, 50 + half_a_window + 1)),
             None,
             "the look-ahead is half a window and no more",
+        );
+    }
+
+    /// **A window a builder reads does not depend on where its region ends, even when records
+    /// past the end were dropped for depth.** The case that broke it: covered ground, then a
+    /// stretch of records over the depth ceiling (a satellite at hundreds of reads a position),
+    /// then covered ground again. A dropped record reports no depth, so until 2026-11-01 it did
+    /// not move the accumulator's frontier either, and the centres within half a window before
+    /// the stretch were finalised only by the first covered record after it. A cover ending at
+    /// the stretch never drew that record, so its builder read those centres as absent; a cover
+    /// running past it read real windows. Which of the two a run got was set by where its
+    /// building regions ended, and so by its thread count — HG002 chr20 at 30x lost nine
+    /// records' windows at two threads.
+    #[test]
+    fn a_window_does_not_depend_on_where_the_region_ends_beside_records_over_the_ceiling() {
+        /// One sample's reader: one-base records at the given positions, each covered or
+        /// dropped for depth.
+        struct CeilingSource {
+            records: std::vec::IntoIter<(u64, bool)>,
+        }
+        impl ObservationSource for CeilingSource {
+            type Error = SourceFailed;
+
+            fn next_observation(
+                &mut self,
+                _spare: Option<SampleLocusObservations>,
+            ) -> Option<Result<SampleLocusObservations, SourceFailed>> {
+                unreachable!("the cache draws this source through `next_drawn`")
+            }
+
+            fn next_drawn(
+                &mut self,
+                _spare: Option<SampleLocusObservations>,
+            ) -> Option<Result<Drawn, SourceFailed>> {
+                let (position, over_the_ceiling) = self.records.next()?;
+                let record = observation_over(region(position, position));
+                Some(Ok(if over_the_ceiling {
+                    Drawn::OverDepthCeiling {
+                        region: record.region,
+                        stand_in: StandIn::Record(SampleLocusObservations {
+                            observations: Vec::new(),
+                            ..record
+                        }),
+                    }
+                } else {
+                    Drawn::Built(record)
+                }))
+            }
+        }
+
+        // Covered 1–300, dropped for depth 301–700, covered again at 900.
+        let records: Vec<(u64, bool)> = (1..=300)
+            .map(|position| (position, false))
+            .chain((301..=700).map(|position| (position, true)))
+            .chain(std::iter::once((900, false)))
+            .collect();
+        let windows_read_over = |covered: GenomeRegion| {
+            let mut cache = ObservationCache::over_fixture(vec![CeilingSource {
+                records: records.clone().into_iter(),
+            }]);
+            cache
+                .cover(covered)
+                .expect("the fixture source and reference hold");
+            cache.with_observations(region(1, 300), |window| {
+                (1..=300)
+                    .map(|position| window.window_coverage_at(0, position_on(0, position)))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let ending_at_the_stretch = windows_read_over(region(1, 300));
+        let running_past_it = windows_read_over(region(1, 1_000));
+        assert!(
+            running_past_it[299].is_some_and(|window| !window.is_absent()),
+            "the control: a cover running past the stretch reads a window at 300",
+        );
+        assert_eq!(
+            ending_at_the_stretch, running_past_it,
+            "a region ending beside records over the depth ceiling read different windows than \
+             one running past them, so the windows depend on where the building regions end",
         );
     }
 

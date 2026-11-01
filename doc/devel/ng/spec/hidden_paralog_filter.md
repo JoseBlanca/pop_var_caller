@@ -554,7 +554,13 @@ pub struct ParalogVerdicts {
 - **Concurrency** — none in passes two and three; they are sequential by design and the output
   is a function of the spill's order, which is genome order. Scoring in parallel is deferred (§7).
 - **Determinism** — the standing oracle: byte-identical output at any thread count, with the
-  filter on and off.
+  filter on and off. Passes two and three cannot break it, but **the windows the records carry
+  into the spill can**: they are measured during calling, whose building regions narrow as the
+  thread count grows. Until 2026-11-01 a record beside ground dropped for depth could carry an
+  absent window at some counts and a real one at others (`window_coverage.md` §3.3); on HG002
+  chr20 at 30x that left 9 more records unscored at two threads, which moved the fitted rate
+  from 0.145137 to 0.145070 and every record's `PARALOG_POST` in its fifth or sixth digit. The
+  oracle therefore compares one thread with several counts, not one.
 
 ## 6. Traps — what will bite the coder
 

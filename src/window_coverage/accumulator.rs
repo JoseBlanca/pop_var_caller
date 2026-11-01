@@ -223,6 +223,20 @@ impl WindowCoverageAccumulator {
         }
     }
 
+    /// Move the finalisation frontier to `position` **without covering it**: it joins no window,
+    /// and every centre whose right edge it reaches is finalised, exactly as an `N` or a
+    /// depth-0 position would finalise them.
+    ///
+    /// **This is for ground the sample has a record over but no depth to report**, which is a
+    /// record dropped for being over the depth ceiling. Without it the stream's frontier waits
+    /// at the last position that *did* report, so when a window closes would depend on how far
+    /// past the drop the stream happens to have been read — and a builder reading the window
+    /// before that would find none (spec `window_coverage.md` §3.3). Under the same ordering
+    /// rule as [`observe`](Self::observe), because it is one: a depth-0 observation.
+    pub fn advance_without_covering(&mut self, contig: ContigId, position: Position) {
+        self.observe(contig, position, b'N', 0);
+    }
+
     /// Pop one finalised window and the centre it belongs to, oldest first, or `None` if none
     /// is ready.
     pub fn pop_ready(&mut self) -> Option<(GenomePosition, WindowCoverage)> {
@@ -971,6 +985,30 @@ mod tests {
             (windows[0].1.mean_depth - 15.0).abs() < 1e-6,
             "position 1 closes at the first observation of position 3, got {}",
             windows[0].1.mean_depth,
+        );
+    }
+
+    /// **Advancing without covering finalises what the frontier reaches and adds nothing to any
+    /// window.** Half is 2 here, so the advance to 5 closes the centres at 1, 2 and 3 and leaves
+    /// 4 open; each closed window holds only the covered positions 1–4 within its reach.
+    #[test]
+    fn advancing_without_covering_finalises_and_adds_nothing() {
+        let mut accumulator = WindowCoverageAccumulator::new(sliding_config());
+        for position in 1..=4 {
+            accumulator.observe(ContigId(0), Position(position), b'G', 10);
+        }
+        accumulator.advance_without_covering(ContigId(0), Position(5));
+        let closed: Vec<u64> =
+            std::iter::from_fn(|| accumulator.pop_ready().map(|(at, _)| at.position.get()))
+                .collect();
+        assert_eq!(closed, [1, 2, 3]);
+
+        let (tail, _) = accumulator.finish();
+        assert_eq!(tail.len(), 1, "the advance became no centre of its own");
+        assert!(
+            (tail[0].1.mean_depth - 10.0).abs() < 1e-6,
+            "the advance joined a window: centre 4's mean depth is {}",
+            tail[0].1.mean_depth,
         );
     }
 
