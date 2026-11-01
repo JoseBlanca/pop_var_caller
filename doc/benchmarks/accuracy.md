@@ -163,3 +163,71 @@ QUAL ≥ 20. HipSTR ran at its defaults.
   with PCR stutter, with 139 false calls per 1,000.
 - **pvc's stutter estimated from the reads is as good as the true one.** Given the simulator's
   own stutter rates instead, pvc gets the same share right to within 3 points in every row.
+
+## Simulated inbreeding: does a wrong F cost genotypes?
+
+A caller that assumes every sample is outbred expects heterozygotes in proportions an inbred
+sample does not have. At low depth, where a heterozygote and a homozygote can look alike, that
+expectation decides many genotypes. pvc estimates each sample's inbreeding coefficient F from
+the data and uses it as the genotype prior; GATK and DeepVariant take no F.
+
+The test is a simulated tomato population: 50 samples over 5 Mb of chromosome 1, 10 samples at
+each of F = 0, 0.25, 0.5, 0.75 and 1, all called together. Every group has the same SNPs, one
+per kilobase, at the same allele frequencies, so F is the only difference between the groups.
+Reads are 150 bp PCR-free pairs simulated at 30×, then downsampled to each lower depth. Every
+sample has about 5,000 SNP genotypes, about 250,000 in all.
+
+pvc ran three ways:
+
+- **F estimated**, its full pipeline;
+- **F = 0**, its defaults, which take every sample as outbred;
+- **F = 0.9 stated** for every sample, the opposite mistake for the outbred groups.
+
+The 30× rows come from pvc c3d1ed69, as the run with fedb2290 has not reached that depth yet.
+At the depths both versions ran, their results differ by less than a tenth of a point.
+
+**pvc's estimate of F.** The mean of the 10 estimates in each group, with the lowest and highest,
+against the F the simulation actually produced:
+
+| simulated F | true F | 3× | 10× | 30× |
+|---|---|---|---|---|
+| 0 | 0.005 | 0.007 (0 to 0.06) | 0.009 (0 to 0.04) | 0.010 (0 to 0.04) |
+| 0.25 | 0.252 | 0.237 (0.21 to 0.28) | 0.243 (0.21 to 0.27) | 0.241 (0.20 to 0.28) |
+| 0.5 | 0.500 | 0.497 (0.44 to 0.56) | 0.501 (0.46 to 0.53) | 0.499 (0.46 to 0.53) |
+| 0.75 | 0.751 | 0.759 (0.73 to 0.79) | 0.753 (0.73 to 0.79) | 0.752 (0.73 to 0.79) |
+| 1 | 1.000 | 1.000 (1.00 to 1.00) | 1.000 (1.00 to 1.00) | 1.000 (1.00 to 1.00) |
+
+**Non-reference genotypes right**, over all 50 samples: the genotypes right among those that
+carry an alternative allele in the truth or in the call.
+
+| depth | pvc, F estimated | pvc, F = 0 | pvc, F = 0.9 stated | GATK | DeepVariant |
+|---|---|---|---|---|---|
+| 3× | 84.3% | 79.0% | 82.7% | 64.6% | 65.0% |
+| 5× | 93.8% | 91.5% | 93.2% | 85.2% | 85.5% |
+| 10× | 98.6% | 98.4% | 98.5% | 97.6% | 97.1% |
+| 15× | 99.3% | 99.3% | 99.3% | 99.4% | 98.9% |
+| 30× | 99.5% | 99.5% | 99.5% | 99.7% | 99.8% |
+
+**Homozygotes called heterozygous at 3×**, in each group of 10 samples (about 50,000 genotypes a
+group):
+
+| simulated F | pvc, F estimated | pvc, F = 0 | GATK | DeepVariant |
+|---|---|---|---|---|
+| 0 | 1,122 | 1,152 | 9 | 120 |
+| 0.25 | 513 | 1,900 | 7 | 226 |
+| 0.5 | 39 | 2,589 | 12 | 279 |
+| 0.75 | 36 | 3,295 | 15 | 365 |
+| 1 | 1 | 4,103 | 15 | 458 |
+
+- **pvc estimates F well even at 3 reads a position.** Each group's mean is within 0.015 of
+  the true F at every depth, and every sample's estimate is within about 0.06 of its group's.
+- **Assuming the samples are outbred costs pvc genotypes in the inbred ones.** At 3×, with F = 0
+  pvc calls 4,103 homozygotes heterozygous in the fully inbred group; with F estimated, 1. The
+  cost falls with depth: at 15× it is 30 against 0.
+- **Stating a wrong F costs much less than ignoring it.** With F = 0.9 stated for every sample,
+  pvc calls 55% of the outbred group's heterozygotes right at 3×, against 70% with F estimated.
+  Over all samples it still gets more right than with F = 0 (82.7% against 79.0%).
+- **GATK and DeepVariant call few homozygotes heterozygous at 3×, but leave many genotypes
+  missing.** At 3× GATK leaves 17,955 of the 45,056 heterozygotes without a genotype and
+  DeepVariant 15,117; pvc leaves 2,261. Most of the gap at 3× and 5× is these missing genotypes.
+  At 30× GATK and DeepVariant are slightly ahead of pvc, 99.7% and 99.8% against 99.5%.
