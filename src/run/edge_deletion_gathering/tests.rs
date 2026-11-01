@@ -66,6 +66,7 @@ fn record(
                 reads[usize::from(allele)] += 1;
             }
             SampleColumn {
+                genotype_rows: None,
                 call: called(genotype, *quality),
                 read_counts: SampleReadCounts::new(reads, 0),
             }
@@ -333,10 +334,12 @@ fn a_no_call_at_either_record() {
         &[b"GTTGTTGTTA", b"GTTGTTG"],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: called(&[0, 1], 30.0),
                 read_counts: SampleReadCounts::new(vec![4, 5], 1),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![3, 0], 0),
             },
@@ -358,10 +361,12 @@ fn a_no_call_at_either_record() {
         &[b"A", b"G"],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0, 0], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: called(&[0, 1], 20.0),
                 read_counts: SampleReadCounts::new(vec![1, 2], 0),
             },
@@ -493,6 +498,7 @@ fn an_empty_allele_is_padded_with_the_base_before_the_widened_span() {
         region(98, 105),
         &[b"GCCACACA", b""],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 30.0),
             read_counts: SampleReadCounts::new(vec![1, 1], 0),
         }],

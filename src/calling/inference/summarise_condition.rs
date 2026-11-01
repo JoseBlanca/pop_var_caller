@@ -54,7 +54,7 @@ use crate::locus_generation::SsrBundleDetail;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::repeat_strata::RepeatCount;
-use crate::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
+use crate::types::{AlleleId, Genotype, GenotypeRows, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
 
 use super::repeat_tract_parameters::{
@@ -1365,6 +1365,15 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
             // why the flag is minted at the point of scoring (`vcf::assemble`'s module note,
             // and `doc/devel/ng/spec/vcf_output.md` §7.1).
             reads_were_uninformative: reads_said_nothing(scratch.sample_genotype_likelihoods(row)),
+            genotype_rows: GenotypeRows {
+                ploidy,
+                log_likelihoods: scratch
+                    .sample_genotype_likelihoods(row)
+                    .iter()
+                    .map(|likelihood| likelihood.get())
+                    .collect(),
+                posteriors: scratch.posterior_row().into(),
+            },
         });
         row += 1;
     }
@@ -4948,6 +4957,7 @@ mod tests {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
                     genotype_quality: Phred::try_new(30.0).expect("a quality"),
                     reads_were_uninformative: false,
+                    genotype_rows: crate::calling::placeholder_genotype_rows(),
                 };
                 3
             ],

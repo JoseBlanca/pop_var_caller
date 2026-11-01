@@ -581,6 +581,8 @@ const FORMAT_DECLARATIONS: &[&str] = &[
     r#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred probability the called genotype is wrong, capped at 99">"#,
     r#"##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Reads this sample observed at the locus, whether or not a written allele explains them">"#,
     r#"##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Reads whose sequence matched each allele exactly, REF first">"#,
+    r#"##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods, the most likely genotype 0, VCF genotype order">"#,
+    r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities, VCF genotype order">"#,
     r#"##FORMAT=<ID=REPCN,Number=.,Type=Integer,Description="Repeat copy number of each called allele, GT order">"#,
     r#"##FORMAT=<ID=REPCNB,Number=.,Type=String,Description="STR bundle records only: each called allele's copies in every run, joined by _, GT order">"#,
 ];

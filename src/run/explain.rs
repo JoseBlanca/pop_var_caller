@@ -469,6 +469,8 @@ pub(crate) fn calling_rows<S>(
                 genotype,
                 genotype_quality,
                 reads_were_uninformative,
+                // The likelihood rows are written above, per genotype, by `calling_rows`.
+                genotype_rows: _,
             } => {
                 let spelled: Vec<String> = genotype
                     .alleles()
