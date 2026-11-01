@@ -79,7 +79,8 @@ use crate::window_coverage::{SampleHistogram, WindowCoverage};
 use super::RunError;
 use super::calling_progress::CallingProgress;
 use super::explain::{
-    ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows, too_wide_rows,
+    ExplainRegions, ExplainRow, LocusEnd, calling_rows, outcome_rows, selection_rows,
+    ssr_evidence_rows, too_wide_rows,
 };
 use super::records::{
     DEFAULT_MIN_SITE_QUALITY, ReferenceBesideScratch, a_written_genotype_carries_an_alternative,
@@ -1539,6 +1540,7 @@ where
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
     if let Some(rows) = explanation {
+        ssr_evidence_rows(rows, observation.region, &per_sample);
         calling_rows(rows, &inference, scratch, parameters.ploidy());
     }
     LocusOutcome::Called(finish(inference, &remap, &unmatched, verdict))
@@ -1604,6 +1606,7 @@ where
     let inference =
         genotyper.call_locus(&evidence, parameters, alleles, calling_loop_config, scratch);
     if let Some(rows) = explanation {
+        ssr_evidence_rows(rows, observation.region, &per_sample);
         calling_rows(rows, &inference, scratch, parameters.ploidy());
     }
     LocusOutcome::Called(finish(inference, &remap, &unmatched, verdict))

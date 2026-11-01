@@ -69,10 +69,11 @@ meaning does.
 |---|---|---|---|
 | `locus` | locus | `generic`, `repeat_tract` or `repeat_bundle` | `alleles`, `covering_samples` |
 | `allele` | allele the merge assembled | `kept` (as candidate *k*), `below_support`, `cut_by_allele_cap`, or `not_selected` at a repeat tract (`refused_not_periodic` until 2026-10-22, when the periodicity check was removed; `candidate_alleles_ssr.md` §7) | `cohort_reads`, `best_sample`, `best_sample_reads`, `best_sample_share` |
-| `reads` | sample × allele with reads | complete reads showing it | `read_groups` |
+| `reads` | sample × allele with reads | complete reads showing it | `read_groups`, `forward`, `placed_left` (strand and position shares, fractions where a read was composed across records) |
 | `partial` | sample × partial observation | reads | `witnessed`, `compatible_with` (candidate alleles it fits) |
+| `evidence` | sample × observation the tract row scores, repeat tracts only | reads | `witness` (`complete` or `partial`), `flank_deletion` (left+right bases), `read_group` |
 | `callable` | sample | `callable` or `set_aside` | why, when set aside |
-| `likelihood` | sample × genotype | the genotype's log-likelihood, natural log | . |
+| `likelihood` | sample × genotype | the genotype's log-likelihood, natural log | `exact`: every digit |
 | `genotype` | sample | the called GT | `GQ`, `missing`, `reads_were_uninformative` |
 | `site` | locus | QUAL as written | `uncorrected_qual`, `ABPEN`, `SPPEN`, `converged`, `passes`, `filter` |
 | `paralog` | locus scored by the hidden-paralog filter | `kept`, `tagged` or `dropped` | `LR`, `posterior` |
@@ -86,6 +87,13 @@ gone — STR bundles are called, and a bundle's rows are a segment's, under the 
 genotype's alleles contributes the shares of the copies carrying them, one compatible with none of
 them is charged as a sequencing error (`read_likelihoods.md` §5.3). The `compatible_with` list is the
 whole of what decides which.
+
+**What a repeat-tract row is made of** is the `evidence` rows, added 2026-11-01: every observation
+the tract path hands the sample's likelihood row, partial reads included, so a sample can have a row
+far from zero and no `reads` row. At SL4.0ch05:51017179 a sample's 10 reads spelled a candidate in
+full and ran on into a variant in the next record; all 10 reached the row as partials. The `likelihood` rows' `exact` value is there because the flatness test behind
+`reads_were_uninformative` compares a row's values exactly, and two values that agree to four
+decimals can still differ in it.
 
 ### 4.2 Loci the caller never saw
 
