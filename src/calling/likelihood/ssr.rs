@@ -990,6 +990,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }

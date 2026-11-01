@@ -81,6 +81,7 @@ fn a_snp_writes_its_seven_columns() {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -419,6 +420,7 @@ fn a_snp_writes_every_site_annotation_in_order() {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -641,6 +643,34 @@ fn the_penalties_are_absent_where_the_correction_did_not_run() {
     assert!(!info.contains("SPPEN"), "got {info}");
 }
 
+/// **`BQPEN` is written where the low-base-quality test ran, and nowhere else** — a run without
+/// the test writes the `INFO` column it wrote before the test existed.
+#[test]
+fn the_low_base_quality_penalty_is_written_only_where_the_test_ran() {
+    let record_with = |low_base_quality| {
+        VcfRecord::new(
+            region_on(0, 60, 60),
+            vec![allele(b"A"), allele(b"T")],
+            vec![1.0, 1.0],
+            one_sample(vec![5, 5], 0, &[0, 1]),
+            pools(&[5, 5]),
+            None,
+            quality(112.5),
+            Some(ArtifactPenalties {
+                allele_balance: quality(3.5),
+                strand_and_read_position: quality(4.0),
+                low_base_quality,
+            }),
+            FilterVerdict::Pass,
+            None,
+        )
+    };
+    let info = info_column(&record_with(Some(quality(7.5))));
+    assert!(info.contains("ABPEN=3.5;SPPEN=4.0;BQPEN=7.5"), "got {info}");
+    let info = info_column(&record_with(None));
+    assert!(!info.contains("BQPEN"), "got {info}");
+}
+
 #[test]
 fn the_uncorrected_quality_is_the_written_one_plus_its_two_penalties() {
     // Spec §6's reason for publishing them: the correction stays recoverable. Both are written
@@ -656,6 +686,7 @@ fn the_uncorrected_quality_is_the_written_one_plus_its_two_penalties() {
         Some(ArtifactPenalties {
             allele_balance: quality(3.5),
             strand_and_read_position: quality(4.0),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -1185,6 +1216,7 @@ fn a_snp_line() {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,

@@ -266,6 +266,8 @@ pub struct AlignedFilesVariantCaller {
     explain: Option<ExplainRegions>,
     /// The site quality below which a called locus is not written (`--min-site-quality`).
     min_site_quality: Phred,
+    /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
+    low_base_quality_weight: f64,
 }
 
 impl AlignedFilesVariantCaller {
@@ -364,7 +366,18 @@ impl AlignedFilesVariantCaller {
             explain: None,
             min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
                 .expect("the default threshold is a valid quality"),
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
         })
+    }
+
+    /// The same run, charging the low-base-quality penalty at `weight` times its tail
+    /// (`doc/devel/ng/spec/low_base_quality.md`); zero leaves it off. The default is
+    /// [`DEFAULT_LOW_BASE_QUALITY_WEIGHT`](crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT).
+    #[must_use]
+    pub fn with_low_base_quality_weight(mut self, weight: f64) -> Self {
+        self.low_base_quality_weight = weight;
+        self
     }
 
     /// The same run, explaining every locus that overlaps `regions`
@@ -788,6 +801,7 @@ impl AlignedFilesVariantCaller {
         // Taken before `walkers` consumes the run; a handful of regions.
         let explain = self.explain.clone();
         let min_site_quality = self.min_site_quality;
+        let low_base_quality_weight = self.low_base_quality_weight;
         let pieces = self.walkers()?;
         let RunReadyToWalk {
             segmentation,
@@ -809,6 +823,7 @@ impl AlignedFilesVariantCaller {
             contigs: &contigs,
             explain: explain.as_ref(),
             min_site_quality,
+            low_base_quality_weight,
         };
         let CohortCallingOutcome {
             calling,
@@ -879,6 +894,9 @@ pub(crate) struct CohortCallingInputs<'a> {
     pub explain: Option<&'a ExplainRegions>,
     /// The site quality below which a called locus is not written (`--min-site-quality`).
     pub min_site_quality: Phred,
+    /// How many times its tail the low-base-quality penalty charges; zero leaves it off
+    /// (`--low-base-quality-weight`, `doc/devel/ng/spec/low_base_quality.md`).
+    pub low_base_quality_weight: f64,
 }
 
 /// What calling a cohort produced, and the spent sources it was read from.
@@ -984,6 +1002,7 @@ where
         contigs,
         explain,
         min_site_quality,
+        low_base_quality_weight,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -1119,6 +1138,7 @@ where
                         verdict,
                         padding,
                         before_left_flank,
+                        low_base_quality_weight,
                     );
                     // **The gate reads the quality the record would carry**, after the artifact
                     // correction, and before the windows are taken: a locus below it is not
@@ -6037,6 +6057,7 @@ mod records_handed_over_as_the_run_finishes_them {
             contigs: &contigs,
             explain: None,
             min_site_quality: Phred::ZERO,
+            low_base_quality_weight: 0.0,
         };
         let mut handed = 0;
         let outcome = call_cohort_from_sources_handing_each_record_over(
@@ -7346,6 +7367,7 @@ where
         contigs,
         explain,
         min_site_quality,
+        low_base_quality_weight,
     } = inputs;
     if let Some(regions) = explain {
         cache.explaining_drops(regions.clone());
@@ -7476,6 +7498,7 @@ where
                         verdict,
                         padding,
                         before_left_flank,
+                        low_base_quality_weight,
                     );
                     // **The gate reads the quality the record would carry**, after the artifact
                     // correction, and before the windows are taken: a locus below it is not

@@ -2872,6 +2872,8 @@ mod tally {
                         mapq_sum: support.mapq_sum,
                         mapq_sum_sq: support.mapq_sum_sq,
                         placed_left: support.placed_left,
+                        // The STR path has no artifact penalties to feed (`low_base_quality.md`).
+                        num_low_quality: 0,
                         // The STR path does not phase — there is no chain id to fold (spec §3).
                         chain_ids: Vec::new(),
                         flank_deletion,

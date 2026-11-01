@@ -54,6 +54,11 @@ pub struct ArtifactPenalties {
     /// reference reads' own at the same site. The larger of the two, scaled by
     /// [`BIAS_RAMP_NO_POWER_BELOW`] / [`BIAS_RAMP_FULL_POWER_AT`].
     pub strand_and_read_position: Phred,
+    /// What the alternative reads' share of low base qualities costs, against the reference
+    /// reads' own at the same site ([`low_base_quality_penalty`]). `None` when the run did not
+    /// ask for the test (`--low-base-quality-weight` zero), so a run without it writes what it
+    /// wrote before the test existed.
+    pub low_base_quality: Option<Phred>,
 }
 
 /// **The alternative-read count at or below which the strand and read-position test is charged
@@ -693,6 +698,97 @@ fn bias_test_power(alternative_reads: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------------------
+// The third test: are the alternative reads' base qualities a fair sample of the site's?
+// ---------------------------------------------------------------------------------------
+
+/// **How much of the site quality an excess of low-quality alternative reads does not support**
+/// (`doc/devel/ng/spec/low_base_quality.md`).
+///
+/// A real variant's reads are as good as the reference reads beside them. Where the sequencer
+/// misreads the same base in many reads — late in the read, beside a run of G or C — the reads
+/// showing the misread carry the low qualities the sequencer gave them, while the reference reads
+/// at the site do not. The likelihood counts each such read as independent evidence, and they are
+/// not: on HG002 at 30×, 13 of 21 reads at chr20:595,931 show the same wrong G at an average
+/// Phred of 15.
+///
+/// So this asks the strand test's question of a different count: the alternative reads below
+/// Phred 20 ([`LOW_BASE_QUALITY_BELOW`](crate::locus_generation::LOW_BASE_QUALITY_BELOW)),
+/// against a beta-binomial whose parameters are the reference reads' low and good counts plus a
+/// prior worth [`LOW_QUALITY_PRIOR_READS`] reads at [`LOW_QUALITY_PRIOR_SHARE`]. **Only an excess
+/// is charged**: alternative reads better than the reference reads are no evidence of an
+/// artifact. The tail is a Phred, times `weight`, times the strand test's ramp
+/// ([`BIAS_RAMP_NO_POWER_BELOW`]), since the test has no more power at three reads than that one.
+///
+/// `weight` zero is the test switched off, and returns zero without computing anything.
+pub fn low_base_quality_penalty(counts: &ArtifactTestCounts, weight: f64) -> Phred {
+    if weight <= 0.0 || counts.alternative_reads < 1.0 {
+        return NO_PENALTY;
+    }
+    let reference_good = (counts.reference_reads - counts.reference_low_quality_reads).max(0.0);
+    let tail = beta_binomial_upper_tail_phred(
+        counts.alternative_low_quality_reads,
+        counts.alternative_reads,
+        counts.reference_low_quality_reads + LOW_QUALITY_PRIOR_READS * LOW_QUALITY_PRIOR_SHARE,
+        reference_good + LOW_QUALITY_PRIOR_READS * (1.0 - LOW_QUALITY_PRIOR_SHARE),
+    );
+    as_penalty(weight * tail * bias_test_power(counts.alternative_reads))
+}
+
+/// **The weight a run charges the low-base-quality test at unless told otherwise**
+/// (`--low-base-quality-weight`).
+///
+/// One, chosen by the owner on 2026-11-01 from the measurements in `low_base_quality.md` §8: on
+/// HG002 chromosome 20 under `--defaults`, against GIAB, it removes 53 false calls for 6 true ones
+/// at 30× and 21 for 2 at 5×; on the tandem-repeat benchmark 130 for 19 at 30×. Two removes 16 more
+/// false calls on chromosome 20 at 30× for 23 more true ones.
+pub const DEFAULT_LOW_BASE_QUALITY_WEIGHT: f64 = 1.0;
+
+/// **How many reads the prior on the expected low-quality share is worth** in
+/// [`low_base_quality_penalty`].
+///
+/// Thirty, so that a site with few reference reads — a homozygous variant, or a site at 3× —
+/// is judged mostly against the prior rather than against one or two reads, while a site with
+/// dozens of reference reads is judged by them. Measured offline on HG002 chromosome 20 at 30×
+/// against 10: at weight 1, 43 of the 72 low-quality false SNPs removed for 4 true ones, against
+/// 29 for 1 (`low_base_quality.md` §4).
+pub const LOW_QUALITY_PRIOR_READS: f64 = 30.0;
+
+/// **The low-quality share the prior is centred on.** About 2 reads in 100 on HG002's 30×
+/// alignment had a base below Phred 20 at a given position on reference ground (2.2 in 100 over
+/// 112 million bases, `low_base_quality.md` §2). A constant rather than each sample's own share,
+/// which calling does not have; at a site with dozens of reference reads it hardly matters.
+pub const LOW_QUALITY_PRIOR_SHARE: f64 = 0.02;
+
+/// **The upper tail of a beta-binomial**, `P(X ≥ observed)`, as a Phred — zero when that
+/// probability is a half or more, where the observed count is not in excess of what is expected.
+///
+/// The half, rather than "above the most likely count", because a site whose alternative reads are
+/// exactly as poor as its reference reads sits at the mean, and the tail from one count above the
+/// mode is still about a half: charging it would put 3 Phred on every such site.
+fn beta_binomial_upper_tail_phred(observed: f64, total: f64, alpha: f64, beta: f64) -> f64 {
+    if total < 1.0 {
+        return 0.0;
+    }
+    let n = total.round() as u64;
+    let k_observed = observed.round().clamp(0.0, n as f64) as u64;
+    if k_observed == 0 {
+        return 0.0;
+    }
+    let distribution = BetaBinomial::new(n, alpha, beta);
+    // Below the mode the flank sum's terms rise before they fall, so it is summed from the far
+    // side instead: P(X ≥ k) = 1 − P(X ≤ k − 1).
+    let tail = if k_observed > distribution.mode() {
+        distribution.flank_sum(k_observed, Direction::Up)
+    } else {
+        1.0 - distribution.flank_sum(k_observed - 1, Direction::Down)
+    };
+    if tail >= 0.5 {
+        return 0.0;
+    }
+    (-10.0 * float::log10(tail.max(1e-300))).max(0.0)
+}
+
+// ---------------------------------------------------------------------------------------
 // The subtraction
 // ---------------------------------------------------------------------------------------
 
@@ -725,13 +821,19 @@ fn bias_test_power(alternative_reads: f64) -> f64 {
 pub fn correct_site_quality(
     baseline: Phred,
     counts: &ArtifactTestCounts,
+    low_base_quality_weight: f64,
 ) -> (Phred, ArtifactPenalties) {
     let penalties = ArtifactPenalties {
         allele_balance: allele_balance_penalty(counts),
         strand_and_read_position: strand_and_read_position_penalty(counts),
+        low_base_quality: (low_base_quality_weight > 0.0)
+            .then(|| low_base_quality_penalty(counts, low_base_quality_weight)),
     };
     let charged = f64::from(penalties.allele_balance.get())
-        + f64::from(penalties.strand_and_read_position.get());
+        + f64::from(penalties.strand_and_read_position.get())
+        + penalties
+            .low_base_quality
+            .map_or(0.0, |penalty| f64::from(penalty.get()));
     let corrected = (f64::from(baseline.get()) - charged).max(0.0);
     (
         Phred::try_new(corrected as f32)
@@ -760,6 +862,8 @@ mod tests {
             alternative_reads,
             alternative_forward_reads: alternative_reads / 2.0,
             alternative_placed_left_reads: alternative_reads / 2.0,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: reference_reads + alternative_reads,
             genotype_expected_alternative_reads,
         }
@@ -1076,6 +1180,8 @@ mod tests {
             alternative_reads,
             alternative_forward_reads,
             alternative_placed_left_reads,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: reference_reads + alternative_reads,
             // Whatever the called genotypes expect is the other test's business; a value that
             // matches the split keeps this fixture from being about two things at once.
@@ -1208,7 +1314,7 @@ mod tests {
     fn a_clean_locus_keeps_its_quality_exactly() {
         let baseline = Phred::try_new(742.5).expect("a quality");
         let (corrected, penalties) =
-            correct_site_quality(baseline, &strand_counts(60.0, 40.0, 20.0, 20.0));
+            correct_site_quality(baseline, &strand_counts(60.0, 40.0, 20.0, 20.0), 0.0);
         assert_eq!(corrected, baseline);
         assert_eq!(penalties.allele_balance.get(), 0.0);
         assert_eq!(penalties.strand_and_read_position.get(), 0.0);
@@ -1231,11 +1337,13 @@ mod tests {
             alternative_reads: 100.0,
             alternative_forward_reads: 100.0,
             alternative_placed_left_reads: 50.0,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: 500.0,
             genotype_expected_alternative_reads: 250.0,
         };
         let baseline = Phred::try_new(5000.0).expect("a quality");
-        let (corrected, penalties) = correct_site_quality(baseline, &counts);
+        let (corrected, penalties) = correct_site_quality(baseline, &counts, 0.0);
         assert!(penalties.allele_balance.get() > 0.0);
         assert!(penalties.strand_and_read_position.get() > 0.0);
 
@@ -1265,11 +1373,13 @@ mod tests {
             alternative_reads: 100.0,
             alternative_forward_reads: 100.0,
             alternative_placed_left_reads: 50.0,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: 500.0,
             genotype_expected_alternative_reads: 250.0,
         };
         let (corrected, penalties) =
-            correct_site_quality(Phred::try_new(30.0).expect("a weak quality"), &counts);
+            correct_site_quality(Phred::try_new(30.0).expect("a weak quality"), &counts, 0.0);
         assert_eq!(corrected.get(), 0.0);
         assert!(
             f64::from(penalties.allele_balance.get())
@@ -1286,7 +1396,7 @@ mod tests {
     fn the_pair_that_comes_back_is_what_the_two_tests_charge() {
         let counts = strand_counts(60.0, 40.0, 38.0, 20.0);
         let (_, penalties) =
-            correct_site_quality(Phred::try_new(500.0).expect("a quality"), &counts);
+            correct_site_quality(Phred::try_new(500.0).expect("a quality"), &counts, 0.0);
         assert_eq!(penalties.allele_balance, allele_balance_penalty(&counts));
         assert_eq!(
             penalties.strand_and_read_position,
@@ -1302,6 +1412,7 @@ mod tests {
         let penalties = ArtifactPenalties {
             allele_balance: Phred::try_new(12.5).expect("a quality"),
             strand_and_read_position: Phred::try_new(0.0).expect("no penalty"),
+            low_base_quality: None,
         };
         assert_eq!(penalties.allele_balance.get(), 12.5);
         assert_eq!(penalties.strand_and_read_position.get(), 0.0);
@@ -1318,6 +1429,8 @@ mod tests {
             alternative_reads: alternative.0,
             alternative_forward_reads: alternative.1,
             alternative_placed_left_reads: alternative.2,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: reference.0 + alternative.0,
             genotype_expected_alternative_reads: alternative.0,
         }
@@ -1413,5 +1526,105 @@ mod tests {
         let counts = counts_with((7.0, 7.0, 7.0), (26.0, 26.0, 26.0));
         let tail = strand_and_read_position_tail_phred(&counts);
         assert!(tail > 10.0 && tail < 40.0, "{tail}");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // The low-base-quality test
+    // -------------------------------------------------------------------------------------
+
+    /// Counts for the low-base-quality tests: reference reads and how many were low quality,
+    /// alternative reads and how many were, strand and position fair.
+    fn low_quality_counts(reference: (f64, f64), alternative: (f64, f64)) -> ArtifactTestCounts {
+        ArtifactTestCounts {
+            reference_low_quality_reads: reference.1,
+            alternative_low_quality_reads: alternative.1,
+            ..balanced_counts(reference.0, alternative.0, alternative.0)
+        }
+    }
+
+    /// **chr20:62,817,001 on HG002 at 30×, in the shape it was written**: 22 alternative reads,
+    /// 18 of them below Phred 20, against 7 reference reads with none. GIAB has no variant there.
+    /// Off, the site keeps its quality of 88.8; at weight 1 the penalty takes it below the write
+    /// threshold of 1.
+    #[test]
+    fn an_excess_of_low_quality_alternative_reads_is_charged_and_only_when_asked() {
+        let counts = low_quality_counts((7.0, 0.0), (22.0, 18.0));
+        let baseline = Phred::try_new(88.8).expect("a quality");
+        let (off, penalties_off) = correct_site_quality(baseline, &counts, 0.0);
+        assert_eq!(penalties_off.low_base_quality, None);
+        assert_eq!(off, baseline);
+        let (on, penalties_on) = correct_site_quality(baseline, &counts, 1.0);
+        let charged = penalties_on.low_base_quality.expect("the test ran");
+        assert!(charged.get() > 87.8, "{charged:?}");
+        assert!(on.get() < 1.0, "{on:?}");
+    }
+
+    /// **A real heterozygote's reads are as good as the reference reads beside it, and the test
+    /// charges nothing** — at 15 reads a side or 150, and where the site's reads are poor but the
+    /// alternative reads are better than the reference reads.
+    #[test]
+    fn alternative_reads_no_worse_than_the_reference_reads_are_not_charged() {
+        for (reference, alternative) in [
+            ((15.0, 0.0), (15.0, 0.0)),
+            ((150.0, 3.0), (150.0, 3.0)),
+            ((20.0, 10.0), (20.0, 2.0)),
+        ] {
+            let counts = low_quality_counts(reference, alternative);
+            assert_eq!(
+                low_base_quality_penalty(&counts, 1.0).get(),
+                0.0,
+                "reference {reference:?}, alternative {alternative:?}"
+            );
+        }
+    }
+
+    /// **The cost of the prior, pinned so it is not mistaken for a defect**: where the reference
+    /// reads are few and poor, the prior's 30 reads at 2 in 100 outweigh them, and a real variant
+    /// whose reads are as poor as the reference reads is charged. Twenty reference reads, half
+    /// below Phred 20, set an expected share of about 21 in 100, so nine poor reads in twenty
+    /// alternative reads read as an excess (`low_base_quality.md` §4). At 300 a side the pull is
+    /// from one half to 46 in 100.
+    #[test]
+    fn a_poor_site_with_few_reference_reads_is_charged_through_the_prior() {
+        let counts = low_quality_counts((20.0, 10.0), (20.0, 9.0));
+        let charged = low_base_quality_penalty(&counts, 1.0).get();
+        assert!(charged > 10.0 && charged < 20.0, "{charged}");
+        // At 300 reads a side, equal shares still draw a few Phred — where a real site's quality
+        // is in the thousands.
+        let counts = low_quality_counts((300.0, 150.0), (300.0, 150.0));
+        let charged = low_base_quality_penalty(&counts, 1.0).get();
+        assert!(charged > 0.0 && charged < 10.0, "{charged}");
+    }
+
+    /// **At three alternative reads or fewer the test has no power and charges nothing**, as the
+    /// strand test does — even when every one of them is poor.
+    #[test]
+    fn three_poor_alternative_reads_are_not_charged() {
+        let counts = low_quality_counts((3.0, 0.0), (3.0, 3.0));
+        assert_eq!(low_base_quality_penalty(&counts, 4.0).get(), 0.0);
+        let counts = low_quality_counts((3.0, 0.0), (5.0, 5.0));
+        assert!(low_base_quality_penalty(&counts, 1.0).get() > 0.0);
+    }
+
+    /// **The upper tail against the naive sum over every outcome at or above the observed one.**
+    #[test]
+    fn the_upper_tail_matches_the_exact_sum() {
+        for (observed, total, alpha, beta) in [
+            (5, 10, 0.6, 29.4),
+            (11, 13, 1.6, 36.4),
+            (40, 300, 6.0, 294.0),
+            (2, 2, 0.6, 29.4),
+        ] {
+            let distribution = BetaBinomial::new(total, alpha, beta);
+            let exact: f64 = (observed..=total)
+                .map(|k| float::exp(distribution.ln_probability(k)))
+                .sum();
+            let phred = beta_binomial_upper_tail_phred(observed as f64, total as f64, alpha, beta);
+            let expected = -10.0 * float::log10(exact);
+            assert!(
+                (phred - expected).abs() < 1e-9 * expected.max(1.0),
+                "{observed}/{total}: {phred} against {expected}"
+            );
+        }
     }
 }

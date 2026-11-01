@@ -45,9 +45,20 @@ pub struct VcfHeaderMetadata {
     /// line nor the filter's three declarations, which is what keeps a filter-off run's header
     /// byte for byte the header it wrote before.
     hidden_paralog: Option<HiddenParalogProvenance>,
+    /// Whether the low-base-quality test ran (`--low-base-quality-weight` above zero). `false`,
+    /// the default, leaves its `INFO` declaration out, for the reason the filter's are left out.
+    low_base_quality_test: bool,
 }
 
 impl VcfHeaderMetadata {
+    /// **Say that the low-base-quality test ran**, so its `BQPEN` field is declared. Consuming,
+    /// for the reason [`Self::the_hidden_duplication_filter_ran`] is.
+    #[must_use]
+    pub fn the_low_base_quality_test_ran(mut self) -> Self {
+        self.low_base_quality_test = true;
+        self
+    }
+
     /// **Say that the hidden-duplication filter ran, and what it was calibrated to.**
     ///
     /// Consuming, so the header cannot be built and then quietly amended: what a header states is
@@ -118,6 +129,7 @@ impl VcfHeaderMetadata {
             log_file_name,
             parameters_source,
             hidden_paralog: None,
+            low_base_quality_test: false,
         })
     }
 
@@ -422,6 +434,10 @@ const INFO_DECLARATIONS: &[&str] = &[
     r#"##INFO=<ID=PERIOD,Number=.,Type=Integer,Description="Repeat unit length in bases; at an STR bundle, one per run in order">"#,
 ];
 
+/// **What the low-base-quality test adds to the header, and only when it ran** — for the reason
+/// the hidden-duplication filter's declarations below are conditional.
+const LOW_BASE_QUALITY_DECLARATION: &str = r#"##INFO=<ID=BQPEN,Number=1,Type=Float,Description="Phred subtracted from QUAL by the low-base-quality artifact test">"#;
+
 /// **What the hidden-duplication filter adds to the header, and only when it ran.**
 ///
 /// Three declarations and, beside them, the `##paralogFilter=` line
@@ -592,6 +608,7 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
         log_file_name: _,
         parameters_source: _,
         hidden_paralog,
+        low_base_quality_test,
     } = metadata;
 
     let mut lines: Vec<String> = vec![format!("##fileformat={FILE_FORMAT}")];
@@ -617,6 +634,9 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     }
 
     lines.extend(INFO_DECLARATIONS.iter().map(ToString::to_string));
+    if *low_base_quality_test {
+        lines.push(LOW_BASE_QUALITY_DECLARATION.to_string());
+    }
     lines.extend(FILTER_DECLARATIONS.iter().map(ToString::to_string));
     // Only where the filter ran — see `HIDDEN_PARALOG_DECLARATIONS`.
     if hidden_paralog.is_some() {

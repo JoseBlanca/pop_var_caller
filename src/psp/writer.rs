@@ -969,6 +969,7 @@ pub(crate) mod tests_support {
                 mapq_sum: 180,
                 mapq_sum_sq: 10_800,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             }],
             reads_without_observation: 1,

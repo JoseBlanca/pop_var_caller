@@ -316,6 +316,8 @@ fn a_run_writing_to(output: PathBuf) -> CallFromAlignmentsArgs {
         max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+        low_base_quality_weight:
+            crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
         hidden_dup_tag: false,
         hidden_dup_window: 0,
         locus_builder_regions_len: None,
@@ -400,6 +402,8 @@ fn a_run_with_no_catalog_is_told_which_file_is_missing_and_how_to_build_it() {
         max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+        low_base_quality_weight:
+            crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
         hidden_dup_tag: false,
         hidden_dup_window: 0,
         locus_builder_regions_len: None,
@@ -622,6 +626,8 @@ fn a_cohort_on_disk() -> (
         max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
         hidden_dup_fdr: 0.0,
         min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+        low_base_quality_weight:
+            crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
         hidden_dup_tag: false,
         hidden_dup_window: 0,
         locus_builder_regions_len: None,

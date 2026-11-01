@@ -215,6 +215,9 @@ pub(super) struct AlleleSupportStats {
     /// Reads whose mapped 5′ end is strictly to the left of this record's anchor
     /// position (freebayes' `placedLeft`).
     pub placed_left: u32,
+    /// Reads whose lowest base quality inside the record is below
+    /// [`LOW_BASE_QUALITY_BELOW`](crate::locus_generation::LOW_BASE_QUALITY_BELOW).
+    pub low_quality: u32,
     /// Σ mapping quality over supporting reads.
     pub mapq_sum: u32,
     /// Σ mapq² over supporting reads.
@@ -1181,6 +1184,7 @@ impl OpenPileupRecord {
                     q_sum,
                     fwd,
                     placed_left,
+                    low_quality,
                     mapq_sum,
                     mapq_sum_sq,
                 } = observation.support;
@@ -1196,6 +1200,7 @@ impl OpenPileupRecord {
                     mapq_sum,
                     mapq_sum_sq,
                     placed_left,
+                    num_low_quality: low_quality,
                     chain_ids: observation.chain_ids,
                 }
             })
@@ -2245,16 +2250,15 @@ fn fold_read_into_record(
         active.read_id,
     );
 
-    let ln_q = minted_ln_read_error(
-        min_bq_for_read(window_events, bq_fallback),
-        active.read.mq_log_err,
-    );
+    let base_quality = min_bq_for_read(window_events, bq_fallback);
+    let ln_q = minted_ln_read_error(base_quality, active.read.mq_log_err);
     let mapq = u32::from(active.read.mapq);
     let new_contribution = AlleleSupportStats {
         num_obs: 1,
         q_sum: ln_q,
         fwd: u32::from(!active.read.is_reverse_strand),
         placed_left: u32::from(active.read.alignment_start < rec_pos),
+        low_quality: u32::from(crate::locus_generation::is_low_base_quality(base_quality)),
         mapq_sum: mapq,
         mapq_sum_sq: (mapq as u64) * (mapq as u64),
     };
@@ -3473,6 +3477,7 @@ fn add_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStats) {
     support.q_sum += c.q_sum;
     support.fwd += c.fwd;
     support.placed_left += c.placed_left;
+    support.low_quality += c.low_quality;
     support.mapq_sum += c.mapq_sum;
     support.mapq_sum_sq += c.mapq_sum_sq;
 }
@@ -3508,6 +3513,12 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
         c.placed_left,
     );
     debug_assert!(
+        support.low_quality >= c.low_quality,
+        "subtract_contribution underflow on low_quality: {} -= {}",
+        support.low_quality,
+        c.low_quality,
+    );
+    debug_assert!(
         support.mapq_sum >= c.mapq_sum,
         "subtract_contribution underflow on mapq_sum: {} -= {}",
         support.mapq_sum,
@@ -3523,6 +3534,7 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
     support.q_sum -= c.q_sum;
     support.fwd = support.fwd.saturating_sub(c.fwd);
     support.placed_left = support.placed_left.saturating_sub(c.placed_left);
+    support.low_quality = support.low_quality.saturating_sub(c.low_quality);
     support.mapq_sum = support.mapq_sum.saturating_sub(c.mapq_sum);
     support.mapq_sum_sq = support.mapq_sum_sq.saturating_sub(c.mapq_sum_sq);
 }
@@ -6427,6 +6439,7 @@ mod tests {
             q_sum: 0.0,
             fwd: 1,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6435,6 +6448,7 @@ mod tests {
             q_sum: 0.0,
             fwd: 0,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6479,6 +6493,7 @@ mod tests {
             q_sum: -3.0,
             fwd: 4,
             placed_left: 2,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6487,6 +6502,7 @@ mod tests {
             q_sum: -2.0,
             fwd: 1,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };

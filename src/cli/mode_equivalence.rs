@@ -142,6 +142,8 @@ mod tests {
             max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             hidden_dup_fdr: 0.0,
             min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
             locus_builder_regions_len: None,
@@ -246,6 +248,8 @@ mod tests {
             max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             hidden_dup_fdr: 0.0,
             min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
             locus_builder_regions_len: None,
@@ -1166,6 +1170,8 @@ mod tests {
             max_generic_alleles: DEFAULT_MAX_CANDIDATE_ALLELES.get(),
             hidden_dup_fdr: 0.0,
             min_site_quality: crate::run::records::DEFAULT_MIN_SITE_QUALITY,
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
             locus_builder_regions_len: None,

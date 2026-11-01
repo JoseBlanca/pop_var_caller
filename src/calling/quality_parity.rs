@@ -607,6 +607,8 @@ mod tests {
             alternative_reads: 0.0,
             alternative_forward_reads: 0.0,
             alternative_placed_left_reads: 0.0,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: 0.0,
             genotype_expected_alternative_reads: 0.0,
         };
@@ -642,6 +644,7 @@ mod tests {
         let (ng, _) = correct_site_quality(
             Phred::try_new(baseline as f32).expect("a baseline quality"),
             &ng_summary(samples),
+            0.0,
         );
         let ng = f64::from(ng.get());
         assert!(
@@ -695,6 +698,7 @@ mod tests {
         let (ng, _) = correct_site_quality(
             Phred::try_new(baseline as f32).expect("a baseline quality"),
             &ng_summary(samples),
+            0.0,
         );
         (f64::from(ng.get()), production)
     }
@@ -757,6 +761,7 @@ mod tests {
         let (_, penalties) = correct_site_quality(
             Phred::try_new(900.0).expect("a baseline quality"),
             &ng_summary(&samples),
+            0.0,
         );
         assert_eq!(penalties.allele_balance.get(), 0.0);
         let (ng, production) = both_corrections(&samples, 900.0);
@@ -783,6 +788,7 @@ mod tests {
         let (ng, _) = correct_site_quality(
             Phred::try_new(20.0).expect("a baseline quality"),
             &ng_summary(&samples),
+            0.0,
         );
         assert_eq!(ng.get(), 0.0, "ng floors the corrected quality at zero");
     }

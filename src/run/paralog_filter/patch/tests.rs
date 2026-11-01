@@ -542,6 +542,7 @@ mod encoded_lines {
                     Some(ArtifactPenalties {
                         allele_balance: quality(3.5),
                         strand_and_read_position: quality(1.25),
+                        low_base_quality: None,
                     }),
                 ),
             ),

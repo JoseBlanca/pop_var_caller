@@ -1400,6 +1400,10 @@ pub struct GenericObservation {
     /// [`AlleleSupport::placed_left`](crate::run::cohort_merge::build::AlleleSupport::placed_left),
     /// whose own comment is the one to read before drawing a conclusion from it.
     pub placed_left_reads: u32,
+    /// Of those reads, how many had a low base quality — the low-base-quality penalty's count,
+    /// carried for the same reason as [`Self::forward_reads`]
+    /// (`doc/devel/ng/spec/low_base_quality.md`).
+    pub low_quality_reads: u32,
 }
 
 impl GenericObservation {
@@ -1423,6 +1427,7 @@ impl GenericObservation {
             q_sum: row.support.q_sum,
             forward_reads: row.support.num_fwd,
             placed_left_reads: row.support.placed_left,
+            low_quality_reads: row.support.num_low_quality,
         }
     }
 
@@ -2298,6 +2303,7 @@ mod tests {
                 mapq_sum: 611,
                 mapq_sum_sq: 37_442,
                 placed_left: 3,
+                num_low_quality: 0,
             },
         }
     }
@@ -2360,6 +2366,7 @@ mod tests {
             mapq_sum: 240,
             mapq_sum_sq: 14_400,
             placed_left: 1,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }

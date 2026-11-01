@@ -711,6 +711,7 @@ impl PartialEq for ComparableLocus {
                         mapq_sum: our_mapq,
                         mapq_sum_sq: our_mapq_sq,
                         placed_left: our_placed_left,
+                        num_low_quality: our_low_quality,
                         chain_ids: our_ids,
                         flank_deletion: our_flank_deletion,
                         held_flank: our_held_flank,
@@ -723,6 +724,7 @@ impl PartialEq for ComparableLocus {
                         && our_mapq == &theirs.mapq_sum
                         && our_mapq_sq == &theirs.mapq_sum_sq
                         && our_placed_left == &theirs.placed_left
+                        && our_low_quality == &theirs.num_low_quality
                         && our_ids == &theirs.chain_ids
                         && our_q_sum == &theirs.q_sum
                         && our_flank_deletion == &theirs.flank_deletion
@@ -1532,6 +1534,7 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left,
+                num_low_quality: 0,
                 chain_ids: if reference == b'A' {
                     Vec::new()
                 } else {

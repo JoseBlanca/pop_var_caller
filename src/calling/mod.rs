@@ -4272,6 +4272,8 @@ mod tests {
             alternative_reads: 6.0,
             alternative_forward_reads: 5.0,
             alternative_placed_left_reads: 2.0,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: 8.0,
             genotype_expected_alternative_reads: 4.0,
         }

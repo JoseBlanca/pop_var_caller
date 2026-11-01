@@ -934,6 +934,24 @@ pub fn log_the_report(calls: &Path, report: &RunReport<'_>, filter_lines: &[Stri
     }
 }
 
+/// `--low-base-quality-weight`'s parser: a finite number, zero or more.
+///
+/// # Errors
+///
+/// A value that is not a number, is negative, or is not finite.
+pub fn parse_low_base_quality_weight(value: &str) -> Result<f64, String> {
+    let weight: f64 = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number"))?;
+    if weight.is_finite() && weight >= 0.0 {
+        Ok(weight)
+    } else {
+        Err(format!(
+            "`{value}` is not a weight: it must be zero or more, and finite"
+        ))
+    }
+}
+
 /// `--min-site-quality`'s parser: a finite quality, zero or more.
 ///
 /// # Errors

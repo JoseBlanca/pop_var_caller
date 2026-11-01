@@ -476,6 +476,10 @@ pub(crate) fn outcome_rows(
                             penalties.strand_and_read_position.get()
                         )),
                     ));
+                    if let Some(penalty) = penalties.low_base_quality {
+                        site.detail
+                            .push(("BQPEN", DetailValue::Text(format!("{:.1}", penalty.get()))));
+                    }
                 }
                 site.detail.push((
                     "filter",

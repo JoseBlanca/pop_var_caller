@@ -593,6 +593,15 @@ cluster in one sample are too few to set a rule from.
 at about 3×. The per-read argument says the weight should hold as a cohort grows, but no cohort of
 thousands has been run.
 
+### 6.6 A third test: low base quality (2026-11-01)
+
+**A third penalty, `BQPEN`, asks whether the alternative reads carry more base qualities below
+Phred 20 than the reference reads at the same site**, with the strand test's arithmetic: a
+beta-binomial against the reference reads' share plus a prior, only an excess charged, the same
+ramp, weight 1 by default. It exists for false SNPs the sequencer made by misreading the same base
+in many reads beside G and C runs, which the likelihood counts as independent evidence. Its design,
+the options weighed and the measurements are in [`low_base_quality.md`](low_base_quality.md).
+
 ---
 
 ## 7. One sample, and three thousand
