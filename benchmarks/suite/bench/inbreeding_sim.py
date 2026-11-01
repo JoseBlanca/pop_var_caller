@@ -35,7 +35,9 @@ Simulated (genome-population-simulator). 50 diploid samples over 5 Mb of tomato 
 0.5, 0.75 and 1, all called together. One SNP a kilobase, the same SNPs at the same frequencies in
 every group (ALT frequency uniform between 0.05 and 0.95), so F is the only difference between the
 groups; F acts site by site, with no runs of homozygosity. 150 bp PCR-free pairs simulated at 30x,
-mapped with minimap2, downsampled to each depth. pvc runs at its defaults (F = 0 for every sample),
+mapped with minimap2, downsampled to each depth. pvc runs with --call-satellites, since the
+simulation plants no stutter and no indels, so a SNP inside a repeat too long for pvc's repeat model
+is called, not left out. pvc runs at its defaults (F = 0 for every sample),
 fitted (each sample's F estimated), and with F stated as 0.9 for every sample; GATK and DeepVariant
 take no F. Each sample's genotype is compared with the truth at every planted SNP: `het_called_het`
 is the share of true heterozygotes called heterozygous, `homozygote_called_het` the homozygotes
@@ -52,6 +54,10 @@ COVERAGE = 30
 DEPTHS = ["3x", "5x", "10x", "15x", "30x"]
 SEED = 42
 STATED_F = 0.9
+# pvc genotypes satellite tracts too (off by default). Safe here: GPS plants SNPs only, with no
+# stutter and no indels, so a long repeat holds nothing pvc's SNP/indel model would get wrong; left
+# off, pvc wrote nothing at the SNPs inside them (17 positions at 30x, 2026-10-31).
+CALL_SATELLITES = True
 ARMS = ["pvc_defaults", "pvc_fitted", "gatk", "deepvariant"]
 STATED_LABEL = f"pvc (F stated {STATED_F})"
 # The slice: 100 kb, 2 samples a group, 10x, called at 5x.
@@ -159,7 +165,7 @@ def steps(ctx):
         callsets = {}
         for arm in ARMS:
             step, callset = arms.arm_steps(ctx, arm, prefix, reference, catalog, bams, regions,
-                                           base, joint=True)
+                                           base, joint=True, call_satellites=CALL_SATELLITES)
             out.append(step)
             callsets[arm] = callset
         step, stated_calls, stated_params = _stated_f_step(ctx, prefix, reference, catalog, bams,
@@ -178,7 +184,8 @@ def steps(ctx):
 
 def _stated_f_step(ctx, prefix, reference, catalog, bams, regions, base, fitted):
     """pvc told every sample's F (STATED_F): `estimate-parameters --inbreeding`, then
-    `call-from-psps`, over the fitted arm's psps (made again when they are gone)."""
+    `call-from-psps`, over the fitted arm's psps (made again when they are gone). The psps record
+    CALL_SATELLITES, and the commands that read them follow it."""
     step_name = f"{prefix}/pvc_stated_f"
     d_final = os.path.join(ctx.pvc_root(), step_name)
     calls = os.path.join(d_final, "calls.vcf.gz")
@@ -194,7 +201,7 @@ def _stated_f_step(ctx, prefix, reference, catalog, bams, regions, base, fitted)
             source = os.path.join(d, "psps")
             run_commands(callers.pvc_generate_psps(ctx, reference, catalog,
                                                    {k: [v] for k, v in bams.items()}, regions,
-                                                   source, logs),
+                                                   source, logs, call_satellites=CALL_SATELLITES),
                          logs, max_concurrent=ctx.threads)
         psps = [os.path.join(source, f"{s}.psp") for s in samples]
         m_fit = run_commands([callers.pvc_estimate_parameters(
@@ -210,7 +217,7 @@ def _stated_f_step(ctx, prefix, reference, catalog, bams, regions, base, fitted)
     step = Step(step_name, "pvc", action,
                 lambda: {"alignments": [file_identity(b) for b in bams.values()],
                          "regions": file_identity(regions), "stated_f": STATED_F,
-                         "threads": ctx.threads},
+                         "threads": ctx.threads, "call_satellites": CALL_SATELLITES},
                 attrs={"caller": "pvc", "depth": base["depth"]})
     return step, calls, params
 
