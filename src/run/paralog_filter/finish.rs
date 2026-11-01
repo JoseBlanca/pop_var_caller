@@ -307,6 +307,7 @@ pub fn fit_score_and_write_the_calls_explaining(
             .map(|windowed| WindowedPriorProvenance {
                 window_bases: windowed.config.window_bases,
                 shrink_records: windowed.config.shrink_records,
+                pulled_towards: windowed.pulled_towards,
                 posterior_cut: windowed.posterior_cut,
             }),
     });
@@ -485,10 +486,11 @@ pub fn what_to_tell_the_operator(run: &FilteredRun) -> Vec<String> {
         };
         lines.push(format!(
             "  --hidden-dup-window: the duplication rate was estimated per window of {} bases, \
-             pulled towards the run-wide rate by {} record(s), and cut by the tail \
+             pulled by {} record(s) towards {:.6}, the median window's rate, and cut by the tail \
              false-discovery rule at probability {}; {rates}",
             windowed.config.window_bases,
             windowed.config.shrink_records,
+            windowed.pulled_towards,
             match windowed.posterior_cut {
                 Some(cut) => format!("{cut:.6}"),
                 None => "none (nothing flagged)".to_string(),
