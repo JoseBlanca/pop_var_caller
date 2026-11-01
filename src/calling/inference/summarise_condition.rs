@@ -952,22 +952,25 @@ impl<'a> TableReassembly<'a> {
 /// ninth is the allele the other eight are pooled *for*, which is chosen before any of this
 /// and is never summed.
 ///
-/// **Seven of the eight are counts and are summed as integers**, which is not a
-/// micro-optimisation but the removal of a question: `f64` addition is not associative, so a
-/// cohort's read totals summed in another order could differ in the last bits and the two
-/// binomial tests downstream would see different inputs at a different worker count. Whole
-/// reads summed as `u64` cannot. The eighth is fractional by construction — a genotype
-/// carrying one copy of two expects half a sample's reads — so it is an `f64` summed in the
-/// run's fixed sample order, the same order and the same reason as the M-step's
-/// (`doc/devel/ng/spec/calling_quality.md` §9).
+/// **The three read counts are summed as integers**, which is not a micro-optimisation but the
+/// removal of a question: `f64` addition is not associative, so a cohort's read totals summed in
+/// another order could differ in the last bits and the two binomial tests downstream would see
+/// different inputs at a different worker count. Whole reads summed as `u64` cannot. **The other
+/// five are fractional by construction** — a read composed across records carries a forward and
+/// a placed-left *share* (`AlleleSupport::num_fwd`), and a genotype carrying one copy of two
+/// expects half a sample's reads — so they are `f64`s summed in the run's fixed sample order,
+/// the same order and the same reason as the M-step's (`doc/devel/ng/spec/calling_quality.md`
+/// §9).
 #[derive(Default)]
 struct PooledArtifactCounts {
     reference_reads: u64,
-    reference_forward_reads: u64,
-    reference_placed_left_reads: u64,
+    reference_forward_reads: f64,
+    reference_placed_left_reads: f64,
     alternative_reads: u64,
-    alternative_forward_reads: u64,
-    alternative_placed_left_reads: u64,
+    alternative_forward_reads: f64,
+    alternative_placed_left_reads: f64,
+    reference_low_quality_reads: u64,
+    alternative_low_quality_reads: u64,
     total_reads: u64,
     genotype_expected_alternative_reads: f64,
 }
@@ -1006,12 +1009,14 @@ impl PooledArtifactCounts {
             // the reference as its alternative.
             if observation.allele.is_reference() {
                 self.reference_reads += reads;
-                self.reference_forward_reads += u64::from(observation.forward_reads);
-                self.reference_placed_left_reads += u64::from(observation.placed_left_reads);
+                self.reference_forward_reads += observation.forward_reads;
+                self.reference_placed_left_reads += observation.placed_left_reads;
+                self.reference_low_quality_reads += u64::from(observation.low_quality_reads);
             } else if observation.allele == primary_alternative {
                 self.alternative_reads += reads;
-                self.alternative_forward_reads += u64::from(observation.forward_reads);
-                self.alternative_placed_left_reads += u64::from(observation.placed_left_reads);
+                self.alternative_forward_reads += observation.forward_reads;
+                self.alternative_placed_left_reads += observation.placed_left_reads;
+                self.alternative_low_quality_reads += u64::from(observation.low_quality_reads);
             }
         }
         self.total_reads += depth;
@@ -1028,11 +1033,13 @@ impl PooledArtifactCounts {
         ArtifactTestCounts {
             primary_alternative,
             reference_reads: self.reference_reads as f64,
-            reference_forward_reads: self.reference_forward_reads as f64,
-            reference_placed_left_reads: self.reference_placed_left_reads as f64,
+            reference_forward_reads: self.reference_forward_reads,
+            reference_placed_left_reads: self.reference_placed_left_reads,
             alternative_reads: self.alternative_reads as f64,
-            alternative_forward_reads: self.alternative_forward_reads as f64,
-            alternative_placed_left_reads: self.alternative_placed_left_reads as f64,
+            alternative_forward_reads: self.alternative_forward_reads,
+            alternative_placed_left_reads: self.alternative_placed_left_reads,
+            reference_low_quality_reads: self.reference_low_quality_reads as f64,
+            alternative_low_quality_reads: self.alternative_low_quality_reads as f64,
             total_reads: self.total_reads as f64,
             genotype_expected_alternative_reads: self.genotype_expected_alternative_reads,
         }
@@ -1081,8 +1088,9 @@ fn pool_allele_reads(per_sample: &[GenericLocusSample<'_>], pooled_reads: &mut [
                 pooled_reads.len()
             );
             assert!(
-                observation.forward_reads <= observation.num_reads
-                    && observation.placed_left_reads <= observation.num_reads,
+                observation.forward_reads <= f64::from(observation.num_reads)
+                    && observation.placed_left_reads <= f64::from(observation.num_reads)
+                    && observation.low_quality_reads <= observation.num_reads,
                 "sample {sample}'s {} reads of allele {allele} carry {} on the forward \
                  strand and {} placed left: both are shares of those same reads, and the \
                  artifact tests read them as fractions",
@@ -2853,6 +2861,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -2883,6 +2892,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -5469,8 +5479,9 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum: -3.0 * f64::from(num_reads),
-            forward_reads,
-            placed_left_reads,
+            forward_reads: f64::from(forward_reads),
+            placed_left_reads: f64::from(placed_left_reads),
+            low_quality_reads: 0,
         }
     }
 

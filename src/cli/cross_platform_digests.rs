@@ -425,7 +425,11 @@ mod tests {
     /// in the Linux container (amd64).
     /// **Re-recorded 2026-10-30** with the whole-reference digest's new definition: only the
     /// `##pvcParameters` line moved, carrying the parameters file's new checksum. It was `97c0120bca8f944d9d26e07695bf87c2`.
-    const CALLS_MD5: &str = "879ac81cb2eed45e9e48363fa49383f2";
+    /// **Re-recorded 2026-11-01** when the low-base-quality test came on by default
+    /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
+    /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
+    /// reproduces the old checksum, `879ac81cb2eed45e9e48363fa49383f2`, exactly. Recorded in the Linux container (arm64).
+    const CALLS_MD5: &str = "eeb54b8cccb65e7a31fde3545329e3a3";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -671,7 +675,11 @@ mod tests {
     /// in the Linux container (amd64).
     /// **Re-recorded 2026-10-30** with the whole-reference digest's new definition: only the
     /// `##pvcParameters` line moved, carrying the parameters file's new checksum. It was `d717848f594200eb3b7c4e39ddeeb3ae`.
-    const WITH_ERRORS_CALLS_MD5: &str = "8d7af38234c53639f550e9042bae46c4";
+    /// **Re-recorded 2026-11-01** when the low-base-quality test came on by default
+    /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
+    /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
+    /// reproduces the old checksum, `8d7af38234c53639f550e9042bae46c4`, exactly. Recorded in the Linux container (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "4e24472e81c47b3d842ca21f1cedf85f";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -940,13 +948,17 @@ mod tests {
     /// four records and `AF` in its fifth decimal at three. The fit's file is unchanged. Putting
     /// the previous `generic.rs` back reproduces `df2ccb357d21f864d657f1b9bdf7d285` exactly.
     /// Recorded in the Linux container (arm64).
+    /// **Re-recorded 2026-11-01** when the low-base-quality test came on by default
+    /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
+    /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
+    /// reproduces the old checksum, `5390c37f58aa0200fb9fcfa6a7c8700a`, exactly. Recorded in the Linux container (arm64).
     /// **Re-recorded 2026-11-01** when a read began counting as placed left by freebayes' rule —
     /// at least as many aligned bases left of the site as right — instead of by starting left of
-    /// it (`calling_quality.md` §6.6; measured on HG002 and tomato before it was recorded): two
+    /// it (`calling_quality.md` §6.7; measured on HG002 and tomato before it was recorded): two
     /// records move in `QUAL` and `SPPEN` only, chrV:55 96.4 → 81.5 and chrV:377 277.9 → 269.4;
     /// every genotype and the fit's file are unchanged. Putting the old rule back reproduces
-    /// `5390c37f58aa0200fb9fcfa6a7c8700a` exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "6a49015c88631a5bc0825f053fad1c8e";
+    /// `df9ca7838395f42ee2a5f1b4f461c6b9` exactly. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "40067fb11da202a3bb5dc8a0b85d9ca1";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
@@ -1004,6 +1016,8 @@ mod tests {
             // Off: this test pins that platforms write the same bytes, over a fixture whose three
             // variant sites include low-quality ones; the threshold is pinned elsewhere.
             min_site_quality: 0.0,
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
             hidden_dup_tag: false,
             hidden_dup_window: 0,
             locus_builder_regions_len: None,

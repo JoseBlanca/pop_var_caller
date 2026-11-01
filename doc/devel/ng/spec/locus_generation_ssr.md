@@ -181,6 +181,35 @@ genotypes right at segments with such a deletion went from 397 to 738 of 1,085; 
 75 more false positives a depth, most of them the two records of a deletion that is now right but
 written in two pieces where the truth writes one.
 
+**A read the delimiter leaves partial is complete when its own alignment has an indel in the flank
+bases the delimiter's junction guard closes** (2026-11-01). The guard lets no gap open in the eight
+flank bases beside each junction (half the flank where that is shorter), so the delimiter cannot
+read an indel there. Where the read's tract also differs from the reference, its cheapest path left
+ends the tract early and lays the read's flank across the reference's with mismatches, and the
+anchor rule then drops that side. Where such a read's CIGAR has an insertion or deletion in those
+guarded bases, and at least five aligned bases on each side beyond the tract, it is complete and
+spelled from its own alignment; the indel, not touching the tract, is the generic path's. Found at
+SL4.0ch05:51017179 (tomato, 63 samples): all ten of one sample's reads carried `ATAAAGAA` over an
+`A` ×8 tract and deleted `ATAGA` five bases into the flank, came back partial, and tied the two
+8-base candidates although eight spelled one of them base for base; the exact tie then decided the
+call differently with the samples in another order. Only reads left partial change: a read the
+delimiter anchors on both sides is measured as before. Measured with `ng_tract_simulator`
+(`flank_deletion_len=5`, distances 0–12, half the non-reference tracts substituted, reads remapped
+by minimap2): at 20 samples and 30×, of 14,009 variant sample genotypes with the deletion one to
+seven bases from the tract, 5,845 wrong and 514 no-calls became 2,760 wrong and none, with the
+reference genotypes unchanged (17 wrong of 26,026); at 3×, 776 more of those variant genotypes
+right for 109 more reference genotypes wrong of 14,111. `str_edge_deletion_alleles.md` §5.1 has the two
+companion rules for deletions at the edge.
+
+**What is still lost** (measured the same way, 2026-11-01). An event whose length changes cancel —
+a repeat inserted and as many flank bases deleted beside it — is written by minimap2 with no indel
+at all, only mismatches, so no rule here sees it, and the guard and the anchor rule keep the
+delimiter from reading it. Realigning reads left partial with the flank guard off, the anchor
+window counted in aligned bases rather than reference bases, was built and measured: it fixed as
+many genotypes as it broke (at one sample and 30×, 7 against 14, most of the broken ones measured
+one repeat short) and was withdrawn. What would address it is the STR path owning a fixed stretch of
+each flank and calling the tract and that stretch as one sequence; that is a design of its own.
+
 It reaches the delimiter at all because the fetch queries the tract **plus its margin** (§2), so a
 read clipping only the flank is delimited too; the aligner then reports `FromLeft`/`FromRight` with an
 empty span, the unanchored side having fallen back to the read's own edge. **It is not a corner:

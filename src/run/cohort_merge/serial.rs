@@ -690,10 +690,10 @@ mod tests {
                 .iter()
                 .map(|allele| String::from_utf8_lossy(allele).into_owned())
                 .collect::<Vec<_>>(),
-            vec!["AAAAAA", "AAACAA", "A"],
-            "the reference over six bases, the substitution widened onto them, and the \
-             deletion — which the reference is all `A`, so the substituted base is the only \
-             letter in it",
+            vec!["AAAAAA", "A", "AAACAA"],
+            "the reference over six bases, the deletion, and the substitution widened onto \
+             them — the deletion first because `A` sorts before `AAACAA`, and the reference \
+             is all `A`, so the substituted base is the only letter in it",
         );
 
         // **The substitution sample is the multi-record case, on minted records.** The
@@ -705,7 +705,7 @@ mod tests {
         assert_eq!(substituting.reads_composed_across_records, 3);
         assert_eq!(substituting.reads_removed_as_evidence, 0);
         assert_eq!(
-            substituting.pooled_support_for(1).num_reads,
+            substituting.pooled_support_for(2).num_reads,
             3,
             "three reads showed the substitution across the whole locus",
         );
@@ -722,7 +722,7 @@ mod tests {
             })
             .fold(f64::NEG_INFINITY, f64::max);
         assert_eq!(
-            substituting.pooled_support_for(1).q_sum,
+            substituting.pooled_support_for(2).q_sum,
             weakest_of_its_records * 3.0,
             "each read takes the weakest of the six positions it was seen at",
         );
@@ -738,14 +738,15 @@ mod tests {
         assert_eq!(deleting.sample, 1);
         assert_eq!(deleting.reads_composed_across_records, 0);
         assert_eq!(
-            deleting.pooled_support_for(2),
+            deleting.pooled_support_for(1),
             crate::run::cohort_merge::build::AlleleSupport {
                 num_reads: minted.num_obs,
-                num_fwd: minted.num_fwd,
+                num_fwd: f64::from(minted.num_fwd),
                 q_sum: minted.q_sum.nats(),
                 mapq_sum: minted.mapq_sum,
                 mapq_sum_sq: minted.mapq_sum_sq,
-                placed_left: minted.placed_left,
+                placed_left: f64::from(minted.placed_left),
+                num_low_quality: 0,
             },
             "one record, so every sum is the one the generator wrote",
         );
@@ -1525,7 +1526,7 @@ mod tests {
                 .iter()
                 .map(|allele| String::from_utf8_lossy(allele).into_owned())
                 .collect::<Vec<_>>(),
-            vec!["AAAAAA", "AAACAA", "A"],
+            vec!["AAAAAA", "A", "AAACAA"],
             "and it is the six-base locus the two samples chained into, alleles and all",
         );
     }

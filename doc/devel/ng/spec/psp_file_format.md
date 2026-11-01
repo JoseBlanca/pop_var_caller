@@ -504,6 +504,19 @@ older in any sense a reader can act on:
 
 A later minor of 1 still reads, as before. `OLDEST_READABLE_MAJOR` is gone.
 
+#### The low-quality read counts (2026-11-01)
+
+**One field added at the body's end, `observation-low-quality-reads`**, written on every record
+whatever its kind: a list of `(observation, count)` varint pairs for each observation whose count is
+not zero — how many of its reads had a base quality of Phred 1 to 19 inside the locus, which the
+low-base-quality artifact test reads ([`low_base_quality.md`](low_base_quality.md)). Empty, one byte
+before compression, on most records. A count of zero, a count above the observation's reads, or a
+second count for one observation is refused.
+
+**No version change**, by the 2026-10-18 rule above. A file written before the field is still read,
+every count zero (`RecordLayout::from_manifest` recognises the field list without it), so the test
+charges nothing on it; a reader from before the field walks past it as an unknown final field.
+
 #### Why a head and not a second stream
 
 **Because the alternative does not save what it appears to.** The obvious design — and the one this

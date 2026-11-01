@@ -99,6 +99,11 @@ pub struct ArtifactTestCounts {
     pub alternative_forward_reads: f64,
     /// Of those, how many were placed left.
     pub alternative_placed_left_reads: f64,
+    /// Of the reference reads, how many had a low base quality
+    /// ([`LOW_BASE_QUALITY_BELOW`](crate::locus_generation::LOW_BASE_QUALITY_BELOW)).
+    pub reference_low_quality_reads: f64,
+    /// Of the alternative reads, how many had a low base quality.
+    pub alternative_low_quality_reads: f64,
     /// Every allele's reads, summed over the samples the locus was called on — the
     /// denominator the allele-balance test compares against.
     pub total_reads: f64,

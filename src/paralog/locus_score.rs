@@ -286,7 +286,17 @@ impl ParalogScorePrecompute {
     /// `0.0` for an absent/outbred sample). `inbreeding.len()` is the cohort size
     /// `N` — every locus scored with this precompute must have the same cohort
     /// size (its `observations.samples.len()`).
-    pub fn new(params: &ParalogModelParams, inbreeding: &[f64]) -> Self {
+    ///
+    /// `samples_able_to_score` is the `N` of the SFS floor `1/2N`: the samples
+    /// that can contribute an observation at all, which leaves out a sample with
+    /// no coverage model. Counting such a sample would move every ratio when a
+    /// sample with no reads joins the run. It is floored at one, so a run where
+    /// no sample can score still builds a grid (every locus scores neutral).
+    pub fn new(
+        params: &ParalogModelParams,
+        inbreeding: &[f64],
+        samples_able_to_score: usize,
+    ) -> Self {
         let cohort_size = inbreeding.len();
         let eps = params.pseudocount_vaf;
         let dispersion = params.allele_dispersion;
@@ -294,7 +304,7 @@ impl ParalogScorePrecompute {
 
         // H1 SFS grid + Wright table.
         let sfs_points = params.allele_freq_prior.n_points;
-        let inv2n = 1.0 / (2.0 * cohort_size as f64);
+        let inv2n = 1.0 / (2.0 * samples_able_to_score.max(1) as f64);
         let mut sfs_log_weight = Vec::with_capacity(sfs_points);
         let mut wright = Vec::with_capacity(sfs_points * cohort_size);
         for i in 0..sfs_points {
@@ -689,7 +699,11 @@ mod tests {
             .iter()
             .map(|o| o.map_or(0.0, |s| s.inbreeding_coefficient))
             .collect();
-        ParalogScorePrecompute::new(&ParalogModelParams::default(), &inbreeding)
+        ParalogScorePrecompute::new(
+            &ParalogModelParams::default(),
+            &inbreeding,
+            inbreeding.len(),
+        )
     }
 
     fn score(samples: &[Option<SampleObservation>]) -> ParalogScore {
@@ -1001,7 +1015,7 @@ mod tests {
         };
         // One sample: rel 1.0, 5 alt of 10, F = 0, σ₀ = 0.26.
         let samples = [obs(1.0, 5, 10, 0.0)];
-        let precompute = ParalogScorePrecompute::new(&params, &[0.0]);
+        let precompute = ParalogScorePrecompute::new(&params, &[0.0], 1);
         let s = score_locus_for_paralogy(
             &LocusObservations { samples: &samples },
             &[SIGMA0],
@@ -1056,7 +1070,7 @@ mod tests {
         score_locus_for_paralogy(
             &LocusObservations { samples: &samples },
             &[0.092],
-            &ParalogScorePrecompute::new(&params, &[0.0]),
+            &ParalogScorePrecompute::new(&params, &[0.0], 1),
         )
         .paralog_log_likelihood_ratio
     }

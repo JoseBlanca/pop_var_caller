@@ -230,6 +230,9 @@ pub fn info_column(record: &VcfRecord) -> String {
             "SPPEN={}",
             penalty_text(penalties.strand_and_read_position)
         ));
+        if let Some(penalty) = penalties.low_base_quality {
+            fields.push(format!("BQPEN={}", penalty_text(penalty)));
+        }
     }
 
     let reference_mapq = record.allele_mapq()[0].mean();

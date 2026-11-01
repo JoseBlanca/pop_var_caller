@@ -530,7 +530,7 @@ HaplotypeCaller's joint calls on 50 of them.
 **First, the reference reads' share is an estimate, not a known probability.** Production took the
 reference reads' forward share as the probability every variant read had of being forward. At a
 homozygous-variant site that share rests on no reference read or one. With none, production
-assumed an even split, which was wrong for the placed-left share as it was then counted (§6.6);
+assumed an even split, which was wrong for the placed-left share as it was then counted (§6.7);
 with one, the share was clamped to 99 in 100. At 300× on GIAB that charged 848 of the
 2,320 true calls 100 Phred or more, up to 3,000. Their baselines are in the thousands, so no call
 was lost, but the number said nothing.
@@ -577,7 +577,7 @@ every stretch whose calls changed: weight 4 removes 13,732 variant genotypes GAT
 it overall. Weight 3 removes 3,168 and 1,796; weight 5, 20,942 and 4,142. Records written go from
 193,893 to 185,851.
 
-**The read-position half could not fire when this was measured** (§6.6): every number in this
+**The read-position half could not fire when this was measured** (§6.7): every number in this
 section, the weight of 4 included, is the strand half's alone.
 
 **A cutoff was tried first and dropped.** Leaving out any site whose tail reached 100 Phred, with the
@@ -597,7 +597,16 @@ cluster in one sample are too few to set a rule from.
 at about 3×. The per-read argument says the weight should hold as a cohort grows, but no cohort of
 thousands has been run.
 
-### 6.6 The read-position half could not fire until 2026-11-01
+### 6.6 A third test: low base quality (2026-11-01)
+
+**A third penalty, `BQPEN`, asks whether the alternative reads carry more base qualities below
+Phred 20 than the reference reads at the same site**, with the strand test's arithmetic: a
+beta-binomial against the reference reads' share plus a prior, only an excess charged, the same
+ramp, weight 1 by default. It exists for false SNPs the sequencer made by misreading the same base
+in many reads beside G and C runs, which the likelihood counts as independent evidence. Its design,
+the options weighed and the measurements are in [`low_base_quality.md`](low_base_quality.md).
+
+### 6.7 The read-position half could not fire until 2026-11-01
 
 **Until 2026-11-01 a read counted as placed left when it merely started left of the site**, which
 is true of nearly every read that covers it: at 3,438 of HG002's chr20 truth sites at 30×, 91,071
@@ -730,7 +739,110 @@ way; writing every called tract instead recovered 55 of them, at the cost of 18 
 **What it does not change.** The artifact correction (§6) still does not apply at a tract; the
 genotype quality (§4) is unchanged; the threshold of `site_quality_threshold.md` is unchanged. In a
 cohort the fold pools every sample's reads, so the prior's share of the answer shrinks as the
-cohort grows, as it does at an ordinary locus.
+cohort grows, as it does at an ordinary locus. (§8.2 records the strand half of §6 tried at a
+tract and withdrawn.)
+
+### 8.2 A tract's strand test: built, measured, not adopted (2026-11-01)
+
+*Owner's direction, 2026-11-01: reuse the strand test of §6.2 and §6.5 at a tract, per allele. It
+was built as described below and measured; it cost true calls for very few false ones, and was
+withdrawn. §8 stands: a tract has no artifact correction. The code is kept as
+`tmp/hg002/tract_strand_test.patch` on branch `flank-indel-junction`.*
+
+**What it did** (HG002, one sample, against GIAB v4.2.1 with vcfeval, genotype match). On chr20 at
+30×, missed calls went from 748 to 792 and false calls from 549 to 546; on the tandem-repeat
+benchmark at 30×, from 14,212 to 14,264 and from 2,393 to 2,388; at 5× each moved by one. The 44
+true calls lost on chr20 were tract records the charge took below the emission threshold — at
+chr20:15,237,514 a heterozygous `T` insertion whose 9 alternative reads were 2 forward, against 13
+of 22 reference reads, charged 35.3 Phred against a site quality of 28.
+
+**Why it cannot work as it stands.** True tract calls are strand-skewed about as often as false
+ones. Of chr20's tract records at 30×, 5,312 true calls and 69 of the 137 false ones drew a tail:
+median 2.6 Phred for both, 90th percentile 8.5 against 10.9, above 10 Phred 6 in 100 against 12 in
+100. With true calls outnumbering false ones about 80 to 1, every cut-off loses many true calls for
+each false one — above 10 Phred, some 320 against 8. And a tract's site quality is low beside an
+ordinary locus's, because the stutter model explains part of its reads, so the weight of 4 fitted
+at ordinary loci takes it under. Replayed at weight 2 or less, no record crossed the threshold
+either way. Most of the one-strand false substitutions have three alternative reads, where the ramp
+charges nothing by design.
+
+**What follows.** The one-strand substitutions inside tracts sit right after long homopolymers; the
+evidence against them is the context, not the strand split. The first recommendation at the end of
+this section is the route left. The rest of the section is the design as it was built.
+
+**Why the premise of §8 does not hold for strand.** §8 left the artifact tests off a tract because
+what goes wrong there is slippage, which the read likelihood prices. Slippage is not all that goes
+wrong. Tracing HG002's errors inside tracts (chr20, 30×, one sample; 165 error loci, 30 traced;
+`tmp/intract/` on branch `flank-indel-junction`): 9 of the 30 were false substitutions inside the
+tract made from reads of one strand only — 3 of 3 alternative reads on the reverse strand, say,
+right after a 16- or 23-base homopolymer — and 4 more were a flank base misread as the run's own
+base on one strand, written as a flank deletion. The tract record carries the `SPPEN` slot and
+leaves it empty: of chr20's 12,832 tract records at 30×, 63 have it, all of them records the
+gathering pass merged with a generic one.
+
+**The test is §6.2's strand tail, unchanged in its statistics.** For an alternative allele, the
+forward count of its complete reads, pooled over the samples called with it, is set against a
+beta-binomial whose parameters are the other reads' forward and reverse counts plus §6.5's prior of
+10 reads split evenly; the two-sided tail as a Phred, times `STRAND_PENALTY_WEIGHT` (4), ramped in
+from nothing at 3 alternative reads or fewer to the full charge at 7 (`BIAS_RAMP_NO_POWER_BELOW`,
+`BIAS_RAMP_FULL_POWER_AT`), and subtracted from the site quality as at an ordinary locus. What it
+charges, for a few counts (alternative reads forward/total against the other reads'):
+
+| alternative | others | tail (Phred) | charged |
+|---|---|---|---|
+| 0 / 3 | 2 / 4 | 5.2 | 0 |
+| 0 / 3 | 7 / 7 | 14.4 | 0 |
+| 1 / 4 | 3 / 6 | 1.8 | 1.8 |
+| 0 / 4 | 7 / 7 | 18.4 | 18.4 |
+| 0 / 5 | 3 / 5 | 14.0 | 28.0 |
+| 0 / 7 | 4 / 7 | 18.5 | 74.2 |
+| 0 / 10 | 5 / 10 | 20.4 | 81.4 |
+
+So **at three alternative reads or fewer nothing is charged, whatever the split**: three reads all
+fall on one strand once in four by chance (2 × ½³), and the ramp exists because charging them cost
+GIAB recall at 5× (§6.5). Of HG002's 13 one-strand cases above, most have three alternative reads;
+the test would charge about 5 of them. It is the cheap half of the problem, not all of it.
+
+**Where a tract differs from an ordinary locus, and the choice made:**
+
+1. **Every alternative allele carried by a called genotype is tested, and the record is charged the
+   largest tail.** An ordinary locus tests one primary alternative; a tract is often multi-allelic,
+   and an artifact can be its minor allele. The record-level charge then costs a tract with one
+   one-strand allele its whole quality, as §6.2 already does for its larger of two tails.
+2. **The expectation is every other complete read at the tract, not the reference allele's alone.**
+   At a tract the reference allele can be rare — a cohort homozygous for another length — while
+   every allele's reads come off the same fragments and share the locus's strand balance.
+3. **The read-position half is not run.** A complete read at a tract spans it by construction, so
+   nearly every one starts left of it: the placed-left share is one for every allele and the tail
+   is zero. Running it would cost a computation and could only charge noise.
+4. **Partial reads are not counted.** The merge keeps no strand count for them
+   (`PartialObservation`), and they show no allele.
+5. **The allele-balance half (§6.2's first test) is not run.** Stutter moves reads between alleles
+   by design, so the observed split is not the genotype's.
+
+**One sample and many.** At one sample and three reads a position, an alternative allele rarely
+has more than three reads, and nothing is charged: the test cannot hurt the weakest corner and
+cannot help it. In a cohort the pooled count crosses seven at low depth per sample, which gives the
+test power where one sample has none; whether the ramp, read off one sample's distributions, is
+right for pooled counts is §6.5's open question, measured here as there. At hundreds of reads and
+thousands of samples a small genuine strand imbalance becomes a large tail; the beta-binomial
+against the locus's own reads is what keeps that from being charged to a locus whose coverage is
+one-sided for innocent reasons.
+
+**Measure before adopting:** HG002 chr20 and the tandem-repeat benchmark at 5× and 30× (the false
+calls inside tracts it removes, and the true calls it filters), the stuttering benchmark at one and
+fifty samples, and tomato's 63 accessions at about 3× against GATK.
+
+**Not settled here, with a recommendation each:**
+
+- **The one-strand cases at three reads** — about 8 of the 13 — need evidence other than the strand
+  split. What they share is position: right after a long homopolymer, on reads that crossed the
+  run before reaching the base, which is where Illumina substitution errors gather.
+  *Recommendation: a context-dependent error rate in the read likelihood, its own document, after
+  this test is measured.*
+- **A charge per allele rather than per record.** Charging the record loses a true allele beside an
+  artifact. *Recommendation: per record now, as §6 does; revisit if the measurement shows true
+  multi-allelic tracts lost.*
 
 ---
 

@@ -1447,20 +1447,21 @@ mod tests {
         ));
         let (block_at, mut generic) = the_only_block(&path_a);
         let (_, bundle) = the_only_block(&path_b);
-        // A body ends with its kind tag, its flank deletions, its bundle payload (format 2.0)
-        // and its held flanks (format 2.1): `0, 0, 0, 0` for the generic record, and for the
-        // bundle `2, 0`, a three-byte payload of two empty flanks and no run, and `0`.
+        // A body ends with its kind tag, its flank deletions, its bundle payload (format 2.0),
+        // its held flanks (format 2.1) and its low-quality counts: `0, 0, 0, 0, 0` for the
+        // generic record, and for the bundle `2, 0`, a three-byte payload of two empty flanks and
+        // no run, and `0, 0`.
         assert_eq!(
-            generic[generic.len() - 4..],
-            [0, 0, 0, 0],
+            generic[generic.len() - 5..],
+            [0, 0, 0, 0, 0],
             "the generic record's end"
         );
         assert_eq!(
-            bundle[bundle.len() - 7..],
-            [2, 0, 3, 0, 0, 0, 0],
+            bundle[bundle.len() - 8..],
+            [2, 0, 3, 0, 0, 0, 0, 0],
             "the bundle record's end"
         );
-        let kind_at = generic.len() - 4;
+        let kind_at = generic.len() - 5;
 
         // A tag no kind uses.
         generic[kind_at] = 7;

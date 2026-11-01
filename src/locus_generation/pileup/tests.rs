@@ -561,6 +561,61 @@ fn insertion_record_has_alt_longer_than_ref() {
     assert_eq!(ins.num_obs, 1);
 }
 
+/// **Each allele counts its reads below Phred 20, and Phred 0 is not one of them** — Phred 0 is
+/// what the walk writes on the losing mate of an overlapping pair (`low_base_quality.md`).
+#[test]
+fn low_quality_reads_are_counted_per_allele_and_phred_zero_is_not() {
+    // Reference ACGTA; the SNP G→T at position 3.
+    let fa = MockFasta::new("ACGTA");
+    let reads = vec![
+        snp_read("good_ref", 1, b"ACGTA", &[30; 5]),
+        snp_read("poor_ref", 1, b"ACGTA", &[30, 30, 12, 30, 30]),
+        snp_read("zero_ref", 1, b"ACGTA", &[30, 30, 0, 30, 30]),
+        snp_read("poor_alt", 1, b"ACTTA", &[30, 30, 8, 30, 30]),
+        snp_read("edge_alt", 1, b"ACTTA", &[30, 30, 19, 30, 30]),
+        snp_read("good_alt", 1, b"ACTTA", &[30, 30, 20, 30, 30]),
+    ];
+    let records = drive_walker(reads, fa);
+    let rec = &records[2];
+    assert_eq!(rec.anchor(), 3);
+    assert_eq!(rec.reference_observation().num_obs, 3);
+    assert_eq!(
+        rec.reference_observation().num_low_quality,
+        1,
+        "Phred 12 only"
+    );
+    assert_eq!(rec.first_alt_observation().num_obs, 3);
+    assert_eq!(
+        rec.first_alt_observation().num_low_quality,
+        2,
+        "Phred 8 and 19, not 20"
+    );
+}
+
+/// **The general fold counts them too**: at a deletion's record the reads are folded over a
+/// window, and a read's count is its lowest base there.
+#[test]
+fn low_quality_reads_are_counted_at_a_deletion() {
+    // Reference ACGTAC; r2 deletes the T at position 4.
+    let fa = MockFasta::new("ACGTAC");
+    let good = snp_read("good", 1, b"ACGTAC", &[30; 6]);
+    let mut poor_deletion = snp_read("poor_deletion", 1, b"ACGAC", &[30, 30, 9, 30, 30]);
+    poor_deletion.cigar = vec![CigarOp::Match(3), CigarOp::Deletion(1), CigarOp::Match(2)];
+    poor_deletion.alignment_end = 6;
+    let records = drive_walker(vec![good, poor_deletion], fa);
+    let anchor = records
+        .iter()
+        .find(|r| r.observations.iter().any(|o| o.bases.as_ref() == b"G"))
+        .expect("the deletion's record");
+    let deletion = anchor
+        .observations
+        .iter()
+        .find(|o| o.bases.as_ref() == b"G")
+        .expect("the deletion allele");
+    assert_eq!(deletion.num_low_quality, 1);
+    assert_eq!(anchor.reference_observation().num_low_quality, 0);
+}
+
 #[test]
 fn forward_strand_count_recorded_correctly() {
     // Reference ACG. Two reads: forward, reverse. Both REF.

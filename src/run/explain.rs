@@ -31,7 +31,7 @@ use crate::calling::{
     ReferenceBesideLocus, SampleGenotypeCall, partial_row_fits_allele,
 };
 use crate::fasta::ContigList;
-use crate::locus_generation::{LocusKind, LocusLen};
+use crate::locus_generation::{LocusKind, LocusLen, ReadWitness, SequenceObservation};
 use crate::regions::{BedError, ContigBounds, RegionSet};
 use crate::run::cohort_merge::build::{CohortObservation, LocusBorder};
 use crate::types::{ContigId, GenomeRegion, Phred, Ploidy};
@@ -97,6 +97,7 @@ pub enum ExplainStep {
     Allele,
     Reads,
     Partial,
+    Evidence,
     Callable,
     Likelihood,
     Genotype,
@@ -114,6 +115,7 @@ impl ExplainStep {
             Self::Allele => "allele",
             Self::Reads => "reads",
             Self::Partial => "partial",
+            Self::Evidence => "evidence",
             Self::Callable => "callable",
             Self::Likelihood => "likelihood",
             Self::Genotype => "genotype",
@@ -185,6 +187,44 @@ impl ExplainRow {
     fn written_at(mut self, position: u64) -> Self {
         self.written_at = Some(position);
         self
+    }
+}
+
+/// **Every observation a repeat-tract locus hands each sample's likelihood row**, as the tract
+/// path rebuilt it — which is more than the `reads` rows show: at a record merging a tract with a
+/// generic variant, the reads that could not be split between the two are here too
+/// (`str_edge_deletion_alleles.md` §6.4), and a row can be far from zero for a sample with no
+/// `reads` row at all. `per_sample` is indexed by run sample.
+pub(crate) fn ssr_evidence_rows(
+    rows: &mut Vec<ExplainRow>,
+    region: GenomeRegion,
+    per_sample: &[&[SequenceObservation]],
+) {
+    for (run_sample, observations) in per_sample.iter().enumerate() {
+        for observation in *observations {
+            let witness = match &observation.read_witness {
+                ReadWitness::Complete => "complete",
+                ReadWitness::Partial { .. } => "partial",
+            };
+            rows.push(
+                ExplainRow::of(
+                    region,
+                    ExplainStep::Evidence,
+                    observation.num_obs.to_string(),
+                )
+                .for_sample(run_sample)
+                .about(spelled(&observation.bases))
+                .with("witness", witness)
+                .with(
+                    "flank_deletion",
+                    format!(
+                        "{}+{}",
+                        observation.flank_deletion.left, observation.flank_deletion.right
+                    ),
+                )
+                .with("read_group", observation.read_group.0),
+            );
+        }
     }
 }
 
@@ -294,8 +334,8 @@ pub(crate) fn selection_rows(
                 continue;
             }
             let reads: u32 = groups.iter().map(|row| row.support.num_reads).sum();
-            let forward: u32 = groups.iter().map(|row| row.support.num_fwd).sum();
-            let placed_left: u32 = groups.iter().map(|row| row.support.placed_left).sum();
+            let forward: f64 = groups.iter().map(|row| row.support.num_fwd).sum();
+            let placed_left: f64 = groups.iter().map(|row| row.support.placed_left).sum();
             rows.push(
                 ExplainRow::of(region, ExplainStep::Reads, reads.to_string())
                     .for_sample(sample.sample)
@@ -416,7 +456,10 @@ pub(crate) fn calling_rows<S>(
                     format!("{:.4}", likelihood.0),
                 )
                 .for_sample(run_sample)
-                .about(named),
+                .about(named)
+                // Every digit, because the flatness test (`reads_said_nothing`) compares rows
+                // exactly, and two values that agree to four decimals can still differ there.
+                .with("exact", format!("{:?}", likelihood.0)),
             );
         }
     }
@@ -478,6 +521,10 @@ pub(crate) fn outcome_rows(
                             penalties.strand_and_read_position.get()
                         )),
                     ));
+                    if let Some(penalty) = penalties.low_base_quality {
+                        site.detail
+                            .push(("BQPEN", DetailValue::Text(format!("{:.1}", penalty.get()))));
+                    }
                 }
                 site.detail.push((
                     "filter",

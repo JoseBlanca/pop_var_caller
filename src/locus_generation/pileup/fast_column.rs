@@ -116,6 +116,9 @@ struct PlainContribution {
     /// The read has at least as much of its span left of this position as right of it
     /// ([`read_placed_left`]).
     placed_left: bool,
+    /// The base's quality is low — see
+    /// [`is_low_base_quality`](crate::locus_generation::is_low_base_quality).
+    low_quality: bool,
     mapq: u8,
 }
 
@@ -129,6 +132,7 @@ struct PlainObservation {
     q_sum: f64,
     fwd: u32,
     placed_left: u32,
+    low_quality: u32,
     mapq_sum: u32,
     mapq_sum_sq: u64,
     /// **The ids of every read folded here, whether it departed from the reference or
@@ -320,6 +324,7 @@ pub(super) fn try_ordinary_column(
                 u64::from(walker_pos),
                 u64::from(walker_pos),
             ),
+            low_quality: crate::locus_generation::is_low_base_quality(bq),
             mapq,
         });
     }
@@ -442,6 +447,7 @@ pub(super) fn try_ordinary_column(
                     q_sum: 0.0,
                     fwd: 0,
                     placed_left: 0,
+                    low_quality: 0,
                     mapq_sum: 0,
                     mapq_sum_sq: 0,
                     chain_ids: Vec::new(),
@@ -455,6 +461,7 @@ pub(super) fn try_ordinary_column(
         observation.q_sum += read.ln_q;
         observation.fwd += u32::from(read.fwd);
         observation.placed_left += u32::from(read.placed_left);
+        observation.low_quality += u32::from(read.low_quality);
         observation.mapq_sum += mapq;
         observation.mapq_sum_sq += u64::from(mapq) * u64::from(mapq);
         if dense {
@@ -534,6 +541,7 @@ pub(super) fn try_ordinary_column(
                 mapq_sum: o.mapq_sum,
                 mapq_sum_sq: o.mapq_sum_sq,
                 placed_left: o.placed_left,
+                num_low_quality: o.low_quality,
                 chain_ids: std::mem::take(&mut o.chain_ids),
             }
         })

@@ -2309,6 +2309,7 @@ mod tests {
                 mapq_sum: 180,
                 mapq_sum_sq: 10_800,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             }],
             reads_without_observation: 1,
@@ -4115,6 +4116,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             })
             .collect();
@@ -4209,9 +4211,9 @@ mod tests {
         ));
 
         let mut manifest = a_manifest();
-        // Four fields short: one short is format 2.0, two short format 1.2 and three short
-        // format 1.1, which a reader reads.
-        manifest.fields.truncate(manifest.fields.len() - 4);
+        // Five fields short: one short is the layout before the low-quality counts, two short
+        // format 2.0, three short format 1.2 and four short format 1.1, which a reader reads.
+        manifest.fields.truncate(manifest.fields.len() - 5);
         assert!(matches!(
             BlockStream::new([].as_slice(), &manifest),
             Err(BlockReadError::UnsupportedRecordLayout { .. })
@@ -4597,6 +4599,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: read % 2,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             })
             .collect();
@@ -4952,6 +4955,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             })
             .collect();
@@ -5080,6 +5084,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             })
             .collect();
@@ -5714,6 +5719,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             })
             .collect();

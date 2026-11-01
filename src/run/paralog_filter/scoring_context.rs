@@ -205,8 +205,12 @@ impl ParalogScoringContext {
             }
         }
 
+        // **The frequency floor counts only samples that can score.** A sample with no model
+        // contributes no observation anywhere, so letting it set `1/2N` would move every ratio
+        // when a sample with no reads joins the run.
+        let samples_with_model = coverage_models.iter().filter(|m| m.is_some()).count();
         Ok(Self {
-            precompute: ParalogScorePrecompute::new(params, &inbreeding),
+            precompute: ParalogScorePrecompute::new(params, &inbreeding, samples_with_model),
             coverage_models,
             why_no_model,
             inbreeding,

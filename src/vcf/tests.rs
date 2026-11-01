@@ -66,6 +66,7 @@ fn a_snp_record() -> VcfRecord {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
