@@ -1391,7 +1391,7 @@ pub struct GenericObservation {
     /// them; anything that gathered them a second way would be a second answer to the same
     /// question.
     pub forward_reads: u32,
-    /// Of those reads, how many started strictly left of the record they were seen at —
+    /// Of those reads, how many lay mostly left of the record they were seen at —
     /// freebayes' `placedLeft`, and the read-position half of the same correction.
     ///
     /// **Counted against each record's own position, not the cohort locus's first base**, by

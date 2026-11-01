@@ -2747,8 +2747,11 @@ mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
     use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
-    use crate::locus_generation::{FlankDeletion, HeldFlank, ReadWitness, SequenceObservation};
+    use crate::locus_generation::{
+        FlankDeletion, HeldFlank, ReadWitness, SequenceObservation, read_placed_left,
+    };
     use crate::read::aligned_read::AlignedRead;
+    use crate::read::prepared_read::alignment_end_of;
     use crate::types::ReadGroupId;
     use std::collections::HashMap;
 
@@ -2798,9 +2801,11 @@ mod tally {
     /// `q_sum` is soft and unconsumed, and the parity oracle checks only bytes and counts (spec
     /// §6).
     ///
-    /// `locus_start` is the tract's 1-based anchor, needed only for `placed_left` — the count of
-    /// supporting reads that began strictly left of it, which is production's own definition
-    /// (`open_record.rs`'s `alignment_start < rec_pos`).
+    /// `locus_start` and `locus_end` are the tract's first and last base, 1-based and inclusive,
+    /// needed only for `placed_left` — the count of supporting reads with at least as much of
+    /// their span left of the tract as right of it ([`read_placed_left`]). The whole tract is
+    /// the locus here, unlike the generic path's anchor, because it is fixed before any read
+    /// is measured.
     ///
     /// `counts` carries the **run-level** totals (complete/partial observations and the four
     /// no-observation reasons); the returned `reads_without_observation` is this locus's own
@@ -2808,6 +2813,7 @@ mod tally {
     pub(super) fn tally<'a>(
         reads_and_outcomes: impl IntoIterator<Item = (&'a AlignedRead, Classified)>,
         locus_start: u64,
+        locus_end: u64,
         counts: &mut SsrGeneratorCounts,
     ) -> SsrTally {
         let mut buckets: HashMap<ObservationIdentity, Support> = HashMap::new();
@@ -2842,9 +2848,15 @@ mod tally {
                     let mapq = u32::from(read.mapq);
                     support.mapq_sum += mapq;
                     support.mapq_sum_sq += u64::from(mapq) * u64::from(mapq);
-                    // Production's rule verbatim: strictly left of the anchor, not at it.
-                    // `placed_start` — the "exactly at it" half — is deliberately not carried.
-                    support.placed_left += u32::from(read.pos < locus_start);
+                    // `pos` fits in 32 bits on any contig the generic path accepts, which
+                    // converts it the same way (`prepare_passthrough`).
+                    let alignment_end = alignment_end_of(read.pos as u32, &read.cigar);
+                    support.placed_left += u32::from(read_placed_left(
+                        read.pos,
+                        u64::from(alignment_end),
+                        locus_start,
+                        locus_end,
+                    ));
                 }
                 Classified::NoObservation(reason) => {
                     reads_without_observation += 1;
@@ -2958,7 +2970,7 @@ mod tally {
                 (&rg1, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, 10, &mut counts).observations;
 
             assert_eq!(
                 observations.len(),
@@ -3006,7 +3018,7 @@ mod tally {
                 outcomes.push((r, observed(bases, ReadWitness::Complete, -1.0)));
             }
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, 10, &mut counts).observations;
 
             let order: Vec<(&[u8], u32)> = observations
                 .iter()
@@ -3064,7 +3076,7 @@ mod tally {
                 (&r, observed(b"CACACACACA", right, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 1, &mut counts).observations;
+            let observations = tally(outcomes, 1, 1, &mut counts).observations;
 
             assert_eq!(
                 observations.len(),
@@ -3078,34 +3090,44 @@ mod tally {
             );
         }
 
-        /// `placed_left` counts supporting reads that began **strictly left** of the locus
-        /// anchor — production's own rule (`alignment_start < rec_pos`), not `<=`.
+        /// `placed_left` counts supporting reads with at least as many aligned bases left of
+        /// the tract as right of it — freebayes' `placedLeft` — and not reads that merely
+        /// started left of it, which is nearly every read that covers a tract.
         ///
-        /// The read starting exactly on the anchor is the discriminating case: it is what
-        /// separates `placed_left` from `placed_start`, the sibling field ng deliberately does
-        /// not carry, and an implementation using `<=` passes every other assertion here.
+        /// Every read here starts left of the tract `[20, 25]`, so the old rule counted all
+        /// four. Two of them lie mostly to its right. The two in the middle are the boundary:
+        /// ten bases each side is a tie and goes left; nine against eleven goes right.
         #[test]
-        fn placed_left_counts_only_reads_starting_strictly_left_of_the_anchor() {
-            let before = read_in_group(0, 9);
-            let on = read_in_group(0, 10);
-            let after = read_in_group(0, 11);
+        fn placed_left_counts_reads_lying_mostly_left_of_the_tract() {
+            fn spanning(pos: u64, len: u32) -> AlignedRead {
+                AlignedRead {
+                    cigar: vec![CigarOp::Match(len)],
+                    ..read_in_group(0, pos)
+                }
+            }
+            let mostly_right = spanning(18, 30); // 2 bases left, 22 right
+            let mostly_left = spanning(1, 30); // 19 left, 5 right
+            let tie = spanning(10, 26); // 10 left, 10 right
+            let one_short = spanning(11, 26); // 9 left, 11 right
             let outcomes = vec![
-                (&before, observed(b"CACACA", ReadWitness::Complete, -1.0)),
-                (&on, observed(b"CACACA", ReadWitness::Complete, -1.0)),
-                (&after, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&mostly_right, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&mostly_left, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&tie, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&one_short, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 20, 25, &mut counts).observations;
 
             assert_eq!(
                 observations.len(),
                 1,
                 "one allele, one group — one observation"
             );
-            assert_eq!(observations[0].num_obs, 3);
+            assert_eq!(observations[0].num_obs, 4);
             assert_eq!(
-                observations[0].placed_left, 1,
-                "only the read starting at 9 is left of the anchor at 10"
+                observations[0].placed_left, 2,
+                "the read with 19 bases left and the tie are placed left; the two with more \
+                 bases right are not, though all four started left of the tract"
             );
         }
 
@@ -3128,7 +3150,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             assert_eq!(result.observations.len(), 2);
             assert_eq!(counts.observations_complete, 1);
             assert_eq!(counts.observations_partial, 1);
@@ -3160,7 +3182,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             assert_eq!(result.observations.len(), 1);
             assert_eq!(result.observations[0].num_obs, 2);
         }
@@ -3188,7 +3210,7 @@ mod tally {
                 (&fwd, held(HeldFlank::Left)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let flanks: Vec<_> = result
                 .observations
                 .iter()
@@ -3212,7 +3234,7 @@ mod tally {
                 (&rev, observed(b"CACACA", ReadWitness::Complete, -3.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let obs = &result.observations[0];
             assert_eq!(obs.num_obs, 2);
             assert_eq!(obs.num_fwd, 1, "one forward, one reverse");
@@ -3252,7 +3274,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             assert!(result.observations.is_empty());
             assert_eq!(result.reads_without_observation, 5);
             assert_eq!(counts.no_border_anchored, 1);
@@ -3290,7 +3312,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let order: Vec<(&[u8], ReadWitness)> = result
                 .observations
                 .iter()
@@ -3354,7 +3376,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let order: Vec<ReadWitness> = result
                 .observations
                 .iter()
@@ -3381,7 +3403,7 @@ mod tally {
             let rev = read(FLAG_REVERSE_STRAND, 30);
             let moments = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
-                let obs = tally(outcomes, 1, &mut counts).observations;
+                let obs = tally(outcomes, 1, 1, &mut counts).observations;
                 assert_eq!(obs.len(), 1, "all reads share one bucket");
                 let o = &obs[0];
                 (o.num_obs, o.num_fwd, o.mapq_sum, o.mapq_sum_sq)
@@ -3407,7 +3429,7 @@ mod tally {
             let r = read(0, 60);
             let run = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
-                let result = tally(outcomes, 1, &mut counts);
+                let result = tally(outcomes, 1, 1, &mut counts);
                 (result.observations, counts)
             };
             let a = run(vec![
@@ -3986,6 +4008,7 @@ where
         let tallied = tally::tally(
             capped.kept.iter().zip(outcomes),
             locus.repeat.start(),
+            locus.repeat.end(),
             &mut self.counts,
         );
         Ok(MeasuredReads {
@@ -5027,24 +5050,29 @@ mod tests {
         assert_eq!(locus.reads_discarded_by_cap, 0, "no cap");
     }
 
-    /// **`placed_left` is counted against the tract anchor, and this is the only test that says
-    /// which coordinate that is.**
+    /// **`placed_left` is counted against the whole tract, and this is the only test that says
+    /// which coordinates those are.**
     ///
-    /// The fold itself (`tally`) is handed `locus_start` as a bare `u64`, and its unit test
-    /// supplies that argument itself — so the unit test pins the comparison (`<`, not `<=`) and
-    /// nothing about *which* coordinate the generator passes. A 0-based/1-based slip, or the
-    /// margin start, or a widened region's start would all be silent: `placed_left` is a QUAL
-    /// bias term, so a wrong anchor is a wrong QUAL on every call with no panic.
+    /// The fold itself (`tally`) is handed the tract's ends as bare `u64`s, and its unit test
+    /// supplies them itself — so the unit test pins the comparison and nothing about *which*
+    /// coordinates the generator passes. A 0-based/1-based slip, the margin's start, or one end
+    /// of the tract in place of both would all be silent: `placed_left` feeds a QUAL penalty, so
+    /// a wrong coordinate is a wrong QUAL with no panic.
     ///
-    /// The fixture separates the two plausible anchors. The tract is `[40, 49]` and `flank_bp`
-    /// is 10, so the margin starts at 30 — and the reads start at 30, 33, 36 and 39, every one
-    /// of them **left of the tract anchor** and **not left of the margin anchor**. So the
-    /// correct anchor counts them all and the margin anchor counts none.
+    /// The tract is `[40, 49]` and `flank_bp` is 10, so the margin starts at 30. The reads are
+    /// 30 bases long and start at 28, 29, 31 and 32: the first two lie at least half left of the
+    /// tract and the other two do not. Each wrong coordinate moves that boundary past some of
+    /// them: against the tract's first base only a read starting at 25 or earlier counts,
+    /// against the margin's first base 15 or earlier, against the tract's last base 34 or
+    /// earlier. (Each read stops inside the margin, which over this all-A reference is what
+    /// gives it an observation at all.)
     #[test]
-    fn placed_left_is_counted_against_the_tract_anchor_not_the_margin() {
+    fn placed_left_is_counted_against_the_whole_tract() {
         use crate::read::input::test_fixtures::read_named_with_length;
-        let records: Vec<_> = (0..4)
-            .map(|i| read_named_with_length(&format!("r{i}"), 0, 30 + i * 3, 30))
+        let records: Vec<_> = [28usize, 29, 31, 32]
+            .iter()
+            .enumerate()
+            .map(|(i, start)| read_named_with_length(&format!("r{i}"), 0, *start, 30))
             .collect();
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
         let mut generator = ssr_generator();
@@ -5059,46 +5087,15 @@ mod tests {
         let supporting: u32 = locus.observations.iter().map(|obs| obs.num_obs).sum();
         let placed_left: u32 = locus.observations.iter().map(|obs| obs.placed_left).sum();
 
-        assert!(
-            supporting > 0,
-            "the fixture must produce observations, or this test cannot discriminate"
+        assert_eq!(
+            supporting, 4,
+            "every read must produce an observation, or this test cannot discriminate"
         );
         assert_eq!(
-            placed_left, supporting,
-            "every supporting read started left of the tract anchor at 40; counting against \
-             the margin start (30) would give 0"
-        );
-    }
-
-    /// The mirror, so the anchor is pinned from **both** sides: reads starting at or after the
-    /// tract anchor contribute nothing to `placed_left`. Together with the test above this
-    /// brackets the anchor — one case fails if it is too far left, the other if it is too far
-    /// right.
-    #[test]
-    fn a_read_starting_on_the_tract_anchor_is_not_placed_left() {
-        use crate::read::input::test_fixtures::read_named_with_length;
-        // Starting exactly on the anchor (40) and after it (43) — 30 bp each, so they still
-        // cover the tract and clear the min-length filter.
-        let records: Vec<_> = [40u64, 43]
-            .iter()
-            .enumerate()
-            .map(|(i, start)| read_named_with_length(&format!("r{i}"), 0, *start as usize, 30))
-            .collect();
-        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
-        let mut generator = ssr_generator();
-        let segment = tract(40, 49);
-
-        generator.begin_segment(span(40, 49));
-        let locus = generator
-            .next_locus(&segment, &reads)
-            .expect("no fetch error")
-            .expect("one locus");
-
-        let placed_left: u32 = locus.observations.iter().map(|obs| obs.placed_left).sum();
-        assert_eq!(
-            placed_left, 0,
-            "strictly left, so the read starting *on* the anchor does not count — this is what \
-             separates `placed_left` from the `placed_start` ng deliberately does not carry"
+            placed_left, 2,
+            "the reads starting at 28 and 29 lie at least half left of the tract [40, 49]; \
+             counting against its first base alone, or the margin's, would give 0, against its \
+             last base alone 4, and the old started-left rule 4"
         );
     }
 
@@ -5309,6 +5306,7 @@ mod tests {
         let ng = tally::tally(
             reads.iter().zip(ng_outcomes),
             ng_locus.repeat.start(),
+            ng_locus.repeat.end(),
             &mut counts,
         );
         let ng_complete: Vec<(Vec<u8>, u32)> = ng

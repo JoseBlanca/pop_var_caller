@@ -940,7 +940,13 @@ mod tests {
     /// four records and `AF` in its fifth decimal at three. The fit's file is unchanged. Putting
     /// the previous `generic.rs` back reproduces `df2ccb357d21f864d657f1b9bdf7d285` exactly.
     /// Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "5390c37f58aa0200fb9fcfa6a7c8700a";
+    /// **Re-recorded 2026-11-01** when a read began counting as placed left by freebayes' rule —
+    /// at least as many aligned bases left of the site as right — instead of by starting left of
+    /// it (`calling_quality.md` §6.6; measured on HG002 and tomato before it was recorded): two
+    /// records move in `QUAL` and `SPPEN` only, chrV:55 96.4 → 81.5 and chrV:377 277.9 → 269.4;
+    /// every genotype and the fit's file are unchanged. Putting the old rule back reproduces
+    /// `5390c37f58aa0200fb9fcfa6a7c8700a` exactly. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "6a49015c88631a5bc0825f053fad1c8e";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

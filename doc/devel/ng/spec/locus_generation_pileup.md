@@ -788,9 +788,11 @@ belongs to whoever owns it (§10).
 
 **`placed_left` — carried; `placed_start` — not (owner 2026-07-27, corrected 2026-07-28).**
 `locus_generation.md` §11 assigns both read-position-bias counters to this generator: freebayes'
-`placedLeft`/`placedStart`, how many supporting reads started strictly left of the record's anchor
-and how many started exactly on it
-([open_record.rs:790-791](../../../../src/pileup/walker/open_record.rs#L790)).
+`placedLeft`/`placedStart`. This section first described `placedLeft` as how many supporting reads
+started strictly left of the record's anchor, which was production's reading and not freebayes'.
+Since 2026-11-01 it is freebayes' own: how many supporting reads have at least as many aligned
+bases left of the anchor as right of it (`read_placed_left` in `src/locus_generation/mod.rs`;
+`calling_quality.md` §6.5).
 
 **`placed_left` is read**, and an earlier draft of this spec wrongly said nothing read it — the grep
 behind that claim was truncated and never reached `src/vcf/`.

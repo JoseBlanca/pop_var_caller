@@ -412,9 +412,10 @@ fn as_penalty(phred: f64) -> Phred {
 ///
 /// **But their share is an estimate, not a known probability**, and at a homozygous-variant site
 /// it rests on no reference read or one. Production's test, which this replaced on 2026-10-07,
-/// took the share as known: with no reference read it assumed an even split, which is wrong for
-/// the placed-left count (nearly every read starts left of the site), and with one it clamped to 99
-/// in 100. At 300× on GIAB that charged 848 of 2,320 true calls 100 Phred or more, up to 3,000.
+/// took the share as known: with no reference read it assumed an even split, which was wrong for
+/// the placed-left count as it was then counted (nearly every read started left of the site), and
+/// with one it clamped to 99 in 100. At 300× on GIAB that charged 848 of 2,320 true calls 100 Phred
+/// or more, up to 3,000.
 ///
 /// So the alternative reads' count is **beta-binomial**: each read's probability of being forward
 /// is drawn from a beta distribution whose parameters are the reference reads' counts plus a prior
@@ -424,8 +425,11 @@ fn as_penalty(phred: f64) -> Phred {
 /// - **for strand, an even split**, which is what sequencing both strands of a fragment gives, and
 ///   what lets a site whose few reference reads are all on one strand be weighed at all;
 /// - **for read position, the site's own pooled share**, reference and alternative reads together,
-///   because how many reads start left of a site depends on read length and record width, and no
-///   constant knows it.
+///   because how many reads lie mostly left of a site depends on the width of what they are
+///   counted against — one base at a SNP, a generic record's anchor however wide the record, a
+///   whole repeat tract — and on read length, and no constant knows it. A consequence: where
+///   there is no reference read, the alternative reads are their own expectation and the
+///   read-position half cannot fire.
 ///
 /// **And it is ramped in, because at two or three alternative reads it has no power.** See
 /// [`BIAS_RAMP_NO_POWER_BELOW`].
@@ -1371,10 +1375,11 @@ mod tests {
     }
 
     /// **A homozygous-variant site with no reference reads is charged little.** 247 variant
-    /// reads, 125 forward and 245 starting left of the site, the shape of GIAB HG002 chr1:4909882
-    /// at 300×. Production's penalty charged that shape hundreds of Phred, because with no
-    /// reference read it assumed half the reads start left of the site; its baseline was in the
-    /// thousands, so the call survived, but only by its size.
+    /// reads, 125 forward and 245 placed left, the shape of GIAB HG002 chr1:4909882 at 300× when
+    /// placed left meant started left of the site (until 2026-11-01). Production's penalty charged
+    /// that shape hundreds of Phred, because with no reference read it assumed half the reads are
+    /// placed left; its baseline was in the thousands, so the call survived, but only by its
+    /// size.
     #[test]
     fn a_homozygous_site_with_no_reference_reads_is_charged_little() {
         let counts = counts_with((0.0, 0.0, 0.0), (247.0, 125.0, 245.0));

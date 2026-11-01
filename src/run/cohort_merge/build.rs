@@ -1498,7 +1498,7 @@ pub enum LocusBorder {
 ///   estimates one number rather than mixing two;
 /// - **the placement count is pooled the same way, and it is the one that mixes two
 ///   questions.** It is counted against each record's own position (see `placed_left`), so
-///   two records of one sample ask "did the read start left of here?" about different
+///   two records of one sample ask "does the read lie mostly left of here?" about different
 ///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
 ///   locus's width — 100 bases at the default bound.
 ///
@@ -1541,12 +1541,12 @@ pub struct AlleleSupport {
     /// Σ MAPQ² over them; with `mapq_sum` and `num_reads` it recovers the mean and variance
     /// the MAPQ multi-mapper filter reads.
     pub mapq_sum_sq: u64,
-    /// How many started strictly left of **the record they were seen at** — freebayes'
+    /// How many lay mostly left of **the record they were seen at** — freebayes'
     /// `placedLeft`, and the read-position-bias term.
     ///
     /// **Not counted against the cohort locus's own first base.** The mint counts it against
-    /// each record's position — `alignment_start < walker_pos` on the generic path
-    /// (`locus_generation/pileup/fast_column.rs`), the tract's anchor on the STR path
+    /// each record's position — the record's anchor on the generic path
+    /// (`locus_generation/pileup/`), the whole tract on the STR path
     /// (`locus_generation/ssr.rs`) — and nothing here re-anchors it, so where a locus spans
     /// several of a sample's records this mixes as many questions as it has records.
     pub placed_left: u32,
@@ -4468,14 +4468,14 @@ mod tests {
 
     /// **The divided counts are rounded once per allele, not once per read**, and the
     /// left-placed count is where the two answers differ. Reads 7, 9 and 11 are each sighted
-    /// at two sequences with six reads behind them in total, of which **three** started left
-    /// of the anchor and **one** was on the forward strand. So each read's share is a half a
+    /// at two sequences with six reads behind them in total, of which **three** were placed
+    /// left and **one** was on the forward strand. So each read's share is a half a
     /// left-placed read and a sixth of a forward one.
     ///
     /// Rounded once: 1.5 left-placed becomes **2** and 0.5 forward becomes **1**. Rounded
     /// per read, each half would become a whole and the allele would claim **3** reads
-    /// started left, out of three reads — twice the truth, and a number that cannot be
-    /// distinguished from every read starting left.
+    /// placed left, out of three reads — twice the truth, and a number that cannot be
+    /// distinguished from every read placed left.
     #[test]
     fn the_divided_counts_are_rounded_once_per_allele() {
         let two_records = [

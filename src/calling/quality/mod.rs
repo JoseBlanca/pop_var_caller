@@ -89,8 +89,9 @@ pub struct ArtifactTestCounts {
     pub reference_reads: f64,
     /// Of those, how many were on the forward strand.
     pub reference_forward_reads: f64,
-    /// Of those, how many started strictly left of the record they were seen at —
-    /// freebayes' `placedLeft`, the read-position term.
+    /// Of those, how many lay mostly left of the record they were seen at —
+    /// freebayes' `placedLeft`, the read-position term
+    /// ([`read_placed_left`](crate::locus_generation::read_placed_left)).
     pub reference_placed_left_reads: f64,
     /// How many reads across the cohort showed [`Self::primary_alternative`].
     pub alternative_reads: f64,

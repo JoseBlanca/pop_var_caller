@@ -450,9 +450,12 @@ Two guards, both inherited and both load-bearing:
 
 **Strand and read position — are the variant reads a fair sample of the site's reads?** A real
 variant's reads come off both strands and sit at varied places within the read; artifact reads
-often pile on one strand or at one end. The penalty is the improbability of the variant reads'
-forward-strand fraction, and of their placed-left fraction, against the *reference* reads' own
-fractions at the same site — the larger of the two. Using the reference reads as the expectation
+often pile on one strand or at one end. A read is **placed left** when at least as many of its
+aligned bases lie left of the site as right of it — freebayes' `placedLeft` — so about half of a
+real variant's reads are placed left, and an artifact made near one end of the reads skews that
+half. The penalty is the improbability of the variant reads' forward-strand fraction, and of their
+placed-left fraction, against the *reference* reads' own fractions at the same site — the larger
+of the two. Using the reference reads as the expectation
 rather than a fixed one half is what makes it robust at a site whose coverage is one-sided for
 innocent reasons.
 
@@ -527,8 +530,8 @@ HaplotypeCaller's joint calls on 50 of them.
 **First, the reference reads' share is an estimate, not a known probability.** Production took the
 reference reads' forward share as the probability every variant read had of being forward. At a
 homozygous-variant site that share rests on no reference read or one. With none, production
-assumed an even split, which is wrong for the placed-left share, since nearly every read starts left
-of the site; with one, the share was clamped to 99 in 100. At 300× on GIAB that charged 848 of the
+assumed an even split, which was wrong for the placed-left share as it was then counted (§6.6);
+with one, the share was clamped to 99 in 100. At 300× on GIAB that charged 848 of the
 2,320 true calls 100 Phred or more, up to 3,000. Their baselines are in the thousands, so no call
 was lost, but the number said nothing.
 
@@ -536,7 +539,10 @@ So the variant reads' count is **beta-binomial**: each read's probability of bei
 from a beta distribution whose parameters are the reference reads' forward and reverse counts plus a
 prior worth 10 reads. The prior is centred on an even split for strand. For read position it is
 centred on the site's own pooled share, reference and variant reads together, because how many
-reads start left of a site depends on read length and record width. With dozens of reference reads
+reads are placed left depends on what they are counted against — one base at a SNP, the anchor
+base of a wider generic record, the whole of a repeat tract — and on read length. Where there is
+no reference read the variant reads are then their own expectation, and the read-position half
+cannot fire. With dozens of reference reads
 the answer is production's; with none or one it falls back to the prior. At 300× the largest tail
 on a true call falls from 3,000 Phred to 75. The tail is the two-sided Sterne tail, found by binary
 search for the mode and for the far flank's edge and summed outward from each edge only while a term
@@ -571,10 +577,8 @@ every stretch whose calls changed: weight 4 removes 13,732 variant genotypes GAT
 it overall. Weight 3 removes 3,168 and 1,796; weight 5, 20,942 and 4,142. Records written go from
 193,893 to 185,851.
 
-**Both halves of the test are kept, though the read-position half adds little.** With strand alone
-at weight 4, GIAB is identical at every depth, and tomato loses about 260 fewer genotypes GATK does
-not call and 53 fewer it does. Read position alone is worse than production: 30× false calls rise
-from 23 to 49, because the strand half is then gone.
+**The read-position half could not fire when this was measured** (§6.6): every number in this
+section, the weight of 4 included, is the strand half's alone.
 
 **A cutoff was tried first and dropped.** Leaving out any site whose tail reached 100 Phred, with the
 penalty left as production's, removed the same three false calls at 300× and nothing below it. On
@@ -592,6 +596,60 @@ cluster in one sample are too few to set a rule from.
 **Open.** Four was chosen at two corners of the range: one sample from 5× to 300×, and 63 samples
 at about 3×. The per-read argument says the weight should hold as a cohort grows, but no cohort of
 thousands has been run.
+
+### 6.6 The read-position half could not fire until 2026-11-01
+
+**Until 2026-11-01 a read counted as placed left when it merely started left of the site**, which
+is true of nearly every read that covers it: at 3,438 of HG002's chr20 truth sites at 30×, 91,071
+of 91,296 reads. The code said it followed freebayes, but freebayes counts a read when at least as
+many of its aligned bases lie left of the site as right of it (`basesLeft >= basesRight`,
+`freebayes/src/Genotype.cpp`, the two counts from `Allele::bpLeft` and `bpRight`). Variant and
+reference reads were then both all placed left, the two fractions always agreed, and the
+read-position half charged about nothing. Under freebayes' count, which ng now uses, 45,606 of the
+same 91,295 reads are placed left.
+
+**What a read is counted against** (`read_placed_left` in `src/locus_generation/mod.rs`):
+
+- **a one-base column**, that base;
+- **a wider generic record**, its anchor base only. The record's full stretch is not final while
+  reads fold — a later read can widen it, and a read that ended before the widen is not counted
+  again — so a count against the stretch would depend on when the widen arrived. At a wide record
+  every read, reference or variant, carries the same extra bases on its right, and the test compares
+  the two fractions, so the shift cancels;
+- **a repeat tract**, the whole tract, whose ends are fixed before any read is measured.
+
+The psp field was renamed from `reads-starting-left-of-the-locus` to
+`reads-lying-mostly-left-of-locus`, so a psp holding the old count is refused rather than mixed
+into a cohort with new ones; the format version stays 1.0.
+
+**Measured with the weight (4) and the ramp unchanged.** HG002 against GIAB v4.2.1 and the GIAB
+tandem-repeat benchmark, vcfeval at genotype level, one sample; tomato1's 80 regions, 63 BAQ-free
+alignment files (57 accessions) at about 3×, psps fitted and called, against GATK HaplotypeCaller's
+joint calls on 62 of them (the benchmark suite's run on the original files), in the 56 samples both
+called. A tomato genotype counts as one GATK calls when GATK gives that sample a variant genotype
+at a record overlapping pvc's.
+
+| | false calls removed | true calls lost |
+|---|---|---|
+| HG002 chr20, 30× | 33 (552 → 519) | 7 (81,832 → 81,825) |
+| HG002 chr20, 5× | 1 | 0 |
+| HG002 tandem repeats, 30× | 100 (2,412 → 2,312) | 13 (21,459 → 21,446) |
+| HG002 tandem repeats, 5× | 3 | 0 |
+
+| tomato, about 3× | records removed | variant genotypes removed | GATK calls them | GATK does not |
+|---|---|---|---|---|
+| 57 accessions | 1,039 of 185,439 (63 added) | 2,633 | 604 | 2,029 |
+| one accession alone | 193 of 30,163 (4 added) | 193 | 49 | 144 |
+
+GATK calls 23 in 100 of the genotypes the fix removes from the cohort, where it calls 77 in 100 of
+everything pvc writes there; 25 in 100 against 81 in 100 for the one accession. No genotype changed
+in any record that was kept. The true calls lost on chr20 are heterozygous, at 18 to 29 reads,
+whose quality before the fix was between 1 and 58. At 5× the ramp leaves the test almost unused: few
+variants there have the seven reads that give it full weight.
+
+**Kept, at the weight and ramp tuned without it.** In every corner measured it removes three to
+eight false calls for each true one. What has not been tried is retuning the weight with both halves
+live, and no cohort above 3× and no cohort of thousands has been run.
 
 ---
 

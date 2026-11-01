@@ -340,14 +340,16 @@ pub struct SequenceObservation {
     pub mapq_sum: u32,
     /// Σ MAPQ² over the supporting reads (see `mapq_sum`).
     pub mapq_sum_sq: u64,
-    /// How many supporting reads started **strictly left** of the locus's anchor —
-    /// freebayes' `placedLeft`, and the read-position-bias term production subtracts
-    /// from QUAL (`vcf/qual_refine.rs`).
+    /// How many supporting reads have at least as much of their aligned span left of the locus
+    /// as right of it — freebayes' `placedLeft`, decided per read by [`read_placed_left`].
+    /// The read-position half of the artifact correction weighs it
+    /// (`calling_quality.md` §6.2).
     ///
-    /// Carried because dropping it would forfeit the ability to reproduce production's
-    /// QUAL, which outranks tidiness. Its sibling `placed_start` is **not** carried: no
-    /// model consumes it, and it is a pure function of the read's start against the
-    /// anchor, so a later consumer can re-derive it without changing the fold (spec §6).
+    /// Until 2026-11-01 this counted reads that merely *started* left of the anchor, which is
+    /// nearly every read covering a position (12,510 of 12,568 at a sample of HG002 chr20
+    /// loci), so the read-position test could never fire.
+    ///
+    /// Its sibling `placed_start` is **not** carried: no model consumes it (spec §6).
     pub placed_left: u32,
     /// **The ids of every read folded here** — one per read, or one per read *pair* with
     /// its mates collapsed onto a single id, and deduplicated, so this is a count of reads
@@ -391,6 +393,30 @@ pub struct SequenceObservation {
     /// 2.1 carries none, and such a read is scored from both sides, one half each
     /// ([`HeldFlank::of_witness`]).
     pub held_flank: Option<HeldFlank>,
+}
+
+/// Whether a read has at least as many aligned reference bases left of a locus as right of it —
+/// freebayes' `placedLeft` (`Genotype.cpp`, `basesLeft >= basesRight`, the two counted in
+/// reference bases by `Allele::bpLeft` and `bpRight`).
+///
+/// A real variant sits at a varied place along the reads that carry it, so about half of them
+/// fall each way. An artifact made near one end of the reads — a misaligned read end, a
+/// low-quality tail — piles up on one side, and the read-position test catches it by
+/// comparing the variant reads' share against the reference reads' (`calling_quality.md`
+/// §6.2).
+///
+/// All four positions are 1-based and inclusive. `basesLeft = locus_start − alignment_start`
+/// and `basesRight = alignment_end − locus_end`, so the comparison is the same as asking
+/// whether the read's midpoint lies at or left of the locus's, which is how it is computed:
+/// in sums, without a signed count. A read that ends inside the locus has a negative count on
+/// its right and is placed left. A tie goes left, as freebayes' does.
+pub(crate) fn read_placed_left(
+    alignment_start: u64,
+    alignment_end: u64,
+    locus_start: u64,
+    locus_end: u64,
+) -> bool {
+    alignment_start + alignment_end <= locus_start + locus_end
 }
 
 /// **Which flank of an STR locus a read anchored before it ran out inside the repeat** — the

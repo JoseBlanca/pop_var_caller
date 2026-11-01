@@ -1604,14 +1604,20 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
             // The failing fetch is at **161**, not at the read's start: a record is opened per
             // covered position, so the walk emits loci at 156–159 first and fails at the first
             // position past the contig.
+            //
+            // **The placed-left counts are no longer production's.** Production counted a read
+            // that started left of the position, so 157–159 held 1. Since 2026-11-01 a read is
+            // placed left when at least as many of its aligned bases lie left of the position as
+            // right of it (`calling_quality.md` §6.6); this read spans 156–175, so it is placed
+            // left of none of them.
             "fetch past the contig end",
             vec![read("far", 156, 175, vec![CigarOp::Match(20)], 20)],
             WalkOutcome {
                 records: vec![
                     Ok(frozen_locus(156, b'T', 0)),
-                    Ok(frozen_locus(157, b'A', 1)),
-                    Ok(frozen_locus(158, b'C', 1)),
-                    Ok(frozen_locus(159, b'G', 1)),
+                    Ok(frozen_locus(157, b'A', 0)),
+                    Ok(frozen_locus(158, b'C', 0)),
+                    Ok(frozen_locus(159, b'G', 0)),
                     Err(
                         "Fasta { chrom_id: 0, start: 161, start_plus_len: 162, cause: \
                          OutOfBounds { contig_length: 160, start: 161, end: 162 } }"

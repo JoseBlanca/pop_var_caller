@@ -72,7 +72,7 @@
 //! that reduces to `(base, read_group)`.
 
 use crate::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, read_placed_left,
 };
 use crate::ref_seq::RefSeq;
 use crate::types::ChainId;
@@ -113,7 +113,8 @@ struct PlainContribution {
     ln_q: f64,
     /// Forward strand.
     fwd: bool,
-    /// The read started strictly left of this position.
+    /// The read has at least as much of its span left of this position as right of it
+    /// ([`read_placed_left`]).
     placed_left: bool,
     mapq: u8,
 }
@@ -313,7 +314,12 @@ pub(super) fn try_ordinary_column(
             base,
             ln_q: minted_ln_read_error(bq, active.read.mq_log_err),
             fwd: !active.read.is_reverse_strand,
-            placed_left: active.read.alignment_start < walker_pos,
+            placed_left: read_placed_left(
+                u64::from(active.read.alignment_start),
+                u64::from(active.read.alignment_end),
+                u64::from(walker_pos),
+                u64::from(walker_pos),
+            ),
             mapq,
         });
     }

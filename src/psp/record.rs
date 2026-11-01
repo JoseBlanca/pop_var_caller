@@ -280,7 +280,11 @@ const BODY_FIELDS: [(&str, FieldEncoding); 25] = [
     ("summed-log-error", SUMMED_LOG_ERROR_ENCODING),
     ("mapq-sum", FieldEncoding::Varint),
     ("mapq-sum-of-squares", FieldEncoding::Varint),
-    ("reads-starting-left-of-the-locus", FieldEncoding::Varint),
+    // Reads with at least as much of their span left of the locus as right of it
+    // (`read_placed_left`). Named `reads-starting-left-of-the-locus` until 2026-11-01, when it
+    // counted reads that merely started left of it; the rename is what refuses a psp holding
+    // the old count, since a cohort mixing the two would weigh one against the other.
+    ("reads-lying-mostly-left-of-locus", FieldEncoding::Varint),
     // Every observation except the residual one — the half of the chain-id column that carries
     // no state, so it stays in the skippable body (spec psp_record_encoding.md §6).
     ("observation-reads", FieldEncoding::ChainIdList),
@@ -362,7 +366,7 @@ const READS_ON_THE_FORWARD_STRAND: &str = body_field(10);
 const SUMMED_LOG_ERROR: &str = body_field(11);
 const MAPQ_SUM: &str = body_field(12);
 const MAPQ_SUM_OF_SQUARES: &str = body_field(13);
-const READS_STARTING_LEFT: &str = body_field(14);
+const READS_PLACED_LEFT: &str = body_field(14);
 const OBSERVATION_READS: &str = body_field(15);
 const READS_WITHOUT_OBSERVATION: &str = body_field(16);
 const READS_DISCARDED_BY_THE_DEPTH_CAP: &str = body_field(17);
@@ -1342,7 +1346,7 @@ pub fn decode_record_body(
         let q_sum = SummedLogError::from_steps(body.read_signed_varint(SUMMED_LOG_ERROR)?);
         let mapq_sum = body.read_u32(MAPQ_SUM)?;
         let mapq_sum_sq = body.read_varint(MAPQ_SUM_OF_SQUARES)?;
-        let placed_left = body.read_u32(READS_STARTING_LEFT)?;
+        let placed_left = body.read_u32(READS_PLACED_LEFT)?;
         let chain_ids = if at == residual_at {
             // Filled after the loop, from the live set minus every list above.
             Vec::new()
@@ -2663,7 +2667,7 @@ mod tests {
 
     use crate::psp::header::{
         ContigIdentity, DEFAULT_GENOMIC_BLOCK_SIZE_BP, DEFAULT_LOOK_BACK_WINDOW_LOG,
-        FORMAT_VERSION, Header, Manifest, ReferenceIdentity, WriterProvenance,
+        FORMAT_VERSION, FieldName, Header, Manifest, ReferenceIdentity, WriterProvenance,
     };
     use proptest::prelude::*;
 
@@ -2873,7 +2877,7 @@ mod tests {
                 255, 159, 21, // summed-log-error: zig-zag of −174,080 steps
                 156, 64, // mapq-sum
                 144, 141, 30, // mapq-sum-of-squares
-                44, // reads-starting-left-of-the-locus
+                44, // reads-lying-mostly-left-of-locus
                 0,  // observation-reads: this observation names none
                 // — observation 2 —
                 14, b'A', b'C', b'G', b'T', b'A', b'C', b'G', b'T', b'A', b'C', b'G', b'T', b'A',
@@ -2887,7 +2891,7 @@ mod tests {
                 255, 15, // summed-log-error: zig-zag of −1,024 steps
                 180, 1, // mapq-sum
                 176, 84, // mapq-sum-of-squares
-                1,  // reads-starting-left-of-the-locus
+                1,  // reads-lying-mostly-left-of-locus
                 0,  // observation-reads: none
                 // — observation 3 —
                 0, // observation-bases: empty
@@ -2899,7 +2903,7 @@ mod tests {
                 13, // summed-log-error: zig-zag of −7 steps
                 60, // mapq-sum
                 144, 28, // mapq-sum-of-squares
-                2,  // reads-starting-left-of-the-locus
+                2,  // reads-lying-mostly-left-of-locus
                 0,  // observation-reads: none
                 // — the record's own tail —
                 12, // reads-without-observation
@@ -3288,6 +3292,29 @@ mod tests {
         );
     }
 
+    /// **A psp holding the old read-position count is refused.** Until 2026-11-01 the field
+    /// counted reads that started left of the locus, nearly every read; the count now is of
+    /// reads lying mostly left of it. The layout is the same, so only the name tells the two
+    /// apart, and a cohort mixing them would set one sample's count against another's.
+    #[test]
+    fn a_manifest_with_the_old_read_position_count_is_refused() {
+        let fields: Vec<FieldSpec> = record_fields()
+            .into_iter()
+            .map(|field| {
+                if field.name.0 == "reads-lying-mostly-left-of-locus" {
+                    FieldSpec {
+                        name: FieldName("reads-starting-left-of-the-locus".to_string()),
+                        ..field
+                    }
+                } else {
+                    field
+                }
+            })
+            .collect();
+        assert_ne!(fields, record_fields(), "the field must be in this build's manifest");
+        assert!(RecordLayout::from_manifest(&a_manifest_declaring(fields)).is_err());
+    }
+
     /// **A 1.1 file is still read, its observations all without a flank deletion** — which is
     /// what a 1.1 writer measured. Its manifest is this build's up to the repeat's right flank.
     #[test]
@@ -3514,7 +3541,7 @@ mod tests {
                 "summed-log-error",
                 "mapq-sum",
                 "mapq-sum-of-squares",
-                "reads-starting-left-of-the-locus",
+                "reads-lying-mostly-left-of-locus",
                 "observation-reads",
                 "reads-without-observation",
                 "reads-discarded-by-the-depth-cap",
