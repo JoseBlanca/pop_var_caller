@@ -2,16 +2,26 @@
 
     uv run --no-project python scripts/genotype_read_support_check.py <vcf[.gz]>...
 
-Two counts, each split into biallelic and multi-allelic records and into GQ below and at or
-above 20, over sample calls with at least two reads in AD:
+Two counts, each split into biallelic and multi-allelic records, into GQ below and at or above
+20, and by whether the sample had reads AD does not show, over sample calls with at least two
+reads in AD:
 
 - **names an alternative with no reads**: the genotype carries an alternative allele whose AD is
   zero while another alternative in the record has reads;
 - **no called allele has a read**: every allele the genotype carries has AD zero, though the
   sample has reads (a 0/0 call on reads that all show an alternative counts here).
 
+**AD counts only reads that matched an allele exactly**; DP counts every read the sample showed.
+The difference is the reads no written allele explains: partial reads, which reached only part of
+the locus, and at a record merging an STR segment with a generic variant, reads the AD rule could
+not split between them (str_edge_deletion_alleles.md §6.4). Either can support a called allele
+that AD shows at zero — on 2026-11-01, 29 of the 31 confident flags on the BAQ-free tomato extract
+were one or the other. So each count is split again: "some reads unexplained" (DP above the sum
+of AD) may be supported by reads AD cannot show; "every read explained" (DP equal to the sum)
+has every read on an allele the call left out.
+
 Neither is always wrong: at a few reads the cohort's frequencies can outweigh one sample's reads.
-What should be rare is either at GQ >= 20. On 2026-10-31 the tomato panel showed 1,620 of the
+What should be rare is either at GQ >= 20 with every read explained. On 2026-10-31 the tomato panel showed 1,620 of the
 second at GQ >= 20 in one run, every one from reads whose error was minted near one — the defect
 read_likelihoods.md §3.3's amendment of that day fixed. Run it on every benchmark VCF; a count
 that grows between two builds is worth a look before anything else.
@@ -56,6 +66,11 @@ def check(path):
             except ValueError:
                 confident = False
             band = "GQ>=20" if confident else "GQ<20"
+            try:
+                unexplained = int(call.get("DP", "0")) > sum(reads)
+            except ValueError:
+                unexplained = False
+            band += ", some reads unexplained" if unexplained else ", every read explained"
             counts[(kind, "calls with two or more reads", "")] += 1
             alternative_without_reads = any(
                 reads[allele] == 0
