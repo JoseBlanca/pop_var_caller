@@ -143,7 +143,16 @@ For each sample and window, the `K = min(16, N − 1)` other samples whose allel
 its own, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the sample's informative records
 in the window — on a fixed sample of at most 500 of them, drawn by record order, so the choice is
 deterministic. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
-what the prototype ran; how accuracy and cost move with `K` is a measurement (§8). A sample with no
+what the prototype ran; how accuracy and cost move with `K` is a measurement (§8).
+
+**A background template** joins the `K` (§11 Q6): its shares at each record are the cohort's allele
+frequencies — `AF`, the reference taking the rest. A copy that matches none of the sampled
+haplotypes — an introgression, a private lineage — copies the background, and its genotype falls back
+to what the cohort's frequencies say rather than to the nearest template's allele. It is one template
+among `K + 1` in every respect: pair states with it, an autozygous state copying it, the same mismatch
+blur.
+
+A sample with no
 informative record in the window has no basis for choosing templates and is not re-called in it.
 
 **A known circularity, stated.** A template's `GP` came from a prior built from the other samples'
@@ -398,18 +407,19 @@ All four as recommended.
 
 ---
 
-## 11. Open questions — **for the owner**
+## 11. Open questions — **ruled by the owner, 2026-11-01, except Q3**
 
-Each with a recommendation.
+Each with the recommendation it was ruled on. Q1, Q2 and Q5–Q8 as recommended; Q4: measure; Q3
+waits for the mixed-cohort measurement of §8.2.
 
-1. **Calls at no-read sites only with evidence nearby (§4.2)?** *Recommend: yes.* Without it the pass
+1. **Calls at no-read sites only with evidence nearby (§4.2)?** **Ruled: yes.** Without it the pass
    writes `0/0` at `GQ` about 17 where a sample has no informative record within reach — a failed
    library, a deletion in that line, a window at zero reads — which is the cohort's frequency, not
    evidence. It keeps every call the prototype recovered from neighbouring evidence.
 2. **After the pass: drop alternatives no sample carries, and records with none left (§4.1)?**
-   *Recommend: yes*, the rule calling already applies. The alternative is a record with `AC` 0 and a
+   **Ruled: yes**, the rule calling already applies. The alternative is a record with `AC` 0 and a
    variant `QUAL`, which no reader can interpret.
-3. **Mixed cohorts.** A run-level switch by the median inbreeding runs the pass on a few outbred
+3. **Mixed cohorts — open.** A run-level switch by the median inbreeding runs the pass on a few outbred
    members of an inbred panel, where heterozygous templates blur, and turns it off for inbred lines
    in an outbred-majority cohort. *Recommend: run-level now, and the mixed-cohort measurement of §8.2
    decides whether to switch per sample* (each sample re-called only if its own fitted inbreeding is
@@ -417,25 +427,25 @@ Each with a recommendation.
 4. **Templates inherit calling's bias against heterozygotes.** A template's shares come from calling's
    `GP`, made under a genome-wide `F` near 0.95, which called 43% of true heterozygotes with four or
    more reads homozygous at 3× (report §5.2); a sample copying it inherits the error, and a template
-   with no reads has shares near the frequency and can look like a good match. *Recommend: measure
-   first* (§8.2 scores templates' own error); if it bites, compute template shares with the report's
+   with no reads has shares near the frequency and can look like a good match. **Ruled: measure
+   first** (§8.2 scores templates' own error); if it bites, compute template shares with the report's
    two-state autozygosity model before the walk, and weight agreement by the template's own
    informative records.
 5. **What rise in false non-reference calls is acceptable?** With the nine accessions at 3×, the
    prototype fixed about 25,500 wrong genotypes at true non-reference sites and made about 2,800 true
-   reference genotypes non-reference (report §5.2). *Recommend: judge by the net, measured per depth, and refuse a
-   default that adds more false non-reference calls than it removes errors in any depth class.*
+   reference genotypes non-reference (report §5.2). **Ruled: judge by the net, measured per depth, and refuse a
+   default that adds more false non-reference calls than it removes errors in any depth class.**
 6. **No template carries the haplotype** — an introgression, a private lineage, 10 samples from 64
    founders. The mismatch rate is the only escape, so the pass imputes the nearest template's allele
    with confidence (07 §2.7 cites 18% heterozygous error in under-represented ancient genomes).
-   *Recommend: add one background template whose shares are the cohort's allele frequencies*, so a
-   stretch no sample matches falls back to calling's own prior, *and confirm on the 64-founder case
-   of §8.2.*
+   **Ruled: add one background template whose shares are the cohort's allele frequencies** (§3.3),
+   so a stretch no sample matches falls back to calling's own prior, **and confirm on the 64-founder
+   case of §8.2.**
 7. **Neighbouring records share reads.** At 26 records a kilobase a 150-base read covers about four;
    the walk treats their likelihoods as independent, so one mismapped read counts several times and
-   `GQ` can come out too high at low depth. *Recommend: let §8.3's calibration decide*; if `GQ` is
+   `GQ` can come out too high at low depth. **Ruled: let §8.3's calibration decide**; if `GQ` is
    overconfident, thin the sites the walk uses for its state posterior to one per read length.
 8. **The whole cohort at 1×.** The prototype was worse than the autozygous state alone at sites with
-   one to three reads (22,408 against 20,111 wrong, report §5.2). *Recommend: measure on §8.2's 1×
-   cases first*; Q4's template correction and Q6's background template are the likely cures, and a
+   one to three reads (22,408 against 20,111 wrong, report §5.2). **Ruled: measure on §8.2's 1×
+   cases first**; Q4's template correction and Q6's background template are the likely cures, and a
    depth-dependent fallback is the last resort.
