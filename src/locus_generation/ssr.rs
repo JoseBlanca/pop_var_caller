@@ -1083,8 +1083,12 @@ mod classify {
                     &read.seq,
                     span,
                     flank_deletion,
-                    &reference[left - flank_deletion.left as usize..left],
-                    &reference[left + tract_len..left + tract_len + flank_deletion.right as usize],
+                    (
+                        &reference[left - flank_deletion.left as usize..left],
+                        &reference
+                            [left + tract_len..left + tract_len + flank_deletion.right as usize],
+                    ),
+                    locus.repeat.delimiter_motif.period(),
                 );
                 (Some(span), deleted)
             }
@@ -1337,8 +1341,11 @@ mod classify {
             &read.seq,
             region.start + start..region.start + end,
             deleted,
-            &left_flank[left - deleted_left..],
-            &reference[left + tract_len..left + tract_len + deleted_right],
+            (
+                &left_flank[left - deleted_left..],
+                &reference[left + tract_len..left + tract_len + deleted_right],
+            ),
+            0,
         ))
     }
 
@@ -1635,14 +1642,23 @@ mod classify {
     ///
     /// `span` is the spelling in read coordinates; `left_flank` and `right_flank` are the
     /// reference bases the deletion took, the tract's side last.
+    ///
+    /// **No flank base is given back that would leave the spelling shorter than `shortest`**
+    /// (2026-11-01): a segment's period, since an allele without a whole copy of the motif is one
+    /// the read model cannot score, and candidate selection drops it; zero at a bundle, whose
+    /// alleles can hold no copy. At chr20:2,472,054 (HG002) a 9-base deletion took seven flank
+    /// bases, `AAAAAAG`, and two of an `A` ×8 tract: given back without the floor, every carrier
+    /// read became an empty spelling with the `G` deleted, the allele was dropped, and only the
+    /// generic path's shortened deletion was written. With it the reads spell `A` with `AG`
+    /// deleted — the same sequence.
     fn in_smallest_form(
         seq: &[u8],
         mut span: Range<usize>,
         mut deleted: FlankDeletion,
-        left_flank: &[u8],
-        right_flank: &[u8],
+        (left_flank, right_flank): (&[u8], &[u8]),
+        shortest: usize,
     ) -> (Range<usize>, FlankDeletion) {
-        while deleted.left > 0 && !span.is_empty() {
+        while deleted.left > 0 && span.len() > shortest {
             let first_deleted = left_flank[left_flank.len() - deleted.left as usize];
             if seq[span.start] != first_deleted {
                 break;
@@ -1650,7 +1666,7 @@ mod classify {
             span.start += 1;
             deleted.left -= 1;
         }
-        while deleted.right > 0 && !span.is_empty() {
+        while deleted.right > 0 && span.len() > shortest {
             let last_deleted = right_flank[deleted.right as usize - 1];
             if seq[span.end - 1] != last_deleted {
                 break;
@@ -2657,6 +2673,51 @@ mod classify {
             }
         }
 
+        /// **A deletion taking a run of flank bases equal to the tract's keeps one copy in the
+        /// spelling** (2026-11-01; HG002 chr20:2,472,054). `…TC AAAAAAG | A ×8`, and the reads
+        /// delete `AAAAAAGAA`: seven flank bases and two of the tract. Smallest form gave every
+        /// spelled `A` back to the flank, the spelling came out empty, and candidate selection
+        /// dropped an allele without a copy of the motif.
+        #[test]
+        fn smallest_form_keeps_a_whole_copy_in_a_segments_spelling() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            use CigarOp::{Deletion, Match};
+            let left_flank = [&b"GTCAGCATTGCAGGTCATCGGTC"[..], b"AAAAAAG"].concat();
+            let tract = b"A".repeat(8);
+            let right_flank = b"CCACGATTGCAGTCAGCTTGACCATAGCAG";
+            let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+            let locus = SsrLocus {
+                repeat: SsrSegment::new("chr1".into(), 31, 38, Motif::new(b"A").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            let seq = [&left_flank[..23], &tract[2..], right_flank].concat();
+            let mut carrier = read(&seq, 40);
+            carrier.cigar = vec![Match(23), Deletion(9), Match(36)];
+            match classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            ) {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, b"A");
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                    assert_eq!(flank_deletion, FlankDeletion { left: 2, right: 0 });
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
         /// Which indels sit in the guarded flank bases, and how far an edge deletion grows
         /// through them: the tract at 30–60, eight guarded bases each side.
         #[test]
@@ -2727,8 +2788,8 @@ mod classify {
                     b"AAT",
                     0..3,
                     FlankDeletion { left: 2, right: 0 },
-                    b"GAA",
-                    b""
+                    (b"GAA", b""),
+                    0,
                 ),
                 (2..3, FlankDeletion::NONE)
             );
@@ -2738,8 +2799,8 @@ mod classify {
                     b"CAT",
                     0..3,
                     FlankDeletion { left: 2, right: 0 },
-                    b"GA",
-                    b""
+                    (b"GA", b""),
+                    0,
                 ),
                 (0..3, FlankDeletion { left: 2, right: 0 })
             );
@@ -2750,8 +2811,8 @@ mod classify {
                     b"AGT",
                     0..3,
                     FlankDeletion { left: 0, right: 2 },
-                    b"",
-                    b"TC"
+                    (b"", b"TC"),
+                    0,
                 ),
                 (0..3, FlankDeletion { left: 0, right: 2 })
             );
@@ -2760,10 +2821,33 @@ mod classify {
                     b"AGC",
                     0..3,
                     FlankDeletion { left: 0, right: 2 },
-                    b"",
-                    b"TC"
+                    (b"", b"TC"),
+                    0,
                 ),
                 (0..2, FlankDeletion { left: 0, right: 1 })
+            );
+            // chr20:2,472,054: six `A`s spelled with `AAAAAAG` missing on the left. With no floor
+            // every `A` is given back and the spelling is empty; with an `A` tract's floor of one
+            // base, one `A` stays and `AG` is the deletion — the same sequence.
+            assert_eq!(
+                in_smallest_form(
+                    b"AAAAAA",
+                    0..6,
+                    FlankDeletion { left: 7, right: 0 },
+                    (b"AAAAAAG", b""),
+                    0,
+                ),
+                (6..6, FlankDeletion { left: 1, right: 0 })
+            );
+            assert_eq!(
+                in_smallest_form(
+                    b"AAAAAA",
+                    0..6,
+                    FlankDeletion { left: 7, right: 0 },
+                    (b"AAAAAAG", b""),
+                    1,
+                ),
+                (5..6, FlankDeletion { left: 2, right: 0 })
             );
             // Tract at [30, 60).
             assert_eq!(

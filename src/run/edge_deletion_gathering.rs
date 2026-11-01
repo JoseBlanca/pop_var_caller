@@ -167,6 +167,49 @@ impl WidenedTract {
     /// the record lies inside the widened one or the allele leaves those bases unchanged. As
     /// `(on the left, bases)`: the first bases of the allele before the record, or its last bases
     /// after it, as many as `reference` (the generic record's) has outside.
+    /// **How many bases apart the haplotypes are that STR allele `allele` and a generic allele
+    /// each write over the two records' union** — the STR allele with the reference outside the
+    /// widened record, against the generic allele with the reference around it (2026-11-01).
+    ///
+    /// Step 1's tie-break among the generic copies the STR allele does not spell. Where a run of
+    /// equal bases crosses the edge, the two paths can remove the same base from different ends
+    /// of it: at HG002 chr20:16,430,962 the STR allele `AACAAAA` took an `A` from the tract with
+    /// the flank's `C`, the generic `CAAAC`→`CAA` the flank's `A` with it. Neither spells the
+    /// other base for base, so the reference copy used to be taken, and the generic deletion
+    /// went onto the sample's reference STR copy — an allele no read carried. Their haplotypes
+    /// differ by one base, the `C` inside the tract the generic path does not call; the
+    /// reference's by two. `usize::MAX` where the records do not line up.
+    fn distance(
+        &self,
+        allele: u16,
+        region: GenomeRegion,
+        reference: &[u8],
+        generic: &[u8],
+    ) -> usize {
+        let own = self.record.region();
+        let (window_start, window_end) = (own.start.get(), own.end.get());
+        let (start, end) = (region.start.get(), region.end.get());
+        // The reference bases of the generic record outside the widened one, on each side.
+        let before = window_start.saturating_sub(start) as usize;
+        let after = end.saturating_sub(window_end) as usize;
+        if before + after > reference.len() {
+            return usize::MAX;
+        }
+        let (head, tail) = (&reference[..before], &reference[reference.len() - after..]);
+        let str_haplotype = [head, &self.record.alleles()[usize::from(allele)], tail].concat();
+        // The union's reference, and the generic allele written over the generic record.
+        let union_reference = [head, &self.record.alleles()[0], tail].concat();
+        let union_start = start.min(window_start);
+        let from = (start - union_start) as usize;
+        let to = from + reference.len();
+        if to > union_reference.len() {
+            return usize::MAX;
+        }
+        let generic_haplotype =
+            [&union_reference[..from], generic, &union_reference[to..]].concat();
+        crate::region_typing::run_parse::edit_distance(&str_haplotype, &generic_haplotype) as usize
+    }
+
     fn beyond<'a>(
         &self,
         region: GenomeRegion,
@@ -447,9 +490,22 @@ fn pair_with(
                     (false, false) => 3,
                 }
             };
+            // Among copies it does not spell, the one whose haplotype is nearest its own
+            // (2026-11-01): see `WidenedTract::distance`.
+            let order = |generic: u16| -> (u8, usize, u8) {
+                let rank = rank(generic);
+                if rank < 2 {
+                    (0, 0, rank)
+                } else {
+                    let bases = &generic_alleles[usize::from(generic)];
+                    let distance =
+                        tract.distance(copy.str_allele, region, &generic_alleles[0], bases);
+                    (1, distance, rank)
+                }
+            };
             let Some(at) = (0..generic_copies.len())
                 .filter(|&at| !taken[at])
-                .min_by_key(|&at| rank(generic_copies[at]))
+                .min_by_key(|&at| order(generic_copies[at]))
             else {
                 break;
             };

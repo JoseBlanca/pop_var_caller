@@ -398,7 +398,7 @@ fn walk_back(
 }
 
 /// Edited bases between two sequences: substitutions, insertions and deletions, one each.
-fn edit_distance(one: &[u8], other: &[u8]) -> u32 {
+pub(crate) fn edit_distance(one: &[u8], other: &[u8]) -> u32 {
     let mut previous: Vec<u32> = (0..=other.len() as u32).collect();
     let mut current = vec![0u32; other.len() + 1];
     for (row, &base) in one.iter().enumerate() {

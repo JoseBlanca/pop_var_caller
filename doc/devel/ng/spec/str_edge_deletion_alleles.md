@@ -97,6 +97,15 @@ wholly inside the segment comes out as `(0, 0)`** — a plain repeat allele, mea
 exactly as today. Stutter, which adds or removes whole units inside the repeat, is always such a
 deletion. Only a sequence whose flank really differs keeps a flank deletion.
 
+**At a segment, no flank base is given back that would leave the spelling shorter than one period**
+(2026-11-01). An allele without a whole copy of the motif is one the read model cannot score, and
+candidate selection drops it (`can_score`, `src/calling/allele_candidates/ssr.rs`). At HG002
+chr20:2,472,054 a 9-base deletion took seven flank bases, `AAAAAAG`, and two of an `A` ×8 tract;
+given back without a floor, all eight carrier reads became an empty spelling with the `G` deleted,
+the allele was dropped, and only the generic path's shortened 7-base deletion was written — a false
+call and a missed one. With the floor they spell `A` with `AG` deleted, the same sequence. A bundle
+keeps no floor: its alleles can be scored with a run at no copies.
+
 **The smallest form is the allele's identity; it is not where the generic path puts the
 deletion.** The generic path left-aligns every read before its pileup (`read/left_align.rs`, a
 port of GATK's `leftAlignIndels`), which slides a deletion as far *left* as it goes — into the
@@ -521,6 +530,17 @@ For each sample with both calls, its copies are paired in three steps:
    genotypes with the flank deletion one to seven bases from the tract went from 2,760 to 1,473 of
    14,009 — among tracts that change only in length, those with one base wrong from 326 to 9 —
    with the reference genotypes unchanged.
+
+   **Among generic copies the STR copy does not spell, it takes the one whose haplotype is nearest
+   its own** (2026-11-01): the STR allele with the reference outside the widened record, against
+   the generic allele with the reference around it, over the two records' union, in edited bases;
+   the reference copy first only at a tie. Where a run of equal bases crosses the edge, the two
+   paths can remove the same base from different ends of it. At HG002 chr20:16,430,962 the STR
+   allele `AACAAAA` took the flank's `C` and an `A` of the tract, the generic path `CAAAC`→`CAA`
+   the flank's `AC`; neither spells the other base for base, the reference copy was taken, and the
+   generic deletion went onto the sample's reference STR copy, writing `AAAAAAA`, which no read
+   carried, as a second allele. The two haplotypes differ by one base, the reference's by two. The
+   STR record still wins on what is written: only which generic copy is used up changes.
 2. **The STR copies left pair with the generic copies left.** Where either side is homozygous, or
    one copy is left, there is one pairing and the reads were never needed.
 3. **Where both are heterozygous, the pairing comes from the cohort.** Every sample whose pairing

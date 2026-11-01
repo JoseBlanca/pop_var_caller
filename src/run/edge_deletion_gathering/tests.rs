@@ -568,3 +568,47 @@ fn a_generic_change_past_the_widened_end_stays_on_the_deletions_copy() {
     assert_eq!(gathering.counts().samples_in_agreement, 2);
     assert_eq!(gathering.counts().samples_overridden, 0);
 }
+
+/// **Where neither generic copy is spelled base for base, the STR copy takes the one whose
+/// haplotype is nearest its own** (2026-11-01; HG002 chr20:16,430,962). `CAAA|C` then `A` ×8 at
+/// 102–109; the sample's chromosome carries `CAA` then `AAACAAAA`. The STR allele `AACAAAA` took
+/// the flank's `C` and an `A` of the tract, the generic path `CAAAC`→`CAA` the flank's `AC`: the
+/// same sequence over a run of `A`s cut at different ends. Before, the STR copy took the reference
+/// generic copy and the deletion went onto the sample's reference STR copy, writing `AAAAAAA`,
+/// which no read carried, and `1/2`.
+#[test]
+fn a_generic_deletion_cut_at_the_other_end_of_a_run_pairs_with_its_own_copy() {
+    let mut gathering = EdgeDeletionGathering::default();
+    let tract = record(
+        region(101, 109),
+        &[b"CAAAAAAAA", b"AACAAAA"],
+        &[(&[0, 1], 40.0)],
+        widened(
+            b"A",
+            TractWidening {
+                left: 1,
+                right: 0,
+                flank_bases_per_allele: vec![1, 0],
+                reach_per_allele: vec![(0, 0), (1, 0)],
+                base_before: Some(b'A'),
+            },
+        ),
+    );
+    let out = written(
+        &mut gathering,
+        vec![
+            record(
+                region(97, 101),
+                &[b"CAAAC", b"CAA"],
+                &[(&[0, 1], 40.0)],
+                None,
+            ),
+            tract,
+        ],
+    );
+    no_record_holds_a_star(&out);
+    assert_eq!(out.len(), 1, "one record: {out:?}");
+    assert_eq!(out[0].region(), region(101, 109));
+    assert_eq!(alleles(&out[0]), vec![&b"CAAAAAAAA"[..], b"AACAAAA"]);
+    assert_eq!(genotypes(&out[0]), vec![Some(vec![0, 1])]);
+}
