@@ -347,8 +347,11 @@ def vcfeval_benchmark_figure(rows, benchmark, title, subtitle, out, name, aggreg
 INBREEDING_CALLERS = ["pvc (fitted)", "GATK", "DeepVariant"]
 INBREEDING_LABEL = {"pvc (fitted)": "pvc, F estimated"}
 INBREEDING_ERRORS = {
+    # A planted SNP's homozygous reference called a variant, and a variant called where nothing
+    # was planted (the scorer's false_variant_genotypes).
     "wrong_gt_truth_ref": tuple(f"true hom_ref, called {c}" for c in ("het", "hom_alt",
-                                                                      "other_allele")),
+                                                                      "other_allele"))
+                          + ("false_variant_genotypes",),
     "wrong_gt_truth_var": tuple(f"true het, called {c}" for c in ("hom_ref", "hom_alt",
                                                                   "other_allele"))
                           + tuple(f"true hom_alt, called {c}" for c in ("hom_ref", "het",

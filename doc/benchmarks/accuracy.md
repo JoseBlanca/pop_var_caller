@@ -244,3 +244,8 @@ mistake.
   F = 0.75 group, the same in all three of pvc's runs (F estimated, F = 0 and F = 0.9 stated).
   GATK makes 53 of these at F = 1, and DeepVariant 57. A wrong F shows instead as homozygotes
   called heterozygous: at F = 1, 30 with F = 0 and none with F estimated.
+- **At 15×, pvc makes the fewest errors in both groups, but DeepVariant genotypes more of the
+  real variants right.** Adding the three marks, at F = 1 pvc makes 148 errors, GATK 169 and
+  DeepVariant 266; at F = 0.75, 176, 189 and 292. DeepVariant gets fewer of the planted SNPs
+  wrong than pvc (102 against 119 at F = 1, 111 against 153 at F = 0.75), but calls a variant
+  where nothing was planted 144 and 152 times; pvc never does.
