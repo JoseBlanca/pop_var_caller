@@ -132,6 +132,16 @@ pub struct WindowCoverageAccumulator {
     ready: VecDeque<(GenomePosition, WindowCoverage)>,
     /// The previous [`observe`](Self::observe)'s position, for the coordinate-order assert.
     last_observed: Option<GenomePosition>,
+    /// The depth summed over every position, each counted once, whatever its base — one half of
+    /// the mean read span the histogram carries.
+    depth_summed: u64,
+    /// The rises in depth from one position to the next, summed — the other half. A read adds
+    /// one to the depth where it starts, so this counts read starts; a step where one read ends
+    /// and another starts shows no rise, which makes the count short at high depth.
+    depth_rises: u64,
+    /// The last position counted on this contig and its depth, so a position reported twice is
+    /// counted once and a gap reads as depth 0.
+    previous_depth: Option<(u64, u32)>,
 }
 
 impl WindowCoverageAccumulator {
@@ -155,6 +165,9 @@ impl WindowCoverageAccumulator {
             distinct_positions_summed: 0,
             ready: VecDeque::new(),
             last_observed: None,
+            depth_summed: 0,
+            depth_rises: 0,
+            previous_depth: None,
         }
     }
 
@@ -194,6 +207,21 @@ impl WindowCoverageAccumulator {
             self.finalise_all();
             self.reset_contig();
             self.contig = Some(contig);
+        }
+
+        // Every position once, its base and depth whatever they are: the read span is a fact
+        // about the reads, not about which positions make a window.
+        if self
+            .previous_depth
+            .is_none_or(|(at, _)| at != position.get())
+        {
+            let depth_before = match self.previous_depth {
+                Some((at, before)) if at + 1 == position.get() => before,
+                _ => 0,
+            };
+            self.depth_summed += u64::from(depth);
+            self.depth_rises += u64::from(depth.saturating_sub(depth_before));
+            self.previous_depth = Some((position.get(), depth));
         }
 
         // A non-`N` covered position joins the buffer as a centre and a sum contributor; an
@@ -276,6 +304,8 @@ impl WindowCoverageAccumulator {
                         depth_bins,
                         windows_folded: self.windows_folded,
                         windows_under_the_floor: self.windows_under_the_floor,
+                        depth_summed: self.depth_summed,
+                        depth_rises: self.depth_rises,
                         counts: self.grid.recut(depth_bin_width, depth_bins),
                     })
                 } else {
@@ -408,6 +438,7 @@ impl WindowCoverageAccumulator {
         self.sum_gc = 0;
         self.summed_positions = 0;
         self.distinct_positions_summed = 0;
+        self.previous_depth = None;
     }
 }
 
@@ -1489,6 +1520,44 @@ mod tests {
             "the seven windows at the real depth sit around column 4: {row:?}",
         );
         assert_eq!(histogram.counts.iter().sum::<u32>(), 10);
+    }
+
+    /// **The read span is the depth summed over its rises**: three reads of five bases, two of
+    /// them overlapping, a gap, a position reported twice, and a contig change. Read starts are
+    /// rises from the previous position's depth, a gap reads as depth 0, a repeated position
+    /// counts once, and a new contig starts from nothing.
+    #[test]
+    fn the_read_span_is_the_depth_summed_over_its_rises() {
+        let mut accumulator = WindowCoverageAccumulator::new(sliding_config());
+        // Reads at 1–5 and 3–7 on contig 0: depth 1,1,2,2,2,1,1.
+        for (position, depth) in [
+            (1u64, 1u32),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (5, 2),
+            (5, 2),
+            (6, 1),
+            (7, 1),
+        ] {
+            accumulator.observe(ContigId(0), Position(position), b'A', depth);
+        }
+        // After a gap, a read at 20–24, and on contig 1 a read at 20–24 again.
+        for contig in [0, 1] {
+            for position in 20..=24u64 {
+                accumulator.observe(ContigId(contig), Position(position), b'A', 1);
+            }
+        }
+        let (_, histogram) = accumulator.finish();
+        let SampleHistogram::Fitted(histogram) = histogram else {
+            panic!("covered positions give a histogram: {histogram:?}");
+        };
+        assert_eq!(
+            histogram.depth_summed, 20,
+            "four reads of five bases, the repeat once"
+        );
+        assert_eq!(histogram.depth_rises, 4, "one rise a read start");
+        assert_eq!(histogram.mean_read_span(), Some(5.0));
     }
 
     /// **A sample no read covers anywhere finalises no window**: every position it reports is at

@@ -288,6 +288,8 @@ pub fn write_the_histogram(sample: usize, histogram: &SampleHistogram, into: &mu
                 depth_bins,
                 windows_folded,
                 windows_under_the_floor,
+                depth_summed,
+                depth_rises,
                 counts,
             } = fitted;
             // **The cells must be the scheme's own count**, because the line writes the scheme
@@ -309,7 +311,7 @@ pub fn write_the_histogram(sample: usize, histogram: &SampleHistogram, into: &mu
             write!(
                 into,
                 "{sample}\tfitted\t{window_bp}\t{gc_bins}\t{}\t{depth_bins}\t\
-                 {windows_folded}\t{windows_under_the_floor}",
+                 {windows_folded}\t{windows_under_the_floor}\t{depth_summed}\t{depth_rises}",
                 depth_bin_width.to_bits(),
             )
             .expect("writing into a String cannot fail");
@@ -426,22 +428,24 @@ mod tests {
             depth_bins: 2,
             windows_folded: 7,
             windows_under_the_floor: 3,
+            depth_summed: 900,
+            depth_rises: 6,
             // Two GC rows of three cells each — two regular bins and the overflow.
             counts: vec![1, 2, 0, 0, 4, 0],
         });
         let mut written = String::new();
         write_the_histogram(4, &histogram, &mut written);
 
-        // Where the cells begin: the sample index, the word `fitted`, and the six scheme and
+        // Where the cells begin: the sample index, the word `fitted`, and the eight scheme and
         // count fields come first.
-        const CELLS_START_AT: usize = 8;
+        const CELLS_START_AT: usize = 10;
 
         let fields: Vec<&str> = written.trim_end().split('\t').collect();
         assert_eq!(fields[0], "4", "the sample index keys the line");
         assert_eq!(fields[1], "fitted");
         assert_eq!(
             &fields[2..CELLS_START_AT],
-            ["500", "2", "4598175219545276416", "2", "7", "3"]
+            ["500", "2", "4598175219545276416", "2", "7", "3", "900", "6"]
         );
         assert_eq!(
             fields[CELLS_START_AT..],
@@ -489,6 +493,8 @@ mod tests {
             depth_bins: 2,
             windows_folded: 0,
             windows_under_the_floor: 0,
+            depth_summed: 0,
+            depth_rises: 0,
             // Two GC rows of three cells each is six; this is five.
             counts: vec![0; 5],
         });

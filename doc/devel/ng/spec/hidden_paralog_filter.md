@@ -135,6 +135,23 @@ copied into ng with its configuration and its tests. Its defaults — the single
 the overflow guard at a fifth — are **inherited from the tomato2 prototype and production, not
 re-measured**.
 
+**σ₀ is the band's spread plus the reads' own noise** (2026-11-01). The fit measures the
+spread of one-copy windows as 1.4826 times the median absolute deviation of relative depth
+inside the single-copy band, and adds in quadrature the variance a window's mean depth has from
+which reads landed in it: for reads of span `L` in a window of `W` bases at one-copy depth `d`,
+`L·(W − L/3) / (W²·d)` while `L ≤ W` (0.27/d for 150-base reads), and `(L − W/3) / (L·d)` past it.
+`L` is the sample's mean read span, the depth it reported summed over the rises in that depth
+(`CoverageByGcHistogram::mean_read_span`); with no rise at all the term is left out.
+
+*Why.* A window's mean depth averages over the reads covering it, not over its 500 positions —
+about three reads at 1×, ten at 3× — and the band `0.4..1.6` cuts away exactly the tails that
+noise produces (44 windows in 100 fall outside it on a tomato accession at 1×). Without the term σ₀
+came out 0.22 where the windows scatter by 0.78, every sample's ordinary depth noise read as extra
+copies, and on 57 tomato accessions at 1× the filter fitted a duplication rate of 0.95 and dropped
+95 records in 100. The term is 0.27 at 1×, 0.009 at 30× and 0.0009 at 300×, against a band
+spread near 0.17² = 0.03 on a deep sample, so it acts where depth is low and nowhere else. The
+measurements are in `doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md`.
+
 **A rejected fit is not an error.** The fit refuses a sample it cannot anchor — no windows, a
 peak in the bottom bin, a mode/median ratio outside the guard, too many windows past the
 histogram's range — and production carries such a sample as *absent*: it contributes no coverage

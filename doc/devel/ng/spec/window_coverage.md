@@ -422,10 +422,17 @@ impl WindowCoverageAccumulator {
   Added up from the shipped constants 2026-09-07 with each per-unit size pinned by a library
   test; a whole-run measurement beside it could only bound the per-sample cost at 1.8 MB
   ([the report](../../reports/implementations/ng_window_coverage_d3_2026-09-07.md) has both).
-- **Three reads a position.** A window of 500 positions at three reads each is a mean over
-  ~1,500 reads, which is the reason the filter windows at all (production's spec §4: per-base
-  counts cannot tell one copy from two at this depth). The floor matters most here — a window
-  over 50 positions at 3× is a mean over 150 reads.
+- **Three reads a position.** A window of 500 positions at three reads each holds 1,500 read
+  *bases*, but only about ten reads: with 150-base reads each read covers up to 150 of the
+  window's positions, so the positions share their reads and the window's mean depth is an
+  average over those ten. It is still steadier than one position's depth, which is the reason the
+  filter windows at all (production's spec §4: per-base counts cannot tell one copy from two at
+  this depth) — but it scatters by about ±30% at 3× and ±55% at 1× from which reads happened to
+  land in it. The coverage model's σ₀ carries that scatter
+  ([`hidden_paralog_filter.md`](hidden_paralog_filter.md) §3.1); **until 2026-11-01 it did not**,
+  this line said "a mean over ~1,500 reads", and on 57 tomato accessions at 1× the filter dropped
+  95 records in 100. The floor matters most here — a window over 50 positions at 3× holds about
+  two reads. *(Corrected 2026-11-01.)*
 - **Three hundred reads a position.** The depth axis scales with the sample (§3.4), so the
   single-copy peak and a four-copy carrier both land inside the range where production's fixed
   scheme would have overflowed and rejected the fit. **This held only on average until

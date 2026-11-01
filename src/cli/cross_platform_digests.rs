@@ -429,7 +429,11 @@ mod tests {
     /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
     /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
     /// reproduces the old checksum, `879ac81cb2eed45e9e48363fa49383f2`, exactly. Recorded in the Linux container (arm64).
-    const CALLS_MD5: &str = "eeb54b8cccb65e7a31fde3545329e3a3";
+    /// **Re-recorded 2026-11-01** when σ₀ gained the reads' own sampling variance
+    /// (`doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md`): only the two records' `PARALOG_LR` moved (chrV:121 −21.62 → −5.53, chrV:201 −18.19 → −4.68), the wider spread weakening the depth evidence for a real variant as well. Every record still
+    /// passes at `PARALOG_POST=0.000000`; leaving the term out reproduces the old checksum,
+    /// `eeb54b8cccb65e7a31fde3545329e3a3`, exactly. Recorded in the Linux container (arm64).
+    const CALLS_MD5: &str = "5093bd735d1a4246f585c636965426cc";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -679,7 +683,11 @@ mod tests {
     /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
     /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
     /// reproduces the old checksum, `8d7af38234c53639f550e9042bae46c4`, exactly. Recorded in the Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "4e24472e81c47b3d842ca21f1cedf85f";
+    /// **Re-recorded 2026-11-01** when σ₀ gained the reads' own sampling variance
+    /// (`doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md`): only the two records' `PARALOG_LR` moved (chrV:121 −21.62 → −5.53, chrV:201 −18.19 → −4.68). Every record still
+    /// passes at `PARALOG_POST=0.000000`; leaving the term out reproduces the old checksum,
+    /// `4e24472e81c47b3d842ca21f1cedf85f`, exactly. Recorded in the Linux container (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "ccb96c2ce18b218935815c06892dcfae";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -952,7 +960,11 @@ mod tests {
     /// (`doc/devel/ng/spec/low_base_quality.md`): every record gains `BQPEN=0.0` and the header its
     /// `##INFO=<ID=BQPEN,…>` line, and nothing else moves; with the weight at zero the run
     /// reproduces the old checksum, `5390c37f58aa0200fb9fcfa6a7c8700a`, exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "df9ca7838395f42ee2a5f1b4f461c6b9";
+    /// **Re-recorded 2026-11-01** when σ₀ gained the reads' own sampling variance
+    /// (`doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md`): every record's `PARALOG_LR` moved toward zero (from −10 to −23 before, −5.3 to −6.4 after) and the `##paralogFilter` line's `lr_cut` from 32.25 to 31.75. Every record still
+    /// passes at `PARALOG_POST=0.000000`; leaving the term out reproduces the old checksum,
+    /// `df9ca7838395f42ee2a5f1b4f461c6b9`, exactly. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "6147bb2b2882ddf4fae2e4b942e406ac";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
