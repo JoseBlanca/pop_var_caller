@@ -102,7 +102,7 @@ fn main() {
         allele_dispersion: options.dispersion,
         ..ParalogModelParams::default()
     };
-    let precompute = ParalogScorePrecompute::new(&params, &[0.0]);
+    let precompute = ParalogScorePrecompute::new(&params, &[0.0], 1);
 
     println!("alt_reads\ttotal_reads\talt_share\trelative_copy_number\tlr\tposterior\tremoved");
     let emit = |alt: u32, total: u32, copy_number: f64| {

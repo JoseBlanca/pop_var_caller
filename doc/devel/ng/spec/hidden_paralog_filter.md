@@ -470,7 +470,10 @@ pub struct ParalogScoringContext {
     inbreeding: Vec<f64>,
     /// σ₀ per sample, `NaN` where absent — the scorer's parallel slice.
     single_copy_depth_sd: Vec<f64>,
-    /// Production's per-pass tables, built once.
+    /// Production's per-pass tables, built once. **One departure from production:** the `N`
+    /// of the SFS floor `1/2N` counts only the samples with a coverage model. A sample with no
+    /// model says nothing at any record, so counting it moved every ratio when a sample with no
+    /// reads joined the run (read-transform oracle, 2026-11-01).
     precompute: ParalogScorePrecompute,
 }
 

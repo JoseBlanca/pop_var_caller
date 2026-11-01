@@ -588,3 +588,32 @@ fn hom_alt_samples_at_a_tract_argue_against_a_duplication() {
         "the tract flag changed the score"
     );
 }
+
+#[test]
+fn a_sample_with_no_reads_joining_the_run_leaves_every_ratio_unchanged() {
+    // **The read-transform oracle's empty-sample relation** (2026-11-01): adding a sample with no
+    // reads moved the ratio at 233,144 tomato records, because the SFS floor `1/2N` counted it.
+    // Such a sample has no coverage model and says nothing anywhere, so it must not set `N`.
+    let three = a_context_over(3);
+    let mut histograms: Vec<SampleHistogram> = (0..3).map(|_| a_fittable_histogram()).collect();
+    histograms.push(SampleHistogram::NoWindowFinalised);
+    let three_and_an_empty_one = a_context_from(histograms, &fit_config());
+
+    let raised = a_window(ONE_COPY_DEPTH * 1.6);
+    let row = (raised, 6, 3);
+    let mut scratch = Vec::new();
+    let without = three
+        .score(&a_generic_locus(vec![row; 3]), &mut scratch)
+        .expect("the cohort's width");
+    let with = three_and_an_empty_one
+        .score(
+            &a_generic_locus(vec![row, row, row, (no_window(), 0, 0)]),
+            &mut scratch,
+        )
+        .expect("the cohort's width");
+    assert_eq!(
+        without.to_bits(),
+        with.to_bits(),
+        "a sample with no reads moved the ratio: {without} against {with}"
+    );
+}
