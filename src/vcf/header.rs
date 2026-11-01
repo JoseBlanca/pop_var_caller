@@ -482,7 +482,7 @@ pub struct HiddenParalogProvenance {
 }
 
 /// **What the windowed duplication rate ran with** — appended to the `##paralogFilter=` line as
-/// `window=W;shrink=K;post_cut=P`.
+/// `window=W;shrink=K;pull_to=R;post_cut=P`.
 ///
 /// `post_cut` is the probability the tail false-discovery rule resolved to, which is what decides
 /// a record in a windowed run; the line's `pi` and `lr_cut` are still the run-wide rate and cut,
@@ -491,8 +491,10 @@ pub struct HiddenParalogProvenance {
 pub struct WindowedPriorProvenance {
     /// The window's width in bases.
     pub window_bases: u64,
-    /// The pull towards the run-wide rate, in records.
+    /// The pull towards the typical window's rate, in records.
     pub shrink_records: f64,
+    /// The typical window's rate, which every window was pulled towards.
+    pub pulled_towards: f64,
     /// The probability the cut resolved to, or `None` where nothing is flagged.
     pub posterior_cut: Option<f64>,
 }
@@ -522,13 +524,18 @@ impl HiddenParalogProvenance {
             Some(WindowedPriorProvenance {
                 window_bases,
                 shrink_records,
+                pulled_towards,
                 posterior_cut,
             }) => {
                 let posterior_cut = match posterior_cut {
                     Some(p) => format!("{:.*}", PARALOG_POSTERIOR_DECIMALS, p),
                     None => "none".to_string(),
                 };
-                format!(";window={window_bases};shrink={shrink_records};post_cut={posterior_cut}")
+                format!(
+                    ";window={window_bases};shrink={shrink_records};pull_to={:.*};\
+post_cut={posterior_cut}",
+                    PARALOG_POSTERIOR_DECIMALS, pulled_towards
+                )
             }
         };
         format!(
@@ -724,6 +731,7 @@ samples_with_coverage_model=61/63",
             windowed: Some(WindowedPriorProvenance {
                 window_bases: 50_000,
                 shrink_records: 10.0,
+                pulled_towards: 0.018_439_2,
                 posterior_cut: Some(0.987_654_321),
             }),
         }
@@ -732,7 +740,7 @@ samples_with_coverage_model=61/63",
         assert_eq!(
             stated,
             "target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;\
-samples_with_coverage_model=1/1;window=50000;shrink=10;post_cut=0.987654",
+samples_with_coverage_model=1/1;window=50000;shrink=10;pull_to=0.018439;post_cut=0.987654",
         );
     }
 
