@@ -2,7 +2,7 @@
 
 Accuray comparison of pvc, GATK, freebayes, DeepVariant.
 
-All the results on this page were measured on : pvc c3d1ed69, GATK 4.6.0.0, freebayes 1.3.6,
+All the results on this page were measured on : pvc fedb2290, GATK 4.6.0.0, freebayes 1.3.6,
 DeepVariant 1.10.0 (each sample called alone, then merged with GLnexus 1.4.1 where there are
 several), HipSTR 0.6.2. pvc ran its full pipeline: pileup files, then parameters estimated from
 the data, then calling.
@@ -46,10 +46,10 @@ SNPs:
 
 | depth | pvc | GATK | freebayes | DeepVariant |
 |---|---|---|---|---|
-| 5× | 68 of 580 | 58 of 428 | 62 of 510 | 61 of 445 |
-| 10× | 13 of 652 | 9 of 610 | 10 of 604 | 9 of 621 |
+| 5× | 68 of 579 | 58 of 428 | 62 of 510 | 61 of 445 |
+| 10× | 13 of 651 | 9 of 610 | 10 of 604 | 9 of 621 |
 | 30× | 1 of 656 | 0 of 668 | 0 of 626 | 0 of 667 |
-| ~300× | 0 of 626 | 0 of 671 | 0 of 640 | 5 of 661 |
+| ~300× | 0 of 627 | 0 of 671 | 0 of 640 | 5 of 661 |
 
 Indels:
 
@@ -58,11 +58,11 @@ Indels:
 | 5× | 14 of 75 | 18 of 60 | 11 of 65 | 9 of 47 |
 | 10× | 5 of 82 | 7 of 74 | 4 of 79 | 4 of 69 |
 | 30× | 1 of 87 | 1 of 78 | 1 of 102 | 1 of 79 |
-| ~300× | 1 of 117 | 1 of 79 | 1 of 92 | 1 of 78 |
+| ~300× | 1 of 116 | 1 of 79 | 1 of 92 | 1 of 78 |
 
 The GIAB truth sets themselves have 0 errors among 667 SNP sites and 1 among 79 indel sites over
 these regions. At 5× the share of SNP sites with an error is about the same for the four callers,
-one in seven to one in nine; pvc checks more sites (580, against 428 to 510), because it leaves
+one in seven to one in nine; pvc checks more sites (579, against 428 to 510), because it leaves
 fewer genotypes missing. For indels at 5×, GATK has an error at one site in three, the other
 three callers at about one in five.
 
@@ -78,12 +78,12 @@ genotypes right, compared as repeat lengths:
 | depth | pvc | DeepVariant | GATK | HipSTR |
 |---|---|---|---|---|
 | 5× | 46% | 45% | 39% | 15% |
-| 10× | 71% | 69% | 62% | 46% |
+| 10× | 70% | 69% | 62% | 46% |
 | 15× | 80% | 79% | 72% | 61% |
-| 20× | 85% | 83% | 77% | 67% |
+| 20× | 84% | 83% | 77% | 67% |
 | 30× | 88% | 87% | 82% | 73% |
-| 50× | 90% | 89% | 86% | 76% |
-| ~300× | 91% | 91% | 91% | 77% |
+| 50× | 89% | 89% | 86% | 76% |
+| ~300× | 90% | 91% | 91% | 77% |
 
 freebayes was not run on this benchmark.
 
@@ -127,7 +127,7 @@ QUAL ≥ 20. HipSTR ran at its defaults.
 | samples | depth | pvc | GATK | freebayes | HipSTR |
 |---|---|---|---|---|---|
 | 1 | 5× | 42% · 4 | 45% · 28 | 28% · 13 | nothing called |
-| 1 | 15× | 86% · 5 | 84% · 112 | 64% · 41 | nothing called |
+| 1 | 15× | 86% · 4 | 84% · 112 | 64% · 41 | nothing called |
 | 1 | 30× | 96% · 2 | 92% · 174 | 84% · 79 | nothing called |
 | 1 | 60× | 99% · 1 | 93% · 219 | 93% · 128 | nothing called |
 | 50 | 5× | 72% · 22 | 45% · 25 | 56% · 88 | 62% · 63 |
