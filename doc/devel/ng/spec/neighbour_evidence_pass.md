@@ -1,10 +1,11 @@
 # ng — the neighbour-evidence pass: refining each sample's genotypes with the loci around them
 
-*Spec, 2026-11-01; the owner ruled its four open decisions the same day (§9). It turns the evaluation in
-[`../research/neighbour_evidence_hmm.md`](../research/neighbour_evidence_hmm.md) into a design, under
-the owner's ruling recorded in its §11. It depends on `PL` and `GP` in every record
-([`vcf_output.md`](vcf_output.md) §7.2, branch `pl-gp`) and is to be measured on the founder cohort of
-[`str_stutter_benchmark.md`](str_stutter_benchmark.md) §12 (branch `cohort-founders`).*
+*Spec, 2026-11-01. The owner ruled its four first decisions the same day (§9); an adversarial review
+the same day found the defects corrected here and the doubts listed in §11, which are the owner's to
+rule. It turns the evaluation in [`../research/neighbour_evidence_hmm.md`](../research/neighbour_evidence_hmm.md)
+into a design, under the owner's ruling recorded in its §11. It depends on `PL` and `GP` in every
+record ([`vcf_output.md`](vcf_output.md) §7.2, branch `pl-gp`) and is to be measured on the founder
+cohort of [`str_stutter_benchmark.md`](str_stutter_benchmark.md) §12 (branch `cohort-founders`).*
 
 ---
 
@@ -18,18 +19,29 @@ pass uses both: for each sample, it asks along the chromosome *which other sampl
 copying here, and are its two copies the same here?*, and re-calls each genotype from its own reads
 together with the answer.
 
-On tomato1 the prototype of this model removed 36–56% of genotype errors in a cohort at 1× and 3×,
-and three in four true non-reference genotypes at sites where the sample had no read; in an outbred
-simulated cohort it removed none (the report's §4–§5). This spec is that model, made a stage of pvc.
+**What the prototype measured** (report §4–§5), on tomato1's 57 accessions over 80 regions of
+100 kb, against the nine deep accessions' own full-depth calls:
+
+- with the nine cut to 3× and 1× among 48 accessions at native depth, 46% and 56% fewer genotype
+  errors; with the whole cohort cut to 3× and 1×, 48% and 36%;
+- at sites where the shallow accession had no read, 85% of true non-reference genotypes wrong today
+  and 26% with the model — when the nine sat among native-depth accessions; with the whole cohort at
+  1× the same comparison is 88% and 47%;
+- in a simulated outbred cohort, nothing.
+
+Those numbers were measured with a transition between the autozygous states that this review found
+wrong (§3.5) and with a procedure that differs from this spec's in the ways §3.7 lists; the Rust
+pass must re-measure them (§8).
 
 ### 1.1 Goals
 
-- Re-call every sample's genotype at every record pvc writes, SNPs, indels, multi-allelic records and
-  STR records alike, from the sample's own likelihoods and the cohort's shared haplotypes.
-- Give a genotype, with an honest quality, where a sample has no reads.
+- Re-call every sample's genotype at every PASS record pvc writes, SNPs, indels, multi-allelic
+  records and STR records alike, from the sample's own likelihoods and the cohort's shared haplotypes.
+- Give a genotype, with an honest quality, where a sample has no reads but its neighbouring sites
+  have its evidence (§4.2).
 - Run on by default where it helps and off where it cannot, saying which and why.
-- Work from what a record already carries — `PL`, `GP`, the alleles — so the same code can run on a
-  finished VCF.
+- Work from what a record carries — `PL`, `GP`, the alleles — and each sample's inbreeding
+  coefficient from the parameters file, so the same code can run on a finished VCF (§9 Q4).
 
 ### 1.2 Non-goals
 
@@ -50,7 +62,8 @@ simulated cohort it removed none (the report's §4–§5). This spec is that mod
   sample's shares are near 0 or 1, which is why a genotype can stand in for a haplotype.
 - **Autozygous.** Of a stretch where a sample's two copies are one ancestral copy counted twice; the
   sample is homozygous along it.
-- **Window.** A stretch of one contig whose records the pass holds and solves together (§2.2).
+- **Informative record** of a sample: one where its `PL` is not flat — its own reads said something.
+- **Window.** A run of consecutive records the pass holds and solves together (§2.2).
 
 ---
 
@@ -58,36 +71,40 @@ simulated cohort it removed none (the report's §4–§5). This spec is that mod
 
 ### 2.1 A stage over finished records
 
-**The pass reads finished VCF lines and writes them rewritten.** That is the one form every run's
-records share at the end: with the hidden-duplication filter on, records are parked on its spill as
-finished lines and read back by its third pass; with it off they are encoded straight for the
-writer. A stage in front of the writer that takes lines in genome order and gives lines back sits in
-both, and the same code can run as its own command over a VCF a run already wrote (§9 Q4).
+**The pass reads finished VCF lines and writes them rewritten.** With the hidden-duplication filter
+on, records are parked on its spill as finished lines and read back by its third pass; with it off,
+they are encoded for the writer, and the stage takes them as the lines the writer would write. One
+form for both runs and for the stand-alone command (§9 Q4) means one code path, and the same input
+precision everywhere: `PL` in whole Phred units, `GP` at three decimals.
 
 This is the "pass over the emitted records" [`run_streaming.md`](run_streaming.md) §4.3 requires for
-any coupling between segments: nothing about calling changes, and the calling workers never wait
-for it.
+any coupling between segments: nothing about calling changes. **The stage's input is a bounded
+buffer**: if the pass falls behind, the calling workers wait for it rather than the buffer growing
+without limit; how often that happens is measured (§8).
 
 ### 2.2 Windows
 
 The pass cannot write a record until it has seen the records after it, because a sample's state at a
-site depends on both sides. It holds records in **windows**: a *core* of `C` bases, written when the
-window is solved, with *margins* of `M` bases either side that are read for context and written by
-the neighbouring window. A record is written once the stream has passed the end of its window's
-right margin. Records are written in the order they arrived.
+site depends on both sides. It holds records in **windows**: a *core*, written when the window is
+solved, with *margins* either side read for context and written by the neighbouring windows.
 
-**Defaults to be measured, starting at `C` = 2 Mb and `M` = 1 Mb.** The prototype's autozygous runs
-and shared stretches were 10 to 300 kb on tomato, limited by tomato1's 100-kb regions; a margin of a
-megabase holds several of either. On a run over short regions — a BED of 100-kb intervals — a
-window is a region and its margins are empty; that is what the prototype measured.
-
-A contig's end closes its last window. Nothing crosses contigs.
+- **Which record belongs to which core is decided by arrival order**, not by position: each window's
+  core is a run of consecutive records, so every record is written exactly once and in the order it
+  arrived.
+- **Positions are each record's written `POS`**, asserted non-decreasing within a contig; distances
+  are differences of `POS`.
+- **Windows span the gaps between BED regions.** A gap is only a long distance, and the corrected
+  transition (§3.5) returns the state to its long-run share across it. A window is cut only at a
+  contig's end; nothing crosses contigs.
+- **Sizes are set by length and by a memory budget** (§6): the core starts at 2 Mb and each margin at
+  1 Mb, and both shrink with the cohort, the margin never below 500 kb.
 
 ### 2.3 Parallelism
 
 Within a window, every sample is solved on its own once the templates are fixed (§3.3), so the
 samples of a window are shared among the run's threads. Windows are solved one after another, which
-keeps the written order without reordering.
+keeps the written order without reordering. **The output does not depend on the thread count**:
+each sample's walk is a function of the window alone, and template ties break by sample order (§3.3).
 
 ---
 
@@ -110,22 +127,29 @@ For a record with `A` written alleles and, at diploidy, `G = A(A+1)/2` genotypes
 - **The sample's likelihood** `L(g)` for each genotype, from `PL`: `L(g) ∝ 10^(−PL_g / 10)`.
 - **Each template's allele shares** `q(a)`, from its `GP`: `q(a) = Σ_g GP_g · copies_a(g) / 2`.
 
-A sample written `.` in both (set aside by the candidate step) is no template at that record and is
-not re-called there. A record with no rows at all — one merged from an STR record and its flank's
-generic records — is passed through unchanged and is not a site of any window's walk.
+What a record contributes depends on what it carries:
+
+- **A record whose `FILTER` is not `PASS`** — tagged by the hidden-duplication filter, or `EMNoConv`,
+  `tooManyAlleles`, `lowDepth` — **is passed through unchanged and is no site of any walk.** A
+  collapsed paralog's false heterozygotes would otherwise break the autozygous runs around them.
+- **A record with no rows at all** — one merged from an STR record and its flank's generic records
+  (`vcf_output.md` §7.2) — is passed through unchanged and is no site.
+- **A sample written `.` in both** (set aside by the candidate step) is not re-called at that record,
+  and as a template there contributes equal shares, `1/A` each — no information.
 
 ### 3.3 The templates
 
-For each sample and window, the `K` other samples whose allele shares agree best with its own over
-the window's records, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the records where the
-sample's `PL` is not flat (where its own reads said something). **The sample itself is never a
-template.** `K` = 16 was what the prototype ran; how accuracy and cost move with `K` is a
-measurement (§8).
+For each sample and window, the `K = min(16, N − 1)` other samples whose allele shares agree best with
+its own, measured as `−Σ_records Σ_a |q_self(a) − q_other(a)|` over the sample's informative records
+in the window — on a fixed sample of at most 500 of them, drawn by record order, so the choice is
+deterministic. Ties break by sample order. **The sample itself is never a template.** `K` = 16 was
+what the prototype ran; how accuracy and cost move with `K` is a measurement (§8). A sample with no
+informative record in the window has no basis for choosing templates and is not re-called in it.
 
-**A known circularity, kept small and stated.** A template's `GP` came from a prior built from the
-other samples' allele copies — the target's included. So a little of the target's own evidence
-returns through its templates. With 56 others the prototype measured no sign of it; it grows as the
-cohort shrinks, which is one reason the pass is off below a cohort size (§5).
+**A known circularity, stated.** A template's `GP` came from a prior built from the other samples'
+allele copies — the target's included. So a little of the target's own evidence returns through its
+templates. Its size is not measured; it shrinks as the cohort grows, and §8 measures it at 10 samples
+by re-calling with templates whose `GP` were computed without the target.
 
 ### 3.4 The emission
 
@@ -142,16 +166,27 @@ and nothing else.
 
 Between records `d` bases apart:
 
-- **A copy keeps its template** with probability `exp(−d / S)`, and otherwise draws one uniformly; in
+- **A copy keeps its template** with probability `e^(−d/S)`, and otherwise draws one uniformly; in
   the non-autozygous state the two copies do this independently.
-- **The autozygous state persists** with probability `exp(−d / R)`; the other state persists with
-  `exp(−d / R′)`, `R′ = R · (1 − F) / F`, so a share `F` of the sample is autozygous in the long run.
-  A change of state draws its templates afresh.
+- **The autozygous state is a two-state Markov chain** with runs of mean `R` and gaps of mean
+  `R′ = R · (1 − F) / F`, so a share `F` of the sample is autozygous in the long run:
 
-`S`, `R` and `F` are per sample. **`F` starts at the sample's fitted inbreeding coefficient** from the
-parameters file and is re-estimated as the mean autozygous posterior; `S` and `R` are chosen by
-likelihood from small grids (`S` ∈ {30, 300} kb, `R` ∈ {10 kb … 3 Mb}), as the prototype did. Refit per
-window or once per contig is a cost-against-accuracy measurement (§8).
+      stay autozygous   = F + (1 − F) · e^(−d/τ)
+      stay not          = (1 − F) + F · e^(−d/τ),        1/τ = 1/R + 1/R′
+
+  Across a gap far longer than `R` and `R′` — a centromere, the space between BED regions — the state
+  returns to `F`. *Corrected 2026-11-01:* the first version, and the prototype the report measured,
+  used `e^(−d/R)` and `e^(−d/R′)` as the two stays, which across a long gap swaps the states: a
+  sample 99% autozygous before a centromere came out 1% after it.
+- A change of state draws its templates afresh.
+
+**The parameters, per sample.** `F` starts at the sample's fitted inbreeding coefficient from the
+parameters file, clamped to [0.01, 0.99], and is re-estimated as the mean autozygous posterior,
+clamped the same. `S` and `R` are chosen by likelihood from small grids — `S` ∈ {30, 300} kb,
+`R` ∈ {10, 30, 100, 300, 1,000, 3,000} kb — **on the first windows of the run that hold at least
+5,000 of the sample's informative records, and then frozen** for the rest of the run. Refitting every
+window would multiply the pass's cost by the grid's twelve walks (§6); whether a frozen fit loses
+accuracy is a measurement (§8).
 
 ### 3.6 The posterior
 
@@ -161,46 +196,88 @@ At a record, with `P(state | window)` from the two walks and `e(state)` the reco
 
 where `P(a/b | k₁, k₂) = q̃_k₁(a) q̃_k₂(b) + q̃_k₁(b) q̃_k₂(a)` for `a ≠ b` (and the one term for `a = b`),
 and `P(a/a | autozygous k) = q̃_k(a)`. Dividing by the emission removes the record's own reads from the
-state probability, so they enter once, through `L(g)`.
+state probability, so they enter once, through `L(g)`. The sum over pair states is computed as
+`Q̃ᵀ · W · Q̃` — templates by alleles, then alleles by alleles — at `K²·A + K·A²` operations a record,
+not `K²·A²`.
+
+### 3.7 Where this departs from the prototype
+
+The numbers in §1 were measured with a procedure that differs from this one, so a gap between the
+Rust pass and those numbers is not by itself a defect:
+
+| | prototype (`eval_tomato.py`) | this spec |
+|---|---|---|
+| templates chosen | once a sample, over all its records in the 8 Mb, flat ones included | per window, over its informative records |
+| `R` and `F` | from a separate two-state model with calling's prior branches | inside the copying model |
+| `S` | chosen per sample from {30, 300} kb | the same, on the first windows, frozen |
+| the autozygous transition | the swapping form (§3.5) | corrected |
+| set-aside samples | re-called, with a prior from the others' shares | not re-called |
+| non-PASS records | sites like any other | passed through, no sites |
 
 ---
 
 ## 4. What it writes
 
+### 4.1 The fields
+
 | field | after the pass |
 |---|---|
-| `GT` | the argmax of the new posterior |
+| `GT` | the argmax of the new posterior, or `./.` where §4.2 withholds it |
 | `GQ` | from the new posterior, as [`calling_quality.md`](calling_quality.md) §4 defines it |
 | `GP` | the new posterior |
 | `PL` | unchanged — it is the evidence |
-| `DP`, `AD`, `REPCN`, `REPCNB` | unchanged (`REPCN`/`REPCNB` follow the new `GT`) |
+| `DP`, `AD` | unchanged |
+| `REPCN`, `REPCNB` | each called allele's value, read off another sample's column that names the same allele |
 | `INFO` `AC`, `AN` | recounted from the new genotypes |
 | `QUAL`, `AF`, every other `INFO` field, `FILTER` | unchanged |
 
-**A sample whose reads said nothing** — flat `PL`, written `./.` by calling (§7.1 there) — gets the
-pass's posterior, and **is written with a genotype when the pass gives one**: the evidence is no
-longer absent, it is the neighbouring loci's. Its `GQ` says how sure that is, and its flat `PL` says
-none of it came from its own reads. *This reverses §7.1's rule for the pass's output; ruled by the owner, 2026-11-01 (§9 Q1).*
+- **`REPCN` and `REPCNB` need no tract arithmetic.** Calling writes only alternatives some sample
+  carries (`drop_alternatives_no_sample_calls`), so every allele of an input record is named by some
+  input call, and its repeat count is in that sample's column.
+- **Alleles the pass leaves uncarried are dropped** as calling drops them: the alternative goes from
+  `ALT`, and every sample's `PL` and `GP` keep only the genotypes over the written alleles
+  (`vcf_output.md` §7.2's subsetting). **A record left with no alternative carried is dropped** — the
+  same rule calling applies to a locus whose alternatives no sample is called with. *Both are the
+  owner's to confirm, §11 Q2.*
+- **The header** gains one line recording whether the pass ran and why, and its parameters, and `GP`'s
+  declaration says the posteriors are the pass's:
 
-**The header** gains one line recording whether the pass ran and why, and its parameters:
+      ##neighbourEvidence=<ran=yes,why="57 samples, median inbreeding 0.98",templates=16,mismatch=0.01,core=2000000,margin=1000000>
+      ##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">
 
-    ##neighbourEvidence=<ran=yes,why="57 samples, median inbreeding 0.98",templates=16,mismatch=0.01,core=2000000,margin=1000000>
+### 4.2 A sample whose reads said nothing
+
+A sample with flat `PL` at a record — written `./.` by calling (`vcf_output.md` §7.1) — gets the
+pass's posterior, and **is written with a genotype when the pass gives one from evidence**: its own
+informative records at the neighbouring sites. Its `GQ` says how sure that is, and its flat `PL` says
+none of it came from its own reads (§9 Q1).
+
+**But a posterior with no evidence behind it is not written as a call.** Where a sample has no
+informative record nearby, every emission around the site is 1, the state posterior is its prior,
+and the posterior genotype is the cohort's frequency — `0/0` at `GQ` 17 for a 2% allele, the
+confident prior-only call `vcf_output.md` §7.1 exists to forbid. So **a flat-`PL` sample is written
+with a genotype only if it has an informative record within one segment length `S` on each side of
+the site** (on one side, where the contig ends within `S` on the other); otherwise it stays `./.` and
+its `GP` is the pass's posterior, as calling writes a prior. *This narrows ruling Q1 to the cases its
+reason covers; the owner's to confirm, §11 Q1.*
 
 ---
 
 ## 5. When it runs
 
 **On by default when the cohort can supply templates and is inbred enough for genotypes to stand in
-for haplotypes; off otherwise, saying so in the header and the run report.** The two conditions:
+for haplotypes; off otherwise, saying so in the header and the run report.** A run-level decision,
+taken once, before the first record is written:
 
-- **At least `N_min` samples with rows at the record's alleles.** Starting value 10: the simulation
-  showed most of the gain at 10 inbred samples (errors 796 → 432 at 3×, report §4).
+- **At least `N_min` samples.** Starting value 10. On the simulation, 10 inbred samples from 8
+  founders already removed 46% of the errors at 3×, against 72% at 63 samples (report §4); at 10
+  samples `K` is 9.
 - **The cohort's median fitted inbreeding coefficient at least `F_min`.** Starting value 0.5. The
   outbred simulation gained nothing; between the two ends is unmeasured.
 
-Both are starting values, to be set from §8's measurements. A command-line option overrides the
-decision either way — `--neighbour-evidence auto|on|off`, `auto` the default — because a user who
-knows their material is a selfing panel at F = 0.4 should be able to say so.
+Both are starting values, to be set from §8's measurements. `--neighbour-evidence auto|on|off`,
+`auto` the default, overrides the decision either way. At a record, the walk's `K` is
+`min(16, samples with rows − 1)`; a record where fewer than two samples have rows is no site.
 
 **At a ploidy other than two the pass is off**: the pair state is diploid.
 
@@ -208,28 +285,34 @@ knows their material is a selfing panel at F = 0.4 should be able to say so.
 
 ## 6. One sample and three thousand, three reads and three hundred
 
-- **One sample.** Off: there are no templates. The report measured what a lone sample would gain from
-  the autozygous state alone — 5% at 3× on tomato — and the owner ruled that not a goal.
-- **Three thousand samples.** Two costs grow with the cohort.
-  - *Choosing templates* compares each sample with every other over a window: `N² × records` a window.
-    At 3,000 samples and the 52,000 records of a 2-Mb tomato window that is about 5 × 10¹¹ operations
-    a window, too many. **The first version compares on a fixed random sample of the window's
-    informative records (starting at 500)**, about 5 × 10⁹ a window; at that scale a positional
-    Burrows–Wheeler index is the tools' answer (07 §2.6) and is deferred (§10).
-  - *The walks* cost `K² + K` per sample per record per pass: 272 at `K` = 16, so a genome of tomato's
-    density (about 24 million records over 900 Mb, own arithmetic from tomato1's 26 a kilobase) costs
-    about 6.5 × 10⁹ per sample per pass. Over 3,000 samples and the grid's passes that is the
-    dominant cost of a run; §8 measures it and how far `K` can fall.
+- **One sample.** Off: there are no templates. A lone sample would gain 5% at 3× on tomato from the
+  autozygous state alone (report §5.2), and the owner ruled that not a goal.
+- **Ten samples.** `K` is 9; templates are few, and the circularity of §3.3 is largest. §8 measures
+  both.
+- **Three thousand samples.** Own arithmetic at tomato's density (26 records a kilobase in tomato1,
+  so about 24 million over a 900-Mb genome), `K` = 16, a biallelic record:
+  - *Choosing templates*: `N²` comparisons over 500 records a window, 4.5 × 10⁹ a window; at the
+    1.5-Mb windows this cohort size needs (below) about 1,800 windows, 8 × 10¹² over the genome —
+    about half an hour.
+  - *The walks*: forward and backward cost about `2 · 3 · (K² + K)` ≈ 1,600 operations a sample a
+    record, and the posterior `K²·A + K·A²` ≈ 580; with every record walked twice (once in its core,
+    once in a neighbour's margin) about 4,400 a sample a record. Over 24 million records and 3,000
+    samples that is 3 × 10¹⁴ operations, **about 21 core-hours** at 4 × 10⁹ a second; at 57 samples,
+    25 core-minutes. The parameter grid adds its twelve walks on the first windows only (§3.5).
 - **Three reads a position.** Where it helps: the prototype's gains are all at 1× and 3×.
 - **Three hundred reads.** The sample's own likelihood dominates every emission and the posterior is
   the calling's; the pass costs time and changes nearly nothing. It still runs if the switch says so:
   depth does not turn it off, because a deep cohort can hold shallow samples.
 
-**Memory.** A window holds its records' rows: at 57 samples and 52,000 records of 2 Mb plus
-margins, about 100,000 records × 57 samples × about 6 numbers, 270 MB at 8 bytes; at 3,000 samples
-14 GB. **The pass therefore holds rows as `f32` and windows shrink with the cohort** —
-`C + 2M` chosen so `records × samples` stays under a budget (starting at 200 million rows, 4.8 GB);
-the margin is kept, the core shortened. Both are measured (§8).
+**Memory.** A window holds, per sample and record, what rewriting the line needs (`DP`, `AD`, `PL`)
+and what the walk reads (`L` and the shares, as `f32`): about 40 bytes for a biallelic record, about
+twice that at three alleles, 400 at ten. At 3,000 samples and tomato's density a 4-Mb window is about
+104,000 records, 12 GB; **the window is therefore sized to a budget** — starting at 120 million
+sample-records, about 5 GB biallelic — by shrinking the core first and the margins to their 500-kb
+floor; at 3,000 samples that is a 1.5-Mb window. Past the floor, at about 3,000 samples, the budget
+is exceeded rather than the margins shortened, and the run report says by how much. A walk keeps its
+forward vectors, `K² + K` numbers a record: as `f32`, 44 MB a sample over a 40,000-record window, one
+per thread.
 
 ---
 
@@ -237,31 +320,49 @@ the margin is kept, the core shortened. Both are measured (§8).
 
 - **Genotype order.** `PL` and `GP` are in the shared table's order (`vcf_output.md` §7.2); the pass
   must read and write them through the same table, never by a hand-rolled index.
-- **A record whose alleles the pass dropped nothing from but whose `GT` moved** must have `REPCN` and
-  `REPCNB` recomputed from the new `GT`, and `AC`/`AN` recounted; a stale `REPCN` is a silent error.
-- **A flat `PL` is not "no information" for the walk:** it contributes an emission of 1 to every
-  state, which is correct, and must not be skipped, or the distances between the remaining records
-  would stretch the transitions.
-- **The window's right margin is not written by that window.** Writing a record twice, or not at all,
-  at a window boundary is the one bookkeeping error the oracle in §8 checks for directly.
+- **A moved `GT` moves `REPCN`, `REPCNB`, `AC` and `AN`** (§4.1); a stale `REPCN` is a silent error.
+- **A flat-`PL` site contributes an emission of 1 to every state.** With the corrected transition
+  (§3.5), skipping it in the walk is exact; it must still get a posterior, since that is where the
+  pass gives its genotype (§4.2).
+- **Positions are unsigned.** A distance is computed from non-decreasing `POS` within a contig; a
+  record out of order is a fault to report, not a negative gap.
+- **Each record is written by exactly one window's core** (§2.2); writing one twice, or not at all,
+  at a boundary is what §8's invariants check directly.
 
 ---
 
 ## 8. How we know it works
 
-1. **Against the Python reference.** The prototype's `hmm.py` on the same input lines gives the same
-   posteriors to 1e-6, on a tomato window and on simulated windows with multi-allelic and STR records.
+1. **Against the Python reference.** The corrected prototype's `hmm.py` gives the same posteriors to
+   1e-9 on windows with multi-allelic records (`src/neighbour_evidence/model.rs`'s tests, done), and
+   on an STR-bearing simulated window.
 2. **On the founder cohort** (`str_stutter_benchmark.md` §12), scored against `truth.vcf` and
    `ancestry.tsv`: founders 4, 16, 64; F 0, 0.5, 0.8, 0.95; samples 10, 50, 200; depth 1, 3, 10, 30.
-   What it sets: `N_min`, `F_min`, `K`, `C` and `M`, whether `S` and `R` are refitted per window.
-   The autozygous posterior is scored against the runs in `ancestry.tsv`.
-3. **On tomato1 held out**, as the report measured: the nine deep accessions cut to 3× and 1×, their
-   full-depth calls as truth. The prototype's numbers (report §5.2) are the floor the Rust version has
-   to reach.
-4. **Cost** at 57 and 500 samples on tomato1's regions, and extrapolated to 3,000 by §6's arithmetic
-   checked against the 500.
-5. **Invariants:** every record in is a record out, in order; the pass with every sample's `PL` flat
-   and `K` = 0 returns its input's genotypes; a record without rows comes out byte-identical.
+   It sets `N_min`, `F_min`, `K`, the window sizes, and whether frozen `S` and `R` cost accuracy. The
+   autozygous posterior is scored against the runs in `ancestry.tsv`. **Two cases the founder model
+   is built to make**: 10 samples from 64 founders, where most haplotypes have no template; and a
+   mixed cohort, inbred lines with outbred samples (F 0) among them.
+3. **Quality, not only error counts.** `GQ` against the observed error rate, in bins, separately for
+   samples with reads and the no-read calls of §4.2; and the count of true-reference genotypes called
+   non-reference, which the prototype tripled (1,382 to 4,227 at the nine-at-3× condition, report
+   §5.2) — the owner sets what rise is acceptable (§11 Q5).
+4. **On tomato1 held out**, as the report measured: the nine deep accessions cut to 3× and 1×, their
+   full-depth calls as truth; and, with no downsampling, **the two plants sequenced both deep and
+   shallow** (SRR7279542 with SRR7279488, SRR7279514 with SRR7279529), whose deep calls are truth for
+   the shallow run. The prototype's numbers are a reference, not a floor, given §3.7.
+5. **The circularity** (§3.3): at 10 and 50 samples, the pass with templates' `GP` recomputed
+   without the target, against the pass as specified.
+6. **Cost and back-pressure** at 57 and 500 samples on tomato1's regions, extrapolated to 3,000 by
+   §6's arithmetic checked against the 500; how long the calling workers waited on the pass.
+7. **Invariants:**
+   - every record in is a record out, in order, unless §4.1 drops it;
+   - output byte-identical at 1, 4 and 16 threads;
+   - a record without rows or not PASS comes out byte-identical;
+   - a long gap or a contig change leaves the autozygous probability at its long-run share (done,
+     `a_long_gap_returns_the_autozygous_state_to_its_share`);
+   - a sample with no informative record in reach keeps `./.` (§4.2);
+   - accuracy at core edges no worse than at core centres.
+8. **Refusal:** the stand-alone command refuses a VCF whose header says the pass ran (§9 Q4).
 
 ---
 
@@ -272,24 +373,69 @@ All four as recommended.
 1. **A sample whose reads said nothing: write the pass's genotype, or keep `./.`?** **Ruled: write
    it.** A call there is the aim the owner set ("where possible a call at a site with little or
    no evidence"), its `GQ` is honest about how sure it is, and its flat `PL` lets anyone filter it
-   out. Keeping `./.` would throw away the three in four the prototype recovered.
+   out. *The review's narrowing of this to calls with evidence nearby is §4.2 and §11 Q1.*
 2. **Mark the refined genotypes per sample?** **Ruled: no new per-sample field.** The header says
-   the pass ran; `PL` against `GP` shows what it changed; a field per sample would add bytes to every
-   column of every record for a fact one header line states.
+   the pass ran and `GP`'s declaration says whose posterior it is (§4.1).
 3. **`--neighbour-evidence auto|on|off`, with `auto` deciding by §5's two conditions?** **Ruled:
    yes.**
-4. **A stand-alone command over a finished VCF**, the same stage run on a file (`pvc refine-genotypes
-   --vcf in.vcf.gz --output out.vcf.gz`)? **Ruled: yes, second, after the in-run stage** — it costs a
-   thin command around the same code, and it lets a cohort called in parts, or called before the pass
-   existed, be refined once its `PL` and `GP` are written.
+4. **A stand-alone command over a finished VCF** (`pvc refine-genotypes --vcf in.vcf.gz --parameters
+   run.parameters.toml --output out.vcf.gz`)? **Ruled: yes, second, after the in-run stage.** It reads
+   each sample's inbreeding coefficient from the run's parameters file, which the VCF names
+   (`##parametersFile=`), and **refuses a VCF the pass has already refined**: refined `GP` as templates
+   would count the cohort's evidence twice.
 
 ---
 
 ## 10. Deferred, with a recommended home
 
-- **Template choice at thousands of samples by a positional Burrows–Wheeler index** (07 §2.6) — here,
-  once §8 measures the sampled-record choice at 500 samples and it does not scale.
+- **Template choice at thousands of samples by a positional Burrows–Wheeler index** (07 §2.6), and
+  re-choosing templates more often than once a window, as the tools do every 0.1 cM — here, once §8
+  measures the sampled choice at 500 samples.
 - **Phased templates and sweeps over the cohort**, the outbred case — not this pass; 07 §2.
 - **Ploidy above two** — a state per multiset of templates; here, when a polyploid cohort is a target.
-- **Refining with the pass's own output** — templates from the refined genotypes, a second sweep —
-  here, if §8 shows the first sweep leaves accuracy on the table.
+- **Refining with the pass's own output** — a second sweep — here, if §8 shows the first leaves
+  accuracy on the table; it must then be one controlled sweep, not a rerun (§9 Q4).
+
+---
+
+## 11. Open questions — **for the owner**
+
+Each with a recommendation.
+
+1. **Calls at no-read sites only with evidence nearby (§4.2)?** *Recommend: yes.* Without it the pass
+   writes `0/0` at `GQ` about 17 where a sample has no informative record within reach — a failed
+   library, a deletion in that line, a window at zero reads — which is the cohort's frequency, not
+   evidence. It keeps every call the prototype recovered from neighbouring evidence.
+2. **After the pass: drop alternatives no sample carries, and records with none left (§4.1)?**
+   *Recommend: yes*, the rule calling already applies. The alternative is a record with `AC` 0 and a
+   variant `QUAL`, which no reader can interpret.
+3. **Mixed cohorts.** A run-level switch by the median inbreeding runs the pass on a few outbred
+   members of an inbred panel, where heterozygous templates blur, and turns it off for inbred lines
+   in an outbred-majority cohort. *Recommend: run-level now, and the mixed-cohort measurement of §8.2
+   decides whether to switch per sample* (each sample re-called only if its own fitted inbreeding is
+   at least `F_min`, every sample still a template).
+4. **Templates inherit calling's bias against heterozygotes.** A template's shares come from calling's
+   `GP`, made under a genome-wide `F` near 0.95, which called 43% of true heterozygotes with four or
+   more reads homozygous at 3× (report §5.2); a sample copying it inherits the error, and a template
+   with no reads has shares near the frequency and can look like a good match. *Recommend: measure
+   first* (§8.2 scores templates' own error); if it bites, compute template shares with the report's
+   two-state autozygosity model before the walk, and weight agreement by the template's own
+   informative records.
+5. **What rise in false non-reference calls is acceptable?** With the nine accessions at 3×, the
+   prototype fixed about 25,500 wrong genotypes at true non-reference sites and made about 2,800 true
+   reference genotypes non-reference (report §5.2). *Recommend: judge by the net, measured per depth, and refuse a
+   default that adds more false non-reference calls than it removes errors in any depth class.*
+6. **No template carries the haplotype** — an introgression, a private lineage, 10 samples from 64
+   founders. The mismatch rate is the only escape, so the pass imputes the nearest template's allele
+   with confidence (07 §2.7 cites 18% heterozygous error in under-represented ancient genomes).
+   *Recommend: add one background template whose shares are the cohort's allele frequencies*, so a
+   stretch no sample matches falls back to calling's own prior, *and confirm on the 64-founder case
+   of §8.2.*
+7. **Neighbouring records share reads.** At 26 records a kilobase a 150-base read covers about four;
+   the walk treats their likelihoods as independent, so one mismapped read counts several times and
+   `GQ` can come out too high at low depth. *Recommend: let §8.3's calibration decide*; if `GQ` is
+   overconfident, thin the sites the walk uses for its state posterior to one per read length.
+8. **The whole cohort at 1×.** The prototype was worse than the autozygous state alone at sites with
+   one to three reads (22,408 against 20,111 wrong, report §5.2). *Recommend: measure on §8.2's 1×
+   cases first*; Q4's template correction and Q6's background template are the likely cures, and a
+   depth-dependent fallback is the last resort.

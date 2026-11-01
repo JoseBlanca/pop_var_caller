@@ -165,13 +165,20 @@ fn site_terms(
 
 /// The three persistence probabilities between two sites `gap` bases apart: a copy keeps its
 /// template, the autozygous state persists, the other state persists.
+///
+/// **The two states are one two-state Markov chain** (spec §3.5): runs of mean `R`, gaps of mean
+/// `R′ = R · (1 − F) / F`, so the chance of staying is `F + (1 − F) · e^(−d/τ)` in a run and
+/// `(1 − F) + F · e^(−d/τ)` outside one, with `1/τ = 1/R + 1/R′`. Across a gap far longer than
+/// both the state returns to its long-run share `F` — not, as two independent `e^(−d/R)` stays
+/// would make it, to the opposite state (found by review, 2026-11-01).
 fn persistence(gap: f64, parameters: &WalkParameters) -> (f64, f64, f64) {
     let share = parameters.autozygous_share;
     let gap_bases = parameters.run_bases * (1.0 - share) / share;
+    let decay = float::exp(-gap * (1.0 / parameters.run_bases + 1.0 / gap_bases));
     (
         float::exp(-gap / parameters.segment_bases),
-        float::exp(-gap / parameters.run_bases),
-        float::exp(-gap / gap_bases),
+        share + (1.0 - share) * decay,
+        (1.0 - share) + share * decay,
     )
 }
 

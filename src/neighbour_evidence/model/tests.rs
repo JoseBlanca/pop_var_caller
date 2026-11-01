@@ -139,3 +139,41 @@ fn a_site_without_reads_takes_the_templates_allele() {
     let middle = &result.posteriors[1];
     assert!(middle[2] > 0.95, "the site without reads: {middle:?}");
 }
+
+/// **A long gap returns the state to its long-run share, it does not swap it** (spec §3.5): a
+/// sample confidently autozygous at one site — homozygous where its two templates differ — and
+/// with no reads at a site a gigabase on, is autozygous there with about the long-run share, 0.8,
+/// not its complement.
+#[test]
+fn a_long_gap_returns_the_autozygous_state_to_its_share() {
+    let homozygous = [1.0, 1e-9, 1e-9];
+    let flat = [1.0, 1.0, 1.0];
+    // Template 0 carries the reference, template 1 the alternative.
+    let shares = [1.0, 0.0, 0.0, 1.0];
+    let sites = [
+        WalkSite {
+            position: 1_000,
+            allele_count: 2,
+            likelihoods: &homozygous,
+            template_shares: &shares,
+        },
+        WalkSite {
+            position: 1_000_001_000,
+            allele_count: 2,
+            likelihoods: &flat,
+            template_shares: &shares,
+        },
+    ];
+    let parameters = WalkParameters {
+        segment_bases: 300_000.0,
+        run_bases: 1_000_000.0,
+        autozygous_share: 0.8,
+        mismatch: 0.01,
+    };
+    let result = walk(&sites, 2, parameters);
+    assert!(
+        (result.autozygous[1] - 0.8).abs() < 1e-6,
+        "after a gigabase: {}",
+        result.autozygous[1]
+    );
+}
