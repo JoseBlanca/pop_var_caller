@@ -124,15 +124,25 @@ impl WidenedTract {
     /// as two records (`AC`→`CT` on the stuttering benchmark's `seg00095`).
     /// `reference` is the generic record's reference, for the bases it covers outside the
     /// widened record.
+    ///
+    /// **Only the part of the generic allele inside the widened record is compared** (2026-11-01).
+    /// The STR allele says nothing about the bases beyond the record, so the generic allele's
+    /// last bases (right flank) or first bases (left flank), as many as the record's reference
+    /// has there, are the generic path's to spell, whatever they are; [`Self::beyond`] says
+    /// whether they differ from the reference. Requiring them to be the reference's made every
+    /// read whose mapper wrote a flank deletion as a shorter deletion and a mismatch disagree
+    /// with its own generic call, and the STR record won: the change beyond its end was dropped,
+    /// or carried onto the sample's other copy.
     fn spells(&self, allele: u16, region: GenomeRegion, reference: &[u8], generic: &[u8]) -> bool {
         let ours = &*self.record.alleles()[usize::from(allele)];
         let (start, end) = (region.start.get(), region.end.get());
         let own = self.record.region();
         let (window_start, window_end) = (own.start.get(), own.end.get());
         if end < self.tract_first {
-            // Left flank: bases of the generic record before the widened one must be unchanged.
+            // Left flank: the generic allele's first `outside` bases lie before the widened
+            // record.
             let outside = window_start.saturating_sub(start) as usize;
-            if outside > reference.len() || !generic.starts_with(&reference[..outside]) {
+            if outside > reference.len() || outside > generic.len() {
                 return false;
             }
             let generic = &generic[outside..];
@@ -141,9 +151,7 @@ impl WidenedTract {
         } else if start > self.tract_last {
             // Right flank: the mirror image.
             let outside = end.saturating_sub(window_end) as usize;
-            if outside > reference.len()
-                || !generic.ends_with(&reference[reference.len() - outside..])
-            {
+            if outside > reference.len() || outside > generic.len() {
                 return false;
             }
             let generic = &generic[..generic.len() - outside];
@@ -152,6 +160,32 @@ impl WidenedTract {
         } else {
             false
         }
+    }
+
+    /// **The bases a generic allele writes beyond the widened record**, where they differ from
+    /// the reference's — the part [`Self::spells`] leaves to the generic path — or `None` where
+    /// the record lies inside the widened one or the allele leaves those bases unchanged. As
+    /// `(on the left, bases)`: the first bases of the allele before the record, or its last bases
+    /// after it, as many as `reference` (the generic record's) has outside.
+    fn beyond<'a>(
+        &self,
+        region: GenomeRegion,
+        reference: &[u8],
+        generic: &'a [u8],
+    ) -> Option<(bool, &'a [u8])> {
+        let own = self.record.region();
+        let (start, end) = (region.start.get(), region.end.get());
+        let before = own.start.get().saturating_sub(start) as usize;
+        let after = end.saturating_sub(own.end.get()) as usize;
+        if before > 0 && end < self.tract_first && before <= generic.len().min(reference.len()) {
+            let bases = &generic[..before];
+            return (bases != &reference[..before]).then_some((true, bases));
+        }
+        if after > 0 && start > self.tract_last && after <= generic.len().min(reference.len()) {
+            let bases = &generic[generic.len() - after..];
+            return (bases != &reference[reference.len() - after..]).then_some((false, bases));
+        }
+        None
     }
 }
 
@@ -421,7 +455,24 @@ fn pair_with(
             };
             disagreed |= rank(generic_copies[at]) >= 2;
             taken[at] = true;
-            choice[slot] = Some(0);
+            // A spelled allele that changes bases beyond the widened record is carried, so the
+            // haplotype gets those bases; anything else is written as the STR allele spells it.
+            let carried = generic_copies[at];
+            choice[slot] = Some(
+                if rank(carried) == 0
+                    && tract
+                        .beyond(
+                            region,
+                            &generic_alleles[0],
+                            &generic_alleles[usize::from(carried)],
+                        )
+                        .is_some()
+                {
+                    carried
+                } else {
+                    0
+                },
+            );
         }
         if reached {
             if disagreed {
@@ -917,7 +968,21 @@ fn spell(
             bases.len().checked_sub((end - g_end) as usize + length)?
         };
         if bases.get(from..from + length)? != &*record.alleles()[0] {
-            return None;
+            // The STR allele changed the record's bases inside the widened record and spells the
+            // generic allele there (`pair_with`, step 1): only the bases beyond it are written.
+            let (on_the_left, beyond) = tract.beyond(
+                record.region(),
+                &record.alleles()[0],
+                &record.alleles()[usize::from(allele)],
+            )?;
+            let at = if on_the_left {
+                from
+            } else {
+                from + length - beyond.len()
+            };
+            bases.get(at..at + beyond.len())?;
+            bases.splice(at..at + beyond.len(), beyond.iter().copied());
+            continue;
         }
         bases.splice(
             from..from + length,

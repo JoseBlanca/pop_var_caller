@@ -533,3 +533,38 @@ fn a_widened_record_alone_is_unchanged() {
     assert_eq!(out, vec![tract]);
     assert_eq!(gathering.counts(), EdgeDeletionGatheringCounts::default());
 }
+
+/// **A generic allele that changes bases past the widened record's end keeps them, on the copy
+/// whose deletion it spells** (2026-11-01; simulated flank deletions beside a tract). The
+/// deletion of `TTA` takes the flank's `A` at 110; a mapper wrote the same reads as that `A`
+/// deleted and the `C` at 111 read as `T`, so the generic path called `ACG`→`TG` at 110–112.
+/// Inside the widened record the two agree — the `A` is gone — and the `T` lies past its end,
+/// where the STR allele says nothing. Sample 0 is homozygous for the deletion and its `TG`;
+/// sample 1 heterozygous at both. Before, the generic allele was required to leave 111–112 as
+/// the reference: the STR record won, the `T` was dropped from sample 0, and sample 1's `TG`
+/// went onto its reference copy, an allele nobody carried.
+#[test]
+fn a_generic_change_past_the_widened_end_stays_on_the_deletions_copy() {
+    let mut gathering = EdgeDeletionGathering::default();
+    let out = written(
+        &mut gathering,
+        vec![
+            a_tract_widened_right(&[(&[1, 1], 30.0), (&[0, 1], 30.0)]),
+            record(
+                region(110, 112),
+                &[b"ACG", b"TG"],
+                &[(&[1, 1], 40.0), (&[0, 1], 40.0)],
+                None,
+            ),
+        ],
+    );
+    no_record_holds_a_star(&out);
+    assert_eq!(out.len(), 1, "one record: {out:?}");
+    let merged = &out[0];
+    // `GTTGTTG` then the `T` at 111; the `G` at 112 every allele shares is trimmed.
+    assert_eq!(merged.region(), region(101, 111));
+    assert_eq!(alleles(merged), vec![&b"GTTGTTGTTAC"[..], b"GTTGTTGT"]);
+    assert_eq!(genotypes(merged), vec![Some(vec![1, 1]), Some(vec![0, 1])]);
+    assert_eq!(gathering.counts().samples_in_agreement, 2);
+    assert_eq!(gathering.counts().samples_overridden, 0);
+}

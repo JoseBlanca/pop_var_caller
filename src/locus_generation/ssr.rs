@@ -1070,6 +1070,15 @@ mod classify {
         let (input_span, flank_deletion) = match input_span {
             Some(span) if !flank_deletion.is_none() => {
                 let tract_len = locus.repeat.tract_len() as usize;
+                let (span, flank_deletion) = through_the_flank_indels(
+                    cigar,
+                    fp,
+                    span,
+                    flank_deletion,
+                    tract_start,
+                    tract_end,
+                    guarded_flank_widths(left, right),
+                );
                 let (span, deleted) = in_smallest_form(
                     &read.seq,
                     span,
@@ -1171,6 +1180,37 @@ mod classify {
             // **unfalsifiable**: the Milestone C review deleted it outright and the whole
             // suite stayed green, because no input can tell the two paths apart. Two
             // spellings of one decision, one of them untestable, is worse than one.
+            //
+            // **Unless the read's own alignment puts an indel in the flank bases the delimiter
+            // may not open a gap in** (2026-11-01). The delimiter's junction guard closes the
+            // true path for such a read, and where the read's tract also differs from the
+            // reference the cheapest path left ends the tract early and lays the read's flank
+            // across the reference's with mismatches, which the anchor rule then rejects: at
+            // SL4.0ch05:51017179 all ten of one sample's reads came back partial and tied two
+            // equal-length candidates, though eight spelled one of them base for base. The
+            // read's own alignment opened the gap the guard forbids, so it is what spells it.
+            RepeatSpan::FromLeft(_) | RepeatSpan::FromRight(_)
+                if input_span.is_some()
+                    && indel_in_the_guarded_flank(
+                        cigar,
+                        fp.ref_start,
+                        tract_start,
+                        tract_end,
+                        guarded_flank_widths(left, right),
+                    )
+                    && {
+                        let (before, after) = aligned_bases_beyond_the_tract(
+                            cigar,
+                            fp.ref_start,
+                            tract_start,
+                            tract_end,
+                        );
+                        before >= MIN_ALIGNED_FLANK_BASES && after >= MIN_ALIGNED_FLANK_BASES
+                    } =>
+            {
+                let spelled = input_span.expect("the guard checked it is Some");
+                complete_or_low_quality(read, spelled, flank_deletion, qual_buffer)
+            }
             RepeatSpan::FromLeft(tract) => partial(read, &region, &tract, HeldFlank::Left, locus),
             RepeatSpan::FromRight(tract) => partial(read, &region, &tract, HeldFlank::Right, locus),
             RepeatSpan::Unanchored => {
@@ -1373,6 +1413,168 @@ mod classify {
                         return true;
                     }
                     at = to;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// **How many flank bases beside each edge the delimiter will not open a gap in**, as `(left,
+    /// right)`: the default junction guard's flank width, cut to half the flank as the delimiter
+    /// cuts it ([`JunctionGuard`]'s `flank_width`).
+    ///
+    /// [`JunctionGuard`]: crate::alignment::ssr_unit_robust::JunctionGuard
+    fn guarded_flank_widths(left_flank_len: usize, right_flank_len: usize) -> (u32, u32) {
+        let width = crate::alignment::ssr_unit_robust::JunctionGuard::default().flank_columns;
+        (
+            width.min(left_flank_len / 2) as u32,
+            width.min(right_flank_len / 2) as u32,
+        )
+    }
+
+    /// **A read's flank deletion run on through every indel its alignment has in the guarded flank
+    /// bases**, with the spelling taking the read's bases up to where its alignment rejoins the
+    /// reference (2026-11-01).
+    ///
+    /// A mapper can write one event beside a tract as several: a deletion at the tract's edge, a
+    /// few matches and an insertion. The deletion alone then made the read's allele, and the
+    /// rest went to the generic path, which wrote the flank the read actually carries; merged,
+    /// the two disagreed on the flank bases and the STR record won, so the sample got an allele
+    /// nobody carried (simulated, `ng_tract_simulator` with flank deletions: one repeat
+    /// inserted and `GAACT` deleted one base from the tract came back as the tract unchanged and
+    /// two flank bases deleted). Taken as one event, the allele is the read's own sequence there.
+    ///
+    /// On each side, the flank deletion grows to the farthest reference base an indel in the
+    /// guarded bases reaches, and the spelling to the read's bases up to it. A flank that grows
+    /// past the window's own is left as it was, as is everything when no indel lies there.
+    fn through_the_flank_indels(
+        cigar: &[CigarOp],
+        fp: Footprint,
+        span: Range<usize>,
+        deleted: FlankDeletion,
+        tract_start: u32,
+        tract_end: u32,
+        widths: (u32, u32),
+    ) -> (Range<usize>, FlankDeletion) {
+        // The farthest flank bases an indel in the guard reaches: `first` on the left (the
+        // first base it takes or sits before), `last` on the right (one past the last).
+        let mut first = tract_start - u32::from(deleted.left);
+        let mut last = tract_end + u32::from(deleted.right);
+        let left_guard = tract_start.saturating_sub(widths.0);
+        let right_guard = tract_end + widths.1;
+        let mut at = fp.ref_start;
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    let (from, to) = (at, at + n);
+                    if from < tract_start && to > left_guard {
+                        first = first.min(from);
+                    }
+                    if to > tract_end && from < right_guard {
+                        last = last.max(to);
+                    }
+                    at = to;
+                }
+                CigarOp::Insertion(_) => {
+                    if at < tract_start && at > left_guard {
+                        first = first.min(at);
+                    }
+                    if at > tract_end && at <= right_guard {
+                        last = last.max(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let grown = FlankDeletion {
+            left: u8::try_from(tract_start - first).unwrap_or(deleted.left),
+            right: u8::try_from(last - tract_end).unwrap_or(deleted.right),
+        };
+        if grown == deleted
+            || grown.left as u32 > widths.0.max(u32::from(deleted.left))
+            || grown.right as u32 > widths.1.max(u32::from(deleted.right))
+        {
+            return (span, deleted);
+        }
+        // The read position before reference base `first` (and any insertion before it), and
+        // the one after the insertions before base `last`.
+        let (mut start, mut end) = (None, None);
+        let (mut ref_cur, mut read_cur) = (fp.ref_start, fp.leading_clip as usize);
+        for op in cigar {
+            match op {
+                CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
+                    if start.is_none() && (ref_cur..ref_cur + n).contains(&first) {
+                        start = Some(read_cur + (first - ref_cur) as usize);
+                    }
+                    if end.is_none() && (ref_cur..ref_cur + n).contains(&last) {
+                        end = Some(read_cur + (last - ref_cur) as usize);
+                    }
+                    ref_cur += n;
+                    read_cur += *n as usize;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                    if start.is_none() && (ref_cur..ref_cur + n).contains(&first) {
+                        start = Some(read_cur);
+                    }
+                    if end.is_none() && (ref_cur..ref_cur + n).contains(&last) {
+                        end = Some(read_cur);
+                    }
+                    ref_cur += n;
+                }
+                CigarOp::Insertion(n) => {
+                    if start.is_none() && ref_cur == first {
+                        start = Some(read_cur);
+                    }
+                    read_cur += *n as usize;
+                }
+                _ => {}
+            }
+        }
+        match (start, end) {
+            (Some(from), Some(to)) if from <= span.start && to >= span.end => (from..to, grown),
+            _ => (span, deleted),
+        }
+    }
+
+    /// **Does an insertion or deletion in the CIGAR sit in the guarded flank bases** — the
+    /// `widths.0` reference bases before the tract or the `widths.1` after it? A deletion counts
+    /// when it takes any of those bases, an insertion when it sits between two of them or at the
+    /// edge. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
+    fn indel_in_the_guarded_flank(
+        cigar: &[CigarOp],
+        ref_start: u32,
+        tract_start: u32,
+        tract_end: u32,
+        widths: (u32, u32),
+    ) -> bool {
+        let left_guard = tract_start.saturating_sub(widths.0)..tract_start;
+        let right_guard = tract_end..tract_end + widths.1;
+        let mut at = ref_start;
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    let (from, to) = (at, at + n);
+                    let takes = |guard: &Range<u32>| from < guard.end && to > guard.start;
+                    if takes(&left_guard) || takes(&right_guard) {
+                        return true;
+                    }
+                    at = to;
+                }
+                // An insertion sits before reference base `at`.
+                CigarOp::Insertion(_)
+                    if (at > left_guard.start && at <= left_guard.end)
+                        || (at >= right_guard.start && at < right_guard.end) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -2334,6 +2536,183 @@ mod classify {
                     other => panic!("expected a complete observation, got {other:?}"),
                 }
             }
+        }
+
+        /// A 15-base-flank locus around `tract`, its reference flanks those of
+        /// SL4.0ch05:51017179, the read of `seq` aligned at the window's first base by `cigar`,
+        /// classified by the shipped delimiter.
+        fn classify_at_ch05(tract: &[u8], seq: &[u8], cigar: Vec<CigarOp>) -> Classified {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            let frame = [&b"AAATGAGGATTAAGG"[..], tract, b"TATGAATAGAAAATA"].concat();
+            let locus = SsrLocus {
+                repeat: SsrSegment::new(
+                    "chr1".into(),
+                    16,
+                    15 + tract.len() as u64,
+                    Motif::new(&tract[..1]).unwrap(),
+                    1.0,
+                )
+                .unwrap()
+                .into(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            let mut carrier = read(seq, 40);
+            carrier.cigar = cigar;
+            classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            )
+        }
+
+        /// **A read whose own alignment opens an indel in the flank bases the delimiter's guard
+        /// closes is spelled by that alignment** (2026-11-01). SL4.0ch05:51017179: the reads
+        /// carry `ATAAAGAA` over an `A` ×8 tract and delete `ATAGA` five bases into the right
+        /// flank. The guard forbids that gap, the delimiter's best path left ends the tract early
+        /// with the flank laid on mismatches, the anchor rule drops the right side, and the
+        /// read came back a partial that tied every 8-base candidate.
+        #[test]
+        fn a_flank_indel_the_guard_forbids_is_spelled_by_the_reads_alignment() {
+            use CigarOp::{Deletion, Match};
+            let seq = [&b"AAATGAGGATTAAGG"[..], b"ATAAAGAA", b"TATGA", b"AAATA"].concat();
+            match classify_at_ch05(b"AAAAAAAA", &seq, vec![Match(28), Deletion(5), Match(5)]) {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, b"ATAAAGAA");
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                    // The deletion does not touch the tract: the generic path calls it.
+                    assert_eq!(flank_deletion, FlankDeletion::NONE);
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// **A deletion at the tract's edge runs on through the indels the read's alignment has in
+        /// the guarded flank bases** (2026-11-01). A sample carrying one more `AAGC` and the
+        /// flank's `GAACT` deleted one base past the tract: minimap2 wrote its reads as the
+        /// reference's eight repeats, the flank's `CG` deleted, two matches, the `G` of the
+        /// extra repeat inserted, and a mismatch. Taken alone, the edge deletion made the allele
+        /// the reference tract with two flank bases gone, which no read carried.
+        #[test]
+        fn an_edge_deletion_runs_on_through_the_flank_indels_beside_it() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            use CigarOp::{Deletion, Insertion, Match};
+            let left_flank = b"GTCAGCATTGCAGGTCATCGGACTTAGCCA";
+            let tract = b"AAGC".repeat(8);
+            let right_flank = b"CGAACTAGTGGAGCAGTTGACCATAGCAGT";
+            let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+            let locus = SsrLocus {
+                repeat: SsrSegment::new("chr1".into(), 31, 62, Motif::new(b"AAGC").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            // The truth: nine repeats, the flank's `C`, then the flank after `GAACT`.
+            let seq = [
+                left_flank.as_slice(),
+                &b"AAGC".repeat(9),
+                b"C",
+                &right_flank[6..],
+            ]
+            .concat();
+            let mut carrier = read(&seq, 40);
+            carrier.cigar = vec![
+                Match(62),
+                Deletion(2),
+                Match(2),
+                Insertion(1),
+                Match(seq.len() as u32 - 65),
+            ];
+            match classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            ) {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    flank_deletion,
+                    ..
+                } => {
+                    // The read's bases up to where its alignment rejoins the reference after the
+                    // insertion, in place of the tract and the four flank bases `CGAA`; the
+                    // mismatch after it is the generic path's.
+                    assert_eq!(&*bases, [tract.as_slice(), b"AAG"].concat().as_slice());
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                    assert_eq!(flank_deletion, FlankDeletion { left: 0, right: 4 });
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// Which indels sit in the guarded flank bases, and how far an edge deletion grows
+        /// through them: the tract at 30–60, eight guarded bases each side.
+        #[test]
+        fn indels_in_the_guarded_flank_are_found_and_an_edge_deletion_grows_through_them() {
+            use CigarOp::{Deletion, Insertion, Match};
+            let widths = (8, 8);
+            for (cigar, expected) in [
+                (vec![Match(65), Deletion(5), Match(20)], true),
+                (vec![Match(68), Deletion(5), Match(20)], false),
+                (vec![Match(18), Deletion(3), Match(70)], false),
+                (vec![Match(24), Deletion(3), Match(70)], true),
+                (vec![Match(62), Insertion(2), Match(20)], true),
+                (vec![Match(68), Insertion(2), Match(20)], false),
+                (vec![Match(40), Deletion(3), Match(40)], false),
+            ] {
+                assert_eq!(
+                    indel_in_the_guarded_flank(&cigar, 0, 30, 60, widths),
+                    expected,
+                    "{cigar:?}"
+                );
+            }
+            let fp = Footprint {
+                ref_start: 0,
+                ref_end: 100,
+                leading_clip: 0,
+                trailing_clip: 0,
+            };
+            // An edge deletion of two flank bases, two matches, an insertion: the flank deletion
+            // grows to the insertion, four bases, and the spelling to the read base after it.
+            let cigar = vec![Match(60), Deletion(2), Match(2), Insertion(1), Match(36)];
+            assert_eq!(
+                through_the_flank_indels(
+                    &cigar,
+                    fp,
+                    30..60,
+                    FlankDeletion { left: 0, right: 2 },
+                    30,
+                    60,
+                    widths,
+                ),
+                (30..63, FlankDeletion { left: 0, right: 4 })
+            );
+            // Nothing else in the guard: unchanged.
+            let cigar = vec![Match(60), Deletion(2), Match(38)];
+            assert_eq!(
+                through_the_flank_indels(
+                    &cigar,
+                    fp,
+                    30..60,
+                    FlankDeletion { left: 0, right: 2 },
+                    30,
+                    60,
+                    widths,
+                ),
+                (30..60, FlankDeletion { left: 0, right: 2 })
+            );
         }
 
         /// The smallest form on both sides: a spelling gives a flank base back while it starts
