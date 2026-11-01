@@ -97,6 +97,15 @@ wholly inside the segment comes out as `(0, 0)`** — a plain repeat allele, mea
 exactly as today. Stutter, which adds or removes whole units inside the repeat, is always such a
 deletion. Only a sequence whose flank really differs keeps a flank deletion.
 
+**At a segment, no flank base is given back that would leave the spelling shorter than one period**
+(2026-11-01). An allele without a whole copy of the motif is one the read model cannot score, and
+candidate selection drops it (`can_score`, `src/calling/allele_candidates/ssr.rs`). At HG002
+chr20:2,472,054 a 9-base deletion took seven flank bases, `AAAAAAG`, and two of an `A` ×8 tract;
+given back without a floor, all eight carrier reads became an empty spelling with the `G` deleted,
+the allele was dropped, and only the generic path's shortened 7-base deletion was written — a false
+call and a missed one. With the floor they spell `A` with `AG` deleted, the same sequence. A bundle
+keeps no floor: its alleles can be scored with a run at no copies.
+
 **The smallest form is the allele's identity; it is not where the generic path puts the
 deletion.** The generic path left-aligns every read before its pileup (`read/left_align.rs`, a
 port of GATK's `leftAlignIndels`), which slides a deletion as far *left* as it goes — into the
@@ -154,6 +163,22 @@ deletion allele it differs by the misread base alone, and is priced at the subst
 **substituted** as part of the extent, which turned every flank sequencing error into an extra
 observation; this counts only a base the read's alignment **deletes**, which a substitution error
 does not produce.
+
+**A flank deletion runs on through every indel the read's alignment has in the guarded flank bases**
+(2026-11-01) — the eight flank bases beside each edge, half the flank where that is shorter, in
+which the delimiter's junction guard opens no gap. A mapper can write one event beside a segment as
+several: a deletion at the edge, two matches and an insertion. Taken alone, the edge deletion made
+the read's allele, and the rest went to the generic path, which wrote the flank the read actually
+carries; gathered (§6), the two disagreed inside the widened record and the STR record won, so the
+sample got an allele no read carried. So on each side the flank deletion grows to the farthest
+reference base an indel in the guarded bases reaches — one past a deletion's last base, or the base
+an insertion sits before — and the spelling takes the read's bases up to there; the smallest form
+(§4) then gives back any flank base the spelling ends with. A flank deletion that would grow past
+the guard is left as it was. Measured with `ng_tract_simulator` (`flank_deletion_len=5`, reads
+remapped by minimap2; `locus_generation_ssr.md` §3 has the setup): at 20 samples and 30×, wrong
+variant sample genotypes went from 661 to 286 of 1,989 where the deletion touches the tract, and
+from 1,473 to 1,108 of 14,009 where it lies one to seven bases away, with the reference genotypes
+unchanged.
 
 **A flank deletion longer than the flank stored with the segment is not recorded**: the read is
 measured as today. The record can only be widened over flank bases the locus holds.
@@ -490,6 +515,32 @@ For each sample with both calls, its copies are paired in three steps:
    mapper wrote a one-base flank deletion as a substitution for four of six reads. **Where the
    generic call did not agree, the STR record wins** (owner, 2026-10-10): the generic copy is
    overridden, and the run counts the copies taken in agreement and the copies overridden.
+
+   **Only the part of the generic allele inside the widened record is compared** (2026-11-01). A
+   generic record can run past the widened record's end, and the STR allele says nothing about the
+   bases there: the generic allele's last bases (right flank) or first bases (left flank), as many
+   as its reference has outside the widened record, are the generic path's to spell. Where they
+   differ from the reference, the copy that takes the allele keeps them, and the merged record
+   writes them on that haplotype. Before, the generic allele was required to leave those bases as
+   the reference, so a read whose mapper wrote the flank deletion as a shorter deletion and a
+   mismatch disagreed with its own generic call: the STR record won and the change past its end
+   was dropped, or, at a heterozygous sample, the leftover generic copy carried it onto the
+   reference copy — an allele nobody carried. Measured with `ng_tract_simulator`
+   (`locus_generation_ssr.md` §3 has the setup): at 20 samples and 30×, wrong variant sample
+   genotypes with the flank deletion one to seven bases from the tract went from 2,760 to 1,473 of
+   14,009 — among tracts that change only in length, those with one base wrong from 326 to 9 —
+   with the reference genotypes unchanged.
+
+   **Among generic copies the STR copy does not spell, it takes the one whose haplotype is nearest
+   its own** (2026-11-01): the STR allele with the reference outside the widened record, against
+   the generic allele with the reference around it, over the two records' union, in edited bases;
+   the reference copy first only at a tie. Where a run of equal bases crosses the edge, the two
+   paths can remove the same base from different ends of it. At HG002 chr20:16,430,962 the STR
+   allele `AACAAAA` took the flank's `C` and an `A` of the tract, the generic path `CAAAC`→`CAA`
+   the flank's `AC`; neither spells the other base for base, the reference copy was taken, and the
+   generic deletion went onto the sample's reference STR copy, writing `AAAAAAA`, which no read
+   carried, as a second allele. The two haplotypes differ by one base, the reference's by two. The
+   STR record still wins on what is written: only which generic copy is used up changes.
 2. **The STR copies left pair with the generic copies left.** Where either side is homozygous, or
    one copy is left, there is one pairing and the reads were never needed.
 3. **Where both are heterozygous, the pairing comes from the cohort.** Every sample whose pairing

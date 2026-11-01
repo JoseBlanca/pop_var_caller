@@ -568,11 +568,14 @@ impl SsrEvidenceScratch {
                     read_witness: ReadWitness::Complete,
                     read_group: row.read_group,
                     num_obs: row.support.num_reads,
-                    num_fwd: row.support.num_fwd,
+                    // Whole already: a tract is one record, so no read's share was divided
+                    // across records, and rounding gives back the mint's own count.
+                    num_fwd: whole_reads(row.support.num_fwd),
                     q_sum: SummedLogError::from_nats(row.support.q_sum),
                     mapq_sum: row.support.mapq_sum,
                     mapq_sum_sq: row.support.mapq_sum_sq,
-                    placed_left: row.support.placed_left,
+                    placed_left: whole_reads(row.support.placed_left),
+                    num_low_quality: row.support.num_low_quality,
                     // Empty on the STR path, which does not phase: a tract is one record, so
                     // the witness already says whether a read spanned it.
                     chain_ids: Vec::new(),
@@ -594,11 +597,26 @@ impl SsrEvidenceScratch {
                     mapq_sum: 0,
                     mapq_sum_sq: 0,
                     placed_left: 0,
+                    num_low_quality: 0,
                     chain_ids: Vec::new(),
                 });
             }
         }
         &self.per_run_sample
+    }
+}
+
+/// A merge row's strand or placement share as whole reads. The share is a fraction only where a
+/// read was composed across records, which a tract's one record never needs; a non-finite or
+/// negative share, which no merge produces, comes back as none.
+fn whole_reads(share: f64) -> u32 {
+    let rounded = share.round();
+    if rounded.is_nan() || rounded <= 0.0 {
+        0
+    } else if rounded >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        rounded as u32
     }
 }
 
@@ -644,11 +662,12 @@ mod tests {
             read_group: ReadGroupId(read_group),
             support: AlleleSupport {
                 num_reads,
-                num_fwd: num_reads / 2,
+                num_fwd: f64::from(num_reads / 2),
                 q_sum,
                 mapq_sum: 60 * num_reads,
                 mapq_sum_sq: u64::from(num_reads) * 3_600,
-                placed_left: num_reads / 2,
+                placed_left: f64::from(num_reads / 2),
+                num_low_quality: 0,
             },
         }
     }
@@ -1314,6 +1333,7 @@ mod tests {
             mapq_sum: 300,
             mapq_sum_sq: 18_000,
             placed_left: 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }];
         let per_run_sample: [&[SequenceObservation]; 2] = [&seen, &[]];

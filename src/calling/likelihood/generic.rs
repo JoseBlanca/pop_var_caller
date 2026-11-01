@@ -1071,6 +1071,15 @@ pub fn assemble_genotype_log_likelihood_row(
     }
 
     score_partials(evidence, genotypes, read_groups, scratch, out);
+
+    // **Every row value is the logarithm of a probability, so none may be above zero** — up to
+    // rounding. Positive values were how the 2026-10-31 likelihood defect showed itself, in
+    // `--explain-loci` output, before anything else noticed; a soak build stops on the first.
+    debug_assert!(
+        out.iter()
+            .all(|value| value.0 <= super::ROW_ROUNDING_ALLOWANCE),
+        "a genotype log-likelihood is above zero, which no probability can be: {out:?}"
+    );
 }
 
 /// Add what the reads that saw only part of the locus are worth — spec §5.3.
@@ -1734,8 +1743,9 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum,
-            forward_reads: num_reads / 2,
-            placed_left_reads: num_reads / 2,
+            forward_reads: f64::from(num_reads / 2),
+            placed_left_reads: f64::from(num_reads / 2),
+            low_quality_reads: 0,
         }
     }
 

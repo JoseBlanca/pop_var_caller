@@ -4,11 +4,16 @@
 # ways whose effect on the calls is known, and checks the calls moved only as they should.
 #
 #   doubled  every read fed twice, each copy under a new name. No QUAL may fall and no genotype
-#            with GQ >= 20 may change.
+#            with GQ >= 20 may change. **Only at depth.** A candidate allele needs 2 reads, so at
+#            a few reads a position every single misread becomes a candidate once doubled; on
+#            the 3x tomato extract that added 109,698 records and set aside 15,635 confident
+#            calls (2026-11-01), while GIAB at 30x held. DOUBLED=measure reports it without
+#            failing, DOUBLED=skip leaves it out; the default is check.
 #   empty    one more sample, with a read group and no reads. Every other sample's calls, and every
 #            site field, must stay the same.
 #   strand   every read's strand flag flipped, and its mate's. Genotypes and SPPEN, the strand and
-#            read-position penalty, must stay the same.
+#            read-position penalty, must stay the same. Run on copies of both sides without the
+#            pairs whose fragment is shorter than a read — see below.
 #   alone    each sample called by itself, against the same sample in the cohort. A measurement:
 #            the differences are counted and characterised, never a failure.
 #
@@ -17,8 +22,9 @@
 # strand" is the record with its 0x10 bit flipped and nothing else: its bases, qualities, CIGAR and
 # position are the reference-strand view either way. The mate's 0x20 bit is flipped with it, so
 # the pair stays consistent. One thing does change: a pair whose fragment is shorter than a read
-# has its bases past the adaptor dropped by a test that depends on which read is forward, so such
-# pairs are counted and printed beside the strand result.
+# has its bases past the adaptor dropped by a test that depends on which read is forward. On the
+# tomato extract those pairs alone changed 238 genotypes, so both sides of the strand relation drop
+# them first (`samtools view -e`), and how many were dropped is printed beside the result.
 #
 # Every run is call-from-alignments with --defaults, so no fit can differ between the two sides,
 # and with --min-site-quality 0 --hidden-dup-tag, so a call that got worse shows up as a worse call
@@ -44,6 +50,8 @@ reference=$1; catalog=$2; regions=$3; out=$4
 shift 4
 alignments=("$@")
 threads=${THREADS:-6}
+doubled_mode=${DOUBLED:-check}
+case $doubled_mode in check|measure|skip) ;; *) echo "DOUBLED is check, measure or skip" >&2; exit 2;; esac
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=${PVC_BIN:-}
@@ -98,16 +106,26 @@ transform() {
   samtools index "$3"
 }
 
-doubled=(); swapped=()
+# full_length <input.bam> <output.bam>: the pairs whose fragment is at least a read long.
+full_length() {
+  samtools view -b -e '(tlen >= qlen) || (tlen <= -qlen)' -o "$2" "$1"
+  samtools index "$2"
+}
+
+doubled=(); full_length_base=(); swapped=()
 for bam in "${alignments[@]}"; do
   name=$(basename "$bam" .bam)
-  transform '{ print; $1 = $1 "_copy"; print }' "$bam" "$out/bam/$name.doubled.bam"
+  if [ "$doubled_mode" != skip ]; then
+    transform '{ print; $1 = $1 "_copy"; print }' "$bam" "$out/bam/$name.doubled.bam"
+    doubled+=("$out/bam/$name.doubled.bam")
+  fi
+  full_length "$bam" "$out/bam/$name.full_length.bam"
   # mawk has no bit operations: flip 0x10 and 0x20 by arithmetic.
   transform '{ f = $2
     f += (int(f / 16) % 2) ? -16 : 16
     if (int(f / 1) % 2) f += (int(f / 32) % 2) ? -32 : 32
-    $2 = f; print }' "$bam" "$out/bam/$name.swapped.bam"
-  doubled+=("$out/bam/$name.doubled.bam"); swapped+=("$out/bam/$name.swapped.bam")
+    $2 = f; print }' "$out/bam/$name.full_length.bam" "$out/bam/$name.swapped.bam"
+  full_length_base+=("$out/bam/$name.full_length.bam"); swapped+=("$out/bam/$name.swapped.bam")
 done
 
 # The empty sample: the first BAM's header with its read groups renamed, and no records.
@@ -118,7 +136,8 @@ samtools index "$out/bam/empty.bam"
 
 echo "=== calling ==="
 call base "${alignments[@]}"
-call doubled "${doubled[@]}"
+[ "$doubled_mode" = skip ] || call doubled "${doubled[@]}"
+call full_length "${full_length_base[@]}"
 call swapped "${swapped[@]}"
 call with_empty "${alignments[@]}" "$out/bam/empty.bam"
 for bam in "${alignments[@]}"; do
@@ -126,15 +145,21 @@ for bam in "${alignments[@]}"; do
 done
 
 echo "=== relations ==="
-check "every read twice" doubled "$out/base.vcf" "$out/doubled.vcf"
-check "strands swapped" strand "$out/base.vcf" "$out/swapped.vcf"
+case $doubled_mode in
+  check) check "every read twice" doubled "$out/base.vcf" "$out/doubled.vcf" ;;
+  measure)
+    echo "--- every read twice (a measurement: DOUBLED=measure)"
+    "${compare[@]}" doubled "$out/base.vcf" "$out/doubled.vcf" || true ;;
+esac
+check "strands swapped, short fragments dropped on both sides" strand "$out/full_length.vcf" \
+  "$out/swapped.vcf"
 short=0
 for bam in "${alignments[@]}"; do
   short=$((short + $(samtools view "$bam" |
-    awk '{ t = $9 < 0 ? -$9 : $9; if (t > 0 && t < length($10)) n++ } END { print n + 0 }')))
+    awk '{ t = $9 < 0 ? -$9 : $9; if (t < length($10)) n++ } END { print n + 0 }')))
 done
-echo "    ($short records in pairs whose fragment is shorter than a read: their adaptor test" \
-  "reads the strand)"
+echo "    ($short records dropped from both sides: a fragment shorter than the read, whose" \
+  "adaptor test reads the strand, or no fragment length at all)"
 check "an empty sample added" empty "$out/base.vcf" "$out/with_empty.vcf" EMPTY
 for bam in "${alignments[@]}"; do
   sample=$(sample_of "$bam")

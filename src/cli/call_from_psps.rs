@@ -145,6 +145,16 @@ pub struct CallFromPspsArgs {
     )]
     pub min_site_quality: f32,
 
+    /// Charge a site whose variant reads carry more low base qualities than its reference reads,
+    /// at this many times the test's tail, subtracted from QUAL (`BQPEN`). 0 leaves the test off
+    /// (`doc/devel/ng/spec/low_base_quality.md`).
+    #[arg(
+        long,
+        default_value_t = crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
+        value_parser = crate::cli::calling_run::parse_low_base_quality_weight
+    )]
+    pub low_base_quality_weight: f64,
+
     /// Threads to use; 0 uses every core. The output is the same at any number.
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
@@ -607,6 +617,7 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         crate::types::Phred::try_new(args.min_site_quality)
             .expect("`parse_min_site_quality` admits only valid qualities"),
     );
+    let caller = caller.with_low_base_quality_weight(args.low_base_quality_weight);
     let sample_names: Vec<String> = caller.sample_names().map(str::to_owned).collect();
 
     let read_groups = caller.read_groups().clone();
@@ -618,6 +629,11 @@ pub fn run_call_from_psps(args: &CallFromPspsArgs) -> Result<(), CallFromPspsCli
         &with_checksums,
         caller.sample_names().map(str::to_owned).collect(),
     )?;
+    let metadata = if args.low_base_quality_weight > 0.0 {
+        metadata.the_low_base_quality_test_ran()
+    } else {
+        metadata
+    };
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what
     // makes `--hidden-dup-fdr 0` byte-identical by construction rather than by hope. With it on, the

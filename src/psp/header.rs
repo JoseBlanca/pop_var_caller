@@ -3042,13 +3042,13 @@ mod tests {
         }
     }
 
-    /// **The record's own fields, and which two of the thirty-two are lists.** A count and
+    /// **The record's own fields, and which two of the thirty-three are lists.** A count and
     /// the names, so a field changing shape has to be changed here on purpose — the two halves
     /// of the chain-id column are the only counted runs a record carries.
     #[test]
     fn exactly_two_of_the_records_fields_are_lists() {
         let fields = crate::psp::record::record_fields();
-        assert_eq!(fields.len(), 32);
+        assert_eq!(fields.len(), 33);
         let lists: Vec<&str> = fields
             .iter()
             .filter(|field| field.shape() == FieldShape::List)

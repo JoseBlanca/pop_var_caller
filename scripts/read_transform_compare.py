@@ -26,10 +26,13 @@ Exit status 1 when a pass/fail relation is broken, 0 otherwise.
 """
 
 import sys
-from collections import Counter
+from collections import Counter, namedtuple
 
 MIN_CONFIDENT_GQ = 20
 EXAMPLES = 12
+
+# One allele a sample carries, as `alone` reports it: the call, and where it was made.
+CarriedAt = namedtuple("CarriedAt", "call qual af where is_str")
 
 
 class Record:
@@ -86,8 +89,38 @@ class Record:
         return genotype is not None and any(allele != self.ref for allele in genotype)
 
 
+class Records:
+    """A VCF's data lines keyed by (contig, position, REF), **parsed only when asked for**.
+
+    Holding every record parsed — a dictionary per sample per record — took 18.5 GB on two
+    63-sample tomato VCFs, more than the dev container's 16 GB. The raw lines take about a
+    twentieth of that, and each comparison parses a record, uses it and lets it go.
+    """
+
+    def __init__(self, samples, lines):
+        self.samples, self.lines = samples, lines
+
+    def __contains__(self, key):
+        return key in self.lines
+
+    def __len__(self):
+        return len(self.lines)
+
+    def get(self, key):
+        line = self.lines.get(key)
+        return None if line is None else Record(line, self.samples)
+
+    def items(self):
+        for key, line in self.lines.items():
+            yield key, Record(line, self.samples)
+
+    def values(self):
+        for _, record in self.items():
+            yield record
+
+
 def read_vcf(path):
-    samples, records = [], {}
+    samples, lines = [], {}
     with open(path) as handle:
         for line in handle:
             if line.startswith("##"):
@@ -95,14 +128,14 @@ def read_vcf(path):
             if line.startswith("#CHROM"):
                 samples = line.rstrip("\n").split("\t")[9:]
                 continue
-            record = Record(line, samples)
-            key = record.key()
+            fields = line.split("\t", 4)
+            key = (fields[0], int(fields[1]), fields[3])
             # Two records at one position with one REF would collide; keep both, told apart by
             # their order in the file, which is the same in both runs when nothing else differs.
-            while key in records:
+            while key in lines:
                 key = key + ("again",)
-            records[key] = record
-    return samples, records
+            lines[key] = line
+    return samples, Records(samples, lines)
 
 
 def show(label, examples):
@@ -259,7 +292,11 @@ def carried_alleles(records, sample, min_qual):
             if alt == record.ref:
                 continue
             key = (record.chrom,) + minimal_allele(record.pos, record.ref, alt)
-            carried[key] = (genotype.count(alt), record.gq(sample), record)
+            # The few fields the report prints, not the record: a parsed record holds every
+            # sample's call, and this keeps one per allele the sample carries.
+            seen = CarriedAt(record.call_text[sample], record.qual, record.info.get("AF"),
+                             record.where(), record.is_str())
+            carried[key] = (genotype.count(alt), record.gq(sample), seen)
     return carried
 
 
@@ -274,7 +311,7 @@ def compare_alone(cohort, alone, sample):
         for key in set(in_cohort) | set(by_itself):
             a, b = in_cohort.get(key), by_itself.get(key)
             record = (a or b)[2]
-            kind = "STR" if record.is_str() else "generic"
+            kind = "STR" if record.is_str else "generic"
             if a is None or b is None:
                 copies, gq, _ = a or b
                 side = "carried only alone" if a is None else "carried only in the cohort"
@@ -287,8 +324,8 @@ def compare_alone(cohort, alone, sample):
                 label = (f"different copies, cohort {gq_band(a[1])}, alone {gq_band(b[1])}")
             label = f"{kind}: {label}"
             classes[label] += 1
-            describe = lambda side: (f"{side[2].call_text[sample]} QUAL {side[2].qual} "
-                                     f"AF {side[2].info.get('AF')} at {side[2].where()[:60]}"
+            describe = lambda side: (f"{side[2].call} QUAL {side[2].qual} "
+                                     f"AF {side[2].af} at {side[2].where[:60]}"
                                      if side else "-")
             examples.setdefault(label, []).append(
                 f"{key[0]}:{key[1]} {key[2]}>{key[3]}\n        cohort {describe(a)}"

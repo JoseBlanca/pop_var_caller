@@ -34,6 +34,9 @@
 //!   on a real benchmark.
 //! - `truth_genotypes.tsv` — every sample's repeat counts at every tract, including the
 //!   homozygous-reference ones, for anything that wants the genotype rather than the record.
+//! - `truth_haplotypes.tsv` — every sample's two haplotypes at every tract, spelled over the
+//!   tract and 40 bases either side, for a scorer that compares sequences whatever records the
+//!   caller writes them as.
 //! - `slippage_rows.toml` — the stutter model the reads were drawn under, written as the rows
 //!   a parameters file states slippage in. Append it to a run's own `.parameters.toml`, with
 //!   that file's empty `slippage_by_stratum_and_group` line deleted, and the caller scores
@@ -57,6 +60,14 @@
 //! 2. **mis-reads a base** — every base of the read, in the tract and in its flanks, is
 //!    replaced by a different one with probability `substitution_rate`.
 //!
+//! **Two optional features ride on a non-reference haplotype**, both off by default and drawn
+//! only when on, so a fixture without them is the one it always was: a deletion in the right
+//! flank, starting a set distance from the tract, and a substituted base in the middle of the
+//! tract. Together they are the case a flank indel next to a non-reference tract makes, where
+//! the delimiter's junction guard can force a read that crossed the tract to count as partial
+//! (found 2026-11-01 at SL4.0ch05:51017179). With the deletion, the read's alignment writes the
+//! length change at the tract's start and the deletion where it lies.
+//!
 //! **Nothing here models a partial-repeat slip, a PCR chimera or a mapping error.** A read is
 //! always placed where it came from and always spans its tract whole. So a caller that does
 //! badly on this fixture is doing badly on the easiest version of the problem, and one that
@@ -75,6 +86,10 @@
 //! | `substitution_rate` | 0.001 | per-base chance of reading the wrong base |
 //! | `variant_rate` | 0.50 | share of (sample, tract) cells carrying a non-reference allele |
 //! | `allele_span` | 3 | furthest a drawn allele sits from the reference, in repeats |
+//! | `flank_deletion_len` | 0 | bases a non-reference haplotype deletes from the right flank; 0 is none |
+//! | `flank_deletion_offset_max` | 12 | furthest the deletion starts from the tract, in bases; tracts cycle 0 to this |
+//! | `flank_deletion_share` | 1.0 | share of non-reference haplotypes carrying the deletion |
+//! | `impure_share` | 0.0 | share of non-reference haplotypes whose tract has its middle base changed |
 //! | `seed` | 20260902 | the draw's seed; the whole fixture is a function of it |
 //!
 //! The defaults are the shipped stutter model's own numbers — `slip_share` 0.10,
@@ -181,6 +196,10 @@ struct Settings {
     substitution_rate: f64,
     variant_rate: f64,
     allele_span: u32,
+    flank_deletion_len: usize,
+    flank_deletion_offset_max: usize,
+    flank_deletion_share: f64,
+    impure_share: f64,
     seed: u64,
 }
 
@@ -196,6 +215,10 @@ impl Default for Settings {
             substitution_rate: 0.001,
             variant_rate: 0.50,
             allele_span: 3,
+            flank_deletion_len: 0,
+            flank_deletion_offset_max: 12,
+            flank_deletion_share: 1.0,
+            impure_share: 0.0,
             seed: 20_260_902,
         }
     }
@@ -228,6 +251,12 @@ impl Settings {
                 "substitution_rate" => settings.substitution_rate = number(key)?,
                 "variant_rate" => settings.variant_rate = number(key)?,
                 "allele_span" => settings.allele_span = number(key)? as u32,
+                "flank_deletion_len" => settings.flank_deletion_len = number(key)? as usize,
+                "flank_deletion_offset_max" => {
+                    settings.flank_deletion_offset_max = number(key)? as usize
+                }
+                "flank_deletion_share" => settings.flank_deletion_share = number(key)?,
+                "impure_share" => settings.impure_share = number(key)?,
                 "seed" => settings.seed = number(key)? as u64,
                 other => return Err(format!("unknown setting `{other}`")),
             }
@@ -241,6 +270,8 @@ impl Settings {
             ("one_step_share", settings.one_step_share),
             ("substitution_rate", settings.substitution_rate),
             ("variant_rate", settings.variant_rate),
+            ("flank_deletion_share", settings.flank_deletion_share),
+            ("impure_share", settings.impure_share),
         ] {
             if !(0.0..=1.0).contains(&share) {
                 return Err(format!("{what} must be a share in [0, 1], got {share}"));
@@ -248,6 +279,16 @@ impl Settings {
         }
         if settings.one_step_share <= 0.0 {
             return Err("one_step_share must be above zero, or no slip has a size".to_string());
+        }
+        // Every read must still carry aligned flank past the deletion, or it stops being a
+        // read that crossed the tract.
+        if settings.flank_deletion_len > 0
+            && settings.flank_deletion_offset_max + settings.flank_deletion_len + 5 > MIN_ANCHOR_BP
+        {
+            return Err(format!(
+                "flank_deletion_offset_max + flank_deletion_len must leave five aligned bases \
+                 inside the {MIN_ANCHOR_BP}-base shortest anchor"
+            ));
         }
         Ok(settings)
     }
@@ -264,15 +305,16 @@ struct Tract {
     reference_repeats: u32,
     /// One-based, the first base of the repeat itself.
     start: usize,
+    /// How many reference bases lie between the tract's last base and the first base a
+    /// haplotype's flank deletion takes — zero touches the tract. Cycles through
+    /// `0..=flank_deletion_offset_max` tract by tract, each period in turn, so every period meets
+    /// every distance.
+    flank_deletion_offset: usize,
 }
 
 impl Tract {
     fn period(&self) -> usize {
         self.motif.len()
-    }
-
-    fn reference_bases(&self) -> Vec<u8> {
-        self.bases_at(self.reference_repeats)
     }
 
     /// How many bases the reference tract spans.
@@ -291,6 +333,22 @@ impl Tract {
     /// The bases this many repeats of the motif spell.
     fn bases_at(&self, repeats: u32) -> Vec<u8> {
         self.motif.repeat(repeats as usize).to_vec()
+    }
+
+    /// The bases this many repeats spell, with the substitution inside the tract that the ch05
+    /// case carried when `impure`: the middle base of an allele of `allele_repeats` repeats.
+    ///
+    /// **The substitution stays where the allele has it when a read slips**, since a slip adds or
+    /// removes whole repeats at the tract's end. Placing it in the middle of the slipped length
+    /// instead turned every slipped read into a different sequence rather than a stutter copy,
+    /// and the caller rightly called it a second allele.
+    fn allele_bases(&self, repeats: u32, impure: bool, allele_repeats: u32) -> Vec<u8> {
+        let mut bases = self.bases_at(repeats);
+        let middle = self.period() * allele_repeats as usize / 2;
+        if impure && middle < bases.len() {
+            bases[middle] = other_base(bases[middle]);
+        }
+        bases
     }
 }
 
@@ -311,6 +369,8 @@ fn build_reference(settings: &Settings, draw: &mut Draw) -> (Vec<u8>, Vec<Tract>
             motif,
             reference_repeats: repeats,
             start,
+            flank_deletion_offset: (index / TRACT_SHAPES.len())
+                % (settings.flank_deletion_offset_max + 1),
         });
     }
     (bases, tracts)
@@ -414,16 +474,57 @@ fn other_base(base: u8) -> u8 {
 // The genotypes and the reads
 // ---------------------------------------------------------------------------
 
-/// One sample's two alleles at one tract, in repeat counts.
+/// One haplotype at one tract: its repeat count, whether its tract carries a substitution, and
+/// whether its right flank carries the deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Haplotype {
+    repeats: u32,
+    impure: bool,
+    flank_deleted: bool,
+}
+
+impl Haplotype {
+    fn reference(tract: &Tract) -> Self {
+        Self {
+            repeats: tract.reference_repeats,
+            impure: false,
+            flank_deleted: false,
+        }
+    }
+
+    /// What this haplotype reads in place of the reference from the tract's first base to the
+    /// one-based `span_end`, which must reach past any flank deletion.
+    fn spelled(
+        &self,
+        tract: &Tract,
+        reference: &[u8],
+        settings: &Settings,
+        span_end: usize,
+    ) -> Vec<u8> {
+        let mut bases = tract.allele_bases(self.repeats, self.impure, self.repeats);
+        let flank = &reference[tract.end()..span_end];
+        if self.flank_deleted {
+            let from = tract.flank_deletion_offset;
+            bases.extend_from_slice(&flank[..from]);
+            bases.extend_from_slice(&flank[from + settings.flank_deletion_len..]);
+        } else {
+            bases.extend_from_slice(flank);
+        }
+        bases
+    }
+}
+
+/// One sample's two haplotypes at one tract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Genotype {
-    first: u32,
-    second: u32,
+    first: Haplotype,
+    second: Haplotype,
 }
 
 impl Genotype {
-    fn is_reference(&self, reference_repeats: u32) -> bool {
-        self.first == reference_repeats && self.second == reference_repeats
+    fn is_reference(&self, tract: &Tract) -> bool {
+        let reference = Haplotype::reference(tract);
+        self.first == reference && self.second == reference
     }
 }
 
@@ -432,11 +533,12 @@ impl Genotype {
 /// **A non-reference allele is never allowed below one repeat**, because a tract of nothing is
 /// not a tract and the caller's ladder has no rung for it.
 fn draw_genotype(tract: &Tract, settings: &Settings, draw: &mut Draw) -> Genotype {
+    let reference_haplotype = Haplotype::reference(tract);
     let reference = tract.reference_repeats;
     if draw.unit() >= settings.variant_rate {
         return Genotype {
-            first: reference,
-            second: reference,
+            first: reference_haplotype,
+            second: reference_haplotype,
         };
     }
     let span = settings.allele_span.max(1);
@@ -457,9 +559,18 @@ fn draw_genotype(tract: &Tract, settings: &Settings, draw: &mut Draw) -> Genotyp
     // Heterozygous half the time, homozygous for the alternative the other half — a shape
     // that gives both the "one allele hides under the other's stutter" case and the "no
     // reference reads at all" case.
+    //
+    // The two optional features ride on the alternative haplotype. Each is drawn only when
+    // switched on, so a fixture with both off draws exactly what it drew before they existed.
+    let alternative = Haplotype {
+        repeats: alternative,
+        impure: settings.impure_share > 0.0 && draw.unit() < settings.impure_share,
+        flank_deleted: settings.flank_deletion_len > 0
+            && draw.unit() < settings.flank_deletion_share,
+    };
     if draw.unit() < 0.5 {
         Genotype {
-            first: reference,
+            first: reference_haplotype,
             second: alternative,
         }
     } else {
@@ -519,14 +630,24 @@ fn reads_at(
         } else {
             genotype.second
         };
-        let observed = observed_repeats(allele, settings, draw);
-        let observed_bases = tract.bases_at(observed);
+        let observed = observed_repeats(allele.repeats, settings, draw);
+        let observed_bases = tract.allele_bases(observed, allele.impure, allele.repeats);
 
         let reference_start = tract.start - left_anchor;
         let mut sequence = Vec::with_capacity(left_anchor + observed_bases.len() + right_anchor);
         sequence.extend_from_slice(&reference[reference_start - 1..tract.start - 1]);
         sequence.extend_from_slice(&observed_bases);
-        sequence.extend_from_slice(&reference[tract.end()..tract.end() + right_anchor]);
+        let right_flank = &reference[tract.end()..tract.end() + right_anchor];
+        let deletion = allele.flank_deleted.then_some(
+            tract.flank_deletion_offset..tract.flank_deletion_offset + settings.flank_deletion_len,
+        );
+        match &deletion {
+            Some(deleted) => {
+                sequence.extend_from_slice(&right_flank[..deleted.start]);
+                sequence.extend_from_slice(&right_flank[deleted.end..]);
+            }
+            None => sequence.extend_from_slice(right_flank),
+        }
         for base in &mut sequence {
             if draw.unit() < settings.substitution_rate {
                 *base = other_base(*base);
@@ -534,6 +655,27 @@ fn reads_at(
         }
 
         let observed_len = observed_bases.len();
+        // **With a flank deletion the length change goes at the tract's start**, as a
+        // left-aligning mapper writes it in a run, so it can never abut the flank deletion as an
+        // insertion beside a deletion.
+        if let Some(deleted) = deletion {
+            let mut cigar = vec![('M', left_anchor)];
+            if observed_len > reference_tract_len {
+                cigar.push(('I', observed_len - reference_tract_len));
+            } else if observed_len < reference_tract_len {
+                cigar.push(('D', reference_tract_len - observed_len));
+            }
+            cigar.push(('M', observed_len.min(reference_tract_len) + deleted.start));
+            cigar.push(('D', deleted.len()));
+            cigar.push(('M', right_anchor - deleted.end));
+            reads.push(Read {
+                reference_start,
+                sequence,
+                cigar: merged(cigar),
+                name: format!("{name_prefix}_{}_{index}", tract.start),
+            });
+            continue;
+        }
         let cigar = if observed_len == reference_tract_len {
             vec![('M', left_anchor + reference_tract_len + right_anchor)]
         } else if observed_len > reference_tract_len {
@@ -556,6 +698,21 @@ fn reads_at(
             name: format!("{name_prefix}_{}_{index}", tract.start),
         });
     }
+}
+
+/// A CIGAR with zero-length operations dropped and neighbours of one kind joined.
+fn merged(cigar: Vec<(char, usize)>) -> Vec<(char, usize)> {
+    let mut out: Vec<(char, usize)> = Vec::with_capacity(cigar.len());
+    for (kind, len) in cigar {
+        if len == 0 {
+            continue;
+        }
+        match out.last_mut() {
+            Some((last, total)) if *last == kind => *total += len,
+            _ => out.push((kind, len)),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +815,9 @@ fn write_bam(
 /// The truth VCF: one record per tract any sample varies at, in the tract's own coordinates.
 ///
 /// **The REF is the whole reference tract and each ALT a whole alternative tract**, which is
-/// the shape ng's own tract records take. Left-alignment is left to `bcftools norm`, which the
+/// the shape ng's own tract records take. Where a haplotype carries the flank deletion, every
+/// allele of the record runs on to the deletion's last base, so the deletion is part of the
+/// haplotype's allele rather than a second record. Left-alignment is left to `bcftools norm`, which the
 /// scorer runs over both sides, so the two meet in the same spelling however either is written
 /// here.
 fn write_truth_vcf(
@@ -666,6 +825,8 @@ fn write_truth_vcf(
     tracts: &[Tract],
     genotypes: &[Vec<Genotype>],
     samples: &[String],
+    reference: &[u8],
+    settings: &Settings,
 ) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
@@ -694,10 +855,11 @@ fn write_truth_vcf(
     writeln!(file)?;
 
     for (index, tract) in tracts.iter().enumerate() {
-        let mut alternatives: Vec<u32> = Vec::new();
+        let reference_haplotype = Haplotype::reference(tract);
+        let mut alternatives: Vec<Haplotype> = Vec::new();
         for sample in genotypes {
             for allele in [sample[index].first, sample[index].second] {
-                if allele != tract.reference_repeats && !alternatives.contains(&allele) {
+                if allele != reference_haplotype && !alternatives.contains(&allele) {
                     alternatives.push(allele);
                 }
             }
@@ -705,19 +867,24 @@ fn write_truth_vcf(
         if alternatives.is_empty() {
             continue;
         }
-        alternatives.sort_unstable();
+        alternatives.sort_unstable_by_key(|one| (one.repeats, one.impure, one.flank_deleted));
+        let span_end = record_end(tract, &alternatives, settings);
+        let spelled = |haplotype: &Haplotype| {
+            String::from_utf8(haplotype.spelled(tract, reference, settings, span_end))
+                .expect("ASCII bases")
+        };
         let alt_field = alternatives
             .iter()
-            .map(|repeats| String::from_utf8(tract.bases_at(*repeats)).expect("ASCII bases"))
+            .map(spelled)
             .collect::<Vec<_>>()
             .join(",");
-        let allele_index = |repeats: u32| -> usize {
-            if repeats == tract.reference_repeats {
+        let allele_index = |haplotype: Haplotype| -> usize {
+            if haplotype == reference_haplotype {
                 0
             } else {
                 1 + alternatives
                     .iter()
-                    .position(|one| *one == repeats)
+                    .position(|one| *one == haplotype)
                     .expect("every drawn allele is either the reference or an alternative")
             }
         };
@@ -726,7 +893,7 @@ fn write_truth_vcf(
             line,
             "{CONTIG}\t{}\t.\t{}\t{alt_field}\t100\tPASS\tPERIOD={}\tGT:REPCN",
             tract.start,
-            String::from_utf8(tract.reference_bases()).expect("ASCII bases"),
+            spelled(&reference_haplotype),
             tract.period(),
         )
         .expect("writing to a String");
@@ -737,12 +904,71 @@ fn write_truth_vcf(
                 "\t{}/{}:{},{}",
                 allele_index(genotype.first),
                 allele_index(genotype.second),
-                genotype.first,
-                genotype.second,
+                genotype.first.repeats,
+                genotype.second.repeats,
             )
             .expect("writing to a String");
         }
         writeln!(file, "{line}")?;
+    }
+    file.flush()
+}
+
+/// One-based, the last base a tract's truth record covers: the tract's own, or past the flank
+/// deletion when any haplotype listed carries it.
+fn record_end(tract: &Tract, haplotypes: &[Haplotype], settings: &Settings) -> usize {
+    if haplotypes.iter().any(|one| one.flank_deleted) {
+        tract.end() + tract.flank_deletion_offset + settings.flank_deletion_len
+    } else {
+        tract.end()
+    }
+}
+
+/// How far either side of a tract the haplotype table's window reaches, in bases.
+const HAPLOTYPE_WINDOW_BP: usize = 40;
+
+/// **Every sample's two haplotypes at every tract, spelled over a fixed window** — the truth a
+/// scorer compares called haplotypes with, whatever records the caller chose to write them as.
+/// The window is `HAPLOTYPE_WINDOW_BP` either side of the tract, one-based and inclusive.
+fn write_haplotype_table(
+    path: &Path,
+    tracts: &[Tract],
+    genotypes: &[Vec<Genotype>],
+    samples: &[String],
+    reference: &[u8],
+    settings: &Settings,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(
+        file,
+        "chrom\twindow_start\twindow_end\tperiod\tdeletion_offset\tsample\tvariant\timpure\t\
+         flank_deleted\tfirst\tsecond"
+    )?;
+    for (index, tract) in tracts.iter().enumerate() {
+        let window_start = tract.start - HAPLOTYPE_WINDOW_BP;
+        let window_end = tract.end() + HAPLOTYPE_WINDOW_BP;
+        let left = &reference[window_start - 1..tract.start - 1];
+        let spell = |haplotype: &Haplotype| {
+            let mut bases = left.to_vec();
+            bases.extend(haplotype.spelled(tract, reference, settings, window_end));
+            String::from_utf8(bases).expect("ASCII bases")
+        };
+        for (sample_index, sample) in samples.iter().enumerate() {
+            let genotype = genotypes[sample_index][index];
+            let carriers = [genotype.first, genotype.second];
+            writeln!(
+                file,
+                "{CONTIG}\t{window_start}\t{window_end}\t{}\t{}\t{sample}\t{}\t{}\t{}\t{}\t{}",
+                tract.period(),
+                tract.flank_deletion_offset,
+                !genotype.is_reference(tract),
+                carriers.iter().any(|one| one.impure),
+                carriers.iter().any(|one| one.flank_deleted),
+                spell(&genotype.first),
+                spell(&genotype.second),
+            )?;
+        }
     }
     file.flush()
 }
@@ -871,9 +1097,9 @@ fn write_genotype_table(
                 tract.period(),
                 String::from_utf8(tract.motif.clone()).expect("ASCII bases"),
                 tract.reference_repeats,
-                genotype.first,
-                genotype.second,
-                genotype.is_reference(tract.reference_repeats),
+                genotype.first.repeats,
+                genotype.second.repeats,
+                genotype.is_reference(tract),
             )?;
         }
     }
@@ -903,7 +1129,22 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
     write_fasta(&out_dir.join("reference.fa"), &reference)?;
     write_tract_bed(&out_dir.join("tracts.bed"), &tracts)?;
     write_confident_bed(&out_dir.join("confident.bed"), reference.len())?;
-    write_truth_vcf(&out_dir.join("truth.vcf"), &tracts, &genotypes, &samples)?;
+    write_truth_vcf(
+        &out_dir.join("truth.vcf"),
+        &tracts,
+        &genotypes,
+        &samples,
+        &reference,
+        &settings,
+    )?;
+    write_haplotype_table(
+        &out_dir.join("truth_haplotypes.tsv"),
+        &tracts,
+        &genotypes,
+        &samples,
+        &reference,
+        &settings,
+    )?;
     write_slippage_rows(&out_dir.join("slippage_rows.toml"), &settings)?;
     write_genotype_table(
         &out_dir.join("truth_genotypes.tsv"),
@@ -917,7 +1158,7 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
         let mut reads = Vec::with_capacity(tracts.len() * settings.depth as usize);
         for (tract_index, tract) in tracts.iter().enumerate() {
             let genotype = genotypes[sample_index][tract_index];
-            if !genotype.is_reference(tract.reference_repeats) {
+            if !genotype.is_reference(tract) {
                 variant_cells += 1;
             }
             reads_at(
@@ -936,7 +1177,7 @@ fn run(out_dir: &Path, settings: Settings) -> Result<(), Box<dyn std::error::Err
         .filter(|index| {
             genotypes
                 .iter()
-                .any(|sample| !sample[*index].is_reference(tracts[*index].reference_repeats))
+                .any(|sample| !sample[*index].is_reference(&tracts[*index]))
         })
         .count();
     println!("out dir           : {}", out_dir.display());

@@ -411,6 +411,11 @@ Two steps, both mechanical:
   B1): two reads showing the same bases from two lanes have different error rates, so a read
   likelihood may not fold them into one term ([`read_likelihoods.md`](read_likelihoods.md) §2.3).
   A sample with one read group is unaffected, which is most of them.
+- **Order.** The reference is allele 0. The alternatives follow in ascending order of their
+  bases and then their flank deletion (`str_edge_deletion_alleles.md` §5.4), **not in the order
+  the samples met them**. Added 2026-11-01: three later steps break ties by table index, so a
+  first-met table made the output depend on the order the samples were listed in. Reversing
+  the samples of 63 tomato accessions changed 19 to 27 records per run, two of them in genotype.
 
 **Unification by exact match is only sound because indels were left-aligned upstream.** The same
 deletion written at two placements would otherwise project to two sequences and become two alleles,

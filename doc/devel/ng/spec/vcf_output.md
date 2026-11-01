@@ -244,6 +244,7 @@ Declarations, with what the value is and which records carry it:
 ##INFO=<ID=DP,Number=1,Type=Integer,Description="Sum of the samples' DP">
 ##INFO=<ID=ABPEN,Number=1,Type=Float,Description="Phred subtracted from QUAL by the allele-balance artifact test">
 ##INFO=<ID=SPPEN,Number=1,Type=Float,Description="Phred subtracted from QUAL by the strand and read-position artifact test">
+##INFO=<ID=BQPEN,Number=1,Type=Float,Description="Phred subtracted from QUAL by the low-base-quality artifact test">
 ##INFO=<ID=MQREF,Number=1,Type=Float,Description="Cohort-pooled mean mapping quality of reads supporting REF">
 ##INFO=<ID=MQALT,Number=A,Type=Float,Description="Cohort-pooled mean mapping quality of reads supporting each ALT">
 ##INFO=<ID=MQDIFF,Number=A,Type=Float,Description="MQALT minus MQREF per ALT; negative means ALT reads map worse (multi-mapper fingerprint)">
@@ -265,7 +266,9 @@ Declarations, with what the value is and which records carry it:
   rule keeps one *authoritative* number without hiding what was subtracted; and it is the
   annotate-and-defer convention every other caller follows
   ([`ng_proposal.md`](ng_proposal.md) step 11a), at a cost of two floats a record. Absent on tract
-  records until the tract quality document defines its own corrections.
+  records until the tract quality document defines its own corrections. **A third, `BQPEN`, since
+  2026-11-01** ([`low_base_quality.md`](low_base_quality.md)): written beside the two, and declared
+  in the header, only when `--low-base-quality-weight` is above zero, which it is by default.
 - **`MQREF`, `MQALT`, `MQDIFF`** — ported from the generic file; the inputs (per-observation
   `mapq_sum` over `num_obs`) are already on every observation, both paths, so tract records carry
   them too — production's tract file simply never had them. A key whose pooled denominator is zero

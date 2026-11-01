@@ -561,6 +561,61 @@ fn insertion_record_has_alt_longer_than_ref() {
     assert_eq!(ins.num_obs, 1);
 }
 
+/// **Each allele counts its reads below Phred 20, and Phred 0 is not one of them** — Phred 0 is
+/// what the walk writes on the losing mate of an overlapping pair (`low_base_quality.md`).
+#[test]
+fn low_quality_reads_are_counted_per_allele_and_phred_zero_is_not() {
+    // Reference ACGTA; the SNP G→T at position 3.
+    let fa = MockFasta::new("ACGTA");
+    let reads = vec![
+        snp_read("good_ref", 1, b"ACGTA", &[30; 5]),
+        snp_read("poor_ref", 1, b"ACGTA", &[30, 30, 12, 30, 30]),
+        snp_read("zero_ref", 1, b"ACGTA", &[30, 30, 0, 30, 30]),
+        snp_read("poor_alt", 1, b"ACTTA", &[30, 30, 8, 30, 30]),
+        snp_read("edge_alt", 1, b"ACTTA", &[30, 30, 19, 30, 30]),
+        snp_read("good_alt", 1, b"ACTTA", &[30, 30, 20, 30, 30]),
+    ];
+    let records = drive_walker(reads, fa);
+    let rec = &records[2];
+    assert_eq!(rec.anchor(), 3);
+    assert_eq!(rec.reference_observation().num_obs, 3);
+    assert_eq!(
+        rec.reference_observation().num_low_quality,
+        1,
+        "Phred 12 only"
+    );
+    assert_eq!(rec.first_alt_observation().num_obs, 3);
+    assert_eq!(
+        rec.first_alt_observation().num_low_quality,
+        2,
+        "Phred 8 and 19, not 20"
+    );
+}
+
+/// **The general fold counts them too**: at a deletion's record the reads are folded over a
+/// window, and a read's count is its lowest base there.
+#[test]
+fn low_quality_reads_are_counted_at_a_deletion() {
+    // Reference ACGTAC; r2 deletes the T at position 4.
+    let fa = MockFasta::new("ACGTAC");
+    let good = snp_read("good", 1, b"ACGTAC", &[30; 6]);
+    let mut poor_deletion = snp_read("poor_deletion", 1, b"ACGAC", &[30, 30, 9, 30, 30]);
+    poor_deletion.cigar = vec![CigarOp::Match(3), CigarOp::Deletion(1), CigarOp::Match(2)];
+    poor_deletion.alignment_end = 6;
+    let records = drive_walker(vec![good, poor_deletion], fa);
+    let anchor = records
+        .iter()
+        .find(|r| r.observations.iter().any(|o| o.bases.as_ref() == b"G"))
+        .expect("the deletion's record");
+    let deletion = anchor
+        .observations
+        .iter()
+        .find(|o| o.bases.as_ref() == b"G")
+        .expect("the deletion allele");
+    assert_eq!(deletion.num_low_quality, 1);
+    assert_eq!(anchor.reference_observation().num_low_quality, 0);
+}
+
 #[test]
 fn forward_strand_count_recorded_correctly() {
     // Reference ACG. Two reads: forward, reverse. Both REF.
@@ -576,38 +631,77 @@ fn forward_strand_count_recorded_correctly() {
 }
 
 #[test]
-fn placed_left_is_per_record() {
-    // Reference ACGTA. Two reads:
-    //   r1 starts at pos 1, covers 1..5
-    //   r2 starts at pos 3, covers 3..5
-    // At record pos 3, r1 was placed_left (start=1 < 3) and r2 was not (start=3 == 3).
-    //
-    // **Adapted at B2, and the half that went is the point** (spec §12): this was
-    // `placed_left_and_placed_start_are_per_record`, and ng no longer computes
-    // `placed_start` at all — nothing consumes it, and it is a pure function of the read's
-    // start against the anchor, so a later consumer re-derives it without touching the fold
-    // (spec §6). `placed_left` **is** consumed — `vcf::qual_refine` turns it into the
-    // read-position-bias term subtracted from QUAL — so that half stands unchanged, and
-    // the count of reads that did *not* start left is asserted through `num_obs` rather
-    // than through the field that is gone.
-    let fa = MockFasta::new("ACGTA");
-    let r1 = snp_read("r1", 1, b"ACGTA", &[30; 5]);
-    let r2 = snp_read("r2", 3, b"GTA", &[30; 3]);
-    let records = drive_walker(vec![r1, r2], fa);
+fn placed_left_counts_reads_lying_mostly_left_of_the_record() {
+    // Reference ACGTACGTAC, the record at 3, a plain column (the fast path). A read is placed
+    // left when at least as many of its aligned bases lie left of the record as right of it —
+    // freebayes' `placedLeft` — not when it merely starts left of it:
+    //   tie           1..5   2 left, 2 right  -> placed left (a tie goes left)
+    //   on_anchor     3..5   0 left, 2 right  -> not
+    //   mostly_right  2..10  1 left, 7 right  -> not, though it starts left of 3
+    //   mostly_left   1..3   2 left, 0 right  -> placed left
+    // Until 2026-11-01 the count was "started strictly left", which gave 3 here.
+    let fa = MockFasta::new("ACGTACGTAC");
+    let tie = snp_read("tie", 1, b"ACGTA", &[30; 5]);
+    let on_anchor = snp_read("on_anchor", 3, b"GTA", &[30; 3]);
+    let mostly_right = snp_read("mostly_right", 2, b"CGTACGTAC", &[30; 9]);
+    let mostly_left = snp_read("mostly_left", 1, b"ACG", &[30; 3]);
+    let records = drive_walker(vec![tie, mostly_left, mostly_right, on_anchor], fa);
     let rec3 = records.iter().find(|r| r.anchor() == 3).unwrap();
-    assert_eq!(rec3.reference_observation().num_obs, 2);
-    assert_eq!(rec3.reference_observation().placed_left, 1);
-    // **A real check, not arithmetic on the two lines above it.** The first version of
-    // this substitution asserted `num_obs - placed_left == 1` right after asserting
-    // `num_obs == 2` and `placed_left == 1`, which is true by construction whatever the
-    // walk did — the "test that cannot fail" pattern, introduced while removing a genuine
-    // assertion. What the deleted `placed_start` half actually pinned is that the counter
-    // is **per record**: r1 starts left of *this* record's anchor and not of the one at 1.
-    let rec1 = records.iter().find(|r| r.anchor() == 1).unwrap();
+    assert_eq!(rec3.reference_observation().num_obs, 4);
     assert_eq!(
-        rec1.reference_observation().placed_left,
-        0,
-        "at the record anchored on r1's own start, nothing is placed left of it"
+        rec3.reference_observation().placed_left,
+        2,
+        "the tie and the read lying left of the record; not the one that starts left of it \
+         and lies mostly right",
+    );
+    // **Per record**: the same reads, counted against the record at 1, which three of them
+    // start on, are none of them placed left.
+    let rec1 = records.iter().find(|r| r.anchor() == 1).unwrap();
+    assert_eq!(rec1.reference_observation().placed_left, 0);
+}
+
+#[test]
+fn placed_left_at_an_indel_record_counts_against_its_anchor() {
+    // Reference ACGTACGTACGT. A three-base deletion anchored at 4 sends the column down the
+    // general path. Every read starts left of the anchor, so the old rule counted them all;
+    // counted against the anchor base:
+    //   deletion      1..9 (4M3D2M)  3 left, 5 right  -> not
+    //   mostly_right  3..12          1 left, 8 right  -> not
+    //   tie           1..7           3 left, 3 right  -> placed left
+    // (A reference read has to reach 7, the record's last base, to be a complete observation of
+    // it, so 3 bases right of the anchor is the fewest it can have.)
+    let fa = MockFasta::new("ACGTACGTACGT");
+    let deletion = PreparedRead {
+        chrom_id: 0,
+        alignment_start: 1,
+        alignment_end: 9,
+        cigar: vec![CigarOp::Match(4), CigarOp::Deletion(3), CigarOp::Match(2)],
+        seq: b"ACGTTA".to_vec(),
+        bq_baq: vec![30; 6],
+        mq_log_err: -3.0,
+        mapq: 60,
+        is_reverse_strand: false,
+        qname: Arc::from("deletion"),
+        mate_role: MateRole::Solo,
+        adaptor_boundary: None,
+        read_group: ReadGroupId(0),
+    };
+    let mostly_right = snp_read("mostly_right", 3, b"GTACGTACGT", &[30; 10]);
+    let tie = snp_read("tie", 1, b"ACGTACG", &[30; 7]);
+    let records = drive_walker(vec![deletion, tie, mostly_right], fa);
+    let rec4 = records.iter().find(|r| r.anchor() == 4).unwrap();
+    let reference = rec4.reference_observation();
+    assert_eq!(reference.num_obs, 2);
+    assert_eq!(reference.placed_left, 1, "only the tie, 3 bases each side of 4");
+    let deleted = rec4
+        .observations
+        .iter()
+        .find(|o| o.bases.len() < rec4.footprint_len() as usize)
+        .expect("the deletion's observation");
+    assert_eq!(deleted.num_obs, 1);
+    assert_eq!(
+        deleted.placed_left, 0,
+        "3 bases left of the anchor and 5 right"
     );
 }
 

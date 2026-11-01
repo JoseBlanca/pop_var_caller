@@ -197,9 +197,12 @@ pub struct SequenceObservation {
     /// variance from these.
     pub mapq_sum: u32,
     pub mapq_sum_sq: u64,
-    /// How many supporting reads started strictly left of the locus's anchor — freebayes'
-    /// `placedLeft`, the read-position-bias term production subtracts from QUAL. Its sibling
-    /// `placed_start` is NOT carried: no model consumes it, and it is re-derivable.
+    /// How many supporting reads have at least as many aligned bases left of the locus as
+    /// right of it — freebayes' `placedLeft`, which the read-position half of the artifact
+    /// correction weighs (`calling_quality.md` §6.2). The locus is the record's anchor base on
+    /// the generic path and the whole tract on the STR path. Until 2026-11-01 it counted reads
+    /// that started left of the anchor, which is nearly every read. Its sibling `placed_start`
+    /// is NOT carried: no model consumes it.
     pub placed_left: u32,
     /// Phase-chain ids of the reads folded here — what lets a later step chain observations
     /// at neighbouring loci into a haplotype.

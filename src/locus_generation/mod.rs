@@ -283,6 +283,24 @@ impl SampleLocusObservations {
     }
 }
 
+/// **The base quality below which a read counts as low quality** for
+/// [`SequenceObservation::num_low_quality`].
+///
+/// Phred 20 because that is where the false SNPs it exists for separate from real ones: on HG002
+/// chromosome 20 at 30×, 72 false SNPs had their variant bases average below it while the
+/// reference bases at the same sites averaged 28 (`doc/devel/ng/spec/low_base_quality.md` §1).
+pub const LOW_BASE_QUALITY_BELOW: u8 = 20;
+
+/// Whether a read whose lowest base quality inside a locus is `base_quality` counts towards
+/// [`SequenceObservation::num_low_quality`].
+///
+/// **Phred 0 does not count.** It is what the read walk writes on the losing mate of an
+/// overlapping pair, so it says the pair was counted once rather than that a base was poor; a
+/// real overlap would otherwise mark a share of every allele's reads low quality.
+pub fn is_low_base_quality(base_quality: u8) -> bool {
+    (1..LOW_BASE_QUALITY_BELOW).contains(&base_quality)
+}
+
 /// One distinct `(bases, witness, read group, flank deletion, held flank)` the reads showed at a
 /// locus, with the pooled support of every read that showed it.
 ///
@@ -340,15 +358,24 @@ pub struct SequenceObservation {
     pub mapq_sum: u32,
     /// Σ MAPQ² over the supporting reads (see `mapq_sum`).
     pub mapq_sum_sq: u64,
-    /// How many supporting reads started **strictly left** of the locus's anchor —
-    /// freebayes' `placedLeft`, and the read-position-bias term production subtracts
-    /// from QUAL (`vcf/qual_refine.rs`).
+    /// How many supporting reads have at least as much of their aligned span left of the locus
+    /// as right of it — freebayes' `placedLeft`, decided per read by [`read_placed_left`].
+    /// The read-position half of the artifact correction weighs it
+    /// (`calling_quality.md` §6.2).
     ///
-    /// Carried because dropping it would forfeit the ability to reproduce production's
-    /// QUAL, which outranks tidiness. Its sibling `placed_start` is **not** carried: no
-    /// model consumes it, and it is a pure function of the read's start against the
-    /// anchor, so a later consumer can re-derive it without changing the fold (spec §6).
+    /// Until 2026-11-01 this counted reads that merely *started* left of the anchor, which is
+    /// nearly every read covering a position (12,510 of 12,568 at a sample of HG002 chr20
+    /// loci), so the read-position test could never fire.
+    ///
+    /// Its sibling `placed_start` is **not** carried: no model consumes it (spec §6).
     pub placed_left: u32,
+    /// How many supporting reads had a base quality below [`LOW_BASE_QUALITY_BELOW`] inside the
+    /// locus — the lowest of the read's bases there, the same base quality the read's error is
+    /// minted from. The low-base-quality penalty compares the variant reads' share of these with
+    /// the reference reads' (`doc/devel/ng/spec/low_base_quality.md`).
+    ///
+    /// **Zero on the STR path**, which has no artifact penalties to feed.
+    pub num_low_quality: u32,
     /// **The ids of every read folded here** — one per read, or one per read *pair* with
     /// its mates collapsed onto a single id, and deduplicated, so this is a count of reads
     /// only where no pair overlapped itself.
@@ -391,6 +418,30 @@ pub struct SequenceObservation {
     /// 2.1 carries none, and such a read is scored from both sides, one half each
     /// ([`HeldFlank::of_witness`]).
     pub held_flank: Option<HeldFlank>,
+}
+
+/// Whether a read has at least as many aligned reference bases left of a locus as right of it —
+/// freebayes' `placedLeft` (`Genotype.cpp`, `basesLeft >= basesRight`, the two counted in
+/// reference bases by `Allele::bpLeft` and `bpRight`).
+///
+/// A real variant sits at a varied place along the reads that carry it, so about half of them
+/// fall each way. An artifact made near one end of the reads — a misaligned read end, a
+/// low-quality tail — piles up on one side, and the read-position test catches it by
+/// comparing the variant reads' share against the reference reads' (`calling_quality.md`
+/// §6.2).
+///
+/// All four positions are 1-based and inclusive. `basesLeft = locus_start − alignment_start`
+/// and `basesRight = alignment_end − locus_end`, so the comparison is the same as asking
+/// whether the read's midpoint lies at or left of the locus's, which is how it is computed:
+/// in sums, without a signed count. A read that ends inside the locus has a negative count on
+/// its right and is placed left. A tie goes left, as freebayes' does.
+pub(crate) fn read_placed_left(
+    alignment_start: u64,
+    alignment_end: u64,
+    locus_start: u64,
+    locus_end: u64,
+) -> bool {
+    alignment_start + alignment_end <= locus_start + locus_end
 }
 
 /// **Which flank of an STR locus a read anchored before it ran out inside the repeat** — the
@@ -1353,6 +1404,7 @@ mod tests {
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -1833,6 +1885,7 @@ mod tests {
                 mapq_sum: 540,
                 mapq_sum_sq: 32_400,
                 placed_left: 3,
+                num_low_quality: 0,
                 chain_ids: vec![1, 2],
             }],
             reads_without_observation: 0,
@@ -1889,6 +1942,7 @@ mod tests {
             mapq_sum: 60,
             mapq_sum_sq: 3_600,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         };
         let partial = SequenceObservation {

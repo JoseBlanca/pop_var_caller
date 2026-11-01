@@ -398,7 +398,7 @@ fn score_with_ng(handed: &HandedToTheScorer) -> ng::ParalogScore {
     ng::score_locus_for_paralogy(
         &ng::LocusObservations { samples: &samples },
         &sigma0,
-        &ng::ParalogScorePrecompute::new(&params, &inbreeding),
+        &ng::ParalogScorePrecompute::new(&params, &inbreeding, inbreeding.len()),
     )
 }
 

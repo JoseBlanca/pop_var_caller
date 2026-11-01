@@ -132,6 +132,7 @@ fn scale(observation: &mut SequenceObservation, fraction: f64) {
     let exact = f64::from(kept) / f64::from(observation.num_obs);
     observation.num_fwd = count(observation.num_fwd).min(kept);
     observation.placed_left = count(observation.placed_left).min(kept);
+    observation.num_low_quality = count(observation.num_low_quality).min(kept);
     observation.q_sum = SummedLogError::from_nats(observation.q_sum.nats() * exact);
     observation.mapq_sum = (f64::from(observation.mapq_sum) * exact).round() as u32;
     observation.mapq_sum_sq = (observation.mapq_sum_sq as f64 * exact).round() as u64;
@@ -168,6 +169,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: 3_600 * u64::from(reads),
             placed_left: reads / 4,
+            num_low_quality: 0,
             chain_ids: ids.collect(),
         }
     }
