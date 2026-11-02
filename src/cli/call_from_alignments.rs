@@ -271,6 +271,17 @@ pub struct CallFromAlignmentsArgs {
     )]
     pub neighbour_evidence: calling_run::NeighbourEvidenceArg,
 
+    /// The share of the neighbour-evidence pass's drawn paths that must agree on how two
+    /// neighbouring heterozygous sites are phased for the VCF to phase them together. 1, all of
+    /// them, is the strictest; lower values give longer phase blocks with more wrong links.
+    #[arg(
+        long,
+        default_value_t = crate::neighbour_evidence::phase::MIN_PATH_AGREEMENT,
+        value_parser = calling_run::parse_path_agreement,
+        help_heading = "Advanced"
+    )]
+    pub phase_min_path_agreement: f64,
+
     /// Build a `.csi` (BAM) or `.crai` (CRAM) index beside any alignment file that has none.
     #[arg(long, help_heading = "Advanced")]
     pub build_index_if_missing: bool,
@@ -768,6 +779,7 @@ pub fn run_call_from_alignments(
             args.neighbour_evidence,
             &inbreeding_by_sample,
             ploidy,
+            args.phase_min_path_agreement,
         ));
     // **The sink is where the filter's flag lands.** With the filter off, this hands each record
     // straight to the writer — the call the run made before the filter existed, which is what

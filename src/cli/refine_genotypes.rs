@@ -9,6 +9,10 @@
 //!
 //! **A VCF the pass has already refined is refused.** Its `GP` would be the pass's own, and using
 //! them as templates would count the cohort's evidence a second time (§9 Q4, §10).
+//!
+//! **So is a VCF that is already phased** (`neighbour_evidence_phase_output.md` §3) — one whose
+//! header declares `PS`, or with a `|` in a `GT`: the pass writes its own `PS`, and the columns it
+//! leaves unchanged would keep the input's blocks beside the pass's under the same convention.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -25,7 +29,10 @@ use crate::cli::provenance::current_command_line;
 use crate::cli::run_output::{self, LogFileError};
 use crate::neighbour_evidence::stage::{NeighbourEvidenceSwitch, decide};
 use crate::types::{ContigId, GenomePosition, Ploidy, Position};
-use crate::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
+use crate::vcf::header::{
+    HeaderContig, HeaderMetadataError, PHASE_SET_DECLARATION, PHASED_GENOTYPE_DECLARATION,
+    VcfHeaderMetadata,
+};
 use crate::vcf::{RecordPlace, VcfWriteError, VcfWriter};
 
 /// `GP`'s declaration as calling writes it, and as the pass rewrites it (§4.1).
@@ -58,6 +65,15 @@ pub struct RefineGenotypesArgs {
     /// Where to write the run's log. Defaults to `pvc_refine_genotypes.log` beside the output.
     #[arg(long)]
     pub log: Option<PathBuf>,
+
+    /// The share of the pass's drawn paths that must agree on how two neighbouring heterozygous
+    /// sites are phased for the VCF to phase them together. 1, all of them, is the strictest.
+    #[arg(
+        long,
+        default_value_t = crate::neighbour_evidence::phase::MIN_PATH_AGREEMENT,
+        value_parser = calling_run::parse_path_agreement
+    )]
+    pub phase_min_path_agreement: f64,
 }
 
 /// What stops `pvc refine-genotypes`.
@@ -85,6 +101,12 @@ pub enum RefineGenotypesCliError {
          refining it again would count the cohort's evidence twice — refine the VCF calling wrote"
     )]
     AlreadyRefined { path: PathBuf },
+    /// The input already carries a phase.
+    #[error(
+        "`{path}` is already phased ({what}); the pass writes its own phase sets — strip the \
+         input's first, e.g. `bcftools annotate -x FORMAT/PS` and `bcftools +setGT -- -t a -n u`"
+    )]
+    AlreadyPhased { path: PathBuf, what: String },
     /// The parameters file could not be read or lacks what the pass needs.
     #[error("the parameters file `{path}`: {reason}")]
     Parameters { path: PathBuf, reason: String },
@@ -151,8 +173,19 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
             path: args.vcf.clone(),
         });
     }
+    if header
+        .meta_lines
+        .iter()
+        .any(|line| line.starts_with("##FORMAT=<ID=PS,"))
+    {
+        return Err(RefineGenotypesCliError::AlreadyPhased {
+            path: args.vcf.clone(),
+            what: "its header declares PS".to_string(),
+        });
+    }
     let (inbreeding, ploidy) = read_parameters(args, &header)?;
-    let decision = decide(NeighbourEvidenceSwitch::On, &inbreeding, ploidy);
+    let decision = decide(NeighbourEvidenceSwitch::On, &inbreeding, ploidy)
+        .with_min_path_agreement(args.phase_min_path_agreement);
     if !decision.ran {
         return Err(RefineGenotypesCliError::CannotRun {
             path: args.vcf.clone(),
@@ -163,6 +196,7 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
 
     let mut out_header: Vec<String> = Vec::with_capacity(header.meta_lines.len() + 2);
     let mut placed = false;
+    let mut declared_phase = false;
     for line in &header.meta_lines {
         if line.starts_with("##neighbourEvidence=") {
             continue;
@@ -182,6 +216,13 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
             ));
             placed = true;
         }
+        // `GT` now says it is phased where `PS` is set, and `PS` is declared beside it.
+        if line.starts_with("##FORMAT=<ID=GT,") {
+            out_header.push(PHASED_GENOTYPE_DECLARATION.to_string());
+            out_header.push(PHASE_SET_DECLARATION.to_string());
+            declared_phase = true;
+            continue;
+        }
         out_header.push(if line == CALLING_GP {
             REFINED_GP.to_string()
         } else {
@@ -197,6 +238,10 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
             "##refineGenotypesCommandline={}",
             current_command_line()
         ));
+    }
+    if !declared_phase {
+        out_header.push(PHASED_GENOTYPE_DECLARATION.to_string());
+        out_header.push(PHASE_SET_DECLARATION.to_string());
     }
     out_header.push(header.column_line.clone());
     let mut header_text = out_header.join("\n");
@@ -233,6 +278,15 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
         if line.is_empty() {
             continue;
         }
+        if has_a_phased_genotype(&line) {
+            return Err(RefineGenotypesCliError::AlreadyPhased {
+                path: args.vcf.clone(),
+                what: format!(
+                    "a GT has `|`: {}",
+                    line.chars().take(80).collect::<String>()
+                ),
+            });
+        }
         let place = place_of_line(&line, &contig_ids).ok_or_else(|| {
             RefineGenotypesCliError::NotRefinable {
                 path: args.vcf.clone(),
@@ -255,6 +309,23 @@ pub fn run_refine_genotypes(args: &RefineGenotypesArgs) -> Result<(), RefineGeno
         run_output::elapsed_text(started.elapsed())
     );
     Ok(())
+}
+
+/// Whether a record has a `GT` written with `|`.
+fn has_a_phased_genotype(line: &str) -> bool {
+    let mut fields = line.split('\t');
+    let Some(format) = fields.nth(8) else {
+        return false;
+    };
+    let Some(genotype_at) = format.split(':').position(|key| key == "GT") else {
+        return false;
+    };
+    fields.any(|column| {
+        column
+            .split(':')
+            .nth(genotype_at)
+            .is_some_and(|genotype| genotype.contains('|'))
+    })
 }
 
 /// A text reader over a plain or bgzf-compressed file.

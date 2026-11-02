@@ -1,5 +1,6 @@
 use super::*;
 use crate::neighbour_evidence::test_cohort::{CohortShape, test_cohort};
+use crate::vcf::header::UNPHASED_GENOTYPE_DECLARATION;
 
 const SAMPLES: usize = 20;
 
@@ -59,6 +60,7 @@ fn args(vcf: PathBuf, parameters: PathBuf, output: PathBuf) -> RefineGenotypesAr
         output,
         threads: 0,
         force: true,
+        phase_min_path_agreement: 1.0,
     }
 }
 
@@ -93,6 +95,10 @@ fn a_calling_vcf_is_refined_and_a_refined_one_refused() {
             .any(|line| line.starts_with("##neighbourEvidence=<ran=yes"))
     );
     assert!(header.contains(&REFINED_GP));
+    // The pass writes phase: `GT`'s declaration says so, and `PS` is declared.
+    assert!(header.contains(&PHASED_GENOTYPE_DECLARATION));
+    assert!(header.contains(&PHASE_SET_DECLARATION));
+    assert!(!header.contains(&UNPHASED_GENOTYPE_DECLARATION));
     let records_in = std::fs::read_to_string(&vcf)
         .expect("the input reads")
         .lines()
@@ -132,4 +138,45 @@ fn a_sample_missing_from_the_parameters_is_refused() {
     let error = run_refine_genotypes(&args(vcf, parameters, directory.path().join("out.vcf")))
         .expect_err("refused");
     assert!(error.to_string().contains("`s7`"), "{error}");
+}
+
+/// **An input already phased is refused** (phase output spec §3): a header declaring `PS`, or a
+/// `GT` written with `|`.
+#[test]
+fn a_phased_input_is_refused() {
+    let directory = tempfile::tempdir_in("tmp").expect("a directory to work in");
+    let (vcf, parameters, _) = calling_output(directory.path());
+    let text = std::fs::read_to_string(&vcf).expect("the input reads");
+
+    let declared = directory.path().join("declared.vcf");
+    std::fs::write(
+        &declared,
+        text.replacen("##INFO=", &format!("{PHASE_SET_DECLARATION}\n##INFO="), 1),
+    )
+    .expect("written");
+    let error = run_refine_genotypes(&args(
+        declared,
+        parameters.clone(),
+        directory.path().join("out1.vcf"),
+    ))
+    .expect_err("refused");
+    assert!(
+        matches!(error, RefineGenotypesCliError::AlreadyPhased { .. }),
+        "{error}"
+    );
+
+    let piped = directory.path().join("piped.vcf");
+    let header_end = text.find("\n#CHROM").expect("a column line");
+    let (header, records) = text.split_at(header_end);
+    std::fs::write(
+        &piped,
+        format!("{header}{}", records.replacen("\t0/0:", "\t0|0:", 1)),
+    )
+    .expect("written");
+    let error = run_refine_genotypes(&args(piped, parameters, directory.path().join("out2.vcf")))
+        .expect_err("refused");
+    assert!(
+        matches!(error, RefineGenotypesCliError::AlreadyPhased { .. }),
+        "{error}"
+    );
 }

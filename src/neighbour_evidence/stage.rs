@@ -19,6 +19,7 @@
 use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
+use super::phase::{EXTRA_PATHS_PER_ROUND, LEAN_MIN, MIN_PATH_AGREEMENT};
 use super::records::SiteRecord;
 use super::refine::{
     FillCheck, HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW, MAX_HIDDEN_SHARE, MISMATCH, NoReadRule,
@@ -58,9 +59,29 @@ pub struct NeighbourEvidenceDecision {
     pub inbreeding_by_sample: Vec<f64>,
     /// The window sizes the run plans with.
     pub sizes: WindowSizes,
+    /// The share of drawn paths that must agree at a phase link (`--phase-min-path-agreement`,
+    /// phase output spec §9).
+    pub min_path_agreement: f64,
 }
 
 impl NeighbourEvidenceDecision {
+    /// The same decision, a phase link kept where `share` of the drawn paths agree.
+    ///
+    /// # Panics
+    ///
+    /// If `share` is not in `(0, 1]`; the command line checks it first.
+    #[must_use]
+    pub fn with_min_path_agreement(self, share: f64) -> Self {
+        assert!(
+            share > 0.0 && share <= 1.0,
+            "a path agreement is a share in (0, 1]: got {share}"
+        );
+        Self {
+            min_path_agreement: share,
+            ..self
+        }
+    }
+
     /// The value of the `##neighbourEvidence=` header line.
     #[must_use]
     pub fn as_header_value(&self) -> String {
@@ -70,8 +91,9 @@ impl NeighbourEvidenceDecision {
                 "<ran=yes,why=\"{why}\",templates={MAX_TEMPLATES},mismatch={MISMATCH},core={},margin={},\
                  rounds={PHASING_ROUNDS},haplotype_templates={MAX_TEMPLATES},\
                  hidden_per_window={HIDDEN_RECORDS_PER_SAMPLE_PER_WINDOW},\
-                 hidden_share={MAX_HIDDEN_SHARE}>",
-                self.sizes.core_bases, self.sizes.margin_bases
+                 hidden_share={MAX_HIDDEN_SHARE},extra_paths={EXTRA_PATHS_PER_ROUND},\
+                 lean_min={LEAN_MIN},path_agreement={}>",
+                self.sizes.core_bases, self.sizes.margin_bases, self.min_path_agreement
             )
         } else {
             format!("<ran=no,why=\"{why}\">")
@@ -125,6 +147,7 @@ pub fn decide(
         why,
         inbreeding_by_sample: inbreeding_by_sample.to_vec(),
         sizes: WindowSizes::default(),
+        min_path_agreement: MIN_PATH_AGREEMENT,
     }
 }
 
@@ -142,6 +165,7 @@ pub struct NeighbourEvidenceStage {
     /// Each contig's length, by contig id, for §4.2's rule at a contig's end.
     contig_lengths: Vec<u64>,
     sizes: WindowSizes,
+    min_path_agreement: f64,
     fits: Vec<SampleFit>,
     contig: Option<ContigId>,
     held: Vec<HeldLine>,
@@ -167,6 +191,7 @@ impl NeighbourEvidenceStage {
             samples: decision.inbreeding_by_sample.len(),
             contig_lengths,
             sizes: decision.sizes,
+            min_path_agreement: decision.min_path_agreement,
             fits: decision
                 .inbreeding_by_sample
                 .iter()
@@ -267,7 +292,7 @@ impl NeighbourEvidenceStage {
                     &mut self.fits,
                     MAX_TEMPLATES,
                     NoReadRule::default(),
-                    Phasing::rounds_for(key),
+                    Phasing::rounds_for(key).with_min_path_agreement(self.min_path_agreement),
                 );
                 for (sum, check) in self.fill_checks.iter_mut().zip(solved.checks) {
                     *sum += check;

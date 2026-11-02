@@ -600,6 +600,17 @@ const FILTER_DECLARATIONS: &[&str] = &[
 
 /// **Every `FORMAT` field the file can carry, declared** — spec §7.
 /// `GP`'s declaration as calling writes it.
+/// `GT`'s declaration as calling writes it: never phased.
+pub(crate) const UNPHASED_GENOTYPE_DECLARATION: &str =
+    r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#;
+
+/// `GT`'s declaration where the neighbour-evidence pass ran: it writes the phase it is confident
+/// of (`neighbour_evidence_phase_output.md` §3).
+pub(crate) const PHASED_GENOTYPE_DECLARATION: &str = r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype; phased (|) where PS is set, unphased (/) elsewhere">"#;
+
+/// `PS`'s declaration, where the neighbour-evidence pass ran (phase output spec §3).
+pub(crate) const PHASE_SET_DECLARATION: &str = r#"##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set: the POS of the first phased record of this block; records of a sample with the same PS are phased together">"#;
+
 const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities, VCF genotype order">"#;
 
 /// `GP`'s declaration where the neighbour-evidence pass rewrote it (`neighbour_evidence_pass.md`
@@ -607,7 +618,7 @@ const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Fl
 const REFINED_GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">"#;
 
 const FORMAT_DECLARATIONS: &[&str] = &[
-    r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#,
+    UNPHASED_GENOTYPE_DECLARATION,
     r#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred probability the called genotype is wrong, capped at 99">"#,
     r#"##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Reads this sample observed at the locus, whether or not a written allele explains them">"#,
     r#"##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Reads whose sequence matched each allele exactly, REF first">"#,
@@ -695,10 +706,15 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     lines.extend(FORMAT_DECLARATIONS.iter().map(|declaration| {
         if refined && *declaration == GENOTYPE_POSTERIOR_DECLARATION {
             REFINED_GENOTYPE_POSTERIOR_DECLARATION.to_string()
+        } else if refined && *declaration == UNPHASED_GENOTYPE_DECLARATION {
+            PHASED_GENOTYPE_DECLARATION.to_string()
         } else {
             (*declaration).to_string()
         }
     }));
+    if refined {
+        lines.push(PHASE_SET_DECLARATION.to_string());
+    }
 
     let mut headings = FIXED_COLUMN_HEADINGS.to_string();
     for name in metadata.sample_names() {

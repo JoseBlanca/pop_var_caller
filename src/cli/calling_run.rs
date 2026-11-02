@@ -667,14 +667,32 @@ pub enum NeighbourEvidenceArg {
     Off,
 }
 
+/// **`--phase-min-path-agreement`'s value**: a share in `(0, 1]` (phase output spec §9).
+///
+/// # Errors
+///
+/// A value that is not a number in `(0, 1]`.
+pub fn parse_path_agreement(text: &str) -> Result<f64, String> {
+    let share: f64 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number"))?;
+    if share > 0.0 && share <= 1.0 {
+        Ok(share)
+    } else {
+        Err(format!("`{text}` is not a share in (0, 1]"))
+    }
+}
+
 /// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
 /// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
-/// header is written, and stated in it either way.
+/// header is written, and stated in it either way. `min_path_agreement` is
+/// `--phase-min-path-agreement`.
 #[must_use]
 pub fn neighbour_evidence_decision(
     asked: NeighbourEvidenceArg,
     inbreeding_by_sample: &[InbreedingF],
     ploidy: Ploidy,
+    min_path_agreement: f64,
 ) -> NeighbourEvidenceDecision {
     let switch = match asked {
         NeighbourEvidenceArg::Auto => NeighbourEvidenceSwitch::Auto,
@@ -682,7 +700,7 @@ pub fn neighbour_evidence_decision(
         NeighbourEvidenceArg::Off => NeighbourEvidenceSwitch::Off,
     };
     let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
-    let decision = decide(switch, &inbreeding, ploidy);
+    let decision = decide(switch, &inbreeding, ploidy).with_min_path_agreement(min_path_agreement);
     tracing::info!(
         "neighbour-evidence pass: {} ({})",
         if decision.ran { "runs" } else { "off" },
