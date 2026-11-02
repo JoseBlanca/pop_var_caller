@@ -93,7 +93,7 @@ pub enum CalledRecordSink {
     /// **The filter is off.** Records go straight to the VCF, through the same call the run made
     /// before this work — which is what makes the byte-identity oracle a property of the code
     /// rather than a hope.
-    StraightToTheVcf(VcfWriter),
+    StraightToTheVcf(Box<VcfWriter>),
     /// **The filter is on.** Records are parked; the VCF is not opened until pass three.
     ParkedOnTheSpill(SpillingSink),
 }

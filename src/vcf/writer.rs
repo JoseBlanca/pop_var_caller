@@ -32,6 +32,8 @@ use thiserror::Error;
 use super::VcfRecord;
 use super::encode::record_line;
 use super::header::{VcfHeaderMetadata, header_text};
+use crate::neighbour_evidence::line::RewriteTally;
+use crate::neighbour_evidence::stage::NeighbourEvidenceStage;
 use crate::types::{GenomePosition, Ploidy, Position};
 
 /// The 28-byte empty-block marker every well-formed bgzf file ends with.
@@ -83,6 +85,22 @@ pub struct VcfWriter {
     metadata: VcfHeaderMetadata,
     last: Option<RecordPlace>,
     records_written: u64,
+    /// **The neighbour-evidence pass, when the run decided to run it** (header metadata): every
+    /// line goes through it and comes back, in order, once its window is solved
+    /// (`neighbour_evidence_pass.md` §2.1). `None` writes each line as it arrives.
+    neighbour_evidence: Option<Box<NeighbourEvidenceStage>>,
+    /// Lines the pass has handed back and not yet written; kept to reuse its allocation.
+    released: Vec<(RecordPlace, Vec<u8>)>,
+}
+
+/// **What a finished file holds**: the records written, and what the neighbour-evidence pass did
+/// when it ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinishedVcf {
+    /// Record lines in the file.
+    pub records_written: u64,
+    /// The pass's counts, when it ran.
+    pub neighbour_evidence: Option<RewriteTally>,
 }
 
 impl VcfWriter {
@@ -99,13 +117,41 @@ impl VcfWriter {
         metadata: VcfHeaderMetadata,
         ploidy: Ploidy,
     ) -> Result<Self, VcfWriteError> {
-        let mut sink = Sink::open_tmp(final_path)?;
         let header = header_text(&metadata);
+        Self::create_with_header(final_path, metadata, ploidy, &header)
+    }
+
+    /// **Open the output with a header written elsewhere** — `pvc refine-genotypes`, which keeps
+    /// the header of the VCF it rewrites and amends it. `metadata` still supplies what the writer
+    /// itself reads: the contigs, the sample count and whether the neighbour-evidence pass runs.
+    /// `header` must end with the `#CHROM` line and its newline.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::create`].
+    pub fn create_with_header(
+        final_path: &Path,
+        metadata: VcfHeaderMetadata,
+        ploidy: Ploidy,
+        header: &str,
+    ) -> Result<Self, VcfWriteError> {
+        let mut sink = Sink::open_tmp(final_path)?;
         sink.write_all(header.as_bytes())
             .map_err(|source| VcfWriteError::Write {
                 tmp_path: tmp_path_for(final_path),
                 source,
             })?;
+        let neighbour_evidence = metadata
+            .neighbour_evidence()
+            .filter(|decision| decision.ran)
+            .map(|decision| {
+                let lengths = metadata
+                    .contigs()
+                    .iter()
+                    .map(|contig| contig.length)
+                    .collect();
+                Box::new(NeighbourEvidenceStage::new(decision, lengths))
+            });
         Ok(Self {
             sink,
             final_path: final_path.to_path_buf(),
@@ -113,6 +159,8 @@ impl VcfWriter {
             metadata,
             last: None,
             records_written: 0,
+            neighbour_evidence,
+            released: Vec::new(),
         })
     }
 
@@ -166,7 +214,30 @@ impl VcfWriter {
         if let Some(last) = self.last {
             self.check_order(last, place)?;
         }
+        self.last = Some(place);
+        match self.neighbour_evidence.as_mut() {
+            None => self.write_checked_line(line),
+            Some(stage) => {
+                stage.push(place, line.to_vec(), &mut self.released);
+                self.write_released()
+            }
+        }
+    }
 
+    /// Writes the lines the neighbour-evidence pass has handed back, in its order — the order
+    /// they arrived in, already checked.
+    fn write_released(&mut self) -> Result<(), VcfWriteError> {
+        let released = std::mem::take(&mut self.released);
+        for (_, line) in &released {
+            self.write_checked_line(line)?;
+        }
+        self.released = released;
+        self.released.clear();
+        Ok(())
+    }
+
+    /// Writes one line whose place has been checked.
+    fn write_checked_line(&mut self, line: &[u8]) -> Result<(), VcfWriteError> {
         self.sink
             .write_all(line)
             .and_then(|()| self.sink.write_all(b"\n"))
@@ -175,7 +246,6 @@ impl VcfWriter {
                 source,
             })?;
 
-        self.last = Some(place);
         self.records_written += 1;
         Ok(())
     }
@@ -258,8 +328,19 @@ impl VcfWriter {
     /// # Errors
     ///
     /// If any of the flush, the bgzf terminator, the `fsync`s or the rename fails.
-    pub fn finish(self) -> Result<(), VcfWriteError> {
-        self.sink.finish(&self.final_path)
+    pub fn finish(mut self) -> Result<FinishedVcf, VcfWriteError> {
+        let mut neighbour_evidence = None;
+        if let Some(stage) = self.neighbour_evidence.as_mut() {
+            stage.finish(&mut self.released);
+            neighbour_evidence = Some(stage.tally());
+            self.write_released()?;
+        }
+        let records_written = self.records_written;
+        self.sink.finish(&self.final_path)?;
+        Ok(FinishedVcf {
+            records_written,
+            neighbour_evidence,
+        })
     }
 }
 

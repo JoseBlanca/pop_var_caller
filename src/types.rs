@@ -1371,6 +1371,25 @@ impl fmt::Debug for Motif {
 // The genotype — calling's output vocabulary, shared across steps
 // ---------------------------------------------------------------------
 
+/// **One sample's genotype rows at a called locus** — what its reads said about every candidate
+/// genotype, and what the call made of it, in the genotype table's order: `0/0, 0/1, 1/1, 0/2, …`
+/// at diploidy, the same enumeration at any ploidy (`calling::genotype_table`).
+///
+/// Written to the VCF as `PL` and `GP` (`doc/devel/ng/spec/vcf_output.md` §7.2). Both rows have
+/// one entry a genotype of the alleles the locus was called over; the ploidy is kept beside them
+/// because the row length alone does not say which genotype an entry is once alleles are dropped.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenotypeRows {
+    /// Copies of each chromosome in the rows' genotypes.
+    pub ploidy: Ploidy,
+    /// The natural-log likelihood of the sample's reads under each genotype, as the final calling
+    /// pass scored them. Flat — every entry equal — where the reads say nothing.
+    pub log_likelihoods: Box<[f64]>,
+    /// The posterior probability of each genotype under the prior the sample was called with;
+    /// sums to one. With flat likelihoods it is that prior.
+    pub posteriors: Box<[f64]>,
+}
+
 /// One individual's genotype at one locus: which alleles that individual
 /// carries, one entry per copy of the genome. A **multiset** — order does not
 /// matter and repeats are the point, since carrying two copies of the same

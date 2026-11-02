@@ -37,11 +37,12 @@ use super::{
     FilterVerdict, MapqPool, PaddingBase, SampleCall, SampleColumn, SampleReadCounts,
     TractAnnotation, VcfRecord,
 };
+use crate::calling::genotype_table::{GenotypeIdx, GenotypeTable};
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
 use crate::calling::{LocusInference, SampleGenotypeCall};
 use crate::locus_generation::{FlankDeletion, LocusKind};
 use crate::region_typing::run_parse::parse_into_runs;
-use crate::types::{AlleleId, Genotype, Phred};
+use crate::types::{AlleleId, Genotype, GenotypeRows, Phred};
 use crate::types::{GenomeRegion, Position};
 use crate::window_coverage::WindowCoverage;
 
@@ -172,6 +173,7 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
                 sample.allele_reads,
                 sample.reads_no_written_allele_explains,
             ),
+            genotype_rows: written_rows(call),
         })
         .collect();
 
@@ -512,6 +514,10 @@ fn drop_alternatives_no_sample_calls(
             .unexplained_reads()
             .saturating_add(dropped_reads);
         column.read_counts = SampleReadCounts::new(reads, unexplained);
+        column.genotype_rows = column
+            .genotype_rows
+            .take()
+            .map(|rows| rows_over_kept_alleles(&rows, &kept));
         if let SampleCall::Called { genotype, .. } = &mut column.call {
             let renamed: Vec<AlleleId> = genotype
                 .alleles()
@@ -554,6 +560,64 @@ fn drop_alternatives_no_sample_calls(
     });
 }
 
+/// **A sample's rows over the alleles the record keeps**: only the genotypes whose alleles are all
+/// written, in the order they had — which is the genotype table's order over the kept alleles,
+/// because that enumeration orders genotypes by their alleles' indices and renumbering the kept
+/// alleles keeps their order. The posteriors are divided by what is left so they sum to one; the
+/// likelihoods need nothing, since `PL` is shifted to its best entry when it is written
+/// (`vcf_output.md` §7.2).
+fn rows_over_kept_alleles(rows: &GenotypeRows, kept: &[bool]) -> GenotypeRows {
+    let table = GenotypeTable::build(rows.ploidy, kept.len());
+    let view = table.view();
+    assert_eq!(
+        view.genotype_count(),
+        rows.log_likelihoods.len(),
+        "a sample's rows hold one entry a genotype of the alleles the locus was called over: \
+         {} alleles at ploidy {} make {} genotypes and the rows hold {}",
+        kept.len(),
+        rows.ploidy.get(),
+        view.genotype_count(),
+        rows.log_likelihoods.len()
+    );
+    let mut log_likelihoods = Vec::new();
+    let mut posteriors = Vec::new();
+    for genotype in 0..view.genotype_count() {
+        // PANIC-FREE: `genotype` ranges over the table's own count.
+        let copies = view
+            .allele_counts_of(GenotypeIdx(genotype as u32))
+            .expect("an index below the genotype count names a genotype");
+        if copies
+            .iter()
+            .zip(kept)
+            .all(|(&count, &keep)| count == 0 || keep)
+        {
+            log_likelihoods.push(rows.log_likelihoods[genotype]);
+            posteriors.push(rows.posteriors[genotype]);
+        }
+    }
+    let left: f64 = posteriors.iter().sum();
+    if left > 0.0 {
+        for posterior in &mut posteriors {
+            *posterior /= left;
+        }
+    }
+    GenotypeRows {
+        ploidy: rows.ploidy,
+        log_likelihoods: log_likelihoods.into(),
+        posteriors: posteriors.into(),
+    }
+}
+
+/// The rows a sample's `PL` and `GP` are written from: every called sample's, the ones whose
+/// reads said nothing included (`vcf_output.md` §7.2) — a sample the candidate step set aside has
+/// none.
+fn written_rows(call: &SampleGenotypeCall) -> Option<GenotypeRows> {
+    match call {
+        SampleGenotypeCall::Called { genotype_rows, .. } => Some(genotype_rows.clone()),
+        SampleGenotypeCall::Missing => None,
+    }
+}
+
 fn written_call(call: &SampleGenotypeCall) -> SampleCall {
     match call {
         SampleGenotypeCall::Missing => SampleCall::NoCall,
@@ -561,6 +625,8 @@ fn written_call(call: &SampleGenotypeCall) -> SampleCall {
             genotype,
             genotype_quality,
             reads_were_uninformative,
+            // Carried to the column by `written_rows`, whether or not the call is written.
+            genotype_rows: _,
         } => {
             if *reads_were_uninformative {
                 SampleCall::NoCall

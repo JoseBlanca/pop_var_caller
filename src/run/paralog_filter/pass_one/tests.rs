@@ -61,6 +61,7 @@ fn called(alleles: &[u16], counts: Vec<u32>) -> SampleColumn {
 /// makes `Σ AD[1..]` and `DP − AD[0]` indistinguishable; on real reads it is routinely non-zero.
 fn called_with_unexplained(alleles: &[u16], counts: Vec<u32>, unexplained: u32) -> SampleColumn {
     SampleColumn {
+        genotype_rows: None,
         call: SampleCall::Called {
             genotype: Genotype::new(alleles.iter().map(|id| AlleleId(*id)).collect()),
             genotype_quality: quality(30.0),
@@ -71,6 +72,7 @@ fn called_with_unexplained(alleles: &[u16], counts: Vec<u32>, unexplained: u32) 
 
 fn no_call(counts: Vec<u32>) -> SampleColumn {
     SampleColumn {
+        genotype_rows: None,
         call: SampleCall::NoCall,
         read_counts: SampleReadCounts::new(counts, 0),
     }

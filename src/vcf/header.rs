@@ -17,6 +17,8 @@ use std::collections::HashSet;
 
 use thiserror::Error;
 
+use crate::neighbour_evidence::stage::NeighbourEvidenceDecision;
+
 /// The largest contig length a VCF `##contig` line can carry.
 ///
 /// **The VCF integer type is 32-bit signed**, so a longer contig cannot be written honestly;
@@ -48,6 +50,11 @@ pub struct VcfHeaderMetadata {
     /// Whether the low-base-quality test ran (`--low-base-quality-weight` above zero). `false`,
     /// the default, leaves its `INFO` declaration out, for the reason the filter's are left out.
     low_base_quality_test: bool,
+    /// Whether the neighbour-evidence pass runs, and why (`neighbour_evidence_pass.md` §4.1).
+    /// `None` — a command that never decides, such as one writing a fixture — writes no
+    /// `##neighbourEvidence=` line; a calling run always decides, and states the decision either
+    /// way.
+    neighbour_evidence: Option<NeighbourEvidenceDecision>,
 }
 
 impl VcfHeaderMetadata {
@@ -57,6 +64,21 @@ impl VcfHeaderMetadata {
     pub fn the_low_base_quality_test_ran(mut self) -> Self {
         self.low_base_quality_test = true;
         self
+    }
+
+    /// **Say whether the neighbour-evidence pass runs, and why** — decided once, before the
+    /// file is opened (`neighbour_evidence_pass.md` §5). Consuming, for the reason
+    /// [`Self::the_hidden_duplication_filter_ran`] is.
+    #[must_use]
+    pub fn the_neighbour_evidence_decision(mut self, decision: NeighbourEvidenceDecision) -> Self {
+        self.neighbour_evidence = Some(decision);
+        self
+    }
+
+    /// Whether the neighbour-evidence pass runs, when the run decided.
+    #[must_use]
+    pub fn neighbour_evidence(&self) -> Option<&NeighbourEvidenceDecision> {
+        self.neighbour_evidence.as_ref()
     }
 
     /// **Say that the hidden-duplication filter ran, and what it was calibrated to.**
@@ -130,6 +152,7 @@ impl VcfHeaderMetadata {
             parameters_source,
             hidden_paralog: None,
             low_base_quality_test: false,
+            neighbour_evidence: None,
         })
     }
 
@@ -576,11 +599,20 @@ const FILTER_DECLARATIONS: &[&str] = &[
 ];
 
 /// **Every `FORMAT` field the file can carry, declared** — spec §7.
+/// `GP`'s declaration as calling writes it.
+const GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities, VCF genotype order">"#;
+
+/// `GP`'s declaration where the neighbour-evidence pass rewrote it (`neighbour_evidence_pass.md`
+/// §4.1).
+const REFINED_GENOTYPE_POSTERIOR_DECLARATION: &str = r#"##FORMAT=<ID=GP,Number=G,Type=Float,Description="Genotype posterior probabilities after the neighbour-evidence pass, VCF genotype order">"#;
+
 const FORMAT_DECLARATIONS: &[&str] = &[
     r#"##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype, unphased">"#,
     r#"##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Phred probability the called genotype is wrong, capped at 99">"#,
     r#"##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Reads this sample observed at the locus, whether or not a written allele explains them">"#,
     r#"##FORMAT=<ID=AD,Number=R,Type=Integer,Description="Reads whose sequence matched each allele exactly, REF first">"#,
+    r#"##FORMAT=<ID=PL,Number=G,Type=Integer,Description="Phred-scaled genotype likelihoods, the most likely genotype 0, VCF genotype order">"#,
+    GENOTYPE_POSTERIOR_DECLARATION,
     r#"##FORMAT=<ID=REPCN,Number=.,Type=Integer,Description="Repeat copy number of each called allele, GT order">"#,
     r#"##FORMAT=<ID=REPCNB,Number=.,Type=String,Description="STR bundle records only: each called allele's copies in every run, joined by _, GT order">"#,
 ];
@@ -616,6 +648,7 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
         parameters_source: _,
         hidden_paralog,
         low_base_quality_test,
+        neighbour_evidence,
     } = metadata;
 
     let mut lines: Vec<String> = vec![format!("##fileformat={FILE_FORMAT}")];
@@ -639,6 +672,12 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     if let Some(paralog) = hidden_paralog {
         lines.push(format!("##paralogFilter={}", paralog.as_header_value()));
     }
+    if let Some(decision) = neighbour_evidence {
+        lines.push(format!(
+            "##neighbourEvidence={}",
+            decision.as_header_value()
+        ));
+    }
 
     lines.extend(INFO_DECLARATIONS.iter().map(ToString::to_string));
     if *low_base_quality_test {
@@ -649,7 +688,17 @@ pub fn header_text(metadata: &VcfHeaderMetadata) -> String {
     if hidden_paralog.is_some() {
         lines.extend(HIDDEN_PARALOG_DECLARATIONS.iter().map(ToString::to_string));
     }
-    lines.extend(FORMAT_DECLARATIONS.iter().map(ToString::to_string));
+    // `GP` says whose posterior it is: the pass's, where it ran (§4.1).
+    let refined = neighbour_evidence
+        .as_ref()
+        .is_some_and(|decision| decision.ran);
+    lines.extend(FORMAT_DECLARATIONS.iter().map(|declaration| {
+        if refined && *declaration == GENOTYPE_POSTERIOR_DECLARATION {
+            REFINED_GENOTYPE_POSTERIOR_DECLARATION.to_string()
+        } else {
+            (*declaration).to_string()
+        }
+    }));
 
     let mut headings = FIXED_COLUMN_HEADINGS.to_string();
     for name in metadata.sample_names() {

@@ -13,6 +13,30 @@ Three ways to call a sample's genotype at each record:
 import numpy as np
 
 
+def stays(gap, share, run_bases):
+    """Probabilities of staying autozygous and staying not autozygous across `gap` bases: the
+    two-state Markov chain with mean run `run_bases`, mean gap run_bases*(1-share)/share, and
+    long-run autozygous share `share`. A long gap returns the state to `share`.
+
+    Corrected 2026-11-01: until then each state's stay was exp(-gap/its own mean length), which
+    swaps the two states across a gap much longer than both. The measurements in
+    neighbour_evidence_hmm.md were made with the old form; tomato1's 80 regions are separated by
+    such gaps."""
+    gap_bases = run_bases * (1 - share) / share
+    decay = np.exp(-gap * (1 / run_bases + 1 / gap_bases))
+    return share + (1 - share) * decay, (1 - share) + share * decay
+
+
+def background_shares(alt_frequencies):
+    """The background template's allele shares at one record (spec §3.3): the cohort's allele
+    frequencies, the reference taking the rest. Rounded frequencies can sum past one; the
+    reference is then 0 and the shares are rescaled to sum to one. Appended to `haplotypes`'
+    templates as one more row, it is a template like the others in every state."""
+    alt = np.asarray(alt_frequencies, dtype=float)
+    shares = np.concatenate([[max(0.0, 1.0 - alt.sum())], alt])
+    return shares / shares.sum()
+
+
 def genotype_pairs(n_alleles):
     """(j, k) with j <= k for each genotype index in VCF order."""
     return [(j, k) for k in range(n_alleles) for j in range(k + 1)]
@@ -95,7 +119,8 @@ def autozygosity(sites, positions, inbreeding, run_bases):
     pos = np.asarray(positions, dtype=float)
     gaps = np.diff(pos, prepend=pos[0])
     gaps[gaps < 0] = 1e9  # a new contig: forget
-    stay = np.stack([np.exp(-gaps / run_not), np.exp(-gaps / run_ibd)], axis=1)
+    stay_ibd, stay_not = stays(gaps, f, run_ibd)
+    stay = np.stack([stay_not, stay_ibd], axis=1)
     emit = np.array([[l @ ind, l @ ibd] for l, ind, ibd in sites])
     emit /= emit.max(axis=1, keepdims=True)
     state, loglik = _two_state_forward_backward(emit, stay)
@@ -158,7 +183,7 @@ def haplotypes(sites, positions, templates, inbreeding, run_bases, segment_bases
             p = np.full((K, K), (1 - f) / (K * K))
         else:
             gap = pos[i] - pos[i - 1]
-            s_d, s_n = np.exp(-gap / run_ibd), np.exp(-gap / run_not)
+            s_d, s_n = stays(gap, f, run_ibd)
             keep = np.exp(-gap / segment_bases)
             mass_d, mass_p = prev_d.sum(), prev_p.sum()
             # within the autozygous class: one template, switches like one copy
@@ -190,7 +215,7 @@ def haplotypes(sites, positions, templates, inbreeding, run_bases, segment_bases
             bwd_p[i] = np.full((K, K), bwd_d[i][0])
         else:
             gap = pos[i + 1] - pos[i]
-            s_d, s_n = np.exp(-gap / run_ibd), np.exp(-gap / run_not)
+            s_d, s_n = stays(gap, f, run_ibd)
             keep = np.exp(-gap / segment_bases)
             d_in = keep * bd + (1 - keep) * bd.sum() / K
             rows, cols = bp.sum(axis=1), bp.sum(axis=0)

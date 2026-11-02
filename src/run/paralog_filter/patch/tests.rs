@@ -357,6 +357,7 @@ mod encoded_lines {
 
     fn called(alleles: &[u16], counts: Vec<u32>) -> SampleColumn {
         SampleColumn {
+            genotype_rows: None,
             call: SampleCall::Called {
                 genotype: Genotype::new(alleles.iter().map(|id| AlleleId(*id)).collect()),
                 genotype_quality: quality(30.0),
@@ -367,6 +368,7 @@ mod encoded_lines {
 
     fn no_call(counts: Vec<u32>) -> SampleColumn {
         SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(counts, 0),
         }

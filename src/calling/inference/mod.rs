@@ -1134,6 +1134,7 @@ mod tests {
                     // likelihood, so it claims the reads said something rather than
                     // pretending to have checked.
                     reads_were_uninformative: false,
+                    genotype_rows: crate::calling::placeholder_genotype_rows(),
                 })
                 .collect();
             let expected = ExpectedAlleleCopies::new(copies, &candidates);
