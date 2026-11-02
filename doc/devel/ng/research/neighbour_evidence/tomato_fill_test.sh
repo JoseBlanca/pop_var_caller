@@ -7,7 +7,9 @@
 # cohort.tsv: one line per alignment file, `sample<TAB>path`, in the order accessions join the
 # cohort; the first N samples are the cohort of size N, so each cohort holds the smaller ones. A
 # sample with two files has two lines. The suite's `inputs/tomato/catalogue.tsv` (sample, project,
-# path) cut to columns 1 and 3 is one.
+# path) cut to columns 1 and 3 is one; it lists samples by name, so shuffle it with a fixed seed
+# first for cohorts that mix projects, and with them depths:
+#   cut -f1,3 catalogue.tsv | shuf --random-source=<(yes) > cohort.tsv
 #
 # Environment: REGIONS (a BED; default all of SL4.0ch01), THREADS (default 16), PVC (the binary;
 # default the newer of target/release/pvc and target-container/release/pvc), MASK_SHARE (0.02),
@@ -57,10 +59,10 @@ mapfile -t samples < <(cut -f1 "$cohort" | awk '!seen[$0]++' | head -n "$largest
     echo "cohort.tsv names ${#samples[@]} samples, fewer than $largest" >&2; exit 1; }
 
 # One psp per sample, in a directory of its own: generate-psps names it by the files' @RG SM, which
-# need not be the name cohort.tsv gives.
-for sample in "${samples[@]}"; do
-    [[ -e $work/psps/$sample/done ]] && continue
-    alignments=()
+# need not be the name cohort.tsv gives. generate-psps is one thread, so THREADS samples run at once.
+make_psp() {
+    local sample=$1 name path
+    local alignments=()
     while IFS=$'\t' read -r name path; do
         [[ $name == "$sample" ]] && alignments+=(--alignment "$path")
     done < "$cohort"
@@ -68,6 +70,16 @@ for sample in "${samples[@]}"; do
         --regions "$REGIONS" --output-dir "$work/psps/$sample" --force \
         > "$work/logs/psp.$sample.log" 2>&1
     touch "$work/psps/$sample/done"
+}
+for sample in "${samples[@]}"; do
+    [[ -e $work/psps/$sample/done ]] && continue
+    while (( $(jobs -rp | wc -l) >= threads )); do
+        wait -n
+    done
+    make_psp "$sample" &
+done
+while (( $(jobs -rp | wc -l) > 0 )); do
+    wait -n
 done
 
 for size in ${sizes//,/ }; do
