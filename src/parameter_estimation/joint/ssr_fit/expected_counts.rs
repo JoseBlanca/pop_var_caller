@@ -164,7 +164,7 @@ fn slips_into_each_bucket(
 }
 
 /// **A class's rows of reads, each distinct one held once**: a row is one sample's reads at one
-/// tract, the count in each read-length bucket with its libraries pooled. Two samples whose reads
+/// tract, the count in each read-length bucket with its read groups pooled. Two samples whose reads
 /// fall in the same buckets in the same numbers hold the same row. On tomato2's 59 samples,
 /// 754,601 rows hold 8,780 distinct ones, class by class.
 ///
@@ -383,9 +383,9 @@ impl ReadModel {
         let genotypes = genotype_pairs(classes);
         let span = allele_span;
         let read_span = evidence.read_span;
-        let libraries = one_stutter_for_every_library(evidence);
+        let read_groups = one_stutter_for_every_read_group(evidence);
         let mut distributions =
-            ReadDistributionsByLevel::of(&[slippage], &libraries, span, read_span);
+            ReadDistributionsByLevel::of(&[slippage], &read_groups, span, read_span);
         let per_allele = distributions.read_distribution_by_allele.swap_remove(0);
         let ln_read_chances = ln_read_chances(&per_allele, &genotypes);
         let slips_by_bucket = (0..classes)
@@ -828,26 +828,26 @@ pub(super) fn expected_counts_by_distinct_rows(
         .expected_counts(shares, concentration)
 }
 
-/// Every library of `evidence` scored at the class's one stutter: one slippage group, every
-/// multiplier one. The counting fit does not fit libraries apart.
-fn one_stutter_for_every_library(evidence: &StratumEvidence) -> Vec<Library> {
+/// Every read group of `evidence` scored at the class's one stutter: one slippage group, every
+/// multiplier one. The counting fit does not fit read groups apart.
+fn one_stutter_for_every_read_group(evidence: &StratumEvidence) -> Vec<ReadGroupStutter> {
     evidence
-        .libraries
+        .read_groups
         .iter()
-        .map(|library| Library {
+        .map(|read_group| ReadGroupStutter {
             slippage_group: 0,
             stutter_multiplier: 1.0,
-            ..*library
+            ..*read_group
         })
         .collect()
 }
 
-/// One sample's reads at a tract, its libraries summed bucket by bucket, written over `reads`,
+/// One sample's reads at a tract, its read groups summed bucket by bucket, written over `reads`,
 /// which holds one count a bucket.
 fn pool_reads_into(sample: &SampleTractReads, reads: &mut [u32]) {
     reads.fill(0);
-    for (_, library_reads) in &sample.by_library {
-        for (into, count) in reads.iter_mut().zip(library_reads) {
+    for (_, read_group_reads) in &sample.by_read_group {
+        for (into, count) in reads.iter_mut().zip(read_group_reads) {
             *into += count;
         }
     }
@@ -1060,9 +1060,9 @@ pub(super) fn pair_cubics_by_tract(
 ) -> Vec<Vec<PairCubic>> {
     let classes = allele_classes_in(allele_span);
     let genotypes = genotype_pairs(classes);
-    let libraries = one_stutter_for_every_library(evidence);
+    let read_groups = one_stutter_for_every_read_group(evidence);
     let distributions =
-        ReadDistributionsByLevel::of(&[slippage], &libraries, allele_span, evidence.read_span);
+        ReadDistributionsByLevel::of(&[slippage], &read_groups, allele_span, evidence.read_span);
     let ln_read_chances =
         ln_read_chances(&distributions.read_distribution_by_allele[0], &genotypes);
     let distinct = DistinctRows::of(evidence, homozygote_excess);
@@ -1383,8 +1383,9 @@ mod tests {
         let classes = allele_classes_in(allele_span);
         let genotypes = genotype_pairs(classes);
         let read_span = evidence.read_span;
-        let libraries = one_stutter_for_every_library(&evidence);
-        let distributions = ReadDistributionsByLevel::of(&[at], &libraries, allele_span, read_span);
+        let read_groups = one_stutter_for_every_read_group(&evidence);
+        let distributions =
+            ReadDistributionsByLevel::of(&[at], &read_groups, allele_span, read_span);
         let per_allele = &distributions.read_distribution_by_allele[0];
         let mut posteriors: Vec<Vec<f64>> = Vec::new();
         for tract in &evidence.tracts {

@@ -11,7 +11,8 @@
 //! The evidence is gathered as `estimate-parameters` gathers it, the depth rule applied. **One line
 //! a class**: its rows (one a (tract, sample) with reads), its distinct rows with a sample's read
 //! groups pooled, as the fit holds them today, and its distinct rows keyed by the sample's read
-//! groups and each read group's own reads, as a fit scoring each read group at its own stutter must.
+//! groups and each read group's own reads, as a fit scoring each read group at its own stutter
+//! must.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -55,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for sample in stratum.tracts.iter().flat_map(|tract| &tract.samples) {
             rows += 1;
             let mut summed = vec![0_u32; (2 * stratum.read_span + 1) as usize];
-            for (_, reads) in &sample.by_library {
+            for (_, reads) in &sample.by_read_group {
                 for (into, count) in summed.iter_mut().zip(reads) {
                     *into += count;
                 }
@@ -63,9 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pooled.insert(summed);
             by_read_group.insert(
                 sample
-                    .by_library
+                    .by_read_group
                     .iter()
-                    .map(|(library, reads)| (library.0, reads.clone()))
+                    .map(|(read_group, reads)| (read_group.0, reads.clone()))
                     .collect(),
             );
         }
@@ -77,7 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}\t{}\t{}\t{rows}\t{}\t{}",
             stratum.stratum.period,
             stratum.stratum.reference_repeats,
-            stratum.libraries.len(),
+            stratum.read_groups.len(),
             pooled.len(),
             by_read_group.len()
         )?;

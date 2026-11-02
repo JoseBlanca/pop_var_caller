@@ -654,7 +654,7 @@ pub enum UndeterminedErrors {
 /// **Fits every class of one motif length at once, by penalised counting.**
 ///
 /// `classes` are the classes of one motif length, any order, each repeat count at most once.
-/// `homozygote_excess` is indexed by sample. Every library is scored at its class's stutter
+/// `homozygote_excess` is indexed by sample. Every read group is scored at its class's stutter
 /// (multipliers are not fitted here). The allele window is `fit.allele_span`.
 ///
 /// With [`PenalisedFitConfig::pair_alternations`] above zero, the between-locus share is then read
@@ -917,12 +917,12 @@ fn fitted_period(
 ///
 /// # Panics
 ///
-/// - When a class's evidence declares more than one slippage group. The fit scores every library
+/// - When a class's evidence declares more than one slippage group. The fit scores every read group
 ///   at one stutter, and a class's [`StratumFit::slippage`] holds that one; stutter per slippage
 ///   group is not built (`str_library_stutter.md`).
-/// - When a class's libraries do not fit together ([`StratumEvidence::check_libraries`]), or two
-///   classes with reads share a motif length and a repeat count. Two classes at one repeat count
-///   where one has no reads do not panic: each comes back, the one without reads refused.
+/// - When a class's read groups do not fit together ([`StratumEvidence::check_read_groups`]), or
+/// two   classes with reads share a motif length and a repeat count. Two classes at one repeat
+/// count   where one has no reads do not panic: each comes back, the one without reads refused.
 /// - When the stutter prior's settings cannot be used
 ///   ([`PenalisedFitConfig::stutter_prior_problem`]) and there is a class to fit.
 ///
@@ -1030,11 +1030,11 @@ fn fit_repeat_tracts_logging(
         assert_eq!(
             evidence.groups, 1,
             "period {} at {} repeats: the evidence declares {} slippage groups, and the \
-             penalised fit fits one stutter for every library; stutter per slippage group is not \
+             penalised fit fits one stutter for every read group; stutter per slippage group is not \
              built (str_library_stutter.md)",
             evidence.stratum.period, evidence.stratum.reference_repeats, evidence.groups
         );
-        evidence.check_libraries();
+        evidence.check_read_groups();
     }
     if let Some(rule) = &exclusion.depth {
         let deep = tract_exclusion::leave_out_deep_tracts(strata, rule);
@@ -1889,7 +1889,7 @@ impl Period {
                             tracts: vec![tract.clone()],
                             read_span: evidence.read_span,
                             groups: evidence.groups,
-                            libraries: Arc::clone(&evidence.libraries),
+                            read_groups: Arc::clone(&evidence.read_groups),
                             tracts_over_guard_threshold: 0,
                             reads_crossing_tracts_over_guard_threshold: 0,
                             tracts_too_deep: 0,
@@ -4118,7 +4118,7 @@ mod tests {
     }
 
     /// **Evidence that declares two slippage groups is refused**, by name: the fit has one
-    /// stutter for every library.
+    /// stutter for every read group.
     #[test]
     #[should_panic(expected = "declares 2 slippage groups")]
     fn evidence_with_two_slippage_groups_is_refused() {
@@ -4683,7 +4683,7 @@ mod tests {
             }
             tract.samples = vec![SampleTractReads {
                 sample: 0,
-                by_library: vec![(LibraryIndex(0), buckets)],
+                by_read_group: vec![(ReadGroupIndex(0), buckets)],
             }];
         }
         evidence

@@ -304,7 +304,7 @@ fn binomial_upper_tail(trials: u64, chance: f64, at_least: u64) -> f64 {
 ///
 /// **The test leans towards keeping a tract.** A read that slips from one allele onto the other's
 /// length is not counted, so on a tract the model describes `K` falls short of `level × N` on
-/// average. Every library is scored at the class's one stutter, so one rate serves every read.
+/// average. Every read group is scored at the class's one stutter, so one rate serves every read.
 pub(super) fn tracts_in_the_stutter_tail(
     evidence: &StratumEvidence,
     homozygote_excess: &[f64],
@@ -370,7 +370,7 @@ mod tests {
         row
     }
 
-    /// A tract whose sample `s` read `rows[s]`, each sample its own library.
+    /// A tract whose sample `s` read `rows[s]`, each sample its own read group.
     fn tract(rows: &[Vec<u32>]) -> TractReads {
         TractReads {
             samples: rows
@@ -378,7 +378,7 @@ mod tests {
                 .enumerate()
                 .map(|(sample, reads)| SampleTractReads {
                     sample: sample as u32,
-                    by_library: vec![(LibraryIndex(sample as u32), reads.clone())],
+                    by_read_group: vec![(ReadGroupIndex(sample as u32), reads.clone())],
                 })
                 .collect(),
         }
@@ -394,7 +394,7 @@ mod tests {
             tracts,
             read_span: RECORDED_OFFSET_RANGE,
             groups: 1,
-            libraries: bench_fixtures::one_library_a_sample(samples),
+            read_groups: bench_fixtures::one_read_group_a_sample(samples),
             tracts_over_guard_threshold: 0,
             reads_crossing_tracts_over_guard_threshold: 0,
             tracts_too_deep: 0,
@@ -467,7 +467,7 @@ mod tests {
     }
 
     fn flagged(evidence: &StratumEvidence, level: f64) -> Vec<usize> {
-        let samples = evidence.libraries.len();
+        let samples = evidence.read_groups.len();
         tracts_in_the_stutter_tail(
             evidence,
             &vec![0.0; samples],
@@ -543,7 +543,7 @@ mod tests {
             TractReads {
                 samples: vec![SampleTractReads {
                     sample: 0,
-                    by_library: vec![(LibraryIndex(0), row)],
+                    by_read_group: vec![(ReadGroupIndex(0), row)],
                 }],
             }
         };

@@ -26,8 +26,8 @@
 //!    draws.
 //! 4. **Each sample's reads at the locus**: a Poisson number with mean [`CohortModel::depth`], each
 //!    read from either copy with even odds, its length reported through the stutter of the sample's
-//!    library ([`Slippage::read_probabilities`] at [`library_level`]). A sample with no read at a
-//!    locus is left out of that locus, as the census leaves it out.
+//!    read group ([`Slippage::read_probabilities`] at [`read_group_level`]). A sample with no read
+//! at a    locus is left out of that locus, as the census leaves it out.
 //!
 //! Reads are recorded to `±read_span` (the census's [`RECORDED_OFFSET_RANGE`], 8) with the end
 //! buckets saturating, while alleles reach ±14 — so the fit's outermost allele classes (±9, which
@@ -130,7 +130,7 @@ impl ParameterCurve {
     }
 }
 
-/// The three stutter numbers of a library at multiplier one, each a curve.
+/// The three stutter numbers of a read group at multiplier one, each a curve.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StutterTruth {
@@ -321,13 +321,13 @@ pub struct CohortModel {
     /// not coverage: at a long tract fewer reads span it than cover a position.
     pub depth: f64,
     pub homozygote_excess: HomozygoteExcessTruth,
-    /// One stutter multiplier per library (`[1.0]` by default); sample `s` is in library
-    /// `s mod libraries`.
+    /// One stutter multiplier per read group (`[1.0]` by default); sample `s` is in read group
+    /// `s mod read groups`.
     #[serde(default = "default_multipliers")]
-    pub library_multipliers: Vec<f64>,
-    /// Whether the evidence's library list carries the true multipliers (as if a previous fit had
-    /// found them) or one for every library (as if none had been fitted). The truth's class levels
-    /// are always at multiplier one.
+    pub read_group_multipliers: Vec<f64>,
+    /// Whether the evidence's read group list carries the true multipliers (as if a previous fit
+    /// had found them) or one for every read group (as if none had been fitted). The truth's class
+    /// levels are always at multiplier one.
     #[serde(default)]
     pub multipliers_told: bool,
     #[serde(default)]
@@ -520,7 +520,7 @@ impl CohortModel {
                 low: 0.85,
                 high: 0.99,
             },
-            library_multipliers: default_multipliers(),
+            read_group_multipliers: default_multipliers(),
             multipliers_told: false,
             structure: PopulationStructure::OnePopulation,
             seed: 1,
@@ -669,10 +669,10 @@ pub(super) enum Depth {
 
 /// What drawing one locus needs besides its frequencies.
 pub(super) struct LocusDrawing<'a> {
-    /// Per library, per allele class, the probability of each read bucket.
-    pub per_library: &'a [Vec<Vec<f64>>],
-    /// How many libraries the samples cycle through.
-    pub libraries: usize,
+    /// Per read group, per allele class, the probability of each read bucket.
+    pub per_read_group: &'a [Vec<Vec<f64>>],
+    /// How many read groups the samples cycle through.
+    pub read_groups: usize,
     pub homozygote_excess: &'a [f64],
     pub depth: Depth,
     pub buckets: usize,
@@ -715,8 +715,8 @@ pub(super) fn draw_locus_and_genotypes(
         } else {
             rng.categorical(frequencies)
         };
-        let library = sample % drawing.libraries;
-        let per_allele = &drawing.per_library[library];
+        let read_group = sample % drawing.read_groups;
+        let per_allele = &drawing.per_read_group[read_group];
         let mut counts = vec![0_u32; drawing.buckets];
         for _ in 0..depth {
             let allele = if rng.uniform() < 0.5 { first } else { second };
@@ -724,7 +724,7 @@ pub(super) fn draw_locus_and_genotypes(
         }
         reads.samples.push(SampleTractReads {
             sample: sample as u32,
-            by_library: vec![(LibraryIndex(library as u32), counts)],
+            by_read_group: vec![(ReadGroupIndex(read_group as u32), counts)],
         });
         genotypes.push((first, second));
     }
@@ -748,7 +748,7 @@ fn seed_for(seed: u64, label: u64) -> u64 {
 ///
 /// # Panics
 ///
-/// When the model has no samples, a negative depth, no libraries, or a non-positive multiplier.
+/// When the model has no samples, a negative depth, no read groups, or a non-positive multiplier.
 #[must_use]
 pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
     assert!(model.samples > 0, "a cohort has at least one sample");
@@ -757,12 +757,12 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
         "depth is a mean number of reads, not negative"
     );
     assert!(
-        !model.library_multipliers.is_empty()
+        !model.read_group_multipliers.is_empty()
             && model
-                .library_multipliers
+                .read_group_multipliers
                 .iter()
                 .all(|m| *m > 0.0 && m.is_finite()),
-        "every library has a finite positive stutter multiplier"
+        "every read group has a finite positive stutter multiplier"
     );
     let PopulationStructure::OnePopulation = model.structure;
 
@@ -775,17 +775,17 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
             }
         })
         .collect();
-    let libraries: Arc<[Library]> = model
-        .library_multipliers
+    let read_groups: Arc<[ReadGroupStutter]> = model
+        .read_group_multipliers
         .iter()
         .enumerate()
-        .map(|(index, multiplier)| Library {
+        .map(|(index, multiplier)| ReadGroupStutter {
             stutter_multiplier: if model.multipliers_told {
                 *multiplier
             } else {
                 1.0
             },
-            ..Library::in_group(ReadGroupId(index as u32), 0)
+            ..ReadGroupStutter::in_group(ReadGroupId(index as u32), 0)
         })
         .collect();
 
@@ -796,12 +796,12 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
         .map(|(repeats, loci)| {
             let truth = model.truth_at(*repeats, *loci);
             let reach = model.true_allele_reach;
-            let per_library: Vec<Vec<Vec<f64>>> = model
-                .library_multipliers
+            let per_read_group: Vec<Vec<Vec<f64>>> = model
+                .read_group_multipliers
                 .iter()
                 .map(|multiplier| {
                     let slippage = Slippage {
-                        level: library_level(truth.slippage.level, *multiplier),
+                        level: read_group_level(truth.slippage.level, *multiplier),
                         ..truth.slippage
                     };
                     (-reach..=reach)
@@ -810,8 +810,8 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
                 })
                 .collect();
             let drawing = LocusDrawing {
-                per_library: &per_library,
-                libraries: model.library_multipliers.len(),
+                per_read_group: &per_read_group,
+                read_groups: model.read_group_multipliers.len(),
                 homozygote_excess: &homozygote_excess,
                 depth: Depth::Poisson(model.depth),
                 buckets: (2 * read_span + 1) as usize,
@@ -845,7 +845,7 @@ pub fn draw_period(model: &CohortModel, read_span: i32) -> DrawnPeriod {
                 tracts,
                 read_span,
                 groups: 1,
-                libraries: Arc::clone(&libraries),
+                read_groups: Arc::clone(&read_groups),
                 tracts_over_guard_threshold: 0,
                 reads_crossing_tracts_over_guard_threshold: 0,
                 tracts_too_deep: 0,
@@ -1031,7 +1031,7 @@ mod tests {
     /// **The reads reproduce their truth**: over many loci, the share of reads in each bucket is
     /// the class's shares mixed through the stutter, `Σ_a share_a · P(bucket | a)` — each read's
     /// allele is, averaged over loci and genotypes, a draw from the class's shares. Checked with a
-    /// second library at three times the stutter, whose reads must follow its own level.
+    /// second read group at three times the stutter, whose reads must follow its own level.
     #[test]
     fn the_reads_reproduce_the_shares_through_the_stutter() {
         let mut model = CohortModel::tomato_like(2, StutterRegime::Pcr);
@@ -1039,14 +1039,14 @@ mod tests {
         model.loci = LociPerClass::Each(4_000);
         model.samples = 20;
         model.depth = 5.0;
-        model.library_multipliers = vec![1.0, 3.0];
+        model.read_group_multipliers = vec![1.0, 3.0];
         let drawn = draw_period(&model, RECORDED_OFFSET_RANGE);
         let truth = &drawn.truth[0];
         let read_span = RECORDED_OFFSET_RANGE;
         let reach = truth.true_allele_reach;
         let buckets = (2 * read_span + 1) as usize;
-        for (library, multiplier) in [(0_u32, 1.0), (1, 3.0)] {
-            // Per locus, this library's reads in each bucket: reads at one locus share its
+        for (read_group, multiplier) in [(0_u32, 1.0), (1, 3.0)] {
+            // Per locus, this read group's reads in each bucket: reads at one locus share its
             // alleles, so the error is taken over loci, which are independent.
             let per_locus: Vec<Vec<f64>> = drawn.strata[0]
                 .tracts
@@ -1054,8 +1054,8 @@ mod tests {
                 .map(|tract| {
                     let mut counts_here = vec![0.0; buckets];
                     for sample in &tract.samples {
-                        for (index, counts) in &sample.by_library {
-                            if index.0 == library {
+                        for (index, counts) in &sample.by_read_group {
+                            if index.0 == read_group {
                                 for (into, count) in counts_here.iter_mut().zip(counts) {
                                     *into += f64::from(*count);
                                 }
@@ -1070,7 +1070,7 @@ mod tests {
                 .collect();
             let reads: f64 = observed.iter().sum();
             let slippage = Slippage {
-                level: library_level(truth.slippage.level, multiplier),
+                level: read_group_level(truth.slippage.level, multiplier),
                 ..truth.slippage
             };
             let mut expected = vec![0.0; observed.len()];
@@ -1093,7 +1093,7 @@ mod tests {
                 let standard_error = spread.sqrt() / reads;
                 assert!(
                     (share - probability).abs() < 5.0 * standard_error.max(1e-5),
-                    "library {library}, bucket {bucket}: {share} against {probability}, \
+                    "read group {read_group}, bucket {bucket}: {share} against {probability}, \
                      error {standard_error}"
                 );
             }
@@ -1147,8 +1147,8 @@ mod tests {
             mix(tract.samples.len() as u64);
             for sample in &tract.samples {
                 mix(u64::from(sample.sample));
-                for (library, counts) in &sample.by_library {
-                    mix(u64::from(library.0));
+                for (read_group, counts) in &sample.by_read_group {
+                    mix(u64::from(read_group.0));
                     for count in counts {
                         mix(u64::from(*count));
                     }

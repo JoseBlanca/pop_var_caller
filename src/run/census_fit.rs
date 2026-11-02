@@ -1031,25 +1031,27 @@ mod tests {
                 .strata;
         assert!(!strata.is_empty(), "the fixture's tract is gathered");
 
-        let mut a_sample_read_through_two_libraries = false;
+        let mut a_sample_read_through_two_read_groups = false;
         for stratum in &strata {
             assert_eq!(stratum.groups, 3);
-            assert_eq!(stratum.libraries.len(), read_groups.len());
-            for (index, library) in stratum.libraries.iter().enumerate() {
-                assert_eq!(library.read_group, read_groups[index]);
-                assert_eq!(library.slippage_group, index as u32);
-                assert_eq!(library.stutter_multiplier, 1.0);
+            assert_eq!(stratum.read_groups.len(), read_groups.len());
+            for (index, read_group) in stratum.read_groups.iter().enumerate() {
+                assert_eq!(read_group.id, read_groups[index]);
+                assert_eq!(read_group.slippage_group, index as u32);
+                assert_eq!(read_group.stutter_multiplier, 1.0);
             }
             for row in stratum.tracts.iter().flat_map(|tract| &tract.samples) {
                 assert!(
-                    row.by_library.windows(2).all(|pair| pair[0].0 < pair[1].0),
-                    "a sample's libraries are listed in increasing order"
+                    row.by_read_group
+                        .windows(2)
+                        .all(|pair| pair[0].0 < pair[1].0),
+                    "a sample's read groups are listed in increasing order"
                 );
-                a_sample_read_through_two_libraries |= row.by_library.len() == 2;
+                a_sample_read_through_two_read_groups |= row.by_read_group.len() == 2;
             }
         }
         assert!(
-            a_sample_read_through_two_libraries,
+            a_sample_read_through_two_read_groups,
             "some sample's reads at some tract came through both its read groups, kept apart"
         );
     }
