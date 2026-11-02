@@ -49,11 +49,13 @@ sequence then counts a right genotype as wrong. On the first cohort that mismatc
 | 50 at 3×, outbred, 64 founders | 2,237 of 17,244 (13%) | 43 | 55 of 1,170 (4.70%) | 2 (17) |
 | 10 at 3×, outbred, 64 founders | 21 of 3,161 (1%) | 0 | 7 of 13 | 3 (19) |
 
-**Against the prototype** with the same rule (the check's 36-path rule): Rust phases more on every
-cohort — 72% against 46% at 200 samples, 13% against 7% on the 64-founder outbred cohort. Its
-links are wrong less often on four cohorts (0.05% against 0.28% at 200 samples, 4.7% against 7.8%
-on the 64-founder outbred one) and more often on three (0.09% against 0.05% on the first cohort,
-0.51% against 0.35%, 0.14% against 0.10%), all of those under the 1% limit. Its phase sets are
+**Against the prototype** with the same rule (the check's 36-path rule): Rust phases more on seven
+of the nine cohorts — 72% against 46% at 200 samples, 13% against 7% on the 64-founder outbred
+cohort — fewer on the 10-sample outbred one (21 SNPs against 48), and none on the 10-sample inbred
+one, as the prototype. Its links are wrong less often on four cohorts (0.05% against 0.28% at 200
+samples, 4.7% against 7.8% on the 64-founder outbred one) and more often on four: three under the
+1% limit (0.09% against 0.05% on the first cohort, 0.51% against 0.35%, 0.14% against 0.10%) and
+the 10-sample outbred one far over it (7 of 13 against 15 of 42). Its phase sets are
 about half as long (N50 8 against 13 records on the first cohort). The prototype fixed the copying length
 at 300 kb; Rust fits it per sample from {30, 300} kb, and a 30-kb fit breaks links over 30 kb.
 Which of the two causes each difference was not separated.

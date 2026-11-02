@@ -242,7 +242,8 @@ fn repeat_counts_come_from_columns_naming_the_allele() {
 
 /// **A phased column is written `a|b` with its block in `PS`, through the allele renumbering, and
 /// its repeat counts in the same order** (phase output spec §3): the record's allele 1 is carried
-/// by no one and dropped, so the input's `0|2` is written `0|1`, copy 0's repeat count first; an
+/// by no one and dropped, so the pass's `2|0` — copy 0 on allele 2 — is written `1|0`, with copy
+/// 0's repeat count first (`9,7`); an
 /// unphased heterozygote stays `/` with `PS` `.`, `FORMAT` gains `PS` last, and a column that
 /// dropped trailing fields gets `.` up to it.
 #[test]

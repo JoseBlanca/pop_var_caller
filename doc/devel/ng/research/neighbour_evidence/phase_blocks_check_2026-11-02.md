@@ -27,10 +27,11 @@ Neither more draws nor a stricter rule fixes the last two: the model there is co
   0.5 at both records.
 - **The rule the owner adopted** (every round's path agrees and leans) misses the ceiling on five
   of the nine cohorts.
-- **Joining windows works.** 57 joins were made on 4 cohorts, and none was wrong.
+- **Joining windows works.** 53 joins were made on 4 cohorts, and none was wrong.
 - **The share of paths that disagree at a link is not yet an error rate.** It ranks links within a
-  cohort, but the links where all paths agree are wrong 0.05% of the time on one cohort and 12% on
-  another. So the ceiling cannot yet be a user's parameter.
+  cohort, but the links where all paths agree are wrong 0.06% of the time on one cohort, 12% on
+  another and 37% (23 of 62) on 10 outbred samples. So the ceiling cannot yet be a user's
+  parameter.
 
 ## The cohorts and the rules
 
@@ -118,9 +119,10 @@ spec's 3 stays.
 ## What follows
 
 - **Adopt the 36-path rule** as the spec's link rule. It is the adopted rule made stricter, and it
-  is what passes. In Rust the 8 extra draws can share one pass per record: the cumulative weights
-  of a record's states are built once, and each draw then picks from them. Cost and memory are
-  unmeasured. Storing each path's orientation bit at every record a sample could phase is about 5
+  is what passes. In Rust the 8 extra draws could share one pass per record: the cumulative
+  weights of a record's states built once, each draw then picking from them. Cost and memory are
+  unmeasured. (The Rust build draws each separately; its cost is in
+  `doc/devel/reports/implementations/phase_output_2026-11-02.md`.) Storing each path's orientation bit at every record a sample could phase is about 5
   bytes a record, or 0.6 GB at 3,000 samples and 39,000 records.
 - **The outbred cohorts need a check that does not come from the model's own draws.** That is the
   owner's decision (see the chat report of 2026-11-02).

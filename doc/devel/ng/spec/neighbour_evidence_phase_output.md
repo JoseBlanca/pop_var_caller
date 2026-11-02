@@ -221,9 +221,9 @@ blocks, with 28% to 61% of true heterozygotes phased. The round rule above passe
 them. It fails on outbred cohorts: 1.2%, 7.8% and 36% (§6). Fewer extra draws are not enough: with
 4, the 64-founder 50-sample cohort is at 1.43%.
 
-In Rust the extra draws share one pass per record. A record's cumulative state weights are built
-once, and each draw picks from them, so 8 draws should cost much less than 8 backward walks
-(unmeasured). The link test needs each path's orientation bit at every record whose paths all lean,
+As built, each extra path is a backward draw of its own, from the forward probabilities the
+round already holds; drawing them from shared cumulative weights a record would be cheaper, but
+the whole phase added 10% at 200 samples (§4), so it was not needed. The link test needs each path's orientation bit at every record whose paths all lean,
 since only those can be linked: 36 bits, about 5 bytes a record a sample. (As built, 16 bytes at
 every allele pair — §4.)
 
