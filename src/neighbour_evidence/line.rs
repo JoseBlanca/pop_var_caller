@@ -8,6 +8,10 @@
 //! `GP` and the repeat counts, recounts `AC` and `AN`, and drops the alternative alleles no
 //! sample is called with any more, subsetting every per-allele and per-genotype field as calling
 //! does (`vcf_output.md` §7.2). `PL`, `DP`, `QUAL`, `FILTER` and every other field are kept.
+//!
+//! **The phase** (`neighbour_evidence_phase_output.md` §3): a column the pass phased is written
+//! `a|b`, copy 0's allele first, and its block in a `PS` field appended after every other; `PS` is
+//! `.` in every other column, and the repeat counts follow the written `GT`'s order.
 
 use super::model::GenotypePairs;
 use super::records::{SampleColumns, SiteRecord};
@@ -151,9 +155,17 @@ pub(crate) fn rewrite_line(
     let phred_at = key("PL").expect("a site has PL");
     let posterior_at = key("GP").expect("a site has GP");
     let repeats_at = key("REPCN").or_else(|| key("REPCNB"));
+    // `PS` goes after every field the line has, so each field the pass rewrites keeps its place.
+    let phase_set_at = key("PS").unwrap_or(format.len());
+    let field_count = format.len().max(phase_set_at + 1);
     let mut columns: Vec<Vec<String>> = fields[9..]
         .iter()
-        .map(|column| column.split(':').map(str::to_string).collect())
+        .map(|column| {
+            let mut values: Vec<String> = column.split(':').map(str::to_string).collect();
+            // A column may drop trailing fields; `PS` must land in its own place.
+            values.resize(field_count, ".".to_string());
+            values
+        })
         .collect();
     tally.sites += 1;
 
@@ -230,13 +242,26 @@ pub(crate) fn rewrite_line(
     for (sample, column) in columns.iter_mut().enumerate() {
         let outcome = refined.outcomes[sample];
         let recalled = outcome != Outcome::Unchanged;
-        let genotype_text = |genotype: Option<(usize, usize)>| match genotype {
-            Some((first, second)) => format!("{}/{}", new_index[first], new_index[second]),
-            None => "./.".to_string(),
+        // The phase, where the pass wrote one for this very genotype: copy 0's allele first.
+        let phase = refined.phases[sample].filter(|phase| {
+            outcome == Outcome::Called
+                && genotypes[sample]
+                    == Some((phase.first.min(phase.second), phase.first.max(phase.second)))
+        });
+        let genotype_text = |genotype: Option<(usize, usize)>| match (genotype, phase) {
+            (Some(_), Some(phase)) => {
+                format!("{}|{}", new_index[phase.first], new_index[phase.second])
+            }
+            (Some((first, second)), None) => {
+                format!("{}/{}", new_index[first], new_index[second])
+            }
+            (None, _) => "./.".to_string(),
         };
         if recalled || subsetting {
             column[genotype_at] = genotype_text(genotypes[sample]);
         }
+        column[phase_set_at] =
+            phase.map_or_else(|| ".".to_string(), |phase| phase.block.to_string());
         let posteriors: Option<Vec<f64>> = if recalled {
             Some(
                 refined.posteriors[sample * genotype_count..(sample + 1) * genotype_count].to_vec(),
@@ -290,7 +315,8 @@ pub(crate) fn rewrite_line(
         if let (Some(repeats_at), true) = (repeats_at, recalled) {
             column[repeats_at] = match genotypes[sample] {
                 None => ".".to_string(),
-                Some((first, second)) => [first, second]
+                Some(pair) => phase
+                    .map_or([pair.0, pair.1], |phase| [phase.first, phase.second])
                     .iter()
                     .map(|&allele| {
                         repeat_counts[allele].clone().unwrap_or_else(|| {
@@ -367,6 +393,9 @@ pub(crate) fn rewrite_line(
         .collect();
     out[4] = alt;
     out[7] = info.join(";");
+    if phase_set_at == format.len() {
+        out[8] = format!("{}:PS", fields[8]);
+    }
     out.extend(columns.iter().map(|column| column.join(":")));
     Some(out.join("\t").into_bytes())
 }
