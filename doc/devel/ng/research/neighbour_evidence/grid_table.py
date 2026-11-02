@@ -68,3 +68,21 @@ for low, high in [(0, 9), (10, 19), (20, 29), (30, 49), (50, 98), (99, 99)]:
         n, wrong = gq[f'{row}_gq{low}-{high}_n'], gq[f'{row}_gq{low}-{high}_wrong']
         cells.append(f'{wrong} of {n:,}' + (f' ({100 * wrong / n:.1f}%)' if n else ''))
     print(f'| {low}–{high} | {cells[0]} | {cells[1]} |')
+print()
+print('Missing data before and after the pass, with the GQ 10 floor on calls made without reads.')
+print()
+print('| founders | F | samples | depth | genotypes | missing before | missing after | filled | of them wrong | where samples have reads: wrong, calling → pass |')
+print('|---|---|---|---|---|---|---|---|---|---|')
+for r in rows:
+    c = collections.Counter(r['counts'])
+    with_reads = c['reads_nonref_n'] + c['reads_ref_n']
+    missing = c['no_reads_nonref_n'] + c['no_reads_ref_n']
+    total = with_reads + missing
+    filled = c['no_reads_floor10_called']
+    wrong = c['no_reads_floor10_wrong']
+    calling = c['reads_nonref_calling_wrong'] + c['reads_ref_calling_wrong']
+    passing = c['reads_nonref_pass_wrong'] + c['reads_ref_pass_wrong']
+    share = f' ({100 * wrong / filled:.1f}%)' if filled else ''
+    print(f"| {r['founders']} | {r['inbreeding']:g} | {r['samples']} | {r['depth']:g}× | {total:,} | "
+          f"{missing:,} ({100 * missing / total:.1f}%) | {missing - filled:,} ({100 * (missing - filled) / total:.1f}%) | "
+          f"{filled:,} | {wrong}{share} | {calling:,} → {passing:,} |")
