@@ -77,7 +77,7 @@
 # and found to be zero, and a zero under any other warrant is a stated number —
 # the inbreeding coefficient a run takes when nobody said is 0.0, `defaulted`.
 # The sections below say which is which where it matters.
-format_version = 6
+format_version = 7
 ploidy = 2
 
 [fitted_from]
@@ -285,6 +285,43 @@ duplicated_share = { value = 0.026, standard_error = 0.0023, separately_determin
 carrier_shape_a = { value = 2.22, standard_error = 0.439, separately_determined = true }
 carrier_shape_b = { value = 3.51, standard_error = 0.522 }
 share_with_carriers_above_stated_frequency = { value = 0.026 }
+
+[repeat_tracts_left_out]
+# The repeat tracts the stutter fit did not learn from, and why. Informational:
+# a calling run reads none of it, every tract left out here is still called, and
+# editing it changes nothing.
+#
+# A tract whose reads come from more copies than the reference holds shows reads
+# at lengths no genotype of two alleles explains, and the fit could only explain
+# them as slippage, which inflates its class's slip rate. Two rules leave such
+# tracts out, beside the guard (`over_guard_threshold`: more than one read in
+# ten of those differing from the reference differs by a non-whole number of
+# repeats). **The depth rule** (`too_deep`) leaves out a tract whose crossing
+# reads, summed over samples, exceed `depth_rule.times_expected` times what one
+# copy gives, or the count one copy reaches by chance less than
+# `depth_rule.chance` of the time where that is larger. What one copy gives is
+# `typical_depth` — the reads the typical tract would have if every read
+# reaching it crossed it — times the share of reaching reads that cross a tract
+# of that class. **The stutter-tail rule** (`in_stutter_tail`) leaves out a
+# tract where the reads off both alleles of the genotype each sample's reads
+# favour, summed over samples, are at least `stutter_tail_rule.times_rate` times
+# what the class's slip rate predicts and that many would occur by slippage less
+# than `stutter_tail_rule.chance` of the time. It runs in rounds, refitting each
+# motif length after each, until a round leaves nothing out (`settled = true`)
+# or `stutter_tail_rule.max_rounds` rounds have run.
+#
+# `fitted` is how many of a class's tracts its slip rate was fitted from. A
+# class with `fitted = 0` and tracts left out has no slippage row of its own.
+typical_depth = 40.625
+depth_rule = { times_expected = 2.0, chance = 0.001 }
+stutter_tail_rule = { times_rate = 2.5, chance = 0.002, max_rounds = 10 }
+stutter_tail_by_period = [
+    { period = 1, rounds = 2, settled = true },
+    { period = 5, rounds = 10, settled = false },
+]
+by_stratum = [
+    { period = 5, reference_repeats = 9, fitted = 50, over_guard_threshold = 1, too_deep = 7, in_stutter_tail = 2 },
+]
 
 [repeat_tracts]
 # Everything about repeat tracts. A **stratum** is a class of tract, and every

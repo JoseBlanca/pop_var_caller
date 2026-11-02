@@ -61,6 +61,7 @@ use rayon::prelude::*;
 
 pub mod expected_counts;
 pub mod penalised_fit;
+pub mod tract_exclusion;
 
 use crate::float;
 use crate::parameter_estimation::joint::census::{
@@ -238,6 +239,19 @@ pub struct TractReads {
     pub samples: Vec<SampleTractReads>,
 }
 
+impl TractReads {
+    /// **How many reads crossed the tract and reported a whole-repeat length**, over every sample
+    /// and library.
+    pub fn crossing_reads(&self) -> u64 {
+        self.samples
+            .iter()
+            .flat_map(|sample| &sample.by_library)
+            .flat_map(|(_, reads)| reads)
+            .map(|reads| u64::from(*reads))
+            .sum()
+    }
+}
+
 /// One stratum's tracts, and what the fit needs to know about the shape of them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StratumEvidence {
@@ -261,6 +275,18 @@ pub struct StratumEvidence {
     /// units — the guard's threshold. Such a tract is not something this noise model describes,
     /// and the fit says so rather than fitting it (`parameter_prepass_joint_records.md` §3.3).
     pub tracts_over_guard_threshold: u64,
+    /// **Reads that crossed a tract the guard left out**, over every sample and read group. With
+    /// the reads crossing the kept tracts, it is what the depth rule's crossing share counts as
+    /// crossed: the share is over every tract of the stratum, so the guard cannot move it
+    /// (`parameter_prepass_ssr.md` §4.6.1).
+    pub reads_crossing_tracts_over_guard_threshold: u64,
+    /// Tracts left out because their reads, summed over every sample, far exceed what one copy
+    /// gives: the depth rule (`parameter_prepass_ssr.md` §4.6.1, [`tract_exclusion`]).
+    pub tracts_too_deep: u64,
+    /// Tracts left out because, against the genotype each sample's reads favour, far more of their reads sat
+    /// off both alleles than the class's slip rate allows: the stutter-tail rule
+    /// (`parameter_prepass_ssr.md` §4.6.1, [`tract_exclusion`]).
+    pub tracts_in_stutter_tail: u64,
     /// Reads that reached a tract and crossed no whole copy of it, so reported no length.
     /// **Not evidence about slippage and not dropped silently**: a tract longer than a read is
     /// never crossed in any sample at any depth, so this count runs along the repeat-count
@@ -1229,6 +1255,9 @@ pub fn gather_strata(
                     groups,
                     libraries: Arc::clone(&libraries),
                     tracts_over_guard_threshold: 0,
+                    reads_crossing_tracts_over_guard_threshold: 0,
+                    tracts_too_deep: 0,
+                    tracts_in_stutter_tail: 0,
                     reads_reaching_not_crossing: 0,
                     guard_reads: 0,
                     bases_compared: 0,
@@ -1286,6 +1315,8 @@ pub fn gather_strata(
                     evidence.guard_reads += guard.non_whole_reads;
                     if guard.is_over_threshold() {
                         evidence.tracts_over_guard_threshold += 1;
+                        evidence.reads_crossing_tracts_over_guard_threshold +=
+                            reads.crossing_reads();
                         continue;
                     }
                     evidence.tracts.push(reads);
@@ -1512,6 +1543,9 @@ pub mod bench_fixtures {
             groups: 1,
             libraries: one_library_a_sample(samples),
             tracts_over_guard_threshold: 0,
+            reads_crossing_tracts_over_guard_threshold: 0,
+            tracts_too_deep: 0,
+            tracts_in_stutter_tail: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
             // A drawn stratum has no sequence behind it, so it has no substitution rate. Zero
@@ -2021,6 +2055,9 @@ mod evidence_size {
             groups: 1,
             libraries: Arc::from([Library::in_group(ReadGroupId(0), 0)]),
             tracts_over_guard_threshold: 0,
+            reads_crossing_tracts_over_guard_threshold: 0,
+            tracts_too_deep: 0,
+            tracts_in_stutter_tail: 0,
             reads_reaching_not_crossing: 0,
             guard_reads: 0,
             bases_compared: 0,

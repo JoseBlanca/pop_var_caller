@@ -708,6 +708,8 @@ impl ParametersFile {
             ordinary_site_prior: _,
             // Informational, and carries no warrant: a calling run reads none of it.
             duplicated_positions: _,
+            // Informational too: which tracts the fit left out, and nothing a run reads.
+            repeat_tracts_left_out: _,
             repeat_tracts,
             stated_constants,
             // Carries no warrant: it is what the run typed, not what a fit found, so there is

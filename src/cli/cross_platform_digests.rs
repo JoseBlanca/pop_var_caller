@@ -274,7 +274,14 @@ mod tests {
     /// **Re-recorded 2026-10-30** when the whole-reference digest became the MD5 of the contig
     /// digests (owner, `perf_repeat-scanner_2026-10-30.md`): only the `reference_digest` line and
     /// the census's "reference digest" term moved, diffed against the run before. It was `999e03bef3448832ba0285f0cc77013c`.
-    const FITTED_PARAMETERS_MD5: &str = "76ca3f1d41df216bdebb31a211693ed0";
+    /// **Re-recorded 2026-11-02** when the fit began leaving duplicated tracts out of the stutter fit
+    /// (parameters file format 7, `parameter_prepass_ssr.md` §4.6.1): this fixture leaves none out,
+    /// so the file moves by `format_version` and the new `[repeat_tracts_left_out]` section only —
+    /// taking both out reproduces the old checksum, `76ca3f1d41df216bdebb31a211693ed0`, exactly — and the VCF by its
+    /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
+    /// Again the same day, when the section's note began saying the stutter-tail rule counts against
+    /// the genotype each sample's reads favour: putting the old sentence back reproduces `10ac8802b6d82f5606bfa48a3932e109`.
+    const FITTED_PARAMETERS_MD5: &str = "f4282c42a1b42d9f018ed23313e0310e";
 
     /// The checksum of the VCF called with that file, without its `##commandline` and
     /// `##reference` lines.
@@ -445,7 +452,7 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `443a89c2b2066d269a43107f4e253a16`, exactly. Recorded in the Linux container (arm64).
-    const CALLS_MD5: &str = "c8201d16bc0d8574c123c88f082846fd";
+    const CALLS_MD5: &str = "50c08ae0a51e01882b70041979b99f83";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -562,7 +569,14 @@ mod tests {
     /// **Re-recorded 2026-10-30** when the whole-reference digest became the MD5 of the contig
     /// digests (owner, `perf_repeat-scanner_2026-10-30.md`): only the `reference_digest` line and
     /// the census's "reference digest" term moved, diffed against the run before. It was `74601f6755190f65c159a41c95bff1ed`.
-    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "659b51f8718480f218e27ca58437699d";
+    /// **Re-recorded 2026-11-02** when the fit began leaving duplicated tracts out of the stutter fit
+    /// (parameters file format 7, `parameter_prepass_ssr.md` §4.6.1): this fixture leaves none out,
+    /// so the file moves by `format_version` and the new `[repeat_tracts_left_out]` section only —
+    /// taking both out reproduces the old checksum, `659b51f8718480f218e27ca58437699d`, exactly — and the VCF by its
+    /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
+    /// Again the same day, when the section's note began saying the stutter-tail rule counts against
+    /// the genotype each sample's reads favour: putting the old sentence back reproduces `41130496d7dc1120a2d2e4760af301f4`.
+    const WITH_ERRORS_FITTED_PARAMETERS_MD5: &str = "6a75cce6cf5adbc4558fc5a37f389b9d";
 
     /// The checksum of the VCF called with that file, as [`CALLS_MD5`] is of the first.
     ///
@@ -711,7 +725,7 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `35933d51ad28e7a7f30ac8272e18c6d5`, exactly. Recorded in the Linux container (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "9c7bbea51346dd01e20110add15602bd";
+    const WITH_ERRORS_CALLS_MD5: &str = "62b2a7d1fa6a7c47667a7b816e44a864";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -841,7 +855,14 @@ mod tests {
     /// **Re-recorded 2026-10-30** when the whole-reference digest became the MD5 of the contig
     /// digests (owner, `perf_repeat-scanner_2026-10-30.md`): only the `reference_digest` line and
     /// the census's "reference digest" term moved, diffed against the run before. It was `aef60ff6d9816096e75a960d9ca5d0e8`.
-    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "bc215cb5e61214c1ff95a30fb065f442";
+    /// **Re-recorded 2026-11-02** when the fit began leaving duplicated tracts out of the stutter fit
+    /// (parameters file format 7, `parameter_prepass_ssr.md` §4.6.1): this fixture leaves none out,
+    /// so the file moves by `format_version` and the new `[repeat_tracts_left_out]` section only —
+    /// taking both out reproduces the old checksum, `bc215cb5e61214c1ff95a30fb065f442`, exactly — and the VCF by its
+    /// `##pvcParameters` line, which names that checksum. Recorded in the Linux container (arm64).
+    /// Again the same day, when the section's note began saying the stutter-tail rule counts against
+    /// the genotype each sample's reads favour: putting the old sentence back reproduces `5045368821e56ca04c011245fead47f7`.
+    const OF_21_SAMPLES_FITTED_PARAMETERS_MD5: &str = "64ed7e146fe238eebf7295aa10cd3666";
     /// **Re-recorded 2026-10-07** with the strand penalty of [`CALLS_MD5`]'s last note: the same 22
     /// records and genotypes, the SNPs' `QUAL` lower. It was `4a2c9b7ef87c94f09d55261bb290bf57`.
     /// Recorded in the Linux container (arm64, glibc) only.
@@ -1006,7 +1027,7 @@ mod tests {
     /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
     /// header line: the two changes together and nothing else — taking the read-sampling term out of
     /// σ₀ reproduces the previous checksum, `c21340eb1a9d52d3b5f540a95e45969c`, exactly. Recorded in the Linux container (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "7cf07f4fe020c7c469bcfc58d3d40fa4";
+    const OF_21_SAMPLES_CALLS_MD5: &str = "3bfeadc38c78f7aa12e1f027f43a96a6";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).

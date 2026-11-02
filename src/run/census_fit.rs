@@ -30,8 +30,10 @@
 use std::collections::BTreeMap;
 
 use crate::calling::parameters_file::{
-    CensusIdentity, FittedDensity, FittedDuplicatedPositions, InformationalNumber, PairedNumber,
-    ParametersFile, ReadsBehindEachCalibration, SeedRung, SnpIndelFitStart, StartOutcome,
+    CensusIdentity, DepthRuleSettings, FittedDensity, FittedDuplicatedPositions,
+    InformationalNumber, PairedNumber, ParametersFile, ReadsBehindEachCalibration,
+    RepeatTractsLeftOut, SeedRung, SnpIndelFitStart, StartOutcome, StutterTailPeriodRow,
+    StutterTailRuleSettings, TractsLeftOutRow,
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::parameter_estimation::calibration::MintedReadErrors;
@@ -49,6 +51,7 @@ use crate::parameter_estimation::joint::sequencing_batches::SequencingBatches;
 use crate::parameter_estimation::joint::ssr_fit::penalised_fit::{
     PenalisedFitConfig, fit_repeat_tracts,
 };
+use crate::parameter_estimation::joint::ssr_fit::tract_exclusion::{TractExclusion, TractsLeftOut};
 use crate::parameter_estimation::joint::ssr_fit::{
     StratumEvidence, StratumOutcome, StratumSubstitutionCounts, gather_strata, strata_of_kept_loci,
 };
@@ -81,6 +84,10 @@ pub struct CohortFit {
     /// the evidence the parameters file needs, which is why the evidence itself can be dropped
     /// as soon as the fit returns.
     pub substitution_counts: Vec<StratumSubstitutionCounts>,
+    /// **What the two rules that leave tracts out of the stutter fit did** (spec
+    /// `parameter_prepass_ssr.md` §4.6.1), written to the parameters file as the informational
+    /// table `[repeat_tracts_left_out]`.
+    pub tracts_left_out: TractsLeftOut,
 }
 
 /// Why a cohort could not be fitted.
@@ -251,13 +258,22 @@ pub fn fit_a_cohort(
     let homozygote_excess = homozygote_excess_in_cohort_order(cohort, &fit);
 
     let CohortTractStrata {
-        strata: evidence,
+        strata: mut evidence,
         tracts: kept_tracts,
     } = the_tract_strata_of_a_cohort(cohort, loci, contig_of, slippage_group_of)?;
     // **Every sample's reads at every stratum**: the penalised fit reads the whole cohort, one
     // motif length at a time, so no sample order is drawn. `homozygote_excess` is indexed as the
     // evidence's samples are, the cohort's own order.
-    let outcomes = fit_repeat_tracts(&evidence, &homozygote_excess, tracts);
+    //
+    // **Tracts whose reads come from more copies than the reference holds are left out** by
+    // depth and by the stutter tail (spec `parameter_prepass_ssr.md` §4.6.1); they are still
+    // called.
+    let (outcomes, tracts_left_out) = fit_repeat_tracts(
+        &mut evidence,
+        &homozygote_excess,
+        tracts,
+        &TractExclusion::production(),
+    );
     // **The evidence is the largest thing the tract half holds and nothing after the fit needs
     // more of it than these two counts a stratum**, so it goes here rather than when the
     // parameters file has been written.
@@ -272,6 +288,7 @@ pub fn fit_a_cohort(
         strata: outcomes,
         tracts: kept_tracts,
         substitution_counts,
+        tracts_left_out,
     })
 }
 
@@ -549,6 +566,7 @@ pub fn parameters_file_of(
     terms: &RecordingTerms,
     repeat_routing: Option<&StrRepeatCriteria>,
     snp_indel_fit: &JointFit,
+    tracts_left_out: &TractsLeftOut,
 ) -> ParametersFile {
     let file = ParametersFile::of_run_under(
         parameters,
@@ -566,6 +584,48 @@ pub fn parameters_file_of(
         snp_indel_fit.duplicated_report.as_ref(),
     );
     file.with_what_the_data_determine(fitted_density, duplicated_positions)
+        .with_repeat_tracts_left_out(Some(the_tracts_left_out_as_written(tracts_left_out)))
+}
+
+/// **What the rules that leave tracts out of the stutter fit did, in the file's words**
+/// (`[repeat_tracts_left_out]`, spec `parameter_prepass_ssr.md` §4.6.1).
+fn the_tracts_left_out_as_written(left_out: &TractsLeftOut) -> RepeatTractsLeftOut {
+    RepeatTractsLeftOut {
+        typical_depth: left_out.typical_depth,
+        depth_rule: left_out.exclusion.depth.map(|rule| DepthRuleSettings {
+            times_expected: rule.times_expected,
+            chance: rule.chance,
+        }),
+        stutter_tail_rule: left_out
+            .exclusion
+            .stutter_tail
+            .map(|rule| StutterTailRuleSettings {
+                times_rate: rule.times_rate,
+                chance: rule.chance,
+                max_rounds: rule.max_rounds as u64,
+            }),
+        stutter_tail_by_period: left_out
+            .stutter_tail_by_period
+            .iter()
+            .map(|(period, outcome)| StutterTailPeriodRow {
+                period: *period,
+                rounds: outcome.rounds as u64,
+                settled: outcome.settled,
+            })
+            .collect(),
+        by_stratum: left_out
+            .by_stratum
+            .iter()
+            .map(|row| TractsLeftOutRow {
+                period: row.stratum.period,
+                reference_repeats: row.stratum.reference_repeats,
+                fitted: row.fitted,
+                over_guard_threshold: row.over_guard_threshold,
+                too_deep: row.too_deep,
+                in_stutter_tail: row.in_stutter_tail,
+            })
+            .collect(),
+    }
 }
 
 /// **Format 4's two informational tables, as a file seeded on `rung` writes them**: the density's
@@ -1350,6 +1410,7 @@ mod writing_the_parameters_file {
             &terms,
             plan.terms.ssr_criteria.as_ref(),
             &fit.generic,
+            &fit.tracts_left_out,
         );
         (parameters, file)
     }
@@ -1447,6 +1508,12 @@ mod a_sample_with_repeat_tracts_only {
             strata: Vec::new(),
             tracts: 0,
             substitution_counts: Vec::new(),
+            tracts_left_out: TractsLeftOut {
+                exclusion: TractExclusion::none(),
+                typical_depth: None,
+                stutter_tail_by_period: Vec::new(),
+                by_stratum: Vec::new(),
+            },
         };
         let read_groups = ReadGroups::of_lanes(&[
             ("rg0", "s0", "lib0"),
@@ -1488,6 +1555,7 @@ mod a_sample_with_repeat_tracts_only {
             &terms,
             Some(&StrRepeatCriteria::default()),
             &fit.generic,
+            &fit.tracts_left_out,
         );
         let multiplier =
             &file.base_quality_calibration.by_read_group[4].error_probability_multiplier;

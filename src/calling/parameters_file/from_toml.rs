@@ -713,6 +713,7 @@ mod tests {
         let mut file = a_file_using_every_shape();
         file.format_version = 3;
         file.ordinary_site_prior.fitted_density = None;
+        file.repeat_tracts_left_out = None;
         file.duplicated_positions = None;
         file.repeat_tracts
             .fallback_between_locus_share_with_own_shares = None;

@@ -726,6 +726,87 @@ impl ScoredDistinctRows<'_> {
     }
 }
 
+/// The stutter-tail rule's genotype (`parameter_prepass_ssr.md` §4.6.1).
+impl ScoredDistinctRows<'_> {
+    /// **The genotype each sample's reads favour alone**: for every (tract, sample) with reads, in
+    /// the order of `evidence.tracts` then each tract's samples, the genotype whose likelihood of
+    /// the reads is highest at the scored stutter, with no prior. A tie goes to the genotype first
+    /// in [`genotype_pairs`] order.
+    ///
+    /// **What the stutter-tail rule counts off-length reads against** (`parameter_prepass_ssr.md`
+    /// §4.6.1). With no prior, a sample's reads at two lengths are always two alleles, so a tract
+    /// polymorphic between samples is never counted as stutter, whatever its class's shares say.
+    pub(super) fn genotypes_the_reads_favour(&self) -> Vec<Option<(usize, usize)>> {
+        let model = &self.model;
+        self.distinct
+            .rows
+            .par_iter()
+            .map(|(index, _)| {
+                let row = &self.scored[*index as usize];
+                let mut highest: Option<(usize, f64)> = None;
+                for (genotype, scaled) in row.scaled.iter().enumerate() {
+                    if *scaled > 0.0 && highest.is_none_or(|(_, top)| *scaled > top) {
+                        highest = Some((genotype, *scaled));
+                    }
+                }
+                highest.map(|(genotype, _)| model.genotypes[genotype])
+            })
+            .collect()
+    }
+}
+
+/// **Each tract's reads, and how many of them sat off both alleles of the genotype their
+/// sample's reads favour**, summed over the tract's samples: one `(crossing reads, off-length reads)` a tract, in
+/// the order of `evidence.tracts`. What the stutter-tail rule tests (`parameter_prepass_ssr.md`
+/// §4.6.1).
+///
+/// A sample's genotype is the one its reads favour alone, with no prior
+/// ([`ScoredDistinctRows::genotypes_the_reads_favour`]). **Not the one the fit weighs highest**: that
+/// one's prior is the class's allele shares, not the tract's own allele frequencies, so at a few
+/// reads a sample carrying a length rare in its class was given the class's common genotype and its
+/// reads counted as stutter. On tomato2's 59 inbred accessions that left out 438 tracts, 86 to 90 in
+/// 100 of them polymorphic between accessions; with the reads alone, 3
+/// (`ng_stutter_fit_outliers_2026-11-02.md` §5). **A read is off-length when its bucket is neither
+/// allele's**, and the end buckets saturate, so a read and an allele both at or past the recorded
+/// range share a bucket and the read is not counted. A sample whose reads no genotype explains adds
+/// its reads and none of them as off-length.
+pub(super) fn reads_off_the_genotype_the_reads_favour(
+    evidence: &StratumEvidence,
+    homozygote_excess: &[f64],
+    slippage: Slippage,
+    allele_span: i32,
+) -> Vec<(u64, u64)> {
+    // The table pairs each row with its sample's excess; with no prior, nothing reads it.
+    let distinct = DistinctRows::of(evidence, homozygote_excess);
+    let scored = ScoredDistinctRows::of(evidence, &distinct, slippage, allele_span);
+    let genotypes = scored.genotypes_the_reads_favour();
+    let read_span = evidence.read_span;
+    let slot = |class: usize| {
+        ((class as i32 - allele_span).clamp(-read_span, read_span) + read_span) as usize
+    };
+    (0..evidence.tracts.len())
+        .map(|tract| {
+            let rows = distinct.tract_starts[tract]..distinct.tract_starts[tract + 1];
+            let mut crossing = 0_u64;
+            let mut off_length = 0_u64;
+            for row in rows {
+                let reads = &distinct.reads[distinct.rows[row].0 as usize];
+                crossing += reads.iter().map(|count| u64::from(*count)).sum::<u64>();
+                if let Some((a, b)) = genotypes[row] {
+                    let (a, b) = (slot(a), slot(b));
+                    off_length += reads
+                        .iter()
+                        .enumerate()
+                        .filter(|(bucket, _)| *bucket != a && *bucket != b)
+                        .map(|(_, count)| u64::from(*count))
+                        .sum::<u64>();
+                }
+            }
+            (crossing, off_length)
+        })
+        .collect()
+}
+
 /// **One round's expected counts over the whole class**, at the stutter `slippage`, the
 /// allele-length shares `shares` and the spread `concentration`: the counts of
 /// [`expected_counts_by_tract`] summed, with every distinct row of reads scored once however many
