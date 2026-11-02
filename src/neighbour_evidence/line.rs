@@ -27,7 +27,8 @@ pub struct RewriteTally {
     pub called: u64,
     /// Of those, columns whose reads said nothing — `./.` before the pass (§4.2).
     pub called_without_reads: u64,
-    /// Columns re-called and written `./.` for lack of evidence nearby (§4.2).
+    /// Columns of samples without reads re-called and written `./.`: no evidence nearby, `GQ` below
+    /// the floor, or probably copying the background (§4.2).
     pub withheld: u64,
     /// Re-called columns whose genotype differs from calling's.
     pub genotypes_changed: u64,

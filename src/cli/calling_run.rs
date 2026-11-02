@@ -484,7 +484,7 @@ pub fn log_neighbour_evidence(finished: &FinishedVcf) {
     };
     tracing::info!(
         "neighbour-evidence pass: {} records re-called; {} genotypes called ({} of them where the \
-         sample had no reads), {} withheld for lack of evidence nearby, {} changed; {} alleles \
+         sample had no reads), {} left ./. where the sample had no reads, {} changed; {} alleles \
          and {} records dropped as no longer called; {} repeat counts unknown",
         run_output::with_thousands(tally.sites),
         run_output::with_thousands(tally.called),
