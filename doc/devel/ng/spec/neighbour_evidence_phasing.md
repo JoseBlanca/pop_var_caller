@@ -237,8 +237,9 @@ gains `rounds=R` and `haplotype_templates=16`, so a reader can tell which model 
 
 ### 4.1 The fill check, on hidden records
 
-**Before round 1, 20 records of each sample in each window are hidden** (owner, 2026-11-02, §10 Q4):
-drawn at random among the window's core records where the sample's reads are informative, from
+**Before round 1, up to 50 records of each sample in each window are hidden, and at most 5% of
+those where its reads are informative** (owner, 2026-11-02, §10 Q4; the numbers set at the Rust
+build): drawn at random among the window's core records where the sample's reads are informative, from
 §5's generator. At a hidden record the sample is treated as having no reads in every round — its
 walk and its path read a flat likelihood there — so none of its reads at that record reach any
 template's haplotype, and its averaged neighbours-only prediction there is what a real `./.` would
@@ -251,11 +252,16 @@ be filled with: no reads at the record, reads around it.
 - **The genotype written at a hidden record** is the averaged prediction times the sample's own
   likelihood there, renormalised — a posterior like any other, its reads entering once.
 - **What it costs:** the sample's reads at a hidden record are missing from what other samples copy
-  there. At 20 records a window it is negligible (in tomato about 1 in 2,500 of a sample's records);
-  hiding 40 of a 2-Mb simulated cohort's roughly 1,000 records a sample moved its errors within the
-  seed spread, hiding 200 (a fifth) added about 30%.
-- **Why 20 a window and not a fixed rate:** a rate small enough to be free over a genome (1 in
-  1,000) gives a few-megabase run a handful of records a sample, and the check needs 30.
+  there. In tomato's windows 50 is about 1 in 1,000 of a sample's records. In the Rust pass on the
+  2-Mb simulated cohorts (the 5% cap binding, about 25 a contig) wrong genotypes moved from 398 to
+  401, 615 to 587 and 69 to 69 against 20 a window, and from 2,613 to 2,809 on the outbred cohort;
+  in the prototype, hiding 200 of about 1,000 records a sample (a fifth) added about 30%.
+- **Why 50 a window, capped, and not a fixed rate:** a rate small enough to be free over a genome (1
+  in 1,000) gives a few-megabase run a handful of records a sample, and the check needs 30; the
+  first build's 20 a window could never reach 30 in a run of one window. With 50 and the cap, a
+  single-window run estimates for 12 to 28 of 50 samples on the inbred and partly inbred cohorts and
+  for none on the outbred one, where few genotypes settle at 3×; a whole-genome run sums hundreds of
+  windows.
 
 Measured in the prototype (`phaser.py --hide 200`, hiding many for the measurement only), the
 check's estimate against the fills' true error:
@@ -414,8 +420,8 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
     circularity of §7 on the genotype.
 13. **Rounds 3 and 8** against 5 on the 200-sample cells (§10 Q3).
 14. **The fill check on hidden records** (§4.1): its estimate against the true fill error on the cells
-    of point 2, the 200-sample cells included, at the production 20 a window — the prototype
-    measured it with 200 a sample; and that hiding 20 a window moves wrong-genotype counts by less
+    of point 2, the 200-sample cells included, at the production 50 a window — the prototype
+    measured it with 200 a sample; and that hiding 50 a window moves wrong-genotype counts by less
     than the seed spread.
 
 ---
@@ -447,5 +453,5 @@ result is the same at 1 and 30 threads. **The seed is a constant in the code, no
   prediction echoes the sample's own reads (§7). Offered: round 1's prediction, the averaged one, or
   removing the echo at a cost of a round. *The owner's proposal, adopted after the prototype
   measured it:* hide a few records of each sample from the start, so the echo never forms there,
-  and check only those — the hiding test of Beagle users, built in. 20 a window rather than the
-  proposed 1 in 1,000, so small runs get enough.
+  and check only those — the hiding test of Beagle users, built in. Up to 50 a window (at most 5%)
+  rather than the proposed 1 in 1,000, so small runs get enough.

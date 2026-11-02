@@ -8,7 +8,7 @@ about 2× — and written as each record's PL and GP, then solved as `refine_win
 it: round 1 with the samples' GP shares as templates, later rounds with the haplotypes of the round
 before (one of each sample, scored as `choose_haplotypes` scores them), a path drawn from the walk
 with the same SplitMix64 stream and state order as `random.rs`, the haplotypes re-estimated along it,
-twenty core records of each sample hidden, and the result the posterior averaged over rounds 2 to 5
+up to fifty core records of each sample hidden (at most 5% of its informative ones), and the result the posterior averaged over rounds 2 to 5
 (the prediction times the reads at hidden records). The walk is `hmm.haplotypes`, which the Rust
 walk already matches to 1e-9. The parameters are fixed — the Rust side freezes each sample's fit at
 the same grid point — and every input goes through the f32 the Rust records store.
@@ -24,7 +24,7 @@ SAMPLES, RECORDS, FOUNDERS = 8, 300, 3
 SPACING = 500
 SEGMENT, RUN, SHARE, MISMATCH = 300_000.0, 300_000.0, 0.5, 0.01
 CHOSEN = 1 * 6 + 3            # SEGMENT_GRID[1], RUN_GRID[3], segment-major
-ROUNDS, WINDOW_KEY, K, HIDDEN = 5, 11, 16, 20
+ROUNDS, WINDOW_KEY, K, HIDDEN, HIDDEN_SHARE = 5, 11, 16, 50, 0.05
 MASK = (1 << 64) - 1
 SEED = 0x6E65_6967_6862_6F75
 
@@ -185,7 +185,7 @@ def choose_haplotypes(s, previous, store):
 def hidden_records(s):
     candidates = [i for i in SITES if ROW[s][i] == 'informative']
     u = Uniforms(1, WINDOW_KEY, s, 0)
-    count = min(HIDDEN, len(candidates))
+    count = min(HIDDEN, int(HIDDEN_SHARE * len(candidates)), len(candidates))
     for d in range(count):
         remaining = len(candidates) - d
         picked = d + min(int(u.next() * remaining), remaining - 1)

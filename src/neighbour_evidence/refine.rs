@@ -201,8 +201,12 @@ impl Phasing {
 pub const PHASING_ROUNDS: usize = 5;
 
 /// **How many core records of each sample are hidden from the rounds for the fill check**
-/// (phasing spec §4.1).
-pub const HIDDEN_RECORDS_PER_SAMPLE: usize = 20;
+/// (phasing spec §4.1), at most: a run of one window must be able to reach the check's 30 sites.
+pub const HIDDEN_RECORDS_PER_SAMPLE: usize = 50;
+
+/// **The largest share of a sample's informative core records hidden**, so a short window does not
+/// lose much of a sample's evidence to the check.
+pub const MAX_HIDDEN_SHARE: f64 = 0.05;
 
 /// **Solves one window**: `records` is the whole window, `core` the indices of the records it
 /// writes, `contig_length` the contig's length if the header gives it (for §4.2's rule at the
@@ -453,7 +457,8 @@ fn add_to(sum: &mut [f64], values: &[f64]) {
 }
 
 /// **The core records of `sample` hidden from the rounds** (phasing spec §4.1): up to
-/// [`HIDDEN_RECORDS_PER_SAMPLE`] of the core walked sites where its reads are informative, drawn
+/// [`HIDDEN_RECORDS_PER_SAMPLE`] of the core walked sites where its reads are informative, and at
+/// most [`MAX_HIDDEN_SHARE`] of them, drawn
 /// without replacement — a partial Fisher–Yates shuffle of them in record order, one uniform a draw
 /// — and returned ascending.
 fn hidden_records(
@@ -469,7 +474,9 @@ fn hidden_records(
         .filter(|&index| records[index].row(sample) == SampleRow::Informative)
         .collect();
     let mut uniforms = Uniforms::new(StreamPurpose::HiddenRecords, window_key, sample, 0);
-    let count = HIDDEN_RECORDS_PER_SAMPLE.min(candidates.len());
+    let count = HIDDEN_RECORDS_PER_SAMPLE
+        .min((MAX_HIDDEN_SHARE * candidates.len() as f64) as usize)
+        .min(candidates.len());
     for draw in 0..count {
         let remaining = candidates.len() - draw;
         let picked =
