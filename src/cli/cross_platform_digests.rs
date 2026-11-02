@@ -442,7 +442,10 @@ mod tests {
     /// after the contigs, and nothing else moves — the pass is off on this cohort, too few samples or too
     /// little inbreeding for `auto` — and leaving that line out of the checksum reproduces the old one, `8d06ba1d16363cfbeef432a4a3633879`,
     /// exactly. Recorded on macOS (arm64).
-    const CALLS_MD5: &str = "443a89c2b2066d269a43107f4e253a16";
+    /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
+    /// header line: the two changes together and nothing else — taking the read-sampling term out of
+    /// σ₀ reproduces the previous checksum, `443a89c2b2066d269a43107f4e253a16`, exactly. Recorded in the Linux container (arm64).
+    const CALLS_MD5: &str = "c8201d16bc0d8574c123c88f082846fd";
 
     /// **The checksum of the parameters file fitted on the same cohort with sequencing errors in its
     /// reads** ([`a_varying_cohort_with_sequencing_errors_on_disk`]) — the file that carries the fit's
@@ -705,7 +708,10 @@ mod tests {
     /// after the contigs, and nothing else moves — the pass is off on this cohort, too few samples or too
     /// little inbreeding for `auto` — and leaving that line out of the checksum reproduces the old one, `d30f2cde2e78096f28b1bf1357eeae05`,
     /// exactly. Recorded on macOS (arm64).
-    const WITH_ERRORS_CALLS_MD5: &str = "35933d51ad28e7a7f30ac8272e18c6d5";
+    /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
+    /// header line: the two changes together and nothing else — taking the read-sampling term out of
+    /// σ₀ reproduces the previous checksum, `35933d51ad28e7a7f30ac8272e18c6d5`, exactly. Recorded in the Linux container (arm64).
+    const WITH_ERRORS_CALLS_MD5: &str = "9c7bbea51346dd01e20110add15602bd";
 
     /// **The same cohort grown to 21 samples**
     /// ([`a_larger_varying_cohort_with_sequencing_errors_on_disk`]), the fit and the calls. **A
@@ -997,7 +1003,10 @@ mod tests {
     /// after the contigs, and nothing else moves — the pass is off on this cohort, too few samples or too
     /// little inbreeding for `auto` — and leaving that line out of the checksum reproduces the old one, `26a52f1d4675bfcf7d73fae613b9e6c8`,
     /// exactly. Recorded on macOS (arm64).
-    const OF_21_SAMPLES_CALLS_MD5: &str = "c21340eb1a9d52d3b5f540a95e45969c";
+    /// **Re-recorded 2026-11-02** on merging the σ₀ change with `PL`/`GP` and the neighbour-evidence
+    /// header line: the two changes together and nothing else — taking the read-sampling term out of
+    /// σ₀ reproduces the previous checksum, `c21340eb1a9d52d3b5f540a95e45969c`, exactly. Recorded in the Linux container (arm64).
+    const OF_21_SAMPLES_CALLS_MD5: &str = "7cf07f4fe020c7c469bcfc58d3d40fa4";
 
     /// How many samples [`OF_21_SAMPLES_FITTED_PARAMETERS_MD5`] is of: one past the largest cohort
     /// whose errors come from the whole matrix (`fit::information::FULL_MATRIX_SAMPLES`, 20).
