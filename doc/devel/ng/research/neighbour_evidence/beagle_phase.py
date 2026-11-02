@@ -2,14 +2,17 @@
 once per target sample, the target left out, so its own reads never reach the haplotypes its
 templates are given.
 
-usage: uv run python beagle_phase.py prepare <cell dir> [<cell dir> ...]
+usage: uv run python beagle_phase.py prepare [--min-gq N] <cell dir> [<cell dir> ...]
        then, in the dev container (Java), run the commands written to <cell>/beagle/commands.sh
 
 prepare writes <cell>/beagle/input.vcf — the biallelic SNP PASS records of calls_off.vcf.gz that
 match a truth record (phasing_ceiling.py's records), GT only, ./. where calling wrote it — and one
 Beagle command per sample, `excludesamples=` naming it, output <cell>/beagle/out_<index>.vcf.gz.
-Beagle runs with its defaults (it estimates its population size and error rate) and imputes the
-./. it is given, so every template haplotype is complete.
+With --min-gq, a genotype whose GQ is below N goes in as ./. and Beagle imputes it — Beagle 5
+reads hard calls only, so a heterozygote 3 reads showed as a homozygote otherwise goes in as a
+confident error; that run's files go in <cell>/beagle_gq<N>/. Beagle runs with its defaults (it
+estimates its population size and error rate) and imputes the ./. it is given, so every template
+haplotype is complete.
 """
 import gzip, os, sys
 
@@ -17,8 +20,8 @@ JAR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 
                                    'beagle', 'beagle.jar'))
 
 
-def prepare(cell):
-    out_dir = os.path.join(cell, 'beagle')
+def prepare(cell, min_gq=None):
+    out_dir = os.path.join(cell, 'beagle' if min_gq is None else f'beagle_gq{min_gq}')
     os.makedirs(out_dir, exist_ok=True)
     truth = set()
     with gzip.open(os.path.join(cell, 'sim', 'truth.vcf.gz'), 'rt') as fh:
@@ -41,7 +44,12 @@ def prepare(cell):
                 continue
             if f[6] != 'PASS' or (f[0], int(f[1]), f[3], f[4]) not in truth:
                 continue
-            gts = [c.split(':', 1)[0] for c in f[9:]]
+            gq_at = f[8].split(':').index('GQ')
+            gts = []
+            for column in f[9:]:
+                values = column.split(':')
+                confident = min_gq is None or (values[gq_at] != '.' and int(values[gq_at]) >= min_gq)
+                gts.append(values[0] if confident else './.')
             rows.append('\t'.join([f[0], f[1], f'{f[0]}_{f[1]}', f[3], f[4], '.', 'PASS', '.', 'GT']
                                   + gts) + '\n')
     with open(os.path.join(out_dir, 'input.vcf'), 'w') as out:
@@ -65,5 +73,9 @@ def prepare(cell):
 if __name__ == '__main__':
     if sys.argv[1] != 'prepare':
         sys.exit(__doc__)
-    for cell in sys.argv[2:]:
-        prepare(cell)
+    args = sys.argv[2:]
+    min_gq = None
+    if args[0] == '--min-gq':
+        min_gq, args = int(args[1]), args[2:]
+    for cell in args:
+        prepare(cell, min_gq)

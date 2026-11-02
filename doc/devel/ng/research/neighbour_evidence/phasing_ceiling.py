@@ -21,6 +21,7 @@ re-called three ways, the templates differing only in what they carry:
 
   beagle     each template sample's two haplotypes as Beagle 5.5 phased them from calling's GT,
              the target left out of the run (beagle_phase.py); only where its runs exist
+  beagle_gq20  the same from calling's GT with GQ below 20 given to Beagle as ./.
 
 plus the background template (the cohort's allele frequencies) in each. `genotypes` against
 `haplotypes` is what phasing alone is worth; `pvc` against `genotypes` what uncertain genotypes
@@ -41,7 +42,7 @@ K = 16
 COMPARED = 500
 SEGMENT_BASES = 300_000.0
 RUN_BASES = 2_000_000.0
-ARMS = ('pvc', 'genotypes', 'haplotypes', 'subtraction', 'beagle')
+ARMS = ('pvc', 'genotypes', 'haplotypes', 'subtraction', 'beagle', 'beagle_gq20')
 MISMATCH = 0.01
 
 
@@ -193,9 +194,9 @@ def subtraction_haplotypes(cell, target, wanted):
     return result
 
 
-def beagle_haplotypes(cell, target):
+def beagle_haplotypes(cell, target, run='beagle'):
     """Sample name -> {(contig, position): (allele, allele)} from the run without `target`, or None."""
-    path = os.path.join(cell, 'beagle', f'out_{target}.vcf.gz')
+    path = os.path.join(cell, run, f'out_{target}.vcf.gz')
     if not os.path.exists(path):
         return None
     out = {}
@@ -214,7 +215,7 @@ def beagle_haplotypes(cell, target):
 
 
 def template_rows(record, templates, arm, phased=None, index=None, beagle=None, samples=None):
-    if arm == 'beagle':
+    if arm in ('beagle', 'beagle_gq20'):
         rows = [np.eye(2)[a] for t in templates
                 for a in beagle[samples[t]][(record['contig'], record['pos'])]]
         rows.append(background_shares([record['af']]))
@@ -241,10 +242,11 @@ def solve(args):
     templates = choose(records, target, len(samples))
     by_contig = CONTIGS[cell]
     phased = subtraction_haplotypes(cell, target, templates)
-    beagle = beagle_haplotypes(cell, target)
+    beagle_runs = {run: beagle_haplotypes(cell, target, run) for run in ('beagle', 'beagle_gq20')}
     counts = {}
     for arm in ARMS:
-        if arm == 'beagle' and beagle is None:
+        beagle = beagle_runs.get(arm)
+        if arm in beagle_runs and beagle is None:
             continue
         c = dict(reads=0, calling_wrong=0, pass_wrong=0, missing=0, filled=0, filled_wrong=0)
         for rows in by_contig.values():

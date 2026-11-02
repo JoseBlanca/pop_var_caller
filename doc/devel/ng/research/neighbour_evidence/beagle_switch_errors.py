@@ -2,7 +2,8 @@
 heterozygous sites it writes heterozygous, and how often the phase flips between consecutive such
 sites (a switch error; random phase flips half the time).
 usage: uv run python beagle_switch_errors.py <cell dir> [...]"""
-import gzip, sys
+import gzip, os, sys
+RUN = os.environ.get("BEAGLE_RUN", "beagle")
 for cell in sys.argv[1:]:
     truth = {}
     for line in gzip.open(f'{cell}/sim/truth.vcf.gz', 'rt'):
@@ -12,7 +13,7 @@ for cell in sys.argv[1:]:
         truth[(f[0], int(f[1]))] = dict(zip(names, f[9:]))
     het = called_het = pairs = switches = 0
     rows = []
-    for line in gzip.open(f'{cell}/beagle/out_0.vcf.gz', 'rt'):
+    for line in gzip.open(f'{cell}/{RUN}/out_0.vcf.gz', 'rt'):
         if line.startswith('##'): continue
         f = line.rstrip('\n').split('\t')
         if line.startswith('#'): bn = f[9:]; continue
