@@ -181,3 +181,42 @@ fn the_records_compared_are_spread_over_the_window() {
     let records = window(&[Some(always), Some(second_half), Some(first_half)], 2_000);
     assert_eq!(choose_templates(&records, 0, 2), Some(vec![1, 2]));
 }
+
+/// **A phasing round's haplotype choice takes each sample's better copy, one a sample** (phasing
+/// spec §2.3): sample 0 is homozygous for the alternative; sample 1 carries it on copy 1 only,
+/// sample 2 on neither, sample 3 on both. Samples 1 and 3 tie at no disagreement and come first in
+/// sample order, each with the copy that carries the alternative (copy 0 for sample 3, on the tie
+/// between its two); sample 2 offers its copy 0 last.
+#[test]
+fn a_round_takes_each_samples_better_haplotype_once() {
+    let records = window_of(4, |_, _| &HOMOZYGOUS_ALTERNATIVE);
+    let compared = compared_records(&records, 0);
+    assert_eq!(compared.len(), 400.min(AGREEMENT_RECORDS));
+    let homozygous_alternative = [0.0, 0.0, 1.0];
+    let reference = [1.0, 0.0];
+    let alternative = [0.0, 1.0];
+    let haplotype = |other: usize, copy: usize, _: usize| -> &[f64] {
+        match (other, copy) {
+            (1, 1) | (3, _) => &alternative,
+            _ => &reference,
+        }
+    };
+    let chosen = choose_haplotypes(
+        &records,
+        0,
+        &compared,
+        &|_| &homozygous_alternative,
+        &haplotype,
+        3,
+    );
+    assert_eq!(chosen, vec![(1, 1), (3, 0), (2, 0)]);
+    let chosen = choose_haplotypes(
+        &records,
+        0,
+        &compared,
+        &|_| &homozygous_alternative,
+        &haplotype,
+        1,
+    );
+    assert_eq!(chosen, vec![(1, 1)]);
+}

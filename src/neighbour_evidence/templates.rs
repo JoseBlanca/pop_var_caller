@@ -20,6 +20,7 @@
 //! and is the same on every run. The background template is not chosen here; it joins every walk
 //! (§3.3).
 
+use super::model::GenotypePairs;
 use super::records::{SampleRow, SiteRecord};
 
 /// The most templates a walk copies from, the background aside (`K`, §3.3) — what the prototype
@@ -39,20 +40,13 @@ pub fn choose_templates(
     sample: usize,
     max_templates: usize,
 ) -> Option<Vec<usize>> {
-    let informative: Vec<&SiteRecord> = records
-        .iter()
-        .filter(|record| record.is_site() && record.row(sample) == SampleRow::Informative)
+    let compared: Vec<&SiteRecord> = compared_records(records, sample)
+        .into_iter()
+        .map(|index| &records[index])
         .collect();
-    if informative.is_empty() {
+    if compared.is_empty() {
         return None;
     }
-    let compared: Vec<&SiteRecord> = if informative.len() <= AGREEMENT_RECORDS {
-        informative
-    } else {
-        (0..AGREEMENT_RECORDS)
-            .map(|draw| informative[draw * informative.len() / AGREEMENT_RECORDS])
-            .collect()
-    };
     let samples = compared[0].sample_count();
     let mut differences: Vec<(f64, usize)> = (0..samples)
         .filter(|&other| other != sample)
@@ -81,6 +75,110 @@ pub fn choose_templates(
             .map(|(_, other)| other)
             .collect(),
     )
+}
+
+/// **The records a sample's templates are chosen over**, as indices into `records`: its
+/// informative sites, at most [`AGREEMENT_RECORDS`] of them spread evenly by record order (§3.3).
+/// Empty when it has none.
+#[must_use]
+pub fn compared_records(records: &[SiteRecord], sample: usize) -> Vec<usize> {
+    let informative: Vec<usize> = (0..records.len())
+        .filter(|&index| {
+            records[index].is_site() && records[index].row(sample) == SampleRow::Informative
+        })
+        .collect();
+    if informative.len() <= AGREEMENT_RECORDS {
+        informative
+    } else {
+        (0..AGREEMENT_RECORDS)
+            .map(|draw| informative[draw * informative.len() / AGREEMENT_RECORDS])
+            .collect()
+    }
+}
+
+/// **The haplotypes sample `sample` copies from in a phasing round** (phasing spec §2.3), best
+/// first, as `(sample, copy)`: at most `max_templates`, at most one of each other sample.
+///
+/// A haplotype's score is the rate at which it carries an allele the sample's genotype lacks — at
+/// each record `Σ_a h(a) · P(genotype without a)`, `h` the haplotype and the genotype probabilities
+/// the sample's posterior from the previous round, `previous(record)` — summed over the `compared`
+/// records where the haplotype's sample is informative too, and scored by
+/// [`disagreement_bound`]. Each other sample offers its better haplotype (copy 0 on a tie); the
+/// offers are ranked by score, then sample, then copy. `haplotype(other, copy, record)` reads the
+/// previous round's haplotypes.
+///
+/// One of each sample because without it the slots fill with copies of the commonest haplotype:
+/// 871 wrong genotypes against 689 on the prototype's first cohort (spec §2.3).
+#[must_use]
+pub fn choose_haplotypes<'a>(
+    records: &[SiteRecord],
+    sample: usize,
+    compared: &[usize],
+    previous: &dyn Fn(usize) -> &'a [f64],
+    haplotype: &dyn Fn(usize, usize, usize) -> &'a [f64],
+    max_templates: usize,
+) -> Vec<(usize, usize)> {
+    let Some(&first) = compared.first() else {
+        return Vec::new();
+    };
+    let samples = records[first].sample_count();
+    let mut pairs = GenotypePairs::default();
+    // P(genotype without a) at each compared record, for every allele.
+    let lacking: Vec<Vec<f64>> = compared
+        .iter()
+        .map(|&index| {
+            let alleles = records[index].allele_count;
+            let posterior = previous(index);
+            (0..alleles)
+                .map(|allele| {
+                    pairs
+                        .of(alleles)
+                        .iter()
+                        .zip(posterior)
+                        .filter(|&(&(a, b), _)| a != allele && b != allele)
+                        .map(|(_, &probability)| probability)
+                        .sum()
+                })
+                .collect()
+        })
+        .collect();
+    let mut offers: Vec<(f64, usize, usize)> = (0..samples)
+        .filter(|&other| other != sample)
+        .map(|other| {
+            let mut shared = 0_usize;
+            let mut disagreement = [0.0_f64; 2];
+            for (position, &index) in compared.iter().enumerate() {
+                if records[index].row(other) != SampleRow::Informative {
+                    continue;
+                }
+                shared += 1;
+                for (copy, total) in disagreement.iter_mut().enumerate() {
+                    *total += haplotype(other, copy, index)
+                        .iter()
+                        .zip(&lacking[position])
+                        .map(|(carried, lacked)| carried * lacked)
+                        .sum::<f64>();
+                }
+            }
+            let scores = disagreement.map(|total| disagreement_bound(total, shared));
+            if scores[1] < scores[0] {
+                (scores[1], other, 1)
+            } else {
+                (scores[0], other, 0)
+            }
+        })
+        .collect();
+    offers.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+    });
+    offers
+        .into_iter()
+        .take(max_templates)
+        .map(|(_, other, copy)| (other, copy))
+        .collect()
 }
 
 /// **A pessimistic disagreement rate** from `disagreement` summed over `shared` records: the mean
