@@ -224,7 +224,8 @@ them. It fails on outbred cohorts: 1.2%, 7.8% and 36% (§6). Fewer extra draws a
 In Rust the extra draws share one pass per record. A record's cumulative state weights are built
 once, and each draw picks from them, so 8 draws should cost much less than 8 backward walks
 (unmeasured). The link test needs each path's orientation bit at every record whose paths all lean,
-since only those can be linked: 36 bits, about 5 bytes a record a sample.
+since only those can be linked: 36 bits, about 5 bytes a record a sample. (As built, 16 bytes at
+every allele pair — §4.)
 
 A stricter `LEAN_MIN` is **not** a lever on the block rule — above 0.75 no round can disagree — but
 it is one on which records are phased.
@@ -314,21 +315,25 @@ at the `POS` of the record before it.
 
 | what | existing code | change |
 |---|---|---|
-| the rounds and the store | `refine::refine_window_in_rounds`, `HaplotypeStore` | each sample keeps a consensus row (sums, `f32`, `2·(A − 1)` a record, as the store); per round, at every record of the window, the two bits of §2.1 (biallelic) or the round's haplotypes (more than two alleles); the alignment of §2.1 runs inside the sample's round closure after its draw |
+| the rounds and the store | `refine::refine_window_in_rounds`, `phase::SamplePhase` | each sample keeps a consensus row (sums, `f32`, `2·(A − 1)` a record, as the store) and, at every allele pair of every record, each path's two bits — its lean's sign and whether it reaches 0.5 — as two 64-bit masks; the extra paths come from `model::walk_and_draw_paths`; the alignment of §2.1 runs inside the sample's round closure after its draw (built: steps 1–2, `1ab612e2`, `7686b276`) |
 | the blocks | new, after the last round | the phased records (§2.2), the links (§2.3), the window's blocks per sample |
 | a record's result | `RefinedRecord` | gains, per sample, the orientation (copy 0's allele of the pair) or none, and the block's `PS` |
 | the window's join | `stage::NeighbourEvidenceStage` | keeps, per sample, the last written block (§2.4) across windows; passes it into the solve; updates it from what the window writes |
 | the line | `line::rewrite_line` | writes `|`, `PS`, and the repeat counts in `GT` order, through the allele renumbering |
 | the header | `vcf/header.rs`, `stage.rs` (`as_header_value`), `cli/refine_genotypes.rs` | `PS`, `GT`'s description, `lean_min`; the refusal of a phased input |
 
-**Memory**, per sample and window: a consensus row the size of one store buffer (8 bytes a
-biallelic record), and two bits a round at every record (a byte at `R` = 5). At 3,000 samples and a
-floor-sized window of 39,000 records (phasing spec §5) that is 39,000 × 3,000 × 8 bytes = 0.94 GB
-for the consensus and 117 MB for the bits, plus the rounds' haplotypes at the few records with more
-than two alleles.
+**Memory**, per sample and window, as built: a consensus row the size of one store buffer (8 bytes
+a biallelic record), and the paths' bits — two 64-bit masks, 16 bytes, at every allele pair of
+every record (one pair at a biallelic record, three at a triallelic). At 3,000 samples and a
+floor-sized window of 39,000 records (phasing spec §5) that is 39,000 × 3,000 × 8 bytes = 0.94 GB for
+the consensus and 1.9 GB for the bits — beside the store's two buffers, 1.9 GB. The bits could be
+packed into 9 bytes (36 paths × 2 bits) or kept only where every path leans; not done, since no
+cohort that size has been run and the owner prefers the simpler code until one is.
 
-**Time**: the alignment and the link test are one pass over a sample's records a round, a few
-operations a record — small beside a walk.
+**Time**, measured (`refine-genotypes`, 6 threads, this laptop): the extra paths and the phase add
+10% at 200 samples (15.9 s → 17.5 s); on the 50-sample cohorts, single runs of 3.2 s to 4.0 s,
+from 6% faster to 21% slower — differences of the size of one run's noise. The extra paths are drawn one by one, each a backward pass; drawing them from shared
+cumulative weights is not needed at this cost.
 
 ---
 

@@ -28,8 +28,9 @@ The VCF header states whether it ran and why, in a `##neighbourEvidence=` line.
 the pass on a VCF pvc wrote without it, so the same calls can be compared with and without it.
 
 **Forcing it on outside what `auto` accepts is at your own risk.** The pass is built for inbred
-lines. It does not phase haplotypes, so in an outbred sample — heterozygous over most of its
-genome — the samples it copies from give it only a blurred guide. On simulated outbred cohorts it
+lines. In an outbred sample — heterozygous over most of its genome — few other samples carry the
+same pair of haplotypes over a long stretch, and the samples it copies from give it only a weak
+guide. On simulated outbred cohorts it
 removed 13% to 24% of the wrong genotypes at 50 samples and did harm at 10: three quarters more wrong genotypes where samples
 had reads, in a cohort of 10 drawn from 64 lineages. Outbred species such as human, cattle or
 outbred crops have not been measured and are expected to fare no better. For those, use an
@@ -40,6 +41,8 @@ imputation tool that phases, such as Beagle or GLIMPSE.
 - `GT`, `GQ` and `GP` of every sample at every PASS record, from the new posterior. `PL` and `AD`
   stay as the reads gave them, cut to the alleles kept: a filled genotype keeps a flat `PL`, which
   shows that none of its evidence came from its own reads.
+- A heterozygote whose phase the pass is confident of is written with `|` and a `PS` field (next
+  section); `REPCN` follows the written order of `GT`.
 - `AC` and `AN` are recounted. An alternative allele no sample carries any more is removed from the
   record, and a record left with no alternative carried is removed.
 
@@ -49,6 +52,45 @@ imputation tool that phases, such as Beagle or GLIMPSE.
 - the filled genotype's `GQ` would be below 10; or
 - the sample is probably copying no other sample there — its haplotype is not carried by anyone
   else in the cohort — so the genotype would only be the cohort's allele frequency.
+
+## Phase: `|` and `PS`
+
+The pass estimates each sample's two haplotypes, and it writes the phase where it is confident. A
+heterozygous genotype is then written `0|1` or `1|0`, the first allele on one chromosome copy and
+the second on the other, with a `PS` (*phase set*) field. **Genotypes of one sample with the same
+`PS` are phased together**: their first alleles lie on one chromosome. Nothing is said about two
+different `PS` values. `PS` is the position of the first phased genotype of its set, the VCF
+specification's convention.
+
+Every other genotype is written as before, `0/1`, `0/0`, `./.`, with `PS` `.`. A heterozygote is
+left unphased when the pass is not sure which copy carries which allele, when it is not sure how it
+relates to its neighbours, or when it would be a phase set of one.
+
+Phase sets are short and many by design. A link between two neighbouring heterozygotes is written
+only when every one of the pass's 36 drawn estimates of the haplotypes agrees on it. On simulated
+cohorts at 3× (some samples at 30×), counting SNPs only:
+
+| simulated cohort | true heterozygotes phased | links inside phase sets that are wrong |
+|---|---|---|
+| inbred or partly inbred, 50 to 200 samples, 16 or 64 lineages | 44% to 77% | 0.05% to 0.5% |
+| 50 outbred samples, 16 lineages | 24% | 0.4% |
+| 50 outbred samples, 64 lineages | 13% | 4.7% |
+| 10 outbred samples, 64 lineages | 1% | 7 of 13 |
+
+**Outbred cohorts with many distinct haplotypes are where the phase is least reliable**, as in the
+last two rows. The pass phases few genotypes there, but those it does phase are wrong far more
+often than elsewhere.
+
+`--phase-min-path-agreement` (default `1`) is the share of the drawn estimates that must agree for
+a link to be written. Lower values give longer phase sets with more wrong links.
+
+Tools that read `PS`, such as WhatsHap, or SHAPEIT with its option to use it, treat each phase set
+on its own. A tool that ignores `PS` reads every `|` of a sample as one phase along the whole
+chromosome, which these phase sets do not claim.
+
+`pvc refine-genotypes` refuses a VCF that is already phased, one whose header declares `PS` or with
+a `|` in a genotype, since its phase sets would mix with the pass's. Remove the phase first, for
+example with `bcftools annotate -x FORMAT/PS`.
 
 ## How good the fills are: the fill check
 
