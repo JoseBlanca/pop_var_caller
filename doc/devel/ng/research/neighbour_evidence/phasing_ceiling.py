@@ -19,6 +19,9 @@ re-called three ways, the templates differing only in what they carry:
              the relatives' GP; round two their round-one haplotypes. The target is left out of
              every step that phases its templates, so its reads do not come back to it.
 
+  beagle     each template sample's two haplotypes as Beagle 5.5 phased them from calling's GT,
+             the target left out of the run (beagle_phase.py); only where its runs exist
+
 plus the background template (the cohort's allele frequencies) in each. `genotypes` against
 `haplotypes` is what phasing alone is worth; `pvc` against `genotypes` what uncertain genotypes
 cost. Biallelic SNP PASS records matching a truth record only; segment and run lengths fixed at the
@@ -38,7 +41,7 @@ K = 16
 COMPARED = 500
 SEGMENT_BASES = 300_000.0
 RUN_BASES = 2_000_000.0
-ARMS = ('pvc', 'genotypes', 'haplotypes', 'subtraction')
+ARMS = ('pvc', 'genotypes', 'haplotypes', 'subtraction', 'beagle')
 MISMATCH = 0.01
 
 
@@ -190,7 +193,32 @@ def subtraction_haplotypes(cell, target, wanted):
     return result
 
 
-def template_rows(record, templates, arm, phased=None, index=None):
+def beagle_haplotypes(cell, target):
+    """Sample name -> {(contig, position): (allele, allele)} from the run without `target`, or None."""
+    path = os.path.join(cell, 'beagle', f'out_{target}.vcf.gz')
+    if not os.path.exists(path):
+        return None
+    out = {}
+    with gzip.open(path, 'rt') as fh:
+        for line in fh:
+            if line.startswith('##'):
+                continue
+            f = line.rstrip('\n').split('\t')
+            if line.startswith('#'):
+                names = f[9:]
+                out = {name: {} for name in names}
+                continue
+            for name, gt in zip(names, f[9:]):
+                out[name][(f[0], int(f[1]))] = tuple(int(a) for a in gt.split('|'))
+    return out
+
+
+def template_rows(record, templates, arm, phased=None, index=None, beagle=None, samples=None):
+    if arm == 'beagle':
+        rows = [np.eye(2)[a] for t in templates
+                for a in beagle[samples[t]][(record['contig'], record['pos'])]]
+        rows.append(background_shares([record['af']]))
+        return np.array(rows)
     if arm == 'subtraction':
         rows = [np.array([1 - phased[t][record['contig']][c][index], phased[t][record['contig']][c][index]])
                 for t in templates for c in (0, 1)]
@@ -213,13 +241,16 @@ def solve(args):
     templates = choose(records, target, len(samples))
     by_contig = CONTIGS[cell]
     phased = subtraction_haplotypes(cell, target, templates)
+    beagle = beagle_haplotypes(cell, target)
     counts = {}
     for arm in ARMS:
+        if arm == 'beagle' and beagle is None:
+            continue
         c = dict(reads=0, calling_wrong=0, pass_wrong=0, missing=0, filled=0, filled_wrong=0)
         for rows in by_contig.values():
             sites = [(r['lik'][target], None, None) for r in rows]
             posteriors, _ = haplotypes(sites, [r['pos'] for r in rows],
-                                       [template_rows(r, templates, arm, phased, i)
+                                       [template_rows(r, templates, arm, phased, i, beagle, samples)
                                         for i, r in enumerate(rows)],
                                        inbreeding[target], RUN_BASES, SEGMENT_BASES)
             for r, post in zip(rows, posteriors):
@@ -267,6 +298,8 @@ def main():
         name = os.path.basename(os.path.normpath(cell))
         for arm in ARMS:
             c = totals[cell][arm]
+            if not c:
+                continue
             share = f" ({100 * c['filled_wrong'] / c['filled']:.1f}%)" if c['filled'] else ''
             print(f"| {name} | {arm} | {c['calling_wrong']:,} → {c['pass_wrong']:,} of {c['reads']:,} | "
                   f"{c['missing']:,} | {c['filled']:,} | {c['filled_wrong']:,}{share} |", flush=True)
