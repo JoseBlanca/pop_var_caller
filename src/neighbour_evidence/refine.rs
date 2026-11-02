@@ -34,6 +34,54 @@ pub const MISMATCH: f64 = 0.01;
 /// (`doc/devel/reports/implementations/neighbour_pass_phase4_2026-11-02.md`, decision 1).
 pub const NO_READ_MIN_GENOTYPE_QUALITY: f32 = 10.0;
 
+/// **When a sample's reads contradict its neighbours** at a site: the reads are at least this many
+/// times less likely under the neighbours' prediction than under the genotype that fits them best.
+/// One read showing an allele the neighbours rule out does it; so does a deep heterozygote the
+/// neighbours call homozygous. A ratio, not a confident own genotype, so the check works at one
+/// read a site, where no single genotype ever is confident.
+pub const CONTRADICTION_LIKELIHOOD_RATIO: f64 = 10.0;
+
+/// **When a sample without reads at a record is written with a genotype** (§4.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoReadRule {
+    /// The least `GQ` the pass's call must reach.
+    pub min_genotype_quality: f32,
+    /// The most a sample's neighbours may disagree with its own confident genotypes in the window
+    /// — `disagreed / checked` of its [`NeighbourCheck`] — before every no-read call of the sample
+    /// in the window is withheld. `None` applies no such limit.
+    pub max_neighbour_disagreement: Option<f64>,
+}
+
+impl Default for NoReadRule {
+    fn default() -> Self {
+        Self {
+            min_genotype_quality: NO_READ_MIN_GENOTYPE_QUALITY,
+            max_neighbour_disagreement: None,
+        }
+    }
+}
+
+/// **How well a sample's neighbours predict it in a window**, the evidence for trusting what they
+/// say where it has no reads. At every site where the sample has reads and the neighbours alone
+/// would make a call the [`NoReadRule`] keeps (their prediction's `GQ` at least its floor), the
+/// reads are checked against the prediction: `disagreed` counts the sites where they contradict it
+/// ([`CONTRADICTION_LIKELIHOOD_RATIO`]). `disagreed / checked` then estimates how often the sample's
+/// no-read calls in this window are wrong, measured on its own data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NeighbourCheck {
+    pub checked: u32,
+    pub disagreed: u32,
+}
+
+/// **The pass's result over one window's core**: each record's, and each sample's check.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowRefinement {
+    /// One per core record, in order.
+    pub records: Vec<RefinedRecord>,
+    /// One per sample; zero for a sample not re-called in the window.
+    pub checks: Vec<NeighbourCheck>,
+}
+
 /// **What the pass did to one sample at one record.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -63,12 +111,14 @@ struct SampleSolution {
     /// `posteriors`.
     sites: Vec<(usize, Outcome, usize)>,
     posteriors: Vec<f64>,
+    check: NeighbourCheck,
 }
 
 /// **Solves one window**: `records` is the whole window, `core` the indices of the records it
 /// writes, `contig_length` the contig's length if the header gives it (for §4.2's rule at the
-/// contig's end), `fits` one per sample, updated while the samples are still fitting. Returns one
-/// [`RefinedRecord`] per core record, in order.
+/// contig's end), `fits` one per sample, updated while the samples are still fitting, `no_read`
+/// when a sample without reads is written with a genotype. Returns one [`RefinedRecord`] per core
+/// record, in order, and each sample's [`NeighbourCheck`].
 ///
 /// # Panics
 ///
@@ -80,7 +130,8 @@ pub fn refine_window(
     contig_length: Option<u64>,
     fits: &mut [SampleFit],
     max_templates: usize,
-) -> Vec<RefinedRecord> {
+    no_read: NoReadRule,
+) -> WindowRefinement {
     assert!(
         records
             .windows(2)
@@ -100,6 +151,7 @@ pub fn refine_window(
                 sample,
                 fit,
                 max_templates,
+                no_read,
             )
         })
         .collect();
@@ -111,10 +163,12 @@ pub fn refine_window(
             posteriors: vec![0.0; samples * record.genotype_count()],
         })
         .collect();
+    let mut checks = vec![NeighbourCheck::default(); samples];
     for (sample, solution) in solutions.iter().enumerate() {
         let Some(solution) = solution else {
             continue;
         };
+        checks[sample] = solution.check;
         for &(record, outcome, start) in &solution.sites {
             let genotypes = records[record].genotype_count();
             let out = &mut refined[record - core.start];
@@ -123,7 +177,10 @@ pub fn refine_window(
                 .copy_from_slice(&solution.posteriors[start..start + genotypes]);
         }
     }
-    refined
+    WindowRefinement {
+        records: refined,
+        checks,
+    }
 }
 
 /// One sample's walk over the window, or `None` if it has no informative record there.
@@ -134,6 +191,7 @@ fn refine_sample(
     sample: usize,
     fit: &mut SampleFit,
     max_templates: usize,
+    no_read: NoReadRule,
 ) -> Option<SampleSolution> {
     let templates = choose_templates(records, sample, max_templates)?;
     let walked: Vec<usize> = (0..records.len())
@@ -185,9 +243,30 @@ fn refine_sample(
     let result = walk(&sites, walk_templates, parameters);
     let reach = parameters.segment_bases as u64;
 
+    // The neighbours against the sample's own confident genotypes, over the whole window.
+    let mut check = NeighbourCheck::default();
+    for (site, &index) in walked.iter().enumerate() {
+        if records[index].row(sample) != SampleRow::Informative {
+            continue;
+        }
+        let prediction = &result.neighbour_predictions[site];
+        if score_best_genotype(prediction).1.get() < no_read.min_genotype_quality {
+            continue;
+        }
+        let own = sites[site].likelihoods;
+        let best = own.iter().copied().fold(0.0, f64::max);
+        let under_prediction: f64 = prediction.iter().zip(own).map(|(p, l)| p * l).sum();
+        check.checked += 1;
+        check.disagreed += u32::from(under_prediction * CONTRADICTION_LIKELIHOOD_RATIO < best);
+    }
+    let neighbours_trusted = no_read.max_neighbour_disagreement.is_none_or(|most| {
+        check.checked > 0 && f64::from(check.disagreed) <= most * f64::from(check.checked)
+    });
+
     let mut solution = SampleSolution {
         sites: Vec::new(),
         posteriors: Vec::new(),
+        check,
     };
     for (site, &index) in walked.iter().enumerate() {
         if !core.contains(&index) {
@@ -198,13 +277,15 @@ fn refine_sample(
             SampleRow::Absent => continue,
             SampleRow::Informative => Outcome::Called,
             SampleRow::Flat => {
-                if has_evidence_nearby(
-                    &informative_positions,
-                    record.position,
-                    reach,
-                    contig_length,
-                ) && score_best_genotype(&result.posteriors[site]).1.get()
-                    >= NO_READ_MIN_GENOTYPE_QUALITY
+                if neighbours_trusted
+                    && has_evidence_nearby(
+                        &informative_positions,
+                        record.position,
+                        reach,
+                        contig_length,
+                    )
+                    && score_best_genotype(&result.posteriors[site]).1.get()
+                        >= no_read.min_genotype_quality
                 {
                     Outcome::Called
                 } else {

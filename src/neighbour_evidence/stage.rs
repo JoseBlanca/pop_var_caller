@@ -20,7 +20,7 @@ use super::fit::SampleFit;
 use super::line::{RewriteTally, rewrite_line, site_of};
 use super::model::GenotypePairs;
 use super::records::SiteRecord;
-use super::refine::{MISMATCH, refine_window};
+use super::refine::{MISMATCH, NoReadRule, refine_window};
 use super::templates::MAX_TEMPLATES;
 use super::windows::{WindowSizes, plan_window};
 use crate::types::{ContigId, Ploidy};
@@ -244,7 +244,9 @@ impl NeighbourEvidenceStage {
                     contig_length,
                     &mut self.fits,
                     MAX_TEMPLATES,
+                    NoReadRule::default(),
                 )
+                .records
             };
             for held in &mut self.held[plan.core_start..plan.core_end] {
                 let line = std::mem::take(&mut held.line);

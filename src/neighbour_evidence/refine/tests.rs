@@ -60,7 +60,9 @@ fn the_pass_fixes_errors_and_fills_sites_without_reads_on_an_inbred_cohort() {
         None,
         &mut fits,
         MAX_TEMPLATES,
-    );
+        NoReadRule::default(),
+    )
+    .records;
     let (mut calling_errors, mut pass_errors, mut with_reads) = (0, 0, 0);
     let (mut without_reads, mut filled, mut filled_wrong, mut guessed_wrong) = (0, 0, 0, 0);
     for (index, record) in cohort.records.iter().enumerate() {
@@ -113,7 +115,9 @@ fn a_sample_without_evidence_on_both_sides_is_withheld() {
         None,
         &mut fits,
         MAX_TEMPLATES,
-    );
+        NoReadRule::default(),
+    )
+    .records;
     for record in &refined[1_000..] {
         assert_eq!(record.outcomes[0], Outcome::Withheld);
         let total: f64 = record.posteriors[..3].iter().sum();
@@ -155,11 +159,25 @@ fn only_the_core_is_returned() {
         ..SHAPE
     });
     let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.95)).collect();
-    let whole = refine_window(&cohort.records, 0..600, None, &mut fits, MAX_TEMPLATES);
+    let whole = refine_window(
+        &cohort.records,
+        0..600,
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+    );
     let mut fits: Vec<SampleFit> = (0..SHAPE.samples).map(|_| SampleFit::new(0.95)).collect();
-    let middle = refine_window(&cohort.records, 200..400, None, &mut fits, MAX_TEMPLATES);
-    assert_eq!(middle.len(), 200);
-    assert_eq!(middle, whole[200..400]);
+    let middle = refine_window(
+        &cohort.records,
+        200..400,
+        None,
+        &mut fits,
+        MAX_TEMPLATES,
+        NoReadRule::default(),
+    );
+    assert_eq!(middle.records.len(), 200);
+    assert_eq!(middle.records, whole.records[200..400]);
 }
 
 /// **The result does not depend on the thread count** (§2.3): one thread against four, bit for
@@ -178,7 +196,14 @@ fn the_result_does_not_depend_on_the_thread_count() {
         pool.install(|| {
             let mut fits: Vec<SampleFit> =
                 (0..SHAPE.samples).map(|_| SampleFit::new(0.95)).collect();
-            refine_window(&cohort.records, 0..800, None, &mut fits, MAX_TEMPLATES)
+            refine_window(
+                &cohort.records,
+                0..800,
+                None,
+                &mut fits,
+                MAX_TEMPLATES,
+                NoReadRule::default(),
+            )
         })
     };
     assert_eq!(solve(1), solve(4));

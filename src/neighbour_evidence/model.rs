@@ -48,6 +48,11 @@ pub struct WalkSite<'a> {
 pub struct WalkResult {
     /// The sample's genotype posterior at each site, in the genotype table's order.
     pub posteriors: Vec<Vec<f64>>,
+    /// **What the sample's neighbours alone say at each site**: the genotype distribution the
+    /// states give before the sample's own likelihood is multiplied in (§3.6), normalised. At a
+    /// site where the sample has no reads it is the posterior; where it has reads, comparing the
+    /// two measures how well the neighbours predict this sample.
+    pub neighbour_predictions: Vec<Vec<f64>>,
     /// The probability the sample is autozygous at each site.
     pub autozygous: Vec<f64>,
     /// The log-likelihood of the sample's evidence over the window under these parameters — what
@@ -267,6 +272,7 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
 
     // Backward, right to left, and each site's posterior as soon as its backward vector exists.
     let mut posteriors = vec![Vec::new(); sites.len()];
+    let mut neighbour_predictions = vec![Vec::new(); sites.len()];
     let mut autozygous_probability = vec![0.0; sites.len()];
     let mut backward_autozygous = vec![1.0; k];
     let mut backward_pairs = vec![1.0; k * k];
@@ -382,29 +388,39 @@ pub fn walk(sites: &[WalkSite<'_>], templates: usize, parameters: WalkParameters
                 autozygous_weight[a] += state_autozygous[state] * blurred[state * alleles + a];
             }
         }
-        let mut posterior: Vec<f64> = pairs_of_alleles
+        let mut prediction: Vec<f64> = pairs_of_alleles
             .of(alleles)
             .iter()
-            .zip(site.likelihoods)
-            .map(|(&(a, b), likelihood)| {
+            .map(|&(a, b)| {
                 let mut weight = pair_weight[a * alleles + b];
                 if a == b {
                     weight += autozygous_weight[a];
                 } else {
                     weight += pair_weight[b * alleles + a];
                 }
-                weight * likelihood
+                weight
             })
+            .collect();
+        let mut posterior: Vec<f64> = prediction
+            .iter()
+            .zip(site.likelihoods)
+            .map(|(weight, likelihood)| weight * likelihood)
             .collect();
         let total: f64 = posterior.iter().sum();
         for value in &mut posterior {
             *value /= total;
         }
+        let total: f64 = prediction.iter().sum();
+        for value in &mut prediction {
+            *value /= total;
+        }
         posteriors[index] = posterior;
+        neighbour_predictions[index] = prediction;
     }
 
     WalkResult {
         posteriors,
+        neighbour_predictions,
         autozygous: autozygous_probability,
         log_likelihood,
     }
