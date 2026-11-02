@@ -190,3 +190,41 @@ fn a_long_gap_returns_the_autozygous_state_to_its_share() {
         result.autozygous[1]
     );
 }
+
+/// **A deep heterozygote whose homozygous likelihoods are exactly zero gets a posterior, not NaN**:
+/// at 30× those likelihoods underflow the window's `f32` store, every autozygous state's emission
+/// is then 0, and dividing it back out was 0/0 (found on the founder simulator's 30× cell,
+/// 2026-11-02).
+#[test]
+fn a_zero_emission_state_contributes_nothing() {
+    let heterozygous = [0.0, 1.0, 0.0];
+    let shares = [1.0, 0.0, 0.0, 1.0];
+    let sites = [
+        WalkSite {
+            position: 1_000,
+            allele_count: 2,
+            likelihoods: &heterozygous,
+            template_shares: &shares,
+        },
+        WalkSite {
+            position: 2_000,
+            allele_count: 2,
+            likelihoods: &heterozygous,
+            template_shares: &shares,
+        },
+    ];
+    let parameters = WalkParameters {
+        segment_bases: 300_000.0,
+        run_bases: 1_000_000.0,
+        autozygous_share: 0.95,
+        mismatch: 0.01,
+    };
+    let result = walk(&sites, 2, parameters);
+    for posterior in &result.posteriors {
+        assert!(
+            posterior.iter().all(|value| value.is_finite()),
+            "{posterior:?}"
+        );
+        assert!((posterior[1] - 1.0).abs() < 1e-12, "{posterior:?}");
+    }
+}

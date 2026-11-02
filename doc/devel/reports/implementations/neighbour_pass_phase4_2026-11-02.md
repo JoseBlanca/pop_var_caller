@@ -15,9 +15,9 @@ the rest are listed in §5 and still running.*
 - **Dropping calls without reads below `GQ` 10 removes most of that damage** (ruled, built): the
   pass then fills a quarter to nine tenths of the missing genotypes, wrong at most 3.5 times in 100
   — except with 10 samples at 1×, where one fill in six is wrong (decision 2).
-- **The pass helps outbred and half-inbred cohorts that descend from 16 founders** — 4,934 wrong
-  genotypes become 3,773 at inbreeding 0 — so the `auto` rule's median-inbreeding condition turns it
-  off where it works. Decision 3, pending the 64-founder cells.
+- **The pass harms a small outbred cohort descended from many lines** — 10 samples from 64 founders,
+  wrong genotypes 1,239 → 2,155 — and helps the large outbred ones; the `auto` rule's inbreeding
+  condition keeps it off in both, so it stays (decision 3).
 
 ## 2. What was measured
 
@@ -130,30 +130,30 @@ depth; a second seed of the 10-sample cells shows whether it is this draw. *Coun
 written `GQ` after allele subsetting; the built floor reads the posterior before it, which moves a
 handful of calls.*
 
-### Decision 3 — the `auto` rule's inbreeding condition. I recommend deciding after the 64-founder cells.
+### Decision 3 — the `auto` rule's inbreeding condition. *Settled by the 64-founder cells: keep it.*
 
-`auto` runs the pass only where the cohort's median inbreeding is at least 0.5 (§5, starting value).
-With 16 founders and 50 samples at 3× it helps at every inbreeding measured:
+`auto` runs the pass only where the cohort's median inbreeding is at least 0.5 (§5). With 16
+founders and 50 samples at 3× the pass helps at every inbreeding measured, which suggested dropping
+the condition. The 64-founder cells say not to:
 
-| F | wrong where samples have reads, calling → pass | false non-reference added, with the floor |
-|---|---|---|
-| 0 | 4,934 → 3,773 | −46 |
-| 0.5 | 2,595 → 1,173 | 48 |
-| 0.8 | 1,245 → 374 | 7 |
-| 0.95 | 281 → 90 | −5 |
+| founders | F | samples | wrong where samples have reads, calling → pass |
+|---|---|---|---|
+| 16 | 0 | 50 | 4,934 → 3,773 (24% fewer) |
+| 64 | 0 | 50 | 5,308 → 4,614 (13% fewer) |
+| 64 | 0 | 10 | **1,239 → 2,155 (74% more)** |
+| 64 | 0.95 | 10 | 164 → 163 |
+| 64 | 0.95 | 50 | 317 → 168 |
 
-The evaluation report's outbred simulation gained nothing, and the difference is the founders: there
-every site was drawn independently, so no two samples shared a stretch; here 16 founders give every
-sample many close relatives, outbred or not. What decides the threshold is therefore how many
-haplotypes the cohort's samples share, not their inbreeding — and the cells that test that, 64
-founders at 10 and 50 samples, are still running. If the pass still helps there at F 0, I will
-recommend dropping the inbreeding condition and keeping only `N_min`; if it does not, a condition on
-something closer to haplotype sharing. Until then `auto` stays as specified.
+**A small outbred cohort descended from many lines is where the pass does harm**, and the rule as
+specified turns it off there. In no cell measured does `auto` switch the pass on where it hurts; the
+price is the gain it forgoes in large outbred cohorts. Lowering the condition for large cohorts would
+need outbred cells between 10 and 50 samples, and more founders — not run. Why the outbred 10-sample
+cohort goes wrong is not measured; the spec's own guess (§11 Q3) is that heterozygous templates blur
+the copying.
 
 ## 5. Not yet measured
 
-- **Still running**: 64 founders at 50 and at 10 samples (3×), 30× at 10 and 50 samples, 200
-  samples at 1× and 3×. This report gains their rows when they land.
+- **Still running**: 30× at 50 samples, 200 samples at 1× and 3×. This report gains their rows when they land.
 - **Not started**, from §8: the mixed inbred-and-outbred cohort (the simulator draws one `F` for the
   whole cohort); the autozygous posterior against `ancestry.tsv` (not in the VCF); template bias
   (§11 Q4); the circularity (§8.5); tomato1 held out and the two deep-and-shallow plants; cost at 500
