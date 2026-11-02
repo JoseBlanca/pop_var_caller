@@ -171,8 +171,13 @@ per-tract estimate made from the same reads, stutter included. The owner chose n
 - **Tomato's overdispersion** (§5) and **per-library stutter**: the owner's next item after this
   branch is fitting stutter per library (`str_library_stutter.md`); it would also say how much of
   tomato's 2–3.5-fold spread is library mixing.
-- **The cheap test the owner approved**: call HG002 with the 3- to 6-base rates set near their true
-  values, to size what the remaining overestimate costs.
+- **What the remaining overestimate costs — measured, and it is nothing on HG002 chr20.** Every 3- to
+  6-base class's slip rate set to 0.1 in 100 (tracts GIAB calls homozygous show none; zero would make
+  one slipped read force a genotype), the rest of the fit unchanged, calls from the same psps: at 30×
+  identical (841 missed / 373 false; inside STR segments 108 / 118); at 5×, 24,910 / 4,343 against
+  24,913 / 4,346. So the 4-base motif at 24 copies (§3) and the 6-base rates still above the
+  confident-tract measurement do not reach a call here. *One sample, one chromosome*: a cohort, or a
+  genome with more of these classes, may differ.
 
 ## 9. Data and scripts
 
