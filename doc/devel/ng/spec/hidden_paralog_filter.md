@@ -135,6 +135,23 @@ copied into ng with its configuration and its tests. Its defaults — the single
 the overflow guard at a fifth — are **inherited from the tomato2 prototype and production, not
 re-measured**.
 
+**σ₀ is the band's spread plus the reads' own noise** (2026-11-01). The fit measures the
+spread of one-copy windows as 1.4826 times the median absolute deviation of relative depth
+inside the single-copy band, and adds in quadrature the variance a window's mean depth has from
+which reads landed in it: for reads of span `L` in a window of `W` bases at one-copy depth `d`,
+`L·(W − L/3) / (W²·d)` while `L ≤ W` (0.27/d for 150-base reads), and `(L − W/3) / (L·d)` past it.
+`L` is the sample's mean read span, the depth it reported summed over the rises in that depth
+(`CoverageByGcHistogram::mean_read_span`); with no rise at all the term is left out.
+
+*Why.* A window's mean depth averages over the reads covering it, not over its 500 positions —
+about three reads at 1×, ten at 3× — and the band `0.4..1.6` cuts away exactly the tails that
+noise produces (44 windows in 100 fall outside it on a tomato accession at 1×). Without the term σ₀
+came out 0.22 where the windows scatter by 0.78, every sample's ordinary depth noise read as extra
+copies, and on 57 tomato accessions at 1× the filter fitted a duplication rate of 0.95 and dropped
+95 records in 100. The term is 0.27 at 1×, 0.009 at 30× and 0.0009 at 300×, against a band
+spread near 0.17² = 0.03 on a deep sample, so it acts where depth is low and nowhere else. The
+measurements are in `doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md`.
+
 **A rejected fit is not an error.** The fit refuses a sample it cannot anchor — no windows, a
 peak in the bottom bin, a mode/median ratio outside the guard, too many windows past the
 histogram's range — and production carries such a sample as *absent*: it contributes no coverage
@@ -289,8 +306,12 @@ two re-estimates the rate locally
 2. **A bin's rate is estimated from the records within half a window of the bin's centre** —
    25,000 bases either side at the default window of 50,000 (`--hidden-dup-window`, §3.6) — by
    the same EM that gives π.
-3. **The estimate is pulled toward the run-wide π**, as if 10 extra records sat in every window at
-   that rate. A window holding few records keeps about π; one holding hundreds keeps its own.
+3. **The estimate is pulled toward a typical window's rate**, as if 10 extra records sat in every
+   window at that rate. A window holding few records keeps about the typical rate; one holding
+   hundreds keeps its own. The typical rate is found by doing this once with π as the anchor and
+   taking the median of the bins' rates; every bin is then estimated again, pulled toward that
+   median. Where windows hold too few records to move far from π, the median stays near π and the
+   filter behaves as with π as the anchor. *Since 2026-11-01; until then the anchor was π itself.*
 4. **Each record's posterior is σ(LR + logit π_b)**, with π_b its own bin's rate. That is the
    `PARALOG_POST` written (§3.5).
 5. **The cut** ranks the records by posterior, highest first, and flags the longest run from the
@@ -301,9 +322,11 @@ two re-estimates the rate locally
 Pass two keeps each record's contig and position for this (12 bytes a record), then one posterior
 (8 bytes a record) until pass three — flat in the sample count. The time grows with the window,
 not the cohort: each occupied bin's EM runs over the records in its window. The `##paralogFilter`
-line (§3.5) gains `window=`, `shrink=` (the pull, in records) and `post_cut=` (the posterior the
-cut resolved to, `none` where nothing is flagged); in a windowed run `post_cut` decides, and `pi`
-and `lr_cut` are the run-wide values the windows were pulled toward.
+line (§3.5) gains `window=`, `shrink=` (the pull, in records), `pull_to=` (the typical window's
+rate every window was pulled toward) and `post_cut=` (the posterior the cut resolved to, `none`
+where nothing is flagged); in a windowed run `post_cut` decides, and `pi` and `lr_cut` are the
+run-wide values, which decide nothing on their own. The two rounds of bin rates double the
+windowed step's time.
 
 **Why (the owner's decision, 2026-10-23).** On GIAB HG002 chromosome 22, called as one sample, the
 run-wide π is 0.13 to 0.16, while the same EM gives 0.0003 to 0.005 inside GIAB's trusted regions
@@ -321,6 +344,20 @@ cohort of 20 at 3x removed fewer real variant genotypes (4,129 → 3,083), at th
 (`tail_fdr_posterior_cut`) are the values those measurements were taken at. The one other cut
 measured — flag a posterior above the one the run-wide cut stands for — was dropped. Windows of
 20,000 to 100,000 bases behaved alike; nothing outside that range was tried.
+
+**Why the anchor is a typical window's rate (2026-11-01).** π is a mixture: on HG002 chromosome
+20 one record in seven is duplication-like, nearly all outside GIAB's trusted regions, so π is
+0.145 there while the median window's rate is 0.018. Pulling 10 records toward π gave every clean
+window a rate of about 0.02 to 0.03 whatever its own records said (0.003 to 0.017), which lifted
+moderate ratios over the cut. With the median as the anchor, HG002 called alone and scored by
+vcfeval inside the trusted regions gained 33, 15 and 7 true calls at 5x, 10x and 30x and 4, 1 and 2
+false ones; on clean ground the true SNPs removed fell from 79 to 53, 55 to 41 and 13 to 6, and on
+GIAB's low-mappability and segmental-duplication ground the false SNPs removed went from 21 to 18,
+17 to 16 and 83 to 83. HG002, HG003 and HG004 over their 100 benchmark regions at 5x to 300x, where
+π is at or near zero, wrote the same calls and verdicts. On 57 tomato accessions at about 3x the
+rule unflagged 13 of 22,864 records and flagged none new. The simulated genome and the chromosome-22
+trio behind the paragraph above were not re-run: their data is not on the machine that measured
+this ([report](../../reports/ng_dup_filter_misses_2026-11-01.md) §7).
 
 **A window of 0 is the filter as it was before 2026-10-23**: every record's posterior uses the
 run-wide π, the histogram cut decides, and the header line carries no windowed fields. It is there
@@ -412,15 +449,15 @@ ratio is written so that a run that drops can be audited against one that tags.
 **The header carries the run's calibration**, production's line with one addition:
 
 ```text
-##paralogFilter=target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;samples_with_coverage_model=61/63;window=50000;shrink=10;post_cut=0.987654
+##paralogFilter=target_fdr=0.0100;pi=0.031250;lr_cut=4.2117;em_converged=true;samples_with_coverage_model=61/63;window=50000;shrink=10;pull_to=0.018439;post_cut=0.987654
 ```
 
 Production writes the first four ([`paralog_provenance`, `write_pass.rs:120`](../../../../src/var_calling/paralog_filter/write_pass.rs))
 because a dropped record leaves no per-record trace; the fifth says how much of the cohort the
-coverage evidence rested on. The last three are the windowed rate's (§3.3): the window in bases,
-the pull toward π in records, and the posterior the cut resolved to (`none` where nothing is
-flagged). In a windowed run `post_cut` decides, and `pi` and `lr_cut` are the run-wide values the
-windows were pulled toward; a run at a window of 0 writes the first five only. ng's header writes
+coverage evidence rested on. The last four are the windowed rate's (§3.3): the window in bases,
+the pull in records, the typical window's rate it pulls toward, and the posterior the cut resolved
+to (`none` where nothing is flagged). In a windowed run `post_cut` decides, and `pi` and `lr_cut`
+are the run-wide values; a run at a window of 0 writes the first five only. ng's header writes
 its meta lines as `##key=value`
 ([`header_text`, `header.rs:431`](../../../../src/ng/vcf/header.rs)); this is one more.
 
@@ -470,7 +507,10 @@ pub struct ParalogScoringContext {
     inbreeding: Vec<f64>,
     /// σ₀ per sample, `NaN` where absent — the scorer's parallel slice.
     single_copy_depth_sd: Vec<f64>,
-    /// Production's per-pass tables, built once.
+    /// Production's per-pass tables, built once. **One departure from production:** the `N`
+    /// of the SFS floor `1/2N` counts only the samples with a coverage model. A sample with no
+    /// model says nothing at any record, so counting it moved every ratio when a sample with no
+    /// reads joined the run (read-transform oracle, 2026-11-01).
     precompute: ParalogScorePrecompute,
 }
 
@@ -554,7 +594,13 @@ pub struct ParalogVerdicts {
 - **Concurrency** — none in passes two and three; they are sequential by design and the output
   is a function of the spill's order, which is genome order. Scoring in parallel is deferred (§7).
 - **Determinism** — the standing oracle: byte-identical output at any thread count, with the
-  filter on and off.
+  filter on and off. Passes two and three cannot break it, but **the windows the records carry
+  into the spill can**: they are measured during calling, whose building regions narrow as the
+  thread count grows. Until 2026-11-01 a record beside ground dropped for depth could carry an
+  absent window at some counts and a real one at others (`window_coverage.md` §3.3); on HG002
+  chr20 at 30x that left 9 more records unscored at two threads, which moved the fitted rate
+  from 0.145137 to 0.145070 and every record's `PARALOG_POST` in its fifth or sixth digit. The
+  oracle therefore compares one thread with several counts, not one.
 
 ## 6. Traps — what will bite the coder
 

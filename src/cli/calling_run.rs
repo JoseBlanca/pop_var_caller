@@ -37,7 +37,11 @@ use crate::calling::parameters_file::{
 };
 use crate::calling::run_parameters::RunParameters;
 use crate::cli::provenance::current_command_line;
+use crate::cli::run_output;
 use crate::fasta::ContigList;
+use crate::neighbour_evidence::stage::{
+    NeighbourEvidenceDecision, NeighbourEvidenceSwitch, decide,
+};
 use crate::parameter_estimation::Estimate;
 use crate::parameter_estimation::joint::loci::{ReferenceDigest, SelectionError};
 use crate::read::input::read_groups::ReadGroups;
@@ -49,6 +53,7 @@ use crate::run::cohort_merge::{
 };
 use crate::run::{MergeParameters, RunReport};
 use crate::types::{DomainError, InbreedingF, Ploidy};
+use crate::vcf::FinishedVcf;
 use crate::vcf::header::{HeaderContig, HeaderMetadataError, VcfHeaderMetadata};
 
 /// Everything a calling run can refuse before it reads an observation, whichever mode it is.
@@ -470,6 +475,61 @@ pub fn round_shape_for(
             NonZeroUsize::new(in_flight).expect("the clamp's floor is one"),
         ),
     )
+}
+
+/// **What the neighbour-evidence pass did**, one line in the log, when it ran.
+pub fn log_neighbour_evidence(finished: &FinishedVcf) {
+    let Some(tally) = finished.neighbour_evidence else {
+        return;
+    };
+    tracing::info!(
+        "neighbour-evidence pass: {} records re-called; {} genotypes called ({} of them where the \
+         sample had no reads), {} withheld for lack of evidence nearby, {} changed; {} alleles \
+         and {} records dropped as no longer called; {} repeat counts unknown",
+        run_output::with_thousands(tally.sites),
+        run_output::with_thousands(tally.called),
+        run_output::with_thousands(tally.called_without_reads),
+        run_output::with_thousands(tally.withheld),
+        run_output::with_thousands(tally.genotypes_changed),
+        run_output::with_thousands(tally.alleles_dropped),
+        run_output::with_thousands(tally.records_dropped),
+        run_output::with_thousands(tally.repeat_counts_unknown),
+    );
+}
+
+/// **`--neighbour-evidence`'s three values** (`neighbour_evidence_pass.md` §5, ruled §9 Q3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum NeighbourEvidenceArg {
+    /// Run where the cohort is at least 10 samples with median inbreeding at least 0.5.
+    Auto,
+    /// Run wherever it can: two or more samples, diploid.
+    On,
+    /// Do not run.
+    Off,
+}
+
+/// **Whether this run uses the neighbour-evidence pass, and why**, from the option, each sample's
+/// inbreeding coefficient in the run's sample order, and the ploidy — taken once, before the
+/// header is written, and stated in it either way.
+#[must_use]
+pub fn neighbour_evidence_decision(
+    asked: NeighbourEvidenceArg,
+    inbreeding_by_sample: &[InbreedingF],
+    ploidy: Ploidy,
+) -> NeighbourEvidenceDecision {
+    let switch = match asked {
+        NeighbourEvidenceArg::Auto => NeighbourEvidenceSwitch::Auto,
+        NeighbourEvidenceArg::On => NeighbourEvidenceSwitch::On,
+        NeighbourEvidenceArg::Off => NeighbourEvidenceSwitch::Off,
+    };
+    let inbreeding: Vec<f64> = inbreeding_by_sample.iter().map(|f| f.get()).collect();
+    let decision = decide(switch, &inbreeding, ploidy);
+    tracing::info!(
+        "neighbour-evidence pass: {} ({})",
+        if decision.ran { "runs" } else { "off" },
+        decision.why
+    );
+    decision
 }
 
 /// **The ploidy this run was asked for, judged against what the caller can score.**
@@ -931,6 +991,24 @@ pub fn log_the_report(calls: &Path, report: &RunReport<'_>, filter_lines: &[Stri
             Some(warning) => tracing::warn!("{warning}"),
             None => tracing::debug!("report: {line}"),
         }
+    }
+}
+
+/// `--low-base-quality-weight`'s parser: a finite number, zero or more.
+///
+/// # Errors
+///
+/// A value that is not a number, is negative, or is not finite.
+pub fn parse_low_base_quality_weight(value: &str) -> Result<f64, String> {
+    let weight: f64 = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number"))?;
+    if weight.is_finite() && weight >= 0.0 {
+        Ok(weight)
+    } else {
+        Err(format!(
+            "`{value}` is not a weight: it must be zero or more, and finite"
+        ))
     }
 }
 

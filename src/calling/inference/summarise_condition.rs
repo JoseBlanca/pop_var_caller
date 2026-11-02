@@ -54,7 +54,7 @@ use crate::locus_generation::SsrBundleDetail;
 use crate::parameter_estimation::Provenance;
 use crate::parameter_estimation::joint::ssr_fit::Slippage;
 use crate::parameter_estimation::repeat_strata::RepeatCount;
-use crate::types::{AlleleId, Genotype, InbreedingF, LogProb, Ploidy};
+use crate::types::{AlleleId, Genotype, GenotypeRows, InbreedingF, LogProb, Ploidy};
 use std::iter::repeat_n;
 
 use super::repeat_tract_parameters::{
@@ -952,22 +952,25 @@ impl<'a> TableReassembly<'a> {
 /// ninth is the allele the other eight are pooled *for*, which is chosen before any of this
 /// and is never summed.
 ///
-/// **Seven of the eight are counts and are summed as integers**, which is not a
-/// micro-optimisation but the removal of a question: `f64` addition is not associative, so a
-/// cohort's read totals summed in another order could differ in the last bits and the two
-/// binomial tests downstream would see different inputs at a different worker count. Whole
-/// reads summed as `u64` cannot. The eighth is fractional by construction — a genotype
-/// carrying one copy of two expects half a sample's reads — so it is an `f64` summed in the
-/// run's fixed sample order, the same order and the same reason as the M-step's
-/// (`doc/devel/ng/spec/calling_quality.md` §9).
+/// **The three read counts are summed as integers**, which is not a micro-optimisation but the
+/// removal of a question: `f64` addition is not associative, so a cohort's read totals summed in
+/// another order could differ in the last bits and the two binomial tests downstream would see
+/// different inputs at a different worker count. Whole reads summed as `u64` cannot. **The other
+/// five are fractional by construction** — a read composed across records carries a forward and
+/// a placed-left *share* (`AlleleSupport::num_fwd`), and a genotype carrying one copy of two
+/// expects half a sample's reads — so they are `f64`s summed in the run's fixed sample order,
+/// the same order and the same reason as the M-step's (`doc/devel/ng/spec/calling_quality.md`
+/// §9).
 #[derive(Default)]
 struct PooledArtifactCounts {
     reference_reads: u64,
-    reference_forward_reads: u64,
-    reference_placed_left_reads: u64,
+    reference_forward_reads: f64,
+    reference_placed_left_reads: f64,
     alternative_reads: u64,
-    alternative_forward_reads: u64,
-    alternative_placed_left_reads: u64,
+    alternative_forward_reads: f64,
+    alternative_placed_left_reads: f64,
+    reference_low_quality_reads: u64,
+    alternative_low_quality_reads: u64,
     total_reads: u64,
     genotype_expected_alternative_reads: f64,
 }
@@ -1006,12 +1009,14 @@ impl PooledArtifactCounts {
             // the reference as its alternative.
             if observation.allele.is_reference() {
                 self.reference_reads += reads;
-                self.reference_forward_reads += u64::from(observation.forward_reads);
-                self.reference_placed_left_reads += u64::from(observation.placed_left_reads);
+                self.reference_forward_reads += observation.forward_reads;
+                self.reference_placed_left_reads += observation.placed_left_reads;
+                self.reference_low_quality_reads += u64::from(observation.low_quality_reads);
             } else if observation.allele == primary_alternative {
                 self.alternative_reads += reads;
-                self.alternative_forward_reads += u64::from(observation.forward_reads);
-                self.alternative_placed_left_reads += u64::from(observation.placed_left_reads);
+                self.alternative_forward_reads += observation.forward_reads;
+                self.alternative_placed_left_reads += observation.placed_left_reads;
+                self.alternative_low_quality_reads += u64::from(observation.low_quality_reads);
             }
         }
         self.total_reads += depth;
@@ -1028,11 +1033,13 @@ impl PooledArtifactCounts {
         ArtifactTestCounts {
             primary_alternative,
             reference_reads: self.reference_reads as f64,
-            reference_forward_reads: self.reference_forward_reads as f64,
-            reference_placed_left_reads: self.reference_placed_left_reads as f64,
+            reference_forward_reads: self.reference_forward_reads,
+            reference_placed_left_reads: self.reference_placed_left_reads,
             alternative_reads: self.alternative_reads as f64,
-            alternative_forward_reads: self.alternative_forward_reads as f64,
-            alternative_placed_left_reads: self.alternative_placed_left_reads as f64,
+            alternative_forward_reads: self.alternative_forward_reads,
+            alternative_placed_left_reads: self.alternative_placed_left_reads,
+            reference_low_quality_reads: self.reference_low_quality_reads as f64,
+            alternative_low_quality_reads: self.alternative_low_quality_reads as f64,
             total_reads: self.total_reads as f64,
             genotype_expected_alternative_reads: self.genotype_expected_alternative_reads,
         }
@@ -1081,8 +1088,9 @@ fn pool_allele_reads(per_sample: &[GenericLocusSample<'_>], pooled_reads: &mut [
                 pooled_reads.len()
             );
             assert!(
-                observation.forward_reads <= observation.num_reads
-                    && observation.placed_left_reads <= observation.num_reads,
+                observation.forward_reads <= f64::from(observation.num_reads)
+                    && observation.placed_left_reads <= f64::from(observation.num_reads)
+                    && observation.low_quality_reads <= observation.num_reads,
                 "sample {sample}'s {} reads of allele {allele} carry {} on the forward \
                  strand and {} placed left: both are shares of those same reads, and the \
                  artifact tests read them as fractions",
@@ -1357,6 +1365,15 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
             // why the flag is minted at the point of scoring (`vcf::assemble`'s module note,
             // and `doc/devel/ng/spec/vcf_output.md` §7.1).
             reads_were_uninformative: reads_said_nothing(scratch.sample_genotype_likelihoods(row)),
+            genotype_rows: GenotypeRows {
+                ploidy,
+                log_likelihoods: scratch
+                    .sample_genotype_likelihoods(row)
+                    .iter()
+                    .map(|likelihood| likelihood.get())
+                    .collect(),
+                posteriors: scratch.posterior_row().into(),
+            },
         });
         row += 1;
     }
@@ -2853,6 +2870,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -2883,6 +2901,7 @@ mod tests {
             mapq_sum: 60 * reads,
             mapq_sum_sq: u64::from(reads) * 3_600,
             placed_left: reads / 2,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -4938,6 +4957,7 @@ mod tests {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
                     genotype_quality: Phred::try_new(30.0).expect("a quality"),
                     reads_were_uninformative: false,
+                    genotype_rows: crate::calling::placeholder_genotype_rows(),
                 };
                 3
             ],
@@ -5469,8 +5489,9 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum: -3.0 * f64::from(num_reads),
-            forward_reads,
-            placed_left_reads,
+            forward_reads: f64::from(forward_reads),
+            placed_left_reads: f64::from(placed_left_reads),
+            low_quality_reads: 0,
         }
     }
 
@@ -6933,8 +6954,8 @@ mod tests {
         assert_eq!(inference.passes, 2);
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 2.015_067_414_196_071).abs() < 1e-12
-                && (copies[1] - 1.984_932_585_803_929_3).abs() < 1e-12,
+            (copies[0] - 2.017_218_810_602_41).abs() < 1e-12
+                && (copies[1] - 1.982_781_189_397_590_2).abs() < 1e-12,
             "the cohort's four chromosomes split as the reads split them: {copies:?}"
         );
         assert_eq!(
@@ -7070,8 +7091,10 @@ mod tests {
 
         assert_eq!(inference.passes, 2);
         assert!(inference.converged);
+        // Re-recorded 2026-10-31, when spec §3.3's amendment began scoring a read as the average
+        // over a genotype's copies, `1 − ε` from its own allele's.
         let copies = inference.cohort_expected_copies().copies();
-        let expected = [3.008_738_983_972_081_7, 2.991_261_016_027_918];
+        let expected = [3.009_985_352_332_220_6, 2.990_014_647_667_779_4];
         assert!(
             copies
                 .iter()
@@ -7102,7 +7125,7 @@ mod tests {
             .collect();
         for (sample, (got, want)) in qualities
             .iter()
-            .zip([20.701_796_f32, 30.193_914, 17.712_873])
+            .zip([20.104_8_f32, 29.945_402, 17.118_761])
             .enumerate()
         {
             assert!(
@@ -7111,7 +7134,7 @@ mod tests {
             );
         }
         assert!(
-            (inference.site_quality.get() - 119.721_42_f32).abs() < 1e-3,
+            (inference.site_quality.get() - 117.716_15_f32).abs() < 1e-3,
             "the site quality: {}",
             inference.site_quality.get()
         );
@@ -7123,7 +7146,8 @@ mod tests {
         // the convergence threshold, so the numbers above barely move whether or not that
         // assembly happens; stopped after one pass they have not converged, and dropping the
         // assembly moves the site quality from **119.720 to 119.742** and this sample's
-        // confidence from **30.194 to 30.180** (measured 2026-08-26). The cohort's expected
+        // confidence from **30.194 to 30.180** (measured 2026-08-26, before spec §3.3's
+        // amendment of 2026-10-31 moved every value here; they were re-recorded then). The cohort's expected
         // copies are identical either way, which is the point: they are the loop's own output
         // and the loop has already stopped.
         let mut capped_scratch = worker_scratch();
@@ -7136,12 +7160,12 @@ mod tests {
         );
         assert!(!capped.converged, "one pass is not enough for this locus");
         assert!(
-            (capped.site_quality.get() - 119.720_436_f32).abs() < 1e-4,
+            (capped.site_quality.get() - 117.714_85_f32).abs() < 1e-4,
             "the capped run's site quality: {}",
             capped.site_quality.get()
         );
         assert!(
-            (called(&capped, 1).1.get() - 30.193_907_f32).abs() < 1e-4,
+            (called(&capped, 1).1.get() - 29.945_393_f32).abs() < 1e-4,
             "the capped run's middle sample: {}",
             called(&capped, 1).1.get()
         );
@@ -9915,8 +9939,8 @@ mod tests {
         );
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 0.007_744_253_786_433_548).abs() < 1e-12
-                && (copies[1] - 1.992_255_746_213_566_4).abs() < 1e-12,
+            (copies[0] - 0.008_884_578_139_146_705).abs() < 1e-12
+                && (copies[1] - 1.991_115_421_860_853_3).abs() < 1e-12,
             "the one called sample's two chromosomes are nearly all alternative: {copies:?}"
         );
     }
@@ -10067,14 +10091,13 @@ mod tests {
         let outbred_quality = called(&inference, 0).1.get();
         let inbred_quality = called(&inference, 1).1.get();
         assert!(
-            (outbred_quality - 32.323_853).abs() < 1e-3
-                && (inbred_quality - 20.752_254).abs() < 1e-3,
+            (outbred_quality - 32.109_31).abs() < 1e-3 && (inbred_quality - 20.539_87).abs() < 1e-3,
             "the same reads under F = 0 and F = 0.9: {outbred_quality} and {inbred_quality}"
         );
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 2.003_187_445_790_709_7).abs() < 1e-12,
-            "scoring both rows at F = 0 gives 2.000584 instead: {copies:?}"
+            (copies[0] - 2.003_347_292_611_038_3).abs() < 1e-12,
+            "scoring both rows at F = 0 gives a different split: {copies:?}"
         );
     }
 
@@ -10277,8 +10300,8 @@ mod tests {
         assert!(inference.converged);
         let copies = inference.cohort_expected_copies().copies();
         assert!(
-            (copies[0] - 1.019_039_125_169_859_6).abs() < 1e-12
-                && (copies[1] - 0.980_960_874_830_140_3).abs() < 1e-12,
+            (copies[0] - 1.020_306_935_702_036).abs() < 1e-12
+                && (copies[1] - 0.979_693_064_297_963_8).abs() < 1e-12,
             "one diploid sample's two chromosomes, split as its reads split them: {copies:?}"
         );
     }

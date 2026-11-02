@@ -10,6 +10,7 @@ use super::estimate_contamination::EstimateContaminationArgs;
 use super::estimate_parameters::EstimateParametersArgs;
 use super::generate_psps::GeneratePspsArgs;
 use super::inspect_psp::InspectPspArgs;
+use super::refine_genotypes::RefineGenotypesArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
@@ -88,6 +89,14 @@ pub enum PopVarCallerCommand {
     /// parameters, read from the psps instead of the alignments. The ground called and what
     /// counts as a repeat are the ones the psps were written with.
     CallFromPsps(CallFromPspsArgs),
+
+    /// Re-call a finished VCF's genotypes with the evidence of the samples each one shares
+    /// stretches of chromosome with.
+    ///
+    /// The neighbour-evidence pass a calling run makes in front of its writer, run on a VCF pvc
+    /// wrote with it off. Each sample's starting inbreeding coefficient comes from the run's
+    /// parameters file. A VCF the pass has already refined is refused.
+    RefineGenotypes(RefineGenotypesArgs),
 
     /// Tools for developing and debugging the caller.
     #[command(subcommand)]

@@ -29,6 +29,7 @@ use super::errors::WalkerError;
 use super::witnessed_ref::{WitnessedRefPositions, WitnessedRefRuns};
 use crate::locus_generation::{
     LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
+    read_placed_left,
 };
 
 /// Pre-allocated capacity for `OpenPileupRecord::folded_reads` —
@@ -187,14 +188,10 @@ impl FoldedReads {
 /// `AlleleSupportStats` **minus
 /// `placed_start`**.
 ///
-/// `placed_left` stays because something computes on it:
-/// `vcf::qual_refine` turns it into the read-position-bias term
-/// subtracted from QUAL, live through `final_qual` into the cohort VCF writer
-/// and the `--min-qual` gate, so dropping it would forfeit the ability to
-/// reproduce production's QUAL. `placed_start` is merged, serialised and printed
-/// by the `psp-to-pileup` dump and read by **nothing that computes**, and it is
-/// cheap to reverse: both counters are pure functions of the read's start against
-/// the record's anchor (spec §6, arch §3).
+/// `placed_left` stays because something computes on it: the read-position half of the
+/// artifact correction (`calling_quality.md` §6.2). `placed_start` was merged, serialised and
+/// printed by the `psp-to-pileup` dump and read by **nothing that computes** (spec §6,
+/// arch §3).
 ///
 /// # `placed_start` is gone, and this is where it went
 ///
@@ -212,9 +209,12 @@ pub(super) struct AlleleSupportStats {
     pub q_sum: f64,
     /// Reads on the forward strand among `num_obs`.
     pub fwd: u32,
-    /// Reads whose mapped 5′ end is strictly to the left of this record's anchor
-    /// position (freebayes' `placedLeft`).
+    /// Reads with at least as much of their span left of this record's anchor as right of it
+    /// ([`read_placed_left`], freebayes' `placedLeft`).
     pub placed_left: u32,
+    /// Reads whose lowest base quality inside the record is below
+    /// [`LOW_BASE_QUALITY_BELOW`](crate::locus_generation::LOW_BASE_QUALITY_BELOW).
+    pub low_quality: u32,
     /// Σ mapping quality over supporting reads.
     pub mapq_sum: u32,
     /// Σ mapq² over supporting reads.
@@ -1181,6 +1181,7 @@ impl OpenPileupRecord {
                     q_sum,
                     fwd,
                     placed_left,
+                    low_quality,
                     mapq_sum,
                     mapq_sum_sq,
                 } = observation.support;
@@ -1196,6 +1197,7 @@ impl OpenPileupRecord {
                     mapq_sum,
                     mapq_sum_sq,
                     placed_left,
+                    num_low_quality: low_quality,
                     chain_ids: observation.chain_ids,
                 }
             })
@@ -2245,16 +2247,26 @@ fn fold_read_into_record(
         active.read_id,
     );
 
-    let ln_q = minted_ln_read_error(
-        min_bq_for_read(window_events, bq_fallback),
-        active.read.mq_log_err,
-    );
+    let base_quality = min_bq_for_read(window_events, bq_fallback);
+    let ln_q = minted_ln_read_error(base_quality, active.read.mq_log_err);
     let mapq = u32::from(active.read.mapq);
     let new_contribution = AlleleSupportStats {
         num_obs: 1,
         q_sum: ln_q,
         fwd: u32::from(!active.read.is_reverse_strand),
-        placed_left: u32::from(active.read.alignment_start < rec_pos),
+        // **Against the anchor base, not the record's whole stretch.** The stretch is not
+        // final while reads fold — a widen extends it to the right, and a read that ended
+        // before the widen never folds again — so a count taken against it would depend on
+        // when the widen arrived. The anchor never moves. At a wider record every read, ref
+        // or alt, has the same extra bases on its right, and the test compares the two shares
+        // against each other, so the shift cancels (`calling_quality.md` §6.2).
+        placed_left: u32::from(read_placed_left(
+            u64::from(active.read.alignment_start),
+            u64::from(active.read.alignment_end),
+            u64::from(rec_pos),
+            u64::from(rec_pos),
+        )),
+        low_quality: u32::from(crate::locus_generation::is_low_base_quality(base_quality)),
         mapq_sum: mapq,
         mapq_sum_sq: (mapq as u64) * (mapq as u64),
     };
@@ -3473,6 +3485,7 @@ fn add_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStats) {
     support.q_sum += c.q_sum;
     support.fwd += c.fwd;
     support.placed_left += c.placed_left;
+    support.low_quality += c.low_quality;
     support.mapq_sum += c.mapq_sum;
     support.mapq_sum_sq += c.mapq_sum_sq;
 }
@@ -3508,6 +3521,12 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
         c.placed_left,
     );
     debug_assert!(
+        support.low_quality >= c.low_quality,
+        "subtract_contribution underflow on low_quality: {} -= {}",
+        support.low_quality,
+        c.low_quality,
+    );
+    debug_assert!(
         support.mapq_sum >= c.mapq_sum,
         "subtract_contribution underflow on mapq_sum: {} -= {}",
         support.mapq_sum,
@@ -3523,6 +3542,7 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
     support.q_sum -= c.q_sum;
     support.fwd = support.fwd.saturating_sub(c.fwd);
     support.placed_left = support.placed_left.saturating_sub(c.placed_left);
+    support.low_quality = support.low_quality.saturating_sub(c.low_quality);
     support.mapq_sum = support.mapq_sum.saturating_sub(c.mapq_sum);
     support.mapq_sum_sq = support.mapq_sum_sq.saturating_sub(c.mapq_sum_sq);
 }
@@ -6427,6 +6447,7 @@ mod tests {
             q_sum: 0.0,
             fwd: 1,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6435,6 +6456,7 @@ mod tests {
             q_sum: 0.0,
             fwd: 0,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6449,6 +6471,7 @@ mod tests {
             q_sum: -1.0,
             fwd: 1,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6457,6 +6480,7 @@ mod tests {
             q_sum: -1.0,
             fwd: 5,
             placed_left: 5,
+            low_quality: 5,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6464,6 +6488,7 @@ mod tests {
         assert_eq!(s.num_obs, 0);
         assert_eq!(s.fwd, 0);
         assert_eq!(s.placed_left, 0);
+        assert_eq!(s.low_quality, 0);
         // q_sum is straight f64 subtract by design (signed):
         // (-1.0) - (-1.0) = 0.0.
         assert!((s.q_sum - 0.0).abs() < 1e-12);
@@ -6479,6 +6504,7 @@ mod tests {
             q_sum: -3.0,
             fwd: 4,
             placed_left: 2,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -6487,6 +6513,7 @@ mod tests {
             q_sum: -2.0,
             fwd: 1,
             placed_left: 0,
+            low_quality: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };

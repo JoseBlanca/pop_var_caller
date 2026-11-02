@@ -4,16 +4,23 @@
 # and the unit tests hold them on one-contig fixtures; this runs them where real reads, a real
 # catalog and a fitted parameters file give a defect somewhere to show up.
 #
-#   fit       estimate-parameters at 1 thread and at --threads, and with the psps reversed:
-#             the same parameters file
-#   psp       call-from-psps at 1 thread, at --threads, with the psps reversed, and with a
-#             narrow locus-building region: the same VCF
-#   direct    call-from-alignments at 1 thread, at --threads, and with the alignments reversed:
-#             the same VCF; and with the fitted parameters, psp mode's VCF
+#   fit       estimate-parameters at 1 thread and at each of THREAD_COUNTS, and with the psps
+#             reversed: the same parameters file
+#   psp       call-from-psps at 1 thread, at each of THREAD_COUNTS, with the psps reversed, and
+#             with a narrow locus-building region: the same VCF
+#   direct    call-from-alignments at 1 thread, at each of THREAD_COUNTS, and with the alignments
+#             reversed: the same VCF; and with the fitted parameters, psp mode's VCF
 #   regions   call-from-alignments over the whole BED, and once per BED line with the results
 #             joined: the same records. Only with the hidden-dup filter off (--hidden-dup-fdr 0),
 #             whose false-discovery rate is a genome-wide quantity and so legitimately depends on
 #             what else was called.
+#
+# **Several thread counts, not one.** How the ground is cut into building regions depends on the
+# thread count (`round_shape_for`), so a defect at a region's edge shows at some counts and not
+# others: on HG002 chr20 the output was the same at 1 and 6 threads and different at 2. Each count
+# is compared with 1 thread. The thread-count runs also write the window each record read
+# (NG_WINDOW_COVERAGE_FILE) and those are compared too, because a window lost at a region's edge
+# moves the VCF only where it moves the hidden-duplication filter's fit.
 #
 # A reversed cohort writes its sample columns reversed, so every VCF is normalised before the
 # comparison: its sample columns sorted by name, and the two header lines that record the command
@@ -28,7 +35,8 @@
 #
 # PVC_BIN picks the binary; without it, the newest of target{,-container}/{soak,release}/pvc.
 # The soak build is preferred because it carries debug assertions and overflow checks, so every
-# run here doubles as a run under those. THREADS (default 6) sets the many-thread side.
+# run here doubles as a run under those. THREAD_COUNTS (default "2 3 6") lists the counts compared
+# with 1 thread; the last of them is used for the checks that are not about threads.
 set -eu
 
 if [ "$#" -lt 5 ]; then
@@ -39,7 +47,8 @@ fi
 reference=$1; catalog=$2; regions=$3; out=$4
 shift 4
 alignments=("$@")
-threads=${THREADS:-6}
+read -r -a thread_counts <<< "${THREAD_COUNTS:-2 3 6}"
+threads=${thread_counts[${#thread_counts[@]} - 1]}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=${PVC_BIN:-}
@@ -130,9 +139,12 @@ fit() {
     > "$out/$name.fit.stdout" 2>&1
 }
 fit fit_t1 1 "${psp_files[@]}"
-fit fit_tn "$threads" "${psp_files[@]}"
+for n in "${thread_counts[@]}"; do
+  fit "fit_t$n" "$n" "${psp_files[@]}"
+  compare "fit: 1 thread vs $n" "$out/fit_t1.parameters.toml" "$out/fit_t$n.parameters.toml"
+done
+cp "$out/fit_t$threads.parameters.toml" "$out/fit_tn.parameters.toml"
 fit fit_reversed "$threads" "${psp_reversed[@]}"
-compare "fit: 1 thread vs $threads" "$out/fit_t1.parameters.toml" "$out/fit_tn.parameters.toml"
 compare "fit: psps reversed" "$out/fit_tn.parameters.toml" "$out/fit_reversed.parameters.toml"
 parameters=$out/fit_tn.parameters.toml
 
@@ -140,15 +152,19 @@ echo "=== psp mode ==="
 call_psps() {
   local name=$1 nthreads=$2 extra=$3; shift 3
   # shellcheck disable=SC2086
-  "$bin" call-from-psps --reference "$reference" --catalog "$catalog" \
+  NG_WINDOW_COVERAGE_FILE=$out/$name.windows.tsv "$bin" call-from-psps --reference "$reference" --catalog "$catalog" \
     $(as_args --psp "$@") --parameters "$parameters" --threads "$nthreads" $extra \
     --output "$out/$name.vcf" --log "$out/$name.log" --force > "$out/$name.stdout" 2>&1
 }
 call_psps psp_t1 1 "" "${psp_files[@]}"
-call_psps psp_tn "$threads" "" "${psp_files[@]}"
+for n in "${thread_counts[@]}"; do
+  call_psps "psp_t$n" "$n" "" "${psp_files[@]}"
+  compare "psp: 1 thread vs $n" "$out/psp_t1.vcf" "$out/psp_t$n.vcf" vcf
+  compare "psp: windows read, 1 thread vs $n" "$out/psp_t1.windows.tsv" "$out/psp_t$n.windows.tsv"
+done
+cp "$out/psp_t$threads.vcf" "$out/psp_tn.vcf"
 call_psps psp_reversed "$threads" "" "${psp_reversed[@]}"
 call_psps psp_narrow "$threads" "--locus-builder-regions-len 7919" "${psp_files[@]}"
-compare "psp: 1 thread vs $threads" "$out/psp_t1.vcf" "$out/psp_tn.vcf" vcf
 compare "psp: psps reversed" "$out/psp_tn.vcf" "$out/psp_reversed.vcf" vcf
 compare "psp: 7,919-base locus-building regions" "$out/psp_tn.vcf" "$out/psp_narrow.vcf" vcf
 
@@ -156,16 +172,21 @@ echo "=== direct mode ==="
 call_direct() {
   local name=$1 nthreads=$2 extra=$3; shift 3
   # shellcheck disable=SC2086
-  "$bin" call-from-alignments --reference "$reference" --catalog "$catalog" \
+  NG_WINDOW_COVERAGE_FILE=$out/$name.windows.tsv "$bin" call-from-alignments --reference "$reference" --catalog "$catalog" \
     $(as_args --alignment "$@") --threads "$nthreads" $extra \
     --output "$out/$name.vcf" --log "$out/$name.log" --force > "$out/$name.stdout" 2>&1
 }
 call_direct direct_t1 1 "--defaults --regions $regions" "${alignments[@]}"
-call_direct direct_tn "$threads" "--defaults --regions $regions" "${alignments[@]}"
+for n in "${thread_counts[@]}"; do
+  call_direct "direct_t$n" "$n" "--defaults --regions $regions" "${alignments[@]}"
+  compare "direct: 1 thread vs $n" "$out/direct_t1.vcf" "$out/direct_t$n.vcf" vcf
+  compare "direct: windows read, 1 thread vs $n" \
+    "$out/direct_t1.windows.tsv" "$out/direct_t$n.windows.tsv"
+done
+cp "$out/direct_t$threads.vcf" "$out/direct_tn.vcf"
 call_direct direct_reversed "$threads" "--defaults --regions $regions" "${reversed[@]}"
 call_direct direct_fitted "$threads" "--parameters $parameters --regions $regions" \
   "${alignments[@]}"
-compare "direct: 1 thread vs $threads" "$out/direct_t1.vcf" "$out/direct_tn.vcf" vcf
 compare "direct: alignments reversed" "$out/direct_tn.vcf" "$out/direct_reversed.vcf" vcf
 compare "direct vs psp mode, fitted parameters" "$out/psp_tn.vcf" "$out/direct_fitted.vcf" vcf
 

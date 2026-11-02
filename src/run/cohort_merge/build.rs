@@ -559,6 +559,43 @@ impl AlleleLookup {
         }
         index
     }
+
+    /// Put every allele after the reference in ascending `(bases, flank deletion)` order, and
+    /// answer where each old index went (`new = moved_to[old]`).
+    ///
+    /// **Why the table has a canonical order rather than the order samples met it in:** three
+    /// consumers break ties by table index — the STR admission sort and the earned-spelling
+    /// pick between two alleles with the same bases and different flank deletions, and the
+    /// likelihood row's summation order — so a first-met table made the output depend on the
+    /// order samples were listed in. Reversing the samples changed 19 to 27 records per run on
+    /// 63 tomato accessions, two of them in genotype (invariance oracle, 2026-11-01). Sorting
+    /// here fixes all three at once and leaves none of them a tie-break to get right.
+    ///
+    /// The reference stays at [`REFERENCE_ALLELE`]. `(bases, flank deletion)` is unique by
+    /// construction, so the order is total.
+    fn sort_canonically(&mut self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.distinct.len()).collect();
+        order[1..].sort_unstable_by(|&left, &right| {
+            (&self.distinct[left], self.flank_deletions[left])
+                .cmp(&(&self.distinct[right], self.flank_deletions[right]))
+        });
+        let mut moved_to = vec![0; order.len()];
+        for (new, &old) in order.iter().enumerate() {
+            moved_to[old] = new;
+        }
+        self.distinct = order
+            .iter()
+            .map(|&old| std::mem::take(&mut self.distinct[old]))
+            .collect();
+        self.flank_deletions = order.iter().map(|&old| self.flank_deletions[old]).collect();
+        for index in self.by_bases.values_mut() {
+            *index = moved_to[*index];
+        }
+        for (index, _) in &mut self.with_flank_deletion {
+            *index = moved_to[*index];
+        }
+        moved_to
+    }
 }
 
 impl AlleleTable {
@@ -569,7 +606,9 @@ impl AlleleTable {
     /// showed it — a cohort where every sample is homozygous for the variant still has to
     /// be genotyped against the reference. Then each sample in turn, in the run's sample
     /// order, contributes what its reads showed ([`alleles_of_sample`]), and every one of
-    /// those is deduplicated against what is already there.
+    /// those is deduplicated against what is already there. The alternatives are then sorted
+    /// by `(bases, flank deletion)`, so the table does not depend on the order the samples
+    /// were listed in ([`AlleleLookup::sort_canonically`]).
     ///
     /// **Unification by exact byte equality is only sound because indels were left-aligned
     /// upstream** (`LeftAlignPreparer`, `ng/read/left_align.rs`), and it is worth being
@@ -683,11 +722,9 @@ impl AlleleTable {
             );
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
 
-            // **Ascending `(allele, read group)`, sorted once per sample.** The tally is filled
-            // in the order the derivation emits alleles, which is neither. Unstable is enough:
-            // the key is unique, one entry per pair by construction.
-            tally.sort_unstable_by_key(|held| (held.allele, held.read_group));
-
+            // **Not sorted here.** The rows are put into ascending `(allele, read group)` order
+            // once the table's own order is settled, below; sorting them by first-met ids now
+            // would be undone there.
             per_sample.push(SampleSupport {
                 sample,
                 partials: partials_of_sample(&reference, sample_members),
@@ -726,6 +763,21 @@ impl AlleleTable {
                 reads_removed_as_evidence: removed,
                 reads_composed_across_records: composed_across_records,
             });
+        }
+
+        // **The table's order is the alleles', not the samples'** — see
+        // [`AlleleLookup::sort_canonically`]. Each sample's rows are renamed and put back
+        // into ascending `(allele, read group)` order, the order they were promised in: the
+        // tally was filled in the order the derivation emitted alleles, which is neither.
+        // Unstable is enough, because the key is unique, one entry per pair by construction.
+        let moved_to = alleles.sort_canonically();
+        for support in &mut per_sample {
+            for row in &mut support.supported {
+                row.allele = moved_to[row.allele];
+            }
+            support
+                .supported
+                .sort_unstable_by_key(|row| (row.allele, row.read_group));
         }
 
         (
@@ -1498,19 +1550,21 @@ pub enum LocusBorder {
 ///   estimates one number rather than mixing two;
 /// - **the placement count is pooled the same way, and it is the one that mixes two
 ///   questions.** It is counted against each record's own position (see `placed_left`), so
-///   two records of one sample ask "did the read start left of here?" about different
+///   two records of one sample ask "does the read lie mostly left of here?" about different
 ///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
 ///   locus's width — 100 bases at the default bound.
 ///
-/// Rounded once per row rather than per read, so the counts stay as close to whole reads as the
-/// division allows. **Per row means per `(allele, read group)` since B1, and that is a change
-/// of grain, not only of wording**: two lanes' shares of one divided read are now rounded
-/// separately, so adding the rows back can differ by up to half a read per lane from what a
-/// single row would have held. The row is what a model reads, and a row has to be whole reads
-/// to be usable on its own; `SampleSupport::pooled_support_for` is where the difference
-/// shows, and `tests::a_divided_read_is_rounded_once_per_read_group_not_once_per_allele` pins it
-/// at one forward read. (Named rather than linked: a `#[cfg(test)]` item does not exist in a doc
-/// build, so a link to one is an unresolved link.)
+/// **The strand and placement counts are left as fractions; the MAPQ sums are rounded** once
+/// per row rather than per read. Rounding the strand share made the strand test depend on which
+/// strand a read was *not* on: a lone composed read with a forward share of ½ rounded to one
+/// forward read on either strand, and swapping every read's strand moved the strand-and-position
+/// penalty at 4,260 tomato records (read-transform oracle, 2026-11-01). Both tests read the
+/// counts as rates, so a fraction costs them nothing. **Per row means per `(allele, read
+/// group)` since B1**: two lanes' MAPQ shares of one divided read are rounded separately, so
+/// adding the rows back can differ by up to half a unit per lane from what a single row would
+/// have held. `tests::a_divided_read_keeps_its_strand_share_per_read_group` pins the fractions
+/// at one read divided over two lanes. (Named rather than linked: a `#[cfg(test)]` item does not
+/// exist in a doc build, so a link to one is an unresolved link.)
 ///
 /// **This row is one allele of one read group, not one allele of the sample** — see
 /// [`SupportedAllele`], which carries the group. It was one row per allele until the calling
@@ -1532,8 +1586,12 @@ pub struct AlleleSupport {
     /// so it is counted where it belongs rather than divided. Saturating, which needs four
     /// billion reads on one allele of one sample at one locus.
     pub num_reads: u32,
-    /// Of those, how many were on the forward strand — strand bias.
-    pub num_fwd: u32,
+    /// Of those, how many were on the forward strand — strand bias. **A fraction, not rounded**:
+    /// a read composed across records counts as the pooled forward share of the sequences it
+    /// showed, and rounding that per row made a lone read with a share of ½ count forward
+    /// whichever strand it was on (read-transform oracle, 2026-11-01). The strand test reads it
+    /// as a rate, so nothing downstream needs it whole.
+    pub num_fwd: f64,
     /// Σ per-read log-error over them — the freebayes per-read error term.
     pub q_sum: f64,
     /// Σ MAPQ over them.
@@ -1541,15 +1599,20 @@ pub struct AlleleSupport {
     /// Σ MAPQ² over them; with `mapq_sum` and `num_reads` it recovers the mean and variance
     /// the MAPQ multi-mapper filter reads.
     pub mapq_sum_sq: u64,
-    /// How many started strictly left of **the record they were seen at** — freebayes'
+    /// How many lay mostly left of **the record they were seen at** — freebayes'
     /// `placedLeft`, and the read-position-bias term.
     ///
     /// **Not counted against the cohort locus's own first base.** The mint counts it against
-    /// each record's position — `alignment_start < walker_pos` on the generic path
-    /// (`locus_generation/pileup/fast_column.rs`), the tract's anchor on the STR path
+    /// each record's position — the record's anchor on the generic path
+    /// (`locus_generation/pileup/`), the whole tract on the STR path
     /// (`locus_generation/ssr.rs`) — and nothing here re-anchors it, so where a locus spans
     /// several of a sample's records this mixes as many questions as it has records.
-    pub placed_left: u32,
+    ///
+    /// A fraction for the reason [`num_fwd`](Self::num_fwd) is.
+    pub placed_left: f64,
+    /// How many had a low base quality inside the record they were seen at
+    /// ([`SequenceObservation::num_low_quality`]) — the low-base-quality penalty's count.
+    pub num_low_quality: u32,
 }
 
 impl AlleleSupport {
@@ -1562,11 +1625,12 @@ impl AlleleSupport {
     fn added_to(self, other: Self) -> Self {
         Self {
             num_reads: self.num_reads.saturating_add(other.num_reads),
-            num_fwd: self.num_fwd.saturating_add(other.num_fwd),
+            num_fwd: self.num_fwd + other.num_fwd,
             q_sum: self.q_sum + other.q_sum,
             mapq_sum: self.mapq_sum.saturating_add(other.mapq_sum),
             mapq_sum_sq: self.mapq_sum_sq.saturating_add(other.mapq_sum_sq),
-            placed_left: self.placed_left.saturating_add(other.placed_left),
+            placed_left: self.placed_left + other.placed_left,
+            num_low_quality: self.num_low_quality.saturating_add(other.num_low_quality),
         }
     }
 }
@@ -1612,19 +1676,20 @@ impl AlleleSupportTally {
         self.sums.add(share);
     }
 
-    /// Round the divided sums back to whole numbers, once, when the allele is finished.
+    /// Round the MAPQ sums back to whole numbers, once, when the allele is finished.
     ///
     /// This is the one place the five are spelled out apart, because it is the one place
-    /// they differ: three are counts of reads and round, one is a sum of squares and rounds
-    /// wider, and the quality is a real number that does not round at all.
+    /// they differ: the MAPQ sum rounds, its sum of squares rounds wider, and the strand and
+    /// placement counts stay fractions, as the quality does (see [`AlleleSupport::num_fwd`]).
     fn finish(self) -> AlleleSupport {
         AlleleSupport {
             num_reads: self.num_reads,
-            num_fwd: round_to_u32(self.sums.num_fwd),
+            num_fwd: self.sums.num_fwd,
             q_sum: self.sums.q_sum,
             mapq_sum: round_to_u32(self.sums.mapq_sum),
             mapq_sum_sq: round_to_u64(self.sums.mapq_sum_sq),
-            placed_left: round_to_u32(self.sums.placed_left),
+            placed_left: self.sums.placed_left,
+            num_low_quality: round_to_u32(self.sums.num_low_quality),
         }
     }
 }
@@ -1648,6 +1713,7 @@ struct SupportSums {
     mapq_sum: f64,
     mapq_sum_sq: f64,
     placed_left: f64,
+    num_low_quality: f64,
 }
 
 impl SupportSums {
@@ -1663,6 +1729,7 @@ impl SupportSums {
         // behind one sequence.
         self.mapq_sum_sq += sequence.mapq_sum_sq as f64;
         self.placed_left += f64::from(sequence.placed_left);
+        self.num_low_quality += f64::from(sequence.num_low_quality);
     }
 
     /// **Destructured rather than field-accessed**, so that a sixth sum added to this type
@@ -1674,12 +1741,14 @@ impl SupportSums {
             mapq_sum,
             mapq_sum_sq,
             placed_left,
+            num_low_quality,
         } = other;
         self.num_fwd += num_fwd;
         self.q_sum += q_sum;
         self.mapq_sum += mapq_sum;
         self.mapq_sum_sq += mapq_sum_sq;
         self.placed_left += placed_left;
+        self.num_low_quality += num_low_quality;
     }
 
     /// Divide the four count-like sums by the reads they were measured over — **not the
@@ -1692,11 +1761,13 @@ impl SupportSums {
             mapq_sum,
             mapq_sum_sq,
             placed_left,
+            num_low_quality,
         } = self;
         *num_fwd /= reads;
         *mapq_sum /= reads;
         *mapq_sum_sq /= reads;
         *placed_left /= reads;
+        *num_low_quality /= reads;
     }
 }
 
@@ -2334,6 +2405,7 @@ mod tests {
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -2883,7 +2955,7 @@ mod tests {
         let locus = closed_locus(region(10, 14), &[&first, &second, &deletion]);
 
         let table = AlleleTable::over(&locus);
-        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"ACTTA", b"A"]);
+        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"A", b"ACTTA"]);
     }
 
     /// **One deletion recorded at three different placements inside one locus comes out as
@@ -2975,7 +3047,7 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"ACTTA", b"ACATA", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"ACATA", b"ACTTA"],
         );
         assert_eq!(table.index_of(b"ACGTA"), Some(0));
     }
@@ -3025,7 +3097,7 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"ACATC", b"ACGTC", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"ACATC", b"ACGTC"],
             "read 7's two changes, read 11's one, and the other sample's deletion",
         );
     }
@@ -3053,7 +3125,7 @@ mod tests {
         );
         assert_eq!(
             table.index_of(b"ACATC"),
-            Some(1),
+            Some(2),
             "and read 7, which was named at both, is still evidence",
         );
     }
@@ -3093,7 +3165,7 @@ mod tests {
 
         assert_eq!(
             AlleleTable::over(&locus).index_of(b"ACGTC"),
-            Some(2),
+            Some(3),
             "the reference at 12, the change at 14",
         );
     }
@@ -3159,7 +3231,7 @@ mod tests {
             None,
             "read 7 is not evidence here"
         );
-        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"ACGTC", b"A"]);
+        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"A", b"ACGTC"]);
     }
 
     /// **A chain id means nothing across samples.** The identifier space is per file
@@ -3185,7 +3257,7 @@ mod tests {
         assert_eq!(table.index_of(b"ACATA"), None);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"ACGTC", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"ACGTC"],
             "only the other sample's own change, and the deletion",
         );
     }
@@ -3203,7 +3275,7 @@ mod tests {
         let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
 
         let table = AlleleTable::over(&locus);
-        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"ACATC", b"A"]);
+        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"A", b"ACATC"]);
     }
 
     /// A read named at three of the sample's records carries all three changes: the
@@ -3219,7 +3291,7 @@ mod tests {
         let locus = closed_locus(region(10, 14), &[&three_records, &deletion]);
 
         let table = AlleleTable::over(&locus);
-        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"AGATC", b"A"]);
+        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"A", b"AGATC"]);
     }
 
     /// **A read that showed two different things at one record is removed**, the same as a
@@ -3248,7 +3320,7 @@ mod tests {
         );
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"ACGTC", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"ACGTC"],
             "only read 11's allele, and the other sample's deletion",
         );
     }
@@ -3276,10 +3348,10 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             table.index_of(b"ACATA"),
-            Some(1),
+            Some(2),
             "with one record the disagreeing fragment is not removed",
         );
-        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"ACATA", b"A"]);
+        assert_eq!(alleles_of(&table), vec![&b"ACGTA"[..], b"A", b"ACATA"]);
     }
 
     /// **The reference after a sample's last record closes the allele.** Every fixture
@@ -3298,7 +3370,7 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"AGATA", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"AGATA"],
             "the anchor base, the two changes, and the reference to the locus's end",
         );
     }
@@ -3332,7 +3404,7 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"ATGTGA", b"ACTT"],
+            vec![&b"ACGTA"[..], b"ACTT", b"ATGTGA"],
             "six bases over five, and four over five",
         );
     }
@@ -3364,7 +3436,7 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"AGATA", b"ACTTC", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"ACTTC", b"AGATA"],
             "both samples' compositions, neither lost to the other",
         );
         assert_eq!(
@@ -3374,7 +3446,7 @@ mod tests {
         );
     }
 
-    /// **The alleles come out in chain-id order, whatever order the reads were folded in.**
+    /// **The alleles come out in the same order, whatever order the reads were folded in.**
     /// The same two reads as the fixture above, with the ids listed the other way round in
     /// every observation: the table is identical, which is the determinism spec §9 rests on
     /// — the output cannot depend on which builder or which walk produced the ids.
@@ -3399,8 +3471,8 @@ mod tests {
         assert_eq!(alleles_of(&one), alleles_of(&other));
         assert_eq!(
             alleles_of(&one),
-            vec![&b"ACGTA"[..], b"ACATC", b"ACGTC", b"A"],
-            "read 7 before read 11, by id and not by arrival",
+            vec![&b"ACGTA"[..], b"A", b"ACATC", b"ACGTC"],
+            "in the order of their bases, not of arrival",
         );
     }
 
@@ -3498,6 +3570,32 @@ mod tests {
         let _ = AlleleTable::over(&locus);
     }
 
+    /// **The table does not depend on the order the samples were listed in** — the invariance
+    /// oracle's sample-order relation (2026-11-01). Listed first-met, the deletion was allele 1
+    /// with the SNP's sample second and allele 2 with it first; three later steps break ties by
+    /// that index, so reversing 63 tomato accessions changed two genotypes.
+    #[test]
+    fn the_table_is_the_same_whichever_sample_is_listed_first() {
+        let snp = [member(region(12, 12), b"G", b"T")];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let insertion = [member(region(10, 10), b"A", b"AT")];
+
+        let forward = AlleleTable::over(&closed_locus(
+            region(10, 14),
+            &[&snp, &deletion, &insertion],
+        ));
+        let reversed = AlleleTable::over(&closed_locus(
+            region(10, 14),
+            &[&insertion, &deletion, &snp],
+        ));
+        assert_eq!(alleles_of(&forward), alleles_of(&reversed));
+        assert_eq!(
+            alleles_of(&forward),
+            vec![&b"ACGTA"[..], b"A", b"ACTTA", b"ATCGTA"],
+            "the reference, then the rest by their bases",
+        );
+    }
+
     /// Every allele the samples showed is findable by its bytes, and nothing else is: the
     /// lookup is what lets B3 attribute a sample's support by composing its reads again
     /// rather than the build carrying an assignment for every one.
@@ -3509,8 +3607,8 @@ mod tests {
 
         let table = AlleleTable::over(&locus);
         assert_eq!(table.index_of(b"ACGTA"), Some(0));
-        assert_eq!(table.index_of(b"ACTTA"), Some(1));
-        assert_eq!(table.index_of(b"A"), Some(2));
+        assert_eq!(table.index_of(b"A"), Some(1));
+        assert_eq!(table.index_of(b"ACTTA"), Some(2));
         assert_eq!(
             table.index_of(b"ACGTT"),
             None,
@@ -3618,11 +3716,12 @@ mod tests {
             support.pooled_support_for(REFERENCE_ALLELE),
             AlleleSupport {
                 num_reads: 2,
-                num_fwd: 1,
+                num_fwd: 1.0,
                 q_sum: -5.0,
                 mapq_sum: 100,
                 mapq_sum_sq: 5_000,
-                placed_left: 0,
+                placed_left: 0.0,
+                num_low_quality: 0,
             },
             "the reads that agreed with the reference are support for allele 0",
         );
@@ -3635,11 +3734,12 @@ mod tests {
             support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 4,
-                num_fwd: 3,
+                num_fwd: 3.0,
                 q_sum: -8.0,
                 mapq_sum: 240,
                 mapq_sum_sq: 14_400,
-                placed_left: 1,
+                placed_left: 1.0,
+                num_low_quality: 0,
             },
         );
     }
@@ -3658,9 +3758,8 @@ mod tests {
     /// [`pooled_support_for`](SampleSupport::pooled_support_for) is asserted against here.
     /// **That is a property of this fixture and not of the merge**: every count here is added
     /// whole, because the sample has one record. Where a read is divided across records the
-    /// four count-like sums are rounded per row, so two rows can round to one read more or less
-    /// than the single row would have — see
-    /// [`a_divided_read_is_rounded_once_per_read_group_not_once_per_allele`].
+    /// MAPQ sums are rounded per row, so two rows can round to one unit more or less than the
+    /// single row would have — see [`a_divided_read_keeps_its_strand_share_per_read_group`].
     #[test]
     fn one_allele_from_two_read_groups_is_two_rows_holding_the_mints_own_numbers() {
         let two_lanes = [record_of(
@@ -3701,33 +3800,36 @@ mod tests {
             rows[0].support,
             AlleleSupport {
                 num_reads: 3,
-                num_fwd: 2,
+                num_fwd: 2.0,
                 q_sum: -9.0,
                 mapq_sum: 150,
                 mapq_sum_sq: 7_500,
-                placed_left: 0,
+                placed_left: 0.0,
+                num_low_quality: 0,
             },
         );
         assert_eq!(
             rows[1].support,
             AlleleSupport {
                 num_reads: 2,
-                num_fwd: 1,
+                num_fwd: 1.0,
                 q_sum: -6.0,
                 mapq_sum: 120,
                 mapq_sum_sq: 7_200,
-                placed_left: 1,
+                placed_left: 1.0,
+                num_low_quality: 0,
             },
         );
         assert_eq!(
             support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 5,
-                num_fwd: 3,
+                num_fwd: 3.0,
                 q_sum: -15.0,
                 mapq_sum: 270,
                 mapq_sum_sq: 14_700,
-                placed_left: 1,
+                placed_left: 1.0,
+                num_low_quality: 0,
             },
             "the two rows add back to the one row this used to be",
         );
@@ -3737,16 +3839,14 @@ mod tests {
     /// [`AlleleBacking::read_group`]'s multi-record arm — the two tests either side of this one
     /// build a single record and take the other branch entirely.
     ///
-    /// **And the rounding grain moved with the axis, which is what the second half asserts.**
-    /// The four count-like sums of a divided read are fractions until the row is finished, and
-    /// finishing rounds them. That used to happen once per allele and now happens once per
-    /// `(allele, read group)`, so each lane can round its share up or down on its own: here two
-    /// lanes each hold half a forward read, and each half rounds up, so the sample's rows total
-    /// two forward reads where one row would have held one. **Neither answer is wrong** — a row
-    /// has to be whole reads to be usable on its own — but the total is no longer what a single
-    /// row would have carried, and a reader adding the rows back must know it.
+    /// **And the strand share is kept as a fraction, which is what the second half asserts.**
+    /// Each lane holds half a forward read. When the share was rounded per row, each half
+    /// rounded up and the rows totalled two forward reads out of three — and a lone read with a
+    /// share of ½ counted forward whichever strand it was on. Unrounded, the rows add back to one
+    /// forward read: two forward sightings at one record and none at the other, over three reads
+    /// seen twice each.
     #[test]
-    fn a_divided_read_is_rounded_once_per_read_group_not_once_per_allele() {
+    fn a_divided_read_keeps_its_strand_share_per_read_group() {
         // Two records; reads 7, 9 and 11 all show `A` then `C`, so each composes the same
         // allele across both. Reads 7 and 9 are lane 1, read 11 is lane 2.
         let two_records = [
@@ -3807,18 +3907,83 @@ mod tests {
         assert_eq!(rows[1].read_group, ReadGroupId(2));
         assert_eq!(rows[1].support.num_reads, 1);
 
-        // Each lane's forward share is exactly half a read, and each row rounds it to one.
-        assert_eq!(rows[0].support.num_fwd, 1, "lane 1: two reads, one forward");
-        assert_eq!(rows[1].support.num_fwd, 1, "lane 2: one read, one forward");
+        // Each lane's forward share is exactly half a read, and stays half a read.
+        assert_eq!(
+            rows[0].support.num_fwd, 0.5,
+            "lane 1: two reads, a quarter each"
+        );
+        assert_eq!(
+            rows[1].support.num_fwd, 0.5,
+            "lane 2: one read, half forward"
+        );
         assert_eq!(
             support.pooled_support_for(compound).num_fwd,
-            2,
-            "the rows total two forward reads; one pooled row would have rounded once",
+            1.0,
+            "two forward sightings out of six, over three reads: one forward read",
         );
         assert_eq!(
             support.pooled_support_for(compound).num_reads,
             3,
             "the read count is exact either way — every read is named",
+        );
+    }
+
+    /// **Swapping every read's strand turns each forward count into its complement** — the
+    /// read-transform oracle's strand relation, at the one place it broke (2026-11-01).
+    ///
+    /// Read 7 composes `A` then `C` and is the only read of that allele. Each of its two
+    /// sequences was also shown by a read of the other strand, so its pooled forward share is ½
+    /// whichever strand it is on. Rounded per row, that half became one forward read in both
+    /// orientations, and a lone deletion read at SL4.0ch01:3411198 moved the
+    /// strand-and-position penalty from 25.4 to 10.3. Kept as a fraction, the two orientations
+    /// add up to the one read.
+    #[test]
+    fn swapping_every_reads_strand_complements_a_composed_reads_forward_share() {
+        let forward_count_of_read_7 = |read_7_forward: bool| {
+            // Reads 9 and 11 are always on the other strand from read 7.
+            let fwd = |forward: bool| u32::from(forward);
+            let (seven, other) = (fwd(read_7_forward), fwd(!read_7_forward));
+            let two_records = [
+                record_of(
+                    region(12, 12),
+                    b"G",
+                    vec![
+                        shown_by(b"A", &[7, 9], -2.0, seven + other, 120, 7_200, 0),
+                        shown_by(b"G", &[11], -1.0, other, 60, 3_600, 0),
+                    ],
+                ),
+                record_of(
+                    region(14, 14),
+                    b"A",
+                    vec![
+                        shown_by(b"C", &[7, 11], -2.0, seven + other, 120, 7_200, 0),
+                        shown_by(b"A", &[9], -1.0, other, 60, 3_600, 0),
+                    ],
+                ),
+            ];
+            let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+            let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+            let observed = CohortObservation::over(&locus, &no_measurement());
+            let compound = observed
+                .alleles
+                .iter()
+                .position(|allele| &**allele == b"ACATC")
+                .expect("read 7's allele");
+            let support = observed.per_sample[0].pooled_support_for(compound);
+            assert_eq!(support.num_reads, 1, "read 7 alone shows it");
+            support.num_fwd
+        };
+
+        let as_mapped = forward_count_of_read_7(true);
+        let swapped = forward_count_of_read_7(false);
+        assert_eq!(
+            as_mapped, 0.5,
+            "half of each of read 7's sequences was forward"
+        );
+        assert_eq!(
+            as_mapped + swapped,
+            1.0,
+            "one read, so its forward counts on the two strands must add to one",
         );
     }
 
@@ -4002,7 +4167,7 @@ mod tests {
     /// every other one-group fixture happens to emit its alleles in ascending order anyway.
     ///
     /// This one does not: the record shows the alternative first, so the reference is interned
-    /// second and the emission order is allele 1 then allele 0.
+    /// second and the emission order is the alternative (allele 2, after the deletion) then allele 0.
     #[test]
     fn a_one_read_group_samples_rows_are_in_ascending_allele_order() {
         let alternative_first = [record_of(
@@ -4027,10 +4192,10 @@ mod tests {
                 .alleles
                 .iter()
                 .position(|allele| &**allele == b"ACTTA"),
-            Some(1),
-            "the alternative is interned after the reference",
+            Some(2),
+            "the alternative sorts after the reference and the deletion",
         );
-        assert_eq!(alleles, vec![0, 1], "ascending allele order: {alleles:?}");
+        assert_eq!(alleles, vec![0, 2], "ascending allele order: {alleles:?}");
         assert!(
             support
                 .supported
@@ -4155,11 +4320,12 @@ mod tests {
             support.pooled_support_for(snp),
             AlleleSupport {
                 num_reads: 3,
-                num_fwd: 2,
+                num_fwd: 2.0,
                 q_sum: -5.0,
                 mapq_sum: 170,
                 mapq_sum_sq: 9_700,
-                placed_left: 1,
+                placed_left: 1.0,
+                num_low_quality: 0,
             },
             "and adding the two rows back gives what the one row used to hold",
         );
@@ -4167,11 +4333,12 @@ mod tests {
             support.pooled_support_for(allele_of(b"ACATA")),
             AlleleSupport {
                 num_reads: 1,
-                num_fwd: 1,
+                num_fwd: 1.0,
                 q_sum: -3.0,
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
-                placed_left: 0,
+                placed_left: 0.0,
+                num_low_quality: 0,
             },
             "the other allele keeps its own, unmixed",
         );
@@ -4190,8 +4357,8 @@ mod tests {
     ///   −0.5 is an error probability of about 3 in 5 and −2.0 about 1 in 7. What read 7
     ///   saw badly at 14 is what limits its evidence for an allele covering both;
     /// - **the other four pooled over the three reads behind the two sequences**: forward
-    ///   2/3, MAPQ 170/3 ≈ 56.7, MAPQ² 9,700/3 ≈ 3,233.3, placed left 1/3 — each rounded
-    ///   once, at the allele.
+    ///   2/3, MAPQ 170/3 ≈ 56.7, MAPQ² 9,700/3 ≈ 3,233.3, placed left 1/3 — the MAPQ pair
+    ///   rounded once, at the allele, and the strand and placement shares kept as fractions.
     ///
     /// Read 9, named at 12 alone, is removed, so `ACATA` is not in the table at all.
     #[test]
@@ -4223,11 +4390,12 @@ mod tests {
             support.pooled_support_for(compound),
             AlleleSupport {
                 num_reads: 1,
-                num_fwd: 1,
+                num_fwd: 2.0 / 3.0,
                 q_sum: -0.5,
                 mapq_sum: 57,
                 mapq_sum_sq: 3_233,
-                placed_left: 0,
+                placed_left: 1.0 / 3.0,
+                num_low_quality: 0,
             },
         );
         assert_eq!(support.reads_composed_across_records, 1);
@@ -4303,11 +4471,12 @@ mod tests {
             split.pooled_support_for(allele_of(b"ACATC")),
             AlleleSupport {
                 num_reads: 2,
-                num_fwd: 2,
+                num_fwd: 2.0,
                 q_sum: -1.0,
                 mapq_sum: 120,
                 mapq_sum_sq: 7_200,
-                placed_left: 0,
+                placed_left: 0.0,
+                num_low_quality: 0,
             },
             "reads 7 and 9, each taking the weaker −0.5 of its two sightings",
         );
@@ -4315,11 +4484,12 @@ mod tests {
             split.pooled_support_for(allele_of(b"ACTTC")),
             AlleleSupport {
                 num_reads: 1,
-                num_fwd: 1,
+                num_fwd: 0.75,
                 q_sum: -6.0,
                 mapq_sum: 53,
                 mapq_sum_sq: 2_925,
-                placed_left: 0,
+                placed_left: 0.25,
+                num_low_quality: 0,
             },
             "read 11, from the sequence it was sighted at rather than the record's first",
         );
@@ -4466,18 +4636,18 @@ mod tests {
         );
     }
 
-    /// **The divided counts are rounded once per allele, not once per read**, and the
+    /// **The divided counts are summed once per allele, not rounded per read**, and the
     /// left-placed count is where the two answers differ. Reads 7, 9 and 11 are each sighted
-    /// at two sequences with six reads behind them in total, of which **three** started left
-    /// of the anchor and **one** was on the forward strand. So each read's share is a half a
+    /// at two sequences with six reads behind them in total, of which **three** were placed
+    /// left and **one** was on the forward strand. So each read's share is a half a
     /// left-placed read and a sixth of a forward one.
     ///
-    /// Rounded once: 1.5 left-placed becomes **2** and 0.5 forward becomes **1**. Rounded
+    /// Summed: **1.5** left-placed and **0.5** forward, kept as fractions since 2026-11-01. Rounded
     /// per read, each half would become a whole and the allele would claim **3** reads
-    /// started left, out of three reads — twice the truth, and a number that cannot be
-    /// distinguished from every read starting left.
+    /// placed left, out of three reads — twice the truth, and a number that cannot be
+    /// distinguished from every read placed left.
     #[test]
-    fn the_divided_counts_are_rounded_once_per_allele() {
+    fn the_divided_counts_are_summed_once_per_allele() {
         let two_records = [
             record_of(
                 region(12, 12),
@@ -4504,13 +4674,14 @@ mod tests {
             observed.per_sample[0].pooled_support_for(compound),
             AlleleSupport {
                 num_reads: 3,
-                num_fwd: 1,
+                num_fwd: 0.5,
                 q_sum: -6.0,
                 mapq_sum: 90,
                 mapq_sum_sq: 5_400,
-                placed_left: 2,
+                placed_left: 1.5,
+                num_low_quality: 0,
             },
-            "1.5 left-placed reads rounded once are 2, where three halves rounded are 3",
+            "three halves of a left-placed read are 1.5, where three halves rounded are 3",
         );
     }
 
@@ -4942,7 +5113,7 @@ mod tests {
         let table = AlleleTable::over(&locus);
         assert_eq!(
             alleles_of(&table),
-            vec![&b"ACGTA"[..], b"ACTTA", b"A"],
+            vec![&b"ACGTA"[..], b"A", b"ACTTA"],
             "the partial's `A` would have been a fourth allele",
         );
     }
@@ -5027,7 +5198,7 @@ mod tests {
                 .iter()
                 .map(|allele| allele.to_vec())
                 .collect::<Vec<_>>(),
-            vec![b"ACGTA".to_vec(), b"ACTTA".to_vec(), b"A".to_vec()],
+            vec![b"ACGTA".to_vec(), b"A".to_vec(), b"ACTTA".to_vec()],
             "the reference, the substitution and the deletion — the partial's `A` would have \
              been a fourth",
         );

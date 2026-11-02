@@ -200,7 +200,8 @@ contamination fraction, and the contaminant carrying that allele at 1 in 1,000. 
 how often the contaminant carries it** — 1.13 nats at 1 in 100, 1.89 at 1 in 2. The term that wants the **arithmetic** mean is the one for reads the genotype *does* explain,
 `log(1 − ε)`, and it is worth 0.05 nats over those same 20 reads — a fifth of a Phred. **ng does not
 carry the substitution because §3.3 drops the term it would have appeared in, not because it is
-wrong.**
+wrong.** *(Since 2026-10-31 §3.3 carries `1 − ε`, from the geometric mean; §3.3's amendment and §2.3
+give what that costs.)*
 
 §2.3 turns this into a contract and §3.3 shows the SNP/indel formula that satisfies it exactly — it
 is not a coincidence that freebayes' expression has the shape it has.
@@ -291,6 +292,15 @@ between them is their quality — which is why this contract is about quality an
    `q_sum`, or not at all.** §3.3's formula is built to satisfy this and §12's ninth test pins it:
    compute the likelihood from a list of made-up reads and from the aggregate of those same reads,
    and require the two to agree.
+
+   > **AMENDED 2026-10-31 (owner): this rule now holds for reads of one quality, not for reads of
+   > mixed quality.** §3.3's amendment puts `1 − ε` and a cap at a half inside the logarithm, and
+   > neither is additive in `q_sum`. Reads of one quality still pool exactly, to a relative
+   > `4.3 × 10⁻¹⁴`, because the fold's geometric mean is then each read's own error. Reads of mixed
+   > quality do not: alternating Phred 93 and Phred 1, the fold sits up to 0.69 nats a read from the
+   > reads scored singly. The trade was made because without it a read minted near an error of one
+   > argued against the allele it showed; §3.3's amendment gives the measurements on both sides.
+   > The paragraphs below describe the rule as it stood until then.
 
    > **They agree to a relative 2 × 10⁻¹⁴, not bit for bit — corrected 2026-08-24, measured while
    > building the row** ([`calling_read_likelihoods.md`](../impl_plan/calling_read_likelihoods.md)
@@ -613,8 +623,87 @@ is open about them is what that measurement is worth, which is Q1 (§11) and not
 
 ### 3.3 The formula
 
-**A read either shows something the genotype can produce, in which case it is charged only for which
-copy it came from, or it does not, in which case it is charged for being wrong.** For a genotype `g`
+**AMENDED 2026-10-31 (owner): a read is scored as the average over the genotype's copies, and the
+error it is charged is capped at a half.** The formula below this amendment is the one it replaces,
+kept because the rest of this document argues from it.
+
+**What went wrong.** The formula below gives a read the genotype explains `k/P`, with no `(1 − ε)`,
+and a read it cannot explain `ε/m`, uncapped. That is sound while `ε` is small. When a read's minted
+error is near one, the second number matches or beats the first, and **the read argues against the
+allele it shows**. On the tomato panel at SL4.0ch06:14571014, sample SRS3394712's eight reads all
+showed `CTTCCCA` with a minted error of 0.84, because the base beside the inserted `C` was at Phred 0
+to 2 in every one of them. The row it got was `0/0` −1.38, `1/1` 0.00 and `0/2` **+4.16**: a
+genotype carrying neither copy of the reads' allele scored above the one carrying two, and above
+zero. 60 of the panel's 61 samples were called `0/2` there. The tomato alignments had BAQ written
+over their qualities, which pvc does not support, but nothing about the defect needs BAQ: a read
+gets an error near one from any base at Phred 0 to 2 inside the locus window, and from the losing
+mate of an overlapping pair, which the read walk sets to Phred 0.
+
+**The formula.** For a genotype `g` with copy counts `k_b` over ploidy `P`:
+
+```text
+log Lg(g)  =   Σ  n_o · log own(o | g)   +  q_sum_other
+               o
+
+own(o | g) =   Σ  (k_b / P) · e(o | b)
+               b
+
+e(o | a(o)) = 1 − ε_o                        ← a copy of the read's own allele read it correctly
+e(o | b)    = ε_o / m(a(o), b)               ← a copy of another allele, misread into this one
+              (the minted ε, unscaled, where a(o) and b are one indel apart — §3.5)
+
+ε_o = min( scale_{r(o)} · exp(q_sum_o / n_o),  ½ )
+```
+
+`m` and the indel rule are now properties of the **allele pair**, applied copy by copy, where before
+they were properties of the whole genotype ("every carried allele one substitution away"). The two
+agree on every homozygote. On a genotype mixing alleles that differ from the read in different
+ways, the old rule charged the scaled error with no spread, which was the most generous charge on
+offer: at the tomato site it is what put `0/2` first.
+
+**Why a half.** Below it, `1 − ε` is at least every pair's charge, since `m ≥ 1`, so a copy of the
+read's own allele never lowers a genotype's score and a read can never argue against the allele it
+shows. At the cap, a read whose alleles differ with no spread says nothing. One substitution away,
+it still favours its own allele threefold, which is right: three wrong bases were on offer and it
+showed this one. **Every row is then at or below zero**, which the formula below did not
+guarantee: it scored 10,550 of 1.56 million rows above zero over 100 kb of the tomato panel.
+
+**What it bought, measured.** On HG002's chromosome 20 under `--defaults`, scored by vcfeval against
+GIAB v4.2.1, false positives fell from 4,640 to 4,616 at 5×, 2,100 to 2,077 at 10× and 483 to 477
+at 30×, and false negatives rose by one at each depth; the calls that changed were nearly all SNPs.
+On a simulated cohort with known genotypes and overlapping read pairs, from 1 to 1,000 samples and
+3× to 100×, it was never worse in any cell. Up to 100 samples, wrong genotypes fell from 3,799 to
+3,728 of 64,400 calls; at 1,000 samples and 3× they fell from 8,830 to 8,668 of 70,000. Every
+change was at 3× or 5×; at 10× and above nothing moved by more than two calls. **So the gain is
+small and one-directional, and it lands at low depth**, where a single poor read can carry a call.
+Run time on chromosome 20 did not change.
+
+**What it costs: pooling is no longer exact** — §2.3's second rule, amended the same day. `1 − ε`
+wants each read's own error, and a fold carries only the geometric mean, which is far below the
+arithmetic one when qualities are mixed. The cap binds on single reads the fold averages below it.
+Measured on the row's own sweeps:
+
+- **reads of one quality pool exactly**: the fold's geometric mean is then every read's error, and
+  the row from the fold matches the row from the single reads to a relative `4.3 × 10⁻¹⁴` over read
+  counts 2 to 300 — floating-point order only;
+- **reads of mixed quality do not**: alternating Phred 93 and Phred 1, the fold sits up to **0.69
+  nats a read** from scoring the reads one at a time, worst under a genotype carrying none of their
+  allele, where one at a time the cap binds on every Phred-1 read.
+
+**So, pooled, the amendment acts where most of a pool's reads are poor** — the case that produced
+the defect — and a pool with a few poor reads among good ones is scored very nearly as the formula
+below scored it. That is what the measurements above measured. The exact property the formula
+below had, that pooling never changes the answer, is given up.
+
+**Ends of the range.** Nothing is estimated, so the rule is the same at one sample and at a
+thousand. At three reads a position a poor read is a third of the evidence, and that is where it
+moved calls; at 300 the reads it neutralises are outvoted either way. A fitted scale raises how
+often the cap binds: fits run from 2.7 to 19.6 on GIAB and tomato, and at 19.6 any read minted
+worse than 1 in 39 is capped.
+
+**The formula this amendment replaced.** **A read either shows something the genotype can produce,
+in which case it is charged only for which copy it came from, or it does not, in which case it is
+charged for being wrong.** For a genotype `g`
 with copy counts `k_a` over ploidy `P`, at a locus whose allele table has `A` alleles:
 
 ```text
@@ -643,7 +732,9 @@ case.
 
 **Two approximations live in this formula and both have a size.**
 
-- **A read that the genotype explains is not charged for being right.** The exact term is
+- **A read that the genotype explains is not charged for being right** *(removed 2026-10-31: §3.3's
+  amendment charges `1 − ε`, from the geometric mean, which is the smaller of the two means and so
+  overstates `1 − ε` by at most the size worked out here)*. The exact term is
   `log(k_a/P) + log(1 − ε)` and the second half is dropped, because recovering it needs the
   *arithmetic* mean of `ε` over the observation's reads and `q_sum` gives the geometric mean (§1.4).
   The omission is `−n·ln(1 − ε)` nats for a genotype explaining `n` reads at rate `ε` — which is
@@ -669,7 +760,7 @@ them side by side is the quickest way to see what is genuinely new here and what
 
 | | freebayes, default branch | this document |
 |---|---|---|
-| a read the genotype explains | `log(k_a / P)`, no `(1 − ε)` factor | **the same**, and §3.3's first approximation is the same omission |
+| a read the genotype explains | `log(k_a / P)`, no `(1 − ε)` factor | **the same** until 2026-10-31; since then the average over the genotype's copies, `1 − ε` from a copy of the read's allele (§3.3's amendment) |
 | a read the genotype cannot explain | `log[ 1 − (1 − ε_base)(1 − ε_map) ]` | `log[ max(ε_base, ε_map) ] + log scale − log m` (no `log scale` for an indel error, §3.5) |
 | combining base and mapping error | a **sum** — the read is wrong if either is | the **worse of the two**, which is production's mint |
 | which base's quality, on a multi-base allele | the **average** over the allele's bases, and the **minimum** across alleles merged into one haplotype ([`Allele.cpp:158`](../../../../freebayes/src/Allele.cpp), [`AlleleParser.cpp:3154`](../../../../freebayes/src/AlleleParser.cpp)) | the **minimum** across the whole locus window ([`open_record.rs:944`](../../../../src/pileup/walker/open_record.rs)) |
@@ -891,7 +982,10 @@ log Lg(g)  =  Σ_o  n_o · log[ (1 − c) · own(o | g)  +  c · q(o) ]
 
 - `c` is this read group's contamination fraction, zero when the parameters fit emits none.
 - `own(o | g)` is what §3.3's formula computes per read, as a probability rather than a logarithm:
-  `k_a/P` for an explained observation, `ε̄ / m` for a wrong one.
+  `k_a/P` for an explained observation, `ε̄ / m` for a wrong one — **since 2026-10-31 the average
+  over the genotype's copies of `1 − ε` and the pair's charge, with `ε` capped at a half** (§3.3's
+  amendment). The identity at `c = 0` below still holds against the amended §3.3, and is still
+  checked; its log-space oracle is replaced by an independent per-copy one.
 - `q(o)` is **the contaminating population's frequency of the allele this observation shows, at this
   locus** — read off the caller's own frequency estimate for the samples sequenced in the same batch
   as this one, and recomputed every iteration as that estimate moves (owner, 2026-08-24).
@@ -1986,6 +2080,12 @@ term(o | g)  =  Σ  ( k_a / P )   over the alleles a in g that are compatible wi
 and if no allele in `g` is compatible, the observation is charged as an error exactly as in §3.3,
 with `m = 1`, because a multi-position difference has no finite set of wrong outcomes to divide by.
 
+> **AMENDED 2026-10-31 (owner), with §3.3: a partial is scored as the average over the genotype's
+> copies too.** With `c` of the `P` copies compatible, `term(o | g) = (c/P)·(1 − ε) + (1 − c/P)·ε`,
+> `ε` capped at a half and charged with `m = 1`. A partial compatible with every copy now adds
+> `ln(1 − ε)` a read rather than nothing — the same under every genotype it fits, so it still
+> separates none of them.
+
 **That charge keeps §3.2's scale even where §3.5's 2026-10-21 amendment drops it for a complete
 read.** Deciding that a fragment differs from a carried allele by one indel and nothing else would
 mean aligning the fragment against the allele, and the partial rule deliberately compares bytes at
@@ -2554,7 +2654,9 @@ production already tests and ng's port should carry across
    to the last bit and that is luck rather than arithmetic. *This asked for bitwise agreement until
    2026-08-24; §2.3 carries the correction and the measurement.* This is the test that would have
    caught §1.4's geometric-mean substitution, and it is the reason §3.3's formula is shaped the way
-   it is.
+   it is. *Amended 2026-10-31 with §2.3: the agreement is now required for reads of one quality, and
+   for reads of mixed quality the gap is measured and bounded (0.69 nats a read at worst on the
+   Phred 93/1 alternation) so that a change making it worse fails.*
 10. **The calibration scale reproduces the fitted rate.** Given a read group's minted per-read error
     probabilities and the pre-pass's fitted rate, the scaled probabilities' mean equals the fitted
     rate to floating-point tolerance. A second assertion checks the definitional requirement of §3.2:
@@ -2566,7 +2668,10 @@ production already tests and ng's port should carry across
     genotype, at several allele counts and quality spreads. *Not bitwise: §3.6's identity is exact
     algebra, and §8's evaluation order puts an `exp`/`log` round trip between the two forms.* This is what lets contamination default
     on: it pins that a clean sample is untouched, and it fails the moment anyone reintroduces
-    production's extra `(1 − ε)` factor or its allele-count divisor into `own`.
+    production's extra `(1 − ε)` factor or its allele-count divisor into `own`. *Since 2026-10-31
+    the oracle is §3.3's amended per-copy formula, classifying each allele pair from its bases, and
+    the test fails instead if the cap is removed or the pair's charge is read from the wrong
+    homozygote.*
 12. **The censored tail is a complement.** For every candidate and every period, the probability that
     the tract is at least `ℓ` plus the probability that it is shorter must sum to **the truncated
     distribution's own total mass** — one minus the loss test 5 reports — to floating-point tolerance.

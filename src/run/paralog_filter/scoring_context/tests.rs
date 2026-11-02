@@ -26,6 +26,8 @@ fn a_fittable_histogram() -> SampleHistogram {
         depth_bins,
         windows_folded: 4200,
         windows_under_the_floor: 0,
+        depth_summed: 0,
+        depth_rises: 0,
         counts,
     })
 }
@@ -226,6 +228,8 @@ fn each_way_a_sample_can_lose_its_model_is_kept_apart_from_the_others() {
             depth_bins: 40,
             windows_folded: 0,
             windows_under_the_floor: 0,
+            depth_summed: 0,
+            depth_rises: 0,
             counts: vec![0; 41],
         }),
     ];
@@ -343,6 +347,8 @@ fn a_gc_varying_histogram() -> SampleHistogram {
         depth_bins: depth_bins as u32,
         windows_folded: 600,
         windows_under_the_floor: 0,
+        depth_summed: 0,
+        depth_rises: 0,
         counts,
     })
 }
@@ -586,5 +592,34 @@ fn hom_alt_samples_at_a_tract_argue_against_a_duplication() {
         hom_alt.to_bits(),
         score(&a_generic_locus(vec![(raised, 0, 9); 6])).to_bits(),
         "the tract flag changed the score"
+    );
+}
+
+#[test]
+fn a_sample_with_no_reads_joining_the_run_leaves_every_ratio_unchanged() {
+    // **The read-transform oracle's empty-sample relation** (2026-11-01): adding a sample with no
+    // reads moved the ratio at 233,144 tomato records, because the SFS floor `1/2N` counted it.
+    // Such a sample has no coverage model and says nothing anywhere, so it must not set `N`.
+    let three = a_context_over(3);
+    let mut histograms: Vec<SampleHistogram> = (0..3).map(|_| a_fittable_histogram()).collect();
+    histograms.push(SampleHistogram::NoWindowFinalised);
+    let three_and_an_empty_one = a_context_from(histograms, &fit_config());
+
+    let raised = a_window(ONE_COPY_DEPTH * 1.6);
+    let row = (raised, 6, 3);
+    let mut scratch = Vec::new();
+    let without = three
+        .score(&a_generic_locus(vec![row; 3]), &mut scratch)
+        .expect("the cohort's width");
+    let with = three_and_an_empty_one
+        .score(
+            &a_generic_locus(vec![row, row, row, (no_window(), 0, 0)]),
+            &mut scratch,
+        )
+        .expect("the cohort's width");
+    assert_eq!(
+        without.to_bits(),
+        with.to_bits(),
+        "a sample with no reads moved the ratio: {without} against {with}"
     );
 }

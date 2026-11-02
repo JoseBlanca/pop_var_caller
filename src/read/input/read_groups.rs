@@ -287,13 +287,29 @@ fn owned_str(raw: &[u8]) -> Box<str> {
 /// a file with no `@RG` is an error, not an empty contribution.
 pub fn build_read_groups(paths: &[PathBuf]) -> Result<ReadGroups, ReadGroupError> {
     let mut read_groups: Vec<ReadGroup> = Vec::new();
+    let mut with_baq_qualities: Vec<&Path> = Vec::new();
 
     for path in paths {
         let header = read_header(path).map_err(|source| ReadGroupError::HeaderRead { source })?;
+        if wrote_baq_over_base_qualities(&header) {
+            with_baq_qualities.push(path);
+        }
         let file: Arc<Path> = Arc::from(path.as_path());
         for declared in declared_read_groups(&header, path)? {
             read_groups.push(into_read_group(declared, Arc::clone(&file)));
         }
+    }
+    if let Some(first) = with_baq_qualities.first() {
+        tracing::warn!(
+            "{} of {} alignment file(s) record a `samtools calmd -A` step that wrote BAQ over the \
+             base qualities (first: {}). pvc does not support such reads: BAQ lowers the bases \
+             beside an indel towards Phred 0, and pvc then treats every read of an indel in a \
+             short run as almost certainly wrong, so those indels are missed or mis-genotyped. \
+             Realign, or recompute the alignments without `calmd -A`.",
+            with_baq_qualities.len(),
+            paths.len(),
+            first.display()
+        );
     }
 
     reject_duplicate_read_group_ids(&read_groups)?;
@@ -303,6 +319,32 @@ pub fn build_read_groups(paths: &[PathBuf]) -> Result<ReadGroups, ReadGroupError
     Ok(ReadGroups {
         read_groups,
         per_sample,
+    })
+}
+
+/// **Whether the file's `@PG` history shows BAQ written over its base qualities** — a
+/// `samtools calmd` run with `-A` and with `-r` or `-E`. Without `-A`, `calmd` keeps BAQ in a `BQ`
+/// tag pvc does not read, so the qualities are the instrument's and the file is fine.
+///
+/// The header is the only trace the step leaves, so a pipeline that dropped its `@PG` lines
+/// passes unnoticed; this is a warning for the files that say so, not a guarantee.
+fn wrote_baq_over_base_qualities(header: &sam::Header) -> bool {
+    use sam::header::record::value::map::program::tag::COMMAND_LINE;
+
+    header.programs().as_ref().values().any(|program| {
+        let Some(command_line) = program.other_fields().get(&COMMAND_LINE) else {
+            return false;
+        };
+        let command_line = String::from_utf8_lossy(command_line.as_ref());
+        let mut words = command_line.split_whitespace();
+        if !words.any(|word| word == "calmd") {
+            return false;
+        }
+        let flags: String = words
+            .filter(|word| word.starts_with('-') && !word.starts_with("--"))
+            .flat_map(|word| word.chars().skip(1))
+            .collect();
+        flags.contains('A') && (flags.contains('r') || flags.contains('E'))
     })
 }
 
@@ -1568,5 +1610,47 @@ mod build_tests {
         let error = build_read_groups(&[good, bad]).expect_err("the second file has no @RG");
 
         assert!(matches!(error, ReadGroupError::NoReadGroups { .. }));
+    }
+
+    // --- BAQ written over the base qualities ---
+
+    fn header_whose_history_ran(command_line: &str) -> sam::Header {
+        format!("@HD\tVN:1.6\n@PG\tID:samtools\tPN:samtools\tCL:{command_line}\n")
+            .parse()
+            .expect("a valid header")
+    }
+
+    /// The tomato benchmark's own line, and the flag orders `calmd` accepts.
+    #[test]
+    fn calmd_with_a_and_r_or_e_wrote_baq_over_the_qualities() {
+        for command_line in [
+            "samtools calmd -Ar -@4 - ref.fa",
+            "samtools calmd -r -A in.bam ref.fa",
+            "samtools calmd -bAE in.bam ref.fa",
+        ] {
+            assert!(
+                wrote_baq_over_base_qualities(&header_whose_history_ran(command_line)),
+                "{command_line}"
+            );
+        }
+    }
+
+    /// Without `-A` the BAQ goes into a `BQ` tag pvc never reads, and the other tools on a
+    /// file's history are no concern of this check.
+    #[test]
+    fn calmd_without_a_or_without_baq_and_other_tools_leave_the_qualities_alone() {
+        for command_line in [
+            "samtools calmd -r in.bam ref.fa",
+            "samtools calmd -A in.bam ref.fa",
+            "samtools markdup -@4 - -",
+            "minimap2 -R @RG\\tID:x -t 10 -a -x sr ref.mmi -",
+        ] {
+            assert!(
+                !wrote_baq_over_base_qualities(&header_whose_history_ran(command_line)),
+                "{command_line}"
+            );
+        }
+        let no_history: sam::Header = "@HD\tVN:1.6\n".parse().expect("a valid header");
+        assert!(!wrote_baq_over_base_qualities(&no_history));
     }
 }

@@ -625,6 +625,7 @@ fn a_windowed_rate_decides_the_verdict_and_the_probability_written() {
         posterior_cut: Some(0.99),
         occupied_bins: 1,
         local_rates: None,
+        pulled_towards: 0.02,
     });
 
     let (did, lines) = write_and_read_back(&spill, &output, &verdicts, true);

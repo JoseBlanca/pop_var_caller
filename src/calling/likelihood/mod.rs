@@ -93,12 +93,13 @@
 //! - **Every probability is floored before a logarithm**, so one impossible observation
 //!   yields a finite very negative number instead of turning a sample's whole row into
 //!   `NaN`. The floor is [`MIN_BASE_ERROR`] here, and the geometric clamps in the stutter
-//!   distribution. **Floored and not capped**, which C1 corrected on 2026-08-24 and the owner
-//!   settled the same day: production pairs that floor with a ceiling at a half, and a ceiling
-//!   binds on a single read and not on the fold of that read with others — a non-linear
-//!   function of a per-read quality, which is exactly what the aggregation contract forbids.
-//!   The ceiling and the method that applied it are deleted;
-//!   `tests::what_the_row_charges_a_poor_read_is_not_capped` is what stops them coming back.
+//!   distribution. **An observation's charged error is floored here and capped at a half by the
+//!   generic row** ([`generic::MAX_CHARGED_ERROR`]). The cap was refused on 2026-08-24 because
+//!   it binds on a single read and not on the fold of that read with others, which the
+//!   aggregation contract then forbade; the owner amended that contract on 2026-10-31 (spec
+//!   §2.3, §3.3), because without a cap a read minted near an error of one argued against the
+//!   allele it showed. [`ReadGroupCalibration::charged_error`] itself stays uncapped, and
+//!   `tests::what_the_row_charges_a_poor_read_is_not_capped` pins that.
 //!
 //! ## Three tiers of parameter, and only the middle one is open
 //!
@@ -206,6 +207,13 @@ pub use crate::alignment::stutter::{GEOM_MAX, GEOM_MIN};
 /// rather than negative infinity, so one such read makes a genotype very unlikely instead of
 /// making the sample's whole row `NaN` (spec §8).
 pub const MIN_BASE_ERROR: f64 = 1e-12;
+
+/// **How far above zero a genotype log-likelihood may sit before a debug build stops.** Every
+/// value is a sum of logarithms of probabilities, so it is at most zero; a mixture of copy
+/// shares that sums to one can round to one plus a unit in the last place, and 300 reads of it
+/// add up to about `7 × 10⁻¹⁴`. A billionth is far above that and far below anything a defect
+/// produces — the one this guards against gave `+4.16`.
+pub const ROW_ROUNDING_ALLOWANCE: f64 = 1e-9;
 
 /// **The multiplier a read group's reads are charged where nothing was fitted — two: every read's
 /// reported error probability is doubled, about 3 Phred less confident than the instrument
@@ -481,9 +489,17 @@ impl ReadGroupCalibration {
 
     /// **The error probability the row actually charges an observation** — this read group's
     /// scale times the geometric mean of its reads' minted error, floored against zero and
-    /// **not capped from above**.
+    /// **not capped from above** — the generic row caps what it charges at
+    /// [`generic::MAX_CHARGED_ERROR`], after the reads are pooled (spec §3.3 as amended
+    /// 2026-10-31), and the reasons below are why the cap is not here.
     ///
     /// # Why it floors and does not cap
+    ///
+    /// **Superseded in part on 2026-10-31**: the owner accepted the cost measured below for the
+    /// generic row, which now caps the pooled charge, because uncapped a read minted near an
+    /// error of one argued against the allele it showed. What follows is the original argument,
+    /// which still decides where the cap sits — after pooling, on the observation, never on the
+    /// reads before it.
     ///
     /// Production pairs its floor with a ceiling at a half, and ng adopted both at A2 before
     /// anything consumed them. **The ceiling cannot be applied to what the row charges**,
@@ -504,11 +520,8 @@ impl ReadGroupCalibration {
     /// — so it changes no answer that can occur and exists only so a logarithm never sees a
     /// zero (spec §8).
     ///
-    /// **So this may return a number above one**, where a poor read is scaled up. Spec §3.3's
-    /// log-space form does the same thing: it charges `q_sum + n·log scale`, which is
-    /// positive under exactly the same conditions. That is a property of the model as
-    /// specified, not something introduced here, and a row that clamped it would silently
-    /// disagree with §3.3 wherever the clamp bit.
+    /// **So this may return a number above one**, where a poor read is scaled up; the generic
+    /// row's cap is what keeps that from reaching a likelihood.
     ///
     /// # Panics
     ///
@@ -1383,17 +1396,22 @@ pub struct GenericObservation {
     /// locus (`doc/devel/ng/spec/calling_quality.md` §3.3). This view is where that
     /// specification says the counts travel, and the merge's `AlleleSupport` already has
     /// them; anything that gathered them a second way would be a second answer to the same
-    /// question.
-    pub forward_reads: u32,
-    /// Of those reads, how many started strictly left of the record they were seen at —
+    /// question. A fraction where a read was composed across records, as the merge's is.
+    pub forward_reads: f64,
+    /// Of those reads, how many lay mostly left of the record they were seen at —
     /// freebayes' `placedLeft`, and the read-position half of the same correction.
     ///
     /// **Counted against each record's own position, not the cohort locus's first base**, by
     /// the mint that produced it; nothing re-anchors it, so where a locus spans several of a
     /// sample's records this mixes as many questions as it has records. Carried forward from
     /// [`AlleleSupport::placed_left`](crate::run::cohort_merge::build::AlleleSupport::placed_left),
-    /// whose own comment is the one to read before drawing a conclusion from it.
-    pub placed_left_reads: u32,
+    /// whose own comment is the one to read before drawing a conclusion from it. A fraction,
+    /// as [`Self::forward_reads`] is.
+    pub placed_left_reads: f64,
+    /// Of those reads, how many had a low base quality — the low-base-quality penalty's count,
+    /// carried for the same reason as [`Self::forward_reads`]
+    /// (`doc/devel/ng/spec/low_base_quality.md`).
+    pub low_quality_reads: u32,
 }
 
 impl GenericObservation {
@@ -1417,6 +1435,7 @@ impl GenericObservation {
             q_sum: row.support.q_sum,
             forward_reads: row.support.num_fwd,
             placed_left_reads: row.support.placed_left,
+            low_quality_reads: row.support.num_low_quality,
         }
     }
 
@@ -2287,11 +2306,12 @@ mod tests {
             read_group: ReadGroupId(read_group),
             support: AlleleSupport {
                 num_reads,
-                num_fwd: 7,
+                num_fwd: 7.0,
                 q_sum,
                 mapq_sum: 611,
                 mapq_sum_sq: 37_442,
-                placed_left: 3,
+                placed_left: 3.0,
+                num_low_quality: 0,
             },
         }
     }
@@ -2354,6 +2374,7 @@ mod tests {
             mapq_sum: 240,
             mapq_sum_sq: 14_400,
             placed_left: 1,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -2382,8 +2403,8 @@ mod tests {
         let observation =
             GenericObservation::of_supported_allele(&supported_row(3, 9, 17, -41.25), AlleleId(3));
 
-        assert_eq!(observation.forward_reads, 7);
-        assert_eq!(observation.placed_left_reads, 3);
+        assert_eq!(observation.forward_reads, 7.0);
+        assert_eq!(observation.placed_left_reads, 3.0);
     }
 
     /// The type's doc promises plain scalars and cheap copying. A field owning heap would
@@ -2391,11 +2412,12 @@ mod tests {
     /// works under (spec §8), so the width is pinned rather than described.
     #[test]
     fn the_observation_stays_a_handful_of_scalars_wide() {
-        // **32, and it was 24 before the two site-quality counters joined it.** Not 34: the
-        // `f64` wants eight-byte alignment, so the two-byte allele id and the four
-        // four-byte counts are padded out to twenty-four before it. The two counters cost
-        // eight bytes on a struct the merge already pays 48 for.
-        assert_eq!(std::mem::size_of::<GenericObservation>(), 32);
+        // **40: it was 24 before the two site-quality counters joined it, and 32 while they were
+        // whole reads.** They became `f64` shares on 2026-11-01, because rounding a composed
+        // read's strand share made the strand test asymmetric. `f32` shares kept it at 32 and
+        // saved nothing measurable: a row lives for one locus on one worker. Three eights, plus
+        // the two-byte allele id and the two four-byte counts padded out to sixteen.
+        assert_eq!(std::mem::size_of::<GenericObservation>(), 40);
         assert_eq!(std::mem::align_of::<GenericObservation>(), 8);
         assert!(!std::mem::needs_drop::<GenericObservation>());
     }
@@ -2680,8 +2702,8 @@ mod tests {
     /// floor moved to `1e-9` changes an impossible observation's charge by 7 nats, which is a
     /// plausible-looking number rather than a failure.
     ///
-    /// **Production's ceiling is deliberately not adopted and so is not pinned here** — see
-    /// `what_the_row_charges_a_poor_read_is_not_capped`.
+    /// **Production's ceiling is not applied here and so is not pinned here** — the generic row
+    /// applies its own, after pooling; see `what_the_row_charges_a_poor_read_is_not_capped`.
     #[test]
     fn the_floor_still_equals_productions() {
         // Production's `var_calling::contamination_estimation::MIN_BASE_ERROR` at commit
@@ -4391,8 +4413,9 @@ mod tests {
 
     // ---- C1: what the row charges a wrong read ----
 
-    /// **A poor read is charged what it was minted with, past a half and all**, which is the
-    /// property a ceiling would break.
+    /// **This method charges a poor read what it was minted with, past a half and all** — the
+    /// cap belongs to the generic row, applied to the pooled observation (spec §3.3 as amended
+    /// 2026-10-31), and a cap here would act on single reads before pooling.
     ///
     /// A read minted at Phred 1 is an error of 0.794. Production's ceiling would return 0.5 —
     /// 0.46 nats away — and spec §2.3 forbids it: the merge hands the row *folds* of reads and
@@ -4404,8 +4427,8 @@ mod tests {
     /// pinned to a relative `2 × 10⁻¹⁴`.
     ///
     /// The ceiling and the method that applied it were deleted on the owner's decision
-    /// (2026-08-24) once nothing outside this module's tests read either. **This test is what
-    /// is left of them**, so that reintroducing a cap fails here rather than moving genotypes.
+    /// (2026-08-24) once nothing outside this module's tests read either, and the cap came back
+    /// on 2026-10-31 in the row rather than here. **This test keeps it out of this method.**
     #[test]
     fn what_the_row_charges_a_poor_read_is_not_capped() {
         let calibration = ReadGroupCalibration::unscaled();

@@ -239,6 +239,25 @@ would be finalised by the *next* cover, after their builder has run, so the buil
 and the sample reads as absent at exactly the loci nearest every region boundary. The plan lands it
 as its own commit with the whole-store oracle green either side (§10).
 
+**Drawing half a window further is enough only if every record drawn moves the frontier.** What
+closes a centre is a *position* the accumulator is fed, so a record that feeds it nothing leaves
+the frontier behind. A record dropped for being over the run's depth ceiling (`--max-depth`) is
+such a record: it has no evidence to measure, so it reports no depth. Until 2026-11-01 it moved
+the frontier nowhere either. Behind a stretch of dropped records — a satellite at a thousand
+reads a position, say — the centres in the last half window before the stretch then waited for
+the first covered record after it. A cover that ran past the stretch drew that record, and the
+centres had their windows. A cover that ended inside the stretch did not, and its builder read
+them as absent. Where a cover ends is set by the building regions, whose width the run divides
+by its thread count, so the result changed with the thread count: on HG002 chr20 at 30x, nine
+records in chr20:31,063,769–31,063,977 read as absent at two threads and had windows at one and
+at six, and the filter's fitted rate moved with them.
+
+**So a dropped record moves the frontier to its first base, at no depth** — the rule a position
+at depth 0 already follows. It joins no window, so no window's value changes; what changes is
+only *when* a centre is finalised, and that is now fixed by the sample's records rather than by
+where a cover stopped. The record past the chain's reach that every cover draws is then always
+enough to finalise every centre in the region, dropped or not.
+
 **Emitted values are held per sample until eviction.** The accumulator's ready values go into a
 per-sample deque keyed by position, alongside the held summaries; `evict_before` drains it with
 them; a builder reads it through the cohort window it is already handed
@@ -422,10 +441,17 @@ impl WindowCoverageAccumulator {
   Added up from the shipped constants 2026-09-07 with each per-unit size pinned by a library
   test; a whole-run measurement beside it could only bound the per-sample cost at 1.8 MB
   ([the report](../../reports/implementations/ng_window_coverage_d3_2026-09-07.md) has both).
-- **Three reads a position.** A window of 500 positions at three reads each is a mean over
-  ~1,500 reads, which is the reason the filter windows at all (production's spec §4: per-base
-  counts cannot tell one copy from two at this depth). The floor matters most here — a window
-  over 50 positions at 3× is a mean over 150 reads.
+- **Three reads a position.** A window of 500 positions at three reads each holds 1,500 read
+  *bases*, but only about ten reads: with 150-base reads each read covers up to 150 of the
+  window's positions, so the positions share their reads and the window's mean depth is an
+  average over those ten. It is still steadier than one position's depth, which is the reason the
+  filter windows at all (production's spec §4: per-base counts cannot tell one copy from two at
+  this depth) — but it scatters by about ±30% at 3× and ±55% at 1× from which reads happened to
+  land in it. The coverage model's σ₀ carries that scatter
+  ([`hidden_paralog_filter.md`](hidden_paralog_filter.md) §3.1); **until 2026-11-01 it did not**,
+  this line said "a mean over ~1,500 reads", and on 57 tomato accessions at 1× the filter dropped
+  95 records in 100. The floor matters most here — a window over 50 positions at 3× holds about
+  two reads. *(Corrected 2026-11-01.)*
 - **Three hundred reads a position.** The depth axis scales with the sample (§3.4), so the
   single-copy peak and a four-copy carrier both land inside the range where production's fixed
   scheme would have overflowed and rejected the fit. **This held only on average until
@@ -464,7 +490,9 @@ impl WindowCoverageAccumulator {
    different scale from the measurement. Nothing fails; every copy number is biased.
 2. **Anchor only for a generic record.** Spreading a deletion record's depth over its span
    double-counts the interior, which has records of its own. A tract has none.
-3. **The look-ahead** (§3.3). Own commit; oracle green before and after.
+3. **The look-ahead** (§3.3). Own commit; oracle green before and after. **And every record
+   drawn moves the frontier, including one dropped for depth** (§3.3): a record that feeds the
+   accumulator nothing makes when a window closes depend on where the cover stopped.
 4. **`NaN` by bits.** A codec, a comparison or a test that normalises `NaN` turns *absent* into a
    number. Production's `LocusWindowCoverage` compares by bit pattern for this reason
    ([`types.rs:233`](../../../../src/var_calling/types.rs)).
@@ -559,4 +587,8 @@ exactly the records §3.1 builds bodies for.
 - **Nothing moved with the filter off**: the VCF is byte-identical to the run before this work,
   on the run fixtures and the tomato slice.
 - **Thread-count invariance**: the pairs and histograms are identical at one thread and at
-  sixteen.
+  every other count. **Several counts, not one**, because the building regions are the run's
+  ground divided by the thread count, so a defect at a region's edge appears at some counts and
+  not others — the over-depth defect in §3.3 showed at two threads and not at six.
+  [`scripts/run_invariance_oracle.sh`](../../../../scripts/run_invariance_oracle.sh) compares one
+  thread with each of 2, 3 and 6 by default, on the VCF and on the window each record read.

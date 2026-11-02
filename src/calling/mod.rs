@@ -103,7 +103,7 @@ use crate::parameter_estimation::repeat_strata::{RepeatCount, Stratum as SsrStra
 use crate::region_typing::run_parse::RunParse;
 use crate::types::{
     AlleleId, BatchId, BatchOfEachReadGroup, BatchOfEachSample, ErrorRate, GenomeRegion, Genotype,
-    InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
+    GenotypeRows, InbreedingF, LogProb, Phred, Ploidy, ReadGroupId, SsrPeriod,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -2948,6 +2948,10 @@ pub enum SampleGenotypeCall {
         /// loci — but a sample that covered nothing at a locus is scored there all the
         /// same, and this is what says so.
         reads_were_uninformative: bool,
+        /// The sample's likelihood and posterior rows over every genotype of the table the locus
+        /// was called with — the `PL` and `GP` the VCF writes (`vcf_output.md` §7.2). Taken in
+        /// the final pass, where both exist for one sample at a time.
+        genotype_rows: GenotypeRows,
     },
     /// The candidate step ruled this sample uncallable at this locus, so it took no part in
     /// the loop and emission writes its `GT` as missing.
@@ -2956,6 +2960,52 @@ pub enum SampleGenotypeCall {
     /// (`doc/devel/ng/spec/calling_em_loop.md` §5.0.1), and [`LocusInference::new`] refuses
     /// a locus that carries one there.
     Missing,
+}
+
+#[cfg(test)]
+impl SampleGenotypeCall {
+    /// **Test fixtures only**: a called sample's rows replaced by flat ones — every genotype equally
+    /// likely and equally probable — over `allele_count` alleles at the genotype's ploidy, so a
+    /// fixture built without a calling pass still carries rows the VCF assembly can index.
+    #[must_use]
+    pub fn with_flat_rows(self, allele_count: usize) -> Self {
+        match self {
+            Self::Called {
+                genotype,
+                genotype_quality,
+                reads_were_uninformative,
+                genotype_rows: _,
+            } => {
+                let ploidy = Ploidy::try_new(
+                    u8::try_from(genotype.alleles().len()).expect("a fixture's ploidy fits a u8"),
+                )
+                .expect("a fixture's genotype names at least one copy");
+                let genotypes = GenotypeTable::build(ploidy, allele_count).genotype_count();
+                Self::Called {
+                    genotype,
+                    genotype_quality,
+                    reads_were_uninformative,
+                    genotype_rows: GenotypeRows {
+                        ploidy,
+                        log_likelihoods: vec![0.0; genotypes].into(),
+                        posteriors: vec![1.0 / genotypes as f64; genotypes].into(),
+                    },
+                }
+            }
+            Self::Missing => Self::Missing,
+        }
+    }
+}
+
+/// **Test fixtures only**: rows with no entries, for a call that is never assembled into a record.
+#[cfg(test)]
+#[must_use]
+pub fn placeholder_genotype_rows() -> GenotypeRows {
+    GenotypeRows {
+        ploidy: Ploidy::try_new(2).expect("two copies is a ploidy"),
+        log_likelihoods: Box::new([]),
+        posteriors: Box::new([]),
+    }
 }
 
 impl SampleGenotypeCall {
@@ -3872,6 +3922,7 @@ mod tests {
             // These fixtures are about what a called locus holds, not about what the reads
             // said, so they use the case where the reads said something.
             reads_were_uninformative: false,
+            genotype_rows: placeholder_genotype_rows(),
         }
     }
 
@@ -4272,6 +4323,8 @@ mod tests {
             alternative_reads: 6.0,
             alternative_forward_reads: 5.0,
             alternative_placed_left_reads: 2.0,
+            reference_low_quality_reads: 0.0,
+            alternative_low_quality_reads: 0.0,
             total_reads: 8.0,
             genotype_expected_alternative_reads: 4.0,
         }

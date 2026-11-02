@@ -19,8 +19,8 @@ Besides the usual lines, the header records how the file was made:
 ## QUAL and GQ
 
 - **QUAL**: the Phred-scaled probability that no sample in the cohort carries any alternative
-  allele at the site, after subtracting two penalties for looking like a sequencing artifact
-  (`ABPEN` and `SPPEN`, below). A QUAL of 20 means a 1 in 100 chance that the site is not
+  allele at the site, after subtracting three penalties for looking like a sequencing artifact
+  (`ABPEN`, `SPPEN` and `BQPEN`, below). A QUAL of 20 means a 1 in 100 chance that the site is not
   variable at all. It is at least 0 and at most 9999. QUAL does not grow with the number of
   samples that match the reference.
 - **GQ**: the Phred-scaled probability that this sample's genotype is wrong, at most 99.
@@ -35,13 +35,15 @@ Besides the usual lines, the header records how the file was made:
 | `DP` | the sum of the samples' `DP` |
 | `ABPEN` | Phred subtracted from QUAL because the reads' allele balance looks like an artifact |
 | `SPPEN` | Phred subtracted from QUAL because the alternative reads come from one strand or one read position |
+| `BQPEN` | Phred subtracted from QUAL because more of the alternative reads than of the reference reads have a base quality below 20 — the sequencer misreading the same base in many reads, typically late in the read beside a run of G or C |
 | `MQREF`, `MQALT`, `MQDIFF` | mean mapping quality of the reads supporting the reference and each alternative allele, and their difference. A strongly negative `MQDIFF` means the alternative reads map worse, a sign of reads from elsewhere in the genome |
 | `STR` | flag: the record is an STR or an STR bundle |
 | `RU`, `PERIOD` | the repeat unit and its length, one value per repeat in a bundle |
 | `PARALOG_LR`, `PARALOG_POST` | the hidden-duplication filter's evidence, and its probability that the site is a hidden duplication |
 
-`ABPEN` and `SPPEN` appear only when there were reads to test. When QUAL is not 0,
-`QUAL + ABPEN + SPPEN` is the quality before penalties.
+`ABPEN`, `SPPEN` and `BQPEN` appear only when there were reads to test, and `BQPEN` only when
+`--low-base-quality-weight` is not 0. When QUAL is not 0, `QUAL + ABPEN + SPPEN + BQPEN` is the
+quality before penalties.
 
 ## FORMAT
 

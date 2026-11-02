@@ -368,7 +368,19 @@ impl<'a> WrongReadChargeTable<'a> {
     pub fn genotype_count(&self) -> usize {
         self.values.len() / self.allele_count
     }
+
+    /// The charge for a read showing `observed` under genotype row `genotype`.
+    fn cell(&self, genotype: usize, observed: usize) -> WrongReadCharge {
+        self.values[genotype * self.allele_count + observed]
+    }
 }
+
+/// **The largest error a read is charged** — the point at which a read becomes uninformative.
+/// At an error of one half, `1 − ε` is no smaller than the charge any other allele's copy gives
+/// the read, so a read can never argue *against* the allele it shows; uncapped, reads minted at
+/// `ε ≈ 0.84` on BAQ-lowered qualities beside indels called genotypes carrying none of their
+/// allele (found 2026-10-31).
+pub const MAX_CHARGED_ERROR: f64 = 0.5;
 
 /// Whether two projected allele sequences differ by a substitution at exactly one position.
 ///
@@ -654,12 +666,24 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 ///             +  q_sum_other                                       ← the pooled leftover
 /// ```
 ///
-/// **A read either shows something the genotype can produce, in which case it is charged only
-/// for which copy it came from, or it does not, in which case it is charged for being wrong** —
-/// that is `own(o | g)`, `k_a/P` on the first branch and `ε̄/m` on the second — `ε̄` scaled by the
-/// read group's calibration, except where every carried allele is one indel away
-/// ([`WrongReadCharge::OneIndelAway`], spec §3.5 amended 2026-10-21), where it is the unscaled
-/// minted error. Beside it sits the
+/// **A read came from one of the genotype's `P` copies, each equally likely**, so `own(o | g)` is
+/// the average over the copies of what one copy gives the read: `1 − ε` for a copy of the allele
+/// the read shows, and the allele pair's error charge for a copy of any other allele —
+/// `ε/m(o, b)`, `ε` scaled by the read group's calibration, except where the two alleles are one
+/// indel apart ([`WrongReadCharge::OneIndelAway`], spec §3.5 amended 2026-10-21), where it is the
+/// unscaled minted error:
+///
+/// ```text
+/// own(o | g)  =  Σ  (k_b / P) · e(o | b),     e(o | o) = 1 − ε,   e(o | b) = ε_b / m(o, b)
+///                b
+/// ```
+///
+/// **`ε` is capped at [`MAX_CHARGED_ERROR`], one half** (spec §3.3, amended 2026-10-31). Below
+/// the cap `1 − ε` is at least every error charge, so carrying a copy of the read's own allele
+/// never lowers a genotype's score; at the cap the read says nothing. Without it a read whose
+/// minted error was near one — a base at Phred 0 to 2, or the silenced half of an overlapping
+/// pair — argued *against* the allele it showed, and uncapped scaling could lift the charge
+/// above one and the row's values above zero. Beside `own` sits the
 /// chance the read is not this individual's at all: `c` of this read group's reads came from
 /// somebody else, and `q(o)` is how often that somebody else shows the allele this observation
 /// shows. `q_sum_other` is the same number in every row so it cancels when the caller
@@ -681,29 +705,21 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 ///
 /// # One logarithm per term, and what it costs
 ///
-/// Spec §8 puts exactly one logarithm on each `(observation, genotype)` pair, which is where
-/// §3.3's shape — every logarithm hoisted out of the loop — stops applying. Two things are still
-/// hoisted, because they can be. The **explained** side depends on the genotype only through its
-/// copy count, so its logarithm is taken once per copy count per observation, into a
-/// `ploidy + 1` array, rather than once per genotype. The **error** side has one logarithm per
-/// term and nothing beside it: the spread table stores `m`, which is what the mixture divides
-/// by, so no logarithm is taken or undone there.
+/// Spec §8 puts exactly one logarithm on each `(observation, genotype)` pair. What one copy of
+/// each allele gives the observation is computed once per observation into an `alleles`-long
+/// array, and each genotype then sums its carried copies' entries — at most `ploidy` non-zero
+/// terms — before its one logarithm.
 ///
-/// # Two approximations live in this formula and both have a size
+/// # What pooling costs, with its size
 ///
-/// **A read the genotype explains is not charged for being right.** The exact term is
-/// `log(k_a/P) + log(1 − ε)` and the second half is dropped, because recovering it needs the
-/// *arithmetic* mean of `ε` over the observation's reads and the evidence carries the geometric
-/// one. The omission is at most `n·ε` nats for a genotype explaining `n` reads at rate `ε`, and
-/// what matters is the *difference* between two genotypes — 0.002 nats at 20 reads and 1 error
-/// in a thousand, 0.75 nats at 300 reads and a poor library at 1 in 20. **Negligible at good
-/// chemistry, small but real at bad chemistry and high depth**, and it always favours the
-/// genotype that explains more reads.
-///
-/// **Every read supporting one allele is charged the same, whatever its own quality**, once it
-/// is on the error side. That is exactly what `q_sum` encodes and is not an approximation at
-/// all: the sum of logs is the log of the product, which is what a labelled-read likelihood
-/// wants.
+/// **`1 − ε` and the cap use the geometric mean of the observation's errors**, the one average
+/// `q_sum` carries (spec §1.4), where the exact terms need each read's own `ε`. For reads of
+/// one quality the two are the same and pooling changes nothing. For reads of mixed quality the
+/// geometric mean is far below the arithmetic one — Phred 93 and Phred 1 alternating fold to
+/// `2 × 10⁻⁵` while half the reads sit at 0.79 — so the fold scores such a pool very nearly as
+/// the formula before the amendment did, and it sits up to 0.69 nats a read from the reads
+/// scored singly (spec §2.3 as amended 2026-10-31). **Pooled, the amendment acts where most of a
+/// pool's reads are poor.**
 ///
 /// # What contamination costs the aggregation contract, with its size
 ///
@@ -727,10 +743,10 @@ fn splits_into_a_prefix_and_a_suffix(bases: &[u8], allele: &[u8]) -> bool {
 /// that carrier's sequence. **This convenience row passes no flank**
 /// ([`ReferenceBesideLocus::NONE`]), so a partial longer than an allele is compared against the
 /// allele alone; the calling loop fills through [`fill_generic_emissions`] with the locus's
-/// flanks. A partial the genotype's carried alleles can all have produced
-/// contributes `Σ k_a/P` over them; one none of them can is charged as an error **with no
-/// spread**, because a read disagreeing over several positions has no finite set of wrong
-/// outcomes to divide by. [`allele_is_compatible_with_partial`] carries the rule and what it declines to
+/// flanks. A partial is scored as a complete read is, averaged over the genotype's copies: a
+/// compatible copy gives it `1 − ε`, any other copy `ε` **with no spread**, because a read
+/// disagreeing over several positions has no finite set of wrong outcomes to divide by — `ε`
+/// capped at [`MAX_CHARGED_ERROR`] here too. [`allele_is_compatible_with_partial`] carries the rule and what it declines to
 /// decide; the verdicts are cached in the caller's
 /// [`GenericRowScratch`](crate::calling::likelihood::GenericRowScratch), once per
 /// `(partial, allele)` rather than once per genotype.
@@ -978,13 +994,20 @@ pub fn assemble_genotype_log_likelihood_row(
     // about what `k / P` is.
     let copy_share = super::copy_shares(genotypes.ploidy());
 
-    // The explained side's logarithms, one per copy count, refilled per observation because both
-    // halves of the mixture change with the read group and the allele. Declared here so the row
-    // writes into one array rather than standing a fresh one up per observation — the same
-    // discipline the caller's own scratch follows, at a scale small enough to live on the stack.
-    let mut log_explained_mixture = [f64::NAN; MAX_PLOIDY_COPIES + 1];
-
     let counts = genotypes.genotype_allele_counts();
+    // **Each allele's homozygote row**, which is where the charge for one allele pair lives: a
+    // genotype carrying only `b` charges a read showing `o` exactly as one copy of `b` does.
+    let homozygote_of: Vec<usize> = (0..allele_count)
+        .map(|allele| {
+            (0..genotype_count)
+                .find(|&genotype| {
+                    counts[genotype * allele_count + allele] as usize == copies_of_the_genome
+                })
+                .expect("every allele has its homozygote in the genotype table")
+        })
+        .collect();
+    // What one copy of each allele gives this observation, refilled per observation.
+    let mut per_copy = vec![0.0_f64; allele_count];
     for (at, observation) in evidence.supported.iter().enumerate() {
         let allele = usize::from(observation.allele.get());
         assert!(
@@ -1006,59 +1029,57 @@ pub fn assemble_genotype_log_likelihood_row(
         // row and this is the cohort frequency.
         let from_somebody_else_carrying_this_allele = contamination_fraction
             * contamination.contaminant_frequency_of(observation.read_group, observation.allele);
-        // `(1 − c) · ε̄` — this individual's share of what a read of this observation is charged
-        // for being wrong, before the spread divides it. **`ε̄` comes from the cache**: it reads
-        // no frequency, so it is one of the emissions computed once for the locus
-        // ([`fill_generic_emissions`]). It is floored and deliberately not capped;
-        // [`ReadGroupCalibration::charged_error`] says why.
-        let this_individuals_charged_error =
-            from_this_individual * scratch.charged_error_of_supported(at);
+        // **Capped at the point where a read stops carrying information** — see
+        // [`MAX_CHARGED_ERROR`]. `ε` comes from the cache: it reads no frequency.
+        let charged_error = scratch
+            .charged_error_of_supported(at)
+            .min(MAX_CHARGED_ERROR);
         // The same, unscaled — what an indel error is charged (spec §3.5, amended 2026-10-21).
-        let this_individuals_minted_error =
-            from_this_individual * scratch.minted_error_of_supported(at);
+        let minted_error = scratch.minted_error_of_supported(at).min(MAX_CHARGED_ERROR);
 
-        // **The explained side varies with the genotype only through its copy count**, so its
-        // logarithm is taken here — at most `ploidy` of them per observation — rather than once
-        // per genotype. At a six-allele diploid that is 2 logarithms against 21.
-        for (log_mixture, share) in log_explained_mixture
-            .iter_mut()
-            .zip(copy_share)
-            .take(copies_of_the_genome + 1)
-            .skip(1)
-        {
-            *log_mixture =
-                float::ln(from_this_individual * share + from_somebody_else_carrying_this_allele);
+        // **What one copy of each allele gives this read.** A copy of the read's own allele
+        // produced it correctly, `1 − ε`; a copy of another allele produced it by an error,
+        // charged as that allele pair's homozygote charges it — spread over the bases it could
+        // have shown, and unscaled when only an indel could have made it.
+        for (carried, value) in per_copy.iter_mut().enumerate() {
+            *value = if carried == allele {
+                1.0 - charged_error
+            } else {
+                let charge = wrong_read_charges.cell(homozygote_of[carried], allele);
+                let error = if charge.is_scaled() {
+                    charged_error
+                } else {
+                    minted_error
+                };
+                error / charge.divisor()
+            };
         }
 
-        // **Two columns, walked together.** For a fixed observation the allele is fixed, so
-        // what the genotype loop needs is this allele's column of copy counts and its column of
-        // spreads — both strided by the allele count, both checked once here rather than per
-        // term. A bounds-checked accessor per `(observation, genotype)` would put a
-        // `checked_mul` and a formatting closure inside the loop.
-        let carried_copies = counts[allele..].iter().step_by(allele_count);
-        let spreads = wrong_read_charges.charges_of(observation.allele);
-
-        for ((slot, &copies), charge) in out.iter_mut().zip(carried_copies).zip(spreads) {
+        // **A genotype's chance of the read is the average over its copies** — the read came
+        // from one copy, each equally likely.
+        for (genotype, slot) in out.iter_mut().enumerate() {
+            let carried = &counts[genotype * allele_count..(genotype + 1) * allele_count];
+            let own: f64 = carried
+                .iter()
+                .zip(&per_copy)
+                .filter(|&(&copies, _)| copies > 0)
+                .map(|(&copies, &value)| copy_share[copies as usize] * value)
+                .sum();
             slot.0 += reads
-                * if copies > 0 {
-                    log_explained_mixture[copies as usize]
-                } else {
-                    // The one thing that depends on the genotype: how this wrong read is
-                    // charged, given what this genotype carries — spread over the bases it
-                    // could have shown, and unscaled when only an indel could have made it.
-                    let own_error = if charge.is_scaled() {
-                        this_individuals_charged_error
-                    } else {
-                        this_individuals_minted_error
-                    };
-                    float::ln(
-                        own_error / charge.divisor() + from_somebody_else_carrying_this_allele,
-                    )
-                };
+                * float::ln(from_this_individual * own + from_somebody_else_carrying_this_allele);
         }
     }
 
-    score_partials(evidence, genotypes, read_groups, &copy_share, scratch, out);
+    score_partials(evidence, genotypes, read_groups, scratch, out);
+
+    // **Every row value is the logarithm of a probability, so none may be above zero** — up to
+    // rounding. Positive values were how the 2026-10-31 likelihood defect showed itself, in
+    // `--explain-loci` output, before anything else noticed; a soak build stops on the first.
+    debug_assert!(
+        out.iter()
+            .all(|value| value.0 <= super::ROW_ROUNDING_ALLOWANCE),
+        "a genotype log-likelihood is above zero, which no probability can be: {out:?}"
+    );
 }
 
 /// Add what the reads that saw only part of the locus are worth — spec §5.3.
@@ -1073,11 +1094,11 @@ pub fn assemble_genotype_log_likelihood_row(
 /// read `genotypes` times — the cache is what makes this `partials × alleles` rather than
 /// `partials × genotypes × alleles`, a factor of 3.5 at a six-allele diploid.
 ///
-/// For one genotype, a partial's own term is `Σ k_a/P` over the alleles it carries that are
-/// compatible — **a sum, not a maximum**, because the read could have come from any copy the
-/// genotype holds and the copies are what the share divides. Compatible with none, it is
-/// charged as an error exactly as §3.3 charges one, **with `m = 1`**: a read that disagrees over
-/// several positions has no finite set of wrong outcomes to divide by.
+/// For one genotype holding `c` of its `P` copies compatible with the partial, the partial's own
+/// term is `(c/P)·(1 − ε) + (1 − c/P)·ε` — **a sum over copies, not a maximum**, because the read
+/// could have come from any copy the genotype holds. An incompatible copy charges `ε` with
+/// **`m = 1`**: a read that disagrees over several positions has no finite set of wrong outcomes
+/// to divide by. `ε` is capped at [`MAX_CHARGED_ERROR`], as for a complete observation.
 ///
 /// The contaminant's half is the same sum over the same alleles, weighted by their frequency in
 /// the batch — the chance a neighbour's DNA would have shown what this read showed is the chance
@@ -1086,7 +1107,6 @@ fn score_partials(
     evidence: &super::GenericSampleEvidence<'_>,
     genotypes: &GenotypeTableView<'_>,
     read_groups: super::ReadGroupParameters<'_>,
-    copy_share: &[f64],
     scratch: &super::GenericRowScratch,
     out: &mut [LogProb],
 ) {
@@ -1117,25 +1137,26 @@ fn score_partials(
         // is what `NO_ERROR_SPREAD` is, so this is the same quantity the observation walk
         // charges an unexplained read and carries the same name. The cache holds it already
         // divided, for the reason it holds the other half: it reads no frequency.
-        let this_individuals_charged_error =
-            from_this_individual * scratch.charged_error_of_partial(partial_at);
+        // Capped as a complete observation's is — see [`MAX_CHARGED_ERROR`].
+        let charged_error = scratch
+            .charged_error_of_partial(partial_at)
+            .min(MAX_CHARGED_ERROR);
 
-        // **The same hoist the observation walk makes, for the same reason**: the mixture varies
-        // with the genotype only through how many compatible copies it carries, so its logarithm
-        // is taken once per copy count rather than once per genotype — at a six-allele diploid,
-        // 3 against 21. **Slot 0 is the error case**, which leaves the genotype loop with no
-        // branch at all.
-        log_mixture[0] = float::ln(
-            this_individuals_charged_error + from_somebody_else_carrying_a_compatible_allele,
-        );
+        // **The genotype matters only through how many compatible copies it carries**, so the
+        // logarithm is taken once per copy count rather than once per genotype. A compatible
+        // copy produced the read correctly, `1 − ε`; any other produced it by an error, with no
+        // spread.
+        let copies_in_all = copies_of_the_genome as f64;
         for (copies, log_term) in log_mixture
             .iter_mut()
             .enumerate()
             .take(copies_of_the_genome + 1)
-            .skip(1)
         {
+            let compatible_share = copies as f64 / copies_in_all;
             *log_term = float::ln(
-                from_this_individual * copy_share[copies]
+                from_this_individual
+                    * (compatible_share * (1.0 - charged_error)
+                        + (1.0 - compatible_share) * charged_error)
                     + from_somebody_else_carrying_a_compatible_allele,
             );
         }
@@ -1722,8 +1743,9 @@ mod tests {
             read_group: ReadGroupId(read_group),
             num_reads,
             q_sum,
-            forward_reads: num_reads / 2,
-            placed_left_reads: num_reads / 2,
+            forward_reads: f64::from(num_reads / 2),
+            placed_left_reads: f64::from(num_reads / 2),
+            low_quality_reads: 0,
         }
     }
 
@@ -1806,15 +1828,16 @@ mod tests {
 
     /// **A hand-computed biallelic diploid case**, every term written out.
     ///
-    /// Two reads showing the reference with a summed log error of −6, one read showing the
-    /// alternative at −7; the two alleles differ at one position, so a wrong read's charge is
-    /// reduced by `ln 3`. With the scale at one:
+    /// Two reads showing the reference with a summed log error of −6, so `ε₀ = e⁻³` each, and one
+    /// read showing the alternative at −7, `ε₁ = e⁻⁷`; the two alleles differ at one position, so
+    /// a copy of the other allele gives a read `ε/3`. A genotype's chance of a read is the average
+    /// over its two copies of what each gives it (spec §3.3, amended 2026-10-31). With the scale at
+    /// one:
     ///
-    /// - **reference homozygote**: the two reference reads are explained and charged
-    ///   `2·ln(2/2) = 0`; the alternative read is an error, charged `−7 + 1·(0 − ln 3)`.
-    /// - **heterozygote**: every read is explained, at `ln(1/2)` each — `3·(−ln 2)`.
-    /// - **alternative homozygote**: the alternative read is explained at `ln(2/2) = 0`; the two
-    ///   reference reads are errors, charged `−6 + 2·(0 − ln 3)`.
+    /// - **reference homozygote**: each reference read `1 − ε₀`; the alternative read `ε₁/3`.
+    /// - **heterozygote**: each reference read `½(1 − ε₀) + ½·ε₀/3`; the alternative read
+    ///   `½(1 − ε₁) + ½·ε₁/3`.
+    /// - **alternative homozygote**: each reference read `ε₀/3`; the alternative read `1 − ε₁`.
     #[test]
     fn a_biallelic_diploid_row_is_what_the_formula_says_term_by_term() {
         let alleles = locus(&[b"A", b"C"]);
@@ -1822,32 +1845,35 @@ mod tests {
         let supported = [observation(0, 0, 2, -6.0), observation(1, 0, 1, -7.0)];
         let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
 
-        let scored = row(&evidence, &alleles, &table, &uncalibrated());
-
         let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
         let het = genotype_carrying(&table, &[1, 1]).get() as usize;
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
-        let half = float::ln(0.5);
+        let expected = |scale: f64| {
+            let (reference, alternative) = (scale * float::exp(-3.0), scale * float::exp(-7.0));
+            let het_of = |error: f64| 0.5 * (1.0 - error) + 0.5 * error / 3.0;
+            [
+                2.0 * float::ln(1.0 - reference) + float::ln(alternative / 3.0),
+                2.0 * float::ln(het_of(reference)) + float::ln(het_of(alternative)),
+                2.0 * float::ln(reference / 3.0) + float::ln(1.0 - alternative),
+            ]
+        };
 
-        assert!((scored[hom_ref] - (-7.0 - LOG_SPREAD)).abs() < 1e-12);
-        assert!((scored[het] - 3.0 * half).abs() < 1e-12);
-        assert!((scored[hom_alt] - (-6.0 - 2.0 * LOG_SPREAD)).abs() < 1e-12);
+        let scored = row(&evidence, &alleles, &table, &uncalibrated());
+        let [want_hom_ref, want_het, want_hom_alt] = expected(1.0);
+        assert!((scored[hom_ref] - want_hom_ref).abs() < 1e-12);
+        assert!((scored[het] - want_het).abs() < 1e-12);
+        assert!((scored[hom_alt] - want_hom_alt).abs() < 1e-12);
 
         // The heterozygote wins here, which is the answer two reads against one should give.
         assert!(scored[het] > scored[hom_ref] && scored[het] > scored[hom_alt]);
 
-        // **And again with a scale that is not one**, because `log scale` is exactly zero at a
-        // defaulted calibration — so every assertion above is blind to what the row does with
-        // it. At a scale of 2.5 each error-side read is charged `ln 2.5` more.
+        // **And again with a scale that is not one**, because at a scale of one the scale is
+        // invisible: at 2.5 every read's error, on both sides of every copy, is 2.5 times larger.
         let calibrated_scored = row(&evidence, &alleles, &table, &calibrated(2.5));
-        let log_scale = float::ln(2.5);
-        assert!((calibrated_scored[hom_ref] - (-7.0 + log_scale - LOG_SPREAD)).abs() < 1e-12);
-        assert!(
-            (calibrated_scored[hom_alt] - (-6.0 + 2.0 * log_scale - 2.0 * LOG_SPREAD)).abs()
-                < 1e-12
-        );
-        // The heterozygote explains every read, so no scale reaches it at all.
-        assert_eq!(calibrated_scored[het], scored[het]);
+        let [want_hom_ref, want_het, want_hom_alt] = expected(2.5);
+        assert!((calibrated_scored[hom_ref] - want_hom_ref).abs() < 1e-12);
+        assert!((calibrated_scored[het] - want_het).abs() < 1e-12);
+        assert!((calibrated_scored[hom_alt] - want_hom_alt).abs() < 1e-12);
     }
 
     /// **What counts as one insertion or deletion.** One contiguous run present in one sequence
@@ -1917,10 +1943,10 @@ mod tests {
 
     /// **The scale reaches substitution errors and not indel errors** (spec §12's twentieth
     /// test; §3.5 as amended 2026-10-21). One read on each allele of the previous fixture, at a
-    /// scale of four. Under the reference homozygote the SNP read is charged
-    /// `q + ln 4 − ln 3` and the insertion read `q`, unscaled; under SNP + insertion the
-    /// reference read is mixed and keeps `q + ln 4`. At a scale of one nothing differs from the
-    /// formula before the amendment, because `ln 1` is zero either way.
+    /// scale of four, `εᵢ = e^qᵢ`. Each copy charges a read by the allele pair: a copy of `ACCT`
+    /// gives a reference read `4ε/3` (one substitution, scaled and spread), a copy of `ACGGT`
+    /// gives it `ε` (one insertion, unscaled), and `ACCT` and `ACGGT` give each other's reads `4ε`
+    /// (neither, scaled and unspread). A copy of the read's own allele gives `1 − 4ε`.
     #[test]
     fn an_indel_error_is_charged_without_the_scale_and_a_substitution_with_it() {
         let alleles = locus(&[b"ACGT", b"ACCT", b"ACGGT"]);
@@ -1931,22 +1957,30 @@ mod tests {
             observation(2, 0, 1, -7.0),
         ];
         let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
-        let log_scale = float::ln(4.0);
-        let half = float::ln(0.5);
+        let (reference, snp, insertion) = (float::exp(-5.0), float::exp(-6.0), float::exp(-7.0));
 
         let scored = row(&evidence, &alleles, &table, &calibrated(4.0));
 
         let hom_ref = genotype_carrying(&table, &[2, 0, 0]).get() as usize;
         let snp_and_insertion = genotype_carrying(&table, &[0, 1, 1]).get() as usize;
         let hom_insertion = genotype_carrying(&table, &[0, 0, 2]).get() as usize;
-        assert!((scored[hom_ref] - ((-6.0 + log_scale - LOG_SPREAD) + -7.0)).abs() < 1e-12);
-        assert!((scored[snp_and_insertion] - ((-5.0 + log_scale) + 2.0 * half)).abs() < 1e-12);
+        let want_hom_ref =
+            float::ln(1.0 - 4.0 * reference) + float::ln(4.0 * snp / 3.0) + float::ln(insertion);
+        assert!((scored[hom_ref] - want_hom_ref).abs() < 1e-12);
+        let want_snp_and_insertion = float::ln(0.5 * 4.0 * reference / 3.0 + 0.5 * reference)
+            + float::ln(0.5 * (1.0 - 4.0 * snp) + 0.5 * 4.0 * snp)
+            + float::ln(0.5 * 4.0 * insertion + 0.5 * (1.0 - 4.0 * insertion));
+        assert!((scored[snp_and_insertion] - want_snp_and_insertion).abs() < 1e-12);
         // Under the insertion homozygote the reference read is one indel away (unscaled) and
         // the SNP read is not one indel from `ACGGT` (scaled, unspread).
-        assert!((scored[hom_insertion] - (-5.0 + (-6.0 + log_scale))).abs() < 1e-12);
+        let want_hom_insertion =
+            float::ln(reference) + float::ln(4.0 * snp) + float::ln(1.0 - 4.0 * insertion);
+        assert!((scored[hom_insertion] - want_hom_insertion).abs() < 1e-12);
 
         let unscaled = row(&evidence, &alleles, &table, &uncalibrated());
-        assert!((unscaled[hom_ref] - ((-6.0 - LOG_SPREAD) + -7.0)).abs() < 1e-12);
+        let want_unscaled_hom_ref =
+            float::ln(1.0 - reference) + float::ln(snp / 3.0) + float::ln(insertion);
+        assert!((unscaled[hom_ref] - want_unscaled_hom_ref).abs() < 1e-12);
     }
 
     /// **"Every carried allele", where the genotype carries two different indels.** An
@@ -2043,195 +2077,166 @@ mod tests {
         assert!(scored.iter().all(|&value| value == 0.0));
     }
 
-    /// **The aggregation contract, and the reason the formula has this shape** (spec §12 test 9).
+    /// **The aggregation contract where it still holds exactly** (spec §12 test 9, as amended
+    /// 2026-10-31).
     ///
     /// The merge folds every read showing one allele from one read group into a single
-    /// observation with a count and a summed log error. That fold must not change the answer —
-    /// a likelihood that treated an observation's reads as interchangeable when their qualities
-    /// differ would be wrong by an amount nobody measured.
-    ///
-    /// So: five reads at five *different* error probabilities, scored as five observations of
-    /// one read each, and again as the one observation the merge would have built. The reads
-    /// are deliberately spread from Phred 40 to Phred 9, because a fixture where they all carry
-    /// the same quality cannot tell the two forms apart.
+    /// observation with a count and a summed log error, from which only the geometric mean of
+    /// the reads' errors comes back. **When every read in the fold carries the same quality,
+    /// that mean is each read's own error**, so the fold must give exactly what the reads give
+    /// one at a time — up to the order floating-point additions happen in, which
+    /// [`WORST_AGGREGATION_RELATIVE`] bounds. Swept over read counts from 2 to 300, the three
+    /// single-quality profiles (Phred 30, 93 and 1, the last above the cap at every scale here),
+    /// three scales and two ploidies.
     ///
     /// **The per-read form is built by struct literal rather than through `new`**, because the
-    /// constructor requires strictly ascending `(allele, read group)` pairs and five reads on
-    /// one allele are five rows sharing a pair. That is the merge's invariant, not the
-    /// formula's, and this test is about the formula.
-    ///
-    /// **The tolerance is [`WORST_AGGREGATION_RELATIVE`] and not zero, though this fixture
-    /// happens to agree to the last bit.** Its exactness is a property of five reads at these
-    /// qualities, not of the formula: `how_far_the_bitwise_aggregation_claim_reaches` sweeps
-    /// wider and finds the two forms apart. Asserting equality here would pin a fixture-specific
-    /// accident and break on a change that costs nothing.
+    /// constructor requires strictly ascending `(allele, read group)` pairs and the reads of one
+    /// allele are rows sharing a pair. That is the merge's invariant, not the formula's.
     #[test]
-    fn pooling_an_observations_reads_does_not_change_the_answer() {
+    fn pooling_reads_of_one_quality_does_not_change_the_answer() {
         let alleles = locus(&[b"A", b"C"]);
-        let table = diploid(2);
-        let calibration = calibrated(2.5);
-
-        let per_read_errors: Vec<f64> = [40u8, 31, 22, 15, 9]
-            .iter()
-            .map(|&phred| {
-                float::ln(float::exp(
-                    -f64::from(phred) / 10.0 * std::f64::consts::LN_10,
-                ))
-            })
-            .collect();
-
-        let one_at_a_time: Vec<GenericObservation> = per_read_errors
-            .iter()
-            .map(|&q| observation(1, 0, 1, q))
-            .collect();
-        let per_read = GenericSampleEvidence {
-            supported: &one_at_a_time,
-            unmatched_q_sum: 0.0,
-            partials: &[],
-        };
-
-        let folded = [observation(1, 0, 5, per_read_errors.iter().sum())];
-        let aggregate = GenericSampleEvidence::new(&folded, 0.0, &[]);
-
-        let from_reads = row(&per_read, &alleles, &table, &calibration);
-        let from_fold = row(&aggregate, &alleles, &table, &calibration);
-
-        for (genotype, (reads, fold)) in from_reads.iter().zip(&from_fold).enumerate() {
-            // The hom-alt genotype scores exactly zero here — every read is explained at
-            // `ln(2/2)` — so the denominator is floored rather than dividing zero by zero.
-            let relative =
-                (reads - fold).abs() / reads.abs().max(fold.abs()).max(f64::MIN_POSITIVE);
-            assert!(
-                relative <= WORST_AGGREGATION_RELATIVE,
-                "genotype {genotype}: {reads} from the reads, {fold} from the fold, a relative \
-                 {relative} apart"
-            );
-        }
-    }
-
-    /// **How far the bitwise claim actually reaches**, swept rather than asserted from one
-    /// fixture — because a single set of qualities agreeing to the last bit could be luck.
-    ///
-    /// Spec §2.3 says the aggregation identity "*is* bitwise: §3.3's formula sums the same terms
-    /// in the same order either way". The sweep below is what that sentence is worth: **144
-    /// `(quality set, scale, ploidy, genotype)` combinations** — six quality sets from two to
-    /// seven reads and Phred 45 down to 3, three read-group scales including one that is not
-    /// one, and ploidy 2 and 4.
-    ///
-    /// **The two forms disagree, and the specification's sentence was therefore too strong**
-    /// (measured 2026-08-24; spec §2.3 is corrected to match). They are not the same sequence of
-    /// additions — a read at a time accumulates `q_r + log scale − log m`, where the fold
-    /// accumulates `Σ q_r + n·log scale − n·log m` once — so they round differently, and the
-    /// sibling test above happens to land on a fixture where they do not. **One fixture agreeing
-    /// to the last bit is luck, and this sweep is what tells the two apart.**
-    ///
-    /// **The bound is relative and not a unit-in-the-last-place count, because the count grows
-    /// with depth.** A first version of this sweep stopped at seven reads and put the worst at
-    /// two ulps; widening it to the depths this caller commits to — up to 300 reads a position —
-    /// takes that past a hundred, because the disagreement is repeated summation and grows with
-    /// how much is summed. What does *not* grow is the relative size, which is what
-    /// [`WORST_AGGREGATION_RELATIVE`] bounds, and a caller comparing genotypes cares about the
-    /// relative one.
-    ///
-    /// **What the contract actually requires is untouched**, and it is worth separating the two
-    /// claims. Spec §2.3's requirement is that pooling must not change the answer *because of
-    /// the model* — that no term is a non-linear function of a per-read quality, since `q_sum`
-    /// recovers only the geometric mean. The formula's shape guarantees that exactly, and it is
-    /// what the test above pins. What is *not* exact is the floating-point summation order.
-    const WORST_AGGREGATION_RELATIVE: f64 = 2.0e-14;
-
-    /// How far the aggregation identity holds, measured rather than claimed — see
-    /// [`WORST_AGGREGATION_ULPS`].
-    #[test]
-    fn how_far_the_bitwise_aggregation_claim_reaches() {
-        let alleles = locus(&[b"A", b"C"]);
-
         let mut worst_relative = 0.0_f64;
-        let mut worst_ulps = 0u64;
         let mut worst_where = String::new();
-        let mut disagreeing = 0usize;
-        let mut compared = 0usize;
-
         for reads in [2usize, 3, 5, 8, 13, 20, 50, 120, 300] {
-            for profile in QUALITY_PROFILES {
-                let qualities: Vec<u8> = (0..reads).map(|at| profile(at, reads)).collect();
-                let errors: Vec<f64> = qualities
-                    .iter()
-                    .map(|&phred| -f64::from(phred) / 10.0 * std::f64::consts::LN_10)
-                    .collect();
-                let one_at_a_time: Vec<GenericObservation> =
-                    errors.iter().map(|&q| observation(1, 0, 1, q)).collect();
-                let folded = [observation(1, 0, reads as u32, errors.iter().sum())];
-
-                for scale in [1.0_f64, 2.5, 0.37] {
-                    let calibration = calibrated(scale);
-                    for copies in [2u8, 4] {
-                        let table = GenotypeTable::build(
-                            Ploidy::try_new(copies).expect("a fixture ploidy"),
-                            2,
-                        );
-                        let from_reads = row(
-                            &GenericSampleEvidence {
-                                supported: &one_at_a_time,
-                                unmatched_q_sum: 0.0,
-                                partials: &[],
-                            },
-                            &alleles,
-                            &table,
-                            &calibration,
-                        );
-                        let from_fold = row(
-                            &GenericSampleEvidence::new(&folded, 0.0, &[]),
-                            &alleles,
-                            &table,
-                            &calibration,
-                        );
-
-                        for (genotype, (from_read, from_sum)) in
-                            from_reads.iter().zip(&from_fold).enumerate()
-                        {
-                            let ulps = from_read.to_bits().abs_diff(from_sum.to_bits());
-                            let relative = (from_read - from_sum).abs()
-                                / from_read.abs().max(from_sum.abs()).max(f64::MIN_POSITIVE);
-                            if ulps > 0 {
-                                disagreeing += 1;
-                            }
-                            worst_ulps = worst_ulps.max(ulps);
-                            if relative > worst_relative {
-                                worst_relative = relative;
-                                worst_where = format!(
-                                    "{reads} reads, scale {scale}, ploidy {copies}, genotype \
-                                     {genotype}: {from_read} from the reads, {from_sum} from the \
-                                     fold, {ulps} ulps"
-                                );
-                            }
-                            compared += 1;
-                        }
-                    }
+            for phred in [30u8, 93, 1] {
+                let (worst, at) = fold_against_reads(&alleles, &vec![phred; reads]);
+                if worst.relative > worst_relative {
+                    worst_relative = worst.relative;
+                    worst_where = format!("{reads} reads at Phred {phred}, {at}");
                 }
             }
         }
-
-        // 9 read counts × 5 profiles × 3 scales × (3 diploid + 5 tetraploid genotypes) = 1,080.
-        assert_eq!(compared, 1_080, "the sweep covers 1,080 comparisons");
-
-        // **The sweep must actually disagree somewhere**, or it is measuring a number against
-        // itself and the bound below means nothing. This is also what pins the row's summation
-        // *shape*: an accumulation that summed the read counts as integers and multiplied each
-        // logarithm in once at the end is bitwise exact here, so it would drive this to zero —
-        // and that would be a different formula from the one spec §2.3 now describes.
-        assert!(
-            disagreeing > 0,
-            "no comparison disagreed, so this sweep pins nothing"
-        );
-
         assert!(
             worst_relative <= WORST_AGGREGATION_RELATIVE,
-            "the aggregation identity is off by a relative {worst_relative}, past the \
-             {WORST_AGGREGATION_RELATIVE} this sweep measured ({worst_ulps} ulps at worst) — \
-             worst at {worst_where}"
+            "pooling reads of one quality moved the answer by a relative {worst_relative}, past \
+             {WORST_AGGREGATION_RELATIVE} — worst at {worst_where}"
         );
     }
+
+    /// **What pooling reads of different quality costs**, measured (spec §2.3 as amended
+    /// 2026-10-31).
+    ///
+    /// A copy of the read's own allele gives it `1 − ε`, and that wants each read's own `ε`
+    /// where the fold carries only their geometric mean, which is far below the arithmetic one
+    /// when qualities are mixed — the 93/1 alternation folds to `2 × 10⁻⁵` while half its reads
+    /// sit at 0.79. So the fold scores such a pool as nearly error-free on the explained side,
+    /// which is what the formula before the amendment did for every pool: **pooled, the
+    /// amendment acts only where most of a pool's reads are poor.** The cap is the other
+    /// source, and on this sweep the larger: it binds on single reads the fold averages below it.
+    ///
+    /// The bound is per read, because the gap is a per-read term summed:
+    /// [`WORST_POOLING_COST_PER_READ`], measured on the 93/1 alternation.
+    #[test]
+    fn what_pooling_reads_of_different_quality_costs() {
+        let alleles = locus(&[b"A", b"C"]);
+        let mut worst_per_read = 0.0_f64;
+        let mut worst_where = String::new();
+        for reads in [2usize, 3, 5, 8, 13, 20, 50, 120, 300] {
+            for profile in [MIXED_QUALITY_PROFILES[0], MIXED_QUALITY_PROFILES[1]] {
+                let qualities: Vec<u8> = (0..reads).map(|at| profile(at, reads)).collect();
+                let (worst, at) = fold_against_reads(&alleles, &qualities);
+                if worst.per_read > worst_per_read {
+                    worst_per_read = worst.per_read;
+                    worst_where = format!("{reads} reads, {at}");
+                }
+            }
+        }
+        assert!(
+            worst_per_read > 0.0,
+            "pooling reads of mixed quality cost nothing, so this sweep pins nothing"
+        );
+        assert!(
+            worst_per_read <= WORST_POOLING_COST_PER_READ,
+            "pooling reads of mixed quality cost {worst_per_read} nats a read, past the \
+             {WORST_POOLING_COST_PER_READ} measured — worst at {worst_where}"
+        );
+    }
+
+    /// How far the fold sits from scoring the same reads one at a time, worst over three scales
+    /// (one, 2.5 and 0.37), ploidy two and four, and every genotype: the relative gap and the
+    /// absolute one per read. The reads all show the alternative allele, so every genotype has
+    /// copies that explain them and, below the homozygote, copies that do not.
+    fn fold_against_reads(alleles: &CandidateAlleles, qualities: &[u8]) -> (FoldGap, String) {
+        let errors: Vec<f64> = qualities
+            .iter()
+            .map(|&phred| -f64::from(phred) / 10.0 * std::f64::consts::LN_10)
+            .collect();
+        let one_at_a_time: Vec<GenericObservation> =
+            errors.iter().map(|&q| observation(1, 0, 1, q)).collect();
+        let folded = [observation(
+            1,
+            0,
+            qualities.len() as u32,
+            errors.iter().sum(),
+        )];
+
+        let mut worst = FoldGap::default();
+        let mut worst_where = String::new();
+        for scale in [1.0_f64, 2.5, 0.37] {
+            let calibration = calibrated(scale);
+            for copies in [2u8, 4] {
+                let table =
+                    GenotypeTable::build(Ploidy::try_new(copies).expect("a fixture ploidy"), 2);
+                let from_reads = row(
+                    &GenericSampleEvidence {
+                        supported: &one_at_a_time,
+                        unmatched_q_sum: 0.0,
+                        partials: &[],
+                    },
+                    alleles,
+                    &table,
+                    &calibration,
+                );
+                let from_fold = row(
+                    &GenericSampleEvidence::new(&folded, 0.0, &[]),
+                    alleles,
+                    &table,
+                    &calibration,
+                );
+                for (genotype, (by_read, by_fold)) in from_reads.iter().zip(&from_fold).enumerate()
+                {
+                    let gap = (by_read - by_fold).abs();
+                    let relative = gap / by_read.abs().max(by_fold.abs()).max(f64::MIN_POSITIVE);
+                    let per_read = gap / qualities.len() as f64;
+                    if relative > worst.relative || per_read > worst.per_read {
+                        worst_where = format!(
+                            "scale {scale}, ploidy {copies}, genotype {genotype}: {by_read} from \
+                             the reads, {by_fold} from the fold"
+                        );
+                    }
+                    worst.relative = worst.relative.max(relative);
+                    worst.per_read = worst.per_read.max(per_read);
+                }
+            }
+        }
+        (worst, worst_where)
+    }
+
+    #[derive(Default)]
+    struct FoldGap {
+        relative: f64,
+        per_read: f64,
+    }
+
+    /// How far pooling reads of one quality may move the answer, relative — floating-point
+    /// summation order only, since the fold's geometric mean is then every read's own error. A
+    /// read at a time accumulates per-read terms where the fold multiplies one term by the
+    /// count, so the two round differently, and the count of units in the last place grows
+    /// with depth while the relative size does not. Measured worst over the sweep: `4.3 × 10⁻¹⁴`,
+    /// at 120 reads at Phred 30, scale 2.5 — `10⁻¹²` Phred in the units a genotype is decided in.
+    const WORST_AGGREGATION_RELATIVE: f64 = 1.0e-13;
+
+    /// The most pooling reads of mixed quality costs a read, in nats — see
+    /// [`what_pooling_reads_of_different_quality_costs`]. Measured worst over the sweep: 0.690
+    /// nats, on the 93/1 alternation under a genotype that carries none of the reads' allele —
+    /// one at a time the cap binds on every Phred-1 read, while the fold's geometric mean sits
+    /// far below it.
+    const WORST_POOLING_COST_PER_READ: f64 = 0.70;
+
+    /// The two mixed-quality profiles of [`QUALITY_PROFILES`]: a 93/1 alternation and a fall from
+    /// 45 to 3.
+    const MIXED_QUALITY_PROFILES: [fn(usize, usize) -> u8; 2] =
+        [QUALITY_PROFILES[2], QUALITY_PROFILES[3]];
 
     /// Four quality shapes, as a function of a read's position and how many reads there are:
     /// all reads at Phred 30, all at Phred 93 (the highest the read preparation admits), a
@@ -2246,12 +2251,11 @@ mod tests {
             (45.0 - 42.0 * (at as f64 / span)).round() as u8
         },
         // **Every read at Phred 1**, which is the only profile here whose *fold* is charged
-        // more than an error of a half — 0.794 at a scale of one, 1.99 at 2.5. Every other
-        // profile's geometric mean sits far below the ceiling even when single reads do not
-        // (the 93/1 alternation folds to 2 × 10⁻⁵), so without this one no fixture in either
-        // sweep can tell a capped charge from an uncapped one, and the zero-contamination
-        // sweep's claim to catch a reintroduced ceiling was false. Found by C1's review, which
-        // reintroduced the cap and watched that sweep pass.
+        // more than an error of a half — 0.794 at a scale of one, 1.99 at 2.5 — and so the
+        // only one on which [`MAX_CHARGED_ERROR`] binds. Every other profile's geometric mean
+        // sits far below the cap even when single reads do not (the 93/1 alternation folds to
+        // 2 × 10⁻⁵), so without this one no fixture can tell a capped charge from an uncapped
+        // one.
         |_, _| 1,
     ];
 
@@ -2317,8 +2321,12 @@ mod tests {
     /// (spec §3.5). Add the coefficient back and take the spread out, and the two must agree —
     /// **every difference attributed, none unexplained.**
     ///
-    /// **Three differences, not two**, and the third is why this runs at a scale that is not
-    /// one: production has no calibration at all, so ng's `n·log scale` on the error side has to
+    /// **Four differences, not two.** The fourth is spec §3.3's amendment of 2026-10-31: ng
+    /// scores a read as the average over the genotype's copies, `1 − ε` from a copy of its own
+    /// allele and `ε/m` from any other, with `ε` capped at a half, where both production and ng
+    /// before it scored `k/P` for an explained read and `ε/m` for a wrong one. It is written out
+    /// below in closed form, from the fixture's numbers and not from the row. The third is why
+    /// this runs at a scale that is not one: production has no calibration at all, so ng's `n·log scale` on the error side has to
     /// come back out too. At a defaulted calibration that term is exactly zero and the whole
     /// reconciliation is blind to it — which is how a mutation deleting `log scale` outright
     /// survived every test in this file, at a cost of 372.84 nats on a four-allele fixture.
@@ -2447,12 +2455,44 @@ mod tests {
                 .map(|o| f64::from(o.num_reads) * log_scale)
                 .sum();
 
-            let reconciled = ours.get() + coefficient + spread_effect - scale_effect;
+            // The amendment, per observation: what the averaged, capped form gives the reads
+            // against what the form before it gave them. Every allele pair here is one
+            // substitution apart, so every charge is scaled and spread over three.
+            let amendment_effect: f64 = supported
+                .iter()
+                .map(|o| {
+                    let observed = usize::from(o.allele.get());
+                    let error = scale * float::exp(o.q_sum / f64::from(o.num_reads));
+                    let capped = error.min(MAX_CHARGED_ERROR);
+                    let averaged: f64 = counts
+                        .iter()
+                        .enumerate()
+                        .map(|(carried, &copies)| {
+                            let share = f64::from(copies) / 2.0;
+                            share
+                                * if carried == observed {
+                                    1.0 - capped
+                                } else {
+                                    capped / ERROR_SPREAD_BASES
+                                }
+                        })
+                        .sum();
+                    let before = if counts[observed] > 0 {
+                        f64::from(counts[observed]) / 2.0
+                    } else {
+                        error / ERROR_SPREAD_BASES
+                    };
+                    f64::from(o.num_reads) * (float::ln(averaged) - float::ln(before))
+                })
+                .sum();
+
+            let reconciled =
+                ours.get() - amendment_effect + coefficient + spread_effect - scale_effect;
             assert!(
                 (reconciled - theirs).abs() < 1e-9,
-                "genotype {genotype} ({as_copies:?}): ng {} + coefficient {coefficient} + \
-                 spread {spread_effect} − scale {scale_effect} = {reconciled}, production \
-                 {theirs}",
+                "genotype {genotype} ({as_copies:?}): ng {} − amendment {amendment_effect} + \
+                 coefficient {coefficient} + spread {spread_effect} − scale {scale_effect} = \
+                 {reconciled}, production {theirs}",
                 ours.get()
             );
             compared += 1;
@@ -2505,9 +2545,10 @@ mod tests {
 
     /// **At a scale of three the calibration and the spread cancel exactly**, so a wrongly
     /// explained read is charged its `q_sum` and nothing else. That is a term-by-term statement
-    /// about `log scale` which does not restate `f64::ln`.
+    /// about the scale which does not restate `f64::ln`; the reads a homozygote explains add
+    /// `n·ln(1 − 3ε)` beside it, and that is taken off first.
     ///
-    /// A row that dropped `log scale` charges `q_sum − n·ln 3` here instead. Every fixture with a
+    /// A row that dropped the scale charges `q_sum − n·ln 3` here instead. Every fixture with a
     /// scale other than one that came before this compared the row against *itself* under a fold
     /// or a permutation, where the scale cancels — so a review mutation deleting the term outright
     /// survived the whole file.
@@ -2522,29 +2563,30 @@ mod tests {
 
         let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+        let explained_reference = 2.0 * float::ln(1.0 - 3.0 * float::exp(-3.0));
+        let explained_alternative = float::ln(1.0 - 3.0 * float::exp(-7.0));
 
         assert!(
-            (scored[hom_ref] - -7.0).abs() < 1e-12,
+            (scored[hom_ref] - explained_reference - -7.0).abs() < 1e-12,
             "the wrongly explained read is charged {}, not its own q_sum",
-            scored[hom_ref]
+            scored[hom_ref] - explained_reference
         );
         assert!(
-            (scored[hom_alt] - -6.0).abs() < 1e-12,
+            (scored[hom_alt] - explained_alternative - -6.0).abs() < 1e-12,
             "the two wrongly explained reads are charged {}, not their own q_sum",
-            scored[hom_alt]
+            scored[hom_alt] - explained_alternative
         );
     }
 
     /// **Two read groups a hundredfold apart, and which one the wrong reads came from changes the
-    /// genotype called.** Five reference reads from a group at scale 0.01 and six alternative
-    /// reads from a group at one: the reference homozygote wins, and a row ignoring `log scale`
-    /// calls the alternative homozygote instead.
+    /// genotype called.** Five good reference reads, `ε = e⁻⁶`, and two alternative reads with a
+    /// summed log error of −2. From a group at scale one the two are charged `e⁻¹ = 0.37` each and
+    /// the reference homozygote wins; from a group at scale 0.01 they are charged 0.0037 and the
+    /// heterozygote wins. A row ignoring the scale calls the same genotype both times.
     #[test]
     fn which_read_group_the_wrong_reads_came_from_changes_the_call() {
         let alleles = locus(&[b"A", b"C"]);
         let table = diploid(2);
-        let supported = [observation(0, 0, 5, -1.0), observation(1, 1, 6, -1.0)];
-        let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
         let calibration = vec![
             ReadGroupCalibration {
                 scale: 0.01,
@@ -2553,27 +2595,47 @@ mod tests {
             },
             ReadGroupCalibration::unscaled(),
         ];
-
-        let scored = row(&evidence, &alleles, &table, &calibration);
-
         let hom_ref = genotype_carrying(&table, &[2, 0]).get() as usize;
         let het = genotype_carrying(&table, &[1, 1]).get() as usize;
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
+        let reference = float::exp(-6.0);
+        let expected = |alternative: f64| {
+            let reference_read = |own: f64| own * (1.0 - reference) + (1.0 - own) * reference / 3.0;
+            let alternative_read =
+                |own: f64| own * (1.0 - alternative) + (1.0 - own) * alternative / 3.0;
+            [0.0, 0.5, 1.0].map(|alternative_share| {
+                5.0 * float::ln(reference_read(1.0 - alternative_share))
+                    + 2.0 * float::ln(alternative_read(alternative_share))
+            })
+        };
 
-        assert!((scored[hom_ref] - (-1.0 - 6.0 * LOG_SPREAD)).abs() < 1e-12);
-        assert!((scored[het] - 11.0 * float::ln(0.5)).abs() < 1e-12);
-        assert!(
-            (scored[hom_alt] - (-1.0 + 5.0 * float::ln(0.01) - 5.0 * LOG_SPREAD)).abs() < 1e-12
-        );
-        assert!(
-            scored[hom_ref] > scored[het] && scored[hom_ref] > scored[hom_alt],
-            "the reference homozygote should win: {scored:?}"
-        );
+        for (alternative_group, alternative, winner) in [
+            (1, float::exp(-1.0), hom_ref),
+            (0, 0.01 * float::exp(-1.0), het),
+        ] {
+            let supported = [
+                observation(0, 1, 5, -30.0),
+                observation(1, alternative_group, 2, -2.0),
+            ];
+            let evidence = GenericSampleEvidence::new(&supported, 0.0, &[]);
+            let scored = row(&evidence, &alleles, &table, &calibration);
+
+            let [want_hom_ref, want_het, want_hom_alt] = expected(alternative);
+            assert!((scored[hom_ref] - want_hom_ref).abs() < 1e-12);
+            assert!((scored[het] - want_het).abs() < 1e-12);
+            assert!((scored[hom_alt] - want_hom_alt).abs() < 1e-12);
+            assert!(
+                (0..3).all(|genotype| genotype == winner || scored[winner] > scored[genotype]),
+                "with the alternative reads from group {alternative_group}, genotype {winner} \
+                 should win: {scored:?}"
+            );
+        }
     }
 
     /// **The copy share is the genotype's own ploidy**, term by term at four copies — the one
-    /// thing a diploid fixture cannot say, because `ln(k/P)` at `k = P` is zero at every ploidy
-    /// and the heterozygote's `ln(1/2)` is all a diploid row constrains.
+    /// thing a diploid fixture cannot say. Three reference reads at `ε₀ = e⁻²` and one alternative
+    /// read at `ε₁ = e⁻⁷`; a genotype with `k` alternative copies gives a reference read
+    /// `(4 − k)/4·(1 − ε₀) + k/4·ε₀/3` and the alternative read `k/4·(1 − ε₁) + (4 − k)/4·ε₁/3`.
     ///
     /// A row reading the copy share off a hardcoded ploidy of two returns **positive**
     /// log-probabilities here and reorders the genotypes. The aggregation sweep does not see it,
@@ -2587,12 +2649,18 @@ mod tests {
 
         let scored = row(&evidence, &alleles, &table, &uncalibrated());
         let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
+        let (reference, alternative) = (float::exp(-2.0), float::exp(-7.0));
 
-        assert!((at(&[4, 0]) - (-7.0 - LOG_SPREAD)).abs() < 1e-12);
-        assert!((at(&[3, 1]) - (3.0 * float::ln(0.75) + float::ln(0.25))).abs() < 1e-12);
-        assert!((at(&[2, 2]) - 4.0 * float::ln(0.5)).abs() < 1e-12);
-        assert!((at(&[1, 3]) - (3.0 * float::ln(0.25) + float::ln(0.75))).abs() < 1e-12);
-        assert!((at(&[0, 4]) - (-6.0 - 3.0 * LOG_SPREAD)).abs() < 1e-12);
+        for alternative_copies in 0..=4u32 {
+            let share = f64::from(alternative_copies) / 4.0;
+            let want = 3.0 * float::ln((1.0 - share) * (1.0 - reference) + share * reference / 3.0)
+                + float::ln(share * (1.0 - alternative) + (1.0 - share) * alternative / 3.0);
+            let got = at(&[4 - alternative_copies, alternative_copies]);
+            assert!(
+                (got - want).abs() < 1e-12,
+                "{alternative_copies} alternative copies: {got}, not {want}"
+            );
+        }
         assert!(
             scored.iter().all(|&value| value < 0.0),
             "a log-probability cannot be positive: {scored:?}"
@@ -2607,7 +2675,8 @@ mod tests {
     ///
     /// Here the locus carries a deletion. Against the reference homozygote the substitution allele
     /// takes `ln 3` and the deletion takes nothing; against the deletion homozygote *neither*
-    /// wrong read is one substitution away, so the charge is the two `q_sum`s alone.
+    /// wrong read is one substitution away, so the charge is the two `q_sum`s alone, beside what
+    /// the deletion reads it explains add.
     #[test]
     fn a_wrong_read_that_could_not_be_a_misread_takes_no_spread() {
         let alleles = locus(&[b"ACGT", b"ACCT", b"AT"]);
@@ -2619,10 +2688,13 @@ mod tests {
         let at = |copies: &[u32]| scored[genotype_carrying(&table, copies).get() as usize];
 
         assert!((at(&[2, 0, 0]) - (-4.0 - 2.0 * LOG_SPREAD - 5.0)).abs() < 1e-12);
+        // The deletion homozygote explains the three deletion reads, `3·ln(1 − e^(−5/3))`, and
+        // charges the two others their `q_sum` with no spread.
+        let explained = 3.0 * float::ln(1.0 - float::exp(-5.0 / 3.0));
         assert!(
-            (at(&[0, 0, 2]) - -4.0).abs() < 1e-12,
+            (at(&[0, 0, 2]) - explained - -4.0).abs() < 1e-12,
             "a genotype whose every wrong read is an indel away is charged {}, not −4",
-            at(&[0, 0, 2])
+            at(&[0, 0, 2]) - explained
         );
     }
 
@@ -2978,35 +3050,23 @@ mod tests {
     // ---- C1: the contamination mixture ----
 
     /// How far the mixture at no contamination may sit from spec §3.3's own arithmetic,
-    /// **relative**, over the sweep below.
-    ///
-    /// **A relative bound and not a unit-in-the-last-place count**, for the reason spec §2.3
-    /// gives about the aggregation identity: the departure is a rounding of a sum that grows
-    /// with depth, so a ulp count grows with it and a relative size does not. Measured worst
-    /// across the sweep's 4,440 comparisons: **`7.3 × 10⁻¹⁵`**, at three alleles, 300 reads and
-    /// a scale of 2.5 — a log-likelihood of −3.8844873955582386 from the mixture against
-    /// −3.884487395558267 from §3.3. This bound is 2.7 times that, the same margin its sibling
-    /// [`WORST_AGGREGATION_RELATIVE`] carries. In the units a genotype is decided in, the worst
-    /// disagreement is `1 × 10⁻¹³` Phred.
-    ///
-    /// **The worst case is a small log-likelihood, not a large one**, which is what a relative
-    /// bound is for: it arises on the all-Phred-1 profile, where the genotype explains nearly
-    /// everything and the row lands near −3.9 rather than near −1,600. The absolute gap there
-    /// is `2.8 × 10⁻¹⁴` nats.
+    /// **relative**, over the sweep below — rounding only, since at `c = 0` the mixture is
+    /// `1 · own + 0`. A relative bound rather than a unit-in-the-last-place count, for the reason
+    /// spec §2.3 gives: a rounding of a sum grows with depth, its relative size does not.
     const MIXTURE_AT_ZERO_RELATIVE_TOLERANCE: f64 = 2.0e-14;
 
-    /// **Spec §3.3's closed form, written out again in log space and independently of the
-    /// row** — the oracle the mixture is checked against at zero contamination.
+    /// **Spec §3.3's formula, written out again independently of the row** — the oracle the
+    /// mixture is checked against at zero contamination.
     ///
-    /// This is the formula the row *used* to be, before spec §3.6's mixture replaced it: every
-    /// logarithm outside the observation walk, an explained read charged `n·log(k/P)` and a
-    /// wrong one `q_sum + n·(log scale − log m)`. It is deliberately not a call into the row
-    /// under a flag — a shared implementation would agree with itself whatever either of them
-    /// did.
-    ///
-    /// **It reads its spreads from [`fill_wrong_read_charges`]** rather than from a literal
-    /// `ln 3`, so deleting that filler is a compile error here rather than a quiet subtraction
-    /// (the gate B1's review put on this file).
+    /// A read's chance under a genotype is the average over its copies: `1 − ε` from a copy of
+    /// the read's own allele, and from a copy of any other allele the pair's charge — `ε/3` one
+    /// substitution away, the unscaled minted error one indel away, `ε` otherwise — with both
+    /// errors capped at [`MAX_CHARGED_ERROR`] (spec §3.3 as amended 2026-10-31, §3.5 as amended
+    /// 2026-10-21). It is deliberately not a call into the row under a flag — a shared
+    /// implementation would agree with itself whatever either of them did — and **it classifies
+    /// each allele pair from the bases** with [`differ_by_one_substitution`] and
+    /// [`differ_by_one_indel`], where the row reads the charge table's homozygote rows, so a
+    /// table filled or read wrongly shows here.
     fn plain_log_likelihood_row(
         evidence: &GenericSampleEvidence<'_>,
         alleles: &CandidateAlleles,
@@ -3016,31 +3076,38 @@ mod tests {
         let view = table.view();
         let allele_count = view.allele_count();
         let ploidy = f64::from(view.ploidy().get());
-        let spread_values = spreads(alleles, table);
-        let spread_table = WrongReadChargeTable::over(&spread_values, &view);
         let counts = view.genotype_allele_counts();
+        let bases: Vec<&[u8]> = alleles.iter().collect();
 
         (0..view.genotype_count())
             .map(|genotype| {
                 let mut total = evidence.unmatched_q_sum;
                 for observation in evidence.supported {
-                    let allele = usize::from(observation.allele.get());
-                    let copies = counts[genotype * allele_count + allele];
-                    let reads = f64::from(observation.num_reads);
-                    total += if copies > 0 {
-                        reads * float::ln(f64::from(copies) / ploidy)
-                    } else {
-                        let scale = calibration[observation.read_group.get() as usize];
-                        let charge =
-                            spread_table.at(GenotypeIdx(genotype as u32), observation.allele);
-                        // §3.5 as amended 2026-10-21: an indel error takes no scale.
-                        let log_scale = if charge.is_scaled() {
-                            scale.log_scale()
-                        } else {
-                            0.0
-                        };
-                        observation.q_sum + reads * (log_scale - float::ln(charge.divisor()))
-                    };
+                    let observed = usize::from(observation.allele.get());
+                    let read_group = calibration[observation.read_group.get() as usize];
+                    let charged = read_group
+                        .charged_error(observation.q_sum, observation.num_reads)
+                        .min(MAX_CHARGED_ERROR);
+                    let minted = read_group
+                        .minted_error(observation.q_sum, observation.num_reads)
+                        .min(MAX_CHARGED_ERROR);
+                    let own: f64 = (0..allele_count)
+                        .map(|carried| {
+                            let share =
+                                f64::from(counts[genotype * allele_count + carried]) / ploidy;
+                            let from_this_copy = if carried == observed {
+                                1.0 - charged
+                            } else if differ_by_one_substitution(bases[observed], bases[carried]) {
+                                charged / ERROR_SPREAD_BASES
+                            } else if differ_by_one_indel(bases[observed], bases[carried]) {
+                                minted
+                            } else {
+                                charged
+                            };
+                            share * from_this_copy
+                        })
+                        .sum();
+                    total += f64::from(observation.num_reads) * float::ln(own);
                 }
                 total
             })
@@ -3051,22 +3118,13 @@ mod tests {
     /// `c == 0` branch making it so.**
     ///
     /// The row runs its one shipped code path with every fraction at zero; the oracle runs spec
-    /// §3.3 in log space. They agree to [`MIXTURE_AT_ZERO_RELATIVE_TOLERANCE`], which is what lets
+    /// §3.3 on its own. They agree to [`MIXTURE_AT_ZERO_RELATIVE_TOLERANCE`], which is what lets
     /// contamination default on: a clean cohort is untouched by the default.
     ///
-    /// **Not bitwise, and the sweep is what shows it.** §3.6's identity is exact algebra — `ε̄`
-    /// is `exp(q_sum/n)` by construction, so `n·log ε̄` *is* `q_sum` — but §8 evaluates the
-    /// mixture in probability space, which puts an `exp`/`log` round trip between the two forms.
-    ///
-    /// **What this test fails on, beyond a wrong number.** It fails the moment anyone
-    /// reintroduces production's extra `(1 − ε)` factor into `own` (which would move every
-    /// explained read) or its allele-count divisor (which would move every wrong one), because
-    /// the oracle has neither. **And it fails if the mixture is given a ceiling**, which took
-    /// a fifth quality profile to make true: every read at Phred 1 folds to a charged error of
-    /// 0.794 at a scale of one and 1.99 at 2.5, so a clamp binds on the row and not on the
-    /// log-space oracle. Until that profile was added the claim was false — every other
-    /// profile's *fold* sits far below the ceiling however poor its single reads are, and C1's
-    /// review reintroduced the cap and watched this sweep pass.
+    /// **What this test fails on, beyond a wrong number.** It fails if the cap is taken off or
+    /// moved — every read at Phred 1 folds to a charged error of 0.794 at a scale of one and 1.99
+    /// at 2.5, both above it — if a copy of the read's own allele stops giving `1 − ε`, or if a
+    /// pair's charge is read off the wrong homozygote.
     #[test]
     fn the_mixture_at_no_contamination_is_the_plain_formula() {
         let loci = [
@@ -3077,7 +3135,6 @@ mod tests {
 
         let mut worst_relative = 0.0_f64;
         let mut worst_where = String::new();
-        let mut disagreeing = 0usize;
         let mut compared = 0usize;
 
         for bases in loci {
@@ -3115,9 +3172,6 @@ mod tests {
                                         .abs()
                                         .max(from_plain.abs())
                                         .max(f64::MIN_POSITIVE);
-                                if relative > 0.0 {
-                                    disagreeing += 1;
-                                }
                                 if relative > worst_relative {
                                     worst_relative = relative;
                                     worst_where = format!(
@@ -3138,21 +3192,11 @@ mod tests {
         // (6 + 15) at three and (10 + 35) at four: 60 × 74 = 4,440.
         assert_eq!(compared, 4_440, "the sweep covers 4,440 comparisons");
 
-        // **The sweep must actually disagree somewhere**, or the row and the oracle are the
-        // same arithmetic and this bound means nothing. The explained side *is* bitwise — the
-        // mixture multiplies the copy share by one and adds zero — so what has to disagree is
-        // the error side, and it is the round trip that makes it.
-        assert!(
-            disagreeing > 0,
-            "no comparison disagreed, so this sweep pins nothing: either the row grew a \
-             `c == 0` branch or the oracle is calling it"
-        );
-
         assert!(
             worst_relative <= MIXTURE_AT_ZERO_RELATIVE_TOLERANCE,
             "the mixture at zero contamination is off from §3.3 by a relative \
-             {worst_relative}, past the {MIXTURE_AT_ZERO_RELATIVE_TOLERANCE} this sweep measured, on \
-             {disagreeing} of {compared} comparisons — worst at {worst_where}"
+             {worst_relative}, past the {MIXTURE_AT_ZERO_RELATIVE_TOLERANCE} allowed — worst at \
+             {worst_where}"
         );
     }
 
@@ -3166,8 +3210,8 @@ mod tests {
     ///
     /// For the **reference homozygote**, at a scale of one:
     ///
-    /// - the two reference reads are explained, `own = 2/2 = 1`, so each is charged
-    ///   `log(0.97 · 1 + 0.03 · 0.999)`;
+    /// - the two reference reads are explained, `own = 1 − e⁻³`, so each is charged
+    ///   `log(0.97 · (1 − e⁻³) + 0.03 · 0.999)`;
     /// - the alternative read is not, and the two alleles differ at one position so its error is
     ///   spread three ways: `own = e⁻⁷/3`, charged `log(0.97 · e⁻⁷/3 + 0.03 · 0.001)`.
     ///
@@ -3199,18 +3243,20 @@ mod tests {
         let (q_ref, q_alt) = (0.999_f64, 0.001_f64);
         let (error_ref, error_alt) = (float::exp(-6.0 / 2.0), float::exp(-7.0));
 
-        // The reference homozygote: both reference reads explained at a full copy share, the
+        // The reference homozygote: both reference reads produced correctly by either copy, the
         // alternative read wrong with its error spread three ways.
-        let expected_hom_ref = 2.0 * float::ln(own * 1.0 + other * q_ref)
+        let expected_hom_ref = 2.0 * float::ln(own * (1.0 - error_ref) + other * q_ref)
             + float::ln(own * error_alt / ERROR_SPREAD_BASES + other * q_alt);
-        // The heterozygote explains every read at half a copy share, so no error term at all.
-        let expected_het =
-            2.0 * float::ln(own * 0.5 + other * q_ref) + float::ln(own * 0.5 + other * q_alt);
+        // The heterozygote: each read from its own allele's copy half the time and from the
+        // other copy, by a misread, the other half.
+        let het_of = |error: f64| 0.5 * (1.0 - error) + 0.5 * error / ERROR_SPREAD_BASES;
+        let expected_het = 2.0 * float::ln(own * het_of(error_ref) + other * q_ref)
+            + float::ln(own * het_of(error_alt) + other * q_alt);
         // The alternative homozygote: the alternative read explained, both reference reads
         // wrong — and `q_sum` is −6 over two reads, so each is charged the geometric mean e⁻³.
         let expected_hom_alt = 2.0
             * float::ln(own * error_ref / ERROR_SPREAD_BASES + other * q_ref)
-            + float::ln(own * 1.0 + other * q_alt);
+            + float::ln(own * (1.0 - error_alt) + other * q_alt);
 
         assert!((scored[hom_ref] - expected_hom_ref).abs() < 1e-12);
         assert!((scored[het] - expected_het).abs() < 1e-12);
@@ -3228,10 +3274,13 @@ mod tests {
     ///
     /// | the contaminant shows the alternative at | the heterozygote leads by |
     /// |---|---|
-    /// | never (no mixture) | 6.019 nats |
-    /// | 1 in 1,000 | 5.981 |
-    /// | 1 in 100 | 5.376 |
-    /// | 1 in 2 | 2.131 |
+    /// | never (no mixture) | 6.053 nats |
+    /// | 1 in 1,000 | 6.016 |
+    /// | 1 in 100 | 5.411 |
+    /// | 1 in 2 | 2.166 |
+    ///
+    /// (Each is 0.035 nats above what it was before spec §3.3's amendment of 2026-10-31, which
+    /// charges the reference homozygote `ln(1 − e⁻³)` for each reference read it explains.)
     ///
     /// **So a rare contaminant allele buys almost nothing and a common one buys 3.9 nats, 17
     /// Phred.** That is the same lever spec §3.6 measures for what the mixture costs the
@@ -3285,11 +3334,11 @@ mod tests {
         );
 
         let measured = [clean, contaminated[0], contaminated[1], contaminated[2]];
-        for (found, recorded) in measured.into_iter().zip([6.019, 5.981, 5.376, 2.131]) {
+        for (found, recorded) in measured.into_iter().zip([6.053, 6.016, 5.411, 2.166]) {
             assert!(
                 (found - recorded).abs() < 1e-3,
                 "the gaps are {measured:?} nats, and the table above says \
-                 [6.019, 5.981, 5.376, 2.131]"
+                 [6.053, 6.016, 5.411, 2.166]"
             );
         }
     }
@@ -3734,14 +3783,22 @@ mod tests {
         )
     }
 
-    /// **A partial compatible with both of a heterozygote's alleles contributes exactly one** —
-    /// no information, correctly. Its two copy shares are a half each and they add.
+    /// **What a partial of `reads` reads at an error of `e⁻⁷` each adds under a genotype whose
+    /// every copy is compatible with it**: `ln(1 − e⁻⁷)` a read, the chance each was read
+    /// correctly (spec §5.3 as amended 2026-10-31). It is the same for every genotype whose copies
+    /// all fit the read, so such a read moves none of them against another.
+    fn every_copy_compatible(reads: f64) -> f64 {
+        reads * float::ln(1.0 - float::exp(-7.0))
+    }
+
+    /// **A partial compatible with both of a heterozygote's alleles says nothing** — every copy
+    /// fits it, so it adds what it adds to any genotype that fits it entirely. —
     ///
     /// The read saw the locus's first two positions and showed `AC`, which both alleles start
-    /// with; they differ only at the third position, which it never reached. `ln 1` is zero, so
-    /// the heterozygote's row is untouched — and that is the property, not an accident of the
-    /// fixture: a read that cannot tell two alleles apart must not move the genotype carrying
-    /// both.
+    /// with; they differ only at the third position, which it never reached. So the heterozygote
+    /// and the reference homozygote get the same number — and that is the property, not an
+    /// accident of the fixture: a read that cannot tell two alleles apart must not move the
+    /// genotype carrying both against one carrying either.
     #[test]
     fn a_partial_compatible_with_both_of_a_heterozygotes_alleles_says_nothing() {
         let alleles = locus(&[b"ACG", b"ACT"]);
@@ -3752,9 +3809,9 @@ mod tests {
         let seen_the_first_two = [partial(&[(0, 2)], b"AC", 3, -21.0)];
         let scored = row_with_partials(&[], &seen_the_first_two, &alleles, &table);
 
-        assert_eq!(scored[het], 0.0, "the heterozygote is untouched");
+        assert_eq!(scored[het], every_copy_compatible(3.0));
         // And the homozygote too, since it also carries a compatible allele at full share.
-        assert_eq!(scored[hom_ref], 0.0);
+        assert_eq!(scored[hom_ref], every_copy_compatible(3.0));
     }
 
     /// **A partial no allele of the genotype can have produced is charged as an error, with no
@@ -3773,7 +3830,7 @@ mod tests {
         let scored = row_with_partials(&[], &showed_the_alternative, &alleles, &table);
 
         assert!((scored[hom_ref] - 3.0 * (-7.0)).abs() < 1e-12);
-        assert_eq!(scored[hom_alt], 0.0);
+        assert_eq!(scored[hom_alt], every_copy_compatible(3.0));
         // **No spread**: `ln 3` per read away from what the complete path charges a
         // one-substitution mismatch.
         assert!((scored[hom_ref] - (3.0 * -7.0 - 3.0 * LOG_SPREAD)).abs() > 3.0);
@@ -3826,7 +3883,7 @@ mod tests {
         // `CG` at the right border: both alleles end with it, so neither is refused.
         let at_the_right_border = [partial(&[(1, 3)], b"CG", 2, -14.0)];
         let scored = row_with_partials(&[], &at_the_right_border, &alleles, &table);
-        assert_eq!(scored[hom_ref], 0.0);
+        assert_eq!(scored[hom_ref], every_copy_compatible(2.0));
 
         // The same bases at the left border: neither allele starts with `CG`, so every genotype
         // is charged.
@@ -3855,8 +3912,8 @@ mod tests {
         let scored = row_with_partials(&[], &missed_the_middle, &alleles, &table);
 
         // Differs only inside the hole — the read cannot tell it from the reference.
-        assert_eq!(scored[carries(&[2, 0, 0, 0])], 0.0);
-        assert_eq!(scored[carries(&[0, 2, 0, 0])], 0.0);
+        assert_eq!(scored[carries(&[2, 0, 0, 0])], every_copy_compatible(2.0));
+        assert_eq!(scored[carries(&[0, 2, 0, 0])], every_copy_compatible(2.0));
         // Differs at position 1, which the read saw.
         assert!((scored[carries(&[0, 0, 2, 0])] - 2.0 * (-7.0)).abs() < 1e-12);
         // Differs at position 4, which the read also saw.
@@ -3879,8 +3936,10 @@ mod tests {
         let scored = row_with_partials(&[], &saw_only_the_middle, &alleles, &table);
 
         assert!(
-            scored.iter().all(|&score| score == 0.0),
-            "every genotype should be untouched, and they are {scored:?}"
+            scored
+                .iter()
+                .all(|&score| score == every_copy_compatible(2.0)),
+            "every genotype should be charged alike, and they are {scored:?}"
         );
     }
 
@@ -3951,11 +4010,12 @@ mod tests {
         let expected = 3.0 * float::ln(0.95 * float::exp(-7.0) + 0.05 * 0.3);
         assert!((contaminated[hom_ref] - expected).abs() < 1e-12);
         // And where the genotype explains it, the contaminant's share adds to the individual's
-        // copy share rather than taking from it: half of `0.95` for one copy, all of it for two.
+        // rather than taking from it. One compatible copy in two gives `½(1 − ε) + ½ε`, exactly a
+        // half; two give `1 − ε`.
         let het = genotype_carrying(&table, &[1, 1]).get() as usize;
         let hom_alt = genotype_carrying(&table, &[0, 2]).get() as usize;
         let expected_het = 3.0 * float::ln(0.95 * 0.5 + 0.05 * 0.3);
-        let expected_hom_alt = 3.0 * float::ln(0.95 + 0.05 * 0.3);
+        let expected_hom_alt = 3.0 * float::ln(0.95 * (1.0 - float::exp(-7.0)) + 0.05 * 0.3);
         assert!((contaminated[het] - expected_het).abs() < 1e-12);
         assert!((contaminated[hom_alt] - expected_hom_alt).abs() < 1e-12);
     }
@@ -3990,7 +4050,8 @@ mod tests {
         let partials = [partial(&[(0, 2)], b"TT", 2, -14.0)];
         let scored = row_with_partials(&supported, &partials, &alleles, &table);
         assert!(scored.iter().all(|score| score.is_finite()), "{scored:?}");
-        assert_eq!(scored[every_copy_alternative], 0.0);
+        // Five reads, three complete and two partial, every one fitting every copy.
+        assert_eq!(scored[every_copy_alternative], every_copy_compatible(5.0));
     }
 
     /// **A run anchored to neither border makes the whole test vacuous, and the rule has to say
@@ -4014,9 +4075,11 @@ mod tests {
         let scored = row_with_partials(&[], &read, &alleles, &table);
 
         assert!(
-            scored.iter().all(|&score| score == 0.0),
-            "no genotype may be charged when the read's bases cannot be placed, and they are \
-             {scored:?}"
+            scored
+                .iter()
+                .all(|&score| score == every_copy_compatible(2.0)),
+            "no genotype may be charged more than another when the read's bases cannot be \
+             placed, and they are {scored:?}"
         );
     }
 
@@ -4034,8 +4097,10 @@ mod tests {
         let scored = row_with_partials(&[], &read, &alleles, &table);
 
         assert!(
-            scored.iter().all(|&score| score == 0.0),
-            "every genotype should be untouched, and they are {scored:?}"
+            scored
+                .iter()
+                .all(|&score| score == every_copy_compatible(2.0)),
+            "every genotype should be charged alike, and they are {scored:?}"
         );
     }
 
@@ -4055,7 +4120,7 @@ mod tests {
         let saw_everything = [partial(&[(0, 4)], b"ACGT", 2, -14.0)];
         let scored = row_with_partials(&[], &saw_everything, &alleles, &table);
 
-        assert_eq!(scored[hom_ref], 0.0);
+        assert_eq!(scored[hom_ref], every_copy_compatible(2.0));
         assert!((scored[hom_alt] - 2.0 * (-7.0)).abs() < 1e-12);
     }
 
@@ -4288,11 +4353,12 @@ mod tests {
             with_flank[hom_alt] > with_flank[het],
             "with the flank the homozygous deletion wins, {with_flank:?}"
         );
-        // The partials now fit both alleles, so they cost nothing under either genotype and the
-        // margin is the complete reads' alone: 232 × ln 2.
+        // The partials now fit both alleles, so they cost the same under either genotype and
+        // the margin is the complete reads' alone: `1 − ε` a read under the homozygote against
+        // `½(1 − ε) + ½ε = ½` under the heterozygote, so 232 × ln(2(1 − 10⁻³)).
         let margin = with_flank[hom_alt] - with_flank[het];
         assert!(
-            (margin - 232.0 * std::f64::consts::LN_2).abs() < 1e-9,
+            (margin - 232.0 * float::ln(2.0 * (1.0 - 1e-3))).abs() < 1e-9,
             "{margin}"
         );
     }
@@ -4395,12 +4461,14 @@ mod tests {
         let saw_the_first_two = [partial(&[(0, 2)], b"AC", 2, -14.0)];
         let scored = row_with_partials(&[], &saw_the_first_two, &alleles, &table);
 
-        // Two copies each of two compatible alleles — all four copies, so `ln 1` is zero.
-        assert_eq!(scored[carries(&[2, 2, 0])], 0.0);
-        // One compatible copy in four.
-        assert!((scored[carries(&[1, 0, 3])] - 2.0 * float::ln(0.25)).abs() < 1e-12);
-        // Three compatible copies in four.
-        assert!((scored[carries(&[2, 1, 1])] - 2.0 * float::ln(0.75)).abs() < 1e-12);
+        // Two copies each of two compatible alleles — all four copies.
+        assert_eq!(scored[carries(&[2, 2, 0])], every_copy_compatible(2.0));
+        // One compatible copy in four, `¼(1 − ε) + ¾ε` a read; three in four, `¾(1 − ε) + ¼ε`.
+        let error = float::exp(-7.0);
+        let one_in_four = 2.0 * float::ln(0.25 * (1.0 - error) + 0.75 * error);
+        assert!((scored[carries(&[1, 0, 3])] - one_in_four).abs() < 1e-12);
+        let three_in_four = 2.0 * float::ln(0.75 * (1.0 - error) + 0.25 * error);
+        assert!((scored[carries(&[2, 1, 1])] - three_in_four).abs() < 1e-12);
         // None — charged the reads' own quality, with no spread.
         assert!((scored[carries(&[0, 0, 4])] - 2.0 * (-7.0)).abs() < 1e-12);
     }
@@ -4442,10 +4510,10 @@ mod tests {
         let first = score(&showed_the_alternative);
         assert!((first[hom_ref] - 2.0 * (-7.0)).abs() < 1e-12);
 
-        // A narrower sample whose one partial shows the reference: the reference homozygote is
-        // untouched, which it would not be if the previous sample's verdicts survived.
+        // A narrower sample whose one partial shows the reference: the reference homozygote
+        // explains it, which it would not if the previous sample's verdicts survived.
         let showed_the_reference = [partial(&[(0, 2)], b"AC", 1, -7.0)];
         let second = score(&showed_the_reference);
-        assert_eq!(second[hom_ref], 0.0);
+        assert_eq!(second[hom_ref], every_copy_compatible(1.0));
     }
 }

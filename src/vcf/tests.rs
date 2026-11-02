@@ -52,10 +52,12 @@ fn a_snp_record() -> VcfRecord {
         vec![1.4, 0.6],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: called(&[0, 1], 42.0),
                 read_counts: SampleReadCounts::new(vec![10, 9], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: called(&[0, 0], 60.0),
                 read_counts: SampleReadCounts::new(vec![20, 0], 0),
             },
@@ -66,6 +68,7 @@ fn a_snp_record() -> VcfRecord {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -79,6 +82,7 @@ fn a_tract_record() -> VcfRecord {
         vec![allele(b"CACACACACACACACA"), allele(b"CACACACACACA")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 35.0),
             read_counts: SampleReadCounts::new(vec![12, 11], 7),
         }],
@@ -119,10 +123,12 @@ fn a_sample_can_have_reads_and_no_call() {
         vec![2.0, 0.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![4, 3], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0, 0], 0),
             },
@@ -153,6 +159,7 @@ fn a_refused_tract_locus_is_expressible() {
         vec![allele(b"ATATATATATAT")],
         vec![0.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(vec![0], 2),
         }],
@@ -190,6 +197,7 @@ fn a_full_tract_deletion() -> VcfRecord {
         vec![allele(b"ATATAT"), allele(b"")],
         vec![0.4, 1.6],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[1, 1], 30.0),
             read_counts: SampleReadCounts::new(vec![0, 14], 0),
         }],
@@ -219,6 +227,7 @@ fn a_deletion_at_the_first_base_of_a_contig_is_padded_from_the_right() {
         vec![allele(b"ATAT"), allele(b"")],
         vec![0.5, 1.5],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[1, 1], 25.0),
             read_counts: SampleReadCounts::new(vec![0, 8], 0),
         }],
@@ -352,6 +361,7 @@ fn a_read_count_vector_narrower_than_the_allele_table_is_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5], 0),
         }],
@@ -372,6 +382,7 @@ fn a_mapping_quality_pool_wider_than_the_allele_table_is_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -392,6 +403,7 @@ fn expected_copies_wider_than_the_allele_table_are_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -412,6 +424,7 @@ fn a_read_count_vector_wider_than_the_allele_table_is_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5, 5], 0),
         }],
@@ -440,6 +453,7 @@ fn a_mapping_quality_pool_of_the_wrong_width_is_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -463,6 +477,7 @@ fn mapping_qualities_pooled_over_other_reads_than_ad_counts_are_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -483,6 +498,7 @@ fn expected_copies_of_the_wrong_width_are_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -503,6 +519,7 @@ fn a_call_naming_an_allele_past_the_table_is_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[1, 2], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -523,6 +540,7 @@ fn a_record_with_no_alleles_is_refused() {
         Vec::new(),
         Vec::new(),
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(Vec::new(), 0),
         }],
@@ -545,6 +563,7 @@ fn an_empty_reference_allele_is_refused() {
         vec![allele(b""), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -567,6 +586,7 @@ fn a_reference_allele_that_does_not_span_the_region_is_refused() {
         vec![allele(b"ATG"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -604,6 +624,7 @@ fn a_backwards_region_is_refused() {
         vec![allele(b"A")],
         vec![0.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(vec![0], 0),
         }],
@@ -626,6 +647,7 @@ fn an_empty_allele_without_a_padding_base_is_refused() {
         vec![allele(b"ATATAT"), allele(b"")],
         vec![0.4, 1.6],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[1, 1], 30.0),
             read_counts: SampleReadCounts::new(vec![0, 14], 0),
         }],
@@ -646,6 +668,7 @@ fn a_padding_base_with_no_empty_allele_is_refused() {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[0, 1], 20.0),
             read_counts: SampleReadCounts::new(vec![5, 5], 0),
         }],
@@ -666,6 +689,7 @@ fn a_right_hand_padding_base_away_from_the_contig_start_is_refused() {
         vec![allele(b"ATATAT"), allele(b"")],
         vec![0.4, 1.6],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[1, 1], 30.0),
             read_counts: SampleReadCounts::new(vec![0, 14], 0),
         }],
@@ -687,6 +711,7 @@ fn a_left_hand_padding_base_at_the_contig_start_is_refused() {
         vec![allele(b"ATAT"), allele(b"")],
         vec![0.5, 1.5],
         vec![SampleColumn {
+            genotype_rows: None,
             call: called(&[1, 1], 25.0),
             read_counts: SampleReadCounts::new(vec![0, 8], 0),
         }],

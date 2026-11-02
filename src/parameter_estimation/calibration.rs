@@ -322,6 +322,7 @@ mod tests {
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         }
     }

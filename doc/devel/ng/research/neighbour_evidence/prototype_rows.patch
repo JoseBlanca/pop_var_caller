@@ -1,0 +1,183 @@
+diff --git a/src/calling/inference/summarise_condition.rs b/src/calling/inference/summarise_condition.rs
+index 3bafdb68..4b81b7ab 100644
+--- a/src/calling/inference/summarise_condition.rs
++++ b/src/calling/inference/summarise_condition.rs
+@@ -1300,6 +1300,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
+     let ploidy = genotypes.ploidy();
+     let mut pooled = PooledArtifactCounts::default();
+     let mut calls = Vec::with_capacity(evidence.sample_count());
++    let mut prototype_rows = Vec::with_capacity(evidence.sample_count());
+ 
+     // **The run's sample order against a row cursor.** The scratch holds one row per sample
+     // the locus is called on, in this same order with the uncallable samples' gaps closed up
+@@ -1335,6 +1336,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
+         );
+         if !callable {
+             calls.push(SampleGenotypeCall::Missing);
++            prototype_rows.push(None);
+             continue;
+         }
+         score_one_sample(
+@@ -1342,6 +1344,14 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
+             genotypes,
+             PassPrior::LeaveOneOut { model, inbreeding },
+         );
++        prototype_rows.push(Some((
++            scratch
++                .sample_genotype_likelihoods(row)
++                .iter()
++                .map(|l| l.get())
++                .collect(),
++            scratch.sample_concentration().to_vec(),
++        )));
+         let (winner, genotype_quality) = score_best_genotype(scratch.posterior_row());
+         // PANIC-FREE: `score_best_genotype` returns an index into the posterior row, which
+         // `prepare_for_locus` sized from this same table's genotype count.
+@@ -1421,7 +1431,7 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
+ 
+     let cohort_expected_copies =
+         ExpectedAlleleCopies::new(scratch.cohort_expected_copies().to_vec(), &candidates);
+-    LocusInference::new(
++    let mut inference = LocusInference::new(
+         evidence.region(),
+         candidates,
+         calls,
+@@ -1432,7 +1442,9 @@ pub(crate) fn summarise_final_pass<SsrEmissionScratch>(
+         repeat_tract,
+         site_quality,
+         artifact_pool.map(|(_, primary)| pooled.into_summary(primary)),
+-    )
++    );
++    inference.prototype_rows = prototype_rows;
++    inference
+ }
+ 
+ /// The owned genotype a row of the table's copy counts describes — allele `a` repeated as
+diff --git a/src/calling/mod.rs b/src/calling/mod.rs
+index 0fd4f831..b89445fb 100644
+--- a/src/calling/mod.rs
++++ b/src/calling/mod.rs
+@@ -1960,7 +1960,6 @@ impl<SsrEmissionScratch> CallingScratch<SsrEmissionScratch> {
+         &mut self.seed_concentration
+     }
+ 
+-    #[cfg(test)]
+     /// The sample being scored, its own concentration.
+     ///
+     /// # Panics
+@@ -3319,6 +3318,11 @@ pub struct LocusInference {
+     /// ([`qual_refine.rs:79`](../../../src/vcf/qual_refine.rs)), and `None` is that same
+     /// answer as a type rather than as an early return.
+     artifact_test_counts: Option<ArtifactTestCounts>,
++    /// **Prototype (branch `neighbour-hmm`), not for merge.** Each sample's natural-log genotype
++    /// likelihoods in VCF genotype order and its leave-one-out allele concentration, as the
++    /// final pass scored them; `None` for a sample set aside. Empty unless the final pass
++    /// filled it. Written to the VCF as `LL` and `AC0` so a second pass can rebuild the prior.
++    pub prototype_rows: Vec<Option<(Vec<f64>, Vec<f64>)>>,
+ }
+ 
+ impl LocusInference {
+@@ -3512,6 +3516,7 @@ impl LocusInference {
+             repeat_tract,
+             site_quality,
+             artifact_test_counts,
++            prototype_rows: Vec::new(),
+         }
+     }
+ 
+diff --git a/src/vcf/assemble.rs b/src/vcf/assemble.rs
+index 73c5c328..c19e1d82 100644
+--- a/src/vcf/assemble.rs
++++ b/src/vcf/assemble.rs
+@@ -156,6 +156,8 @@ pub fn assemble_record(locus: &LocusInference, evidence: LocusEvidenceForOutput)
+         evidence.filter.as_str()
+     );
+ 
++    write_prototype_rows(locus, &evidence);
++
+     let alleles: Vec<Box<[u8]>> = locus
+         .alleles()
+         .iter()
+@@ -576,3 +578,82 @@ fn written_call(call: &SampleGenotypeCall) -> SampleCall {
+ 
+ #[cfg(test)]
+ mod tests;
++
++/// **Prototype (branch `neighbour-hmm`), not for merge.** When `PVC_PROTOTYPE_ROWS` names a file,
++/// every assembled record appends one tab-separated line to it: contig index, start, end, locus
++/// kind, the candidate alleles (`-` for an empty one), the per-sample reads, the `FILTER`, the
++/// site quality, then one field per sample — `.` for a sample set aside, otherwise its
++/// natural-log genotype likelihoods in VCF order and its leave-one-out allele concentration,
++/// `;`-separated, the two lists joined by `|`. Records arrive from several workers, so the
++/// lines are in no particular order.
++fn write_prototype_rows(locus: &LocusInference, evidence: &LocusEvidenceForOutput) {
++    use std::io::Write as _;
++    use std::sync::{Mutex, OnceLock};
++    static SINK: OnceLock<Option<Mutex<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
++    let sink = SINK.get_or_init(|| {
++        std::env::var_os("PVC_PROTOTYPE_ROWS").map(|path| {
++            Mutex::new(std::io::BufWriter::new(
++                std::fs::File::create(path).expect("the prototype rows file can be created"),
++            ))
++        })
++    });
++    let Some(sink) = sink else { return };
++    let joined = |values: &[f64]| {
++        values
++            .iter()
++            .map(|value| format!("{value:.4}"))
++            .collect::<Vec<_>>()
++            .join(";")
++    };
++    let kind = match locus.alleles().kind() {
++        LocusKind::Generic => "G",
++        LocusKind::Ssr(_) => "S",
++        LocusKind::SsrBundle(_) => "B",
++    };
++    let alleles = locus
++        .alleles()
++        .iter()
++        .map(|bases| {
++            if bases.is_empty() {
++                "-".to_string()
++            } else {
++                String::from_utf8_lossy(bases).into_owned()
++            }
++        })
++        .collect::<Vec<_>>()
++        .join(",");
++    let depths = evidence
++        .samples
++        .iter()
++        .map(|sample| {
++            (sample.allele_reads.iter().sum::<u32>() + sample.reads_no_written_allele_explains)
++                .to_string()
++        })
++        .collect::<Vec<_>>()
++        .join(",");
++    let mut line = format!(
++        "{}\t{}\t{}\t{kind}\t{alleles}\t{depths}\t{}\t{}",
++        locus.region.contig.get(),
++        locus.region.start.get(),
++        locus.region.end.get(),
++        evidence.filter.as_str(),
++        evidence.corrected_site_quality.get(),
++    );
++    for rows in &locus.prototype_rows {
++        line.push('\t');
++        match rows {
++            None => line.push('.'),
++            Some((likelihoods, concentration)) => {
++                line.push_str(&joined(likelihoods));
++                line.push('|');
++                line.push_str(&joined(concentration));
++            }
++        }
++    }
++    line.push('\n');
++    let mut writer = sink.lock().expect("the prototype rows lock is not poisoned");
++    writer
++        .write_all(line.as_bytes())
++        .expect("the prototype rows file takes a write");
++    writer.flush().expect("the prototype rows file flushes");
++}

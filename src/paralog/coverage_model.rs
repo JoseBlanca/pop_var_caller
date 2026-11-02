@@ -653,15 +653,33 @@ fn smooth_median(curve: &[f64], window: usize) -> Vec<f64> {
 /// binning, vs a catastrophically overconfident hardcoded `1e-3`). It keeps
 /// σ₀ strictly positive so the Normal coverage term never spikes.
 ///
-/// NB: this is a *depth-resolution* floor, not a *sampling* floor. Because the
-/// histogram bins **window-mean** depths (500 bp windows), a window's depth is
-/// far less noisy than a single Poisson draw of the coverage level, so a naive
-/// `1/√scale` Poisson floor over-inflates σ₀ at low coverage (measured on
-/// tomato2 @~6×: σ₀ 0.27 → 0.41, halving the paralog drops). The out-of-range
-/// case that a Poisson floor was meant to catch — a single high-depth sample
-/// whose single-copy peak overflows the histogram — is handled upstream by the
-/// depth-range guard ([`CoverageModelError::DepthRangeExceeded`]), which
-/// rejects the fit before σ₀ is ever computed.
+/// **Plus the noise of the reads themselves**, added in quadrature
+/// ([`read_sampling_variance`]). A window's mean depth is an average over the
+/// *reads* that cover it, not over its 500 positions, and at low depth those
+/// are few: at one read a position and 150-base reads a window holds about
+/// three, and its mean depth scatters by about ±55% from that alone. The band
+/// MAD cannot see that spread — the band `(0.4, 1.6)` around one copy cuts
+/// away the tails it lives in (44 windows in 100 fall outside it on a tomato
+/// accession at 1×) — so it reported 0.22 where the windows scatter by 0.78,
+/// every sample's ordinary noise read as extra copies, and on 57 tomato
+/// accessions at 1× the filter fitted a duplication rate of 0.95 and dropped
+/// 95 records in 100 (report `doc/devel/reports/ng_dup_filter_read_sampling_2026-11-01.md`).
+/// The term is `read span / (window × depth)` in size, so it vanishes with
+/// depth: 0.27 at 1×, 0.009 at 30×, 0.0009 at 300×, against a band MAD near
+/// 0.17 squared (0.03) on a deep sample.
+///
+/// **This reverses an earlier argument**, kept here because it was measured: a
+/// `1/√scale` Poisson floor was rejected on tomato2 at about 6× because it took
+/// σ₀ from 0.27 to 0.41 and halved the paralog drops. That argument rested on a
+/// window's depth being "far less noisy than a single Poisson draw" because it
+/// averages 500 positions; the 500 positions share their reads, so the
+/// average is over the reads. The drops it halved were not checked against a
+/// truth.
+///
+/// The out-of-range case — a single high-depth sample whose single-copy peak
+/// overflows the histogram — is handled upstream by the depth-range guard
+/// ([`CoverageModelError::DepthRangeExceeded`]), which rejects the fit before
+/// σ₀ is ever computed.
 fn fit_sigma0(
     hist: &CoverageByGcHistogram,
     layout: &HistogramLayout,
@@ -695,7 +713,38 @@ fn fit_sigma0(
     };
     let mut devs: Vec<(f64, u64)> = vals.iter().map(|&(v, w)| ((v - center).abs(), w)).collect();
     let mad = weighted_median(&mut devs).unwrap_or(0.0);
-    (1.4826 * mad).max(resolution_floor)
+    let band_spread = (1.4826 * mad).max(resolution_floor);
+    match hist.mean_read_span() {
+        Some(read_span) => {
+            let sampling = read_sampling_variance(read_span, f64::from(hist.window_bp), scale);
+            (band_spread * band_spread + sampling).sqrt()
+        }
+        None => band_spread,
+    }
+}
+
+/// **How much a window's mean depth varies, relative to one copy, from which reads happened to
+/// land in it** — the variance of `window mean depth / depth` when reads of `read_span` bases
+/// start independently at `depth / read_span` a base.
+///
+/// Each read adds its overlap with the window, divided by the window, to the mean. Summing the
+/// squared overlaps over every start position gives, relative to the depth squared:
+///
+/// ```text
+///   read_span ≤ window:   read_span · (window − read_span / 3) / (window² · depth)
+///   read_span > window:   (read_span − window / 3) / (read_span · depth)
+/// ```
+///
+/// The two agree at `read_span = window` (both `2 / (3 · depth)`). The first is the ordinary
+/// short-read case — 0.27 / depth for 150-base reads in a 500-base window; the second is long
+/// reads, where every read covers the whole window and the mean is about one Poisson count.
+fn read_sampling_variance(read_span: f64, window: f64, depth: f64) -> f64 {
+    debug_assert!(read_span > 0.0 && window > 0.0 && depth > 0.0);
+    if read_span <= window {
+        read_span * (window - read_span / 3.0) / (window * window * depth)
+    } else {
+        (read_span - window / 3.0) / (read_span * depth)
+    }
 }
 
 #[cfg(test)]
@@ -728,6 +777,8 @@ mod tests {
             depth_bins,
             windows_folded: n,
             windows_under_the_floor: 0,
+            depth_summed: 0,
+            depth_rises: 0,
             counts,
         }
     }
@@ -881,6 +932,50 @@ mod tests {
         assert!(
             approx(model.single_copy_depth_sd(), 1.4826 * (1.0 / 10.5), 1e-6),
             "sigma0 = {}",
+            model.single_copy_depth_sd()
+        );
+    }
+
+    /// **The read-sampling variance** is `0.27 / depth` for 150-base reads in a 500-base window,
+    /// and its two branches meet where the read is as long as the window.
+    #[test]
+    fn read_sampling_variance_at_short_reads_and_at_the_join() {
+        assert!(approx(
+            read_sampling_variance(150.0, 500.0, 1.0),
+            0.27,
+            1e-12
+        ));
+        assert!(approx(
+            read_sampling_variance(150.0, 500.0, 30.0),
+            0.009,
+            1e-12
+        ));
+        let below = read_sampling_variance(500.0, 500.0, 2.0);
+        let above = read_sampling_variance(500.0 + 1e-9, 500.0, 2.0);
+        assert!(approx(below, 1.0 / 3.0, 1e-12) && approx(above, below, 1e-9));
+    }
+
+    /// **σ₀ takes the read-sampling noise when the histogram knows its read span**: the same
+    /// spread as `sigma0_fit_from_spread`, with 150-base reads at the fitted one-copy depth of
+    /// 10.5, adds `0.27 / 10.5` to the band's variance.
+    #[test]
+    fn sigma0_adds_the_read_sampling_variance() {
+        let tiles = [
+            (0.5, 8.5, 100),
+            (0.5, 9.5, 100),
+            (0.5, 10.5, 140),
+            (0.5, 11.5, 100),
+            (0.5, 12.5, 100),
+        ];
+        let mut h = hist(1, 30, 1.0, 500, &tiles);
+        h.depth_summed = 15_000;
+        h.depth_rises = 100;
+        let model = SingleCopyCoverageModel::fit(&h, &CoverageFitConfig::default()).expect("fit");
+        let band: f64 = 1.4826 * (1.0 / 10.5);
+        let expected = (band * band + 0.27 / 10.5).sqrt();
+        assert!(
+            approx(model.single_copy_depth_sd(), expected, 1e-6),
+            "sigma0 = {}, expected {expected}",
             model.single_copy_depth_sd()
         );
     }

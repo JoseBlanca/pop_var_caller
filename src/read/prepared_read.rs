@@ -94,7 +94,7 @@ pub(crate) fn prepare_passthrough(
 /// Sums the CIGAR steps that consume reference. **Every variant is named rather than caught
 /// by a wildcard**, so a step added to [`CigarOp`] has to be classified deliberately instead
 /// of silently contributing nothing and shortening every read that carries it.
-fn alignment_end_of(start_1: u32, cigar: &[CigarOp]) -> u32 {
+pub(crate) fn alignment_end_of(start_1: u32, cigar: &[CigarOp]) -> u32 {
     let mut ref_span: u32 = 0;
     for op in cigar {
         match *op {

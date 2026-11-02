@@ -1070,12 +1070,25 @@ mod classify {
         let (input_span, flank_deletion) = match input_span {
             Some(span) if !flank_deletion.is_none() => {
                 let tract_len = locus.repeat.tract_len() as usize;
+                let (span, flank_deletion) = through_the_flank_indels(
+                    cigar,
+                    fp,
+                    span,
+                    flank_deletion,
+                    tract_start,
+                    tract_end,
+                    guarded_flank_widths(left, right),
+                );
                 let (span, deleted) = in_smallest_form(
                     &read.seq,
                     span,
                     flank_deletion,
-                    &reference[left - flank_deletion.left as usize..left],
-                    &reference[left + tract_len..left + tract_len + flank_deletion.right as usize],
+                    (
+                        &reference[left - flank_deletion.left as usize..left],
+                        &reference
+                            [left + tract_len..left + tract_len + flank_deletion.right as usize],
+                    ),
+                    locus.repeat.delimiter_motif.period(),
                 );
                 (Some(span), deleted)
             }
@@ -1171,6 +1184,37 @@ mod classify {
             // **unfalsifiable**: the Milestone C review deleted it outright and the whole
             // suite stayed green, because no input can tell the two paths apart. Two
             // spellings of one decision, one of them untestable, is worse than one.
+            //
+            // **Unless the read's own alignment puts an indel in the flank bases the delimiter
+            // may not open a gap in** (2026-11-01). The delimiter's junction guard closes the
+            // true path for such a read, and where the read's tract also differs from the
+            // reference the cheapest path left ends the tract early and lays the read's flank
+            // across the reference's with mismatches, which the anchor rule then rejects: at
+            // SL4.0ch05:51017179 all ten of one sample's reads came back partial and tied two
+            // equal-length candidates, though eight spelled one of them base for base. The
+            // read's own alignment opened the gap the guard forbids, so it is what spells it.
+            RepeatSpan::FromLeft(_) | RepeatSpan::FromRight(_)
+                if input_span.is_some()
+                    && indel_in_the_guarded_flank(
+                        cigar,
+                        fp.ref_start,
+                        tract_start,
+                        tract_end,
+                        guarded_flank_widths(left, right),
+                    )
+                    && {
+                        let (before, after) = aligned_bases_beyond_the_tract(
+                            cigar,
+                            fp.ref_start,
+                            tract_start,
+                            tract_end,
+                        );
+                        before >= MIN_ALIGNED_FLANK_BASES && after >= MIN_ALIGNED_FLANK_BASES
+                    } =>
+            {
+                let spelled = input_span.expect("the guard checked it is Some");
+                complete_or_low_quality(read, spelled, flank_deletion, qual_buffer)
+            }
             RepeatSpan::FromLeft(tract) => partial(read, &region, &tract, HeldFlank::Left, locus),
             RepeatSpan::FromRight(tract) => partial(read, &region, &tract, HeldFlank::Right, locus),
             RepeatSpan::Unanchored => {
@@ -1297,8 +1341,11 @@ mod classify {
             &read.seq,
             region.start + start..region.start + end,
             deleted,
-            &left_flank[left - deleted_left..],
-            &reference[left + tract_len..left + tract_len + deleted_right],
+            (
+                &left_flank[left - deleted_left..],
+                &reference[left + tract_len..left + tract_len + deleted_right],
+            ),
+            0,
         ))
     }
 
@@ -1380,6 +1427,168 @@ mod classify {
         false
     }
 
+    /// **How many flank bases beside each edge the delimiter will not open a gap in**, as `(left,
+    /// right)`: the default junction guard's flank width, cut to half the flank as the delimiter
+    /// cuts it ([`JunctionGuard`]'s `flank_width`).
+    ///
+    /// [`JunctionGuard`]: crate::alignment::ssr_unit_robust::JunctionGuard
+    fn guarded_flank_widths(left_flank_len: usize, right_flank_len: usize) -> (u32, u32) {
+        let width = crate::alignment::ssr_unit_robust::JunctionGuard::default().flank_columns;
+        (
+            width.min(left_flank_len / 2) as u32,
+            width.min(right_flank_len / 2) as u32,
+        )
+    }
+
+    /// **A read's flank deletion run on through every indel its alignment has in the guarded flank
+    /// bases**, with the spelling taking the read's bases up to where its alignment rejoins the
+    /// reference (2026-11-01).
+    ///
+    /// A mapper can write one event beside a tract as several: a deletion at the tract's edge, a
+    /// few matches and an insertion. The deletion alone then made the read's allele, and the
+    /// rest went to the generic path, which wrote the flank the read actually carries; merged,
+    /// the two disagreed on the flank bases and the STR record won, so the sample got an allele
+    /// nobody carried (simulated, `ng_tract_simulator` with flank deletions: one repeat
+    /// inserted and `GAACT` deleted one base from the tract came back as the tract unchanged and
+    /// two flank bases deleted). Taken as one event, the allele is the read's own sequence there.
+    ///
+    /// On each side, the flank deletion grows to the farthest reference base an indel in the
+    /// guarded bases reaches, and the spelling to the read's bases up to it. A flank that grows
+    /// past the window's own is left as it was, as is everything when no indel lies there.
+    fn through_the_flank_indels(
+        cigar: &[CigarOp],
+        fp: Footprint,
+        span: Range<usize>,
+        deleted: FlankDeletion,
+        tract_start: u32,
+        tract_end: u32,
+        widths: (u32, u32),
+    ) -> (Range<usize>, FlankDeletion) {
+        // The farthest flank bases an indel in the guard reaches: `first` on the left (the
+        // first base it takes or sits before), `last` on the right (one past the last).
+        let mut first = tract_start - u32::from(deleted.left);
+        let mut last = tract_end + u32::from(deleted.right);
+        let left_guard = tract_start.saturating_sub(widths.0);
+        let right_guard = tract_end + widths.1;
+        let mut at = fp.ref_start;
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    let (from, to) = (at, at + n);
+                    if from < tract_start && to > left_guard {
+                        first = first.min(from);
+                    }
+                    if to > tract_end && from < right_guard {
+                        last = last.max(to);
+                    }
+                    at = to;
+                }
+                CigarOp::Insertion(_) => {
+                    if at < tract_start && at > left_guard {
+                        first = first.min(at);
+                    }
+                    if at > tract_end && at <= right_guard {
+                        last = last.max(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let grown = FlankDeletion {
+            left: u8::try_from(tract_start - first).unwrap_or(deleted.left),
+            right: u8::try_from(last - tract_end).unwrap_or(deleted.right),
+        };
+        if grown == deleted
+            || grown.left as u32 > widths.0.max(u32::from(deleted.left))
+            || grown.right as u32 > widths.1.max(u32::from(deleted.right))
+        {
+            return (span, deleted);
+        }
+        // The read position before reference base `first` (and any insertion before it), and
+        // the one after the insertions before base `last`.
+        let (mut start, mut end) = (None, None);
+        let (mut ref_cur, mut read_cur) = (fp.ref_start, fp.leading_clip as usize);
+        for op in cigar {
+            match op {
+                CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
+                    if start.is_none() && (ref_cur..ref_cur + n).contains(&first) {
+                        start = Some(read_cur + (first - ref_cur) as usize);
+                    }
+                    if end.is_none() && (ref_cur..ref_cur + n).contains(&last) {
+                        end = Some(read_cur + (last - ref_cur) as usize);
+                    }
+                    ref_cur += n;
+                    read_cur += *n as usize;
+                }
+                CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                    if start.is_none() && (ref_cur..ref_cur + n).contains(&first) {
+                        start = Some(read_cur);
+                    }
+                    if end.is_none() && (ref_cur..ref_cur + n).contains(&last) {
+                        end = Some(read_cur);
+                    }
+                    ref_cur += n;
+                }
+                CigarOp::Insertion(n) => {
+                    if start.is_none() && ref_cur == first {
+                        start = Some(read_cur);
+                    }
+                    read_cur += *n as usize;
+                }
+                _ => {}
+            }
+        }
+        match (start, end) {
+            (Some(from), Some(to)) if from <= span.start && to >= span.end => (from..to, grown),
+            _ => (span, deleted),
+        }
+    }
+
+    /// **Does an insertion or deletion in the CIGAR sit in the guarded flank bases** — the
+    /// `widths.0` reference bases before the tract or the `widths.1` after it? A deletion counts
+    /// when it takes any of those bases, an insertion when it sits between two of them or at the
+    /// edge. Coordinates as in [`deletion_takes_flank_bases_at_a_tract_edge`].
+    fn indel_in_the_guarded_flank(
+        cigar: &[CigarOp],
+        ref_start: u32,
+        tract_start: u32,
+        tract_end: u32,
+        widths: (u32, u32),
+    ) -> bool {
+        let left_guard = tract_start.saturating_sub(widths.0)..tract_start;
+        let right_guard = tract_end..tract_end + widths.1;
+        let mut at = ref_start;
+        for op in cigar {
+            match op {
+                CigarOp::Match(n)
+                | CigarOp::SeqMatch(n)
+                | CigarOp::SeqMismatch(n)
+                | CigarOp::Skip(n) => at += n,
+                CigarOp::Deletion(n) => {
+                    let (from, to) = (at, at + n);
+                    let takes = |guard: &Range<u32>| from < guard.end && to > guard.start;
+                    if takes(&left_guard) || takes(&right_guard) {
+                        return true;
+                    }
+                    at = to;
+                }
+                // An insertion sits before reference base `at`.
+                CigarOp::Insertion(_)
+                    if (at > left_guard.start && at <= left_guard.end)
+                        || (at >= right_guard.start && at < right_guard.end) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// **How many flank bases the read's deletions take beside the tract**, or `None` when no
     /// deletion crosses or touches either edge (or one takes more than 255 flank bases, which no
     /// flank this path holds is long enough for). A deletion crossing the tract's first base, or
@@ -1433,14 +1642,23 @@ mod classify {
     ///
     /// `span` is the spelling in read coordinates; `left_flank` and `right_flank` are the
     /// reference bases the deletion took, the tract's side last.
+    ///
+    /// **No flank base is given back that would leave the spelling shorter than `shortest`**
+    /// (2026-11-01): a segment's period, since an allele without a whole copy of the motif is one
+    /// the read model cannot score, and candidate selection drops it; zero at a bundle, whose
+    /// alleles can hold no copy. At chr20:2,472,054 (HG002) a 9-base deletion took seven flank
+    /// bases, `AAAAAAG`, and two of an `A` ×8 tract: given back without the floor, every carrier
+    /// read became an empty spelling with the `G` deleted, the allele was dropped, and only the
+    /// generic path's shortened deletion was written. With it the reads spell `A` with `AG`
+    /// deleted — the same sequence.
     fn in_smallest_form(
         seq: &[u8],
         mut span: Range<usize>,
         mut deleted: FlankDeletion,
-        left_flank: &[u8],
-        right_flank: &[u8],
+        (left_flank, right_flank): (&[u8], &[u8]),
+        shortest: usize,
     ) -> (Range<usize>, FlankDeletion) {
-        while deleted.left > 0 && !span.is_empty() {
+        while deleted.left > 0 && span.len() > shortest {
             let first_deleted = left_flank[left_flank.len() - deleted.left as usize];
             if seq[span.start] != first_deleted {
                 break;
@@ -1448,7 +1666,7 @@ mod classify {
             span.start += 1;
             deleted.left -= 1;
         }
-        while deleted.right > 0 && !span.is_empty() {
+        while deleted.right > 0 && span.len() > shortest {
             let last_deleted = right_flank[deleted.right as usize - 1];
             if seq[span.end - 1] != last_deleted {
                 break;
@@ -2336,6 +2554,228 @@ mod classify {
             }
         }
 
+        /// A 15-base-flank locus around `tract`, its reference flanks those of
+        /// SL4.0ch05:51017179, the read of `seq` aligned at the window's first base by `cigar`,
+        /// classified by the shipped delimiter.
+        fn classify_at_ch05(tract: &[u8], seq: &[u8], cigar: Vec<CigarOp>) -> Classified {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            let frame = [&b"AAATGAGGATTAAGG"[..], tract, b"TATGAATAGAAAATA"].concat();
+            let locus = SsrLocus {
+                repeat: SsrSegment::new(
+                    "chr1".into(),
+                    16,
+                    15 + tract.len() as u64,
+                    Motif::new(&tract[..1]).unwrap(),
+                    1.0,
+                )
+                .unwrap()
+                .into(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            let mut carrier = read(seq, 40);
+            carrier.cigar = cigar;
+            classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            )
+        }
+
+        /// **A read whose own alignment opens an indel in the flank bases the delimiter's guard
+        /// closes is spelled by that alignment** (2026-11-01). SL4.0ch05:51017179: the reads
+        /// carry `ATAAAGAA` over an `A` ×8 tract and delete `ATAGA` five bases into the right
+        /// flank. The guard forbids that gap, the delimiter's best path left ends the tract early
+        /// with the flank laid on mismatches, the anchor rule drops the right side, and the
+        /// read came back a partial that tied every 8-base candidate.
+        #[test]
+        fn a_flank_indel_the_guard_forbids_is_spelled_by_the_reads_alignment() {
+            use CigarOp::{Deletion, Match};
+            let seq = [&b"AAATGAGGATTAAGG"[..], b"ATAAAGAA", b"TATGA", b"AAATA"].concat();
+            match classify_at_ch05(b"AAAAAAAA", &seq, vec![Match(28), Deletion(5), Match(5)]) {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, b"ATAAAGAA");
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                    // The deletion does not touch the tract: the generic path calls it.
+                    assert_eq!(flank_deletion, FlankDeletion::NONE);
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// **A deletion at the tract's edge runs on through the indels the read's alignment has in
+        /// the guarded flank bases** (2026-11-01). A sample carrying one more `AAGC` and the
+        /// flank's `GAACT` deleted one base past the tract: minimap2 wrote its reads as the
+        /// reference's eight repeats, the flank's `CG` deleted, two matches, the `G` of the
+        /// extra repeat inserted, and a mismatch. Taken alone, the edge deletion made the allele
+        /// the reference tract with two flank bases gone, which no read carried.
+        #[test]
+        fn an_edge_deletion_runs_on_through_the_flank_indels_beside_it() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            use CigarOp::{Deletion, Insertion, Match};
+            let left_flank = b"GTCAGCATTGCAGGTCATCGGACTTAGCCA";
+            let tract = b"AAGC".repeat(8);
+            let right_flank = b"CGAACTAGTGGAGCAGTTGACCATAGCAGT";
+            let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+            let locus = SsrLocus {
+                repeat: SsrSegment::new("chr1".into(), 31, 62, Motif::new(b"AAGC").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            // The truth: nine repeats, the flank's `C`, then the flank after `GAACT`.
+            let seq = [
+                left_flank.as_slice(),
+                &b"AAGC".repeat(9),
+                b"C",
+                &right_flank[6..],
+            ]
+            .concat();
+            let mut carrier = read(&seq, 40);
+            carrier.cigar = vec![
+                Match(62),
+                Deletion(2),
+                Match(2),
+                Insertion(1),
+                Match(seq.len() as u32 - 65),
+            ];
+            match classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            ) {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    flank_deletion,
+                    ..
+                } => {
+                    // The read's bases up to where its alignment rejoins the reference after the
+                    // insertion, in place of the tract and the four flank bases `CGAA`; the
+                    // mismatch after it is the generic path's.
+                    assert_eq!(&*bases, [tract.as_slice(), b"AAG"].concat().as_slice());
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                    assert_eq!(flank_deletion, FlankDeletion { left: 0, right: 4 });
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// **A deletion taking a run of flank bases equal to the tract's keeps one copy in the
+        /// spelling** (2026-11-01; HG002 chr20:2,472,054). `…TC AAAAAAG | A ×8`, and the reads
+        /// delete `AAAAAAGAA`: seven flank bases and two of the tract. Smallest form gave every
+        /// spelled `A` back to the flank, the spelling came out empty, and candidate selection
+        /// dropped an allele without a copy of the motif.
+        #[test]
+        fn smallest_form_keeps_a_whole_copy_in_a_segments_spelling() {
+            use crate::alignment::ssr_unit_robust::{SsrUnitRobustAligner, UnitRobustScratch};
+            use CigarOp::{Deletion, Match};
+            let left_flank = [&b"GTCAGCATTGCAGGTCATCGGTC"[..], b"AAAAAAG"].concat();
+            let tract = b"A".repeat(8);
+            let right_flank = b"CCACGATTGCAGTCAGCTTGACCATAGCAG";
+            let frame = [left_flank.as_slice(), &tract, right_flank].concat();
+            let locus = SsrLocus {
+                repeat: SsrSegment::new("chr1".into(), 31, 38, Motif::new(b"A").unwrap(), 1.0)
+                    .unwrap()
+                    .into(),
+                tract_with_margin_bases: frame.into(),
+                margin_start: Position(1),
+            };
+            let seq = [&left_flank[..23], &tract[2..], right_flank].concat();
+            let mut carrier = read(&seq, 40);
+            carrier.cigar = vec![Match(23), Deletion(9), Match(36)];
+            match classify_read(
+                &carrier,
+                &locus,
+                &SsrUnitRobustAligner::new(PerQualityEmission::new()),
+                &StutterModel::hipstr_shipped(),
+                &mut UnitRobustScratch::default(),
+                &mut Vec::new(),
+            ) {
+                Classified::Observed {
+                    bases,
+                    read_witness,
+                    flank_deletion,
+                    ..
+                } => {
+                    assert_eq!(&*bases, b"A");
+                    assert_eq!(read_witness, ReadWitness::Complete);
+                    assert_eq!(flank_deletion, FlankDeletion { left: 2, right: 0 });
+                }
+                other => panic!("expected a complete observation, got {other:?}"),
+            }
+        }
+
+        /// Which indels sit in the guarded flank bases, and how far an edge deletion grows
+        /// through them: the tract at 30–60, eight guarded bases each side.
+        #[test]
+        fn indels_in_the_guarded_flank_are_found_and_an_edge_deletion_grows_through_them() {
+            use CigarOp::{Deletion, Insertion, Match};
+            let widths = (8, 8);
+            for (cigar, expected) in [
+                (vec![Match(65), Deletion(5), Match(20)], true),
+                (vec![Match(68), Deletion(5), Match(20)], false),
+                (vec![Match(18), Deletion(3), Match(70)], false),
+                (vec![Match(24), Deletion(3), Match(70)], true),
+                (vec![Match(62), Insertion(2), Match(20)], true),
+                (vec![Match(68), Insertion(2), Match(20)], false),
+                (vec![Match(40), Deletion(3), Match(40)], false),
+            ] {
+                assert_eq!(
+                    indel_in_the_guarded_flank(&cigar, 0, 30, 60, widths),
+                    expected,
+                    "{cigar:?}"
+                );
+            }
+            let fp = Footprint {
+                ref_start: 0,
+                ref_end: 100,
+                leading_clip: 0,
+                trailing_clip: 0,
+            };
+            // An edge deletion of two flank bases, two matches, an insertion: the flank deletion
+            // grows to the insertion, four bases, and the spelling to the read base after it.
+            let cigar = vec![Match(60), Deletion(2), Match(2), Insertion(1), Match(36)];
+            assert_eq!(
+                through_the_flank_indels(
+                    &cigar,
+                    fp,
+                    30..60,
+                    FlankDeletion { left: 0, right: 2 },
+                    30,
+                    60,
+                    widths,
+                ),
+                (30..63, FlankDeletion { left: 0, right: 4 })
+            );
+            // Nothing else in the guard: unchanged.
+            let cigar = vec![Match(60), Deletion(2), Match(38)];
+            assert_eq!(
+                through_the_flank_indels(
+                    &cigar,
+                    fp,
+                    30..60,
+                    FlankDeletion { left: 0, right: 2 },
+                    30,
+                    60,
+                    widths,
+                ),
+                (30..60, FlankDeletion { left: 0, right: 2 })
+            );
+        }
+
         /// The smallest form on both sides: a spelling gives a flank base back while it starts
         /// (or ends) with the deleted flank base nearest it, and stops at the first that differs.
         /// And the flank bases a deletion takes are counted on each side of the tract.
@@ -2348,8 +2788,8 @@ mod classify {
                     b"AAT",
                     0..3,
                     FlankDeletion { left: 2, right: 0 },
-                    b"GAA",
-                    b""
+                    (b"GAA", b""),
+                    0,
                 ),
                 (2..3, FlankDeletion::NONE)
             );
@@ -2359,8 +2799,8 @@ mod classify {
                     b"CAT",
                     0..3,
                     FlankDeletion { left: 2, right: 0 },
-                    b"GA",
-                    b""
+                    (b"GA", b""),
+                    0,
                 ),
                 (0..3, FlankDeletion { left: 2, right: 0 })
             );
@@ -2371,8 +2811,8 @@ mod classify {
                     b"AGT",
                     0..3,
                     FlankDeletion { left: 0, right: 2 },
-                    b"",
-                    b"TC"
+                    (b"", b"TC"),
+                    0,
                 ),
                 (0..3, FlankDeletion { left: 0, right: 2 })
             );
@@ -2381,10 +2821,33 @@ mod classify {
                     b"AGC",
                     0..3,
                     FlankDeletion { left: 0, right: 2 },
-                    b"",
-                    b"TC"
+                    (b"", b"TC"),
+                    0,
                 ),
                 (0..2, FlankDeletion { left: 0, right: 1 })
+            );
+            // chr20:2,472,054: six `A`s spelled with `AAAAAAG` missing on the left. With no floor
+            // every `A` is given back and the spelling is empty; with an `A` tract's floor of one
+            // base, one `A` stays and `AG` is the deletion — the same sequence.
+            assert_eq!(
+                in_smallest_form(
+                    b"AAAAAA",
+                    0..6,
+                    FlankDeletion { left: 7, right: 0 },
+                    (b"AAAAAAG", b""),
+                    0,
+                ),
+                (6..6, FlankDeletion { left: 1, right: 0 })
+            );
+            assert_eq!(
+                in_smallest_form(
+                    b"AAAAAA",
+                    0..6,
+                    FlankDeletion { left: 7, right: 0 },
+                    (b"AAAAAAG", b""),
+                    1,
+                ),
+                (5..6, FlankDeletion { left: 2, right: 0 })
             );
             // Tract at [30, 60).
             assert_eq!(
@@ -2747,8 +3210,11 @@ mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
     use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
-    use crate::locus_generation::{FlankDeletion, HeldFlank, ReadWitness, SequenceObservation};
+    use crate::locus_generation::{
+        FlankDeletion, HeldFlank, ReadWitness, SequenceObservation, read_placed_left,
+    };
     use crate::read::aligned_read::AlignedRead;
+    use crate::read::prepared_read::alignment_end_of;
     use crate::types::ReadGroupId;
     use std::collections::HashMap;
 
@@ -2798,9 +3264,11 @@ mod tally {
     /// `q_sum` is soft and unconsumed, and the parity oracle checks only bytes and counts (spec
     /// §6).
     ///
-    /// `locus_start` is the tract's 1-based anchor, needed only for `placed_left` — the count of
-    /// supporting reads that began strictly left of it, which is production's own definition
-    /// (`open_record.rs`'s `alignment_start < rec_pos`).
+    /// `locus_start` and `locus_end` are the tract's first and last base, 1-based and inclusive,
+    /// needed only for `placed_left` — the count of supporting reads with at least as much of
+    /// their span left of the tract as right of it ([`read_placed_left`]). The whole tract is
+    /// the locus here, unlike the generic path's anchor, because it is fixed before any read
+    /// is measured.
     ///
     /// `counts` carries the **run-level** totals (complete/partial observations and the four
     /// no-observation reasons); the returned `reads_without_observation` is this locus's own
@@ -2808,6 +3276,7 @@ mod tally {
     pub(super) fn tally<'a>(
         reads_and_outcomes: impl IntoIterator<Item = (&'a AlignedRead, Classified)>,
         locus_start: u64,
+        locus_end: u64,
         counts: &mut SsrGeneratorCounts,
     ) -> SsrTally {
         let mut buckets: HashMap<ObservationIdentity, Support> = HashMap::new();
@@ -2842,9 +3311,15 @@ mod tally {
                     let mapq = u32::from(read.mapq);
                     support.mapq_sum += mapq;
                     support.mapq_sum_sq += u64::from(mapq) * u64::from(mapq);
-                    // Production's rule verbatim: strictly left of the anchor, not at it.
-                    // `placed_start` — the "exactly at it" half — is deliberately not carried.
-                    support.placed_left += u32::from(read.pos < locus_start);
+                    // `pos` fits in 32 bits on any contig the generic path accepts, which
+                    // converts it the same way (`prepare_passthrough`).
+                    let alignment_end = alignment_end_of(read.pos as u32, &read.cigar);
+                    support.placed_left += u32::from(read_placed_left(
+                        read.pos,
+                        u64::from(alignment_end),
+                        locus_start,
+                        locus_end,
+                    ));
                 }
                 Classified::NoObservation(reason) => {
                     reads_without_observation += 1;
@@ -2872,6 +3347,8 @@ mod tally {
                         mapq_sum: support.mapq_sum,
                         mapq_sum_sq: support.mapq_sum_sq,
                         placed_left: support.placed_left,
+                        // The STR path has no artifact penalties to feed (`low_base_quality.md`).
+                        num_low_quality: 0,
                         // The STR path does not phase — there is no chain id to fold (spec §3).
                         chain_ids: Vec::new(),
                         flank_deletion,
@@ -2958,7 +3435,7 @@ mod tally {
                 (&rg1, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, 10, &mut counts).observations;
 
             assert_eq!(
                 observations.len(),
@@ -3006,7 +3483,7 @@ mod tally {
                 outcomes.push((r, observed(bases, ReadWitness::Complete, -1.0)));
             }
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, 10, &mut counts).observations;
 
             let order: Vec<(&[u8], u32)> = observations
                 .iter()
@@ -3064,7 +3541,7 @@ mod tally {
                 (&r, observed(b"CACACACACA", right, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 1, &mut counts).observations;
+            let observations = tally(outcomes, 1, 1, &mut counts).observations;
 
             assert_eq!(
                 observations.len(),
@@ -3078,34 +3555,44 @@ mod tally {
             );
         }
 
-        /// `placed_left` counts supporting reads that began **strictly left** of the locus
-        /// anchor — production's own rule (`alignment_start < rec_pos`), not `<=`.
+        /// `placed_left` counts supporting reads with at least as many aligned bases left of
+        /// the tract as right of it — freebayes' `placedLeft` — and not reads that merely
+        /// started left of it, which is nearly every read that covers a tract.
         ///
-        /// The read starting exactly on the anchor is the discriminating case: it is what
-        /// separates `placed_left` from `placed_start`, the sibling field ng deliberately does
-        /// not carry, and an implementation using `<=` passes every other assertion here.
+        /// Every read here starts left of the tract `[20, 25]`, so the old rule counted all
+        /// four. Two of them lie mostly to its right. The two in the middle are the boundary:
+        /// ten bases each side is a tie and goes left; nine against eleven goes right.
         #[test]
-        fn placed_left_counts_only_reads_starting_strictly_left_of_the_anchor() {
-            let before = read_in_group(0, 9);
-            let on = read_in_group(0, 10);
-            let after = read_in_group(0, 11);
+        fn placed_left_counts_reads_lying_mostly_left_of_the_tract() {
+            fn spanning(pos: u64, len: u32) -> AlignedRead {
+                AlignedRead {
+                    cigar: vec![CigarOp::Match(len)],
+                    ..read_in_group(0, pos)
+                }
+            }
+            let mostly_right = spanning(18, 30); // 2 bases left, 22 right
+            let mostly_left = spanning(1, 30); // 19 left, 5 right
+            let tie = spanning(10, 26); // 10 left, 10 right
+            let one_short = spanning(11, 26); // 9 left, 11 right
             let outcomes = vec![
-                (&before, observed(b"CACACA", ReadWitness::Complete, -1.0)),
-                (&on, observed(b"CACACA", ReadWitness::Complete, -1.0)),
-                (&after, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&mostly_right, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&mostly_left, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&tie, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&one_short, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let observations = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 20, 25, &mut counts).observations;
 
             assert_eq!(
                 observations.len(),
                 1,
                 "one allele, one group — one observation"
             );
-            assert_eq!(observations[0].num_obs, 3);
+            assert_eq!(observations[0].num_obs, 4);
             assert_eq!(
-                observations[0].placed_left, 1,
-                "only the read starting at 9 is left of the anchor at 10"
+                observations[0].placed_left, 2,
+                "the read with 19 bases left and the tie are placed left; the two with more \
+                 bases right are not, though all four started left of the tract"
             );
         }
 
@@ -3128,7 +3615,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             assert_eq!(result.observations.len(), 2);
             assert_eq!(counts.observations_complete, 1);
             assert_eq!(counts.observations_partial, 1);
@@ -3160,7 +3647,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             assert_eq!(result.observations.len(), 1);
             assert_eq!(result.observations[0].num_obs, 2);
         }
@@ -3188,7 +3675,7 @@ mod tally {
                 (&fwd, held(HeldFlank::Left)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let flanks: Vec<_> = result
                 .observations
                 .iter()
@@ -3212,7 +3699,7 @@ mod tally {
                 (&rev, observed(b"CACACA", ReadWitness::Complete, -3.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let obs = &result.observations[0];
             assert_eq!(obs.num_obs, 2);
             assert_eq!(obs.num_fwd, 1, "one forward, one reverse");
@@ -3252,7 +3739,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             assert!(result.observations.is_empty());
             assert_eq!(result.reads_without_observation, 5);
             assert_eq!(counts.no_border_anchored, 1);
@@ -3290,7 +3777,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let order: Vec<(&[u8], ReadWitness)> = result
                 .observations
                 .iter()
@@ -3354,7 +3841,7 @@ mod tally {
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let result = tally(outcomes, 1, &mut counts);
+            let result = tally(outcomes, 1, 1, &mut counts);
             let order: Vec<ReadWitness> = result
                 .observations
                 .iter()
@@ -3381,7 +3868,7 @@ mod tally {
             let rev = read(FLAG_REVERSE_STRAND, 30);
             let moments = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
-                let obs = tally(outcomes, 1, &mut counts).observations;
+                let obs = tally(outcomes, 1, 1, &mut counts).observations;
                 assert_eq!(obs.len(), 1, "all reads share one bucket");
                 let o = &obs[0];
                 (o.num_obs, o.num_fwd, o.mapq_sum, o.mapq_sum_sq)
@@ -3407,7 +3894,7 @@ mod tally {
             let r = read(0, 60);
             let run = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
-                let result = tally(outcomes, 1, &mut counts);
+                let result = tally(outcomes, 1, 1, &mut counts);
                 (result.observations, counts)
             };
             let a = run(vec![
@@ -3986,6 +4473,7 @@ where
         let tallied = tally::tally(
             capped.kept.iter().zip(outcomes),
             locus.repeat.start(),
+            locus.repeat.end(),
             &mut self.counts,
         );
         Ok(MeasuredReads {
@@ -5027,24 +5515,29 @@ mod tests {
         assert_eq!(locus.reads_discarded_by_cap, 0, "no cap");
     }
 
-    /// **`placed_left` is counted against the tract anchor, and this is the only test that says
-    /// which coordinate that is.**
+    /// **`placed_left` is counted against the whole tract, and this is the only test that says
+    /// which coordinates those are.**
     ///
-    /// The fold itself (`tally`) is handed `locus_start` as a bare `u64`, and its unit test
-    /// supplies that argument itself — so the unit test pins the comparison (`<`, not `<=`) and
-    /// nothing about *which* coordinate the generator passes. A 0-based/1-based slip, or the
-    /// margin start, or a widened region's start would all be silent: `placed_left` is a QUAL
-    /// bias term, so a wrong anchor is a wrong QUAL on every call with no panic.
+    /// The fold itself (`tally`) is handed the tract's ends as bare `u64`s, and its unit test
+    /// supplies them itself — so the unit test pins the comparison and nothing about *which*
+    /// coordinates the generator passes. A 0-based/1-based slip, the margin's start, or one end
+    /// of the tract in place of both would all be silent: `placed_left` feeds a QUAL penalty, so
+    /// a wrong coordinate is a wrong QUAL with no panic.
     ///
-    /// The fixture separates the two plausible anchors. The tract is `[40, 49]` and `flank_bp`
-    /// is 10, so the margin starts at 30 — and the reads start at 30, 33, 36 and 39, every one
-    /// of them **left of the tract anchor** and **not left of the margin anchor**. So the
-    /// correct anchor counts them all and the margin anchor counts none.
+    /// The tract is `[40, 49]` and `flank_bp` is 10, so the margin starts at 30. The reads are
+    /// 30 bases long and start at 28, 29, 31 and 32: the first two lie at least half left of the
+    /// tract and the other two do not. Each wrong coordinate moves that boundary past some of
+    /// them: against the tract's first base only a read starting at 25 or earlier counts,
+    /// against the margin's first base 15 or earlier, against the tract's last base 34 or
+    /// earlier. (Each read stops inside the margin, which over this all-A reference is what
+    /// gives it an observation at all.)
     #[test]
-    fn placed_left_is_counted_against_the_tract_anchor_not_the_margin() {
+    fn placed_left_is_counted_against_the_whole_tract() {
         use crate::read::input::test_fixtures::read_named_with_length;
-        let records: Vec<_> = (0..4)
-            .map(|i| read_named_with_length(&format!("r{i}"), 0, 30 + i * 3, 30))
+        let records: Vec<_> = [28usize, 29, 31, 32]
+            .iter()
+            .enumerate()
+            .map(|(i, start)| read_named_with_length(&format!("r{i}"), 0, *start, 30))
             .collect();
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
         let mut generator = ssr_generator();
@@ -5059,46 +5552,15 @@ mod tests {
         let supporting: u32 = locus.observations.iter().map(|obs| obs.num_obs).sum();
         let placed_left: u32 = locus.observations.iter().map(|obs| obs.placed_left).sum();
 
-        assert!(
-            supporting > 0,
-            "the fixture must produce observations, or this test cannot discriminate"
+        assert_eq!(
+            supporting, 4,
+            "every read must produce an observation, or this test cannot discriminate"
         );
         assert_eq!(
-            placed_left, supporting,
-            "every supporting read started left of the tract anchor at 40; counting against \
-             the margin start (30) would give 0"
-        );
-    }
-
-    /// The mirror, so the anchor is pinned from **both** sides: reads starting at or after the
-    /// tract anchor contribute nothing to `placed_left`. Together with the test above this
-    /// brackets the anchor — one case fails if it is too far left, the other if it is too far
-    /// right.
-    #[test]
-    fn a_read_starting_on_the_tract_anchor_is_not_placed_left() {
-        use crate::read::input::test_fixtures::read_named_with_length;
-        // Starting exactly on the anchor (40) and after it (43) — 30 bp each, so they still
-        // cover the tract and clear the min-length filter.
-        let records: Vec<_> = [40u64, 43]
-            .iter()
-            .enumerate()
-            .map(|(i, start)| read_named_with_length(&format!("r{i}"), 0, *start as usize, 30))
-            .collect();
-        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
-        let mut generator = ssr_generator();
-        let segment = tract(40, 49);
-
-        generator.begin_segment(span(40, 49));
-        let locus = generator
-            .next_locus(&segment, &reads)
-            .expect("no fetch error")
-            .expect("one locus");
-
-        let placed_left: u32 = locus.observations.iter().map(|obs| obs.placed_left).sum();
-        assert_eq!(
-            placed_left, 0,
-            "strictly left, so the read starting *on* the anchor does not count — this is what \
-             separates `placed_left` from the `placed_start` ng deliberately does not carry"
+            placed_left, 2,
+            "the reads starting at 28 and 29 lie at least half left of the tract [40, 49]; \
+             counting against its first base alone, or the margin's, would give 0, against its \
+             last base alone 4, and the old started-left rule 4"
         );
     }
 
@@ -5309,6 +5771,7 @@ mod tests {
         let ng = tally::tally(
             reads.iter().zip(ng_outcomes),
             ng_locus.repeat.start(),
+            ng_locus.repeat.end(),
             &mut counts,
         );
         let ng_complete: Vec<(Vec<u8>, u32)> = ng

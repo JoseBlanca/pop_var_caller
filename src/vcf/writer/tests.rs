@@ -66,6 +66,7 @@ fn snp_at(contig: u32, position: u64) -> VcfRecord {
         vec![allele(b"A"), allele(b"T")],
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::Called {
                 genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
                 genotype_quality: quality(30.0),
@@ -108,6 +109,7 @@ fn tract_at(contig: u32, span_start: u64, padded: bool) -> VcfRecord {
         alleles,
         vec![1.0, 1.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::Called {
                 genotype: Genotype::new(vec![AlleleId(1), AlleleId(1)]),
                 genotype_quality: quality(30.0),

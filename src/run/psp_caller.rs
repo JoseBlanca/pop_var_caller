@@ -449,6 +449,8 @@ pub struct PspVariantCaller {
     explain: Option<ExplainRegions>,
     /// The site quality below which a called locus is not written (`--min-site-quality`).
     min_site_quality: Phred,
+    /// The low-base-quality penalty's weight (`--low-base-quality-weight`); zero is off.
+    low_base_quality_weight: f64,
 }
 
 impl PspVariantCaller {
@@ -545,7 +547,18 @@ impl PspVariantCaller {
             explain: None,
             min_site_quality: Phred::try_new(DEFAULT_MIN_SITE_QUALITY)
                 .expect("the default threshold is a valid quality"),
+            low_base_quality_weight:
+                crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT,
         })
+    }
+
+    /// The same caller, charging the low-base-quality penalty at `weight` times its tail
+    /// (`doc/devel/ng/spec/low_base_quality.md`); zero leaves it off. The default is
+    /// [`DEFAULT_LOW_BASE_QUALITY_WEIGHT`](crate::calling::quality::artifact_correction::DEFAULT_LOW_BASE_QUALITY_WEIGHT).
+    #[must_use]
+    pub fn with_low_base_quality_weight(mut self, weight: f64) -> Self {
+        self.low_base_quality_weight = weight;
+        self
     }
 
     /// The same caller, writing no locus whose site quality falls below `quality`
@@ -691,6 +704,7 @@ impl PspVariantCaller {
             depth_ceiling,
             explain,
             min_site_quality,
+            low_base_quality_weight,
         } = self;
         // **One accessor for the whole run, never shared** — it walks forward with the merge
         // and releases what it has passed, exactly as direct mode's does.
@@ -755,6 +769,7 @@ impl PspVariantCaller {
             contigs: &contigs,
             explain: explain.as_ref(),
             min_site_quality,
+            low_base_quality_weight,
         };
         let CohortCallingOutcome {
             calling,

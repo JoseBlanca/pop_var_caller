@@ -3,9 +3,9 @@
 //! Build and run on the host (the review's target machine):
 //!
 //! ```text
-//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- all
-//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- generic
-//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap -- gather
+//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap,bench-fixtures -- all
+//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap,bench-fixtures -- generic
+//! cargo run --profile profiling --example dhat_ng_joint_fit --features dhat-heap,bench-fixtures -- gather
 //! ```
 //!
 //! **Three runs and not one, because dhat reports a single `t-gmax`** — the one
@@ -145,7 +145,7 @@ fn main() {
         eprintln!(
             "This example measures allocations and needs the dhat allocator.\n\
              Re-run with: cargo run --profile profiling --example dhat_ng_joint_fit \
-             --features dhat-heap -- {mode}"
+             --features dhat-heap,bench-fixtures -- {mode}"
         );
     }
 

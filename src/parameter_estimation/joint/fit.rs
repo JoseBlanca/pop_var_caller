@@ -5900,7 +5900,11 @@ mod tests {
             b: 0.0,
         };
         assert!(degenerate.expected_alternative_frequency().is_nan());
-        let fit = a_fit_carrying(degenerate, 0.01);
+        // **The fit is built around a real density and the degenerate one put in afterwards**,
+        // because building its density report evaluates the Beta, whose shapes must be above
+        // zero — a debug assertion stops there, before the method under test is reached.
+        let mut fit = a_fit_carrying(a_lopsided_density(), 0.01);
+        fit.density.value = degenerate;
         assert!(fit.fitted_alternative_frequency().is_none());
     }
 

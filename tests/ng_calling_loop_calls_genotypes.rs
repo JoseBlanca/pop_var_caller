@@ -129,6 +129,7 @@ fn showed_from(bases: &[u8], reads: u32, read_group: ReadGroupId) -> SequenceObs
         mapq_sum: 60 * reads,
         mapq_sum_sq: u64::from(reads) * 3_600,
         placed_left: reads / 2,
+        num_low_quality: 0,
         chain_ids: Vec::new(),
     }
 }
@@ -588,13 +589,12 @@ fn a_locus_the_merge_builds_can_still_be_called_over_the_reference_alone() {
 
 /// **A three-allele locus is called over all three, and the candidate ids are not the merge's.**
 ///
-/// Five samples over a reference `A`. The merge interns sequences in the order it meets them
-/// walking samples in ascending order, so its table is **`[A, T, G, C]`**; `G` is one sample's 3
-/// reads in 100, which clears the merge's 2% bar and fails selection's 10%, so it is dropped and
-/// the candidates are **`[A, C, T]`** — admitted in the order of their bases, not the merge's.
-/// **`C` is therefore merge index 3 and candidate id 1, and `T` merge index 1 and candidate id
-/// 2**, and the assertions below are on the literal ids rather than on a lookup by bases — which
-/// is what makes them able to fail.
+/// Five samples over a reference `A`. The merge puts the reference first and the rest in the
+/// order of their bases, so its table is **`[A, C, G, T]`**; `G` is one sample's 3 reads in 100,
+/// which clears the merge's 2% bar and fails selection's 10%, so it is dropped and the candidates
+/// are **`[A, C, T]`**. **`T` is therefore merge index 3 and candidate id 2**, and the assertions
+/// below are on the literal ids rather than on a lookup by bases — which is what makes them able
+/// to fail.
 ///
 /// *(The first version of this test had nothing dropped, so the remapping was the identity and
 /// the ids were resolved by looking each sequence up in the output. Deleting the remapping
@@ -616,8 +616,8 @@ fn a_locus_with_two_alternatives_is_called_over_all_three_and_the_ids_are_select
             .iter()
             .map(|allele| allele.as_ref())
             .collect::<Vec<&[u8]>>(),
-        vec![b"A".as_slice(), b"T", b"G", b"C"],
-        "the merge interns in the order it meets each sequence"
+        vec![b"A".as_slice(), b"C", b"G", b"T"],
+        "the merge puts the reference first and the rest in the order of their bases"
     );
 
     let inference = call(&per_sample);
@@ -660,9 +660,11 @@ fn a_locus_with_two_alternatives_is_called_over_all_three_and_the_ids_are_select
 /// loop takes four passes**, which is the regime the tomato cohort is in (about three reads a
 /// position, 63 accessions) and the one `CLAUDE.md` names as the hardest.
 ///
-/// The cohort's expected copies land at **3.3044 reference against 2.6956 alternative** out of
+/// The cohort's expected copies land at **3.3094 reference against 2.6906 alternative** out of
 /// six — further from an even split than the twenty-read fixture's two parts in a million,
-/// because at three reads the prior is still worth something against the reads.
+/// because at three reads the prior is still worth something against the reads. (3.3044 until
+/// 2026-10-31, when `read_likelihoods.md` §3.3's amendment began charging a read `1 − ε` from a
+/// copy of its own allele.)
 #[test]
 fn at_three_reads_a_sample_the_loop_iterates_and_the_calls_hold() {
     let per_sample = vec![
@@ -684,7 +686,7 @@ fn at_three_reads_a_sample_the_loop_iterates_and_the_calls_hold() {
 
     let copies = inference.cohort_expected_copies().copies();
     assert!(
-        (copies[0] - 3.304_434_8).abs() < 1e-6,
+        (copies[0] - 3.309_384_0).abs() < 1e-6,
         "the prior still moves the cohort at three reads: {copies:?}"
     );
 }
@@ -834,6 +836,7 @@ fn tract_reads(repeats: u32, reads: u32) -> SequenceObservation {
         mapq_sum: 60 * reads,
         mapq_sum_sq: u64::from(reads) * 3_600,
         placed_left: reads / 2,
+        num_low_quality: 0,
         chain_ids: Vec::new(),
     }
 }

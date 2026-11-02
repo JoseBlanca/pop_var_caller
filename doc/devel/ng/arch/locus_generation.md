@@ -84,8 +84,9 @@ pub struct ObservedSequence {
     /// Σ MAPQ and Σ MAPQ² — the multi-mapper Welch's-t filter recovers mean and variance.
     pub mapq_sum: u32,
     pub mapq_sum_sq: u64,
-    /// Supporting reads that began strictly left of the locus anchor — the QUAL
-    /// read-position-bias term. `placed_start` is **not** carried (spec §3, fold-in below).
+    /// Supporting reads with at least as many aligned bases left of the locus as right of it
+    /// (freebayes' `placedLeft`; until 2026-11-01, reads that began left of the anchor) — the
+    /// QUAL read-position-bias term. `placed_start` is **not** carried (spec §3, fold-in below).
     pub placed_left: u32,
     /// Phase-chain ids of the reads folded here — what lets a later step chain observations
     /// into a haplotype.

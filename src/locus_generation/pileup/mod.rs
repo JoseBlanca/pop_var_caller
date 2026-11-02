@@ -254,6 +254,7 @@ mod chain_renaming_tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3600,
                 placed_left: 0,
+                num_low_quality: 0,
                 chain_ids: vec![chain],
             }],
             reads_without_observation: 0,

@@ -258,7 +258,7 @@ const RECORD_BODY_BYTE_COUNT: &str = record_head_field(5);
 /// **The chain ids are not here either, and that is Milestone E.** A record's chain ids are
 /// dropped by [`encode_record_body`] and come back empty from [`decode_record_body`], which is
 /// stated on both and pinned by a test rather than left for a reader to discover.
-const BODY_FIELDS: [(&str, FieldEncoding); 25] = [
+const BODY_FIELDS: [(&str, FieldEncoding); 26] = [
     ("reference-bases", FieldEncoding::LengthPrefixedBytes),
     ("observation-count", FieldEncoding::Varint),
     // Which observation's reads are derived rather than stored, or the observation count for
@@ -280,7 +280,11 @@ const BODY_FIELDS: [(&str, FieldEncoding); 25] = [
     ("summed-log-error", SUMMED_LOG_ERROR_ENCODING),
     ("mapq-sum", FieldEncoding::Varint),
     ("mapq-sum-of-squares", FieldEncoding::Varint),
-    ("reads-starting-left-of-the-locus", FieldEncoding::Varint),
+    // Reads with at least as much of their span left of the locus as right of it
+    // (`read_placed_left`). Named `reads-starting-left-of-the-locus` until 2026-11-01, when it
+    // counted reads that merely started left of it; the rename is what refuses a psp holding
+    // the old count, since a cohort mixing the two would weigh one against the other.
+    ("reads-lying-mostly-left-of-locus", FieldEncoding::Varint),
     // Every observation except the residual one — the half of the chain-id column that carries
     // no state, so it stays in the skippable body (spec psp_record_encoding.md §6).
     ("observation-reads", FieldEncoding::ChainIdList),
@@ -326,6 +330,14 @@ const BODY_FIELDS: [(&str, FieldEncoding); 25] = [
         "observation-held-flanks",
         FieldEncoding::LengthPrefixedBytes,
     ),
+    // **How many of each observation's reads had a low base quality** (`low_base_quality.md`),
+    // after every other field for the reason the three above are: a reader that predates it walks
+    // past it. A list of `(observation, count)` varint pairs for the observations whose count is
+    // not zero — empty on most records.
+    (
+        "observation-low-quality-reads",
+        FieldEncoding::LengthPrefixedBytes,
+    ),
 ];
 
 /// The body fields of formats 1.0 and 1.1, which end at the repeat's right flank.
@@ -336,6 +348,10 @@ const BODY_FIELDS_BEFORE_2_0: usize = 23;
 
 /// The body fields of format 2.0, which end at the STR bundle payload.
 const BODY_FIELDS_BEFORE_2_1: usize = 24;
+
+/// The body fields before the observations' low-quality read counts were added (2026-11-01),
+/// which end at the held flanks.
+const BODY_FIELDS_BEFORE_LOW_QUALITY: usize = 25;
 
 /// The declared name of one field, by its position in [`BODY_FIELDS`].
 ///
@@ -362,7 +378,7 @@ const READS_ON_THE_FORWARD_STRAND: &str = body_field(10);
 const SUMMED_LOG_ERROR: &str = body_field(11);
 const MAPQ_SUM: &str = body_field(12);
 const MAPQ_SUM_OF_SQUARES: &str = body_field(13);
-const READS_STARTING_LEFT: &str = body_field(14);
+const READS_PLACED_LEFT: &str = body_field(14);
 const OBSERVATION_READS: &str = body_field(15);
 const READS_WITHOUT_OBSERVATION: &str = body_field(16);
 const READS_DISCARDED_BY_THE_DEPTH_CAP: &str = body_field(17);
@@ -373,6 +389,7 @@ const REPEAT_RIGHT_FLANK: &str = body_field(21);
 const OBSERVATION_FLANK_DELETIONS: &str = body_field(22);
 const STR_BUNDLE_PAYLOAD: &str = body_field(23);
 const OBSERVATION_HELD_FLANKS: &str = body_field(24);
+const OBSERVATION_LOW_QUALITY_READS: &str = body_field(25);
 
 /// The witness as a whole, for the two faults that are about the set rather than about one of
 /// its numbers. Not a declared field: the three `witness-run-*` entries are.
@@ -539,6 +556,10 @@ pub struct RecordLayout {
     /// `false` for 2.0 and earlier files, whose observations all read as having none recorded,
     /// which is what those formats wrote down.
     body_carries_held_flanks: bool,
+    /// Whether the body ends with the observations' low-quality read counts. `false` for a file
+    /// written before they were, whose observations all read as having none — so the
+    /// low-base-quality penalty charges nothing on it.
+    body_carries_low_quality_reads: bool,
 }
 
 impl RecordLayout {
@@ -557,6 +578,7 @@ impl RecordLayout {
             body_carries_flank_deletions: true,
             body_carries_bundle_payload: true,
             body_carries_held_flanks: true,
+            body_carries_low_quality_reads: true,
         }
     }
 
@@ -577,33 +599,40 @@ impl RecordLayout {
         let before_1_2 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_1_2];
         let before_2_0 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_0];
         let before_2_1 = &BODY_FIELDS[..BODY_FIELDS_BEFORE_2_1];
+        let before_low_quality = &BODY_FIELDS[..BODY_FIELDS_BEFORE_LOW_QUALITY];
         let (
             known,
             head_carries_discarded_reads,
             body_carries_flank_deletions,
             body_carries_bundle_payload,
             body_carries_held_flanks,
+            body_carries_low_quality_reads,
         ) = match matches_fields(manifest, fields_this_build_knows()) {
-            Ok(known) => (known, true, true, true, true),
+            Ok(known) => (known, true, true, true, true, true),
             Err(against_this_build) => {
-                if let Ok(known) =
+                if let Ok(known) = matches_fields(
+                    manifest,
+                    fields_of_body(&RECORD_HEAD_FIELDS, before_low_quality),
+                ) {
+                    (known, true, true, true, true, false)
+                } else if let Ok(known) =
                     matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_2_1))
                 {
-                    (known, true, true, true, false)
+                    (known, true, true, true, false, false)
                 } else if let Ok(known) =
                     matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_2_0))
                 {
-                    (known, true, true, false, false)
+                    (known, true, true, false, false, false)
                 } else if let Ok(known) =
                     matches_fields(manifest, fields_of_body(&RECORD_HEAD_FIELDS, before_1_2))
                 {
-                    (known, true, false, false, false)
+                    (known, true, false, false, false, false)
                 } else {
                     match matches_fields(
                         manifest,
                         fields_of_body(&RECORD_HEAD_FIELDS_1_0, before_1_2),
                     ) {
-                        Ok(known) => (known, false, false, false, false),
+                        Ok(known) => (known, false, false, false, false, false),
                         Err(_) => return Err(against_this_build),
                     }
                 }
@@ -613,6 +642,7 @@ impl RecordLayout {
             body_carries_flank_deletions,
             body_carries_bundle_payload,
             body_carries_held_flanks,
+            body_carries_low_quality_reads,
             unknown_final_encodings: manifest
                 .fields
                 .iter()
@@ -1103,6 +1133,7 @@ pub fn encode_record_body_reusing(
             mapq_sum,
             mapq_sum_sq,
             placed_left,
+            num_low_quality: _, // written once per record, after the held flanks
             chain_ids,
             flank_deletion: _, // written once per record, after the kind
             held_flank: _,     // written once per record, after the bundle payload
@@ -1133,6 +1164,20 @@ pub fn encode_record_body_reusing(
     put_flank_deletions(out, observations);
     put_bundle_payload(out, kind);
     put_held_flanks(out, observations);
+    put_low_quality_reads(out, observations);
+}
+
+/// The observations' low-quality read counts as one length-prefixed field: a varint pair
+/// `(observation, count)` for each observation whose count is not zero, in observation order.
+fn put_low_quality_reads(out: &mut Vec<u8>, observations: &[SequenceObservation]) {
+    let mut pairs: Vec<u8> = Vec::new();
+    for (at, observation) in observations.iter().enumerate() {
+        if observation.num_low_quality > 0 {
+            put_varint(&mut pairs, at as u64);
+            put_varint(&mut pairs, u64::from(observation.num_low_quality));
+        }
+    }
+    put_bytes(out, &pairs);
 }
 
 /// The flank written for [`HeldFlank::Left`] in `observation-held-flanks`; the right is one more.
@@ -1342,7 +1387,7 @@ pub fn decode_record_body(
         let q_sum = SummedLogError::from_steps(body.read_signed_varint(SUMMED_LOG_ERROR)?);
         let mapq_sum = body.read_u32(MAPQ_SUM)?;
         let mapq_sum_sq = body.read_varint(MAPQ_SUM_OF_SQUARES)?;
-        let placed_left = body.read_u32(READS_STARTING_LEFT)?;
+        let placed_left = body.read_u32(READS_PLACED_LEFT)?;
         let chain_ids = if at == residual_at {
             // Filled after the loop, from the live set minus every list above.
             Vec::new()
@@ -1363,6 +1408,8 @@ pub fn decode_record_body(
             mapq_sum,
             mapq_sum_sq,
             placed_left,
+            // Filled after the held flanks, from the record's own list.
+            num_low_quality: 0,
             chain_ids,
         });
     }
@@ -1471,6 +1518,34 @@ pub fn decode_record_body(
                 ));
             }
             observation.held_flank = Some(held);
+        }
+    }
+
+    if layout.body_carries_low_quality_reads {
+        let pairs = body.read_length_prefixed(OBSERVATION_LOW_QUALITY_READS)?;
+        let mut list = FieldReader::new(pairs);
+        while list.bytes_left() > 0 {
+            let at = list.read_varint(OBSERVATION_LOW_QUALITY_READS)?;
+            let count = list.read_varint(OBSERVATION_LOW_QUALITY_READS)?;
+            let observation = usize::try_from(at)
+                .ok()
+                .and_then(|at| observations.get_mut(at));
+            // A count is recorded once, is not zero, and is at most the observation's reads.
+            let Some(observation) = observation.filter(|observation| {
+                observation.num_low_quality == 0
+                    && count > 0
+                    && count <= u64::from(observation.num_obs)
+            }) else {
+                return Err(body.malformed(
+                    OBSERVATION_LOW_QUALITY_READS,
+                    format!(
+                        "observation {at} given {count} low-quality reads, in a record of \
+                         {declared_observations} observations; a count is recorded once, is not \
+                         zero, and is at most the observation's reads"
+                    ),
+                ));
+            };
+            observation.num_low_quality = count as u32;
         }
     }
 
@@ -2663,7 +2738,7 @@ mod tests {
 
     use crate::psp::header::{
         ContigIdentity, DEFAULT_GENOMIC_BLOCK_SIZE_BP, DEFAULT_LOOK_BACK_WINDOW_LOG,
-        FORMAT_VERSION, Header, Manifest, ReferenceIdentity, WriterProvenance,
+        FORMAT_VERSION, FieldName, Header, Manifest, ReferenceIdentity, WriterProvenance,
     };
     use proptest::prelude::*;
 
@@ -2714,6 +2789,7 @@ mod tests {
                     mapq_sum: 8_220,
                     mapq_sum_sq: 493_200,
                     placed_left: 44,
+                    num_low_quality: 0,
                     chain_ids: Vec::new(),
                 },
                 SequenceObservation {
@@ -2728,6 +2804,7 @@ mod tests {
                     mapq_sum: 180,
                     mapq_sum_sq: 10_800,
                     placed_left: 1,
+                    num_low_quality: 0,
                     chain_ids: Vec::new(),
                 },
                 SequenceObservation {
@@ -2745,6 +2822,7 @@ mod tests {
                     mapq_sum: 60,
                     mapq_sum_sq: 3_600,
                     placed_left: 2,
+                    num_low_quality: 0,
                     chain_ids: Vec::new(),
                 },
             ],
@@ -2873,7 +2951,7 @@ mod tests {
                 255, 159, 21, // summed-log-error: zig-zag of −174,080 steps
                 156, 64, // mapq-sum
                 144, 141, 30, // mapq-sum-of-squares
-                44, // reads-starting-left-of-the-locus
+                44, // reads-lying-mostly-left-of-locus
                 0,  // observation-reads: this observation names none
                 // — observation 2 —
                 14, b'A', b'C', b'G', b'T', b'A', b'C', b'G', b'T', b'A', b'C', b'G', b'T', b'A',
@@ -2887,7 +2965,7 @@ mod tests {
                 255, 15, // summed-log-error: zig-zag of −1,024 steps
                 180, 1, // mapq-sum
                 176, 84, // mapq-sum-of-squares
-                1,  // reads-starting-left-of-the-locus
+                1,  // reads-lying-mostly-left-of-locus
                 0,  // observation-reads: none
                 // — observation 3 —
                 0, // observation-bases: empty
@@ -2899,7 +2977,7 @@ mod tests {
                 13, // summed-log-error: zig-zag of −7 steps
                 60, // mapq-sum
                 144, 28, // mapq-sum-of-squares
-                2,  // reads-starting-left-of-the-locus
+                2,  // reads-lying-mostly-left-of-locus
                 0,  // observation-reads: none
                 // — the record's own tail —
                 12, // reads-without-observation
@@ -2908,6 +2986,7 @@ mod tests {
                 0, // observation-flank-deletions: none (format 1.2)
                 0, // str-bundle-payload: empty, the record is no bundle (format 2.0)
                 0, // observation-held-flanks: none (format 2.1)
+                0, // observation-low-quality-reads: none
             ]
         );
     }
@@ -3024,7 +3103,7 @@ mod tests {
         });
         let mut bytes = Vec::new();
         encode_record_body(&record, &mut bytes);
-        let tail = &bytes[bytes.len() - 22..];
+        let tail = &bytes[bytes.len() - 23..];
         assert_eq!(
             tail,
             [
@@ -3039,6 +3118,7 @@ mod tests {
                 0, 9, 1, b'A', // the first: offset, length, motif
                 130, 1, 16, 2, b'A', b'T', // the second, its offset two bytes long
                 0,    // observation-held-flanks: none
+                0,    // observation-low-quality-reads: none
             ]
             .as_slice()
         );
@@ -3068,13 +3148,13 @@ mod tests {
         let mut bytes = Vec::new();
         encode_record_body(&record, &mut bytes);
         assert_eq!(
-            bytes[bytes.len() - 3..],
-            [0, 0, 0],
-            "no flank deletion, an empty payload and no held flank"
+            bytes[bytes.len() - 4..],
+            [0, 0, 0, 0],
+            "no flank deletion, an empty payload, no held flank and no low-quality count"
         );
 
-        // The payload made one byte long, `A`, before the held flanks' empty list.
-        let payload_at = bytes.len() - 2;
+        // The payload made one byte long, `A`, before the two empty lists after it.
+        let payload_at = bytes.len() - 3;
         bytes[payload_at] = 1;
         bytes.insert(payload_at + 1, b'A');
         let refused = decode_record_body(
@@ -3245,9 +3325,10 @@ mod tests {
         let decoded = decode(&bytes).expect("what this encoder wrote, this decoder reads");
         assert_eq!(decoded.record, written);
 
-        // The body's last bytes are the field: its length, then (1, right) and (2, left).
-        let at = bytes.len() - 5;
-        assert_eq!(bytes[at..], [4, 1, 1, 2, 0]);
+        // The body's last bytes are the field: its length, then (1, right) and (2, left) — and
+        // after it the low-quality counts' empty list.
+        let at = bytes.len() - 6;
+        assert_eq!(bytes[at..], [4, 1, 1, 2, 0, 0]);
         // A flank neither left nor right; an observation given one twice; one given to a read
         // that spanned the locus (observation 0 is complete).
         for (byte, value) in [(4, 2), (3, 1), (1, 0)] {
@@ -3259,6 +3340,59 @@ mod tests {
                 "byte {byte} set to {value}: {refused:?}"
             );
         }
+    }
+
+    /// **The low-quality read counts round-trip, and a count that cannot be is refused**: zero
+    /// (zeros are not written), more than the observation's reads, or a second count for one
+    /// observation.
+    #[test]
+    fn the_low_quality_counts_round_trip_and_an_impossible_count_is_refused() {
+        let mut written = a_rich_record();
+        written.observations[0].num_low_quality = 2;
+        written.observations[1].num_low_quality = 3;
+        let (bytes, block_starts_at) = a_run_of_records(std::slice::from_ref(&written));
+        let decode = |bytes: &[u8]| {
+            decode_a_record(
+                &mut a_live_set_reader(),
+                bytes,
+                A_CONTIG,
+                OffsetBase::at_block_start(block_starts_at),
+                &RecordLayout::as_this_build_writes_it(),
+            )
+        };
+        let decoded = decode(&bytes).expect("what this encoder wrote, this decoder reads");
+        assert_eq!(decoded.record, written);
+
+        // The body's last bytes are the field: its length, then (0, 2) and (1, 3).
+        let at = bytes.len() - 5;
+        assert_eq!(bytes[at..], [4, 0, 2, 1, 3]);
+        // Observation 1 has three reads, so four is more than it has; zero is never written; and
+        // observation 0 given a second count.
+        for (byte, value) in [(4, 4), (4, 0), (3, 0)] {
+            let mut damaged = bytes.clone();
+            damaged[at + byte] = value;
+            let refused = decode(&damaged);
+            assert!(
+                matches!(&refused, Err(error) if format!("{error:?}").contains("observation-low-quality-reads")),
+                "byte {byte} set to {value}: {refused:?}"
+            );
+        }
+    }
+
+    /// **A file written before the low-quality counts is still read, every count zero** — so the
+    /// low-base-quality penalty charges nothing on it rather than refusing it.
+    #[test]
+    fn a_manifest_without_the_low_quality_counts_is_read_as_carrying_none() {
+        let fields: Vec<FieldSpec> = fields_of_body(
+            &RECORD_HEAD_FIELDS,
+            &BODY_FIELDS[..BODY_FIELDS_BEFORE_LOW_QUALITY],
+        )
+        .collect();
+        let layout = RecordLayout::from_manifest(&a_manifest_declaring(fields))
+            .expect("the layout before the low-quality counts is still read");
+        assert!(layout.body_carries_held_flanks);
+        assert!(!layout.body_carries_low_quality_reads);
+        assert_eq!(layout.unknown_field_count(), 0);
     }
 
     /// **A 2.0 file is still read, its observations all without a recorded held flank** — which
@@ -3286,6 +3420,29 @@ mod tests {
                 .expect("this build's manifest is read")
                 .body_carries_held_flanks
         );
+    }
+
+    /// **A psp holding the old read-position count is refused.** Until 2026-11-01 the field
+    /// counted reads that started left of the locus, nearly every read; the count now is of
+    /// reads lying mostly left of it. The layout is the same, so only the name tells the two
+    /// apart, and a cohort mixing them would set one sample's count against another's.
+    #[test]
+    fn a_manifest_with_the_old_read_position_count_is_refused() {
+        let fields: Vec<FieldSpec> = record_fields()
+            .into_iter()
+            .map(|field| {
+                if field.name.0 == "reads-lying-mostly-left-of-locus" {
+                    FieldSpec {
+                        name: FieldName("reads-starting-left-of-the-locus".to_string()),
+                        ..field
+                    }
+                } else {
+                    field
+                }
+            })
+            .collect();
+        assert_ne!(fields, record_fields(), "the field must be in this build's manifest");
+        assert!(RecordLayout::from_manifest(&a_manifest_declaring(fields)).is_err());
     }
 
     /// **A 1.1 file is still read, its observations all without a flank deletion** — which is
@@ -3514,7 +3671,7 @@ mod tests {
                 "summed-log-error",
                 "mapq-sum",
                 "mapq-sum-of-squares",
-                "reads-starting-left-of-the-locus",
+                "reads-lying-mostly-left-of-locus",
                 "observation-reads",
                 "reads-without-observation",
                 "reads-discarded-by-the-depth-cap",
@@ -3525,6 +3682,7 @@ mod tests {
                 "observation-flank-deletions",
                 "str-bundle-payload",
                 "observation-held-flanks",
+                "observation-low-quality-reads",
             ]
         );
 
@@ -3668,30 +3826,40 @@ mod tests {
         for position in 0..declared.len() {
             let mut renamed = declared.clone();
             renamed[position].name = FieldName("something-else".to_string());
-            // **The flank deletions renamed is a 1.1 file with three fields this reader does not
-            // know**, the bundle payload renamed a 1.2 file with two, and the held flanks
-            // renamed a 2.0 file with one — the shape a later writer's addition would have — and
-            // each is read as one.
+            // **The flank deletions renamed is a 1.1 file with four fields this reader does not
+            // know**, the bundle payload renamed a 1.2 file with three, the held flanks renamed a
+            // 2.0 file with two, and the low-quality counts renamed the layout before them with
+            // one — the shape a later writer's addition would have — and each is read as one.
             if declared[position].name.0 == "observation-flank-deletions" {
                 let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
-                    .expect("a 1.1 manifest with three unknown fields is read");
+                    .expect("a 1.1 manifest with four unknown fields is read");
                 assert!(!layout.body_carries_flank_deletions);
-                assert_eq!(layout.unknown_field_count(), 3);
+                assert_eq!(layout.unknown_field_count(), 4);
                 continue;
             }
             if declared[position].name.0 == "str-bundle-payload" {
                 let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
-                    .expect("a 1.2 manifest with two unknown fields is read");
+                    .expect("a 1.2 manifest with three unknown fields is read");
                 assert!(layout.body_carries_flank_deletions);
                 assert!(!layout.body_carries_bundle_payload);
-                assert_eq!(layout.unknown_field_count(), 2);
+                assert_eq!(layout.unknown_field_count(), 3);
                 continue;
             }
             if declared[position].name.0 == "observation-held-flanks" {
                 let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed))
-                    .expect("a 2.0 manifest with one unknown field is read");
+                    .expect("a 2.0 manifest with two unknown fields is read");
                 assert!(layout.body_carries_bundle_payload);
                 assert!(!layout.body_carries_held_flanks);
+                assert_eq!(layout.unknown_field_count(), 2);
+                continue;
+            }
+            if declared[position].name.0 == "observation-low-quality-reads" {
+                let layout = RecordLayout::from_manifest(&a_manifest_declaring(renamed)).expect(
+                    "a manifest from before the low-quality counts, with one unknown \
+                             field, is read",
+                );
+                assert!(layout.body_carries_held_flanks);
+                assert!(!layout.body_carries_low_quality_reads);
                 assert_eq!(layout.unknown_field_count(), 1);
                 continue;
             }
@@ -3719,6 +3887,7 @@ mod tests {
                 || declared[position].name.0 == "observation-flank-deletions"
                 || declared[position].name.0 == "str-bundle-payload"
                 || declared[position].name.0 == "observation-held-flanks"
+                || declared[position].name.0 == "observation-low-quality-reads"
             {
                 assert!(
                     RecordLayout::from_manifest(&a_manifest_declaring(dropped)).is_ok(),
@@ -4218,6 +4387,7 @@ mod tests {
             mapq_sum: 0,
             mapq_sum_sq: 0,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         };
 
@@ -4388,8 +4558,9 @@ mod tests {
         let mut body = Vec::new();
         encode_record_body(&record, &mut body);
         // The kind is the byte before the (empty) flank-deletion list, the (empty) bundle
-        // payload and the (empty) held-flank list that end every body.
-        let last = body.len() - 4;
+        // payload, the (empty) held-flank list and the (empty) low-quality counts that end every
+        // body.
+        let last = body.len() - 5;
         assert_eq!(
             body[last], 0,
             "the fixture's kind is Generic, which is tag 0"
@@ -4494,6 +4665,7 @@ mod tests {
                         mapq_sum: mapq,
                         mapq_sum_sq: mapq_squared,
                         placed_left: left,
+                        num_low_quality: 0,
                         chain_ids: Vec::new(),
                     }
                 },
@@ -4605,6 +4777,7 @@ mod tests {
                 mapq_sum: 1_860,
                 mapq_sum_sq: 111_600,
                 placed_left: 12,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             });
 
@@ -4707,6 +4880,7 @@ mod tests {
                 mapq_sum: 1_140,
                 mapq_sum_sq: 68_400,
                 placed_left: 5,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             });
         assert_eq!(
@@ -4751,6 +4925,7 @@ mod tests {
             mapq_sum: 1_140,
             mapq_sum_sq: 68_400,
             placed_left: 5,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         });
         assert_eq!(
@@ -5026,6 +5201,7 @@ mod tests {
             mapq_sum: 60,
             mapq_sum_sq: 3_600,
             placed_left: 0,
+            num_low_quality: 0,
             chain_ids: Vec::new(),
         };
         let record = SampleLocusObservations {
@@ -6347,6 +6523,7 @@ mod tests {
                 mapq_sum: 60,
                 mapq_sum_sq: 3_600,
                 placed_left: 1,
+                num_low_quality: 0,
                 chain_ids: Vec::new(),
             });
         }

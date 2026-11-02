@@ -7,7 +7,9 @@
 
 use super::*;
 use crate::calling::quality::artifact_correction::ArtifactPenalties;
-use crate::types::{AlleleId, ContigId, GenomeRegion, Genotype, Motif, Phred, Ploidy, Position};
+use crate::types::{
+    AlleleId, ContigId, GenomeRegion, Genotype, GenotypeRows, Motif, Phred, Ploidy, Position,
+};
 use crate::vcf::{
     FilterVerdict, MapqPool, SampleCall, SampleColumn, SampleReadCounts, TractAnnotation,
 };
@@ -45,6 +47,7 @@ fn allele(bases: &[u8]) -> Box<[u8]> {
 
 fn one_sample(allele_reads: Vec<u32>, unexplained: u32, genotype: &[u16]) -> Vec<SampleColumn> {
     vec![SampleColumn {
+        genotype_rows: None,
         call: SampleCall::Called {
             genotype: Genotype::new(genotype.iter().copied().map(AlleleId).collect()),
             genotype_quality: quality(40.0),
@@ -81,6 +84,7 @@ fn a_snp_writes_its_seven_columns() {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -142,6 +146,7 @@ fn a_record_with_no_alternative_writes_a_missing_alt() {
         vec![allele(b"ATATATATATAT")],
         vec![0.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(vec![0], 2),
         }],
@@ -419,6 +424,7 @@ fn a_snp_writes_every_site_annotation_in_order() {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -491,6 +497,7 @@ fn the_frequencies_are_normalised_over_the_copies_and_not_over_an() {
         vec![3.0, 1.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
                     genotype_quality: quality(30.0),
@@ -498,6 +505,7 @@ fn the_frequencies_are_normalised_over_the_copies_and_not_over_an() {
                 read_counts: SampleReadCounts::new(vec![6, 6], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0, 0], 0),
             },
@@ -523,6 +531,7 @@ fn a_no_called_sample_is_in_neither_ac_nor_an_but_its_reads_are_in_dp() {
         vec![2.0, 0.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
                     genotype_quality: quality(30.0),
@@ -530,6 +539,7 @@ fn a_no_called_sample_is_in_neither_ac_nor_an_but_its_reads_are_in_dp() {
                 read_counts: SampleReadCounts::new(vec![8, 0], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![2, 1], 4),
             },
@@ -613,6 +623,7 @@ fn a_record_with_no_alternative_omits_every_per_alternative_key() {
         vec![allele(b"ATATATATATAT")],
         vec![0.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(vec![0], 2),
         }],
@@ -641,6 +652,34 @@ fn the_penalties_are_absent_where_the_correction_did_not_run() {
     assert!(!info.contains("SPPEN"), "got {info}");
 }
 
+/// **`BQPEN` is written where the low-base-quality test ran, and nowhere else** — a run without
+/// the test writes the `INFO` column it wrote before the test existed.
+#[test]
+fn the_low_base_quality_penalty_is_written_only_where_the_test_ran() {
+    let record_with = |low_base_quality| {
+        VcfRecord::new(
+            region_on(0, 60, 60),
+            vec![allele(b"A"), allele(b"T")],
+            vec![1.0, 1.0],
+            one_sample(vec![5, 5], 0, &[0, 1]),
+            pools(&[5, 5]),
+            None,
+            quality(112.5),
+            Some(ArtifactPenalties {
+                allele_balance: quality(3.5),
+                strand_and_read_position: quality(4.0),
+                low_base_quality,
+            }),
+            FilterVerdict::Pass,
+            None,
+        )
+    };
+    let info = info_column(&record_with(Some(quality(7.5))));
+    assert!(info.contains("ABPEN=3.5;SPPEN=4.0;BQPEN=7.5"), "got {info}");
+    let info = info_column(&record_with(None));
+    assert!(!info.contains("BQPEN"), "got {info}");
+}
+
 #[test]
 fn the_uncorrected_quality_is_the_written_one_plus_its_two_penalties() {
     // Spec §6's reason for publishing them: the correction stays recoverable. Both are written
@@ -656,6 +695,7 @@ fn the_uncorrected_quality_is_the_written_one_plus_its_two_penalties() {
         Some(ArtifactPenalties {
             allele_balance: quality(3.5),
             strand_and_read_position: quality(4.0),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -681,6 +721,7 @@ fn several_alternatives_give_one_entry_per_alternative_in_every_per_alternative_
         vec![2.0, 1.0, 1.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
                     genotype_quality: quality(30.0),
@@ -688,6 +729,7 @@ fn several_alternatives_give_one_entry_per_alternative_in_every_per_alternative_
                 read_counts: SampleReadCounts::new(vec![4, 4, 0], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(2)]),
                     genotype_quality: quality(30.0),
@@ -727,14 +769,43 @@ fn diploid() -> Ploidy {
 }
 
 #[test]
-fn a_snp_record_carries_four_per_sample_fields() {
+fn a_snp_record_carries_six_per_sample_fields() {
     let record = a_biallelic_snp();
-    assert_eq!(format_keys(&record), "GT:GQ:DP:AD");
-    assert_eq!(sample_columns(&record, diploid()), "0/1:40:10:5,5");
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:PL:GP");
+    assert_eq!(sample_columns(&record, diploid()), "0/1:40:10:5,5:.:.");
+}
+
+/// **`PL` and `GP` as written** (spec §7.2): the log-likelihoods in Phred, shifted so the best
+/// genotype is 0 — `−10 · log10 e` times −8 and −10 natural-log units is 34.7 and 43.4 — and the
+/// posteriors at three places with trailing zeros dropped.
+#[test]
+fn a_sample_s_rows_are_written_as_phred_likelihoods_and_posteriors() {
+    let mut columns = one_sample(vec![5, 5], 0, &[0, 1]);
+    columns[0].genotype_rows = Some(GenotypeRows {
+        ploidy: diploid(),
+        log_likelihoods: Box::new([-10.0, -2.0, -12.0]),
+        posteriors: Box::new([0.0104, 0.98, 0.0096]),
+    });
+    let record = VcfRecord::new(
+        region_on(0, 30, 30),
+        vec![allele(b"A"), allele(b"T")],
+        vec![1.0, 1.0],
+        columns,
+        pools(&[5, 5]),
+        None,
+        quality(50.0),
+        None,
+        FilterVerdict::Pass,
+        None,
+    );
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "0/1:40:10:5,5:35,0,43:0.01,0.98,0.01"
+    );
 }
 
 #[test]
-fn a_tract_record_carries_repeat_counts_as_a_fifth_field() {
+fn a_tract_record_carries_repeat_counts_as_a_seventh_field() {
     let record = VcfRecord::new(
         region_on(0, 2_000, 2_015),
         vec![allele(b"CACACACACACACACA"), allele(b"CACACACACACA")],
@@ -750,9 +821,12 @@ fn a_tract_record_carries_repeat_counts_as_a_fifth_field() {
         )),
     );
 
-    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:REPCN");
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:PL:GP:REPCN");
     // Sixteen bases of a two-base unit is eight copies; twelve is six. DP is 23 + 7.
-    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11:8,6");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "0/1:40:30:12,11:.:.:8,6"
+    );
 }
 
 /// `GG (CA)8 GT (TTG)5 C` against one `CA` copy more — an STR bundle record of two runs.
@@ -784,10 +858,10 @@ fn a_bundle_record_writes_a_unit_per_run_and_its_run_counts_as_repcnb() {
     ));
     let info = info_column(&record);
     assert!(info.ends_with(";STR;RU=CA,TTG;PERIOD=2,3"), "got {info}");
-    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:REPCNB");
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:PL:GP:REPCNB");
     assert_eq!(
         sample_columns(&record, diploid()),
-        "0/1:40:30:12,11:8_5,9_5"
+        "0/1:40:30:12,11:.:.:8_5,9_5"
     );
     assert!(!sample_columns(&record, diploid()).contains("REPCN"));
 }
@@ -806,8 +880,8 @@ fn a_bundle_record_with_no_run_writes_no_repeat_annotation() {
     );
     assert!(!info_column(&record).contains("STR"));
     assert!(!info_column(&record).contains("RU="));
-    assert_eq!(format_keys(&record), "GT:GQ:DP:AD");
-    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11");
+    assert_eq!(format_keys(&record), "GT:GQ:DP:AD:PL:GP");
+    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11:.:.");
 }
 
 #[test]
@@ -825,6 +899,7 @@ fn the_repeat_counts_follow_the_genotype_allele_for_allele() {
         ],
         vec![1.0, 0.5, 0.5],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::Called {
                 genotype: Genotype::new(vec![AlleleId(1), AlleleId(2)]),
                 genotype_quality: quality(55.0),
@@ -843,7 +918,10 @@ fn the_repeat_counts_follow_the_genotype_allele_for_allele() {
 
     // GT names alleles 1 then 2; REPCN must be their counts in that order — 6 then 10, not
     // 10 then 6.
-    assert_eq!(sample_columns(&record, diploid()), "1/2:55:16:0,9,7:6,10");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "1/2:55:16:0,9,7:.:.:6,10"
+    );
 }
 
 #[test]
@@ -872,7 +950,7 @@ fn a_homozygote_states_a_count_for_each_copy_of_the_genome() {
     );
 
     // Both copies carry the four-repeat allele, so REPCN states it twice.
-    assert_eq!(sample_columns(&record, diploid()), "1/1:40:18:0,18:4,4");
+    assert_eq!(sample_columns(&record, diploid()), "1/1:40:18:0,18:.:.:4,4");
 }
 
 #[test]
@@ -885,10 +963,12 @@ fn a_no_called_sample_writes_one_dot_per_copy_and_keeps_its_evidence() {
         vec![1.0, 1.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![4, 3], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0, 0], 0),
             },
@@ -903,7 +983,7 @@ fn a_no_called_sample_writes_one_dot_per_copy_and_keeps_its_evidence() {
 
     assert_eq!(
         sample_columns(&record, diploid()),
-        "./.:.:7:4,3\t./.:.:0:0,0"
+        "./.:.:7:4,3:.:.\t./.:.:0:0,0:.:."
     );
 }
 
@@ -914,6 +994,7 @@ fn a_no_call_at_a_tract_leaves_its_repeat_counts_missing_too() {
         vec![allele(b"ATATATATATAT")],
         vec![0.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(vec![0], 2),
         }],
@@ -927,7 +1008,7 @@ fn a_no_call_at_a_tract_leaves_its_repeat_counts_missing_too() {
         )),
     );
 
-    assert_eq!(sample_columns(&record, diploid()), "./.:.:2:0:.");
+    assert_eq!(sample_columns(&record, diploid()), "./.:.:2:0:.:.:.");
 }
 
 #[test]
@@ -939,6 +1020,7 @@ fn the_no_call_spelling_follows_the_run_s_ploidy() {
         vec![allele(b"A")],
         vec![0.0],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::NoCall,
             read_counts: SampleReadCounts::new(vec![0], 0),
         }],
@@ -967,6 +1049,7 @@ fn a_genotype_quality_is_rounded_and_held_to_the_cap() {
             vec![allele(b"A"), allele(b"T")],
             vec![1.0, 1.0],
             vec![SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
                     genotype_quality: quality(phred),
@@ -1002,6 +1085,7 @@ fn every_sample_of_the_run_gets_a_column_in_the_run_s_order() {
         vec![2.0, 2.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(0)]),
                     genotype_quality: quality(60.0),
@@ -1009,10 +1093,12 @@ fn every_sample_of_the_run_gets_a_column_in_the_run_s_order() {
                 read_counts: SampleReadCounts::new(vec![9, 0], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0, 0], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(1), AlleleId(1)]),
                     genotype_quality: quality(70.0),
@@ -1030,7 +1116,10 @@ fn every_sample_of_the_run_gets_a_column_in_the_run_s_order() {
 
     let columns = sample_columns(&record, diploid());
     assert_eq!(columns.split('\t').count(), 3);
-    assert_eq!(columns, "0/0:60:9:9,0\t./.:.:0:0,0\t1/1:70:8:0,8");
+    assert_eq!(
+        columns,
+        "0/0:60:9:9,0:.:.\t./.:.:0:0,0:.:.\t1/1:70:8:0,8:.:."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,7 +1230,10 @@ fn the_integer_fields_are_written_as_integers() {
     for field in ["AC=1", "AN=2", "DP=30", "PERIOD=2"] {
         assert!(info.contains(field), "{field} in {info}");
     }
-    assert_eq!(sample_columns(&record, diploid()), "0/1:40:30:12,11:8,6");
+    assert_eq!(
+        sample_columns(&record, diploid()),
+        "0/1:40:30:12,11:.:.:8,6"
+    );
 }
 
 #[test]
@@ -1185,6 +1277,7 @@ fn a_snp_line() {
         Some(ArtifactPenalties {
             allele_balance: Phred::ZERO,
             strand_and_read_position: quality(2.5),
+            low_base_quality: None,
         }),
         FilterVerdict::Pass,
         None,
@@ -1194,7 +1287,7 @@ fn a_snp_line() {
         record_line(&record, &contigs(), diploid()),
         "chr1\t1000\t.\tA\tT\t300.0\tPASS\t\
          AF=0.300000;AC=1;AN=2;DP=19;ABPEN=0.0;SPPEN=2.5;MQREF=60.00;MQALT=60.00;MQDIFF=0.00\t\
-         GT:GQ:DP:AD\t0/1:40:19:10,9"
+         GT:GQ:DP:AD:PL:GP\t0/1:40:19:10,9:.:."
     );
 }
 
@@ -1230,7 +1323,7 @@ fn a_repeat_tract_line() {
         record_line(&record, &contigs(), diploid()),
         "chr1\t2000\t.\tCACACACACACACACA\tCACACACACACA\t150.0\tPASS\t\
          AF=0.500000;AC=1;AN=2;DP=30;MQREF=58.00;MQALT=55.00;MQDIFF=-3.00;STR;RU=CA;PERIOD=2\t\
-         GT:GQ:DP:AD:REPCN\t0/1:40:30:12,11:8,6"
+         GT:GQ:DP:AD:PL:GP:REPCN\t0/1:40:30:12,11:.:.:8,6"
     );
 }
 
@@ -1242,6 +1335,7 @@ fn a_multi_allelic_line() {
         vec![2.0, 1.0, 1.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(1)]),
                     genotype_quality: quality(35.0),
@@ -1249,6 +1343,7 @@ fn a_multi_allelic_line() {
                 read_counts: SampleReadCounts::new(vec![4, 4, 0], 0),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::Called {
                     genotype: Genotype::new(vec![AlleleId(0), AlleleId(2)]),
                     genotype_quality: quality(45.0),
@@ -1268,7 +1363,7 @@ fn a_multi_allelic_line() {
         record_line(&record, &contigs(), diploid()),
         "chr1\t20\t.\tA\tC,G\t99.5\tPASS\t\
          AF=0.250000,0.250000;AC=1,1;AN=4;DP=16;MQREF=60.00;MQALT=60.00,60.00;MQDIFF=0.00,0.00\t\
-         GT:GQ:DP:AD\t0/1:35:8:4,4,0\t0/2:45:8:4,0,4"
+         GT:GQ:DP:AD:PL:GP\t0/1:35:8:4,4,0:.:.\t0/2:45:8:4,0,4:.:."
     );
 }
 
@@ -1279,7 +1374,7 @@ fn a_deletion_line_carries_its_padding_base_into_every_allele() {
         record_line(&record, &contigs(), diploid()),
         "chr1\t699\t.\tCATATAT\tC\t90.0\tPASS\t\
          AF=0.800000;AC=2;AN=2;DP=14;MQALT=57.00;MQDIFF=.;STR;RU=AT;PERIOD=2\t\
-         GT:GQ:DP:AD:REPCN\t1/1:30:14:0,14:0,0"
+         GT:GQ:DP:AD:PL:GP:REPCN\t1/1:30:14:0,14:.:.:0,0"
     );
 }
 
@@ -1293,10 +1388,12 @@ fn a_refused_tract_locus_line() {
         vec![0.0],
         vec![
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0], 2),
             },
             SampleColumn {
+                genotype_rows: None,
                 call: SampleCall::NoCall,
                 read_counts: SampleReadCounts::new(vec![0], 0),
             },
@@ -1315,7 +1412,7 @@ fn a_refused_tract_locus_line() {
         record_line(&record, &contigs(), diploid()),
         "chr1\t500\t.\tATATATATATAT\t.\t0.0\tlowDepth\t\
          AN=0;DP=2;STR;RU=AT;PERIOD=2\t\
-         GT:GQ:DP:AD:REPCN\t./.:.:2:0:.\t./.:.:0:0:."
+         GT:GQ:DP:AD:PL:GP:REPCN\t./.:.:2:0:.:.:.\t./.:.:0:0:.:.:."
     );
 }
 
@@ -1346,6 +1443,7 @@ fn a_full_tract_deletion() -> VcfRecord {
         vec![allele(b"ATATAT"), allele(b"")],
         vec![0.4, 1.6],
         vec![SampleColumn {
+            genotype_rows: None,
             call: SampleCall::Called {
                 genotype: Genotype::new(vec![AlleleId(1), AlleleId(1)]),
                 genotype_quality: quality(30.0),
